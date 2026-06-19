@@ -509,7 +509,11 @@ feature). This chapter does not enumerate per-test specs.
    confirmation policy.
 5. **Gas estimation** — gas estimates use `eth_estimateGas` with
    the standard +10% safety margin shared with the V1 EVM path;
-   documented in [Chapter 8](08-fee-routing-engine.md).
+   documented in [Chapter 8](08-fee-routing-engine.md). This is the
+   gas-**limit** estimate; the distinct EIP-1559 fee-per-gas
+   (`maxFeePerGas` / priority-fee) estimation derived from
+   `eth_feeHistory` is bound in
+   [Chapter 50](50-evm-eip1559-fee-estimation.md).
 
 ---
 

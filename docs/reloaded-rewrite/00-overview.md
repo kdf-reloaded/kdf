@@ -39,7 +39,7 @@ the source it describes. The set is composed of:
 | ---------------------------- | ------------------------------------------------------------------- |
 | Meta-chapters                | Chapter 00 (this), chapter 01 (rules and methodology), chapter 30 (cross-cutting index), chapter 34 (provenance ledger). |
 | Anchor chapters              | Chapter 02 (baseline state), chapter 29 (license-condition treatment).               |
-| Substantive driving-spec chapters | Chapters 03 through 28, and chapters 31 through 33.                |
+| Substantive driving-spec chapters | Chapters 03 through 28, chapters 31 through 33, and chapter 50.    |
 
 The substantive chapters are independent: each can be read on its
 own without prior chapters, provided the reader has read chapters 01
@@ -81,8 +81,8 @@ the baseline tree relative to.
 
 ## 0.4 Bound Per-Chapter Shape
 
-**R5.** Every substantive chapter (chapters 03 through 28 and chapters
-31 through 33) MUST
+**R5.** Every substantive chapter (chapters 03 through 28, chapters
+31 through 33, and chapter 50) MUST
 follow the canonical chapter shape: a chapter-bound title line, a
 single `Status:` header on the third line carrying one of the two
 chapter-bound status values (`driving-spec` for substrate-binding
@@ -113,8 +113,8 @@ A first reader SHOULD read the document set in the following order:
 2. Chapter 02 — *Baseline State.* The exact pinned baseline commit
    and the inherited tree shape at that commit.
 3. Chapters 03 through 28 in numerical order, then chapters 31 through
-  33. Each chapter is self-contained and can be read independently if
-  the reader is interested only in one substrate.
+  33, then chapter 50. Each chapter is self-contained and can be read
+  independently if the reader is interested only in one substrate.
 4. Chapter 29 — *Treatment of License Conditions (e) and (f).* The
    project's legal position on the additional copyright-holder
    conditions appended after the baseline date.
