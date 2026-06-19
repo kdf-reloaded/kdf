@@ -390,6 +390,14 @@ the broadcast endpoint (§21.9).
 (converted from SUN at `1 TRX = 10^6 SUN`), with the fee broken
 into bandwidth and energy components (R-F2).
 
+> **Gasless TRC20 (fee delegation).** A separate, optional
+> "GasFree" fee-delegation rail lets a user move a TRC20 token
+> without holding TRX, by signing an off-chain TIP-712 transfer
+> authorization whose fee a third-party provider pays in the
+> token. It is specified in
+> [Chapter 49](49-tron-gasfree-fee-delegation.md); the native
+> resource-fee withdraw of this section is unaffected.
+
 ## 21.11 Deferred Work
 
 The following are explicit gaps, documented as deferred work
