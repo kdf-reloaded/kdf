@@ -74,7 +74,7 @@ and a one-sentence capsule of what the chapter documents.
 | 18 | [Tendermint, IBC, and Cross-Chain HTLC Surfaces](18-tendermint-ibc-htlc.md)                          | Tendermint HTLC dialects, IBC `MsgTransfer` envelope, CW20-style support                                 | The Tendermint HTLC dialects, the IBC transfer envelope, and CW20-style token support.                                                                                   |
 | 19 | [NFT Module Layout](19-nft-module-layout.md)                                                         | EVM-NFT trait surface, storage abstraction, metadata-refresh path                                        | The EVM-NFT trait surface, the storage abstraction, and the pluggable metadata-refresh path.                                                                             |
 | 20 | [Siacoin Integration](20-siacoin-integration.md)                                                     | Sia spend-policy substrate, atomic-swap policy, walletd-backed account model                             | The Sia atomic-swap spend policy and the walletd-backed account model.                                                                                                   |
-| 21 | [Tron Integration](21-tron-integration.md)                                                           | Tron withdraw-only path, Base58Check, protobuf transactions, bandwidth-and-energy fees                   | Withdraw-only Tron support: Base58Check addresses, protobuf transactions, the bandwidth-and-energy fee model.                                                            |
+| 21 | [Tron Integration](21-tron-integration.md)                                                           | Tron wallet + version-1 atomic-swap path, Base58Check, protobuf transactions, bandwidth-and-energy fees, HTLC swap-contract ABI | Tron wallet support and version-1 atomic-swap participation: Base58Check addresses, protobuf transactions, the bandwidth-and-energy fee model, and the SHA-256 HTLC swap-contract ABI. |
 | 22 | [WalletConnect v2](22-walletconnect-v2.md)                                                           | WalletConnect v2 relay client, x25519+HKDF+ChaCha20-Poly1305 transport, session persistence              | The WalletConnect v2 relay client, the keyed transport, and the session-persistence stores.                                                                              |
 | 23 | [Trading API Client](23-trading-api-client.md)                                                       | external-DEX-aggregator typed HTTP client                                                                | The typed HTTP client for the external DEX-aggregator API: quote / build-tx / tokens / portfolio request and response types.                                              |
 | 24 | [GUI Account-State Persistence](24-gui-account-state.md)                                             | GUI account-state schema, three identity variants, eleven management RPCs                                | The named-account storage layer (Iguana / HD / hardware-wallet variants) and its dual-backend persistence.                                                               |
@@ -141,7 +141,8 @@ citation.
   cited in Chapter 17.
 - Tendermint ABCI / Cosmos SDK message types — cited in Chapter 18.
 - Sia spend-policy semantics — cited in Chapter 20.
-- Tron transaction protobuf, TAPOS, and TRC-20 — cited in Chapter 21.
+- Tron transaction protobuf, TAPOS, TRC-20, and the published
+  version-1 HTLC swap-contract ABI — cited in Chapter 21.
 - Zcash shielded-transaction primitives — referenced from Chapter 29.
 
 ### 30.4.7 External APIs and wire-format counterparties
