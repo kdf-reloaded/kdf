@@ -160,14 +160,53 @@ empty `baseFeePerGas` array, the estimator MUST return a well-formed
 estimate (zero base-fee anchor plus the priority-fee term) rather than
 erroring or panicking (R2).
 
-## 50.6 Deferred Work
+## 50.6 Upstream Divergence (informative)
+
+Upstream bundled the base-fee selection correction (R1) together with a
+second, related-but-distinct change on the **withdraw gas-details**
+path: it widened the set of external EVM-client rejection strings that
+are recognised as "the submitted fee cap is below the block base fee".
+Concretely, in addition to the Geth-style strings (`fee cap less than
+block base fee`, `max fee per gas less than block base fee`) it also
+recognises the Nethermind (pre-1.38.0) phrasing `miner premium is
+negative`, so all three map to the same typed fee-cap-below-base-fee
+error instead of an opaque transport error. This matters on fast-block
+chains (e.g. Gnosis) where strict clients (Nethermind ≥ 1.36.0) validate
+`maxFeePerGas ≥ baseFee` during `eth_estimateGas`.
+
+This behaviour is **informative only** for this chapter: it lives on the
+withdraw gas-details surface, which the reloaded tree has not yet ported
+(tracked as D2). The base-fee selection fix (R1) — the part within this
+chapter's scope — is fully captured and matches upstream's functional
+behaviour. The external-client error strings named above are dictated by
+those third-party EVM clients (not upstream expression) and are recorded
+here so the deferred classification work (D2) can reproduce the contract
+faithfully.
+
+Reloaded additionally hardens the percentile selection against an empty
+reward slice (R2) — a path upstream still leaves able to panic — making
+the reloaded estimator a strict superset on the malformed-input path.
+
+## 50.7 Deferred Work
 
 **D1.** *Provider-side fee estimation.* Deriving the estimate from an
 external gas-oracle / provider API instead of (or as a fallback to)
 `eth_feeHistory` is out of scope for this chapter; only the
 history-based simple estimator's base-fee selection is bound here.
 
-## 50.7 Baseline Verifications
+**D2.** *Withdraw fee-cap error classification.* When a transaction is
+submitted with an explicit `maxFeePerGas` that is below the node's
+current block base fee, strict EVM clients reject the request. Mapping
+the client's textual rejection (the external-client error strings that
+signal "fee cap below the block base fee" — see §50.6) into a typed,
+user-meaningful "fee cap below base fee" error — rather than surfacing a
+raw transport error — is part of the withdraw gas-details estimation
+surface, **not** the fee-per-gas estimator bound here. That
+error-classification surface is not yet present in the reloaded tree (it
+arrived upstream with the Tron withdrawal feature); binding it is
+deferred to the chapter that ports that surface.
+
+## 50.8 Baseline Verifications
 
 **V1.** *No EIP-1559 fee estimator at baseline.*
 
@@ -179,7 +218,7 @@ history-based simple estimator's base-fee selection is bound here.
   returns the empty set.
 - *Cross-reference.* [Chapter 2 — Baseline State](02-baseline-state.md).
 
-## 50.8 External References
+## 50.9 External References
 
 - EIP-1559 (fee-market change for the Ethereum chain; per-block base
   fee, the one-eighth maximum per-block base-fee change, and the
@@ -192,7 +231,7 @@ history-based simple estimator's base-fee selection is bound here.
 - [Chapter 17 — Atomic-Swap V2 EVM Path](17-swap-v2-evm-path.md) for
   the related but distinct gas-**limit** estimation (`eth_estimateGas`).
 
-## 50.9 Provenance Footer
+## 50.10 Provenance Footer
 
 - *Inputs:* the public EIP-1559 fee-market specification and the public
   Ethereum JSON-RPC `eth_feeHistory` method definition (the dictated
@@ -204,10 +243,16 @@ history-based simple estimator's base-fee selection is bound here.
 - *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* consulted **only** to confirm the present
   upstream fee-per-gas estimator's base-fee-selection defect (the
-  oldest-window element being used as the latest base fee). The
-  corrected selection requirement (R1) and every dictated fact in §50.3
-  are sourced from the public EIP-1559 specification and the public
-  Ethereum JSON-RPC `eth_feeHistory` method definition (R3/R4), not from
+  oldest-window element being used as the latest base fee) and, on a
+  later parity pass, to confirm that the upstream fix changes exactly the
+  same base-fee selection (oldest → freshest) and to identify the
+  informative divergence recorded in §50.6 (the bundled withdraw-path
+  recognition of an external EVM-client "fee cap below base fee"
+  rejection string). The corrected selection requirement (R1) and every
+  dictated fact in §50.3 are sourced from the public EIP-1559
+  specification and the public Ethereum JSON-RPC `eth_feeHistory` method
+  definition (R3/R4); the external-client error strings named in §50.6
+  are dictated by those third-party EVM clients (R4). None of this is
   the corpus's discretionary expression. No discretionary expression —
   no private type, field, or function names, no function bodies,
   control-flow transcription, helper decomposition, local names, error
