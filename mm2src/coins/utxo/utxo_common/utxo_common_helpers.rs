@@ -36,6 +36,7 @@ where
     Ok(CoinBalance {
         spendable: balance + p2pk_extra,
         unspendable: BigDecimal::from(0),
+        ..Default::default()
     })
 }
 
@@ -72,7 +73,11 @@ where
             .into_iter()
             .map(|(address, spendable)| {
                 let unspendable = BigDecimal::from(0);
-                let balance = CoinBalance { spendable, unspendable };
+                let balance = CoinBalance {
+                    spendable,
+                    unspendable,
+                    ..Default::default()
+                };
                 (address, balance)
             })
             .collect())

@@ -501,6 +501,11 @@ pub enum WithdrawError {
     Transport(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
+    /// CRD §49.3 / §49.9: a Tron TRC20 gasless (GasFree) withdraw failed. The
+    /// inner error owns the observable HTTP status mapping, which is delegated
+    /// through the standard dispatcher. Inert for every non-Tron coin.
+    #[display(fmt = "Gasless withdraw error: {}", _0)]
+    Gasless(crate::eth::tron::gasfree::GasFreeWithdrawError),
     /// CRD R47.5.6a / R47.6.7: the requested withdraw is unsupported under the
     /// MetaMask signing policy (e.g. the non-EVM-keypair TRON family, which the
     /// delegated EVM `eth_sendTransaction` model cannot drive). WASM-only: the
@@ -533,6 +538,8 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::HardwareWalletInternal(_)
             | WithdrawError::Transport(_)
             | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            // CRD §49.9: delegate to the gasless error's own status mapping.
+            WithdrawError::Gasless(e) => e.status_code(),
         }
     }
 }

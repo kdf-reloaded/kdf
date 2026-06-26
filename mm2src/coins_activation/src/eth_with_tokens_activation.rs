@@ -451,6 +451,7 @@ mod tests {
             balances: CoinBalance {
                 spendable: BigDecimal::from(10),
                 unspendable: BigDecimal::from(0),
+                ..Default::default()
             },
         });
         let mut erc20_addresses_infos = HashMap::new();
@@ -480,6 +481,7 @@ mod tests {
             balances: CoinBalance {
                 spendable: BigDecimal::from(3),
                 unspendable: BigDecimal::from(2),
+                ..Default::default()
             },
         });
         let result = EthWithTokensActivationResult {

@@ -7,11 +7,12 @@
 //!
 //! Per-network contract artifacts (controller, beacon, proxy creation
 //! bytecode, §49.5) are *published GasFree SDK constants*. They are hard-bound
-//! per network and are **not** caller-configurable (R2). The concrete bytes are
-//! GasFree SDK artifacts that this chapter references rather than embeds; the
-//! placeholders below MUST be replaced with the published per-network values
-//! before the derivation is byte-exact against the published address vectors
-//! (see `derive.rs` and the chapter's §49.13 external references).
+//! per network and are **not** caller-configurable (R2). The controller and
+//! beacon are the published per-network base58 Tron addresses (decoded to their
+//! EVM form here). The proxy creation bytecode is a GasFree SDK artifact that
+//! this chapter references rather than embeds; it remains a placeholder until
+//! the official per-network bytes are pinned (see the `TODO(gasfree)` in
+//! `network_artifacts` and the chapter's §49.13 external references).
 
 use super::error::GasFreeConfigError;
 use crate::eth::tron::address::TronAddress;
@@ -41,11 +42,9 @@ pub struct GasFreeArtifacts {
     pub creation_bytecode: &'static [u8],
 }
 
-/// TIP-712 chain id for the GasFree domain (§49.6). Tron's EIP-712 chain id is
-/// the network's published value (the Nile testnet's is `3448148188`).
-///
-/// NOTE: the mainnet / Shasta values below are the publicly-cited Tron EIP-712
-/// chain ids and MUST be confirmed against the published GasFree vectors.
+/// TIP-712 chain id for the GasFree domain (§49.6). These are the dictated
+/// per-network Tron EIP-712 chain ids: mainnet `728126428`, Shasta
+/// `2494104990`, Nile `3448148188`.
 pub fn tip712_chain_id(network: &Network) -> u64 {
     match network {
         Network::Mainnet => 728_126_428,
@@ -64,18 +63,60 @@ pub fn network_path_segment(network: &Network) -> &'static str {
     }
 }
 
-/// Published GasFree contract artifacts for `network`.
+/// Per-network published GasFree controller/beacon addresses (§49.5, dictated
+/// interop). These are the base58 Tron addresses published by the GasFree SDK.
+fn controller_beacon_base58(network: &Network) -> (&'static str, &'static str) {
+    match network {
+        Network::Mainnet => (
+            "TFFAMQLZybALaLb4uxHA9RBE7pxhUAjF3U",
+            "TSP9UW6FQhT76XD2jWA6ipGMx3yGbjDffP",
+        ),
+        Network::Nile => (
+            "THQGuFzL87ZqhxkgqYEryRAd7gqFqL5rdc",
+            "TLtCGmaxH3PbuaF6kbybwteZcHptEdgQGC",
+        ),
+        Network::Shasta => (
+            "TQghdCeVDA6CnuNVTUhfaAyPfTetqZWNpm",
+            "TQ1jvA3nLDMDNbJoMPLzTPoqAg8NvZ5CCW",
+        ),
+    }
+}
+
+/// Decode a hard-coded base58 Tron address to its 20-byte EVM form.
 ///
-/// PLACEHOLDER: the controller / beacon / creation bytecode below are
-/// zero-valued stand-ins. They MUST be replaced with the published GasFree SDK
-/// per-network constants for the `CREATE2` derivation (§49.5) to reproduce the
-/// published address vectors. The derivation algorithm itself is exercised in
-/// `derive.rs` against synthetic artifacts.
-pub fn network_artifacts(_network: &Network) -> GasFreeArtifacts {
+/// The input is a compile-time-constant published GasFree contract address, so
+/// a decode failure is a programming error (a bad constant), not a runtime
+/// input fault; the unit tests exercise every network so a bad constant is
+/// caught immediately.
+fn decode_const_tron_evm(base58: &str) -> EthAddress {
+    TronAddress::from_base58(base58)
+        .expect("hard-coded GasFree contract address must be valid base58")
+        .to_evm_address()
+}
+
+/// The GasFree proxy creation bytecode used by the `CREATE2` derivation
+/// (§49.5 step 3).
+///
+// TODO(gasfree): pin official GasFree SDK proxy creation bytecode per network.
+// This is the only remaining placeholder of the §49.5 artifacts: until the
+// exact SDK bytes are embedded, the derived custody address will not match the
+// published per-network vectors. The derivation [`derive_gasfree_address`]
+// already takes the bytecode through [`GasFreeArtifacts::creation_bytecode`], so
+// swapping in the real bytes here is the only change required.
+const GASFREE_PROXY_CREATION_BYTECODE: &[u8] = &[];
+
+/// Published GasFree contract artifacts for `network` (§49.5).
+///
+/// The controller and beacon are the real published per-network addresses. The
+/// `creation_bytecode` is still a placeholder (see
+/// [`GASFREE_PROXY_CREATION_BYTECODE`]); pin the official SDK bytes for the
+/// derivation to reproduce the published address vectors.
+pub fn network_artifacts(network: &Network) -> GasFreeArtifacts {
+    let (controller_b58, beacon_b58) = controller_beacon_base58(network);
     GasFreeArtifacts {
-        controller: EthAddress::zero(),
-        beacon: EthAddress::zero(),
-        creation_bytecode: &[],
+        controller: decode_const_tron_evm(controller_b58),
+        beacon: decode_const_tron_evm(beacon_b58),
+        creation_bytecode: GASFREE_PROXY_CREATION_BYTECODE,
     }
 }
 
@@ -354,5 +395,46 @@ mod tests {
     #[test]
     fn tip712_chain_id_nile_is_published_value() {
         assert_eq!(tip712_chain_id(&Network::Nile), 3_448_148_188);
+    }
+
+    #[test]
+    fn tip712_chain_ids_are_dictated_values() {
+        assert_eq!(tip712_chain_id(&Network::Mainnet), 728_126_428);
+        assert_eq!(tip712_chain_id(&Network::Shasta), 2_494_104_990);
+        assert_eq!(tip712_chain_id(&Network::Nile), 3_448_148_188);
+    }
+
+    #[test]
+    fn network_artifacts_bind_real_controller_and_beacon() {
+        // Every network's published controller/beacon must decode to a non-zero
+        // EVM address and round-trip back to the published base58 string (R2).
+        for network in [Network::Mainnet, Network::Nile, Network::Shasta] {
+            let (controller_b58, beacon_b58) = controller_beacon_base58(&network);
+            let artifacts = network_artifacts(&network);
+
+            assert_ne!(
+                artifacts.controller,
+                EthAddress::zero(),
+                "controller is zero for {network:?}"
+            );
+            assert_ne!(artifacts.beacon, EthAddress::zero(), "beacon is zero for {network:?}");
+            assert_ne!(artifacts.controller, artifacts.beacon);
+
+            assert_eq!(
+                TronAddress::from_evm_address(artifacts.controller).to_base58(),
+                controller_b58
+            );
+            assert_eq!(TronAddress::from_evm_address(artifacts.beacon).to_base58(), beacon_b58);
+        }
+    }
+
+    #[test]
+    fn network_artifacts_differ_across_networks() {
+        let mainnet = network_artifacts(&Network::Mainnet);
+        let nile = network_artifacts(&Network::Nile);
+        let shasta = network_artifacts(&Network::Shasta);
+        assert_ne!(mainnet.controller, nile.controller);
+        assert_ne!(mainnet.controller, shasta.controller);
+        assert_ne!(nile.controller, shasta.controller);
     }
 }

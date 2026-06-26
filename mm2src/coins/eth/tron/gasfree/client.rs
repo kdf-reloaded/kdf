@@ -7,8 +7,11 @@
 //! with strict lifecycle-state parsing (§49.4.7 / R12).
 //!
 //! Today the GET reads (account info, supported tokens, trace) use the
-//! cross-platform header-bearing GET capability ([`slurp_url_with_headers`]);
-//! the POST submit is **deferred** (D-submit) and returns not-implemented.
+//! cross-platform header-bearing GET capability ([`slurp_url_with_headers`])
+//! and the submit POST uses the matching header-bearing POST capability
+//! ([`slurp_post_json_with_headers`]). Both submit and trace are real,
+//! exercised HTTP operations at the client layer; the withdraw path remains
+//! sign-only and does not call submit (\u00a749.8 / D-submit).
 
 use super::error::{sanitize_provider_message, GasFreeProviderError};
 use crate::eth::tron::address::TronAddress;
@@ -234,6 +237,22 @@ fn de_u64<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     d.deserialize_any(V)
 }
 
+/// Optional `u256` that, when present, may arrive as a JSON number or a decimal
+/// string (§49.4.7); an absent field or explicit `null` yields `None`.
+fn de_opt_u256<'de, D: Deserializer<'de>>(d: D) -> Result<Option<U256>, D::Error> {
+    struct OptV;
+    impl<'de> de::Visitor<'de> for OptV {
+        type Value = Option<U256>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an optional u256 as a decimal string or integer")
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> { de_u256(d).map(Some) }
+    }
+    d.deserialize_option(OptV)
+}
+
 // ---------------------------------------------------------------------------
 // Account info payload (§49.4.4)
 // ---------------------------------------------------------------------------
@@ -426,6 +445,27 @@ pub struct TransferResponse {
     pub nonce: u64,
     #[serde(deserialize_with = "de_u64")]
     pub version: u64,
+    /// Provider activation-fee estimate (token base units). Optional: absent on
+    /// some endpoints (§49.4.7).
+    #[serde(
+        rename = "estimatedActivateFee",
+        alias = "estimateActivateFee",
+        default,
+        deserialize_with = "de_opt_u256"
+    )]
+    pub estimated_activate_fee: Option<U256>,
+    /// Provider transfer-fee estimate (token base units). Optional.
+    ///
+    /// Dictated quirk (§49.4.7): the provider spells this inconsistently across
+    /// endpoints, so both `estimatedTransferFee` and the variant spelling
+    /// `estimateTransferFee` (without the trailing `d`) are accepted.
+    #[serde(
+        rename = "estimatedTransferFee",
+        alias = "estimateTransferFee",
+        default,
+        deserialize_with = "de_opt_u256"
+    )]
+    pub estimated_transfer_fee: Option<U256>,
     pub state: TransferState,
     #[serde(rename = "txnState", default)]
     pub txn_state: Option<TxnState>,
@@ -480,6 +520,18 @@ impl GasFreeRestClient {
         interpret_response::<T>(status, &body)
     }
 
+    /// Authenticated POST of a JSON `body`, returning the typed `data` payload
+    /// (§49.4.2 / §49.4.3).
+    async fn post<T: serde::de::DeserializeOwned>(&self, path: &str, body: String) -> Result<T, GasFreeProviderError> {
+        let headers = build_auth_headers("POST", path, &self.api_key, &self.api_secret, Self::now_secs());
+        let header_refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let url = self.url_for(path);
+        let (status, _hdrs, resp) = mm2_net::transport::slurp_post_json_with_headers(&url, header_refs, body)
+            .await
+            .map_err(map_slurp_err)?;
+        interpret_response::<T>(status, &resp)
+    }
+
     /// Fetch account info for `account_address` (§49.4.4).
     pub async fn account_info(&self, account_address: &str) -> Result<AccountInfo, GasFreeProviderError> {
         self.get(&path_account(&self.network, account_address)).await
@@ -495,13 +547,13 @@ impl GasFreeRestClient {
         self.get(&path_trace(&self.network, trace_id)).await
     }
 
-    /// Submit a signed authorization (§49.4.6). **Deferred** (D-submit): the
-    /// authenticated-POST transport is follow-on work; today this is
-    /// not-implemented so the withdraw stays sign-only (§49.8).
-    pub async fn submit(&self, _req: &SubmitRequest) -> Result<TransferResponse, GasFreeProviderError> {
-        Err(GasFreeProviderError::NotImplemented(
-            "GasFree submit is deferred (sign-only today)".to_owned(),
-        ))
+    /// Submit a signed authorization (§49.4.6 / §49.4.2). Implemented as a real
+    /// authenticated POST at the client layer; note the withdraw path remains
+    /// **sign-only** today and does not call this (§49.8 / D-submit).
+    pub async fn submit(&self, req: &SubmitRequest) -> Result<TransferResponse, GasFreeProviderError> {
+        let body = serde_json::to_string(req)
+            .map_err(|e| GasFreeProviderError::InvalidRequest(format!("failed to serialize submit payload: {e}")))?;
+        self.post(&path_submit(&self.network), body).await
     }
 }
 
@@ -708,5 +760,61 @@ mod tests {
         let req = SubmitRequest::new(f).unwrap();
         assert_eq!(req.sig.len(), 130);
         assert!(!req.sig.starts_with("0x"));
+    }
+
+    // A representative submit/trace `data` payload (§49.4.7).
+    fn transfer_envelope(fee_field: &str, fee_value: &str, with_txn: bool) -> String {
+        let txn = if with_txn {
+            r#","txnHash":"0xabc","txnState":"ON_CHAIN""#
+        } else {
+            ""
+        };
+        format!(
+            r#"{{"code":200,"message":"ok","data":{{"id":"trace-1","accountAddress":"TUser","gasFreeAddress":"TCustody","providerAddress":"TProv","targetAddress":"TDest","tokenAddress":"TToken","amount":"1000","nonce":7,{fee_field},"estimatedActivateFee":"0","version":1,"state":"WAITING"{txn}}}}}"#,
+            fee_field = format!(r#""{fee_field}":{fee_value}"#),
+        )
+    }
+
+    #[test]
+    fn submit_trace_decodes_with_canonical_transfer_fee_spelling() {
+        // `estimatedTransferFee` as a JSON number (§49.4.7 number-or-string).
+        let body = transfer_envelope("estimatedTransferFee", "2000000", false);
+        let resp: TransferResponse = interpret_response(StatusCode::OK, body.as_bytes()).unwrap();
+        assert_eq!(resp.id, "trace-1");
+        assert_eq!(resp.nonce, 7);
+        assert_eq!(resp.state, TransferState::Waiting);
+        assert_eq!(resp.estimated_transfer_fee, Some(U256::from(2_000_000u64)));
+        assert_eq!(resp.estimated_activate_fee, Some(U256::zero()));
+        assert!(resp.txn_state.is_none());
+    }
+
+    #[test]
+    fn trace_accepts_variant_transfer_fee_spelling_and_string_int() {
+        // Dictated quirk (§49.4.7): `estimateTransferFee` (no trailing `d`) as a
+        // decimal string, plus an on-chain trace `txnState`.
+        let body = transfer_envelope("estimateTransferFee", r#""3000000""#, true);
+        let resp: TransferResponse = interpret_response(StatusCode::OK, body.as_bytes()).unwrap();
+        assert_eq!(resp.estimated_transfer_fee, Some(U256::from(3_000_000u64)));
+        assert_eq!(resp.txn_state, Some(TxnState::OnChain));
+        assert_eq!(resp.txn_hash.as_deref(), Some("0xabc"));
+    }
+
+    #[test]
+    fn transfer_response_rejects_version_drift_via_unknown_state() {
+        // An unknown lifecycle state is rejected on deserialization (R12).
+        let body = transfer_envelope("estimatedTransferFee", "1", false).replace("WAITING", "ZOMBIE");
+        assert!(interpret_response::<TransferResponse>(StatusCode::OK, body.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn submit_payload_encodes_for_post_body() {
+        // The submit request body that `GasFreeRestClient::submit` would POST:
+        // integers as strings, signature as 130-char hex, no `0x` (§49.4.6).
+        let req = SubmitRequest::new(submit_fields()).unwrap();
+        let body = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["value"], "1000");
+        assert_eq!(parsed["version"], "1");
+        assert_eq!(parsed["sig"].as_str().unwrap().len(), 130);
     }
 }

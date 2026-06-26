@@ -872,6 +872,7 @@ impl EthCoin {
             result.insert(ticker, CoinBalance {
                 spendable,
                 unspendable: BigDecimal::from(0),
+                ..Default::default()
             });
         }
         Ok(result)

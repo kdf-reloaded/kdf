@@ -74,6 +74,20 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
     slurp_req(request).await
 }
 
+/// Executes a POST JSON request with custom headers, returning the response
+/// status, headers and body.
+pub async fn slurp_post_json_with_headers(url: &str, headers: Vec<(&str, &str)>, body: String) -> SlurpResult {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(url)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    for (key, value) in headers {
+        builder = builder.header(key, value);
+    }
+    let request = builder.body(body.into())?;
+    slurp_req(request).await
+}
+
 #[cfg(test)]
 mod tests {
     use crate::native_http::slurp_url;

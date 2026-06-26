@@ -208,6 +208,7 @@ impl TendermintCoin {
             balances.insert(ticker, CoinBalance {
                 spendable: big_decimal_from_sat_unsigned(amount, decimals),
                 unspendable: BigDecimal::default(),
+                ..Default::default()
             });
         }
         Ok(balances)

@@ -607,7 +607,11 @@ impl MarketCoinOps for ZCoin {
                     }
                 },
             );
-            Ok(CoinBalance { spendable, unspendable })
+            Ok(CoinBalance {
+                spendable,
+                unspendable,
+                ..Default::default()
+            })
         };
         Box::new(fut.boxed().compat())
     }

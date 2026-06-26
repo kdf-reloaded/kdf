@@ -160,6 +160,7 @@ mod tests {
         balances.insert("cosmos1abc".to_owned(), CoinBalance {
             spendable: BigDecimal::from(11),
             unspendable: BigDecimal::from(0),
+            ..Default::default()
         });
         let result = TendermintTokenInitResult {
             balances,

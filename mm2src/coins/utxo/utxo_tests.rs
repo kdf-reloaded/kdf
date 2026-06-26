@@ -586,6 +586,7 @@ fn test_withdraw_impl_set_fixed_fee() {
         fee: Some(WithdrawFee::UtxoFixed {
             amount: "0.1".parse().unwrap(),
         }),
+        ..Default::default()
     };
     let expected = Some(
         UtxoFeeDetails {
@@ -627,6 +628,7 @@ fn test_withdraw_impl_sat_per_kb_fee() {
         fee: Some(WithdrawFee::UtxoPerKbyte {
             amount: "0.1".parse().unwrap(),
         }),
+        ..Default::default()
     };
     // The resulting transaction size might be 244 or 245 bytes depending on signature size
     // MM2 always expects the worst case during fee calculation
@@ -671,6 +673,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max() {
         fee: Some(WithdrawFee::UtxoPerKbyte {
             amount: "0.1".parse().unwrap(),
         }),
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     // The resulting transaction size might be 210 or 211 bytes depending on signature size
@@ -717,6 +720,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_equal_to_max_dust_included_to_fee() 
         fee: Some(WithdrawFee::UtxoPerKbyte {
             amount: "0.09999999".parse().unwrap(),
         }),
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     // The resulting transaction size might be 210 or 211 bytes depending on signature size
@@ -763,6 +767,7 @@ fn test_withdraw_impl_sat_per_kb_fee_amount_over_max() {
         fee: Some(WithdrawFee::UtxoPerKbyte {
             amount: "0.1".parse().unwrap(),
         }),
+        ..Default::default()
     };
     coin.withdraw(withdraw_req).wait().unwrap_err();
 }
@@ -796,6 +801,7 @@ fn test_withdraw_impl_sat_per_kb_fee_max() {
         fee: Some(WithdrawFee::UtxoPerKbyte {
             amount: "0.1".parse().unwrap(),
         }),
+        ..Default::default()
     };
     // The resulting transaction size might be 210 or 211 bytes depending on signature size
     // MM2 always expects the worst case during fee calculation
@@ -855,6 +861,7 @@ fn test_withdraw_kmd_rewards_impl(
         coin: "KMD".to_owned(),
         max: false,
         fee: None,
+        ..Default::default()
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some("KMD".into()),
@@ -929,6 +936,7 @@ fn test_withdraw_rick_rewards_none() {
         coin: "RICK".to_owned(),
         max: false,
         fee: None,
+        ..Default::default()
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some(TEST_COIN_NAME.into()),
@@ -1782,7 +1790,9 @@ fn test_qtum_my_balance() {
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
     let coin = block_on(qtum_coin_with_priv_key(&ctx, "tQTUM", &conf, &params, &priv_key)).unwrap();
 
-    let CoinBalance { spendable, unspendable } = coin.my_balance().wait().unwrap();
+    let CoinBalance {
+        spendable, unspendable, ..
+    } = coin.my_balance().wait().unwrap();
     let expected_spendable = BigDecimal::from(66);
     let expected_unspendable = BigDecimal::from(2);
     assert_eq!(spendable, expected_spendable);
@@ -1818,7 +1828,9 @@ fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
     let coin = block_on(qtum_coin_with_priv_key(&ctx, "tQTUM", &conf, &params, &priv_key)).unwrap();
 
-    let CoinBalance { spendable, unspendable } = coin.my_balance().wait().unwrap();
+    let CoinBalance {
+        spendable, unspendable, ..
+    } = coin.my_balance().wait().unwrap();
     let expected_spendable = BigDecimal::from(DISPLAY_BALANCE);
     let expected_unspendable = BigDecimal::from(0);
     assert_eq!(spendable, expected_spendable);
@@ -3087,6 +3099,7 @@ fn test_withdraw_to_p2pkh() {
         coin: TEST_COIN_NAME.into(),
         max: false,
         fee: None,
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     let transaction: UtxoTx = deserialize(tx_details.tx_hex.as_slice()).unwrap();
@@ -3134,6 +3147,7 @@ fn test_withdraw_to_p2sh() {
         coin: TEST_COIN_NAME.into(),
         max: false,
         fee: None,
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     let transaction: UtxoTx = deserialize(tx_details.tx_hex.as_slice()).unwrap();
@@ -3181,6 +3195,7 @@ fn test_withdraw_to_p2wpkh() {
         coin: TEST_COIN_NAME.into(),
         max: false,
         fee: None,
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     let transaction: UtxoTx = deserialize(tx_details.tx_hex.as_slice()).unwrap();

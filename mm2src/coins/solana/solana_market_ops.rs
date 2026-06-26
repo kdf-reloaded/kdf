@@ -24,6 +24,7 @@ impl MarketCoinOps for SolanaCoin {
             Ok(CoinBalance {
                 spendable: result.with_prec(decimals),
                 unspendable: 0.into(),
+                ..Default::default()
             })
         });
         Box::new(fut)

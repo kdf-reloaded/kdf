@@ -96,6 +96,7 @@ fn test_withdraw_impl_fee_details() {
             gas_limit: 2_500_000,
             gas_price: 40,
         }),
+        ..Default::default()
     };
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
 
@@ -790,6 +791,7 @@ fn test_taker_fee_tx_fee() {
     let expected_balance = CoinBalance {
         spendable: BigDecimal::from(5u32),
         unspendable: BigDecimal::from(0u32),
+        ..Default::default()
     };
     assert_eq!(coin.my_balance().wait().expect("!my_balance"), expected_balance);
 

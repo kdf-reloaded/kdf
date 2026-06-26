@@ -447,6 +447,7 @@ impl HDWalletBalanceOps for EthCoin {
         Ok(CoinBalance {
             spendable: balance_decimal,
             unspendable: BigDecimal::from(0),
+            ..Default::default()
         })
     }
 

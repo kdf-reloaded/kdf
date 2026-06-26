@@ -381,6 +381,7 @@ mod tests {
         tokens_balances.insert("IRIS-IBC".to_owned(), CoinBalance {
             spendable: BigDecimal::from(5),
             unspendable: BigDecimal::from(0),
+            ..Default::default()
         });
         let result = TendermintActivationResult {
             ticker: "IRIS".to_owned(),
@@ -389,6 +390,7 @@ mod tests {
             balance: Some(CoinBalance {
                 spendable: BigDecimal::from(7),
                 unspendable: BigDecimal::from(1),
+                ..Default::default()
             }),
             tokens_balances: Some(tokens_balances),
             tokens_tickers: None,

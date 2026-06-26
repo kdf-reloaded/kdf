@@ -159,6 +159,7 @@ mod tests {
         balances.insert("0xabc".to_owned(), CoinBalance {
             spendable: BigDecimal::from(7),
             unspendable: BigDecimal::from(0),
+            ..Default::default()
         });
         let result = Erc20InitResult {
             balances,

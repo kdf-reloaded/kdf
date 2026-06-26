@@ -180,4 +180,30 @@ mod tests {
             derive_gasfree_address(&user(), &a2)
         );
     }
+
+    // Regression pin for the real per-network controller/beacon constants
+    // (§49.5). The proxy creation bytecode is still a placeholder (empty), so
+    // this pins the *current* output, NOT the published GasFree custody-address
+    // vector. When the official SDK bytecode is embedded
+    // (`config::GASFREE_PROXY_CREATION_BYTECODE`), this expected value WILL
+    // change and MUST be re-pinned against the published mainnet user→custody
+    // vector (T1).
+    //
+    // TODO(gasfree): replace with the published mainnet custody-address vector
+    // once the real proxy creation bytecode is pinned.
+    #[test]
+    fn mainnet_derivation_is_stable_with_real_constants_placeholder_bytecode() {
+        use crate::eth::tron::Network;
+
+        // A fixed user EVM address (20 bytes, low-byte 0x42).
+        let mut user_bytes = [0u8; 20];
+        user_bytes[19] = 0x42;
+        let user = EthAddress::from(user_bytes);
+
+        let artifacts = crate::eth::tron::gasfree::config::network_artifacts(&Network::Mainnet);
+        let derived = derive_gasfree_address(&user, &artifacts);
+
+        // Stable, well-formed Tron address with the placeholder (empty) bytecode.
+        assert_eq!(derived.to_base58(), "TY4CVSmxPFiGAdYtFKE9TN9f45TVPQsofm");
+    }
 }

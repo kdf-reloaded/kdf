@@ -54,6 +54,7 @@ impl MarketCoinOps for EthCoin {
             .map(|spendable| CoinBalance {
                 spendable,
                 unspendable: BigDecimal::from(0),
+                ..Default::default()
             });
         Box::new(fut)
     }

@@ -48,6 +48,7 @@ impl MarketCoinOps for LightningCoin {
         let my_balance = CoinBalance {
             spendable: big_decimal_from_sat_unsigned(spendable_msat, decimals),
             unspendable: big_decimal_from_sat_unsigned(unspendable_msat, decimals),
+            ..Default::default()
         };
         Box::new(futures01::future::ok(my_balance))
     }

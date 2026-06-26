@@ -55,6 +55,7 @@ impl MarketCoinOps for SiaCoin {
             Ok(CoinBalance {
                 spendable: hastings_to_siacoin(balance.siacoins),
                 unspendable: hastings_to_siacoin(balance.immature_siacoins),
+                ..Default::default()
             })
         };
         Box::new(fut.boxed().compat())

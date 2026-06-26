@@ -421,7 +421,7 @@ pub enum WithdrawFrom {
         derivation_path: String,
     },
 }
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 pub struct WithdrawRequest {
     pub(crate) coin: String,
     pub(crate) from: Option<WithdrawFrom>,
@@ -431,6 +431,16 @@ pub struct WithdrawRequest {
     #[serde(default)]
     pub(crate) max: bool,
     pub(crate) fee: Option<WithdrawFee>,
+    /// Withdraw fee-rail selector (CRD §49.3.4). Optional and inert for every
+    /// non-Tron coin; only meaningful for a Tron TRC20 gasless withdraw.
+    /// `None` preserves the historical native rail and wire format.
+    #[serde(default)]
+    pub(crate) fee_method: Option<crate::eth::tron::gasfree::FeeMethod>,
+    /// Per-request gasless constraints (CRD §49.3.4), meaningful only with
+    /// `fee_method = gasless | auto` on a Tron TRC20 coin. Inert/`None` for
+    /// every other coin.
+    #[serde(default)]
+    pub(crate) gasless: Option<crate::eth::tron::gasfree::GaslessWithdrawOptions>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -482,6 +492,7 @@ impl WithdrawRequest {
             amount,
             max,
             fee,
+            ..Default::default()
         }
     }
 
@@ -493,6 +504,7 @@ impl WithdrawRequest {
             amount: 0.into(),
             max: true,
             fee: None,
+            ..Default::default()
         }
     }
 }
@@ -689,12 +701,19 @@ pub struct TradeFee {
 pub struct CoinBalance {
     pub spendable: BigDecimal,
     pub unspendable: BigDecimal,
+    /// Locally derived Tron GasFree custody address (CRD §49.3.3). Populated
+    /// only for a Tron TRC20 coin with a configured GasFree provider; `None`
+    /// (and omitted from the wire) for every other coin, preserving the
+    /// historical balance wire format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gasfree_address: Option<String>,
 }
 impl CoinBalance {
     pub fn new(spendable: BigDecimal) -> CoinBalance {
         CoinBalance {
             spendable,
             unspendable: BigDecimal::from(0),
+            gasfree_address: None,
         }
     }
 
@@ -709,6 +728,8 @@ impl Add for CoinBalance {
         CoinBalance {
             spendable: self.spendable + rhs.spendable,
             unspendable: self.unspendable + rhs.unspendable,
+            // A summed balance has no single custody address.
+            gasfree_address: None,
         }
     }
 }
@@ -930,4 +951,68 @@ pub enum HistorySyncState {
     InProgress(Json),
     Error(Json),
     Finished,
+}
+
+#[cfg(test)]
+mod gasfree_shared_surface_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    // CRD §49.3.3: `gasfree_address` is omitted from the balance wire format for
+    // every non-Tron coin (None), preserving the historical balance JSON.
+    #[test]
+    fn non_tron_balance_omits_gasfree_address() {
+        let balance = CoinBalance::new(BigDecimal::from(5));
+        let json = serde_json::to_value(&balance).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("gasfree_address"));
+        assert_eq!(obj.len(), 2); // spendable + unspendable only
+    }
+
+    // CRD §49.3.3: a Tron TRC20 balance carrying a derived custody address
+    // surfaces it on the shared balance report.
+    #[test]
+    fn tron_balance_serializes_gasfree_address() {
+        let balance = CoinBalance {
+            spendable: BigDecimal::from(5),
+            unspendable: BigDecimal::from(0),
+            gasfree_address: Some("TY4CVSmxPFiGAdYtFKE9TN9f45TVPQsofm".to_owned()),
+        };
+        let json = serde_json::to_value(&balance).unwrap();
+        assert_eq!(
+            json["gasfree_address"].as_str(),
+            Some("TY4CVSmxPFiGAdYtFKE9TN9f45TVPQsofm")
+        );
+    }
+
+    // CRD §49.3.4: a non-Tron withdraw request (no fee_method/gasless) parses
+    // unchanged, leaving both new fields inert.
+    #[test]
+    fn withdraw_request_defaults_new_fields() {
+        let req: WithdrawRequest =
+            serde_json::from_str(r#"{"coin":"RICK","to":"RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa","amount":"1"}"#).unwrap();
+        assert!(req.fee_method.is_none());
+        assert!(req.gasless.is_none());
+    }
+
+    // CRD §49.3.4: a Tron TRC20 gasless withdraw drives the rail and per-request
+    // constraints through the same shared request.
+    #[test]
+    fn withdraw_request_parses_gasless_fields() {
+        let req: WithdrawRequest = serde_json::from_str(
+            r#"{
+                "coin":"USDT-TRC20",
+                "to":"TY4CVSmxPFiGAdYtFKE9TN9f45TVPQsofm",
+                "amount":"10",
+                "fee_method":"gasless",
+                "gasless":{"max_fee":"2.5","deadline_seconds":600,"fallback_to_native":true}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(req.fee_method, Some(crate::eth::tron::gasfree::FeeMethod::Gasless));
+        let gasless = req.gasless.expect("gasless options present");
+        assert_eq!(gasless.max_fee, Some(BigDecimal::from_str("2.5").unwrap()));
+        assert_eq!(gasless.deadline_seconds, Some(600));
+        assert!(gasless.fallback_to_native);
+    }
 }

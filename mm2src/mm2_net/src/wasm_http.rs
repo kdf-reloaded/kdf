@@ -45,6 +45,20 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
         .map(|(status_code, response)| (status_code, HeaderMap::new(), response.into_bytes()))
 }
 
+/// Executes a POST JSON request with custom headers, returning the response status, headers and body.
+/// Please note the return header map is empty, because `wasm_bindgen` doesn't provide the way to extract all headers.
+pub async fn slurp_post_json_with_headers(url: &str, headers: Vec<(&str, &str)>, body: String) -> SlurpResult {
+    let mut req = FetchRequest::post(url)
+        .header("Content-Type", "application/json")
+        .body_utf8(body);
+    for (key, value) in headers {
+        req = req.header(key, value);
+    }
+    req.request_str()
+        .await
+        .map(|(status_code, response)| (status_code, HeaderMap::new(), response.into_bytes()))
+}
+
 pub struct FetchRequest {
     uri: String,
     method: FetchMethod,

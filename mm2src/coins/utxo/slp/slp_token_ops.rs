@@ -492,6 +492,7 @@ impl SlpToken {
         Ok(CoinBalance {
             spendable,
             unspendable: 0.into(),
+            ..Default::default()
         })
     }
 

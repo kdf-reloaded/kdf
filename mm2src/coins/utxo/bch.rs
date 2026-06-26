@@ -114,6 +114,7 @@ impl BchUnspents {
         CoinBalance {
             spendable: big_decimal_from_sat_unsigned(spendable_sat, decimals),
             unspendable: big_decimal_from_sat_unsigned(total_unspendable, decimals),
+            ..Default::default()
         }
     }
 
@@ -125,6 +126,7 @@ impl BchUnspents {
                 CoinBalance {
                     spendable: big_decimal_from_sat_unsigned(total_sat, decimals),
                     unspendable: 0.into(),
+                    ..Default::default()
                 }
             })
             .unwrap_or_default()

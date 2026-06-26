@@ -43,6 +43,7 @@ impl SolanaCoin {
             return Ok(CoinBalance {
                 spendable: Default::default(),
                 unspendable: Default::default(),
+                ..Default::default()
             });
         }
         let actual_token_pubkey =
@@ -53,6 +54,7 @@ impl SolanaCoin {
         Ok(CoinBalance {
             spendable: balance,
             unspendable: Default::default(),
+            ..Default::default()
         })
     }
 

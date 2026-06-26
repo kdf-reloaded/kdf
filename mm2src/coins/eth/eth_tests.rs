@@ -731,6 +731,7 @@ fn test_withdraw_impl_manual_fee() {
             gas: 150000,
             gas_price: 1.into(),
         }),
+        ..Default::default()
     };
     coin.my_balance().wait().unwrap();
 
@@ -774,6 +775,7 @@ fn test_withdraw_impl_fee_details() {
             gas: 150000,
             gas_price: 1.into(),
         }),
+        ..Default::default()
     };
     coin.my_balance().wait().unwrap();
 

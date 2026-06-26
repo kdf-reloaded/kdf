@@ -8,6 +8,7 @@
 use common::HttpStatusCode;
 use derive_more::Display;
 use http::StatusCode;
+use serde::{Deserialize, Serialize};
 
 /// Maximum length of provider-supplied text retained in a surfaced error (R10).
 const MAX_PROVIDER_MSG_LEN: usize = 256;
@@ -45,7 +46,7 @@ pub enum GasFreeConfigError {
 
 /// Provider-interaction errors (§49.9). The status mapping is the observable
 /// contract.
-#[derive(Clone, Debug, Display, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
 pub enum GasFreeProviderError {
     #[display(fmt = "Invalid GasFree request: {}", _0)]
     InvalidRequest(String),
@@ -91,7 +92,7 @@ impl HttpStatusCode for GasFreeProviderError {
 
 /// Withdraw-level gasless errors (§49.9). The status mapping is the observable
 /// contract.
-#[derive(Clone, Debug, Display, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]
 pub enum GasFreeWithdrawError {
     #[display(fmt = "Gasless rail unavailable: {}", _0)]
     Unavailable(String),

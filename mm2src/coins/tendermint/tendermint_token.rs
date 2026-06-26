@@ -365,6 +365,7 @@ impl MarketCoinOps for TendermintToken {
             Ok(CoinBalance {
                 spendable: big_decimal_from_sat_unsigned(balance, coin.decimals),
                 unspendable: BigDecimal::default(),
+                ..Default::default()
             })
         };
         Box::new(fut.boxed().compat())
