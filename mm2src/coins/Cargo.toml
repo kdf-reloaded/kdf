@@ -66,6 +66,7 @@ futures = { version = "0.3", package = "futures", features = ["compat", "async-a
 gstuff = { version = "0.7" }
 hex = "0.4.2"
 http = "0.2"
+indexmap = { version = "1.7", features = ["serde-1"] }
 itertools = { version = "0.10", features = ["use_std"] }
 jsonrpc-core = "8.0.1"
 kdf_walletconnect = { path = "../kdf_walletconnect" }

@@ -1851,6 +1851,7 @@ dependencies = [
  "http 0.2.12",
  "hyper",
  "hyper-rustls",
+ "indexmap 1.9.3",
  "itertools 0.10.3",
  "js-sys",
  "jsonrpc-core 8.0.1",

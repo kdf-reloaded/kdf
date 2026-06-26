@@ -8,6 +8,7 @@ pub mod activation;
 pub mod address;
 pub mod api;
 pub mod fee;
+pub mod gasfree;
 pub mod proto;
 pub mod sign;
 pub mod tx_builder;
