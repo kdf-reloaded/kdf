@@ -279,6 +279,17 @@ the `0x41` prefix and the base58check checksum, rejecting
 malformed inputs with a typed error. TRC20 contract addresses
 supplied at activation MUST be accepted in either form.
 
+**R-AD2 (order-display address).** When the order-matching layer
+renders the address that owns a Tron order (derived from the
+order's public key for orderbook display), it MUST produce the
+Tron **base58check display form** (R-AD1), using the same
+secp256k1-public-key-to-payload derivation as the rest of the EVM
+family but rendered in Tron form rather than the `0x`-hex EVM
+form. A Tron coin MUST therefore be a recognised, supported case
+of the order-display address derivation rather than an
+unsupported one. The derivation core is shared with the EVM
+family; only the display encoding is Tron-specific.
+
 > **Binding scope (R36).** The `0x41` prefix, the 21-byte wire
 > form, the base58check display encoding, and the keccak-256
 > address derivation are dictated by the Tron protocol. The
