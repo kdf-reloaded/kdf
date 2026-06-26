@@ -47,6 +47,9 @@ impl FeePerGasSimpleEstimator {
     pub fn history_percentiles() -> &'static [f64] { &Self::HISTORY_PERCENTILES }
 
     fn percentile_of(v: &[U256], percent: f64) -> U256 {
+        if v.is_empty() {
+            return U256::from(0);
+        }
         let mut v_mut = v.to_owned();
         v_mut.sort();
 
@@ -72,6 +75,14 @@ impl FeePerGasSimpleEstimator {
     }
 
     fn predict_base_fee(base_fees: &[U256]) -> U256 { Self::percentile_of(base_fees, Self::BASE_FEE_PERCENTILE) }
+
+    /// Select the freshest base-fee anchor from a decoded `eth_feeHistory`
+    /// `baseFeePerGas` array. Per EIP-1559 / `eth_feeHistory` the array is
+    /// ordered oldest-to-newest (length `blockCount` + 1 on mainline clients,
+    /// the trailing element being the next/pending block), so the freshest
+    /// base fee is the **last** element. Degrades to zero when the array is
+    /// absent / empty.
+    fn latest_base_fee(base_fees: &[U256]) -> U256 { base_fees.last().copied().unwrap_or_else(|| U256::from(0)) }
 
     fn priority_fee_for_level(
         level: PriorityLevelId,
@@ -111,7 +122,7 @@ impl FeePerGasSimpleEstimator {
         // Convert alloy's `u128` base-fee samples into the legacy
         // `U256` shape that the percentile / multiplier helpers expect.
         let base_fees: Vec<U256> = fee_history.base_fee_per_gas.iter().copied().map(u128_to_u256).collect();
-        let latest_base_fee = base_fees.first().copied().unwrap_or_else(|| U256::from(0));
+        let latest_base_fee = Self::latest_base_fee(&base_fees);
         let latest_base_fee_gwei = wei_to_gwei_decimal(latest_base_fee).unwrap_or_else(|_| BigDecimal::from(0));
 
         let predicted_base_fee = Self::predict_base_fee(&base_fees);
@@ -124,5 +135,66 @@ impl FeePerGasSimpleEstimator {
             base_fee_trend: String::default(),
             priority_fee_trend: String::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GWEI: u128 = 1_000_000_000;
+
+    /// Build a `FeeHistory` from a `baseFeePerGas` array (wei) and a per-block
+    /// reward matrix (wei, one row per block, each row holding the three
+    /// percentile columns the estimator reads).
+    fn fee_history(base_fee_per_gas: Vec<u128>, reward: Option<Vec<Vec<u128>>>) -> FeeHistory {
+        FeeHistory {
+            base_fee_per_gas,
+            reward,
+            ..Default::default()
+        }
+    }
+
+    /// T1 (R1 regression): the base-fee anchor MUST be the freshest (last)
+    /// element of the `baseFeePerGas` array, never the first / oldest one.
+    #[test]
+    fn anchor_is_freshest_base_fee() {
+        let base_fees: Vec<U256> = (1..=5u64).map(U256::from).collect();
+        let anchor = FeePerGasSimpleEstimator::latest_base_fee(&base_fees);
+
+        assert_eq!(anchor, U256::from(5u64), "anchor must equal the last element");
+        assert_ne!(anchor, U256::from(1u64), "anchor must not equal the first element");
+    }
+
+    /// T2 (R3): for every priority tier the reported max-fee figure must be
+    /// greater than or equal to the selected (freshest) base-fee anchor.
+    #[test]
+    fn max_fee_never_below_anchor() {
+        let base_fees: Vec<u128> = (1..=5).map(|n| n * GWEI).collect();
+        let anchor = u128_to_u256(5u128 * GWEI); // last element of the array
+        let reward = Some(vec![vec![GWEI, GWEI, GWEI]; base_fees.len()]);
+
+        let estimated = FeePerGasSimpleEstimator::calculate_with_history(&fee_history(base_fees, reward))
+            .expect("estimate should be produced");
+
+        assert!(estimated.low.max_fee_per_gas >= anchor);
+        assert!(estimated.medium.max_fee_per_gas >= anchor);
+        assert!(estimated.high.max_fee_per_gas >= anchor);
+    }
+
+    /// T3 (R2): an empty `baseFeePerGas` array must degrade to a zero base-fee
+    /// anchor and a well-formed estimate, never panic or error.
+    #[test]
+    fn empty_base_fee_array_tolerated() {
+        let reward = Some(vec![vec![GWEI, GWEI, GWEI]]);
+
+        let estimated = FeePerGasSimpleEstimator::calculate_with_history(&fee_history(Vec::new(), reward))
+            .expect("estimate should be produced for an empty base-fee array");
+
+        // Zero base-fee anchor: the predicted base fee derives from the (empty)
+        // array, so it degrades to zero; per-tier max-fee is then the pure
+        // priority-fee term and stays at or above that zero anchor.
+        assert_eq!(estimated.base_fee, U256::from(0u64));
+        assert!(estimated.low.max_fee_per_gas >= U256::from(0u64));
     }
 }
