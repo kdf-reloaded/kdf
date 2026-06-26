@@ -119,6 +119,22 @@ This section specifies the *public contract* the workspace
 exposes for GasFree. The JSON field names below are part of that
 public API and are binding; the Rust types behind them are not.
 
+**Placement (binding).** The withdraw fee-rail fields (§49.3.4)
+and the balance custody-address field (§49.3.3) MUST be exposed on
+the **shared, cross-coin** withdraw-request and balance-report
+structures of the workspace (the same request the standard
+withdraw RPC deserializes and the same report the standard balance
+RPC serializes), not on a Tron-local request/response type. The
+fields are inert (`None`/omitted) for every non-Tron coin, but the
+public JSON contract is the shared one: a caller drives the
+gasless rail through the ordinary withdraw RPC and reads
+`gasfree_address` from the ordinary balance response. Likewise the
+gasless withdraw error family (§49.9) MUST be a variant of the
+shared withdraw-error type so its status mapping flows through the
+standard dispatcher. Surfacing these only through a Tron-internal
+type would leave the §49.3 contract unexposed and is
+non-conforming.
+
 ### 49.3.1 Platform activation (dictated by our public API)
 
 The EVM/Tron platform-activation request gains an optional
@@ -249,9 +265,13 @@ Each request carries two headers:
   order, no separators).
 
 An implementation MUST match this construction byte-for-byte to
-authenticate; it MUST be validated against the provider's
-published auth test vector. The credential material MUST stay
-out of logs and `Debug`.
+authenticate; because the construction is a deterministic function
+of a fixed (method, path, timestamp, api_key, api_secret), it MUST
+be validated against a fixed auth vector (the expected
+`ApiKey {api_key}:{signature}` string for known inputs is
+self-derivable from the algorithm and need not come from a
+provider-published vector). The credential material MUST stay out
+of logs and `Debug`.
 
 A second, proxy-mediated authentication transport (where a
 trusted proxy supplies credentials instead of the client holding
@@ -317,6 +337,13 @@ one of: `INIT`, `NOT_ON_CHAIN`, `ON_CHAIN`, `SOLIDITY`,
 on deserialization so provider API drift surfaces immediately
 rather than being silently misread.
 
+> **Dictated quirk.** The provider API spells the transfer-fee
+> estimate inconsistently across endpoints: a client MUST accept
+> **both** `estimatedTransferFee` and the variant spelling
+> `estimateTransferFee` (without the trailing `d`) as the same
+> field. Integer-valued provider fields may arrive as either JSON
+> numbers or decimal strings, and a client MUST accept both forms.
+
 ## 49.5 GasFree Custody-Address Derivation -- Tron `CREATE2` (dictated interop)
 
 The custody address is derived **locally and deterministically**
@@ -330,8 +357,25 @@ address to be correct.
 Per network the derivation uses three published constants: the
 GasFree **controller** contract address, the **beacon** contract
 address, and the proxy **creation bytecode** (taken from the
-public GasFree SDK; this chapter references them rather than
-embedding the bytecode). The steps:
+public GasFree SDK; this chapter references the bytecode by its
+SDK source rather than embedding it, but it MUST be the exact
+per-network proxy creation bytecode published by the official
+GasFree SDK). The published per-network constants (dictated
+interop, base58 Tron addresses) are:
+
+| Network | Controller (`verifyingContract`) | Beacon |
+| --- | --- | --- |
+| Mainnet | `TFFAMQLZybALaLb4uxHA9RBE7pxhUAjF3U` | `TSP9UW6FQhT76XD2jWA6ipGMx3yGbjDffP` |
+| Nile | `THQGuFzL87ZqhxkgqYEryRAd7gqFqL5rdc` | `TLtCGmaxH3PbuaF6kbybwteZcHptEdgQGC` |
+| Shasta | `TQghdCeVDA6CnuNVTUhfaAyPfTetqZWNpm` | `TQ1jvA3nLDMDNbJoMPLzTPoqAg8NvZ5CCW` |
+
+The `initialize(address)` selector used in step 2 is `0xc4d66de8`
+(the leading 4 bytes of keccak-256 of the ASCII function
+signature). These constants are protocol/SDK-dictated, not
+placeholders: an implementation MUST bind the real published
+values (a zero-valued or absent controller/beacon/bytecode would
+silently produce wrong, user-visible receive addresses). The
+steps:
 
 1. **Salt** = the user's 20-byte EVM-form address, right-aligned
    (left zero-padded) into 32 bytes.
@@ -347,10 +391,11 @@ embedding the bytecode). The steps:
    re-encoded as a Tron address.
 
 The derivation MUST be validated against the published GasFree
-per-network address vectors. The controller and beacon are
-hard-bound per network (not caller-configurable) precisely because
-a wrong value would silently produce a wrong, user-visible receive
-address.
+per-network custody-address vectors carried in the official
+GasFree SDK (covering mainnet, Nile, and Shasta user→custody
+pairs). The controller and beacon are hard-bound per network (not
+caller-configurable) precisely because a wrong value would
+silently produce a wrong, user-visible receive address.
 
 ## 49.6 `PermitTransfer` Signed Authorization -- TIP-712 (dictated interop)
 
@@ -362,9 +407,12 @@ because the signature is only valid if the typed data is
 byte-exact.
 
 - **Domain**: `name` = `GasFreeController`, `version` = `V1.0.0`,
-  `chainId` = the network's EIP-712 chain id (e.g. the Nile
-  testnet's chain id is `3448148188`), `verifyingContract` = the
-  per-network controller (§49.5).
+  `chainId` = the network's EIP-712 chain id, `verifyingContract`
+  = the per-network controller (§49.5). The dictated per-network
+  chain ids are: Tron mainnet `728126428`, Shasta testnet
+  `2494104990`, Nile testnet `3448148188`. (These are the
+  well-known Tron network chain ids; they are also the values the
+  signed authorization's relay payload reports.)
 - **Primary type**: `PermitTransfer`, with fields in order:
   `token` (address), `serviceProvider` (address), `user`
   (address), `receiver` (address), `value` (uint256), `maxFee`
@@ -375,7 +423,9 @@ Signing obligations (behavioural):
 
 - the typed-data hash MUST be validated against the published
   GasFree `PermitTransfer` test vectors (domain separator and
-  full typed-data hash) before the signer is trusted;
+  full typed-data hash) before the signer is trusted; these
+  vectors are published in the official GasFree SDK and cover
+  multiple networks;
 - the signing key MUST correspond to the `user` address; a
   mismatch is refused (the wallet must not sign a transfer that
   debits an address it does not control);
@@ -470,22 +520,40 @@ The withdraw pipeline gains a gasless branch selected by
    address, and a creation timestamp) wrapped as an *unsigned*
    transaction artifact -- i.e. it is **not** broadcast on-chain
    and **not** yet submitted to the provider -- together with the
-   gasless fee details (§49.3.5). The off-chain payload's wrapping
-   envelope shape and its internal type discriminator are
-   discretionary implementation detail.
+   gasless fee details (§49.3.5). The off-chain payload's internal
+   Rust type name is discretionary, but its serialized field set
+   is part of the returned artifact and is informatively: a
+   relay-type discriminator (a fixed wire string identifying the
+   Tron GasFree off-chain rail), the network chain id, the coin
+   ticker, the optional HD `from` selector, the from address, the
+   derived custody (GasFree) address, the per-network controller
+   (`verifyingContract`), the creation timestamp, and a nested
+   **signed authorization** object carrying exactly the
+   `PermitTransfer` fields (`token`, `serviceProvider`, `user`,
+   `receiver`, `value`, `maxFee`, `deadline`, `version`, `nonce`)
+   plus the 65-byte signature; integer fields are serialized as
+   decimal strings and the raw signature is redacted in `Debug`
+   (R9).
 6. **Fallback.** With `fee_method = gasless` and
    `fallback_to_native = true`, a *deterministic* unavailability
    (e.g. the rail is unavailable or balance is insufficient) falls
    back to the native rail instead of erroring; non-deterministic
    provider/transport errors still surface.
 
-**Deferred (scaffolded):** the provider client already models the
-submit and trace endpoints, and the task progress enumeration
-already reserves the submit/wait-for-provider/wait-for-settlement
-phases (§49.3.6), but the withdraw result is sign-only: it does
-not POST the authorization or poll for settlement. Wiring
-submission and settlement tracking into the withdraw result is
-follow-on work (D-submit).
+**Deferred (scaffolded):** the provider client's submit and trace
+operations are **fully implemented at the client layer** (the
+submit POST serializes and validates the authorization per
+§49.4.6 and decodes the submit/trace response payloads per
+§49.4.7), and the task progress enumeration already reserves the
+submit/wait-for-provider/wait-for-settlement phases (§49.3.6); what
+is deferred is only their **integration into the withdraw
+result** -- today's withdraw is sign-only: it does not POST the
+authorization or poll for settlement. Wiring submission and
+settlement tracking into the withdraw result is follow-on work
+(D-submit). (A from-scratch reimplementation MUST therefore
+implement the submit/trace client calls as real, exercised HTTP
+operations -- not as not-implemented stubs -- even though the
+withdraw path leaves them uncalled.)
 
 ## 49.9 Error Taxonomy and Status Codes
 
@@ -583,9 +651,10 @@ T2. **TIP-712 vectors.** The `PermitTransfer` domain separator and
     full typed-data hash reproduce the published GasFree vectors
     across networks.
 
-T3. **Auth vector.** The request-auth signature reproduces the
-    provider's published HMAC test vector; credentials are redacted
-    in `Debug`.
+T3. **Auth vector.** The request-auth signature reproduces a fixed
+    HMAC auth vector (self-derivable from the construction of
+    §49.4.2 for known inputs); credentials are redacted in
+    `Debug`.
 
 T4. **Envelope semantics.** A 200 HTTP response carrying a
     non-200 envelope `code` is rejected; status classes map to the
@@ -621,7 +690,10 @@ D-submit. **Submission and settlement tracking.** Wire the signed
     trace endpoint for settlement, emitting the reserved
     submit/wait progress phases (§49.3.6) and populating
     `trace_id`/tx-hash in the fee details and status. Today's
-    withdraw is sign-only.
+    withdraw is sign-only. (The submit and trace client operations
+    themselves are already implemented and exercised at the client
+    layer; only their wiring into the withdraw result is
+    outstanding.)
 
 D-proxy. **Proxy-mediated authentication transport.** The
     alternative transport that delegates credential handling to a
