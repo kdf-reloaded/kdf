@@ -2,6 +2,29 @@
 
 use super::*;
 
+/// Whether a coin uses the TRON bandwidth/energy fee model rather than the EVM
+/// gas model (R-TF1, R-S1): the EVM gas estimators must never run for these.
+fn is_tron_fee_model(coin_type: &EthCoinType) -> bool {
+    matches!(coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. })
+}
+
+/// Convert a TRON bandwidth/energy fee estimate into a [`TradeFee`] denominated
+/// in TRX (the fee coin is TRX itself, or the TRC20 token's parent platform).
+fn tron_trade_fee(coin: &EthCoin, details: crate::eth::tron::fee::TronTxFeeDetails) -> Result<TradeFee, String> {
+    let fee_coin = match &coin.coin_type {
+        EthCoinType::Tron => &coin.ticker,
+        EthCoinType::Trc20 { platform, .. } => platform,
+        _ => return Err("tron_trade_fee invoked on a non-TRON coin".to_owned()),
+    };
+    let sun = u64::try_from(details.total_fee_sun.max(0)).unwrap_or(0);
+    let amount = u256_to_big_decimal(U256::from(sun), crate::eth::tron::TRX_DECIMALS).map_err(|e| e.to_string())?;
+    Ok(TradeFee {
+        coin: fee_coin.into(),
+        amount: amount.into(),
+        paid_from_trading_vol: false,
+    })
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EthTxFeeDetails {
     pub(crate) coin: String,
@@ -137,6 +160,17 @@ impl MmCoin for EthCoin {
         value: TradePreimageValue,
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
+        // R-TF1/R-S1: TRON coins use the bandwidth/energy model, never EVM gas.
+        if is_tron_fee_model(&self.coin_type) {
+            let amount = match value {
+                TradePreimageValue::Exact(value) | TradePreimageValue::UpperBound(value) => value,
+            };
+            let details = crate::eth::tron::swap_ops::sender_trade_fee_details(self, amount)
+                .await
+                .map_to_mm(TradePreimageError::Transport)?;
+            return tron_trade_fee(self, details).map_to_mm(TradePreimageError::InternalError);
+        }
+
         let gas_price = self.get_gas_price().compat().await.mm_err(Into::into)?;
         let gas_price = increase_gas_price_by_stage(gas_price, &stage);
         let gas_limit = match self.coin_type {
@@ -175,10 +209,12 @@ impl MmCoin for EthCoin {
                     U256::from(300_000)
                 }
             },
-            // Trade-fee preimage for V1 ETH-style HTLC swaps; TRON uses a
-            // bandwidth/energy fee model handled separately. Wired in P10.2.5.
+            // TRON is handled above via the bandwidth/energy model (R-TF1); this
+            // match is only reached for EVM coins.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                unimplemented!("TRON V1 sender trade fee not wired (pending P10.2.5)")
+                return MmError::err(TradePreimageError::InternalError(
+                    "TRON sender trade fee must use the bandwidth/energy model".to_owned(),
+                ))
             },
         };
 
@@ -200,6 +236,15 @@ impl MmCoin for EthCoin {
     fn get_receiver_trade_fee(&self, stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {
         let coin = self.clone();
         let fut = async move {
+            // R-TF1/R-S1: TRON receiver-side claim uses the bandwidth/energy
+            // model, never EVM gas.
+            if is_tron_fee_model(&coin.coin_type) {
+                let details = crate::eth::tron::swap_ops::receiver_trade_fee_details(&coin)
+                    .await
+                    .map_to_mm(TradePreimageError::Transport)?;
+                return tron_trade_fee(&coin, details).map_to_mm(TradePreimageError::InternalError);
+            }
+
             let gas_price = coin.get_gas_price().compat().await.mm_err(Into::into)?;
             let gas_price = increase_gas_price_by_stage(gas_price, &stage);
             let total_fee = gas_price * U256::from(150_000);
@@ -224,6 +269,15 @@ impl MmCoin for EthCoin {
         dex_fee_amount: BigDecimal,
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
+        // R-TF1/R-DF1: the TRON dex-fee transfer (native TRX or TRC20) uses the
+        // bandwidth/energy model, never EVM gas.
+        if is_tron_fee_model(&self.coin_type) {
+            let details = crate::eth::tron::swap_ops::fee_to_send_taker_fee_details(self, dex_fee_amount)
+                .await
+                .map_to_mm(TradePreimageError::Transport)?;
+            return tron_trade_fee(self, details).map_to_mm(TradePreimageError::InternalError);
+        }
+
         let dex_fee_amount = wei_from_big_decimal(&dex_fee_amount, self.decimals).mm_err(Into::into)?;
 
         // pass the dummy params — preimage destination only, never broadcast.
@@ -242,11 +296,11 @@ impl MmCoin for EthCoin {
                 let data = function.encode_input(&[Token::Address(to_addr), Token::Uint(dex_fee_amount)])?;
                 (0.into(), data, token_addr, platform)
             },
-            // ETH-style fee preimage; TRON dex-fee preimage flows through the
-            // dedicated TRON estimator. Activation gating prevents this branch. P10.2.5.
+            // TRON is handled above via the bandwidth/energy model (R-TF1/R-DF1);
+            // this match is only reached for EVM coins.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return MmError::err(TradePreimageError::InternalError(
-                    "TRON dex-fee preimage not yet wired (pending P10.2.5)".to_owned(),
+                    "TRON dex-fee preimage must use the bandwidth/energy model".to_owned(),
                 ));
             },
         };

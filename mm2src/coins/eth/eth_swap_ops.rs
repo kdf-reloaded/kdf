@@ -2,6 +2,120 @@
 
 use super::*;
 
+/// True for the TRON coin family (native TRX or a TRC20 token). Version-1 swap
+/// operations route here to TRON-specific behaviour (R-S1).
+fn is_tron_family(coin_type: &EthCoinType) -> bool {
+    matches!(coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. })
+}
+
+/// Coerce a swap secret / secret-hash to the 32-byte form the TRON swap
+/// contract uses (R-S2 / R-SA1).
+fn tron_bytes32(label: &str, bytes: &[u8]) -> Result<[u8; 32], String> {
+    if bytes.len() != 32 {
+        return ERR!("TRON swap {} must be 32 bytes, got {}", label, bytes.len());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(bytes);
+    Ok(out)
+}
+
+impl EthCoin {
+    /// Resolve the TRON swap-contract address for a swap operation (R-A3/R-D1):
+    /// prefer the negotiated address, falling back to the coin's activated
+    /// swap-contract address. A TRON coin activated without a swap-contract
+    /// address (wallet-only) yields an error here, keeping it off every swap
+    /// path (R-D1).
+    pub(crate) fn tron_swap_contract(&self, negotiated: &Option<BytesJson>) -> Result<Address, String> {
+        let from_arg = negotiated.try_to_address().ok().filter(|a| !a.is_zero());
+        let addr = from_arg.unwrap_or(self.swap_contract_address);
+        if addr.is_zero() {
+            return ERR!("TRON coin has no swap-contract address configured (wallet-only)");
+        }
+        Ok(addr)
+    }
+
+    /// Validate a counterparty's TRON HTLC payment (R-L2). `funder_pub` is the
+    /// payer's public key; the validator (self) is the receiver.
+    fn validate_tron_payment(
+        &self,
+        input: ValidatePaymentInput,
+        funder_pub: &[u8],
+    ) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        let coin = self.clone();
+        let swap_contract = try_fus!(self.tron_swap_contract(&input.swap_contract_address));
+        let funder = try_fus!(addr_from_raw_pubkey(funder_pub));
+        let receiver = self.my_address;
+        let secret_hash = try_fus!(tron_bytes32("secret-hash", &input.secret_hash));
+        let time_lock = input.time_lock as u64;
+        let amount = input.amount.clone();
+        let payment_tx = input.payment_tx.clone();
+        let fut = async move {
+            crate::eth::tron::swap_ops::validate_payment(
+                coin,
+                payment_tx,
+                swap_contract,
+                funder,
+                receiver,
+                secret_hash,
+                time_lock,
+                amount,
+            )
+            .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Send a TRON HTLC payment (maker or taker side) (R-L1).
+    fn send_tron_payment(
+        &self,
+        time_lock: u32,
+        receiver: Address,
+        secret_hash: &[u8],
+        amount: BigDecimal,
+        negotiated: &Option<BytesJson>,
+    ) -> TransactionFut {
+        let coin = self.clone();
+        let swap_contract = try_tx_fus!(self.tron_swap_contract(negotiated));
+        let secret_hash = try_tx_fus!(tron_bytes32("secret-hash", secret_hash));
+        let fut = async move {
+            crate::eth::tron::swap_ops::send_payment(coin, swap_contract, receiver, secret_hash, time_lock, amount)
+                .await
+                .map(TransactionEnum::from)
+                .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Spend a TRON HTLC payment by revealing the secret (R-L3).
+    fn spend_tron_payment(&self, payment_tx: &[u8], secret: &[u8], negotiated: &Option<BytesJson>) -> TransactionFut {
+        let coin = self.clone();
+        let swap_contract = try_tx_fus!(self.tron_swap_contract(negotiated));
+        let secret = try_tx_fus!(tron_bytes32("secret", secret));
+        let payment = payment_tx.to_vec();
+        let fut = async move {
+            crate::eth::tron::swap_ops::spend_payment(coin, swap_contract, payment, secret)
+                .await
+                .map(TransactionEnum::from)
+                .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Refund a TRON HTLC payment after its lock-time has elapsed (R-L4).
+    fn refund_tron_payment(&self, payment_tx: &[u8], time_lock: u32, negotiated: &Option<BytesJson>) -> TransactionFut {
+        let coin = self.clone();
+        let swap_contract = try_tx_fus!(self.tron_swap_contract(negotiated));
+        let payment = payment_tx.to_vec();
+        let fut = async move {
+            crate::eth::tron::swap_ops::refund_payment(coin, swap_contract, payment, time_lock)
+                .await
+                .map(TransactionEnum::from)
+                .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))
+        };
+        Box::new(fut.boxed().compat())
+    }
+}
+
 #[async_trait]
 impl SwapOps for EthCoin {
     fn send_taker_fee(&self, dex_fee: &DexFee, fee_addr: &[u8], _uuid: &[u8]) -> TransactionFut {
@@ -9,6 +123,20 @@ impl SwapOps for EthCoin {
         // For EVM coins, only the fee portion is sent on-chain; the burn
         // portion (if any) is implicit — not sent as a separate transfer.
         let amount = dex_fee.fee_amount();
+
+        // R-DF1: a TRON coin sends the taker-fee through its dedicated transfer
+        // pipeline (native TRX or TRC20), surfaced as a TronTx (R-T5).
+        if is_tron_family(&self.coin_type) {
+            let coin = self.clone();
+            let fee_amount = amount.to_decimal();
+            let fut = async move {
+                crate::eth::tron::swap_ops::send_dex_fee(coin, address, fee_amount)
+                    .await
+                    .map(TransactionEnum::from)
+                    .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))
+            };
+            return Box::new(fut.boxed().compat());
+        }
 
         Box::new(
             self.send_to_address(
@@ -29,6 +157,12 @@ impl SwapOps for EthCoin {
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
         let taker_addr = try_tx_fus!(addr_from_raw_pubkey(taker_pub));
+
+        // R-L1/R-S1: route a TRON maker payment to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.send_tron_payment(time_lock, taker_addr, secret_hash, amount, swap_contract_address);
+        }
+
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
 
         Box::new(
@@ -54,6 +188,12 @@ impl SwapOps for EthCoin {
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
         let maker_addr = try_tx_fus!(addr_from_raw_pubkey(maker_pub));
+
+        // R-L1/R-S1: route a TRON taker payment to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.send_tron_payment(time_lock, maker_addr, secret_hash, amount, swap_contract_address);
+        }
+
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
 
         Box::new(
@@ -78,6 +218,11 @@ impl SwapOps for EthCoin {
         _htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // R-L3/R-S1: route a TRON spend to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.spend_tron_payment(taker_payment_tx, secret, swap_contract_address);
+        }
+
         let tx: UnverifiedTransaction = try_tx_fus!(rlp::decode(taker_payment_tx));
         let signed = try_tx_fus!(SignedEthTx::new(tx));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address(), signed);
@@ -97,6 +242,11 @@ impl SwapOps for EthCoin {
         _htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // R-L3/R-S1: route a TRON spend to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.spend_tron_payment(maker_payment_tx, secret, swap_contract_address);
+        }
+
         let tx: UnverifiedTransaction = try_tx_fus!(rlp::decode(maker_payment_tx));
         let signed = try_tx_fus!(SignedEthTx::new(tx));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
@@ -109,12 +259,17 @@ impl SwapOps for EthCoin {
     fn send_taker_refunds_payment(
         &self,
         taker_payment_tx: &[u8],
-        _time_lock: u32,
+        time_lock: u32,
         _maker_pub: &[u8],
         _secret_hash: &[u8],
         _htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // R-L4/R-S1: route a TRON refund to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.refund_tron_payment(taker_payment_tx, time_lock, swap_contract_address);
+        }
+
         let tx: UnverifiedTransaction = try_tx_fus!(rlp::decode(taker_payment_tx));
         let signed = try_tx_fus!(SignedEthTx::new(tx));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
@@ -128,12 +283,17 @@ impl SwapOps for EthCoin {
     fn send_maker_refunds_payment(
         &self,
         maker_payment_tx: &[u8],
-        _time_lock: u32,
+        time_lock: u32,
         _taker_pub: &[u8],
         _secret_hash: &[u8],
         _htlc_privkey: &[u8],
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // R-L4/R-S1: route a TRON refund to the TRON swap flow.
+        if is_tron_family(&self.coin_type) {
+            return self.refund_tron_payment(maker_payment_tx, time_lock, swap_contract_address);
+        }
+
         let tx: UnverifiedTransaction = try_tx_fus!(rlp::decode(maker_payment_tx));
         let signed = try_tx_fus!(SignedEthTx::new(tx));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
@@ -145,6 +305,19 @@ impl SwapOps for EthCoin {
     }
 
     fn validate_fee(&self, args: ValidateFeeArgs<'_>) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        // R-DF2/R-S1: a TRON coin validates the taker-fee through its dedicated
+        // protobuf-decoding validator.
+        if is_tron_family(&self.coin_type) {
+            let recipient = try_fus!(addr_from_raw_pubkey(args.fee_addr));
+            let amount = args.dex_fee.fee_amount().to_decimal();
+            let fee_tx_bytes = match args.fee_tx {
+                TransactionEnum::TronTx(t) => t.tx_hex(),
+                other => return Box::new(futures01::future::err(ERRL!("expected a TRON fee tx, got {:?}", other))),
+            };
+            let res = crate::eth::tron::swap_ops::validate_dex_fee(self, &fee_tx_bytes, recipient, amount);
+            return Box::new(futures01::future::result(res));
+        }
+
         // LP-17: replaces `selfi.web3.eth().transaction(TransactionId::Hash(tx.hash))` with
         // alloy's native `Provider::get_transaction_by_hash`. Wire-level
         // RPC method (`eth_getTransactionByHash`) is unchanged. The
@@ -257,10 +430,12 @@ impl SwapOps for EthCoin {
                         _ => return ERR!("Should have got uint token but got {:?}", decoded_input[1]),
                     }
                 },
-                // V1 ETH/ERC20 fee validation; TRON uses a separate fee validator.
-                // Activation gating prevents this branch. P10.2.5.
+                // V1 ETH/ERC20 fee validation only. A TRON coin is dispatched
+                // to its protobuf-decoding validator at the top of this method,
+                // so this arm is unreachable for TRON; it stays as a defensive
+                // typed refusal rather than producing incorrect behaviour.
                 EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                    return ERR!("TRON dex-fee validation not yet wired (pending P10.2.5)");
+                    return ERR!("TRON dex-fee validation is handled by the TRON fee validator, not the EVM path");
                 },
             }
 
@@ -270,6 +445,11 @@ impl SwapOps for EthCoin {
     }
 
     fn validate_maker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        // R-L2/R-S1: the taker validates the maker's TRON payment (funder = maker).
+        if is_tron_family(&self.coin_type) {
+            let maker_pub = input.maker_pub.clone();
+            return self.validate_tron_payment(input, &maker_pub);
+        }
         let swap_contract_address = try_fus!(input.swap_contract_address.try_to_address());
         self.validate_payment(
             &input.payment_tx,
@@ -282,6 +462,11 @@ impl SwapOps for EthCoin {
     }
 
     fn validate_taker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        // R-L2/R-S1: the maker validates the taker's TRON payment (funder = taker).
+        if is_tron_family(&self.coin_type) {
+            let taker_pub = input.taker_pub.clone();
+            return self.validate_tron_payment(input, &taker_pub);
+        }
         let swap_contract_address = try_fus!(input.swap_contract_address.try_to_address());
         self.validate_payment(
             &input.payment_tx,
@@ -302,6 +487,16 @@ impl SwapOps for EthCoin {
         from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
+        // R-L6/R-S1: discover a previously-sent TRON payment through the indexed
+        // contract-event endpoint (PaymentSent). Fails with a typed error when no
+        // event-indexer endpoint is configured rather than silently returning None.
+        if is_tron_family(&self.coin_type) {
+            let coin = self.clone();
+            let swap_contract = try_fus!(self.tron_swap_contract(swap_contract_address));
+            let id = crate::eth::tron::swap::swap_id(time_lock, secret_hash);
+            let fut = async move { crate::eth::tron::swap_ops::check_if_payment_sent(&coin, swap_contract, id).await };
+            return Box::new(fut.boxed().compat());
+        }
         let id = self.etomic_swap_id(time_lock, secret_hash);
         let swap_contract_address = try_fus!(swap_contract_address.try_to_address());
         let selfi = self.clone();
@@ -369,13 +564,20 @@ impl SwapOps for EthCoin {
 
     async fn search_for_swap_tx_spend_my(
         &self,
-        _time_lock: u32,
+        time_lock: u32,
         _other_pub: &[u8],
-        _secret_hash: &[u8],
+        secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
+        // R-L6/R-S1: discover the spend/refund of this payment through the indexed
+        // contract-event endpoint, keyed by the swap id.
+        if is_tron_family(&self.coin_type) {
+            let swap_contract = self.tron_swap_contract(swap_contract_address)?;
+            let id = crate::eth::tron::swap::swap_id(time_lock, secret_hash);
+            return crate::eth::tron::swap_ops::search_for_swap_tx_spend(self, swap_contract, id).await;
+        }
         let swap_contract_address = try_s!(swap_contract_address.try_to_address());
         self.search_for_swap_tx_spend(tx, swap_contract_address, search_from_block)
             .await
@@ -383,19 +585,30 @@ impl SwapOps for EthCoin {
 
     async fn search_for_swap_tx_spend_other(
         &self,
-        _time_lock: u32,
+        time_lock: u32,
         _other_pub: &[u8],
-        _secret_hash: &[u8],
+        secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
+        // R-L6/R-S1: discover the spend/refund of this payment through the indexed
+        // contract-event endpoint, keyed by the swap id.
+        if is_tron_family(&self.coin_type) {
+            let swap_contract = self.tron_swap_contract(swap_contract_address)?;
+            let id = crate::eth::tron::swap::swap_id(time_lock, secret_hash);
+            return crate::eth::tron::swap_ops::search_for_swap_tx_spend(self, swap_contract, id).await;
+        }
         let swap_contract_address = try_s!(swap_contract_address.try_to_address());
         self.search_for_swap_tx_spend(tx, swap_contract_address, search_from_block)
             .await
     }
 
     fn extract_secret(&self, _secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
+        // R-L5/R-S1: extract the secret from a TRON receiverSpend protobuf tx.
+        if is_tron_family(&self.coin_type) {
+            return crate::eth::tron::swap_ops::extract_secret(spend_tx);
+        }
         let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
         let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
         let tokens = try_s!(function.decode_input(&unverified.data));
@@ -408,6 +621,16 @@ impl SwapOps for EthCoin {
                 "Expected secret to be fixed bytes, decoded function data is {:?}",
                 tokens
             ),
+        }
+    }
+
+    /// R-S2: a TRON coin's HTLC uses a 32-byte `SHA-256(secret)` payment
+    /// secret-hash; Ethereum coins keep the 20-byte `RIPEMD-160(SHA-256)` form.
+    fn swap_secret_hash(&self, secret: &[u8]) -> Vec<u8> {
+        if is_tron_family(&self.coin_type) {
+            crate::eth::tron::swap::sha256_secret_hash(secret).to_vec()
+        } else {
+            kdf_crypto::dhash160(secret).to_vec()
         }
     }
 
@@ -442,3 +665,32 @@ impl SwapOps for EthCoin {
 
 #[async_trait]
 impl WatcherOps for EthCoin {}
+
+#[cfg(test)]
+mod swap_dispatch_tests {
+    use super::*;
+
+    /// R-S1: chain-family dispatch selects the TRON path for native TRX and
+    /// TRC20 tokens, and leaves Ethereum coins on the Ethereum path.
+    #[test]
+    fn is_tron_family_dispatch() {
+        assert!(!is_tron_family(&EthCoinType::Eth));
+        assert!(!is_tron_family(&EthCoinType::Erc20 {
+            platform: "ETH".to_owned(),
+            token_addr: Address::default(),
+        }));
+        assert!(is_tron_family(&EthCoinType::Tron));
+        assert!(is_tron_family(&EthCoinType::Trc20 {
+            platform: "TRX".to_owned(),
+            token_addr: Address::default(),
+        }));
+    }
+
+    /// R-S2/R-SA1: TRON swap secret/secret-hash values must be exactly 32 bytes.
+    #[test]
+    fn tron_bytes32_enforces_length() {
+        assert!(tron_bytes32("secret-hash", &[0u8; 20]).is_err());
+        assert!(tron_bytes32("secret-hash", &[0u8; 33]).is_err());
+        assert_eq!(tron_bytes32("secret", &[7u8; 32]).unwrap(), [7u8; 32]);
+    }
+}

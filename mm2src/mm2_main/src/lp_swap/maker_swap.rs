@@ -20,7 +20,6 @@ use common::mm_number::{BigDecimal, MmNumber};
 use common::{bits256, executor::Timer, now_ms};
 use crypto::privkey::SerializableSecp256k1Keypair;
 use futures::{compat::Future01CompatExt, select, FutureExt};
-use kdf_crypto::dhash160;
 use keys::KeyPair;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -28,7 +27,7 @@ use mm2_net_config::{net_config_or_panic, NetConfig};
 use parking_lot::Mutex as PaMutex;
 use primitives::hash::H264;
 use rand::Rng;
-use rpc::v1::types::{Bytes as BytesJson, H160 as H160Json, H256 as H256Json, H264 as H264Json};
+use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json, H264 as H264Json};
 use std::any::TypeId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -123,7 +122,7 @@ pub struct MakerSwapData {
     pub maker_coin: String,
     pub taker: H256Json,
     pub secret: H256Json,
-    pub secret_hash: Option<H160Json>,
+    pub secret_hash: Option<BytesJson>,
     pub my_persistent_pub: H264Json,
     pub lock_duration: u64,
     pub maker_amount: BigDecimal,
@@ -333,7 +332,9 @@ impl MakerSwap {
 
     fn get_my_negotiation_data(&self) -> NegotiationDataMsg {
         let r = self.r();
-        let secret_hash = dhash160(&r.data.secret.0).take().to_vec();
+        // R-S2: the shared secret-hash uses the algorithm dictated by the
+        // coin's HTLC (SHA-256 for Tron, RIPEMD-160(SHA-256) otherwise).
+        let secret_hash = self.maker_coin.swap_secret_hash(&r.data.secret.0);
         let maker_coin_swap_contract = self
             .maker_coin
             .swap_contract_address()
@@ -451,7 +452,7 @@ impl MakerSwap {
             taker_coin: self.taker_coin.ticker().to_owned(),
             maker_coin: self.maker_coin.ticker().to_owned(),
             taker: self.taker.bytes.into(),
-            secret_hash: Some(dhash160(&secret).into()),
+            secret_hash: Some(self.maker_coin.swap_secret_hash(&secret).into()),
             secret: secret.into(),
             started_at,
             lock_duration: self.payment_locktime,
@@ -668,7 +669,7 @@ impl MakerSwap {
                 self.r().data.maker_payment_lock as u32,
                 self.r().my_maker_coin_htlc_keypair.public(),
                 &*self.r().other_maker_coin_htlc_pub,
-                &*dhash160(&self.r().data.secret.0),
+                &self.maker_coin.swap_secret_hash(&self.r().data.secret.0),
                 self.r().data.maker_coin_start_block,
                 &self.r().data.maker_coin_swap_contract_address,
             )
@@ -682,7 +683,7 @@ impl MakerSwap {
                         self.r().data.maker_payment_lock as u32,
                         self.r().my_maker_coin_htlc_keypair.public(),
                         &*self.r().other_maker_coin_htlc_pub,
-                        &*dhash160(&self.r().data.secret.0),
+                        &self.maker_coin.swap_secret_hash(&self.r().data.secret.0),
                         self.maker_amount.clone(),
                         &self.r().data.maker_coin_swap_contract_address,
                     );
@@ -821,7 +822,7 @@ impl MakerSwap {
             time_lock: self.taker_payment_lock.load(Ordering::Relaxed) as u32,
             taker_pub: self.r().other_taker_coin_htlc_pub.to_vec(),
             maker_pub: self.r().my_taker_coin_htlc_keypair.public().to_vec(),
-            secret_hash: dhash160(&self.r().data.secret.0).to_vec(),
+            secret_hash: self.taker_coin.swap_secret_hash(&self.r().data.secret.0),
             amount: self.taker_amount.clone(),
             swap_contract_address: self.r().data.taker_coin_swap_contract_address.clone(),
             try_spv_proof_until: wait_taker_payment,
@@ -957,7 +958,7 @@ impl MakerSwap {
             &self.r().maker_payment.clone().unwrap().tx_hex,
             self.r().data.maker_payment_lock as u32,
             &*self.r().other_maker_coin_htlc_pub,
-            &*dhash160(&self.r().data.secret.0),
+            &self.maker_coin.swap_secret_hash(&self.r().data.secret.0),
             self.r().my_maker_coin_htlc_keypair.private().secret.as_slice(),
             &self.r().data.maker_coin_swap_contract_address,
         );
@@ -1162,7 +1163,8 @@ impl MakerSwap {
             .r()
             .data
             .secret_hash
-            .unwrap_or_else(|| dhash160(&self.r().data.secret.0).into());
+            .clone()
+            .unwrap_or_else(|| self.maker_coin.swap_secret_hash(&self.r().data.secret.0).into());
 
         // have to do this because std::sync::RwLockReadGuard returned by r() is not Send,
         // so it can't be used across await

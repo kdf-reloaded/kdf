@@ -188,10 +188,10 @@ impl EthCoin {
                 .compat()
                 .await
             },
-            // TRON HTLC payments use the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // R-D1: TRON is supported only on the version-1 swap path; the
+            // version-2 HTLC protocol is permanently out of scope for TRON.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(TransactionErr::Plain(ERRL!(
-                "TRON taker funding v2 not yet wired (pending P10.2.5)"
+                "TRON is not supported on the version-2 swap path"
             ))),
         }
     }
@@ -243,10 +243,10 @@ impl EthCoin {
                 let decoded = decode_contract_call(function, &tx.data)?;
                 verify_erc20_taker_calldata(&decoded, &inputs, function, token_addr)
             },
-            // TRON validation uses the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // R-D1: TRON is supported only on the version-1 swap path; the
+            // version-2 HTLC protocol is permanently out of scope for TRON.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(ValidateSwapV2TxError::InternalError(
-                "TRON taker funding validation not yet wired (pending P10.2.5)".to_owned(),
+                "TRON is not supported on the version-2 swap path".to_owned(),
             )),
         }
     }
@@ -264,10 +264,10 @@ impl EthCoin {
     ) -> Result<SignedEthTx, TransactionErr> {
         let gas_limit = match self.coin_type {
             EthCoinType::Eth | EthCoinType::Erc20 { .. } => U256::from(self.gas_limit_v2.taker.approve_payment),
-            // TRON approve flow lives in the TRON pipeline. Gated. P10.2.5.
+            // R-D1: TRON is supported only on the version-1 swap path.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Err(TransactionErr::Plain(ERRL!(
-                    "TRON taker payment approve not yet wired (pending P10.2.5)"
+                    "TRON is not supported on the version-2 swap path"
                 )))
             },
         };
@@ -619,7 +619,7 @@ impl EthCoin {
                 ])?)
             },
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(PrepareTxDataError::Internal(
-                "TRON taker payment approve data not yet wired (pending P10.2.5)".to_owned(),
+                "TRON is not supported on the version-2 swap path".to_owned(),
             )),
         }
     }
@@ -661,7 +661,7 @@ impl EthCoin {
                 ])?)
             },
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(PrepareTxDataError::Internal(
-                "TRON spend taker payment data not yet wired (pending P10.2.5)".to_owned(),
+                "TRON is not supported on the version-2 swap path".to_owned(),
             )),
         }
     }
@@ -683,7 +683,7 @@ impl EthCoin {
             EthCoinType::Erc20 { token_addr, .. } => (try_tx_s!(TAKER_SWAP_V2.function(erc20_func_name)), token_addr),
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Err(TransactionErr::Plain(ERRL!(
-                    "TRON swap v2 contract details not yet wired (pending P10.2.5)"
+                    "TRON is not supported on the version-2 swap path"
                 )))
             },
         };
@@ -702,7 +702,7 @@ impl EthCoin {
             EthCoinType::Erc20 { .. } => TAKER_SWAP_V2.function(FN_ERC20_TAKER_PAYMENT)?,
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
                 return Err(PrepareTxDataError::Internal(
-                    "TRON funding decoding not yet wired (pending P10.2.5)".to_owned(),
+                    "TRON is not supported on the version-2 swap path".to_owned(),
                 ));
             },
         };

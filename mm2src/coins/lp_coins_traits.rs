@@ -103,6 +103,13 @@ pub trait SwapOps {
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
+    /// Compute the version-1 swap payment secret-hash for this coin's HTLC (R-S2).
+    ///
+    /// Defaults to `RIPEMD-160(SHA-256(secret))` — the 20-byte form the UTXO and
+    /// EVM version-1 HTLCs use. Coins whose deployed HTLC contract dictates a
+    /// different algorithm (e.g. Tron's 32-byte `SHA-256(secret)`) override this.
+    fn swap_secret_hash(&self, secret: &[u8]) -> Vec<u8> { kdf_crypto::dhash160(secret).to_vec() }
+
     /// Whether the refund transaction can be sent now
     /// For example: there are no additional conditions for ETH, but for some UTXO coins we should wait for
     /// locktime < MTP

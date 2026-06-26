@@ -10,13 +10,36 @@ pub mod api;
 pub mod fee;
 pub mod proto;
 pub mod sign;
+pub mod swap;
+pub mod swap_ops;
 pub mod tx_builder;
 pub mod withdraw;
 
 pub use activation::tron_coin_from_conf_and_request;
 pub use address::TronAddress;
 
+use crate::{BytesJson, Transaction};
+use ethereum_types::H256;
 use serde::{Deserialize, Serialize};
+
+/// A signed, broadcast-ready TRON transaction surfaced through
+/// [`crate::TransactionEnum::TronTx`] (R-T5). Carries the full
+/// protobuf-encoded `Transaction` bytes (the value `/wallet/broadcasthex`
+/// consumes) and the SHA-256 txID derived from the transaction's raw body
+/// (R-L7). The hash is *not* an Ethereum-style RLP hash.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignedTronTx {
+    /// Protobuf-encoded signed `Transaction` bytes.
+    pub tx_bytes: Vec<u8>,
+    /// SHA-256 transaction hash (TRON "txID").
+    pub tx_hash: H256,
+}
+
+impl Transaction for SignedTronTx {
+    fn tx_hex(&self) -> Vec<u8> { self.tx_bytes.clone() }
+
+    fn tx_hash(&self) -> BytesJson { self.tx_hash.0.to_vec().into() }
+}
 
 /// Derive a Base58Check-encoded TRON address string from a hex-encoded
 /// secp256k1 public key. Mirrors `eth::addr_from_pubkey_str` so callers

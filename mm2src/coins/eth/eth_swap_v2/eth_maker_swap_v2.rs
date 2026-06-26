@@ -165,10 +165,10 @@ impl EthCoin {
                 .compat()
                 .await
             },
-            // TRON HTLC payments use the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // R-D1: TRON is supported only on the version-1 swap path; the
+            // version-2 HTLC protocol is permanently out of scope for TRON.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => Err(TransactionErr::Plain(ERRL!(
-                "TRON maker payment v2 not yet wired (pending P10.2.5)"
+                "TRON is not supported on the version-2 swap path"
             ))),
         }
     }
@@ -211,10 +211,10 @@ impl EthCoin {
                 let decoded = decode_contract_call(function, &tx.data)?;
                 verify_erc20_maker_calldata(&decoded, &inputs, function, token_addr)
             },
-            // TRON HTLC validation uses the dedicated TRON pipeline.
-            // Activation gating prevents this branch. P10.2.5.
+            // R-D1: TRON is supported only on the version-1 swap path; the
+            // version-2 HTLC protocol is permanently out of scope for TRON.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(ValidatePaymentError::InternalError(
-                "TRON maker payment validation not yet wired (pending P10.2.5)".to_owned(),
+                "TRON is not supported on the version-2 swap path".to_owned(),
             )),
         }
     }

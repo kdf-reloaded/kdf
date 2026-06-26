@@ -108,6 +108,9 @@ pub enum TransactionEnum {
     ZTransaction(ZTransaction),
     SiaTransaction(siacoin::SiaTransaction),
     CosmosTransaction(tendermint::CosmosTransaction),
+    /// A signed TRON transaction (R-T5). Carries the protobuf-encoded body and
+    /// the SHA-256 txID; produced by the Tron version-1 swap flow.
+    TronTx(crate::eth::tron::SignedTronTx),
 }
 ifrom!(TransactionEnum, UtxoTx);
 ifrom!(TransactionEnum, SignedEthTx);
@@ -119,6 +122,9 @@ impl From<siacoin::SiaTransaction> for TransactionEnum {
 impl From<tendermint::CosmosTransaction> for TransactionEnum {
     fn from(t: tendermint::CosmosTransaction) -> TransactionEnum { TransactionEnum::CosmosTransaction(t) }
 }
+impl From<crate::eth::tron::SignedTronTx> for TransactionEnum {
+    fn from(t: crate::eth::tron::SignedTronTx) -> TransactionEnum { TransactionEnum::TronTx(t) }
+}
 impl Deref for TransactionEnum {
     type Target = dyn Transaction;
     fn deref(&self) -> &dyn Transaction {
@@ -129,6 +135,7 @@ impl Deref for TransactionEnum {
             TransactionEnum::ZTransaction(ref t) => t,
             TransactionEnum::SiaTransaction(ref t) => t,
             TransactionEnum::CosmosTransaction(ref t) => t,
+            TransactionEnum::TronTx(ref t) => t,
         }
     }
 }

@@ -6,8 +6,9 @@
 
 use derive_more::Display;
 use mm2_err_handle::prelude::*;
-use mm2_net::transport::{post_json, SlurpError};
+use mm2_net::transport::{fetch_json, post_json, SlurpError};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::address::TronAddress;
@@ -30,6 +31,8 @@ pub enum TronApiError {
     InvalidResponse(String),
     #[display(fmt = "All nodes failed. Last error: {}", _0)]
     AllNodesFailed(String),
+    #[display(fmt = "No event-indexer endpoint configured")]
+    NoEventIndexer,
 }
 
 impl std::error::Error for TronApiError {}
@@ -185,6 +188,91 @@ pub struct GetAccountResourceRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Indexed contract-event query (§21.9, R-L6)
+// ---------------------------------------------------------------------------
+
+/// Filter parameters for the indexed contract-event query
+/// `GET /v1/contracts/{address}/events` (the public TronGrid-style event-indexer
+/// HTTP API). All fields are optional filters; `fingerprint` is the opaque
+/// cursor returned by a previous page for forward pagination.
+#[derive(Clone, Debug, Default)]
+pub struct ContractEventsQuery<'a> {
+    /// Restrict to a single event name (e.g. `ReceiverSpent`).
+    pub event_name: Option<&'a str>,
+    /// Only return events from blocks the indexer considers solidified/confirmed.
+    pub only_confirmed: bool,
+    /// Lower bound on block number.
+    pub min_block: Option<u64>,
+    /// Page size (the indexer caps this server-side; we request a sane default).
+    pub limit: u32,
+    /// Opaque pagination cursor from a previous response's `meta.fingerprint`.
+    pub fingerprint: Option<&'a str>,
+}
+
+/// A single decoded contract event as returned by the event indexer. The
+/// `result` map carries each event parameter as a named hex/decimal string
+/// (e.g. `{"id": "..", "secret": ".."}`), normalised by
+/// [`super::swap::decode_event_from_indexer`].
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ContractEvent {
+    #[serde(default)]
+    pub transaction_id: String,
+    #[serde(default)]
+    pub event_name: String,
+    #[serde(default)]
+    pub block_number: u64,
+    #[serde(default)]
+    pub result: HashMap<String, String>,
+}
+
+/// Pagination metadata of a contract-event query response.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ContractEventsMeta {
+    /// Cursor for the next page; absent once the last page has been returned.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+}
+
+/// `GET /v1/contracts/{address}/events` response.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ContractEventsResponse {
+    #[serde(default)]
+    pub data: Vec<ContractEvent>,
+    #[serde(default)]
+    pub meta: ContractEventsMeta,
+}
+
+/// Build the `GET /v1/contracts/{address}/events` request URL with its query
+/// string from the event-indexer base URL, the contract address, and the
+/// filter parameters. Pure (no I/O) so the request construction is unit-testable
+/// offline.
+pub(crate) fn build_contract_events_url(base: &str, contract: &str, query: &ContractEventsQuery<'_>) -> String {
+    let base = base.trim_end_matches('/');
+    let mut url = format!("{base}/v1/contracts/{contract}/events");
+    let mut params: Vec<String> = Vec::new();
+    if let Some(name) = query.event_name {
+        params.push(format!("event_name={name}"));
+    }
+    if query.only_confirmed {
+        params.push("only_confirmed=true".to_owned());
+    }
+    if let Some(min_block) = query.min_block {
+        params.push(format!("min_block_number={min_block}"));
+    }
+    if query.limit > 0 {
+        params.push(format!("limit={}", query.limit));
+    }
+    if let Some(fp) = query.fingerprint {
+        params.push(format!("fingerprint={fp}"));
+    }
+    if !params.is_empty() {
+        url.push('?');
+        url.push_str(&params.join("&"));
+    }
+    url
+}
+
+// ---------------------------------------------------------------------------
 // API Client
 // ---------------------------------------------------------------------------
 
@@ -192,6 +280,12 @@ pub struct GetAccountResourceRequest {
 pub struct TronApiClient {
     /// List of TRON full-node API URLs (e.g., `https://api.trongrid.io`).
     nodes: Arc<async_std::sync::Mutex<Vec<String>>>,
+    /// Base URL of the indexed contract-event service (the TronGrid-style event
+    /// indexer, distinct from the bare full node), used for swap spend/refund
+    /// discovery (§21.9, R-L6). `None` when no event endpoint is configured, in
+    /// which case discovery fails with a typed error rather than silently
+    /// reporting "not found".
+    event_indexer: Option<String>,
 }
 
 impl std::fmt::Debug for TronApiClient {
@@ -202,12 +296,17 @@ impl std::fmt::Debug for TronApiClient {
 }
 
 impl TronApiClient {
-    /// Create a new client from a list of node base URLs.
-    pub fn new(node_urls: Vec<String>) -> Self {
+    /// Create a new client from a list of node base URLs and an optional
+    /// event-indexer base URL (§21.9, R-L6).
+    pub fn new(node_urls: Vec<String>, event_indexer: Option<String>) -> Self {
         TronApiClient {
             nodes: Arc::new(async_std::sync::Mutex::new(node_urls)),
+            event_indexer,
         }
     }
+
+    /// Whether an indexed contract-event endpoint is configured (R-L6).
+    pub fn has_event_indexer(&self) -> bool { self.event_indexer.is_some() }
 
     /// Execute an HTTP POST to a TRON endpoint, rotating through nodes on
     /// retryable errors. On success, the successful node is promoted to
@@ -324,12 +423,30 @@ impl TronApiClient {
         };
         self.try_post("/wallet/getaccountresource", &req).await
     }
+
+    /// Query the indexed contract-event endpoint for a contract's events
+    /// (§21.9, R-L6): `GET /v1/contracts/{address}/events`. TRON does not expose
+    /// Ethereum-style log filtering, so swap spend/refund discovery is
+    /// event-indexer based. Fails with [`TronApiError::NoEventIndexer`] when no
+    /// event endpoint is configured.
+    pub async fn get_contract_events(
+        &self,
+        contract_base58: &str,
+        query: &ContractEventsQuery<'_>,
+    ) -> Result<ContractEventsResponse, TronApiError> {
+        let base = self.event_indexer.as_deref().ok_or(TronApiError::NoEventIndexer)?;
+        let url = build_contract_events_url(base, contract_base58, query);
+        fetch_json::<ContractEventsResponse>(&url)
+            .await
+            .map_err(TronApiError::from)
+    }
 }
 
 impl Clone for TronApiClient {
     fn clone(&self) -> Self {
         TronApiClient {
             nodes: Arc::clone(&self.nodes),
+            event_indexer: self.event_indexer.clone(),
         }
     }
 }
@@ -410,5 +527,73 @@ mod tests {
         let resp: TriggerConstantContractResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.constant_result.unwrap().len(), 1);
         assert_eq!(resp.energy_used, Some(685));
+    }
+
+    // ---- R-L6 indexed contract-event query ----
+
+    #[test]
+    fn test_build_contract_events_url_full() {
+        let q = ContractEventsQuery {
+            event_name: Some("ReceiverSpent"),
+            only_confirmed: true,
+            min_block: Some(123),
+            limit: 50,
+            fingerprint: Some("CURSOR"),
+        };
+        let url = build_contract_events_url("https://api.trongrid.io/", "TSwapContractAddr", &q);
+        assert_eq!(
+            url,
+            "https://api.trongrid.io/v1/contracts/TSwapContractAddr/events?event_name=ReceiverSpent&only_confirmed=true&min_block_number=123&limit=50&fingerprint=CURSOR"
+        );
+    }
+
+    #[test]
+    fn test_build_contract_events_url_minimal() {
+        let q = ContractEventsQuery::default();
+        let url = build_contract_events_url("https://example.org", "TAddr", &q);
+        // No filters => bare events path with no query string.
+        assert_eq!(url, "https://example.org/v1/contracts/TAddr/events");
+    }
+
+    #[test]
+    fn test_build_contract_events_url_event_only() {
+        let q = ContractEventsQuery {
+            event_name: Some("SenderRefunded"),
+            limit: 10,
+            ..Default::default()
+        };
+        let url = build_contract_events_url("https://example.org/", "TAddr", &q);
+        assert_eq!(
+            url,
+            "https://example.org/v1/contracts/TAddr/events?event_name=SenderRefunded&limit=10"
+        );
+    }
+
+    #[test]
+    fn test_contract_events_response_deserialize() {
+        let json = r#"{
+            "data":[
+                {"transaction_id":"abc123","event_name":"ReceiverSpent","block_number":42,
+                 "result":{"id":"1111111111111111111111111111111111111111111111111111111111111111",
+                           "secret":"2222222222222222222222222222222222222222222222222222222222222222"}}
+            ],
+            "meta":{"fingerprint":"NEXTCURSOR"}
+        }"#;
+        let resp: ContractEventsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.data.len(), 1);
+        assert_eq!(resp.data[0].transaction_id, "abc123");
+        assert_eq!(resp.data[0].event_name, "ReceiverSpent");
+        assert_eq!(resp.data[0].block_number, 42);
+        assert_eq!(resp.data[0].result.get("secret").unwrap().len(), 64);
+        assert_eq!(resp.meta.fingerprint.as_deref(), Some("NEXTCURSOR"));
+    }
+
+    #[test]
+    fn test_contract_events_response_empty_last_page() {
+        // The last page carries no fingerprint cursor.
+        let json = r#"{"data":[],"meta":{}}"#;
+        let resp: ContractEventsResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data.is_empty());
+        assert!(resp.meta.fingerprint.is_none());
     }
 }

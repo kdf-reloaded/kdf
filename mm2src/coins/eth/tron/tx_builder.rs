@@ -117,6 +117,46 @@ pub fn build_trc20_transfer(
     }
 }
 
+/// Build an unsigned generic `TriggerSmartContract` transaction.
+///
+/// Used by the version-1 atomic-swap flow to call the Tron-deployed HTLC
+/// contract (`ethPayment` / `erc20Payment` / `receiverSpend` / `senderRefund`)
+/// and TRC20 `approve`. `call_value_sun` carries native TRX into a payable
+/// method (non-zero only for the native `ethPayment` lock); `data` is the
+/// ABI-encoded selector + arguments produced by `tron::swap`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_trigger_smart_contract(
+    from: &TronAddress,
+    contract_addr: &TronAddress,
+    call_value_sun: i64,
+    data: Vec<u8>,
+    tapos: &TaposBlockData,
+    now_ms: i64,
+    fee_limit_sun: i64,
+) -> TransactionRaw {
+    let trigger = TriggerSmartContract {
+        owner_address: from.to_bytes().to_vec(),
+        contract_address: contract_addr.to_bytes().to_vec(),
+        call_value: call_value_sun,
+        data,
+    };
+    let any = prost_types::Any {
+        type_url: TRIGGER_SMART_CONTRACT_TYPE_URL.to_string(),
+        value: trigger.encode_to_vec(),
+    };
+    TransactionRaw {
+        ref_block_bytes: tapos.ref_block_bytes.clone(),
+        ref_block_hash: tapos.ref_block_hash.clone(),
+        expiration: now_ms + (DEFAULT_EXPIRATION_SEC as i64 * 1000),
+        contract: vec![TransactionContract {
+            r#type: ContractType::TriggerSmartContract as i32,
+            parameter: Some(any),
+        }],
+        timestamp: now_ms,
+        fee_limit: fee_limit_sun,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,11 +6,9 @@
 //! still construct an alloy provider over the TRON URLs purely as a
 //! placeholder — it is never invoked.
 //!
-//! TRON activation deliberately does not parse `swap_contract_address` or
-//! V2 contracts because TRON-side atomic swaps are still pending
-//! (P10.3.7 / nft_swap_v2). When the field is missing in the request we fall
-//! back to the zero address so the coin can be enabled for withdraw / balance
-//! flows.
+//! TRON activation binds `swap_contract_address` (R-A3) when present, making
+//! the coin version-1 atomic-swap capable; when the field is missing the coin
+//! falls back to the zero address and stays wallet-only (withdraw / balance).
 
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
@@ -19,7 +17,6 @@ use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, Eth
                  SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState};
 
-use common::log::warn;
 use ethereum_types::Address;
 use mm2_core::mm_ctx::MmArc;
 use mm2_eth::keys::KeyPair;
@@ -44,6 +41,23 @@ fn parse_trc20_contract(raw: &str) -> Result<Address, String> {
     let evm = tron.to_evm_address();
     if evm.is_zero() {
         return Err("TRC20 contract_address cannot be zero".to_owned());
+    }
+    Ok(evm)
+}
+
+/// R-A3 / R-AD1: parse the version-1 swap-contract address. Accepts base58check
+/// (`T...`) and hex (`0x41...` / `41...`) forms, converting to the internal
+/// 20-byte EVM payload, and rejects the zero address.
+fn parse_tron_swap_contract(raw: &str) -> Result<Address, String> {
+    let trim = raw.trim();
+    let tron = if trim.starts_with("0x") || trim.starts_with("41") {
+        TronAddress::from_hex(trim).map_err(|e| format!("Invalid swap_contract_address hex: {e}"))?
+    } else {
+        TronAddress::from_base58(trim).map_err(|e| format!("Invalid swap_contract_address base58: {e}"))?
+    };
+    let evm = tron.to_evm_address();
+    if evm.is_zero() {
+        return Err("swap_contract_address cannot be zero".to_owned());
     }
     Ok(evm)
 }
@@ -111,7 +125,24 @@ pub async fn tron_coin_from_conf_and_request(
     let key_pair = KeyPair::from_secret_slice(priv_key).map_err(|e| format!("Failed to derive TRON key pair: {e}"))?;
     let my_address = key_pair.address();
 
-    let tron_api = TronApiClient::new(urls.clone());
+    // R-L6: optional indexed contract-event service base URL (the TronGrid-style
+    // event indexer, distinct from the bare full node), used for swap
+    // spend/refund discovery. When absent the coin stays discovery-incapable and
+    // discovery fails with a typed error rather than silently reporting "not
+    // found".
+    let event_indexer = req["event_indexer_url"]
+        .as_str()
+        .or_else(|| conf["event_indexer_url"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if let Some(url) = &event_indexer {
+        if http::Uri::from_str(url).is_err() {
+            return Err(format!("TRON event_indexer_url '{url}' is not a valid URI"));
+        }
+    }
+
+    let tron_api = TronApiClient::new(urls.clone(), event_indexer);
 
     // Placeholder alloy provider over the TRON URLs. The TRON coin paths
     // never dispatch RPCs through this provider; it exists only to satisfy
@@ -120,9 +151,14 @@ pub async fn tron_coin_from_conf_and_request(
     let web3 = crate::eth::alloy_compat::build_provider(urls, event_handlers)
         .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
 
-    if req["swap_contract_address"].is_string() {
-        warn!("TRON coin '{ticker}': swap_contract_address ignored (TRON swaps not yet wired)");
-    }
+    // R-A3: a swap-contract address makes the coin atomic-swap capable. It is
+    // supplied in base58check (`T...`) or hex (`0x41...` / `41...`) form and is
+    // converted to the internal 20-byte EVM payload. When absent the coin
+    // stays wallet-only (the zero address is refused by the swap pipeline).
+    let swap_contract_address = match req["swap_contract_address"].as_str() {
+        Some(raw) if !raw.trim().is_empty() => parse_tron_swap_contract(raw)?,
+        _ => Address::default(),
+    };
 
     let required_confirmations = req["required_confirmations"]
         .as_u64()
@@ -141,9 +177,10 @@ pub async fn tron_coin_from_conf_and_request(
         signer: EthSigner::Local(key_pair),
         my_address,
         sign_message_prefix: json::from_value(conf["sign_message_prefix"].clone()).unwrap_or(None),
-        // TRON has no EtomicSwap contract today — leave as zero address. Swap
-        // paths reject this defensively until P10.3.7 lands.
-        swap_contract_address: Address::default(),
+        // R-A3: Tron-deployed version-1 swap contract (20-byte EVM payload), or
+        // the zero address when the coin is activated wallet-only. Swap paths
+        // reject the zero address defensively (R-D1).
+        swap_contract_address,
         fallback_swap_contract: None,
         web3,
         web3_instances: Vec::new(),
@@ -295,5 +332,53 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("decimals"));
+    }
+
+    #[test]
+    fn parses_swap_contract_base58_and_hex() {
+        // R-A3 / R-AD1: both display and wire forms resolve to the same payload.
+        let from_b58 = parse_tron_swap_contract("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").expect("base58");
+        let from_hex = parse_tron_swap_contract("41a614f803b6fd780986a42c78ec9c7f77e6ded13c").expect("hex");
+        assert!(!from_b58.is_zero());
+        assert_eq!(from_b58, from_hex);
+    }
+
+    #[test]
+    fn rejects_zero_swap_contract() {
+        let err = parse_tron_swap_contract("410000000000000000000000000000000000000000").unwrap_err();
+        assert!(err.contains("zero"));
+    }
+
+    #[tokio::test]
+    async fn native_trx_without_swap_contract_is_wallet_only() {
+        // R-A3 / R-D1: no swap_contract_address => zero address (wallet-only).
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let conf = json::json!({});
+        let req = json::json!({"urls": ["https://api.trongrid.io"]});
+        let coin = tron_coin_from_conf_and_request(&ctx, "TRX", &conf, &req, &priv_key(), CoinProtocol::TRX {
+            network: Network::Mainnet,
+        })
+        .await
+        .expect("build");
+        assert!(coin.swap_contract_address.is_zero());
+    }
+
+    #[tokio::test]
+    async fn native_trx_binds_swap_contract_when_present() {
+        // R-A3: a supplied swap_contract_address makes the coin swap-capable.
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let conf = json::json!({});
+        let req = json::json!({
+            "urls": ["https://api.trongrid.io"],
+            "swap_contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
+        });
+        let coin = tron_coin_from_conf_and_request(&ctx, "TRX", &conf, &req, &priv_key(), CoinProtocol::TRX {
+            network: Network::Mainnet,
+        })
+        .await
+        .expect("build");
+        let expected = parse_tron_swap_contract("TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t").unwrap();
+        assert_eq!(coin.swap_contract_address, expected);
+        assert!(!coin.swap_contract_address.is_zero());
     }
 }

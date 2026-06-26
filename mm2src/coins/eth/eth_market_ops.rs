@@ -127,6 +127,34 @@ impl MarketCoinOps for EthCoin {
         status.status(&[&self.ticker], "Waiting for confirmations…");
         status.deadline(wait_until * 1000);
 
+        // R-L7/R-S1: a TRON tx is identified by its protobuf-derived hash and
+        // confirmed via the TRON tx-receipt endpoint, not by RLP-decoding an
+        // Ethereum transaction.
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            let coin = self.clone();
+            let tx_bytes = tx.to_vec();
+            let fut = async move {
+                loop {
+                    if status.ms2deadline().unwrap() < 0 {
+                        status.append(" Timed out.");
+                        return ERR!("Waited too long until {} for TRON transaction confirmation", wait_until);
+                    }
+                    match crate::eth::tron::swap_ops::check_confirmations(&coin, &tx_bytes, confirmations).await {
+                        Ok(true) => {
+                            status.append(" Confirmed.");
+                            return Ok(());
+                        },
+                        Ok(false) => {},
+                        Err(e) => {
+                            log!("Error " (e) " checking TRON " (coin.ticker()) " tx confirmations");
+                        },
+                    }
+                    Timer::sleep(check_every as f64).await;
+                }
+            };
+            return Box::new(fut.boxed().compat());
+        }
+
         let unsigned: UnverifiedTransaction = try_fus!(rlp::decode(tx));
         let tx = try_fus!(SignedEthTx::new(unsigned));
 
@@ -207,6 +235,36 @@ impl MarketCoinOps for EthCoin {
         from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
+        // R-L6/R-S1: poll the indexed contract-event endpoint for the TRON HTLC
+        // spend (ReceiverSpent) of this payment, keyed by its swap id. Fails with
+        // a typed error when no event-indexer endpoint is configured.
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            let coin = self.clone();
+            let swap_contract = try_tx_fus!(self.tron_swap_contract(swap_contract_address));
+            let id = try_tx_fus!(crate::eth::tron::swap_ops::payment_swap_id(tx_bytes));
+            let fut = async move {
+                loop {
+                    match crate::eth::tron::swap_ops::find_htlc_spend(&coin, swap_contract, id).await {
+                        Ok(Some(spend)) => return Ok(TransactionEnum::from(spend)),
+                        Ok(None) => {},
+                        Err(e) => {
+                            // A missing event-indexer endpoint is a permanent
+                            // configuration error, not a transient one: surface it.
+                            if e == crate::eth::tron::swap::TronSwapError::NoEventEndpoint.to_string() {
+                                return Err(TransactionErr::Plain(e));
+                            }
+                            log!("Error " (e) " polling TRON spend events");
+                        },
+                    }
+                    if now_ms() / 1000 > wait_until {
+                        return TX_PLAIN_ERR!("Waited too long until {} for the TRON HTLC to be spent", wait_until);
+                    }
+                    Timer::sleep(5.).await;
+                }
+            };
+            return Box::new(fut.boxed().compat());
+        }
+
         let unverified: UnverifiedTransaction = try_tx_fus!(rlp::decode(tx_bytes));
         let tx = try_tx_fus!(SignedEthTx::new(unverified));
         let swap_contract_address = try_tx_fus!(swap_contract_address.try_to_address());
@@ -214,11 +272,9 @@ impl MarketCoinOps for EthCoin {
         let func_name = match self.coin_type {
             EthCoinType::Eth => "ethPayment",
             EthCoinType::Erc20 { .. } => "erc20Payment",
-            // V1 ETH-style HTLC swaps don't apply to TRON; activation gating
-            // prevents this code path from being reached. Real TRON swap
-            // wiring lands in P10.2.5.
+            // TRON is routed to a typed error above; this arm is unreachable.
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                unimplemented!("TRON V1 swap watchers not wired (pending P10.2.5)")
+                unreachable!("TRON wait_for_tx_spend routed above")
             },
         };
 

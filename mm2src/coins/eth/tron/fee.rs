@@ -183,6 +183,81 @@ pub fn estimate_trc20_transfer_fee(
     }
 }
 
+/// Estimate the resource fee of a swap-contract call (R-TF1).
+///
+/// Swap HTLC calls (`ethPayment`/`erc20Payment`/`receiverSpend`/`senderRefund`)
+/// are `TriggerSmartContract` invocations: they consume bandwidth for their
+/// serialized size and energy for VM execution, priced against the Tron
+/// resource model (§21.8). `estimated_energy` comes from the constant-contract
+/// dry-run endpoint (§21.9); the bandwidth size is the typical call size.
+pub fn estimate_swap_contract_call_fee(
+    prices: &TronChainPrices,
+    resources: &TronAccountResources,
+    bandwidth_bytes: i64,
+    estimated_energy: i64,
+) -> TronTxFeeDetails {
+    let free_bw = resources.free_bandwidth_remaining();
+    let staked_bw = resources.staked_bandwidth_remaining();
+    let total_bw = free_bw + staked_bw;
+
+    let bandwidth_fee = if total_bw >= bandwidth_bytes {
+        0
+    } else {
+        bandwidth_bytes * prices.bandwidth_price_sun
+    };
+
+    let available_energy = resources.energy_remaining();
+    let energy_to_pay = (estimated_energy - available_energy).max(0);
+    let energy_fee = energy_to_pay * prices.energy_price_sun;
+
+    TronTxFeeDetails {
+        total_fee_sun: bandwidth_fee + energy_fee,
+        bandwidth_used: bandwidth_bytes,
+        bandwidth_fee_sun: bandwidth_fee,
+        energy_used: estimated_energy,
+        energy_fee_sun: energy_fee,
+        activation_fee_sun: 0,
+    }
+}
+
+/// Typical serialized size (bandwidth) of a swap-contract HTLC call.
+pub const SWAP_CALL_BANDWIDTH: i64 = 350;
+
+/// Conservative default energy for an HTLC payment call when the
+/// constant-contract dry-run endpoint is unavailable.
+pub const SWAP_PAYMENT_ENERGY_DEFAULT: i64 = 60_000;
+
+/// Conservative default energy for an HTLC spend/refund call.
+pub const SWAP_SPEND_ENERGY_DEFAULT: i64 = 40_000;
+
+/// Trade-fee estimate for a maker/taker HTLC *payment* (R-TF1): the cost of the
+/// `ethPayment`/`erc20Payment` lock the coin will broadcast.
+pub fn estimate_maker_taker_payment_fee(
+    prices: &TronChainPrices,
+    resources: &TronAccountResources,
+    estimated_energy: Option<i64>,
+) -> TronTxFeeDetails {
+    let energy = estimated_energy.unwrap_or(SWAP_PAYMENT_ENERGY_DEFAULT);
+    estimate_swap_contract_call_fee(prices, resources, SWAP_CALL_BANDWIDTH, energy)
+}
+
+/// Trade-fee estimate for the *send-taker-fee* step (R-TF1, R-DF1): a native
+/// TRX transfer or a TRC20 transfer to the dex-fee recipient.
+pub fn estimate_fee_to_send_taker_fee(
+    prices: &TronChainPrices,
+    resources: &TronAccountResources,
+    is_trc20: bool,
+    estimated_energy: Option<i64>,
+    recipient_exists: bool,
+) -> TronTxFeeDetails {
+    if is_trc20 {
+        let energy = estimated_energy.unwrap_or(SWAP_SPEND_ENERGY_DEFAULT);
+        estimate_trc20_transfer_fee(prices, resources, energy, recipient_exists)
+    } else {
+        estimate_trx_transfer_fee(prices, resources, recipient_exists)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +391,51 @@ mod tests {
         assert_eq!(res.free_net_used, 0);
         assert_eq!(res.free_net_limit, 0);
         assert_eq!(res.energy_remaining(), 0);
+    }
+
+    // ---- R-TF1 trade-fee estimators ----
+
+    #[test]
+    fn test_swap_payment_fee_uses_default_energy() {
+        let prices = default_prices();
+        let mut resources = fresh_resources();
+        resources.free_net_used = 600; // no free bandwidth
+        let fee = estimate_maker_taker_payment_fee(&prices, &resources, None);
+        assert_eq!(fee.energy_used, SWAP_PAYMENT_ENERGY_DEFAULT);
+        assert_eq!(fee.bandwidth_fee_sun, SWAP_CALL_BANDWIDTH * 1000);
+        assert_eq!(fee.energy_fee_sun, SWAP_PAYMENT_ENERGY_DEFAULT * 420);
+        // No activation fee component for a contract call.
+        assert_eq!(fee.activation_fee_sun, 0);
+    }
+
+    #[test]
+    fn test_swap_payment_fee_dry_run_energy_overrides_default() {
+        let prices = default_prices();
+        let resources = fresh_resources();
+        let fee = estimate_maker_taker_payment_fee(&prices, &resources, Some(12_345));
+        assert_eq!(fee.energy_used, 12_345);
+    }
+
+    #[test]
+    fn test_swap_payment_fee_staked_energy_covers_cost() {
+        let prices = default_prices();
+        let mut resources = fresh_resources();
+        resources.energy_limit = 100_000; // covers the default payment energy
+        let fee = estimate_maker_taker_payment_fee(&prices, &resources, None);
+        assert_eq!(fee.energy_fee_sun, 0);
+    }
+
+    #[test]
+    fn test_fee_to_send_taker_fee_native_vs_trc20() {
+        let prices = default_prices();
+        let mut resources = fresh_resources();
+        resources.free_net_used = 600;
+        // Native TRX taker-fee: no energy component.
+        let native = estimate_fee_to_send_taker_fee(&prices, &resources, false, None, true);
+        assert_eq!(native.energy_used, 0);
+        // TRC20 taker-fee: energy component present.
+        let trc20 = estimate_fee_to_send_taker_fee(&prices, &resources, true, Some(29_000), true);
+        assert_eq!(trc20.energy_used, 29_000);
+        assert_eq!(trc20.energy_fee_sun, 29_000 * 420);
     }
 }
