@@ -41,9 +41,24 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libssl-dev protobuf-compiler cmake \
-            clang libclang-dev git curl ca-certificates
+            build-essential pkg-config libssl-dev cmake \
+            clang libclang-dev git curl ca-certificates unzip
           rm -rf /var/lib/apt/lists/*
+
+      # Debian 11 ships protoc 3.12, which rejects the proto3 `optional` fields
+      # in swap_v2.proto (needs >= 3.15). Install a modern protoc from the
+      # official release instead of the apt package.
+      - name: Install protoc
+        run: |
+          set -eu
+          PROTOC_VERSION=27.3
+          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip"
+          unzip -o /tmp/protoc.zip -d /usr/local
+          rm -f /tmp/protoc.zip
+          chmod +x /usr/local/bin/protoc
+          echo "PROTOC=/usr/local/bin/protoc" >> "$GITHUB_ENV"
+          protoc --version
 
       # The container runs as root; mark the checkout dir safe for git.
       - name: Trust workspace for git
