@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use crypto::hw_rpc_task::{HwConnectStatuses, TrezorRpcTaskConnectProcessor};
 use crypto::trezor::trezor_rpc_task::TrezorRpcTaskProcessor;
 use crypto::trezor::utxo::TrezorUtxoCoin;
-use crypto::trezor::{ProcessTrezorResponse, TrezorError, TrezorPinMatrix3x3Response, TrezorProcessingError};
+use crypto::trezor::{ProcessTrezorResponse, TrezorError, TrezorPassphraseResponse, TrezorPinMatrix3x3Response,
+                     TrezorProcessingError};
 use crypto::{Bip32Error, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, EcdsaCurve, HardwareWalletArc,
              HwError, HwProcessingError, XPub};
 use mm2_core::mm_ctx::MmArc;
@@ -89,7 +90,7 @@ pub trait ExtractExtendedPubkey {
 
     async fn extract_extended_pubkey<XPubExtractor>(
         &self,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         derivation_path: DerivationPath,
     ) -> MmResult<Self::ExtendedPublicKey, HDExtractPubkeyError>
     where
@@ -117,7 +118,9 @@ pub enum RpcTaskXPubExtractor<'task, Task: RpcTask> {
 impl<'task, Task> HDXPubExtractor for RpcTaskXPubExtractor<'task, Task>
 where
     Task: RpcTask,
-    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError> + Send,
+    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>
+        + TryInto<TrezorPassphraseResponse, Error = RpcTaskError>
+        + Send,
 {
     async fn extract_utxo_xpub(
         &self,
@@ -140,7 +143,9 @@ where
 impl<'task, Task> RpcTaskXPubExtractor<'task, Task>
 where
     Task: RpcTask,
-    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError> + Send,
+    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>
+        + TryInto<TrezorPassphraseResponse, Error = RpcTaskError>
+        + Send,
 {
     pub fn new(
         ctx: &MmArc,

@@ -102,16 +102,16 @@ impl From<serde_json::Error> for Web3RpcError {
     fn from(e: serde_json::Error) -> Self { Web3RpcError::InvalidResponse(e.to_string()) }
 }
 
-impl From<ethabi::Error> for Web3RpcError {
-    fn from(e: ethabi::Error) -> Web3RpcError {
+impl From<crate::eth::abi::AbiError> for Web3RpcError {
+    fn from(e: crate::eth::abi::AbiError) -> Web3RpcError {
         // Currently, we use the `ethabi` crate to work with a smart contract ABI known at compile time.
         // It's an internal error if there are any issues during working with a smart contract ABI.
         Web3RpcError::Internal(e.to_string())
     }
 }
 
-impl From<ethabi::Error> for WithdrawError {
-    fn from(e: ethabi::Error) -> Self {
+impl From<crate::eth::abi::AbiError> for WithdrawError {
+    fn from(e: crate::eth::abi::AbiError) -> Self {
         // Currently, we use the `ethabi` crate to work with a smart contract ABI known at compile time.
         // It's an internal error if there are any issues during working with a smart contract ABI.
         WithdrawError::InternalError(e.to_string())
@@ -145,16 +145,16 @@ impl From<Web3RpcError> for BalanceError {
     }
 }
 
-impl From<ethabi::Error> for TradePreimageError {
-    fn from(e: ethabi::Error) -> Self {
+impl From<crate::eth::abi::AbiError> for TradePreimageError {
+    fn from(e: crate::eth::abi::AbiError) -> Self {
         // Currently, we use the `ethabi` crate to work with a smart contract ABI known at compile time.
         // It's an internal error if there are any issues during working with a smart contract ABI.
         TradePreimageError::InternalError(e.to_string())
     }
 }
 
-impl From<ethabi::Error> for BalanceError {
-    fn from(e: ethabi::Error) -> Self {
+impl From<crate::eth::abi::AbiError> for BalanceError {
+    fn from(e: crate::eth::abi::AbiError) -> Self {
         // Currently, we use the `ethabi` crate to work with a smart contract ABI known at compile time.
         // It's an internal error if there are any issues during working with a smart contract ABI.
         BalanceError::Internal(e.to_string())
@@ -218,12 +218,174 @@ pub enum EthCoinType {
     Trc20 { platform: String, token_addr: Address },
 }
 
+/// Per-coin swap gas-fee policy (CRD R35.6.3). Governs how the EVM coin prices
+/// gas for subsequent swap transactions: `Legacy` selects pre-EIP-1559
+/// single gas-price pricing (the default); `Low`/`Medium`/`High` select an
+/// EIP-1559 max-fee / max-priority-fee tier.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub enum SwapGasFeePolicy {
+    #[default]
+    Legacy,
+    Low,
+    Medium,
+    High,
+}
+
+/// Lightweight registration record for an ERC-20 token activated on top of an
+/// EVM platform coin. Stored on the platform [`EthCoinImpl`] so the V2
+/// platform-with-tokens activation result can report per-token balances
+/// (CRD §35.1.3). Mirrors `solana::SplTokenInfo`.
+#[derive(Clone, Copy, Debug)]
+pub struct Erc20TokenInfo {
+    pub token_addr: Address,
+    pub decimals: u8,
+}
+
+/// EVM signing policy held by an [`EthCoinImpl`].
+///
+/// `Local` wraps the secp256k1 [`KeyPair`] derived from a locally-held secret
+/// (Iguana / HD-activated key / TRON) and signs transactions offline, exactly
+/// as the coin did before this seam was introduced. `Metamask` (WASM-only)
+/// delegates signing — and, for transactions, broadcast — to a connected
+/// browser MetaMask session over EIP-1193; the framework holds no secret
+/// (CRD §47.5). `Trezor` (native, non-iOS) delegates signing to a local Trezor
+/// hardware device driven through the interactive withdrawal task; the
+/// framework holds no local secret either (CRD §50, sibling of `Metamask`).
+#[derive(Clone)]
+pub(crate) enum EthSigner {
+    Local(KeyPair),
+    #[cfg(target_arch = "wasm32")]
+    Metamask(crypto::MetamaskArc),
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    Trezor(EthTrezorSigner),
+}
+
+/// Trezor hardware-wallet EVM signing state held **without** a live device
+/// handle (CRD §50.1). The device connection is established at sign time through
+/// the withdrawal task's ctx + task handle, mirroring the UTXO Trezor withdraw
+/// path. This struct only carries the enabled/selected address, its account
+/// public key, and the BIP-44 derivation path, so the coin can report its
+/// address / public key and select the signing path without holding any local
+/// secret.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[derive(Clone)]
+pub(crate) struct EthTrezorSigner {
+    /// BIP-44 derivation path of the enabled address (e.g. `m/44'/60'/0'/0/0`).
+    pub(crate) derivation_path: crypto::DerivationPath,
+    /// Address controlled by the device at `derivation_path`.
+    pub(crate) address: Address,
+    /// Uncompressed secp256k1 public key (64-byte `X || Y`) for the address.
+    pub(crate) public: Public,
+}
+
+impl std::fmt::Debug for EthSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EthSigner::Local(_) => f.write_str("EthSigner::Local"),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(_) => f.write_str("EthSigner::Metamask"),
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(_) => f.write_str("EthSigner::Trezor"),
+        }
+    }
+}
+
+impl EthSigner {
+    /// The address controlled by this signing policy. For `Local` this is the
+    /// key pair's address (unchanged behaviour); for `Metamask` it is the
+    /// connected account proven at connect time (CRD R47.5.3/R47.5.14); for
+    /// `Trezor` it is the device-sourced enabled/selected address (CRD R50.1).
+    pub(crate) fn address(&self) -> Address {
+        match self {
+            EthSigner::Local(key_pair) => key_pair.address(),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(ctx) => ctx.eth_account(),
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(signer) => signer.address,
+        }
+    }
+
+    /// The uncompressed secp256k1 public key (64-byte `X || Y`, no `0x04`
+    /// prefix). For `Metamask` it is the connected account's public key as
+    /// recovered at connect time (CRD R47.5.14); for `Trezor` it is the account
+    /// public key sourced from the device at activation (CRD R50.1).
+    pub(crate) fn public(&self) -> Public {
+        match self {
+            EthSigner::Local(key_pair) => *key_pair.public(),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(ctx) => {
+                // `eth_account_pubkey_uncompressed` is the 65-byte
+                // `0x04 || X || Y` form; `Public` is the 64-byte `X || Y` body.
+                let uncompressed = ctx.eth_account_pubkey_uncompressed();
+                #[allow(deprecated)]
+                Public::from_slice(&AsRef::<[u8]>::as_ref(&uncompressed)[1..65])
+            },
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(signer) => signer.public,
+        }
+    }
+
+    /// The local signing secret, or `None` under a non-local-key policy. The
+    /// framework never holds a MetaMask account key (CRD R47.5.7/R47.5.14) nor
+    /// a Trezor account key (CRD R50.1) — those secrets never leave the wallet
+    /// / device.
+    pub(crate) fn local_secret(&self) -> Option<&mm2_eth::keys::Secret> {
+        match self {
+            EthSigner::Local(key_pair) => Some(key_pair.secret()),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(_) => None,
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(_) => None,
+        }
+    }
+}
+
+/// Error returned by [`EthCoinImpl`] signing entrypoints when the active EVM
+/// signing policy cannot satisfy the request (CRD §47.5). Constructed only on
+/// the WASM target, where the MetaMask policy exists.
+///
+/// `Debug` delegates to `Display` so the bound condition text surfaces verbatim
+/// through the `try_tx_s!`/`{:?}` swap error path (CRD R47.6.7).
+pub enum EthSignerError {
+    /// Atomic-swap / HTLC sign-and-broadcast is unsupported under the MetaMask
+    /// signing policy. A MetaMask-policy EVM coin is a non-swap account: the
+    /// wallet only signs transactions it immediately broadcasts itself, so the
+    /// framework cannot produce the framework-scheduled HTLC payment / spend /
+    /// refund broadcasts a swap requires (CRD R47.5.12 / R47.5.13). Reached only
+    /// via the swap/HTLC send path (`sign_and_send_transaction_impl`); the
+    /// user-facing `withdraw` delegated-broadcast path is handled separately in
+    /// `withdraw_impl` via `eth_sendTransaction` (CRD R47.5.6).
+    SwapSendUnsupported,
+    /// Offline raw-transaction signing is unavailable under MetaMask: the
+    /// wallet never yields a detached, re-broadcastable signed raw transaction
+    /// (CRD R47.5.7 / R47.5.12).
+    OfflineSigningUnsupported,
+}
+
+impl std::fmt::Debug for EthSignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { std::fmt::Display::fmt(self, f) }
+}
+
+impl std::fmt::Display for EthSignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EthSignerError::SwapSendUnsupported => f.write_str(
+                "Atomic swaps are unsupported under the MetaMask signing policy (CRD R47.5.12): a \
+                 MetaMask-policy EVM coin is a non-swap account",
+            ),
+            EthSignerError::OfflineSigningUnsupported => f.write_str(
+                "Offline raw transaction signing is unsupported under the MetaMask signing policy (CRD R47.5.7)",
+            ),
+        }
+    }
+}
+
 /// pImpl idiom.
 #[derive(Debug)]
 pub struct EthCoinImpl {
     pub(crate) ticker: String,
     pub(crate) coin_type: EthCoinType,
-    pub(crate) key_pair: KeyPair,
+    pub(crate) signer: EthSigner,
     pub(crate) my_address: Address,
     pub(crate) sign_message_prefix: Option<String>,
     pub(crate) swap_contract_address: Address,
@@ -258,6 +420,13 @@ pub struct EthCoinImpl {
     /// the chain has an NFT HTLC contract deployed; `None` disables
     /// NFT swap paths for this coin (P10.3.7.b).
     pub(crate) nft_swap_v2_contract: Option<Address>,
+    /// Per-coin swap gas-fee policy (CRD R35.6). Mutable at runtime via
+    /// `set_swap_gas_fee_policy`; defaults to [`SwapGasFeePolicy::Legacy`].
+    pub(crate) swap_gas_fee_policy: Mutex<SwapGasFeePolicy>,
+    /// ERC-20 tokens activated on top of this platform coin, keyed by ticker.
+    /// Populated during V2 platform-with-tokens activation so the activation
+    /// result can report per-token balances (CRD §35.1.3).
+    pub(crate) erc20_tokens_infos: Arc<Mutex<std::collections::HashMap<String, Erc20TokenInfo>>>,
 }
 
 // ─── V2 swap types ──────────────────────────────────────────────────────────
@@ -466,12 +635,12 @@ pub enum EthAssocTypesError {
 pub type ValidatePaymentError = ValidateSwapV2TxError;
 pub type ValidatePaymentResult<T> = MmResult<T, ValidatePaymentError>;
 
-impl From<ethabi::Error> for FindPaymentSpendError {
-    fn from(e: ethabi::Error) -> Self { FindPaymentSpendError::ABIError(e.to_string()) }
+impl From<crate::eth::abi::AbiError> for FindPaymentSpendError {
+    fn from(e: crate::eth::abi::AbiError) -> Self { FindPaymentSpendError::ABIError(e.to_string()) }
 }
 
-impl From<ethabi::Error> for ValidateSwapV2TxError {
-    fn from(e: ethabi::Error) -> Self { ValidateSwapV2TxError::ABIError(e.to_string()) }
+impl From<crate::eth::abi::AbiError> for ValidateSwapV2TxError {
+    fn from(e: crate::eth::abi::AbiError) -> Self { ValidateSwapV2TxError::ABIError(e.to_string()) }
 }
 
 impl From<std::array::TryFromSliceError> for ValidateSwapV2TxError {

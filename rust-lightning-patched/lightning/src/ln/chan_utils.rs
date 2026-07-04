@@ -710,7 +710,7 @@ impl ChannelTransactionParameters {
 	/// given that the holder is the broadcaster.
 	///
 	/// self.is_populated() must be true before calling this function.
-	pub fn as_holder_broadcastable(&self) -> DirectedChannelTransactionParameters {
+	pub fn as_holder_broadcastable(&self) -> DirectedChannelTransactionParameters<'_> {
 		assert!(self.is_populated(), "self.late_parameters must be set before using as_holder_broadcastable");
 		DirectedChannelTransactionParameters {
 			inner: self,
@@ -722,7 +722,7 @@ impl ChannelTransactionParameters {
 	/// given that the counterparty is the broadcaster.
 	///
 	/// self.is_populated() must be true before calling this function.
-	pub fn as_counterparty_broadcastable(&self) -> DirectedChannelTransactionParameters {
+	pub fn as_counterparty_broadcastable(&self) -> DirectedChannelTransactionParameters<'_> {
 		assert!(self.is_populated(), "self.late_parameters must be set before using as_counterparty_broadcastable");
 		DirectedChannelTransactionParameters {
 			inner: self,
@@ -984,7 +984,7 @@ impl ClosingTransaction {
 	///
 	/// This should only be used if you fully trust the builder of this object. It should not
 	/// be used by an external signer - instead use the verify function.
-	pub fn trust(&self) -> TrustedClosingTransaction {
+	pub fn trust(&self) -> TrustedClosingTransaction<'_> {
 		TrustedClosingTransaction { inner: self }
 	}
 
@@ -994,7 +994,7 @@ impl ClosingTransaction {
 	///
 	/// An external validating signer must call this method before signing
 	/// or using the built transaction.
-	pub fn verify(&self, funding_outpoint: OutPoint) -> Result<TrustedClosingTransaction, ()> {
+	pub fn verify(&self, funding_outpoint: OutPoint) -> Result<TrustedClosingTransaction<'_>, ()> {
 		let built = build_closing_transaction(
 			self.to_holder_value_sat, self.to_counterparty_value_sat,
 			self.to_holder_script.clone(), self.to_counterparty_script.clone(),
@@ -1334,7 +1334,7 @@ impl CommitmentTransaction {
 	///
 	/// This should only be used if you fully trust the builder of this object.  It should not
 	/// be used by an external signer - instead use the verify function.
-	pub fn trust(&self) -> TrustedCommitmentTransaction {
+	pub fn trust(&self) -> TrustedCommitmentTransaction<'_> {
 		TrustedCommitmentTransaction { inner: self }
 	}
 
@@ -1344,7 +1344,7 @@ impl CommitmentTransaction {
 	///
 	/// An external validating signer must call this method before signing
 	/// or using the built transaction.
-	pub fn verify<T: secp256k1::Signing + secp256k1::Verification>(&self, channel_parameters: &DirectedChannelTransactionParameters, broadcaster_keys: &ChannelPublicKeys, countersignatory_keys: &ChannelPublicKeys, secp_ctx: &Secp256k1<T>) -> Result<TrustedCommitmentTransaction, ()> {
+	pub fn verify<T: secp256k1::Signing + secp256k1::Verification>(&self, channel_parameters: &DirectedChannelTransactionParameters, broadcaster_keys: &ChannelPublicKeys, countersignatory_keys: &ChannelPublicKeys, secp_ctx: &Secp256k1<T>) -> Result<TrustedCommitmentTransaction<'_>, ()> {
 		// This is the only field of the key cache that we trust
 		let per_commitment_point = self.keys.per_commitment_point;
 		let keys = TxCreationKeys::from_channel_static_keys(&per_commitment_point, broadcaster_keys, countersignatory_keys, secp_ctx).unwrap();

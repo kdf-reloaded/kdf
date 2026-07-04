@@ -212,7 +212,9 @@ async fn build_signed_tx(ctx: &MmArc, req: EvmTxRequest) -> Result<TransactionDe
         gas,
         gas_price,
     };
-    let signed = tx.sign(coin.key_pair.secret(), coin.chain_id);
+    let signed = coin
+        .sign_tx_for_send(tx)
+        .map_err(|e| GetNftInfoError::Internal(e.to_string()))?;
     let bytes = crate::eth::rlp::encode(&signed);
 
     // ── fee details (in platform-coin units, e.g. ETH/MATIC/BNB) ──────

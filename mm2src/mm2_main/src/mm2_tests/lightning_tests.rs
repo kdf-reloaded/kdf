@@ -2,9 +2,9 @@ use super::*;
 use mm2_test_helpers::for_tests::{enable_lightning, sign_message, verify_message};
 
 const T_BTC_ELECTRUMS: &[&str] = &[
-    "electrum1.cipig.net:10068",
-    "electrum2.cipig.net:10068",
-    "electrum3.cipig.net:10068",
+    "blockstream.info:143",
+    "blackie.c3-soft.com:57005",
+    "testnet.qtornado.com:51001",
 ];
 
 fn start_lightning_nodes() -> (MarketMakerIt, MarketMakerIt, String, String) {

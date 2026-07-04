@@ -3,12 +3,13 @@ use crate::utxo::rpc_clients::ElectrumBlockHeader;
 use crate::utxo::utxo_indexedb_block_header_storage::IndexedDBBlockHeadersStorage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::utxo::utxo_sql_block_header_storage::SqliteBlockHeadersStorage;
-use crate::utxo::UtxoBlockHeaderVerificationParams;
+use crate::utxo::SPVConf;
 use async_trait::async_trait;
 use chain::BlockHeader;
 use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use primitives::hash::H256;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 
@@ -26,6 +27,8 @@ pub enum BlockHeaderStorageError {
     CantRetrieveTableError { ticker: String, reason: String },
     #[display(fmt = "Can't query from the storage - query: {} - reason: {}", query, reason)]
     QueryError { query: String, reason: String },
+    #[display(fmt = "Can't delete from the storage for {} - reason: {}", ticker, reason)]
+    DeleteFromStorageError { ticker: String, reason: String },
     #[display(fmt = "Can't init from the storage - ticker: {} - reason: {}", ticker, reason)]
     InitializationError { ticker: String, reason: String },
     #[display(fmt = "Can't decode/deserialize from storage for {} - reason: {}", ticker, reason)]
@@ -34,7 +37,7 @@ pub enum BlockHeaderStorageError {
 
 pub struct BlockHeaderStorage {
     pub inner: Box<dyn BlockHeaderStorageOps>,
-    pub params: UtxoBlockHeaderVerificationParams,
+    pub conf: SPVConf,
 }
 
 impl Debug for BlockHeaderStorage {
@@ -42,7 +45,7 @@ impl Debug for BlockHeaderStorage {
 }
 
 pub trait InitBlockHeaderStorageOps: Send + Sync + 'static {
-    fn new_from_ctx(ctx: MmArc, params: UtxoBlockHeaderVerificationParams) -> Option<BlockHeaderStorage>
+    fn new_from_ctx(ctx: MmArc, conf: SPVConf) -> Option<BlockHeaderStorage>
     where
         Self: Sized;
 }
@@ -85,22 +88,54 @@ pub trait BlockHeaderStorageOps: Send + Sync + 'static {
         for_coin: &str,
         height: u64,
     ) -> Result<Option<String>, MmError<BlockHeaderStorageError>>;
+
+    /// Returns the number of block headers currently stored for the coin.
+    async fn get_block_headers_count(&self, for_coin: &str) -> Result<u64, MmError<BlockHeaderStorageError>>;
+
+    /// Returns the greatest stored block height for the coin, or `None` when the store is empty.
+    async fn get_last_block_height(&self, for_coin: &str) -> Result<Option<u64>, MmError<BlockHeaderStorageError>>;
+
+    /// Returns the height of the stored header whose hash equals `hash`, or `None` when not stored.
+    async fn get_block_height_by_hash(
+        &self,
+        for_coin: &str,
+        hash: H256,
+    ) -> Result<Option<u64>, MmError<BlockHeaderStorageError>>;
+
+    /// Returns the most recent (highest) stored header whose compact difficulty bits differ from
+    /// `max_bits`. Used by the difficulty-retarget computation. Returns `None` when no such header exists.
+    async fn get_last_block_header_with_non_max_bits(
+        &self,
+        for_coin: &str,
+        max_bits: u32,
+    ) -> Result<Option<BlockHeader>, MmError<BlockHeaderStorageError>>;
+
+    /// Removes every stored header whose height lies in the closed interval `[from_height, to_height]`
+    /// (both endpoints inclusive). Serves both oldest-pruning (`[0, bound]`) and divergent-suffix
+    /// removal on reorg (`[fork_height, tip]`).
+    async fn remove_block_headers_from_to_height(
+        &self,
+        for_coin: &str,
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<(), MmError<BlockHeaderStorageError>>;
 }
 
 impl InitBlockHeaderStorageOps for BlockHeaderStorage {
     #[cfg(not(target_arch = "wasm32"))]
-    fn new_from_ctx(ctx: MmArc, params: UtxoBlockHeaderVerificationParams) -> Option<BlockHeaderStorage> {
+    fn new_from_ctx(ctx: MmArc, conf: SPVConf) -> Option<BlockHeaderStorage> {
         ctx.sqlite_connection.as_option().map(|connection| BlockHeaderStorage {
             inner: Box::new(SqliteBlockHeadersStorage(connection.clone())),
-            params,
+            conf,
         })
     }
 
     #[cfg(target_arch = "wasm32")]
-    fn new_from_ctx(_ctx: MmArc, params: UtxoBlockHeaderVerificationParams) -> Option<BlockHeaderStorage> {
+    fn new_from_ctx(ctx: MmArc, conf: SPVConf) -> Option<BlockHeaderStorage> {
+        let storage = IndexedDBBlockHeadersStorage::new(&ctx).ok()?;
         Some(BlockHeaderStorage {
-            inner: Box::new(IndexedDBBlockHeadersStorage {}),
-            params,
+            inner: Box::new(storage),
+            conf,
         })
     }
 }
@@ -147,5 +182,42 @@ impl BlockHeaderStorageOps for BlockHeaderStorage {
         height: u64,
     ) -> Result<Option<String>, MmError<BlockHeaderStorageError>> {
         self.inner.get_block_header_raw(for_coin, height).await
+    }
+
+    async fn get_block_headers_count(&self, for_coin: &str) -> Result<u64, MmError<BlockHeaderStorageError>> {
+        self.inner.get_block_headers_count(for_coin).await
+    }
+
+    async fn get_last_block_height(&self, for_coin: &str) -> Result<Option<u64>, MmError<BlockHeaderStorageError>> {
+        self.inner.get_last_block_height(for_coin).await
+    }
+
+    async fn get_block_height_by_hash(
+        &self,
+        for_coin: &str,
+        hash: H256,
+    ) -> Result<Option<u64>, MmError<BlockHeaderStorageError>> {
+        self.inner.get_block_height_by_hash(for_coin, hash).await
+    }
+
+    async fn get_last_block_header_with_non_max_bits(
+        &self,
+        for_coin: &str,
+        max_bits: u32,
+    ) -> Result<Option<BlockHeader>, MmError<BlockHeaderStorageError>> {
+        self.inner
+            .get_last_block_header_with_non_max_bits(for_coin, max_bits)
+            .await
+    }
+
+    async fn remove_block_headers_from_to_height(
+        &self,
+        for_coin: &str,
+        from_height: u64,
+        to_height: u64,
+    ) -> Result<(), MmError<BlockHeaderStorageError>> {
+        self.inner
+            .remove_block_headers_from_to_height(for_coin, from_height, to_height)
+            .await
     }
 }

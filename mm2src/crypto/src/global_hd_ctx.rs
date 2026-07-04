@@ -10,7 +10,7 @@ use crate::privkey::{bip39_seed_from_mnemonic, key_pair_from_secret, PrivKeyErro
 use bip32::ExtendedPrivateKey;
 use common::drop_mutability;
 use ed25519_dalek_bip32::{DerivationPath as Ed25519DerivationPath, ExtendedSigningKey};
-use hw_common::primitives::DerivationPath;
+use hw_common::primitives::{Bip32Error, DerivationPath, Secp256k1ExtendedPublicKey};
 use keys::{KeyPair, Secret as Secp256k1Secret};
 use mm2_err_handle::prelude::*;
 use std::ops::Deref;
@@ -118,6 +118,20 @@ impl GlobalHDAccountCtx {
         derive_secp256k1_secret(self.bip39_secp_priv_key.clone(), derivation_path)
     }
 
+    /// Derives the account-level secp256k1 extended **public** key at the given BIP-32
+    /// account derivation path (`purpose'/coin_type'/account'`).
+    ///
+    /// Walks the path from the in-memory BIP-32 master extended private key (`m`) and
+    /// returns the extended public key at that node. Callers serialise it to the canonical
+    /// `xpub` form via `.to_string(bip32::Prefix::XPUB)`. This is the software
+    /// (non-hardware) source of account extended public keys for global-HD wallets.
+    pub fn derive_account_extended_pubkey(
+        &self,
+        account_derivation_path: &DerivationPath,
+    ) -> MmResult<Secp256k1ExtendedPublicKey, Bip32Error> {
+        derive_secp256k1_extended_pubkey(self.bip39_secp_priv_key.clone(), account_derivation_path)
+    }
+
     /// Derives an ed25519 signing key at the given SLIP-0010 derivation path.
     pub fn derive_ed25519_signing_key(
         &self,
@@ -142,6 +156,25 @@ pub fn derive_secp256k1_secret(
 
     let secret = *priv_key.private_key().as_ref();
     Ok(Secp256k1Secret::from(secret))
+}
+
+/// Derives a secp256k1 extended **public** key by walking a BIP32 derivation path from a given
+/// extended private key, and returning the extended public key at the resulting node.
+///
+/// This is the software (non-hardware) source of account-level extended public keys for
+/// global-HD wallets: callers pass the in-memory BIP-32 master `m` and an account derivation
+/// path (`purpose'/coin_type'/account'`), then serialise the result to the canonical `xpub`
+/// form via `.to_string(bip32::Prefix::XPUB)`.
+pub fn derive_secp256k1_extended_pubkey(
+    bip39_secp_priv_key: ExtendedPrivateKey<secp256k1::SecretKey>,
+    derivation_path: &DerivationPath,
+) -> MmResult<Secp256k1ExtendedPublicKey, Bip32Error> {
+    let mut priv_key = bip39_secp_priv_key;
+    for child in derivation_path.iter() {
+        priv_key = priv_key.derive_child(child)?;
+    }
+    drop_mutability!(priv_key);
+    Ok(priv_key.public_key())
 }
 
 #[cfg(test)]
@@ -194,6 +227,38 @@ mod tests {
         let s1 = ctx.derive_secp256k1_secret(&path).unwrap();
         let s2 = ctx.derive_secp256k1_secret(&path).unwrap();
         assert_eq!(s1.as_slice(), s2.as_slice());
+    }
+
+    #[test]
+    fn test_derive_account_extended_pubkey_canonical_xpub() {
+        let (_kp, ctx) = GlobalHDAccountCtx::new(TEST_MNEMONIC).unwrap();
+
+        // BIP-84 and BIP-44 account paths both serialise to the canonical `xpub` prefix.
+        let segwit_path = DerivationPath::from_str("m/84'/141'/0'").unwrap();
+        let legacy_path = DerivationPath::from_str("m/44'/141'/0'").unwrap();
+        let segwit_xpub = ctx
+            .derive_account_extended_pubkey(&segwit_path)
+            .unwrap()
+            .to_string(bip32::Prefix::XPUB);
+        let legacy_xpub = ctx
+            .derive_account_extended_pubkey(&legacy_path)
+            .unwrap()
+            .to_string(bip32::Prefix::XPUB);
+
+        assert!(segwit_xpub.starts_with("xpub"));
+        assert!(legacy_xpub.starts_with("xpub"));
+        assert_ne!(segwit_xpub, legacy_xpub);
+
+        // Deterministic across re-derivation and matches the free helper.
+        let again = ctx
+            .derive_account_extended_pubkey(&segwit_path)
+            .unwrap()
+            .to_string(bip32::Prefix::XPUB);
+        assert_eq!(segwit_xpub, again);
+        let helper = derive_secp256k1_extended_pubkey(ctx.root_priv_key().clone(), &segwit_path)
+            .unwrap()
+            .to_string(bip32::Prefix::XPUB);
+        assert_eq!(segwit_xpub, helper);
     }
 
     use std::str::FromStr;

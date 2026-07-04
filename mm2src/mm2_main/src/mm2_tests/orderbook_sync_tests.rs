@@ -7,8 +7,8 @@ use mm2_test_helpers::for_tests::orderbook_v2;
 #[test]
 fn alice_can_see_the_active_order_after_connection() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
     ]);
 
     // start bob and immediately place the order
@@ -31,14 +31,14 @@ fn alice_can_see_the_active_order_after_connection() {
     let (_bob_dump_log, _bob_dump_dashboard) = mm_bob.mm_dump();
     log!({"Bob log path: {}", mm_bob.log_path.display()});
     // Enable coins on Bob side. Print the replies in case we need the "address".
-    log!({ "enable_coins (bob): {:?}", block_on(enable_coins_rick_morty_electrum(&mm_bob)) });
+    log!({ "enable_coins (bob): {:?}", block_on(enable_coins_doc_marty_electrum(&mm_bob)) });
     // issue sell request on Bob side by setting base/rel price
     log!("Issue bob sell request");
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": 0.9,
         "volume": "0.9",
     })))
@@ -49,8 +49,8 @@ fn alice_can_see_the_active_order_after_connection() {
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -80,14 +80,14 @@ fn alice_can_see_the_active_order_after_connection() {
     let (_eve_dump_log, _eve_dump_dashboard) = mm_eve.mm_dump();
     log!({ "Eve log path: {}", mm_eve.log_path.display() });
     // Enable coins on Eve side. Print the replies in case we need the "address".
-    log!({ "enable_coins (eve): {:?}", block_on(enable_coins_rick_morty_electrum(&mm_eve)) });
+    log!({ "enable_coins (eve): {:?}", block_on(enable_coins_doc_marty_electrum(&mm_eve)) });
     // issue sell request on Eve side by setting base/rel price
     log!("Issue eve sell request");
     let rc = block_on(mm_eve.rpc(&json! ({
         "userpass": mm_eve.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": "1",
         "volume": "0.9",
     })))
@@ -98,8 +98,8 @@ fn alice_can_see_the_active_order_after_connection() {
     let rc = block_on(mm_eve.rpc(&json! ({
         "userpass": mm_eve.userpass,
         "method": "setprice",
-        "base": "MORTY",
-        "rel": "RICK",
+        "base": "MARTY",
+        "rel": "DOC",
         "price": "1",
         "volume": "0.9",
     })))
@@ -110,8 +110,8 @@ fn alice_can_see_the_active_order_after_connection() {
     let rc = block_on(mm_eve.rpc(&json! ({
         "userpass": mm_eve.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -135,8 +135,8 @@ fn alice_can_see_the_active_order_after_connection() {
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -174,14 +174,14 @@ fn alice_can_see_the_active_order_after_connection() {
     log!({ "Alice log path: {}", mm_alice.log_path.display() });
 
     // Enable coins on Alice side. Print the replies in case we need the "address".
-    log!({ "enable_coins (alice): {:?}", block_on(enable_coins_rick_morty_electrum(&mm_alice)) });
+    log!({ "enable_coins (alice): {:?}", block_on(enable_coins_doc_marty_electrum(&mm_alice)) });
 
     log!("Get RICK/MORTY orderbook on Alice side");
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -209,12 +209,12 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"},"address_format":{"format":"segwit"}}
     ]);
 
     let alice_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"},"address_format":{"format":"segwit"}}
     ]);
 
@@ -242,7 +242,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
         "userpass": "pass",
         "method": "electrum",
         "coin": "tBTC",
-        "servers": [{"url":"electrum1.cipig.net:10068"},{"url":"electrum2.cipig.net:10068"},{"url":"electrum3.cipig.net:10068"}],
+        "servers": [{"url":"blockstream.info:143"},{"url":"blackie.c3-soft.com:57005"},{"url":"testnet.qtornado.com:51001"}],
         "address_format":{"format":"segwit"},
         "mm2": 1,
     }))).unwrap();
@@ -260,7 +260,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
     let electrum = block_on(mm_bob.rpc(&json!({
         "userpass": "pass",
         "method": "electrum",
-        "coin": "RICK",
+        "coin": "DOC",
         "servers": [{"url":"electrum1.cipig.net:10017"},{"url":"electrum2.cipig.net:10017"},{"url":"electrum3.cipig.net:10017"}],
         "mm2": 1,
     }))).unwrap();
@@ -280,8 +280,8 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
 
     let bob_orders = [
         // (base, rel, price, volume, min_volume)
-        ("tBTC", "RICK", "0.7", "0.0002", Some("0.00015")),
-        ("RICK", "tBTC", "0.7", "0.0002", Some("0.00015")),
+        ("tBTC", "DOC", "0.7", "0.0002", Some("0.00015")),
+        ("DOC", "tBTC", "0.7", "0.0002", Some("0.00015")),
     ];
     for (base, rel, price, volume, min_volume) in bob_orders.iter() {
         let rc = block_on(mm_bob.rpc(&json! ({
@@ -337,7 +337,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
         "userpass": "pass",
         "method": "electrum",
         "coin": "tBTC",
-        "servers": [{"url":"electrum1.cipig.net:10068"},{"url":"electrum2.cipig.net:10068"},{"url":"electrum3.cipig.net:10068"}],
+        "servers": [{"url":"blockstream.info:143"},{"url":"blackie.c3-soft.com:57005"},{"url":"testnet.qtornado.com:51001"}],
         "address_format":{"format":"segwit"},
         "mm2": 1,
     }))).unwrap();
@@ -353,7 +353,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
     let electrum = block_on(mm_alice.rpc(&json!({
         "userpass": "pass",
         "method": "electrum",
-        "coin": "RICK",
+        "coin": "DOC",
         "servers": [{"url":"electrum1.cipig.net:10017"},{"url":"electrum2.cipig.net:10017"},{"url":"electrum3.cipig.net:10017"}],
         "mm2": 1,
     }))).unwrap();
@@ -371,7 +371,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "setprice",
-        "base": "RICK",
+        "base": "DOC",
         "rel": "tBTC",
         "price": "1",
         "volume": "0.1",
@@ -392,7 +392,7 @@ fn alice_can_see_the_active_order_after_orderbook_sync_segwit() {
         "userpass": mm_alice.userpass,
         "method": "orderbook",
         "base": "tBTC",
-        "rel": "RICK",
+        "rel": "DOC",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -409,12 +409,12 @@ fn test_orderbook_segwit() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"},"address_format":{"format":"segwit"}}
     ]);
 
     let alice_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"}}
     ]);
 
@@ -442,7 +442,7 @@ fn test_orderbook_segwit() {
         "userpass": "pass",
         "method": "electrum",
         "coin": "tBTC",
-        "servers": [{"url":"electrum1.cipig.net:10068"},{"url":"electrum2.cipig.net:10068"},{"url":"electrum3.cipig.net:10068"}],
+        "servers": [{"url":"blockstream.info:143"},{"url":"blackie.c3-soft.com:57005"},{"url":"testnet.qtornado.com:51001"}],
         "address_format":{"format":"segwit"},
         "mm2": 1,
     }))).unwrap();
@@ -460,7 +460,7 @@ fn test_orderbook_segwit() {
     let electrum = block_on(mm_bob.rpc(&json!({
         "userpass": "pass",
         "method": "electrum",
-        "coin": "RICK",
+        "coin": "DOC",
         "servers": [{"url":"electrum1.cipig.net:10017"},{"url":"electrum2.cipig.net:10017"},{"url":"electrum3.cipig.net:10017"}],
         "mm2": 1,
     }))).unwrap();
@@ -480,8 +480,8 @@ fn test_orderbook_segwit() {
 
     let bob_orders = [
         // (base, rel, price, volume, min_volume)
-        ("tBTC", "RICK", "0.7", "0.0002", Some("0.00015")),
-        ("RICK", "tBTC", "0.7", "0.0002", Some("0.00015")),
+        ("tBTC", "DOC", "0.7", "0.0002", Some("0.00015")),
+        ("DOC", "tBTC", "0.7", "0.0002", Some("0.00015")),
     ];
     for (base, rel, price, volume, min_volume) in bob_orders.iter() {
         let rc = block_on(mm_bob.rpc(&json! ({
@@ -527,7 +527,7 @@ fn test_orderbook_segwit() {
         "userpass": mm_alice.userpass,
         "method": "orderbook",
         "base": "tBTC",
-        "rel": "RICK",
+        "rel": "DOC",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -542,10 +542,10 @@ fn test_orderbook_segwit() {
 #[test]
 fn test_get_orderbook_with_same_orderbook_ticker() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"protocol":{"type":"UTXO"}},
-        {"coin":"RICK-Utxo","asset":"RICK","orderbook_ticker":"RICK","rpcport":8923,"txversion":4,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"protocol":{"type":"UTXO"}},
+        {"coin":"RICK-Utxo","asset":"DOC","orderbook_ticker":"DOC","rpcport":8923,"txversion":4,"protocol":{"type":"UTXO"}},
         // just a random contract address
-        {"coin":"RICK-ERC20","orderbook_ticker":"RICK","decimals": 18,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"}}},
+        {"coin":"RICK-ERC20","orderbook_ticker":"DOC","decimals": 18,"protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9"}}},
     ]);
 
     let mm = MarketMakerIt::start(
@@ -567,7 +567,7 @@ fn test_get_orderbook_with_same_orderbook_ticker() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "RICK",
+        "base": "DOC",
         "rel": "RICK-Utxo",
     })))
     .unwrap();
@@ -580,7 +580,7 @@ fn test_get_orderbook_with_same_orderbook_ticker() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "RICK",
+        "base": "DOC",
         "rel": "RICK-ERC20",
     })))
     .unwrap();
@@ -590,8 +590,8 @@ fn test_get_orderbook_with_same_orderbook_ticker() {
 #[test]
 fn test_conf_settings_in_orderbook() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"}},
     ]);
 
     let mm_bob = MarketMakerIt::start(
@@ -610,14 +610,14 @@ fn test_conf_settings_in_orderbook() {
     let (_dump_log, _dump_dashboard) = mm_bob.mm_dump();
     log!({"Log path: {}", mm_bob.log_path.display()});
 
-    log! ({"enable_coins (bob): {:?}", block_on (enable_coins_rick_morty_electrum(&mm_bob))});
+    log! ({"enable_coins (bob): {:?}", block_on (enable_coins_doc_marty_electrum(&mm_bob))});
 
     log!("Issue set_price request for RICK/MORTY on Bob side");
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": 0.9,
         "volume": "0.9",
     })))
@@ -628,8 +628,8 @@ fn test_conf_settings_in_orderbook() {
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "setprice",
-        "base": "MORTY",
-        "rel": "RICK",
+        "base": "MARTY",
+        "rel": "DOC",
         "price": 0.9,
         "volume": "0.9",
     })))
@@ -652,14 +652,14 @@ fn test_conf_settings_in_orderbook() {
     let (_dump_log, _dump_dashboard) = mm_alice.mm_dump();
     log!({"Log path: {}", mm_alice.log_path.display()});
 
-    log! ({"enable_coins (alice): {:?}", block_on (enable_coins_rick_morty_electrum(&mm_alice))});
+    log! ({"enable_coins (alice): {:?}", block_on (enable_coins_doc_marty_electrum(&mm_alice))});
 
     log!("Get RICK/MORTY orderbook on Alice side");
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -694,8 +694,8 @@ fn test_conf_settings_in_orderbook() {
 #[test]
 fn alice_can_see_confs_in_orderbook_after_sync() {
     let bob_coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"}},
     ]);
 
     let mm_bob = MarketMakerIt::start(
@@ -714,14 +714,14 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
     // let (_dump_log, _dump_dashboard) = mm_bob.mm_dump();
     log!({"Bob log path: {}", mm_bob.log_path.display()});
 
-    log! ({"enable_coins (bob): {:?}", block_on (enable_coins_rick_morty_electrum(&mm_bob))});
+    log! ({"enable_coins (bob): {:?}", block_on (enable_coins_doc_marty_electrum(&mm_bob))});
 
     log!("Issue sell request on Bob side");
     let rc = block_on(mm_bob.rpc(&json! ({
         "userpass": mm_bob.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": 0.9,
         "volume": "0.9",
     })))
@@ -741,8 +741,8 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
 
     // Alice coins don't have required_confirmations and requires_notarization set
     let alice_coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
     ]);
 
     let mut mm_alice = MarketMakerIt::start(
@@ -761,15 +761,15 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
     let (_dump_log, _dump_dashboard) = mm_alice.mm_dump();
     log!({"Alice log path: {}", mm_alice.log_path.display()});
 
-    log! ({"enable_coins (alice): {:?}", block_on (enable_coins_rick_morty_electrum(&mm_alice))});
+    log! ({"enable_coins (alice): {:?}", block_on (enable_coins_doc_marty_electrum(&mm_alice))});
 
     // setting the price will trigger Alice's subscription to the orderbook topic
     // but won't request the actual orderbook
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": "1",
         "volume": "0.1",
         "cancel_previous": false,
@@ -788,8 +788,8 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -819,8 +819,8 @@ fn alice_can_see_confs_in_orderbook_after_sync() {
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/859
 fn orderbook_extended_data() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","protocol":{"type":"UTXO"}},
     ]);
 
     let mm = MarketMakerIt::start(
@@ -844,12 +844,12 @@ fn orderbook_extended_data() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = &mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    block_on(enable_electrum(&mm, "RICK", false, &[
+    block_on(enable_electrum(&mm, "DOC", false, &[
         "electrum3.cipig.net:10017",
         "electrum2.cipig.net:10017",
         "electrum1.cipig.net:10017",
     ]));
-    block_on(enable_electrum(&mm, "MORTY", false, &[
+    block_on(enable_electrum(&mm, "MARTY", false, &[
         "electrum3.cipig.net:10018",
         "electrum2.cipig.net:10018",
         "electrum1.cipig.net:10018",
@@ -857,11 +857,11 @@ fn orderbook_extended_data() {
 
     let bob_orders = &[
         // (base, rel, price, volume)
-        ("RICK", "MORTY", "0.9", "0.9"),
-        ("RICK", "MORTY", "0.8", "0.9"),
-        ("RICK", "MORTY", "0.7", "0.9"),
-        ("MORTY", "RICK", "0.8", "0.9"),
-        ("MORTY", "RICK", "1", "0.9"),
+        ("DOC", "MARTY", "0.9", "0.9"),
+        ("DOC", "MARTY", "0.8", "0.9"),
+        ("DOC", "MARTY", "0.7", "0.9"),
+        ("MARTY", "DOC", "0.8", "0.9"),
+        ("MARTY", "DOC", "1", "0.9"),
     ];
 
     for (base, rel, price, volume) in bob_orders {
@@ -883,8 +883,8 @@ fn orderbook_extended_data() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -930,8 +930,8 @@ fn orderbook_extended_data() {
 #[test]
 fn orderbook_should_display_base_rel_volumes() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","protocol":{"type":"UTXO"}},
     ]);
 
     let mm = MarketMakerIt::start(
@@ -955,12 +955,12 @@ fn orderbook_should_display_base_rel_volumes() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = &mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    block_on(enable_electrum(&mm, "RICK", false, &[
+    block_on(enable_electrum(&mm, "DOC", false, &[
         "electrum3.cipig.net:10017",
         "electrum2.cipig.net:10017",
         "electrum1.cipig.net:10017",
     ]));
-    block_on(enable_electrum(&mm, "MORTY", false, &[
+    block_on(enable_electrum(&mm, "MARTY", false, &[
         "electrum3.cipig.net:10018",
         "electrum2.cipig.net:10018",
         "electrum1.cipig.net:10018",
@@ -973,8 +973,8 @@ fn orderbook_should_display_base_rel_volumes() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": price,
         "volume": volume,
         "cancel_previous": false,
@@ -987,8 +987,8 @@ fn orderbook_should_display_base_rel_volumes() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -1007,8 +1007,8 @@ fn orderbook_should_display_base_rel_volumes() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "MORTY",
-        "rel": "RICK",
+        "base": "MARTY",
+        "rel": "DOC",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -1030,8 +1030,8 @@ fn orderbook_should_work_without_coins_activation() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json! ([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"}},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -1116,8 +1116,8 @@ fn orderbook_should_work_without_coins_activation() {
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/511
 fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","protocol":{"type":"UTXO"}},
     ]);
 
     let mm = MarketMakerIt::start(
@@ -1141,12 +1141,12 @@ fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     .unwrap();
     let (_dump_log, _dump_dashboard) = mm.mm_dump();
     log!({"Log path: {}", mm.log_path.display()});
-    block_on(enable_electrum(&mm, "RICK", false, &[
+    block_on(enable_electrum(&mm, "DOC", false, &[
         "electrum3.cipig.net:10017",
         "electrum2.cipig.net:10017",
         "electrum1.cipig.net:10017",
     ]));
-    block_on(enable_electrum(&mm, "MORTY", false, &[
+    block_on(enable_electrum(&mm, "MARTY", false, &[
         "electrum3.cipig.net:10018",
         "electrum2.cipig.net:10018",
         "electrum1.cipig.net:10018",
@@ -1156,8 +1156,8 @@ fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": 0.9,
         "volume": "0.9",
         "cancel_previous": false,
@@ -1168,8 +1168,8 @@ fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": 1,
         "volume": "0.9",
         "cancel_previous": false,
@@ -1183,8 +1183,8 @@ fn test_all_orders_per_pair_per_node_must_be_displayed_in_orderbook() {
     let rc = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "orderbook",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!orderbook: {}", rc.1);
@@ -1201,8 +1201,8 @@ fn setprice_min_volume_should_be_displayed_in_orderbook() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json! ([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"}},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -1322,7 +1322,7 @@ fn zhtlc_orders_sync_alice_connected_before_creation() {
     let alice_passphrase = get_passphrase!(".env.client", "ALICE_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC"},"required_confirmations":0}
     ]);
 
@@ -1377,14 +1377,14 @@ fn zhtlc_orders_sync_alice_connected_before_creation() {
     log!("bob_zombie_cache_path "(bob_zombie_cache_path.display()));
     std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", bob_zombie_cache_path).unwrap();
 
-    block_on(enable_electrum_json(&mm_bob, "RICK", false, rick_electrums()));
+    block_on(enable_electrum_json(&mm_bob, "DOC", false, doc_electrums()));
     block_on(enable_z_coin(&mm_bob, "ZOMBIE"));
 
     let set_price_json = json!({
         "userpass": mm_bob.userpass,
         "method": "setprice",
         "base": "ZOMBIE",
-        "rel": "RICK",
+        "rel": "DOC",
         "price": 1,
         "volume": "1",
     });
@@ -1394,7 +1394,7 @@ fn zhtlc_orders_sync_alice_connected_before_creation() {
 
     let set_price_res: SetPriceResponse = json::from_str(&rc.1).unwrap();
 
-    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "RICK"));
+    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "DOC"));
     let orderbook: RpcV2Response<OrderbookV2Response> = json::from_value(orderbook).unwrap();
     let orderbook = orderbook.result;
 
@@ -1407,7 +1407,7 @@ fn zhtlc_orders_sync_alice_connected_before_creation() {
 
     thread::sleep(Duration::from_secs(MIN_ORDER_KEEP_ALIVE_INTERVAL * 3));
 
-    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "RICK"));
+    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "DOC"));
     let orderbook: RpcV2Response<OrderbookV2Response> = json::from_value(orderbook).unwrap();
     let orderbook = orderbook.result;
 
@@ -1426,7 +1426,7 @@ fn zhtlc_orders_sync_alice_connected_after_creation() {
     let alice_passphrase = get_passphrase!(".env.client", "ALICE_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC"},"required_confirmations":0}
     ]);
 
@@ -1458,14 +1458,14 @@ fn zhtlc_orders_sync_alice_connected_after_creation() {
     log!("bob_zombie_cache_path "(bob_zombie_cache_path.display()));
     std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", bob_zombie_cache_path).unwrap();
 
-    block_on(enable_electrum_json(&mm_bob, "RICK", false, rick_electrums()));
+    block_on(enable_electrum_json(&mm_bob, "DOC", false, doc_electrums()));
     block_on(enable_z_coin(&mm_bob, "ZOMBIE"));
 
     let set_price_json = json!({
         "userpass": mm_bob.userpass,
         "method": "setprice",
         "base": "ZOMBIE",
-        "rel": "RICK",
+        "rel": "DOC",
         "price": 1,
         "volume": "1",
     });
@@ -1507,13 +1507,13 @@ fn zhtlc_orders_sync_alice_connected_after_creation() {
     log!("alice_cache_path "(alice_cache_path.display()));
     std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", alice_cache_path).unwrap();
 
-    block_on(enable_electrum_json(&mm_alice, "RICK", false, rick_electrums()));
+    block_on(enable_electrum_json(&mm_alice, "DOC", false, doc_electrums()));
     block_on(enable_z_coin(&mm_alice, "ZOMBIE"));
 
     let set_price_json = json!({
         "userpass": mm_alice.userpass,
         "method": "setprice",
-        "base": "RICK",
+        "base": "DOC",
         "rel": "ZOMBIE",
         "price": 1,
         "volume": "1",
@@ -1524,7 +1524,7 @@ fn zhtlc_orders_sync_alice_connected_after_creation() {
 
     thread::sleep(Duration::from_secs(MIN_ORDER_KEEP_ALIVE_INTERVAL));
 
-    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "RICK"));
+    let orderbook = block_on(orderbook_v2(&mm_alice, "ZOMBIE", "DOC"));
     let orderbook: RpcV2Response<OrderbookV2Response> = json::from_value(orderbook).unwrap();
     let orderbook = orderbook.result;
 

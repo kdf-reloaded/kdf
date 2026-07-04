@@ -1057,7 +1057,9 @@ pub async fn enable_lightning(mm: &MarketMakerIt, coin: &str) -> Json {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn new_mm2_temp_folder_path(ip: Option<IpAddr>) -> PathBuf {
     let now = common::now_ms();
-    let now = Local.timestamp((now / 1000) as i64, (now % 1000) as u32 * 1_000_000);
+    let now = Local
+        .timestamp_opt((now / 1000) as i64, (now % 1000) as u32 * 1_000_000)
+        .unwrap();
     let folder = match ip {
         Some(ip) => format!("mm2_{}_{}", now.format("%Y-%m-%d_%H-%M-%S-%3f"), ip),
         None => format!("mm2_{}", now.format("%Y-%m-%d_%H-%M-%S-%3f")),

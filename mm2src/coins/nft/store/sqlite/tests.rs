@@ -22,9 +22,9 @@ async fn fresh_store() -> SqliteNftStore {
 fn sample_nft(token_id: u64, block: u64, possible_spam: bool) -> Nft {
     Nft {
         common: NftCommon {
-            token_address: Address::from(ADDR_A),
+            token_address: Address::from_slice(&hex::decode(&ADDR_A[2..]).unwrap()),
             amount: BigDecimal::from(1u32),
-            owner_of: Address::from(ADDR_B),
+            owner_of: Address::from_slice(&hex::decode(&ADDR_B[2..]).unwrap()),
             token_hash: None,
             collection_name: Some("Cats".into()),
             symbol: None,
@@ -58,9 +58,9 @@ fn sample_transfer(token_id: u64, log_index: u32, block: u64) -> NftTransfer {
             log_index,
             value: None,
             transaction_type: None,
-            token_address: Address::from(ADDR_A),
-            from_address: Address::from(ADDR_B),
-            to_address: Address::from(ADDR_A),
+            token_address: Address::from_slice(&hex::decode(&ADDR_A[2..]).unwrap()),
+            from_address: Address::from_slice(&hex::decode(&ADDR_B[2..]).unwrap()),
+            to_address: Address::from_slice(&hex::decode(&ADDR_A[2..]).unwrap()),
             amount: BigDecimal::from(1u32),
             verified: None,
             operator: None,

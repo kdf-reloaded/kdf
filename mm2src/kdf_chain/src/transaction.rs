@@ -526,3 +526,45 @@ impl Deserializable for Transaction {
         deserialize_tx(&mut Reader::from_read(buf.as_slice()), TxType::Zcash)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PoS / PoSV coins (selected by the `isPoS` coins-config flag) build
+    /// transactions carrying an `nTime` field. This locks the wire contract:
+    /// `n_time` is serialized into the byte stream and decodes back under the
+    /// PoS layout.
+    #[test]
+    fn pos_n_time_round_trips() {
+        let tx = Transaction {
+            version: 1,
+            n_time: Some(0x6655_4433),
+            overwintered: false,
+            version_group_id: 0,
+            inputs: vec![],
+            outputs: vec![],
+            lock_time: 0,
+            expiry_height: 0,
+            shielded_spends: vec![],
+            shielded_outputs: vec![],
+            join_splits: vec![],
+            value_balance: 0,
+            join_split_pubkey: H256::default(),
+            join_split_sig: H512::default(),
+            binding_sig: H512::default(),
+            zcash: false,
+            str_d_zeel: None,
+            tx_hash_algo: TxHashAlgo::DSHA256,
+        };
+
+        let bytes = serialize(&tx);
+        let decoded = deserialize_tx(&mut Reader::from_read(bytes.as_ref()), TxType::PosWithNTime)
+            .expect("a PoS transaction must decode under the PosWithNTime layout");
+        assert_eq!(
+            decoded.n_time,
+            Some(0x6655_4433),
+            "n_time must survive the serialize/deserialize round-trip"
+        );
+    }
+}

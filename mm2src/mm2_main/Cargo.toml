@@ -7,7 +7,7 @@
 name = "mm2_main"
 version = "0.1.0"
 edition = "2021"
-default-run = "mm2"
+default-run = "kdf"
 
 # wasm-opt reduces the size from 17 Mb to 14. But it runs for few minutes, which is not good for CI.
 # For production builds, it's recommended to run wasm-opt separately.
@@ -19,13 +19,18 @@ wasm-opt = false
 native = []
 track-ctx-pointer = ["common/track-ctx-pointer"]
 custom-swap-locktime = [] # only for testing purposes, should never be activated on release builds.
+ibc-routing-for-swaps = []
 zhtlc-native-tests = ["coins/zhtlc-native-tests"]
 # Compiles in netid 9000 (regtest) for the docker_tests harness.
-# Never enable on the production `mm2` binary.
+# Never enable on the production `kdf` binary.
 regtest-netid = ["mm2_net_config/regtest-netid"]
+# Debugging-only RPC wire dump. Requires explicit runtime env activation too.
+unsafe-rpc-wire-dump = []
+# Escape hatch for controlled release debugging. Never enable in production builds.
+unsafe-rpc-wire-dump-release-override = []
 
 [[bin]]
-name = "mm2"
+name = "kdf"
 path = "src/mm2_bin.rs"
 test = false
 doctest = false
@@ -36,7 +41,7 @@ name = "docker_tests"
 path = "src/docker_tests.rs"
 
 [lib]
-name = "mm2"
+name = "kdflib"
 path = "src/mm2_lib.rs"
 crate-type = ["lib", "cdylib", "staticlib"]
 test = false
@@ -47,6 +52,7 @@ bench = false
 async-std = { version = "1.5", features = ["unstable"] }
 async-trait = "0.1"
 kdf_crypto = { path = "../kdf_crypto" }
+kdf_walletconnect = { path = "../kdf_walletconnect" }
 blake2 = "0.10"
 bytes = "0.4"
 chain = { package = "kdf_chain", path = "../kdf_chain" }
@@ -58,6 +64,7 @@ mm2_metrics = { path = "../mm2_metrics" }
 mm2_test_helpers = { path = "../mm2_test_helpers" }
 mm2_err_handle = { path = "../mm2_err_handle" }
 mm2_event_stream = { path = "../mm2_event_stream" }
+mm2_gui_storage = { path = "../mm2_gui_storage" }
 mm2_io = { path = "../mm2_io" }
 mm2_rpc = { path = "../mm2_rpc" }
 mm2_state_machine = { path = "../mm2_state_machine" }
@@ -71,7 +78,7 @@ crypto = { path = "../crypto" }
 db_common = { path = "../db_common" }
 derive_more = "0.99"
 either = "1.6"
-ethereum-types = { version = "0.4", default-features = false, features = ["std", "serialize"] }
+ethereum-types.workspace = true
 enum-primitive-derive = "0.2"
 fomat-macros = "0.2"
 futures01 = { version = "0.1", package = "futures" }
@@ -89,7 +96,7 @@ lazy_static = "1.4"
 # ledger = { path = "../ledger" }
 libc = "0.2"
 metrics = "0.12"
-mm2_p2p = { path = "../mm2_p2p" }
+mm2_p2p = { path = "../mm2_p2p", features = ["application"] }
 num-traits = "0.2"
 rpc = { package = "kdf_rpc_types", path = "../kdf_rpc_types" }
 rpc_task = { path = "../rpc_task" }
@@ -115,6 +122,7 @@ serialization_derive = { package = "kdf_codec_derive", path = "../kdf_codec_deri
 spv_validation = { package = "kdf_spv_validation", path = "../kdf_spv_validation" }
 sp-runtime-interface = { version = "6.0.0", default-features = false, features = ["disable_target_static_assertions"] }
 sp-trie = { version = "6.0", default-features = false }
+trading_api = { path = "../trading_api" }
 
 timed-map = { version = "1.6", features = ["rustc-hash"] }
 trie-db = { version = "0.23.1", default-features = false }
@@ -134,10 +142,11 @@ instant = {version = "0.1.12", features = ["wasm-bindgen"]}
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dirs = { version = "1" }
 hyper = { version = "0.14.11", features = ["client", "http2", "server", "tcp"] }
-tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net"] }
+tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net", "signal"] }
 futures-rustls = { version = "0.21.1" }
 
 [dev-dependencies]
+crypto = { path = "../crypto", features = ["test-helpers"] }
 mocktopus = "0.8.0"
 testcontainers = { path = "../testcontainers-vendored" }
 winapi = "0.3"

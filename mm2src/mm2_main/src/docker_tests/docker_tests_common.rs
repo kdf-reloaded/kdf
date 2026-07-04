@@ -44,10 +44,52 @@ lazy_static! {
     pub static ref SLP_TOKEN_OWNERS: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::with_capacity(18));
 }
 
-pub static mut QICK_TOKEN_ADDRESS: Option<H160Eth> = None;
-pub static mut QORTY_TOKEN_ADDRESS: Option<H160Eth> = None;
-pub static mut QRC20_SWAP_CONTRACT_ADDRESS: Option<H160Eth> = None;
-pub static mut QTUM_CONF_PATH: Option<PathBuf> = None;
+lazy_static! {
+    pub static ref QICK_TOKEN_ADDRESS: Mutex<Option<H160Eth>> = Mutex::new(None);
+    pub static ref QORTY_TOKEN_ADDRESS: Mutex<Option<H160Eth>> = Mutex::new(None);
+    pub static ref QRC20_SWAP_CONTRACT_ADDRESS: Mutex<Option<H160Eth>> = Mutex::new(None);
+    pub static ref QTUM_CONF_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+}
+
+pub fn get_qtum_conf_path() -> PathBuf {
+    QTUM_CONF_PATH
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("Qtum config is not set yet")
+}
+
+pub fn set_qtum_conf_path(conf_path: PathBuf) { *QTUM_CONF_PATH.lock().unwrap() = Some(conf_path); }
+
+pub fn get_qrc20_contract_address(ticker: &str) -> H160Eth {
+    match ticker {
+        "QICK" => QICK_TOKEN_ADDRESS
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("QICK_TOKEN_ADDRESS must be set already"),
+        "QORTY" => QORTY_TOKEN_ADDRESS
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("QORTY_TOKEN_ADDRESS must be set already"),
+        _ => panic!("Expected QICK or QORTY ticker"),
+    }
+}
+
+pub fn get_qrc20_swap_contract_address() -> H160Eth {
+    QRC20_SWAP_CONTRACT_ADDRESS
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("QRC20_SWAP_CONTRACT_ADDRESS must be set already")
+}
+
+pub fn set_qrc20_contract_addresses(qick: H160Eth, qorty: H160Eth, swap: H160Eth) {
+    *QICK_TOKEN_ADDRESS.lock().unwrap() = Some(qick);
+    *QORTY_TOKEN_ADDRESS.lock().unwrap() = Some(qorty);
+    *QRC20_SWAP_CONTRACT_ADDRESS.lock().unwrap() = Some(swap);
+}
 
 pub const UTXO_ASSET_DOCKER_IMAGE: &str = "docker.io/artempikulin/testblockchain:multiarch";
 
@@ -167,26 +209,11 @@ where
 
 /// Build `Qrc20Coin` from ticker and privkey without filling the balance.
 pub fn qrc20_coin_from_privkey(ticker: &str, priv_key: &[u8]) -> (MmArc, Qrc20Coin) {
-    let (contract_address, swap_contract_address) = unsafe {
-        let contract_address = match ticker {
-            "QICK" => QICK_TOKEN_ADDRESS
-                .expect("QICK_TOKEN_ADDRESS must be set already")
-                .clone(),
-            "QORTY" => QORTY_TOKEN_ADDRESS
-                .expect("QORTY_TOKEN_ADDRESS must be set already")
-                .clone(),
-            _ => panic!("Expected QICK or QORTY ticker"),
-        };
-        (
-            contract_address,
-            QRC20_SWAP_CONTRACT_ADDRESS
-                .expect("QRC20_SWAP_CONTRACT_ADDRESS must be set already")
-                .clone(),
-        )
-    };
+    let contract_address = get_qrc20_contract_address(ticker);
+    let swap_contract_address = get_qrc20_swap_contract_address();
     let platform = "QTUM";
     let ctx = MmCtxBuilder::new().into_mm_arc();
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let conf = json!({
         "coin":ticker,
         "decimals": 8,
@@ -223,20 +250,10 @@ pub fn qrc20_coin_from_privkey(ticker: &str, priv_key: &[u8]) -> (MmArc, Qrc20Co
 }
 
 fn qrc20_coin_conf_item(ticker: &str) -> Json {
-    let contract_address = unsafe {
-        match ticker {
-            "QICK" => QICK_TOKEN_ADDRESS
-                .expect("QICK_TOKEN_ADDRESS must be set already")
-                .clone(),
-            "QORTY" => QORTY_TOKEN_ADDRESS
-                .expect("QORTY_TOKEN_ADDRESS must be set already")
-                .clone(),
-            _ => panic!("Expected either QICK or QORTY ticker, found {}", ticker),
-        }
-    };
+    let contract_address = get_qrc20_contract_address(ticker);
     let contract_address = format!("{:#02x}", contract_address);
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     json!({
         "coin":ticker,
         "required_confirmations":1,
@@ -337,7 +354,7 @@ pub fn generate_qtum_coin_with_random_privkey(
     balance: BigDecimal,
     txfee: Option<u64>,
 ) -> (MmArc, QtumCoin, [u8; 32]) {
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let conf = json!({
         "coin":ticker,
         "decimals":8,
@@ -371,7 +388,7 @@ pub fn generate_segwit_qtum_coin_with_random_privkey(
     balance: BigDecimal,
     txfee: Option<u64>,
 ) -> (MmArc, QtumCoin, [u8; 32]) {
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let conf = json!({
         "coin":ticker,
         "decimals":8,
@@ -476,11 +493,7 @@ pub fn wait_for_estimate_smart_fee(timeout: u64) -> Result<(), String> {
 }
 
 pub async fn enable_qrc20_native(mm: &MarketMakerIt, coin: &str) -> Json {
-    let swap_contract_address = unsafe {
-        QRC20_SWAP_CONTRACT_ADDRESS
-            .expect("QRC20_SWAP_CONTRACT_ADDRESS must be set already")
-            .clone()
-    };
+    let swap_contract_address = get_qrc20_swap_contract_address();
 
     let native = mm
         .rpc(&json! ({
@@ -539,7 +552,7 @@ pub fn trade_base_rel((base, rel): (&str, &str)) {
     let bob_priv_key = generate_and_fill_priv_key(base);
     let alice_priv_key = generate_and_fill_priv_key(rel);
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         qrc20_coin_conf_item("QICK"),
         qrc20_coin_conf_item("QORTY"),

@@ -27,8 +27,8 @@ fn fresh_store() -> IndexedDbNftStore {
 }
 
 fn sample_nft(token_id: u64, block: u64, possible_spam: bool) -> Nft {
-    let token_address = Address::from("0x00000000000000000000000000000000000000A1");
-    let owner = Address::from("0x00000000000000000000000000000000000000A2");
+    let token_address = Address::from_str("00000000000000000000000000000000000000A1").unwrap();
+    let owner = Address::from_str("00000000000000000000000000000000000000A2").unwrap();
     Nft {
         common: NftCommon {
             token_address,
@@ -56,7 +56,7 @@ fn sample_nft(token_id: u64, block: u64, possible_spam: bool) -> Nft {
 }
 
 fn sample_transfer(token_id: u64, block: u64, ts: u64, status: TransferStatus) -> NftTransfer {
-    let token_address = Address::from("0x00000000000000000000000000000000000000A1");
+    let token_address = Address::from_str("00000000000000000000000000000000000000A1").unwrap();
     NftTransfer {
         common: NftTransferCommon {
             block_hash: None,
@@ -66,8 +66,8 @@ fn sample_transfer(token_id: u64, block: u64, ts: u64, status: TransferStatus) -
             value: None,
             transaction_type: None,
             token_address,
-            from_address: Address::from("0x00000000000000000000000000000000000000A2"),
-            to_address: Address::from("0x00000000000000000000000000000000000000A3"),
+            from_address: Address::from_str("00000000000000000000000000000000000000A2").unwrap(),
+            to_address: Address::from_str("00000000000000000000000000000000000000A3").unwrap(),
             amount: BigDecimal::from(1u32),
             verified: Some(1),
             operator: None,

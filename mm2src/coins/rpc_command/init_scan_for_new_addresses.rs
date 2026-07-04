@@ -74,7 +74,8 @@ impl RpcTaskTypes for InitScanAddressesTask {
     type UserAction = ScanAddressesUserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RpcTask for InitScanAddressesTask {
     #[inline]
     fn initial_status(&self) -> Self::InProgressStatus { ScanAddressesInProgressStatus::InProgress }

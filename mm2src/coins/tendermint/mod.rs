@@ -12,6 +12,7 @@ mod tendermint_staking;
 mod tendermint_swap_ops;
 mod tendermint_token;
 mod tendermint_types;
+pub mod wc_integration;
 
 pub use cosmrs::tendermint::PublicKey as TendermintPublicKey;
 pub use cosmrs::AccountId;

@@ -132,6 +132,18 @@ pub async fn init_standalone_coin_user_action<Standalone: InitStandaloneCoinActi
     Ok(SuccessResponse::new())
 }
 
+pub async fn cancel_init_standalone_coin<Standalone: InitStandaloneCoinActivationOps>(
+    ctx: MmArc,
+    req: InitStandaloneCoinStatusRequest,
+) -> MmResult<SuccessResponse, InitStandaloneCoinError> {
+    let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(InitStandaloneCoinError::Internal)?;
+    let mut task_manager = Standalone::rpc_task_manager(&coins_act_ctx)
+        .lock()
+        .map_to_mm(|poison| InitStandaloneCoinError::Internal(poison.to_string()))?;
+    task_manager.cancel_task(req.task_id).mm_err(Into::into)?;
+    Ok(SuccessResponse::new())
+}
+
 pub struct InitStandaloneCoinTask<Standalone: InitStandaloneCoinActivationOps> {
     ctx: MmArc,
     request: InitStandaloneCoinReq<Standalone::ActivationRequest>,
@@ -147,7 +159,8 @@ impl<Standalone: InitStandaloneCoinActivationOps> RpcTaskTypes for InitStandalon
     type UserAction = Standalone::UserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Standalone> RpcTask for InitStandaloneCoinTask<Standalone>
 where
     Standalone: InitStandaloneCoinActivationOps,

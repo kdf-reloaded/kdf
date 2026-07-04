@@ -1,4 +1,4 @@
-use super::{RpcTaskError, TaskId};
+use super::{RpcTaskError, TaskId, TaskStatusError};
 use common::{true_f, HttpStatusCode, StatusCode};
 use derive_more::Display;
 
@@ -8,14 +8,45 @@ use derive_more::Display;
 #[serde(tag = "error_type", content = "error_data")]
 pub enum RpcTaskStatusError {
     NoSuchTask(TaskId),
+    #[display(
+        fmt = "RPC '{}' task is in unexpected status. Actual: '{}', expected: '{}'",
+        task_id,
+        actual,
+        expected
+    )]
+    UnexpectedTaskStatus {
+        task_id: TaskId,
+        actual: TaskStatusError,
+        expected: TaskStatusError,
+    },
     Internal(String),
 }
 
 impl HttpStatusCode for RpcTaskStatusError {
     fn status_code(&self) -> StatusCode {
         match self {
-            RpcTaskStatusError::NoSuchTask(_) => StatusCode::BAD_REQUEST,
+            RpcTaskStatusError::NoSuchTask(_) | RpcTaskStatusError::UnexpectedTaskStatus { .. } => {
+                StatusCode::BAD_REQUEST
+            },
             RpcTaskStatusError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<RpcTaskError> for RpcTaskStatusError {
+    fn from(rpc_err: RpcTaskError) -> Self {
+        match rpc_err {
+            RpcTaskError::NoSuchTask(task_id) => RpcTaskStatusError::NoSuchTask(task_id),
+            RpcTaskError::UnexpectedTaskStatus {
+                task_id,
+                actual,
+                expected,
+            } => RpcTaskStatusError::UnexpectedTaskStatus {
+                task_id,
+                actual,
+                expected,
+            },
+            other => RpcTaskStatusError::Internal(other.to_string()),
         }
     }
 }

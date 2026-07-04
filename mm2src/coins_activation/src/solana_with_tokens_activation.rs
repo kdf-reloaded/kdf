@@ -224,6 +224,7 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
 
     fn start_history_background_fetching(
         &self,
+        _ctx: mm2_core::mm_ctx::MmArc,
         _metrics: MetricsArc,
         _storage: impl TxHistoryStorage + 'static,
         _initial_balance: BigDecimal,

@@ -106,9 +106,9 @@ mod tests {
     fn sample_nft() -> Nft {
         Nft {
             common: NftCommon {
-                token_address: Address::from("0x00000000000000000000000000000000000000A1"),
+                token_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A1").unwrap()),
                 amount: BigDecimal::from(1u32),
-                owner_of: Address::from("0x00000000000000000000000000000000000000A2"),
+                owner_of: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A2").unwrap()),
                 token_hash: Some("hash".into()),
                 collection_name: Some("Cats".into()),
                 symbol: Some("CAT".into()),
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn nft_info_serializes_token_id_as_string() {
         let info = NftInfo {
-            token_address: Address::from("0x00000000000000000000000000000000000000B1"),
+            token_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000B1").unwrap()),
             token_id: BigUint::from(7u32),
             chain: Chain::Polygon,
             contract_type: ContractType::Erc1155,

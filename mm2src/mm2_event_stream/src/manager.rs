@@ -79,6 +79,12 @@ pub struct ClientHandle {
     pub rx: mpsc::Receiver<Arc<Event>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopStreamError {
+    UnknownClient,
+    StreamerNotActive,
+}
+
 impl StreamingManager {
     /// Register a new SSE client. Returns a `ClientHandle` whose `rx` field
     /// yields `Arc<Event>` items as they are broadcast.
@@ -173,26 +179,56 @@ impl StreamingManager {
 
     /// Unsubscribe `client_id` from a streamer. If no subscribers remain,
     /// the streamer is shut down.
-    pub fn stop(&self, client_id: u64, streamer_id: &StreamerId) {
+    pub fn stop(&self, client_id: u64, streamer_id: &StreamerId) { let _ = self.stop_checked(client_id, streamer_id); }
+
+    /// Unsubscribe a registered client from an active streamer.
+    pub fn stop_checked(&self, client_id: u64, streamer_id: &StreamerId) -> Result<(), StopStreamError> {
         let origin = streamer_id.to_string();
         let mut inner = self.inner.write();
 
-        // Remove from client's listening set.
-        if let Some(client) = inner.clients.get_mut(&client_id) {
-            client.listening_to.remove(&origin);
+        if !inner.clients.contains_key(&client_id) {
+            return Err(StopStreamError::UnknownClient);
+        }
+        if !inner.streamers.contains_key(streamer_id) {
+            return Err(StopStreamError::StreamerNotActive);
         }
 
+        // Remove from client's listening set.
+        inner
+            .clients
+            .get_mut(&client_id)
+            .expect("checked above")
+            .listening_to
+            .remove(&origin);
+
         // Remove from streamer's subscriber set.
-        if let Some(info) = inner.streamers.get_mut(streamer_id) {
+        let should_remove = {
+            let info = inner.streamers.get_mut(streamer_id).expect("checked above");
             info.subscribers.remove(&client_id);
-            if info.subscribers.is_empty() {
-                // Last subscriber gone — shut down the streamer.
+            info.subscribers.is_empty()
+        };
+        if should_remove {
+            if let Some(mut info) = inner.streamers.remove(streamer_id) {
                 if let Some(tx) = info.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
-                inner.streamers.remove(streamer_id);
             }
         }
+        Ok(())
+    }
+
+    pub fn client_subscribed_to(&self, client_id: u64, streamer_id: &StreamerId) -> bool {
+        let inner = self.inner.read();
+        inner
+            .clients
+            .get(&client_id)
+            .map(|client| client.listening_to.contains(&streamer_id.to_string()))
+            .unwrap_or(false)
+    }
+
+    pub fn client_registered(&self, client_id: u64) -> bool {
+        let inner = self.inner.read();
+        inner.clients.contains_key(&client_id)
     }
 
     /// Remove a client entirely (e.g., SSE connection closed).
@@ -270,6 +306,18 @@ impl StreamingManager {
         let inner = self.inner.read();
         inner.streamers.contains_key(streamer_id)
     }
+
+    /// Publish a one-off `Event` directly to all clients subscribed to its
+    /// origin streamer, without going through a running streamer instance.
+    ///
+    /// Used for events that are not produced by a long-lived streamer (e.g.
+    /// the interactive data-asker "data needed" event).
+    pub fn broadcast(&self, event: Arc<Event>) {
+        Broadcaster {
+            inner: self.inner.clone(),
+        }
+        .broadcast(event);
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +392,50 @@ mod tests {
 
         // Remove second client — streamer should shut down.
         mgr.stop(2, &StreamerId::Heartbeat);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!mgr.is_active(&StreamerId::Heartbeat));
+    }
+
+    #[tokio::test]
+    async fn stop_checked_reports_unknown_client_and_not_running_streamer() {
+        let mgr = StreamingManager::default();
+        assert_eq!(
+            mgr.stop_checked(7, &StreamerId::Heartbeat),
+            Err(StopStreamError::UnknownClient)
+        );
+
+        let _h1 = mgr.new_client(1);
+        assert_eq!(
+            mgr.stop_checked(1, &StreamerId::Heartbeat),
+            Err(StopStreamError::StreamerNotActive)
+        );
+    }
+
+    #[test]
+    fn client_registered_reports_registered_clients() {
+        let mgr = StreamingManager::default();
+        assert!(!mgr.client_registered(1));
+        let _h1 = mgr.new_client(1);
+        assert!(mgr.client_registered(1));
+        mgr.remove_client(1);
+        assert!(!mgr.client_registered(1));
+    }
+
+    #[tokio::test]
+    async fn stop_checked_noops_for_unsubscribed_client_and_keeps_other_subscribers() {
+        let mgr = StreamingManager::default();
+        let _h1 = mgr.new_client(1);
+        let _h2 = mgr.new_client(2);
+        mgr.add(1, TestStreamer).await.unwrap();
+
+        assert!(mgr.client_subscribed_to(1, &StreamerId::Heartbeat));
+        assert!(!mgr.client_subscribed_to(2, &StreamerId::Heartbeat));
+        mgr.stop_checked(2, &StreamerId::Heartbeat).unwrap();
+        assert!(mgr.is_active(&StreamerId::Heartbeat));
+        assert!(mgr.client_subscribed_to(1, &StreamerId::Heartbeat));
+        assert!(!mgr.client_subscribed_to(2, &StreamerId::Heartbeat));
+
+        mgr.stop_checked(1, &StreamerId::Heartbeat).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(!mgr.is_active(&StreamerId::Heartbeat));
     }

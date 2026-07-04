@@ -19,9 +19,9 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{NetworkBehaviourEventProcess, Swarm},
+             swarm::{NetworkBehaviourEventProcess, Swarm, SwarmEvent},
              NetworkBehaviour, PeerId};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::{collections::hash_map::{DefaultHasher, HashMap},
@@ -31,6 +31,14 @@ use std::{collections::hash_map::{DefaultHasher, HashMap},
           time::Duration};
 use void::Void;
 use wasm_timer::{Instant, Interval};
+
+#[cfg(feature = "application")]
+use crate::{decode_message, encode_message};
+#[cfg(feature = "application")] use futures::FutureExt;
+#[cfg(feature = "application")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "application")]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type AdexCmdTx = Sender<AdexBehaviourCmd>;
 pub type AdexEventRx = Receiver<AdexBehaviourEvent>;
@@ -42,6 +50,29 @@ const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(600);
 const ANNOUNCE_INITIAL_DELAY: Duration = Duration::from_secs(60);
 const CHANNEL_BUF_SIZE: usize = 1024 * 8;
+#[cfg(feature = "application")]
+const MAX_ALLOWED_CLOCK_SKEW_SECS: u64 = 20;
+
+#[cfg(feature = "application")]
+enum PeerClockCheck {
+    Passed,
+    Failed,
+    Inconclusive,
+}
+
+#[cfg(feature = "application")]
+#[derive(Deserialize, Serialize)]
+enum NetworkInfoRequest {
+    GetMm2Version,
+    CurrentTimestamp,
+}
+
+#[cfg(feature = "application")]
+#[derive(Deserialize, Serialize)]
+enum WireP2PRequest {
+    Ordermatch,
+    NetworkInfo(NetworkInfoRequest),
+}
 
 /// Returns info about connected peers
 pub async fn get_peers_info(mut cmd_tx: AdexCmdTx) -> HashMap<String, Vec<String>> {
@@ -243,11 +274,109 @@ pub struct AtomicDexBehaviour {
     cmd_rx: Receiver<AdexBehaviourCmd>,
     gossipsub: Gossipsub,
     request_response: RequestResponseBehaviour,
+    #[cfg(feature = "application")]
+    #[behaviour(ignore)]
+    pending_clock_checks: HashMap<PeerId, oneshot::Receiver<PeerResponse>>,
     peers_exchange: PeersExchange,
     ping: AdexPing,
 }
 
 impl AtomicDexBehaviour {
+    #[cfg(feature = "application")]
+    fn is_current_timestamp_request(request: &[u8]) -> bool {
+        matches!(
+            decode_message::<WireP2PRequest>(request),
+            Ok(WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp))
+        ) || matches!(
+            decode_message::<NetworkInfoRequest>(request),
+            Ok(NetworkInfoRequest::CurrentTimestamp)
+        )
+    }
+
+    #[cfg(feature = "application")]
+    fn request_peer_clock_check(&mut self, peer_id: PeerId) {
+        let request = match encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)) {
+            Ok(req) => req,
+            Err(e) => {
+                error!("Error serializing clock-check request for peer {}: {}", peer_id, e);
+                return;
+            },
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = PeerRequest { req: request };
+        self.request_response.send_request(&peer_id, request, response_tx);
+        self.pending_clock_checks.insert(peer_id, response_rx);
+    }
+
+    #[cfg(feature = "application")]
+    fn current_utc_timestamp_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime must be greater than unix epoch")
+            .as_secs()
+    }
+
+    #[cfg(feature = "application")]
+    fn peer_clock_check_result(response: PeerResponse) -> PeerClockCheck {
+        let peer_timestamp = match response {
+            PeerResponse::Ok { res } => match decode_message::<u64>(&res) {
+                Ok(timestamp) => timestamp,
+                Err(e) => {
+                    error!("Malformed peer timestamp response: {}", e);
+                    return PeerClockCheck::Failed;
+                },
+            },
+            PeerResponse::None => return PeerClockCheck::Inconclusive,
+            PeerResponse::Err { err } => {
+                debug!("Peer clock check inconclusive: {}", err);
+                return PeerClockCheck::Inconclusive;
+            },
+        };
+
+        let now = Self::current_utc_timestamp_secs();
+        let diff = now.abs_diff(peer_timestamp);
+        if diff > MAX_ALLOWED_CLOCK_SKEW_SECS {
+            error!(
+                "Peer clock skew {}s exceeds allowed {}s",
+                diff, MAX_ALLOWED_CLOCK_SKEW_SECS
+            );
+            return PeerClockCheck::Failed;
+        }
+
+        PeerClockCheck::Passed
+    }
+
+    #[cfg(feature = "application")]
+    fn process_pending_clock_checks(swarm: &mut AtomicDexSwarm, cx: &mut Context) {
+        let pending_checks = std::mem::take(&mut swarm.behaviour_mut().pending_clock_checks);
+        let mut still_pending = HashMap::new();
+
+        for (peer_id, mut response_rx) in pending_checks {
+            match response_rx.poll_unpin(cx) {
+                Poll::Ready(Ok(response)) => match Self::peer_clock_check_result(response) {
+                    PeerClockCheck::Passed => (),
+                    PeerClockCheck::Failed => {
+                        if Swarm::disconnect_peer_id(swarm, peer_id).is_err() {
+                            error!("Peer {} disconnect error after failed clock check", peer_id);
+                        }
+                    },
+                    PeerClockCheck::Inconclusive => {
+                        debug!("Keeping peer {} after inconclusive clock check", peer_id);
+                    },
+                },
+                Poll::Ready(Err(_)) => {
+                    debug!("Keeping peer {} after missing clock-check response", peer_id);
+                },
+                Poll::Pending => {
+                    still_pending.insert(peer_id, response_rx);
+                },
+            }
+        }
+
+        swarm.behaviour_mut().pending_clock_checks = still_pending;
+    }
+
     fn notify_on_adex_event(&mut self, event: AdexBehaviourEvent) {
         if let Err(e) = self.event_tx.try_send(event) {
             error!("notify_on_adex_event error {}", e);
@@ -445,6 +574,21 @@ impl NetworkBehaviourEventProcess<RequestResponseBehaviourEvent> for AtomicDexBe
                 request,
                 response_channel,
             } => {
+                #[cfg(feature = "application")]
+                if Self::is_current_timestamp_request(&request.req) {
+                    let response = match encode_message(&Self::current_utc_timestamp_secs()) {
+                        Ok(now) => PeerResponse::Ok { res: now },
+                        Err(e) => PeerResponse::Err {
+                            err: format!("Error serializing current timestamp: {}", e),
+                        },
+                    };
+
+                    if let Err(response) = self.request_response.send_response(response_channel, response) {
+                        error!("Error sending timestamp response: {:?}", response);
+                    }
+                    return;
+                }
+
                 let event = AdexBehaviourEvent::PeerRequest {
                     peer_id,
                     request: request.req,
@@ -479,15 +623,32 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
         // choose some random bootstrap addresses to connect if peers exchange returned not enough peers
         if to_connect.len() < to_connect_num {
             let connect_bootstrap_num = to_connect_num - to_connect.len();
-            for addr in bootstrap_addresses
+            let available_bootstrap = bootstrap_addresses
                 .iter()
                 .filter(|addr| !swarm.behaviour().gossipsub.is_connected_to_addr(addr))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+
+            if to_connect.is_empty() && available_bootstrap.is_empty() {
+                warn!(
+                    "P2P relays below low watermark: connected {}, need {}; no known peers or seednodes available to dial",
+                    connected_relays.len(),
+                    mesh_n_low
+                );
+            } else if available_bootstrap.is_empty() {
+                debug!(
+                    "P2P relays below low watermark: connected {}, need {}; peer exchange returned {}, no seednodes available",
+                    connected_relays.len(),
+                    mesh_n_low,
+                    to_connect.len()
+                );
+            }
+
+            let selected_bootstrap: Vec<Multiaddr> = available_bootstrap
                 .choose_multiple(&mut rng, connect_bootstrap_num)
-            {
-                if let Err(e) = libp2p::Swarm::dial(swarm, (*addr).clone()) {
-                    error!("Bootstrap addr {} dial error {}", addr, e);
-                }
+                .map(|addr| (*addr).clone())
+                .collect();
+            for addr in selected_bootstrap {
+                dial_bootstrap_addr(swarm, addr, "relay maintenance");
             }
         }
         for (peer, addresses) in to_connect {
@@ -495,9 +656,7 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
                 if swarm.behaviour().gossipsub.is_connected_to_addr(&addr) {
                     continue;
                 }
-                if let Err(e) = libp2p::Swarm::dial(swarm, addr.clone()) {
-                    error!("Peer {} address {} dial error {}", peer, addr, e);
-                }
+                dial_peer_addr(swarm, peer, addr, "peer exchange relay maintenance");
             }
         }
     }
@@ -548,10 +707,143 @@ fn announce_my_addresses(swarm: &mut AtomicDexSwarm) {
 pub enum AdexBehaviourError {
     #[display(fmt = "{}", _0)]
     ParsingRelayAddress(RelayAddressError),
+    #[display(fmt = "Error listening on '{}': {}", address, error)]
+    ListenOn { address: String, error: String },
 }
 
 impl From<RelayAddressError> for AdexBehaviourError {
     fn from(e: RelayAddressError) -> Self { AdexBehaviourError::ParsingRelayAddress(e) }
+}
+
+fn listen_on_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr) -> Result<(), AdexBehaviourError> {
+    match Swarm::listen_on(swarm, addr.clone()) {
+        Ok(listener_id) => {
+            info!("P2P listener {:?} scheduled on {}", listener_id, addr);
+            Ok(())
+        },
+        Err(e) => {
+            error!("Failed to start P2P listener on {}: {}", addr, e);
+            Err(AdexBehaviourError::ListenOn {
+                address: addr.to_string(),
+                error: e.to_string(),
+            })
+        },
+    }
+}
+
+fn dial_bootstrap_addr(swarm: &mut AtomicDexSwarm, addr: Multiaddr, reason: &str) {
+    match Swarm::dial(swarm, addr.clone()) {
+        Ok(_) => info!("Dialed {} ({})", addr, reason),
+        Err(e) => error!("P2P bootstrap dial scheduling failed for {} ({}): {}", addr, reason, e),
+    }
+}
+
+fn dial_peer_addr(swarm: &mut AtomicDexSwarm, peer: PeerId, addr: Multiaddr, reason: &str) {
+    match Swarm::dial(swarm, addr.clone()) {
+        Ok(_) => info!("Dialed peer {} at {} ({})", peer, addr, reason),
+        Err(e) => error!(
+            "P2P peer dial scheduling failed for peer {} at {} ({}): {}",
+            peer, addr, reason, e
+        ),
+    }
+}
+
+fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>)
+where
+    TBehaviourOutEvent: std::fmt::Debug,
+    THandlerErr: std::fmt::Debug,
+{
+    match event {
+        SwarmEvent::ConnectionEstablished {
+            peer_id,
+            endpoint,
+            num_established,
+            concurrent_dial_errors,
+            ..
+        } => {
+            info!(
+                "P2P connection established with peer {} via {:?}; total connections to peer: {}",
+                peer_id, endpoint, num_established
+            );
+            if let Some(errors) = concurrent_dial_errors {
+                for (addr, error) in errors {
+                    warn!(
+                        "P2P concurrent dial attempt to peer {} at {} failed before successful connection: {}",
+                        peer_id, addr, error
+                    );
+                }
+            }
+        },
+        SwarmEvent::ConnectionClosed {
+            peer_id,
+            endpoint,
+            num_established,
+            cause,
+            ..
+        } => match cause {
+            Some(cause) => warn!(
+                "P2P connection to peer {} via {:?} closed with error: {:?}; remaining connections to peer: {}",
+                peer_id, endpoint, cause, num_established
+            ),
+            None => info!(
+                "P2P connection to peer {} via {:?} closed cleanly; remaining connections to peer: {}",
+                peer_id, endpoint, num_established
+            ),
+        },
+        SwarmEvent::IncomingConnection {
+            local_addr,
+            send_back_addr,
+            ..
+        } => debug!(
+            "P2P incoming connection attempt on {} from {}",
+            local_addr, send_back_addr
+        ),
+        SwarmEvent::IncomingConnectionError {
+            local_addr,
+            send_back_addr,
+            error,
+            ..
+        } => warn!(
+            "P2P incoming connection failed on {} from {}: {}",
+            local_addr, send_back_addr, error
+        ),
+        SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+            warn!("P2P outgoing connection failed for peer {:?}: {}", peer_id, error);
+        },
+        SwarmEvent::BannedPeer { peer_id, endpoint } => {
+            warn!(
+                "P2P connection from banned peer {} via {:?} was closed",
+                peer_id, endpoint
+            );
+        },
+        SwarmEvent::NewListenAddr { listener_id, address } => {
+            info!("P2P listener {:?} is listening on {}", listener_id, address);
+        },
+        SwarmEvent::ExpiredListenAddr { listener_id, address } => {
+            info!("P2P listener {:?} address expired: {}", listener_id, address);
+        },
+        SwarmEvent::ListenerClosed {
+            listener_id,
+            addresses,
+            reason,
+        } => match reason {
+            Ok(()) => info!(
+                "P2P listener {:?} closed cleanly; addresses: {:?}",
+                listener_id, addresses
+            ),
+            Err(e) => warn!(
+                "P2P listener {:?} closed with error {}; addresses: {:?}",
+                listener_id, e, addresses
+            ),
+        },
+        SwarmEvent::ListenerError { listener_id, error } => {
+            warn!("P2P listener {:?} reported non-fatal error: {}", listener_id, error);
+        },
+        SwarmEvent::Dialing(peer_id) => {
+            debug!("P2P dialing peer {}", peer_id);
+        },
+        other => debug!("Swarm event {:?}", other),
+    }
 }
 
 pub struct WssCerts {
@@ -703,6 +995,8 @@ fn start_gossipsub(
             cmd_rx,
             gossipsub,
             request_response,
+            #[cfg(feature = "application")]
+            pending_clock_checks: HashMap::new(),
             peers_exchange,
             ping,
         };
@@ -722,24 +1016,21 @@ fn start_gossipsub(
             wss_certs,
         } => {
             let dns_addr: Multiaddr = format!("/ip4/{}/tcp/{}", ip, network_ports.tcp).parse().unwrap();
-            libp2p::Swarm::listen_on(&mut swarm, dns_addr).unwrap();
+            listen_on_addr(&mut swarm, dns_addr)?;
             if wss_certs.is_some() {
                 let wss_addr: Multiaddr = format!("/ip4/{}/tcp/{}/wss", ip, network_ports.wss).parse().unwrap();
-                libp2p::Swarm::listen_on(&mut swarm, wss_addr).unwrap();
+                listen_on_addr(&mut swarm, wss_addr)?;
             }
         },
         NodeType::RelayInMemory { port } => {
             let memory_addr: Multiaddr = format!("/memory/{}", port).parse().unwrap();
-            libp2p::Swarm::listen_on(&mut swarm, memory_addr).unwrap();
+            listen_on_addr(&mut swarm, memory_addr)?;
         },
         _ => (),
     }
 
     for relay in bootstrap.choose_multiple(&mut rng, mesh_n) {
-        match libp2p::Swarm::dial(&mut swarm, relay.clone()) {
-            Ok(_) => info!("Dialed {}", relay),
-            Err(e) => error!("Dial {:?} failed: {:?}", relay, e),
-        }
+        dial_bootstrap_addr(&mut swarm, relay.clone(), "initial bootstrap");
     }
 
     let mut check_connected_relays_interval = Interval::new_at(
@@ -759,11 +1050,20 @@ fn start_gossipsub(
 
         loop {
             match swarm.poll_next_unpin(cx) {
-                Poll::Ready(Some(event)) => debug!("Swarm event {:?}", event),
+                Poll::Ready(Some(event)) => {
+                    if let SwarmEvent::ConnectionEstablished { peer_id: _peer_id, .. } = event {
+                        #[cfg(feature = "application")]
+                        swarm.behaviour_mut().request_peer_clock_check(_peer_id);
+                    }
+                    log_swarm_event(&event);
+                },
                 Poll::Ready(None) => return Poll::Ready(()),
                 Poll::Pending => break,
             }
         }
+
+        #[cfg(feature = "application")]
+        AtomicDexBehaviour::process_pending_clock_checks(&mut swarm, cx);
 
         if swarm.behaviour().gossipsub.is_relay() {
             while let Poll::Ready(Some(())) = announce_interval.poll_next_unpin(cx) {
@@ -834,7 +1134,7 @@ fn build_memory_transport(
     upgrade_transport(transport, noise_keys)
 }
 
-/// Set up an encrypted Transport over the Mplex protocol.
+/// Set up an encrypted Transport over the Yamux protocol.
 fn upgrade_transport<T>(
     transport: T,
     noise_keys: libp2p::noise::AuthenticKeypair<libp2p::noise::X25519Spec>,
@@ -850,7 +1150,7 @@ where
     transport
         .upgrade(libp2p::core::upgrade::Version::V1)
         .authenticate(noise::NoiseConfig::xx(noise_keys).into_authenticated())
-        .multiplex(libp2p::mplex::MplexConfig::default())
+        .multiplex(libp2p::yamux::YamuxConfig::default())
         .timeout(std::time::Duration::from_secs(20))
         .map(|(peer, muxer), _| (peer, libp2p::core::muxing::StreamMuxerBox::new(muxer)))
         .boxed()
@@ -948,5 +1248,73 @@ async fn request_one_peer(peer: PeerId, req: Vec<u8>, mut request_response_tx: R
         Err(e) => PeerResponse::Err {
             err: format!("Error on request the peer {:?}: \"{:?}\". Request next peer", peer, e),
         },
+    }
+}
+
+#[cfg(all(test, feature = "application"))]
+mod application_tests {
+    use super::{AtomicDexBehaviour, NetworkInfoRequest, PeerClockCheck, PeerResponse, WireP2PRequest};
+    use crate::encode_message;
+
+    #[test]
+    fn is_peer_clock_check_passed_accepts_small_diff() {
+        let now = AtomicDexBehaviour::current_utc_timestamp_secs();
+        let encoded = encode_message(&(now.saturating_sub(1))).unwrap();
+        let response = PeerResponse::Ok { res: encoded };
+        assert!(matches!(
+            AtomicDexBehaviour::peer_clock_check_result(response),
+            PeerClockCheck::Passed
+        ));
+    }
+
+    #[test]
+    fn is_peer_clock_check_passed_rejects_malformed_payload() {
+        let response = PeerResponse::Ok {
+            res: vec![1_u8, 2_u8, 3_u8],
+        };
+        assert!(matches!(
+            AtomicDexBehaviour::peer_clock_check_result(response),
+            PeerClockCheck::Failed
+        ));
+    }
+
+    #[test]
+    fn peer_clock_check_inconclusive_on_protocol_failure() {
+        assert!(matches!(
+            AtomicDexBehaviour::peer_clock_check_result(PeerResponse::None),
+            PeerClockCheck::Inconclusive
+        ));
+        assert!(matches!(
+            AtomicDexBehaviour::peer_clock_check_result(PeerResponse::Err {
+                err: "unsupported".into()
+            }),
+            PeerClockCheck::Inconclusive
+        ));
+    }
+
+    #[test]
+    fn network_info_request_roundtrip() {
+        let encoded = encode_message(&NetworkInfoRequest::CurrentTimestamp).unwrap();
+        let decoded: NetworkInfoRequest = crate::decode_message(&encoded).unwrap();
+        assert!(matches!(decoded, NetworkInfoRequest::CurrentTimestamp));
+    }
+
+    #[test]
+    fn wire_p2p_request_roundtrip() {
+        let encoded = encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)).unwrap();
+        let decoded: WireP2PRequest = crate::decode_message(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)
+        ));
+    }
+
+    #[test]
+    fn detects_timestamp_in_both_wire_shapes() {
+        let wrapped = encode_message(&WireP2PRequest::NetworkInfo(NetworkInfoRequest::CurrentTimestamp)).unwrap();
+        let bare = encode_message(&NetworkInfoRequest::CurrentTimestamp).unwrap();
+
+        assert!(AtomicDexBehaviour::is_current_timestamp_request(&wrapped));
+        assert!(AtomicDexBehaviour::is_current_timestamp_request(&bare));
     }
 }

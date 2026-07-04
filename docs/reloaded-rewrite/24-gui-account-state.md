@@ -43,7 +43,17 @@ The crate is bounded by the following architectural rules:
 In the chapter-bound substrate the native backend, the type surface,
 the trait, and the handler module are complete; the browser
 backend is the stub of (2); and the eleven handlers are not
-yet registered in the public RPC dispatcher (§24.10 D1).
+yet registered in the public RPC dispatcher.
+
+**Port status.** The `mm2_gui_storage` crate (backend, type
+surface, trait, and the eleven typed handlers) is present in
+reloaded as a **library**, but its public `gui_storage::` JSON-RPC
+namespace is **required but NOT yet registered in reloaded's
+dispatcher** (and `mm2_gui_storage` is not yet a dependency of the
+application crate). Per the project's PORT decision the dispatcher
+registration is a **binding driving-spec requirement**, not
+optional deferred work; the required public method surface is
+specified normatively in §24.9A and §24.7.
 
 ## 24.1 Subsystem Shape
 
@@ -671,6 +681,61 @@ of writing (every call is expected to error). The RPC
 handlers do not have integration tests in the chapter-bound substrate
 because they are not reachable through the dispatcher (D1).
 
+## 24.9A Required Port — `gui_storage::` Dispatcher Surface (driving-spec)
+
+**STATUS.** The capability in this section is **required but NOT
+yet implemented in reloaded; the `mm2_gui_storage` crate (backend,
+trait, type surface, and the eleven typed handlers of §24.7) is
+present** as a library. The crate is not yet a dependency of the
+application crate, and its handlers are not yet wired into the
+public dispatcher. Per the PORT decision the registration is a
+binding requirement, not optional deferred work.
+
+**RP1.** The application crate MUST take `mm2_gui_storage` as a
+dependency and register the eleven handlers of §24.7 under the
+`gui_storage::` JSON-RPC v2 namespace. The method strings are the
+wire contract and MUST be exactly:
+
+| Method                          | Handler (§24.7.3)            | Request type (§24.7.2)            | Success result (§24.7.3)        |
+|---------------------------------|-----------------------------|-----------------------------------|---------------------------------|
+| `gui_storage::enable_account`   | `enable_account`            | `EnableAccountRequest`            | empty success                   |
+| `gui_storage::add_account`      | `add_account`               | `AddAccountRequest`               | empty success                   |
+| `gui_storage::delete_account`   | `delete_account`            | `DeleteAccountRequest`            | empty success                   |
+| `gui_storage::get_accounts`     | `get_accounts`              | `GetAccountsRequest`              | `Vec<AccountWithEnabledFlag>`   |
+| `gui_storage::get_account_coins`| `get_account_coins`         | `GetAccountCoinsRequest`          | `GetAccountCoinsResponse`       |
+| `gui_storage::get_enabled_account` | `get_enabled_account`    | `GetEnabledAccountRequest`        | `AccountWithCoins`              |
+| `gui_storage::set_account_name` | `set_account_name`          | `SetAccountNameRequest`           | empty success                   |
+| `gui_storage::set_account_description` | `set_account_description` | `SetAccountDescriptionRequest` | empty success                   |
+| `gui_storage::set_account_balance` | `set_account_balance`    | `SetBalanceRequest`               | empty success                   |
+| `gui_storage::activate_coins`   | `activate_coins`            | `CoinRequest`                     | empty success                   |
+| `gui_storage::deactivate_coins` | `deactivate_coins`          | `CoinRequest`                     | empty success                   |
+
+**RP2.** The dispatcher MUST route the `gui_storage::`-prefixed
+method (with the prefix stripped) to the matching handler. Each
+handler's request/response wire shapes are the §24.7.2 contract
+and its error envelope is the §24.7.1 `AccountRpcError` contract;
+both bind unchanged by the registration.
+
+**RP3.** Registration does not alter the persistence semantics of
+§24.4–§24.6 or the validation discipline of §24.7. The native
+backend serves the surface on native targets; on the browser
+target the §24.8 stub returns the explicit not-implemented error
+for every method until the §24.10 D2 IndexedDB backend lands.
+
+**RP4 — acceptance criteria.**
+
+- AC1. All eleven `gui_storage::*` methods are reachable through
+  the public dispatcher and exercise the §24.7 handlers.
+- AC2. A round trip — `add_account` → `get_accounts` →
+  `activate_coins` → `get_account_coins` → `enable_account` →
+  `get_enabled_account` → `delete_account` — succeeds on the
+  native target with the §24.7.2 wire shapes and the §24.6
+  persistence/cascade semantics.
+- AC3. Validation failures (over-long name/description/ticker,
+  no-such-account, enabling a hardware-wallet identity) surface as
+  the matching `AccountRpcError` wire token with the §24.7.1 R-R3
+  HTTP status.
+
 ## 24.10 Binding Requirements and Deferred Work
 
 R1-R12 above are binding.
@@ -678,12 +743,14 @@ R1-R12 above are binding.
 The following are **deferred work** named explicitly in scope
 of this chapter:
 
-D1. **Public dispatcher registration.** The eleven handlers
-    of §24.7 shall be registered in the public RPC
-    dispatcher under the `gui_storage::` namespace per R9.
-    In the chapter-bound substrate the handler module exists but is
-    not registered; closing this gap is the single biggest
-    blocker to consumer adoption.
+D1. **[REQUIRED PORT — §24.9A]** Public dispatcher
+    registration. The eleven handlers of §24.7 shall be
+    registered in the public RPC dispatcher under the
+    `gui_storage::` namespace per R9, and `mm2_gui_storage`
+    shall become a dependency of the application crate. In
+    reloaded the handler module exists but is not registered;
+    landing this is a binding requirement, not optional, and
+    is the single biggest blocker to consumer adoption.
 
 D2. **Browser-target persistence.** The browser-target stub
     of §24.8 shall be replaced by an IndexedDB-backed

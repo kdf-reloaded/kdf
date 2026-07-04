@@ -310,4 +310,7 @@ fn encoding_algo_encodes_hex_and_base64() {
     assert_eq!(EncodingAlgo::Hex.encode(data), "010203ff");
     assert_eq!(EncodingAlgo::Base64.encode(data), "AQID/w==");
     assert_eq!(EncodingAlgo::default(), EncodingAlgo::Hex);
+    assert_eq!(serde_json::to_string(&EncodingAlgo::Hex).unwrap(), "\"Hex\"");
+    assert_eq!(serde_json::to_string(&EncodingAlgo::Base64).unwrap(), "\"Base64\"");
+    assert!(serde_json::from_str::<EncodingAlgo>("\"Binary\"").is_err());
 }

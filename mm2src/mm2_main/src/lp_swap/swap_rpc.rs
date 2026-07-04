@@ -1,4 +1,44 @@
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mm2::database::stats_swaps::FiatPriceSnapshot;
+#[cfg(not(target_arch = "wasm32"))]
+use mm2_net::transport::slurp_url;
+
+#[cfg(not(target_arch = "wasm32"))]
+const PRICE_SERVICE_ENDPOINT: &str = "https://prices.komodo.live:1313/api/v2/tickers";
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Deserialize)]
+struct FiatTickerInfo {
+    last_price: BigDecimal,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn strip_platform_suffix(ticker: &str) -> &str { ticker.split('-').next().unwrap_or(ticker) }
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn fetch_completion_fiat_snapshot(swap: &SavedSwap) -> Option<FiatPriceSnapshot> {
+    let maker_coin = swap.maker_coin_ticker().ok()?;
+    let taker_coin = swap.taker_coin_ticker().ok()?;
+    let maker_coin = strip_platform_suffix(&maker_coin);
+    let taker_coin = strip_platform_suffix(&taker_coin);
+
+    let (status, _, body) = slurp_url(PRICE_SERVICE_ENDPOINT).await.ok()?;
+    if status != StatusCode::OK {
+        return None;
+    }
+
+    let response = std::str::from_utf8(&body).ok()?.trim();
+    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response).ok()?;
+
+    let maker_coin_usd_price = prices.get(maker_coin)?.last_price.to_string();
+    let taker_coin_usd_price = prices.get(taker_coin)?.last_price.to_string();
+
+    Some(FiatPriceSnapshot {
+        maker_coin_usd_price,
+        taker_coin_usd_price,
+    })
+}
 
 pub fn my_swaps_dir(ctx: &MmArc) -> PathBuf { ctx.dbdir().join("SWAPS").join("MY") }
 
@@ -31,13 +71,15 @@ pub async fn insert_new_swap_to_db_with_type(
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn add_swap_to_db_index(ctx: &MmArc, swap: &SavedSwap) {
-    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap)
+    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, None)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn save_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
+    let fiat_snapshot = fetch_completion_fiat_snapshot(swap).await;
+
     try_s!(swap.save_to_stats_db(ctx).await);
-    add_swap_to_db_index(ctx, swap);
+    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, fiat_snapshot.as_ref());
     Ok(())
 }
 

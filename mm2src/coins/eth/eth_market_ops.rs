@@ -25,7 +25,11 @@ impl MarketCoinOps for EthCoin {
 
     fn sign_message(&self, message: &str) -> SignatureResult<String> {
         let message_hash = self.sign_message_hash(message).ok_or(SignatureError::PrefixNotFound)?;
-        let privkey = &self.key_pair.secret();
+        let privkey = self.signer.local_secret().ok_or_else(|| {
+            SignatureError::InvalidRequest(
+                "message signing is not available for a key-less signing policy (e.g. MetaMask)".to_string(),
+            )
+        })?;
         let signature = sign(privkey, &H256::from(message_hash))?;
         Ok(format!("0x{}", signature))
     }
@@ -219,7 +223,7 @@ impl MarketCoinOps for EthCoin {
         };
 
         let payment_func = try_tx_fus!(SWAP_CONTRACT.function(func_name));
-        let decoded = try_tx_fus!(payment_func.decode_input(&tx.data));
+        let decoded = try_tx_fus!(payment_func.decode_input(&tx.data[4..]));
         let id = match &decoded[0] {
             Token::FixedBytes(bytes) => bytes.clone(),
             _ => panic!(),
@@ -316,7 +320,12 @@ impl MarketCoinOps for EthCoin {
         Box::new(fut.boxed().compat())
     }
 
-    fn display_priv_key(&self) -> Result<String, String> { Ok(format!("{:#02x}", self.key_pair.secret())) }
+    fn display_priv_key(&self) -> Result<String, String> {
+        match self.signer.local_secret() {
+            Some(secret) => Ok(format!("{:#02x}", secret)),
+            None => Err("Private key export is unsupported under the MetaMask signing policy".to_string()),
+        }
+    }
 
     fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
 

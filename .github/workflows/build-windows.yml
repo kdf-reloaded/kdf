@@ -44,12 +44,12 @@ jobs:
             target
           key: windows-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build mm2
+      - name: Build kdf
         shell: powershell
-        run: cargo build --bin mm2 --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }}
+        run: cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mm2-x86_64-pc-windows-msvc
-          path: target/x86_64-pc-windows-msvc/${{ inputs.profile }}/mm2.exe
+          name: kdf-x86_64-pc-windows-msvc
+          path: target/x86_64-pc-windows-msvc/${{ inputs.profile }}/kdf.exe

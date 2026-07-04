@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ reloaded-gplv2-base ]
+    branches: [ reloaded-gplv2-base, dev ]
   pull_request:
-    branches: [ reloaded-gplv2-base ]
+    branches: [ reloaded-gplv2-base, dev ]
 
 # Supersede in-flight runs of the same workflow on the same ref so a fast
 # follow-up push cancels the now-stale run instead of queuing behind it.
@@ -213,6 +213,96 @@ jobs:
         run: scripts/with-test-passphrases.sh cargo test --bin docker_tests --features regtest-netid -- --test-threads=1 test_search_for_swap_tx_spend test_one_hundred_maker_payments test_withdraw test_utxo_merge test_send_and_validate test_validate_maker_payment_wrong_amount test_list_unspent test_multiple_sequential
         env:
           RUST_LOG: debug
+          
+      - name: Upload mm2 logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mm2-logs-${{ github.run_id }}-${{ github.job }}
+          path: |
+            /tmp/mm2_*/mm2.log
+            /tmp/mm2_*/**/mm2.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  trezor-emulator-tests:
+    # Trezor hardware-wallet signing tests run against the official
+    # trezor-user-env emulator (Docker, host networking) so no physical
+    # device is required. The emulator speaks the Trezor v1 wire protocol
+    # over UDP :21324 and exposes a controller WebSocket on :9001 (+ a
+    # DebugLink on :21325 used to auto-confirm on-device prompts); the tests
+    # drive it via mm2src/trezor/tests/emulator/emulator_control.py
+    # (python3 + websockets). Everything is gated behind the
+    # `trezor-emulator-tests` cargo feature and the TREZOR_EMULATOR_UDP env
+    # var, so the ordinary unit/docker jobs never build or run it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [fmt, unit-tests]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install python websockets (emulator controller client)
+        # emulator_control.py talks to the trezor-user-env controller over a
+        # WebSocket. Prefer the distro package; fall back to pip with
+        # --break-system-packages for PEP 668 environments.
+        run: |
+          python3 --version
+          sudo apt-get install -y python3-websockets \
+            || python3 -m pip install --user --break-system-packages websockets
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-trezor-emu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            test-trezor-emu-
+
+      - name: Check Docker availability
+        run: docker --version && docker info --format '{{.ServerVersion}}'
+
+      - name: Start Trezor emulator (trezor-user-env)
+        run: |
+          docker rm -f tenv 2>/dev/null || true
+          docker run -d --name tenv --network host \
+            ghcr.io/trezor/trezor-user-env:latest
+          # Wait for the controller dashboard to answer before starting tests.
+          for i in $(seq 1 90); do
+            if curl -s -o /dev/null http://localhost:9002; then
+              echo "trezor-user-env up after ${i}s"; break
+            fi
+            sleep 1
+          done
+
+      - name: Run Trezor emulator acceptance tests
+        # Serialize (single emulated device). The suites seed the device
+        # themselves via emulator_control.py and restore clean SLIP-14 state.
+        env:
+          TREZOR_EMULATOR_UDP: 127.0.0.1:21324
+        run: |
+          set -e
+          # Low-level trezor-crate smoke test: get address + sign a legacy tx.
+          cargo test -p trezor --features trezor-emulator-tests \
+            --test emulator_eth -- --nocapture --test-threads=1
+          # EVM Trezor withdraw acceptance suite: native / ERC20 / user-action /
+          # error discriminants (ch. 50 T50.*).
+          cargo test -p coins --features trezor-emulator-tests \
+            eth_trezor_emulator -- --nocapture --test-threads=1
+
+      - name: Emulator logs
+        if: always()
+        run: docker logs tenv 2>&1 | tail -200 || true
+
+      - name: Stop emulator
+        if: always()
+        run: docker rm -f tenv || true
 
   external-network-tests:
     # Allow-to-fail job for tests that depend on live external endpoints
@@ -277,3 +367,14 @@ jobs:
           # seeds (no mainnet funds), safe to keep fixed. See docs/TEST_ENV_VARS.md.
           BOB_PASSPHRASE: "also shoot benefit prefer juice shell elder veteran woman mimic image kidney"
           ALICE_PASSPHRASE: "spice describe gravity federal blast come thank unfair canal monkey style afraid"
+
+      - name: Upload mm2 logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mm2-logs-${{ github.run_id }}-${{ github.job }}
+          path: |
+            /tmp/mm2_*/mm2.log
+            /tmp/mm2_*/**/mm2.log
+          if-no-files-found: warn
+          retention-days: 7

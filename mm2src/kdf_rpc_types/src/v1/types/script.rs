@@ -16,6 +16,7 @@ pub enum ScriptType {
     NullData,
     WitnessScript,
     WitnessKey,
+    WitnessV1Taproot,
     // Qtum specific
     CallSender,
     CreateSender,
@@ -23,6 +24,11 @@ pub enum ScriptType {
     Create,
     // FIRO specific
     LelantusMint,
+    LelantusJMint,
+    SparkMint,
+    SparkSpend,
+    // Verus / VRSC family specific
+    CryptoCondition,
 }
 
 impl ScriptType {
@@ -36,11 +42,16 @@ impl ScriptType {
             ScriptType::NullData => "nulldata",
             ScriptType::WitnessScript => "witness_v0_scripthash",
             ScriptType::WitnessKey => "witness_v0_keyhash",
+            ScriptType::WitnessV1Taproot => "witness_v1_taproot",
             ScriptType::CallSender => "call_sender",
             ScriptType::CreateSender => "create_sender",
             ScriptType::Call => "call",
             ScriptType::Create => "create",
             ScriptType::LelantusMint => "lelantusmint",
+            ScriptType::LelantusJMint => "lelantusjmint",
+            ScriptType::SparkMint => "sparkmint",
+            ScriptType::SparkSpend => "sparkspend",
+            ScriptType::CryptoCondition => "cryptocondition",
         }
     }
 
@@ -54,11 +65,16 @@ impl ScriptType {
             "nulldata" => ScriptType::NullData,
             "witness_v0_scripthash" => ScriptType::WitnessScript,
             "witness_v0_keyhash" => ScriptType::WitnessKey,
+            "witness_v1_taproot" => ScriptType::WitnessV1Taproot,
             "call_sender" => ScriptType::CallSender,
             "create_sender" => ScriptType::CreateSender,
             "call" => ScriptType::Call,
             "create" => ScriptType::Create,
             "lelantusmint" => ScriptType::LelantusMint,
+            "lelantusjmint" => ScriptType::LelantusJMint,
+            "sparkmint" => ScriptType::SparkMint,
+            "sparkspend" => ScriptType::SparkSpend,
+            "cryptocondition" => ScriptType::CryptoCondition,
             _ => return None,
         })
     }
@@ -75,6 +91,7 @@ impl From<ScriptScriptType> for ScriptType {
             ScriptScriptType::NullData => ScriptType::NullData,
             ScriptScriptType::WitnessScript => ScriptType::WitnessScript,
             ScriptScriptType::WitnessKey => ScriptType::WitnessKey,
+            ScriptScriptType::WitnessV1Taproot => ScriptType::WitnessV1Taproot,
             ScriptScriptType::CallSender => ScriptType::CallSender,
             ScriptScriptType::CreateSender => ScriptType::CreateSender,
             ScriptScriptType::Call => ScriptType::Call,
@@ -125,11 +142,16 @@ mod tests {
             (ScriptType::NullData, r#""nulldata""#),
             (ScriptType::WitnessScript, r#""witness_v0_scripthash""#),
             (ScriptType::WitnessKey, r#""witness_v0_keyhash""#),
+            (ScriptType::WitnessV1Taproot, r#""witness_v1_taproot""#),
             (ScriptType::CallSender, r#""call_sender""#),
             (ScriptType::CreateSender, r#""create_sender""#),
             (ScriptType::Call, r#""call""#),
             (ScriptType::Create, r#""create""#),
             (ScriptType::LelantusMint, r#""lelantusmint""#),
+            (ScriptType::LelantusJMint, r#""lelantusjmint""#),
+            (ScriptType::SparkMint, r#""sparkmint""#),
+            (ScriptType::SparkSpend, r#""sparkspend""#),
+            (ScriptType::CryptoCondition, r#""cryptocondition""#),
         ];
         for (variant, encoded) in cases {
             assert_eq!(serde_json::to_string(&variant).unwrap(), encoded);

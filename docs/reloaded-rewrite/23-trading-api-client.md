@@ -23,10 +23,16 @@ replace the first.
 The crate is **a library only**. It does not register any
 public JSON-RPC handler, does not depend on any coin support
 module, and is not consumed by the daemon's runtime path at the
-time of writing. The integration boundary (per-provider RPC
-handlers, allowance-check and transaction-submission wiring
-into EVM coin support) is named explicitly as deferred work in
-§23.9.
+time of writing.
+
+**Port status.** The 1inch binding crate is present in reloaded as
+a **library**. The integration boundary — the public classic-swap
+JSON-RPC surface, plus the EVM allowance/approval and
+transaction-submission wiring — is **required but NOT yet
+implemented in reloaded**. Per the project's PORT decision this is
+a **binding driving-spec requirement**, not optional deferred
+work; the required public method surface and its request/response
+shapes are specified normatively in §23.8A.
 
 The bound surface for the 1inch provider covers:
 
@@ -441,6 +447,343 @@ gate, under which a thin REST-path composer of this kind retains
 little discretionary expression once the dictated grammar and
 interface are excluded.
 
+## 23.8A Required Port — Classic-Swap RPC Surface and EVM Wiring (driving-spec)
+
+**STATUS.** The capabilities in this section are **required but
+NOT yet implemented in reloaded; the 1inch binding crate is
+present** as a library. Per the PORT decision these are binding
+requirements, not optional deferred work. An implementer MUST land
+the public classic-swap RPC surface (§23.8A.1) and the EVM
+allowance/approval wiring (§23.8A.2).
+
+### 23.8A.1 Public RPC method surface
+
+**RP1.** The following **five JSON-RPC v2 methods** MUST be
+registered under the `experimental::1inch_v6_0::` namespace. The
+method strings are the wire contract:
+
+| Method (`experimental::1inch_v6_0::…`) | Binds endpoint (§23.2)                       | Purpose                              |
+|----------------------------------------|----------------------------------------------|--------------------------------------|
+| `classic_swap_contract`                | (no call) provider constants (§23.8.1)       | Resolve the aggregation-router and native-asset-sentinel addresses for a chain |
+| `classic_swap_quote`                   | `GET /swap/v6.0/{chainId}/quote`             | Indicative swap quote                |
+| `classic_swap_create`                  | `GET /swap/v6.0/{chainId}/swap`              | Build an executable swap transaction |
+| `classic_swap_liquidity_sources`       | `GET /swap/v6.0/{chainId}/liquidity-sources` | Enumerate router protocols           |
+| `classic_swap_tokens`                  | `GET /swap/v6.0/{chainId}/tokens`            | Enumerate supported tokens           |
+
+**RP2 — request/response shapes.** Each handler's request
+identifies the target chain, and that identification differs by
+method:
+
+- `classic_swap_quote` and `classic_swap_create` select the chain
+  **indirectly**, through two coin-ticker request fields — `base`
+  (source coin) and `rel` (destination coin). The handler resolves
+  each ticker to its activated EVM coin and derives the numeric
+  chain id from the `base` coin; both coins MUST resolve to the
+  same supported chain. There is **no** explicit chain-id field on
+  these two requests.
+- `classic_swap_liquidity_sources` and `classic_swap_tokens` select
+  the chain **directly**, through an explicit numeric `chain_id`
+  request field.
+- `classic_swap_contract` takes an **empty** request (no chain
+  field): it returns provider constants only.
+
+Each handler's request also carries the typed parameters of §23.4
+for the bound endpoint; each handler's response is the typed
+record of §23.4/§23.5 for that endpoint (the shared classic-swap
+response for quote and create, the liquidity-sources list, the
+token map, or the router/sentinel address record for
+`classic_swap_contract`). The numeric-precision rule R5 (§23.4)
+and the dictated 1inch wire field spellings (§23.7, §23.8) bind
+unchanged.
+
+**RP3 — error mapping.** The handlers MUST map the crate's
+provider error enum (§23.5) onto the project's typed-error
+envelope and HTTP status codes; this is the `HttpStatusCode`
+mapping that R7 (§23.5) deliberately keeps OUT of the library and
+assigns to the RPC layer. The `AllowanceNotEnough` provider error
+(§23.5 R6) MUST surface to the caller carrying the required and
+current allowance as 256-bit unsigned integers.
+
+### 23.8A.2 EVM allowance / approval and submission wiring
+
+**RP4.** A `classic_swap_create` flow against an ERC-20 source
+token MUST integrate with EVM coin support so that:
+
+- the current ERC-20 allowance of the aggregation-router
+  (§23.8.1) over the source token is observable, and
+- an ERC-20 `approve` raising that allowance to at least the
+  required amount can be issued, before the swap transaction is
+  submitted.
+
+The top-level allowance methods `get_token_allowance` and
+`approve_token` are the intended interface for these two steps.
+These two methods **do not exist in reloaded yet** (only internal
+EVM-coin helpers do); they are themselves **part of this required
+port** and their full request/response/error wire contract is
+specified in §23.8A.4. The `AllowanceNotEnough` condition (RP3) is
+the machine-actionable trigger that tells a caller (or an
+orchestration layer) the approval is required and by how much.
+
+**RP5.** Signing and broadcasting the transaction-fields record
+returned by `classic_swap_create` (§23.4) is performed by EVM coin
+support, NOT by the trading-API library (R11 / D7 hold: the
+library stays handler-free and coin-free). The port adds the RPC
+handler and the coin wiring around the library, leaving the
+library's library-only posture intact.
+
+**RP6 — separate from liquidity routing.** The `find_best_quote`
+method belongs to a **distinct** `experimental::liquidity_routing::`
+namespace (a separate routing feature) and is NOT part of this
+1inch classic-swap surface; it is out of scope for this chapter.
+This chapter binds only the five `1inch_v6_0::classic_swap_*`
+methods above.
+
+### 23.8A.3 Acceptance criteria
+
+- AC1. All five `experimental::1inch_v6_0::classic_swap_*` methods
+  are reachable through the public dispatcher and return the
+  §23.4/§23.5 typed shapes.
+- AC2. A chain id outside the supported set (§23.2) is rejected
+  with the invalid-parameter error variant before any network
+  call (consistent with §23.2 / §23.8.1).
+- AC3. A `classic_swap_create` against an under-approved ERC-20
+  source token surfaces `AllowanceNotEnough` carrying the required
+  and current allowance, and an approval issued via `approve_token`
+  followed by a retry succeeds.
+- AC4. The trading-API library remains handler-free and coin-free
+  after the port (R11 / R12 still hold).
+
+### 23.8A.4 Public RPC wire contract (request/response/error field tables)
+
+This subsection pins the **binding wire contract** — the exact
+public JSON-RPC v2 request, response, and error field names a GUI
+client exchanges with the daemon — for all seven required-port
+methods. These RPC-layer field spellings are distinct from the
+1inch upstream HTTP query-parameter spellings of §23.7/§23.8
+(which the handler emits onward to the provider); the names below
+are what a client sends to, and receives from, the daemon. Every
+request/response shape in this subsection is **binding wire
+contract**. Field types are JSON types; "optional" means the field
+may be omitted (a serde default applies where noted). Where a
+request reuses a §23.4 parameter, the exact RPC field spelling is
+listed here rather than re-derived.
+
+**Method strings (as registered in the dispatcher / sent on the
+wire).** The first five are dispatched under the
+`experimental::1inch_v6_0::` prefix; the last two are top-level
+(unnamespaced) methods:
+
+| Capability | Wire method string |
+|------------|--------------------|
+| Router-address resolution | `experimental::1inch_v6_0::classic_swap_contract` |
+| Classic-swap quote | `experimental::1inch_v6_0::classic_swap_quote` |
+| Classic-swap create | `experimental::1inch_v6_0::classic_swap_create` |
+| Liquidity-sources discovery | `experimental::1inch_v6_0::classic_swap_liquidity_sources` |
+| Tokens discovery | `experimental::1inch_v6_0::classic_swap_tokens` |
+| ERC-20 allowance read | `get_token_allowance` |
+| ERC-20 approval | `approve_token` |
+
+#### Shared numeric representation
+
+- Coin-denominated **input** amounts (request `amount`) are sent as
+  a decimal value (JSON number or decimal string, with fraction).
+- The destination amount in the classic-swap response (`dst_amount`)
+  is returned in coin units as the workspace detailed-decimal
+  representation (a decimal value with its fraction/rational
+  companions per the workspace numeric convention).
+- Per-token raw amounts on the allowance/approval path are
+  coin-unit big-decimal values (with fraction).
+- Allowance figures carried inside the allowance-insufficient error
+  are 256-bit unsigned integers (the workspace U256 JSON encoding).
+
+#### `classic_swap_contract` — request / response
+
+- **Request:** an **empty JSON object** (`{}`); no chain field.
+- **Response:** a bare JSON **string** equal to the 1inch
+  aggregation-router contract address for v6.0,
+  `0x111111125421ca6dc452d289314280a0f8842a65` (the on-chain
+  address a caller approves against). The native-asset sentinel
+  address used elsewhere by the provider is the dictated constant
+  `0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` (§23.8.1).
+
+#### `classic_swap_quote` — request
+
+| Field | JSON type | Req? | Bounds / notes |
+|-------|-----------|------|----------------|
+| `base` | string | required | source coin ticker (resolved to an EVM coin; supplies the chain id) |
+| `rel` | string | required | destination coin ticker (must resolve to the same chain) |
+| `amount` | decimal (number or string) | required | sell amount in `base` coin units (with fraction) |
+| `fee` | number | optional | partner fee share, min 0, max 3 |
+| `protocols` | string | optional | comma-separated liquidity-source allow-list |
+| `gas_price` | string | optional | network gas price in Gwei |
+| `complexity_level` | integer | optional | min 0, max 3 |
+| `parts` | integer | optional | max 100 |
+| `main_route_parts` | integer | optional | max 50 |
+| `gas_limit` | integer | optional | max 11500000 |
+| `include_tokens_info` | boolean | optional | serde default `true` |
+| `include_protocols` | boolean | optional | serde default `true` |
+| `include_gas` | boolean | optional | serde default `true` |
+| `connector_tokens` | string | optional | comma-separated token-connector list |
+
+Unknown request fields are rejected (strict deserialization).
+
+#### `classic_swap_create` — request
+
+All `classic_swap_quote` request fields above (identical spellings,
+types, optionality, and bounds) **plus**:
+
+| Field | JSON type | Req? | Bounds / notes |
+|-------|-----------|------|----------------|
+| `slippage` | number | required | allowed slippage, min 0, max 50 |
+| `excluded_protocols` | string | optional | comma-separated exclude-list, max 5 |
+| `permit` | string | optional | EIP-2612 permit blob |
+| `compatibility` | boolean | optional | exclude the Unoswap method |
+| `receiver` | string | optional | recipient address; defaults to caller address |
+| `referrer` | string | optional | partner-fee recipient address |
+| `disable_estimate` | boolean | optional | |
+| `allow_partial_fill` | boolean | optional | |
+| `use_permit2` | boolean | optional | Permit2 auto-approval |
+
+Unknown request fields are rejected (strict deserialization).
+
+#### Shared classic-swap response (`classic_swap_quote` and `classic_swap_create`)
+
+| Field | JSON type | Presence |
+|-------|-----------|----------|
+| `dst_amount` | detailed-decimal amount | always |
+| `src_token` | object (token-info) | present when source token info is requested/available; omitted otherwise |
+| `src_token_kdf` | string or null | source coin ticker as named in the coins config, when resolvable |
+| `dst_token` | object (token-info) | present when destination token info is requested/available; omitted otherwise |
+| `dst_token_kdf` | string or null | destination coin ticker as named in the coins config, when resolvable |
+| `protocols` | array (3-level nested array of route-hop objects) | present when route protocols are requested/available; omitted otherwise |
+| `tx` | object (transaction-fields) | present only for `classic_swap_create`; omitted otherwise |
+| `gas` | integer or null | estimated gas; populated chiefly for `classic_swap_quote` |
+
+The `tx` object (returned by `classic_swap_create`, to be signed
+and broadcast by EVM coin support) carries:
+
+| `tx` field | JSON type | Notes |
+|------------|-----------|-------|
+| `from` | string (address) | |
+| `to` | string (address) | |
+| `data` | string (0x-prefixed hex bytes) | call data |
+| `value` | decimal | native value in coin units |
+| `gas_price` | decimal | gas price in Gwei |
+| `gas` | integer | gas limit |
+
+The `src_token` / `dst_token` objects and the route-hop objects
+inside `protocols` carry the **1inch-dictated** field spellings
+(e.g. `address`, `symbol`, `name`, `decimals`, `eip2612`, `isFoT`,
+`logoURI`, `tags` for token info; `name`, `part`,
+`fromTokenAddress`, `toTokenAddress` for a route hop) — these are
+provider-sourced interop, not RPC-layer-coined (§23.7/§23.8).
+
+#### `classic_swap_liquidity_sources` — request / response
+
+- **Request:** `chain_id` — integer, required (explicit numeric
+  chain id).
+- **Response:** object with one field `protocols` — an array of
+  liquidity-source descriptor objects, each carrying `id` (string),
+  `title` (string), `img` (string URL), and `img_color` (string
+  URL). Image URLs are validated against the provider domain before
+  being surfaced (anti-phishing, §23.x).
+
+#### `classic_swap_tokens` — request / response
+
+- **Request:** `chain_id` — integer, required.
+- **Response:** object with one field `tokens` — a JSON object
+  (map) keyed by coin ticker string, each value a token-info object
+  using the 1inch-dictated token-info field spellings listed above.
+
+#### `get_token_allowance` — request / response
+
+| Request field | JSON type | Req? | Notes |
+|---------------|-----------|------|-------|
+| `coin` | string | required | EVM coin ticker |
+| `spender` | string (address) | required | 0x-prefixed spender address (e.g. the aggregation router) |
+
+- **Response:** a bare JSON **decimal** (big-decimal, with
+  fraction) — the current ERC-20 allowance expressed in `coin`
+  units.
+
+#### `approve_token` — request / response
+
+| Request field | JSON type | Req? | Notes |
+|---------------|-----------|------|-------|
+| `coin` | string | required | EVM coin ticker |
+| `spender` | string (address) | required | 0x-prefixed spender address |
+| `amount` | decimal | required | allowance to set, in `coin` units (with fraction) |
+
+- **Response:** a bare JSON **string** — the 0x-prefixed hash of
+  the broadcast ERC-20 `approve` transaction.
+
+#### Error envelope and HTTP-status mapping (RP3)
+
+Errors use the project's standard tagged error envelope: a
+discriminator field `error_type` and a payload field `error_data`.
+The allowance-insufficient payload carries the current and required
+allowances as 256-bit unsigned integers under `error_data` field
+names `allowance` (current) and `amount` (required); the
+out-of-bounds payload carries `param`, `value`, `min`, and `max`
+(all strings).
+
+**Classic-swap handlers** — condition → HTTP status:
+
+| Condition (behavioural) | HTTP status |
+|-------------------------|-------------|
+| Unknown / not-activated coin ticker | 404 |
+| Coin is not an EVM coin; protocol unsupported; chain unsupported; both coins not on the same chain; address-derivation failure; invalid parameter; parameter out of bounds; numeric-conversion failure; allowance insufficient | 400 |
+| Provider transport / body-parse / general provider-API failure; provider-data conversion failure | 502 |
+| Internal failure | 500 |
+
+**`get_token_allowance` / `approve_token` handlers** — condition →
+HTTP status:
+
+| Condition (behavioural) | HTTP status |
+|-------------------------|-------------|
+| Unknown coin ticker; coin is not an EVM coin; invalid parameter / numeric-conversion failure | 400 |
+| Transaction failure; underlying EVM-RPC failure | 500 |
+
+> **Note (status divergence, informative).** An unknown coin
+> ticker resolves to **404** on the classic-swap handlers but to
+> **400** on the allowance/approval handlers; an implementer MUST
+> preserve this per-surface difference for GUI compatibility.
+
+#### Numeric bases and edge cases (informative)
+
+These notes pin the unit conventions the wire tables above rely on.
+They are realization guidance, not new wire fields:
+
+- **`tx.value` decimals.** The `value` field of the `tx` object is
+  a native-coin amount and uses the EVM native-coin precision of
+  **18 decimals** (the chain's base unit). It is not token-scaled.
+- **`tx.gas_price` unit.** The provider returns the raw gas price
+  in wei; the response `gas_price` field is that value converted to
+  **Gwei** (the unit named in the `tx` table). The inbound 1inch
+  value is wei.
+- **`dst_amount` / token decimals.** `dst_amount` is expressed in
+  `rel`-coin units using the **`rel` coin's own token decimals**
+  (which for an ERC-20 token is the token's declared `decimals`,
+  not a fixed 18); likewise an ERC-20 `base` amount is scaled by
+  the `base` coin's own decimals on the request path. Floating
+  point is never used for any of these on-chain amounts (R5).
+- **`src_token_kdf` / `dst_token_kdf` on quote/create.** Because
+  `classic_swap_quote` and `classic_swap_create` resolve both coins
+  before any provider call, both companion ticker fields are always
+  populated (non-null) on those two methods. The `null` case in the
+  table covers re-use of the shared response shape by a future
+  caller that has not resolved a config ticker, not the two methods
+  bound here.
+- **Native (non-token) EVM coin on the allowance/approval surface.**
+  `get_token_allowance` and `approve_token` are ERC-20 token
+  operations. A coin that is an EVM **native** coin (not a token)
+  has no ERC-20 allowance to read or set; such a request is out of
+  scope for these two methods and surfaces the underlying EVM
+  operation's failure (a 500-class transaction/EVM-RPC error per
+  the table above) rather than a distinct 400 "not a token"
+  condition. An implementer MAY refine this to a dedicated 400
+  condition, but is not required to.
+
 ## 23.9 Binding Requirements
 
 R1-R9 above are binding. In addition:
@@ -478,13 +821,14 @@ D1. **Provider-agnostic abstraction.** A trait covering the
     question. The current per-provider-submodule layout
     leaves room for one but does not bind one.
 
-D2. **JSON-RPC handler registration.** The intended public
-    RPC surface for the 1inch provider is a set of five
-    handlers covering router-address resolution, classic-swap
-    quote, classic-swap create, liquidity-sources discovery,
-    and tokens discovery. None of these handlers exist at the
-    time of writing; the public RPC dispatcher carries no
-    entry for this provider.
+D2. **[REQUIRED PORT — §23.8A.1]** JSON-RPC handler
+    registration. The public RPC surface for the 1inch
+    provider is the set of five handlers under
+    `experimental::1inch_v6_0::` covering router-address
+    resolution, classic-swap quote, classic-swap create,
+    liquidity-sources discovery, and tokens discovery. These
+    handlers are not yet registered in reloaded; landing them
+    is a binding requirement, not optional.
 
 D3. **1inch Fusion mode.** Only the classic-swap surface is
     bound in the chapter-bound substrate. The intent-based, resolver-
@@ -495,11 +839,15 @@ D4. **Portfolio endpoint integration.** The portfolio cross-
     prices request and response types are defined but no
     consumer in the project calls them.
 
-D5. **Allowance-approval flow.** The `AllowanceNotEnough`
-    error variant carries enough information (R6) for a
-    consumer to issue an ERC-20 `approve` call before
-    retrying. No such flow is wired in the chapter-bound substrate;
-    the variant is a parse target without a handler.
+D5. **[REQUIRED PORT — §23.8A.2]** Allowance-approval flow.
+    The `AllowanceNotEnough` condition carries enough
+    information (R6) for a consumer to issue an ERC-20
+    `approve` call before retrying. The `get_token_allowance`
+    and `approve_token` methods that this flow relies on are
+    **not present in reloaded yet** and are themselves part of
+    the port; their wire contract is specified in §23.8A.4.
+    Wiring this flow is a binding requirement of the port, not
+    optional.
 
 D6. **Production rate-limit policy.** Only the test-only
     build path of R3 serialises requests. A production rate-
@@ -507,11 +855,13 @@ D6. **Production rate-limit policy.** Only the test-only
     deferred decision; the crate does not currently impose
     one.
 
-D7. **Transaction signing and broadcast.** The transaction-
-    fields record returned by the classic-swap create
-    endpoint is delivered to the caller. The crate does not
-    sign or broadcast; that wiring belongs in the integrating
-    RPC handler and the EVM coin support module.
+D7. **[REQUIRED PORT — §23.8A.2 RP5]** Transaction signing
+    and broadcast. The transaction-fields record returned by
+    the classic-swap create endpoint is delivered to the
+    caller. The crate does not sign or broadcast; that wiring
+    belongs in the integrating RPC handler and the EVM coin
+    support module, and is part of the required port (the
+    library itself stays handler-free and coin-free).
 
 ## 23.12 External References
 
@@ -582,14 +932,34 @@ V4. The provider's HTTP API is a public specification.
   tokens, the URL grammar and path tokens, the aggregation-router
   and native-asset-sentinel contract addresses, the supported-chain
   set, and the content-negotiation header names — whose authoritative
-  source is the public 1inch v6.0 API, not the historical lineage.
+  source is the public 1inch v6.0 API, not the historical lineage;
+  **public RPC interface recovery / interop wire-format** (the
+  daemon-facing JSON-RPC v2 request, response, and error field
+  names, the seven public method strings, and the error→HTTP-status
+  mapping pinned in §23.8A.4) — these are the public wire contract a
+  GUI client relies on and are required for GUI compatibility.
+- *Forbidden-corpus consultation (interface recovery only):* the
+  historical-lineage corpus was consulted **solely to recover the
+  public RPC wire contract** of §23.8A.4 — public method strings,
+  public request/response JSON field names and types, dictated
+  bounds/enums, and the error-condition→HTTP-status mapping. Only
+  clean-channel interface facts crossed into the chapter. No
+  protected expression — no function bodies, private identifiers,
+  internal error-variant or struct/handler names, helper
+  decomposition, control-flow transcription, or diagnostic/Display
+  string literals — was reproduced. This consultation is an
+  interface/interop recovery, **not** a clean-room derivation of
+  protected expression.
 - *Sibling-allowlist consultations:* none.
-- *Forbidden corpus:* not consulted for clean-room derivation. The
-  dictated 1inch interop fragments enumerated above (R29/R33) are
-  sourced from the public 1inch v6.0 API documentation; no
-  discretionary expression — no function bodies, private
-  identifiers, helper decomposition, control-flow transcription, or
-  diagnostic/Display string literals — from the historical lineage
-  crosses into this chapter. The realisation's residual similarity
-  to that lineage for the thin REST-path composer is governed by the
-  R35 gate (see §23.8 binding-scope note).
+- *Forbidden corpus:* consulted for **interface/interop recovery
+  only** (see the *Forbidden-corpus consultation* entry above) — the
+  public RPC wire contract of §23.8A.4. Not consulted for clean-room
+  derivation of protected expression. The dictated 1inch interop
+  fragments enumerated above (R29/R33) are sourced from the public
+  1inch v6.0 API documentation; no discretionary expression — no
+  function bodies, private identifiers, internal error-variant or
+  struct/handler names, helper decomposition, control-flow
+  transcription, or diagnostic/Display string literals — from the
+  historical lineage crosses into this chapter. The realisation's
+  residual similarity to that lineage for the thin REST-path composer
+  is governed by the R35 gate (see §23.8 binding-scope note).

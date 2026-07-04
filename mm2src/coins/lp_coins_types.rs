@@ -1,5 +1,20 @@
 use super::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::lightning::InvoiceForRPC;
+
+/// Optional, recipient-supplied instructions that a payer consumes when
+/// constructing its swap payment. Negotiated early in the swap and journalled so
+/// it survives a restart. The `Lightning` arm carries a BOLT11 invoice (native
+/// targets only); the `WatcherReward` arm carries the reward amount the payer
+/// embeds. Carried by the `*PaymentInstructionsReceived` legacy swap events.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PaymentInstructions {
+    #[cfg(not(target_arch = "wasm32"))]
+    Lightning(InvoiceForRPC),
+    WatcherReward(BigDecimal),
+}
+
 pub type BalanceResult<T> = Result<T, MmError<BalanceError>>;
 pub type BalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<BalanceError>> + Send>;
 pub type NonZeroBalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<GetNonZeroBalance>> + Send>;

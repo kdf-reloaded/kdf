@@ -72,9 +72,17 @@ the following hold:
 Where practical, a stronger-security alternative is offered as a separate,
 opt-in value of the same setting. Absent an explicit CRD authorisation of
 this form, insecure behaviour is a defect and must be fixed, not shipped.
-This exception never extends to fund-controlling secrets (wallet seeds and
-private keys), which keep their stronger protection regardless of
-compatibility.
+
+Fund-controlling secrets (wallet seeds and private keys) keep their stronger
+protection **by default** regardless of compatibility. The single authorised
+exception is key export, governed by CRD chapter 07: the secure default is
+preserved (the offline / bulk / HD / shielded-key export superset is refused),
+and GLEEC-parity export is reached **only** by an explicit operator opt-in,
+the `allow_insecure_key_export` switch. Because the default stays secure and
+the relaxation is a deliberate, acknowledged operator act, this does not breach
+the rule that fund-controlling secrets are never weakened *by default*. Any
+other extension of a compatibility exception to fund-controlling secrets is a
+defect.
 
 ## 6. Tests
 

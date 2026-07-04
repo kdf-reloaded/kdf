@@ -501,6 +501,22 @@ pub enum WithdrawError {
     Transport(String),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
+    /// CRD R47.5.6a / R47.6.7: the requested withdraw is unsupported under the
+    /// MetaMask signing policy (e.g. the non-EVM-keypair TRON family, which the
+    /// delegated EVM `eth_sendTransaction` model cannot drive). WASM-only: the
+    /// MetaMask policy exists only on the browser target.
+    #[cfg(target_arch = "wasm32")]
+    #[display(fmt = "Unsupported under the MetaMask signing policy: {}", _0)]
+    UnsupportedUnderMetamask(String),
+    /// CRD R50.20 / R50.24: the requested withdraw is unsupported under the
+    /// Trezor hardware-wallet signing policy. Used for the TRON family (which
+    /// the EVM Trezor signing path cannot drive) and to steer clients from the
+    /// direct legacy `withdraw` method to the `task::withdraw` API required for
+    /// Trezor device user-action signing. Native, non-iOS only — the Trezor
+    /// signing policy exists only there.
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+    #[display(fmt = "Unsupported under the Trezor signing policy: {}", _0)]
+    UnsupportedUnderTrezor(String),
 }
 impl HttpStatusCode for WithdrawError {
     fn status_code(&self) -> StatusCode {
@@ -517,6 +533,12 @@ impl HttpStatusCode for WithdrawError {
             | WithdrawError::FromAddressNotFound
             | WithdrawError::UnexpectedFromAddress(_)
             | WithdrawError::UnknownAccount { .. } => StatusCode::BAD_REQUEST,
+            // CRD R47.6.7: unsupported operation under MetaMask maps to 400.
+            #[cfg(target_arch = "wasm32")]
+            WithdrawError::UnsupportedUnderMetamask(_) => StatusCode::BAD_REQUEST,
+            // CRD R50.20 / R50.24: unsupported operation under Trezor maps to 400.
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            WithdrawError::UnsupportedUnderTrezor(_) => StatusCode::BAD_REQUEST,
             WithdrawError::NoTrezorDeviceAvailable
             | WithdrawError::TrezorDisconnected
             | WithdrawError::FoundUnexpectedDevice(_) => StatusCode::GONE,

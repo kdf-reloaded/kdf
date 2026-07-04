@@ -7,6 +7,8 @@ use mm2_err_handle::prelude::*;
 use rpc::v1::types::H160 as H160Json;
 use serde_json::Value as Json;
 
+use crate::mm2::lp_network;
+
 pub type GetPublicKeyRpcResult<T> = Result<T, MmError<GetPublicKeyError>>;
 
 #[derive(Serialize, Display, SerializeErrorType)]
@@ -52,4 +54,18 @@ pub struct GetPublicKeyHashResponse {
 pub async fn get_public_key_hash(ctx: MmArc, _req: Json) -> GetPublicKeyRpcResult<GetPublicKeyHashResponse> {
     let public_key_hash = ctx.rmd160().to_owned().into();
     Ok(GetPublicKeyHashResponse { public_key_hash })
+}
+
+#[derive(Deserialize)]
+pub struct PeerConnectionHealthcheckRequest {
+    pub peer_address: String,
+}
+
+pub type PeerConnectionHealthcheckRpcResult<T> = Result<T, MmError<lp_network::PeerHealthcheckError>>;
+
+pub async fn peer_connection_healthcheck(
+    ctx: MmArc,
+    req: PeerConnectionHealthcheckRequest,
+) -> PeerConnectionHealthcheckRpcResult<bool> {
+    lp_network::peer_connection_healthcheck(ctx, req.peer_address).await
 }

@@ -1084,6 +1084,7 @@ pub(crate) mod time {
 
 	/// A state in which time has no meaning.
 	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+	#[allow(dead_code)]
 	pub struct Eternity;
 
 	#[cfg(not(feature = "no-std"))]

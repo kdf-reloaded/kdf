@@ -6,8 +6,10 @@ use mm2_err_handle::prelude::*;
 pub use webusb_driver::WebUsbError;
 
 // #[cfg(not(target_arch = "wasm32"))] pub mod hid_driver;
-#[cfg(not(target_arch = "wasm32"))] pub mod libusb;
-#[cfg(not(target_arch = "wasm32"))] pub use libusb::UsbError;
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+pub mod libusb;
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+pub use libusb::UsbError;
 
 trait InternalError: Sized {
     fn internal(e: String) -> Self;

@@ -5,13 +5,15 @@ use crate::utxo::{output_script, sat_from_big_decimal, ActualTxFee, Address, Fee
 use crate::{CoinWithDerivationMethod, GetWithdrawSenderAddress, MarketCoinOps, TransactionDetails, WithdrawError,
             WithdrawFee, WithdrawRequest, WithdrawResult};
 use async_trait::async_trait;
-use chain::TransactionOutput;
+use chain::{OutPoint, TransactionOutput};
 use common::log::info;
 use common::now_ms;
 use crypto::hw_rpc_task::{HwConnectStatuses, TrezorRpcTaskConnectProcessor};
+use crypto::privkey::key_pair_from_secret;
 use crypto::trezor::client::TrezorClient;
 use crypto::trezor::{TrezorError, TrezorProcessingError};
-use crypto::{Bip32Error, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, HwError, HwProcessingError};
+use crypto::{derive_secp256k1_secret, Bip32Error, CryptoCtx, CryptoCtxError, CryptoInitError, DerivationPath, HwError,
+             HwProcessingError};
 use keys::{Public as PublicKey, Type as ScriptType};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -19,6 +21,7 @@ use rpc::v1::types::ToTxHash;
 use rpc_task::RpcTaskError;
 use script::{Builder, Script, SignatureVersion, TransactionInputSigner};
 use serialization::{serialize, serialize_with_flags, SERIALIZE_TRANSACTION_WITNESS};
+use std::collections::HashSet;
 use std::iter::once;
 use std::time::Duration;
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
@@ -127,7 +130,11 @@ where
 
     fn on_finishing(&self) -> Result<(), MmError<WithdrawError>>;
 
-    async fn sign_tx(&self, unsigned_tx: TransactionInputSigner) -> Result<UtxoTx, MmError<WithdrawError>>;
+    async fn sign_tx(
+        &self,
+        unsigned_tx: TransactionInputSigner,
+        p2pk_outpoints: &HashSet<OutPoint>,
+    ) -> Result<UtxoTx, MmError<WithdrawError>>;
 
     async fn build(self) -> WithdrawResult {
         let coin = self.coin();
@@ -159,6 +166,9 @@ where
         let _utxo_lock = UTXO_LOCK.lock().await;
         let (unspents, _) = coin
             .get_unspent_ordered_list(&self.sender_address())
+            .await
+            .mm_err(Into::into)?;
+        let p2pk_outpoints = crate::utxo::electrum_p2pk_outpoints_for_address(coin.as_ref(), &self.sender_address())
             .await
             .mm_err(Into::into)?;
         let (value, fee_policy) = if req.max {
@@ -202,7 +212,7 @@ where
             .mm_err(|gen_tx_error| WithdrawError::from_generate_tx_error(gen_tx_error, ticker.clone(), decimals))?;
 
         // Sign the `unsigned` transaction.
-        let signed = self.sign_tx(unsigned).await?;
+        let signed = self.sign_tx(unsigned, &p2pk_outpoints).await?;
 
         // Finish by generating `TransactionDetails` from the signed transaction.
         self.on_finishing()?;
@@ -289,7 +299,11 @@ where
             .mm_err(Into::into)?)
     }
 
-    async fn sign_tx(&self, unsigned_tx: TransactionInputSigner) -> Result<UtxoTx, MmError<WithdrawError>> {
+    async fn sign_tx(
+        &self,
+        unsigned_tx: TransactionInputSigner,
+        _p2pk_outpoints: &HashSet<OutPoint>,
+    ) -> Result<UtxoTx, MmError<WithdrawError>> {
         self.task_handle
             .update_in_progress_status(WithdrawInProgressStatus::SigningTransaction)
             .mm_err(Into::into)?;
@@ -325,9 +339,21 @@ where
             .with_prev_script(Builder::build_p2pkh(&self.from_address.hash));
         let sign_params = sign_params.build().mm_err(Into::into)?;
 
+        // For HD wallets derive the child key for the specific sender address so that the
+        // signing key matches the funded UTXO's locking script.
+        let hd_child_key_pair; // extend lifetime beyond the match arm
         let sign_policy = match self.coin.as_ref().priv_key_policy {
             PrivKeyPolicy::KeyPair(ref key_pair) => SignPolicy::WithKeyPair(key_pair),
-            PrivKeyPolicy::HDWallet { ref activated_key, .. } => SignPolicy::WithKeyPair(activated_key),
+            PrivKeyPolicy::HDWallet {
+                ref bip39_secp_priv_key,
+                ..
+            } => {
+                let secret = derive_secp256k1_secret(bip39_secp_priv_key.clone(), &self.from_derivation_path)
+                    .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+                hd_child_key_pair =
+                    key_pair_from_secret(secret.as_slice()).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+                SignPolicy::WithKeyPair(&hd_child_key_pair)
+            },
             PrivKeyPolicy::Trezor => {
                 let trezor_client = self.trezor_client().await?;
                 SignPolicy::WithTrezor(trezor_client)
@@ -393,7 +419,8 @@ impl<'a, Coin> InitUtxoWithdraw<'a, Coin> {
             on_connected: WithdrawInProgressStatus::Preparing,
             on_connection_failed: WithdrawInProgressStatus::Finishing,
             on_button_request: WithdrawInProgressStatus::WaitingForUserToConfirmPubkey,
-            on_pin_request: WithdrawAwaitingStatus::WaitForTrezorPin,
+            on_pin_request: WithdrawAwaitingStatus::EnterTrezorPin,
+            on_passphrase_request: WithdrawAwaitingStatus::EnterTrezorPassphrase,
             on_ready: WithdrawInProgressStatus::Preparing,
         })
         .with_connect_timeout(TREZOR_CONNECT_TIMEOUT)
@@ -430,19 +457,24 @@ where
 
     fn on_finishing(&self) -> Result<(), MmError<WithdrawError>> { Ok(()) }
 
-    async fn sign_tx(&self, unsigned_tx: TransactionInputSigner) -> Result<UtxoTx, MmError<WithdrawError>> {
+    async fn sign_tx(
+        &self,
+        unsigned_tx: TransactionInputSigner,
+        p2pk_outpoints: &HashSet<OutPoint>,
+    ) -> Result<UtxoTx, MmError<WithdrawError>> {
         let key_pair = self
             .coin
             .as_ref()
             .priv_key_policy
             .key_pair_or_err()
             .mm_err(Into::into)?;
-        Ok(with_key_pair::sign_tx(
+        Ok(with_key_pair::sign_tx_with_p2pk(
             unsigned_tx,
             key_pair,
             self.prev_script(),
             self.signature_version(),
             self.coin.as_ref().conf.fork_id,
+            p2pk_outpoints,
         )
         .mm_err(Into::into)?)
     }

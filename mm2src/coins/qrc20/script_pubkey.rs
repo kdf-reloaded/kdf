@@ -104,7 +104,11 @@ pub fn extract_contract_addr_from_script(script: &Script) -> Result<H160, String
         _ => return ERR!("Unexpected instruction's opcode {}", instruction.opcode),
     }
 
-    Ok(instruction.data.ok_or(ERRL!("An empty contract call data"))?.into())
+    let data = instruction.data.ok_or(ERRL!("An empty contract call data"))?;
+    if data.len() != 20 {
+        return ERR!("Unexpected 'token_address' length: {}", data.len());
+    }
+    Ok(H160::from_slice(&data))
 }
 
 /// Serialize the `number` similar to BigEndian but in QRC20 specific format.

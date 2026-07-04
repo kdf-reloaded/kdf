@@ -108,7 +108,11 @@ async fn withdraw_native_trx(
     let now_ms_i = now_ms() as i64;
     let raw = build_trx_transfer(&sender, &receiver, amount_sun, &tapos, now_ms_i);
 
-    let (hash, sig) = sign_transaction_raw(coin.key_pair.secret(), &raw)
+    let secret = coin
+        .signer
+        .local_secret()
+        .ok_or_else(|| WithdrawError::InternalError("TRON requires a local private key".to_string()))?;
+    let (hash, sig) = sign_transaction_raw(secret, &raw)
         .map_err(|e| WithdrawError::InternalError(format!("TRON signing failed: {e}")))?;
     let tx = proto::Transaction {
         raw_data: Some(raw),
@@ -191,7 +195,11 @@ async fn withdraw_trc20_token(
         TRC20_DEFAULT_FEE_LIMIT_SUN,
     );
 
-    let (hash, sig) = sign_transaction_raw(coin.key_pair.secret(), &raw)
+    let secret = coin
+        .signer
+        .local_secret()
+        .ok_or_else(|| WithdrawError::InternalError("TRON requires a local private key".to_string()))?;
+    let (hash, sig) = sign_transaction_raw(secret, &raw)
         .map_err(|e| WithdrawError::InternalError(format!("TRON signing failed: {e}")))?;
     let tx = proto::Transaction {
         raw_data: Some(raw),

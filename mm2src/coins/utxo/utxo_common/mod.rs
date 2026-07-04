@@ -29,7 +29,12 @@ pub use utxo_common_helpers::*;
 pub use utxo_common_history::*;
 pub use utxo_common_spv::*;
 pub use utxo_common_swap::*;
-pub use utxo_common_tx::*;
+// `UtxoMergeParams` (defined in `utxo_common_tx`) is also reachable through the
+// broad `pub(crate) use super::*;` shared-import re-export below, so rustc flags
+// an ambiguous glob re-export. Both paths resolve to the single definition, so
+// the ambiguity is harmless; allow it rather than enumerate the ~80-name shared
+// re-export explicitly.
+#[allow(ambiguous_glob_reexports)] pub use utxo_common_tx::*;
 
 // ---------- shared imports for sub-modules (accessible via `use super::*;`) ----------
 

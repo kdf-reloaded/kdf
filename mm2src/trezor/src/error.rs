@@ -7,7 +7,7 @@ use prost::{DecodeError, EncodeError};
 
 pub type TrezorResult<T> = Result<T, MmError<TrezorError>>;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 use hw_common::transport::UsbError;
 #[cfg(target_arch = "wasm32")]
 use hw_common::transport::WebUsbError;
@@ -44,7 +44,7 @@ pub enum OperationFailure {
 
 impl From<Failure> for OperationFailure {
     fn from(failure: Failure) -> Self {
-        match failure.code.and_then(FailureType::from_i32) {
+        match failure.code.and_then(|code| FailureType::try_from(code).ok()) {
             Some(FailureType::FailurePinInvalid) | Some(FailureType::FailurePinMismatch) => {
                 OperationFailure::InvalidPin
             },
@@ -79,7 +79,7 @@ impl From<WebUsbError> for TrezorError {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 impl From<UsbError> for TrezorError {
     fn from(e: UsbError) -> Self {
         match e {

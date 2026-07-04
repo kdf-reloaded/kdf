@@ -3,8 +3,8 @@ use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps,
 use crate::utxo::utxo_builder::{UtxoCoinBuilderCommonOps, UtxoCoinWithIguanaPrivKeyBuilder,
                                 UtxoFieldsWithIguanaPrivKeyBuilder};
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
-use crate::utxo::{sat_from_big_decimal, utxo_common, ActualTxFee, AdditionalTxData, Address, BroadcastTxErr,
-                  FeePolicy, GetUtxoListOps, HistoryUtxoTx, HistoryUtxoTxMap, MatureUnspentList,
+use crate::utxo::{sat_from_big_decimal, utxo_common, zcash_params_path, ActualTxFee, AdditionalTxData, Address,
+                  BroadcastTxErr, FeePolicy, GetUtxoListOps, HistoryUtxoTx, HistoryUtxoTxMap, MatureUnspentList,
                   RecentlySpentOutPointsGuard, UtxoActivationParams, UtxoAddressFormat, UtxoArc, UtxoCoinFields,
                   UtxoCommonOps, UtxoFeeDetails, UtxoTxBroadcastOps, UtxoTxGenerationOps, UtxoWeak,
                   VerboseTransactionFrom};
@@ -41,6 +41,9 @@ use serde_json::Value as Json;
 use serialization::{deserialize, serialize_list, CoinVariant, Reader};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -140,6 +143,65 @@ impl consensus::Parameters for ARRRConsensusParams {
 /// Do not refactor away or replace this constant without a protocol-level
 /// compatibility analysis of the ARRR shielded-fee path.
 const DEX_FEE_OVK: OutgoingViewingKey = OutgoingViewingKey([7; 32]);
+
+const SAPLING_SPEND_NAME: &str = "sapling-spend.params";
+const SAPLING_OUTPUT_NAME: &str = "sapling-output.params";
+const SAPLING_SPEND_HASH: &str =
+    "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c";
+const SAPLING_OUTPUT_HASH: &str =
+    "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028";
+
+fn blake2b_file_hash(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = File::open(path)?;
+    let mut state = blake2b_simd::State::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+
+    loop {
+        let read_bytes = file.read(&mut buffer)?;
+        if read_bytes == 0 {
+            break;
+        }
+        state.update(&buffer[..read_bytes]);
+    }
+
+    Ok(state.finalize().to_hex().to_string())
+}
+
+fn verify_zcash_params_integrity(params_dir: &Path) -> MmResult<(), ZCoinBuildError> {
+    if !params_dir.exists() {
+        return MmError::err(ZCoinBuildError::ZCashParamsDirNotFound {
+            path: params_dir.display().to_string(),
+        });
+    }
+
+    let verify = |file_name: &str, expected_hash: &str| {
+        let path = params_dir.join(file_name);
+        if !path.exists() {
+            return MmError::err(ZCoinBuildError::ZCashParamsNotFound);
+        }
+
+        let actual_hash = blake2b_file_hash(&path).map_to_mm(|error| ZCoinBuildError::ZCashParamsReadError {
+            file: file_name.to_string(),
+            path: path.display().to_string(),
+            error,
+        })?;
+
+        if actual_hash != expected_hash {
+            return MmError::err(ZCoinBuildError::ZCashParamsHashMismatch {
+                file: file_name.to_string(),
+                path: path.display().to_string(),
+                expected: expected_hash.to_string(),
+                actual: actual_hash,
+            });
+        }
+
+        Ok(())
+    };
+
+    verify(SAPLING_SPEND_NAME, SAPLING_SPEND_HASH)?;
+    verify(SAPLING_OUTPUT_NAME, SAPLING_OUTPUT_HASH)?;
+    Ok(())
+}
 
 pub struct ZCoinFields {
     dex_fee_addr: PaymentAddress,
@@ -433,8 +495,14 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             .expect("NetConfig dex_fee_z_addr must be a valid z-address")
             .expect("NetConfig dex_fee_z_addr must be a valid z-address");
 
-        let z_tx_prover = tokio::task::block_in_place(LocalTxProver::with_default_location)
-            .or_mm_err(|| ZCoinBuildError::ZCashParamsNotFound)?;
+        let params_dir = zcash_params_path();
+        verify_zcash_params_integrity(&params_dir)?;
+        let z_tx_prover = tokio::task::block_in_place(|| {
+            LocalTxProver::new(
+                &params_dir.join(SAPLING_SPEND_NAME),
+                &params_dir.join(SAPLING_OUTPUT_NAME),
+            )
+        });
 
         let my_z_addr_encoded = encode_payment_address(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS, &my_z_addr);
         let my_z_key_encoded = encode_extended_spending_key(

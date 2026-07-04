@@ -17,10 +17,13 @@
 //  marketmaker
 //
 use coins::lp_coinfind;
-use common::executor::spawn;
-use common::{log, Future01CompatExt};
+use common::executor::{spawn, Timer};
+use common::{log, now_ms, Future01CompatExt, HttpStatusCode};
 use derive_more::Display;
-use futures::{channel::oneshot, StreamExt};
+use futures::{channel::oneshot,
+              future::{select, Either},
+              FutureExt, StreamExt};
+use http::StatusCode;
 use keys::KeyPair;
 use mm2_core::mm_ctx::{MmArc, MmWeak};
 use mm2_err_handle::prelude::*;
@@ -28,17 +31,22 @@ use mm2_metrics::{ClockOps, MetricsOps};
 use mm2_p2p::atomicdex_behaviour::{AdexBehaviourCmd, AdexBehaviourEvent, AdexCmdTx, AdexEventRx, AdexResponse,
                                    AdexResponseChannel};
 use mm2_p2p::peers_exchange::PeerAddresses;
-use mm2_p2p::{decode_message, encode_message, DecodingError, GossipsubMessage, Libp2pPublic, Libp2pSecpPublic,
-              MessageId, NetworkPorts, PeerId, TOPIC_SEPARATOR};
+use mm2_p2p::{decode_message, decode_signed, encode_and_sign, encode_message, pub_sub_topic, DecodingError,
+              GossipsubMessage, Libp2pPublic, Libp2pSecpPublic, MessageId, NetworkPorts, PeerId, TOPIC_SEPARATOR};
 #[cfg(test)] use mocktopus::macros::*;
 use parking_lot::Mutex as PaMutex;
+use rand::random;
 use serde::de;
+use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use crate::mm2::{lp_ordermatch, lp_stats, lp_swap};
 
 pub type P2PRequestResult<T> = Result<T, MmError<P2PRequestError>>;
+
+const PEER_HEALTHCHECK_PREFIX: &str = "peer_healthcheck";
+const PEER_HEALTHCHECK_TIMEOUT_SEC: f64 = 10.;
 
 pub trait Libp2pPeerId {
     fn libp2p_peer_id(&self) -> PeerId;
@@ -60,6 +68,29 @@ pub enum P2PRequestError {
     ExpectedSingleResponseError(usize),
 }
 
+pub type PeerHealthcheckRpcResult<T> = Result<T, MmError<PeerHealthcheckError>>;
+
+#[derive(Debug, Serialize, Display, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+// Variants intentionally share the idiomatic `Error` suffix; renaming them is
+// churny and hurts readability.
+#[allow(clippy::enum_variant_names)]
+pub enum PeerHealthcheckError {
+    ProbeGenerationError(String),
+    ProbeEncodingError(String),
+    InternalError(String),
+}
+
+impl HttpStatusCode for PeerHealthcheckError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            PeerHealthcheckError::ProbeGenerationError(_)
+            | PeerHealthcheckError::ProbeEncodingError(_)
+            | PeerHealthcheckError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 impl From<rmp_serde::encode::Error> for P2PRequestError {
     fn from(e: rmp_serde::encode::Error) -> Self { P2PRequestError::EncodeError(e.to_string()) }
 }
@@ -74,9 +105,31 @@ pub enum P2PRequest {
     NetworkInfo(lp_stats::NetworkInfoRequest),
 }
 
+#[derive(Deserialize, Serialize)]
+enum PeerHealthcheckMsg {
+    Probe {
+        source_peer: String,
+        target_peer: String,
+        nonce: u64,
+        expires_at: u64,
+    },
+    Ack {
+        source_peer: String,
+        target_peer: String,
+        nonce: u64,
+        expires_at: u64,
+    },
+}
+
+pub(crate) struct PendingHealthcheckWaiter {
+    nonce: u64,
+    ack_tx: oneshot::Sender<()>,
+}
+
 pub struct P2PContext {
     /// Using Mutex helps to prevent cloning which can actually result to channel being unbounded in case of using 1 tx clone per 1 message.
     pub cmd_tx: PaMutex<AdexCmdTx>,
+    pub(crate) pending_healthchecks: PaMutex<HashMap<String, PendingHealthcheckWaiter>>,
 }
 
 #[cfg_attr(test, mockable)]
@@ -84,6 +137,7 @@ impl P2PContext {
     pub fn new(cmd_tx: AdexCmdTx) -> Self {
         P2PContext {
             cmd_tx: PaMutex::new(cmd_tx),
+            pending_healthchecks: PaMutex::new(HashMap::new()),
         }
     }
 
@@ -98,6 +152,135 @@ impl P2PContext {
             .clone()
             .downcast()
             .unwrap()
+    }
+}
+
+fn peer_healthcheck_topic(peer_id: &str) -> String { pub_sub_topic(PEER_HEALTHCHECK_PREFIX, peer_id) }
+
+pub fn subscribe_to_own_peer_healthcheck_topic(ctx: &MmArc, peer_id: &str) {
+    subscribe_to_topic(ctx, peer_healthcheck_topic(peer_id));
+}
+
+pub async fn peer_connection_healthcheck(ctx: MmArc, peer_address: String) -> PeerHealthcheckRpcResult<bool> {
+    let my_peer_id = ctx
+        .peer_id
+        .ok_or("Peer ID is not initialized")
+        .map_to_mm(|e| PeerHealthcheckError::InternalError(e.to_string()))?
+        .to_string();
+
+    if peer_address == my_peer_id {
+        return Ok(true);
+    }
+
+    let nonce = random::<u64>();
+    let expires_at = now_ms() / 1000 + PEER_HEALTHCHECK_TIMEOUT_SEC as u64;
+
+    let probe = PeerHealthcheckMsg::Probe {
+        source_peer: my_peer_id.clone(),
+        target_peer: peer_address.clone(),
+        nonce,
+        expires_at,
+    };
+    let signed_probe = encode_and_sign(&probe, &ctx.secp256k1_key_pair().private().secret.take())
+        .map_to_mm(|e| PeerHealthcheckError::ProbeGenerationError(e.to_string()))?;
+
+    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
+
+    subscribe_to_topic(&ctx, peer_healthcheck_topic(&peer_address));
+
+    let (ack_tx, ack_rx) = oneshot::channel();
+    p2p_ctx
+        .pending_healthchecks
+        .lock()
+        .insert(peer_address.clone(), PendingHealthcheckWaiter { nonce, ack_tx });
+
+    let publish_cmd = AdexBehaviourCmd::PublishMsg {
+        topics: vec![peer_healthcheck_topic(&peer_address)],
+        msg: signed_probe,
+    };
+    p2p_ctx
+        .cmd_tx
+        .lock()
+        .try_send(publish_cmd)
+        .map_to_mm(|e| PeerHealthcheckError::ProbeEncodingError(e.to_string()))?;
+
+    let timeout = Timer::sleep(PEER_HEALTHCHECK_TIMEOUT_SEC).fuse();
+    futures::pin_mut!(timeout);
+    let ack_rx = ack_rx.fuse();
+    futures::pin_mut!(ack_rx);
+
+    let result = match select(ack_rx, timeout).await {
+        Either::Left((Ok(()), _)) => true,
+        Either::Left((Err(_), _)) => false,
+        Either::Right(_) => false,
+    };
+
+    p2p_ctx.pending_healthchecks.lock().remove(&peer_address);
+
+    Ok(result)
+}
+
+async fn process_peer_healthcheck_message(ctx: MmArc, sender_peer_id: PeerId, topic_peer: &str, message: &[u8]) {
+    let my_peer_id = match ctx.peer_id.ok_or("Peer ID is not initialized") {
+        Ok(peer_id) => peer_id.to_string(),
+        Err(_) => return,
+    };
+
+    let (healthcheck_msg, _, _) = match decode_signed::<PeerHealthcheckMsg>(message) {
+        Ok(decoded) => decoded,
+        Err(e) => {
+            log::error!("Error decoding peer healthcheck message: {}", e);
+            return;
+        },
+    };
+
+    match healthcheck_msg {
+        PeerHealthcheckMsg::Probe {
+            source_peer,
+            target_peer,
+            nonce,
+            expires_at,
+        } => {
+            if target_peer != my_peer_id || topic_peer != my_peer_id || expires_at <= now_ms() / 1000 {
+                return;
+            }
+
+            let ack = PeerHealthcheckMsg::Ack {
+                source_peer: my_peer_id,
+                target_peer: source_peer,
+                nonce,
+                expires_at,
+            };
+
+            let signed_ack = match encode_and_sign(&ack, &ctx.secp256k1_key_pair().private().secret.take()) {
+                Ok(msg) => msg,
+                Err(e) => {
+                    log::error!("Error signing peer healthcheck ack: {}", e);
+                    return;
+                },
+            };
+
+            broadcast_p2p_msg(&ctx, vec![peer_healthcheck_topic(topic_peer)], signed_ack, None);
+        },
+        PeerHealthcheckMsg::Ack {
+            target_peer,
+            nonce,
+            expires_at,
+            ..
+        } => {
+            if target_peer != my_peer_id || expires_at <= now_ms() / 1000 {
+                return;
+            }
+
+            let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
+            let sender_peer_id = sender_peer_id.to_string();
+            let waiter = { p2p_ctx.pending_healthchecks.lock().remove(&sender_peer_id) };
+            if let Some(waiter) = waiter {
+                if waiter.nonce == nonce {
+                    let _ = waiter.ack_tx.send(());
+                }
+            }
+        },
     }
 }
 
@@ -143,6 +326,11 @@ async fn process_p2p_message(
             Some(lp_ordermatch::ORDERBOOK_PREFIX) => {
                 if let Some(pair) = split.next() {
                     orderbook_pairs.push(pair.to_string());
+                }
+            },
+            Some(PEER_HEALTHCHECK_PREFIX) => {
+                if let Some(peer) = split.next() {
+                    process_peer_healthcheck_message(ctx.clone(), peer_id, peer, &message.data).await;
                 }
             },
             Some(lp_swap::SWAP_PREFIX) => {
@@ -201,16 +389,25 @@ fn process_p2p_request(
     request: Vec<u8>,
     response_channel: AdexResponseChannel,
 ) -> P2PRequestResult<()> {
-    let request = decode_message::<P2PRequest>(&request)?;
-    let result = match request {
-        P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),
-        P2PRequest::NetworkInfo(req) => lp_stats::process_info_request(ctx.clone(), req),
-    };
+    let mut decode_error = None;
+    let res = match decode_message::<P2PRequest>(&request) {
+        Ok(request) => {
+            let result = match request {
+                P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),
+                P2PRequest::NetworkInfo(req) => lp_stats::process_info_request(ctx.clone(), req),
+            };
 
-    let res = match result {
-        Ok(Some(response)) => AdexResponse::Ok { response },
-        Ok(None) => AdexResponse::None,
-        Err(e) => AdexResponse::Err { error: e },
+            match result {
+                Ok(Some(response)) => AdexResponse::Ok { response },
+                Ok(None) => AdexResponse::None,
+                Err(e) => AdexResponse::Err { error: e },
+            }
+        },
+        Err(e) => {
+            let error = e.to_string();
+            decode_error = Some(error.clone());
+            AdexResponse::Err { error }
+        },
     };
 
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
@@ -220,6 +417,11 @@ fn process_p2p_request(
         .lock()
         .try_send(cmd)
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
+
+    if let Some(error) = decode_error {
+        return MmError::err(P2PRequestError::DecodeError(error));
+    }
+
     Ok(())
 }
 
@@ -472,4 +674,25 @@ pub fn lp_network_ports(netid: u16) -> Result<NetworkPorts, MmError<NetIdError>>
 pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<DecodingError>> {
     let public_key = Libp2pSecpPublic::decode(secp_public)?;
     Ok(PeerId::from_public_key(&Libp2pPublic::Secp256k1(public_key)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic};
+    use common::block_on;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+
+    #[test]
+    fn peer_healthcheck_topic_is_prefixed_by_peer() {
+        assert_eq!(peer_healthcheck_topic("12D3KooWtest"), "peer_healthcheck/12D3KooWtest");
+    }
+
+    #[test]
+    fn peer_connection_healthcheck_is_true_for_self_peer() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        ctx.peer_id.pin("12D3KooWself".to_string()).unwrap();
+
+        let result = block_on(peer_connection_healthcheck(ctx, "12D3KooWself".to_string())).unwrap();
+        assert!(result);
+    }
 }

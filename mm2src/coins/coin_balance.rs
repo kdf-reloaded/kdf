@@ -82,7 +82,7 @@ impl Default for EnableCoinScanPolicy {
 pub trait EnableCoinBalanceOps {
     async fn enable_coin_balance<XPubExtractor>(
         &self,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
@@ -100,7 +100,7 @@ where
 {
     async fn enable_coin_balance<XPubExtractor>(
         &self,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
@@ -138,7 +138,7 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
     async fn enable_hd_wallet<XPubExtractor>(
         &self,
         hd_wallet: &Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
@@ -279,7 +279,7 @@ pub mod common_impl {
     pub(crate) async fn enable_hd_wallet<Coin, XPubExtractor>(
         coin: &Coin,
         hd_wallet: &Coin::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where

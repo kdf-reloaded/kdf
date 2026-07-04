@@ -26,10 +26,10 @@
 //!   `TakerPaymentRefundRequired → TakerPaymentRefunded`.
 //! - Abort path: any pre-funding state → `Aborted`.
 
-use coins::{CanRefundHtlc, DexFee, FeeApproxStage, GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs,
-            MakerCoinSwapOpsV2, MmCoin, RefundFundingSecretArgs, RefundTakerPaymentArgs, SendTakerFundingArgs,
-            SpendMakerPaymentArgs, SwapTxTypeWithSecretHash, TakerCoinSwapOpsV2, ToBytes, TradePreimageValue,
-            Transaction, TxPreimageWithSig, ValidateMakerPaymentArgs};
+use coins::{CanRefundHtlc, FeeApproxStage, GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs, MakerCoinSwapOpsV2,
+            MmCoin, RefundFundingSecretArgs, RefundTakerPaymentArgs, SendTakerFundingArgs, SpendMakerPaymentArgs,
+            SwapTxTypeWithSecretHash, TakerCoinSwapOpsV2, ToBytes, TradePreimageValue, Transaction, TxPreimageWithSig,
+            ValidateMakerPaymentArgs};
 use common::executor::Timer;
 use common::log::{error, info, warn};
 use common::mm_number::MmNumber;
@@ -1293,8 +1293,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
             Initialized::new(
                 maker_coin_start_block,
                 taker_coin_start_block,
-                taker_payment_trade_fee.amount.into(),
-                maker_payment_spend_trade_fee.amount.into(),
+                taker_payment_trade_fee.amount,
+                maker_payment_spend_trade_fee.amount,
             ),
             sm,
         )
@@ -1327,11 +1327,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
         };
 
         // Validate started_at difference.
-        let started_at_diff = if sm.started_at > maker_negotiation.started_at {
-            sm.started_at - maker_negotiation.started_at
-        } else {
-            maker_negotiation.started_at - sm.started_at
-        };
+        let started_at_diff = sm.started_at.abs_diff(maker_negotiation.started_at);
         if started_at_diff > MAX_STARTED_AT_DIFF {
             let reason = AbortReason::NegotiationFailed(format!(
                 "started_at difference too large: {} > {}",
@@ -1403,7 +1399,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
             sm.p2p_topic.clone(),
             taker_negotiation_msg,
             super::NEGOTIATE_SEND_INTERVAL,
-            sm.p2p_keypair.clone(),
+            sm.p2p_keypair,
         );
 
         // Wait for maker to acknowledge negotiation.
@@ -1461,6 +1457,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for N
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
         let unique_data = sm.unique_data();
         let taker_secret_hash = sm.taker_secret_hash();
+        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
+            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+            &sm.taker_coin,
+            sm.maker_coin.ticker(),
+            &sm.taker_volume,
+            &taker_coin_htlc_pub,
+        );
 
         let funding_args = SendTakerFundingArgs {
             funding_time_lock: sm.taker_funding_locktime(),
@@ -1468,7 +1472,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for N
             taker_secret_hash: &taker_secret_hash,
             maker_secret_hash: &self.negotiation_data.maker_secret_hash,
             maker_pub: &self.negotiation_data.taker_coin_htlc_pub,
-            dex_fee: &DexFee::NoFee,
+            dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
             swap_unique_data: &unique_data,
@@ -1497,7 +1501,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for N
             sm.p2p_topic.clone(),
             funding_info_msg,
             super::TX_INFO_SEND_INTERVAL,
-            sm.p2p_keypair.clone(),
+            sm.p2p_keypair,
         );
 
         Self::change_state(
@@ -1817,7 +1821,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 .maker_coin
                 .wait_for_confirmations(
                     &maker_payment_tx.tx_hex(),
-                    sm.conf_settings.maker_coin_confs,
+                    confirmation_gate_confs(sm.conf_settings.maker_coin_confs),
                     sm.conf_settings.maker_coin_nota,
                     sm.maker_payment_conf_timeout(),
                     10,
@@ -1826,7 +1830,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 .await;
             if let Err(e) = confirm_result {
                 warn!("Swap {}: maker payment not confirmed in time: {}", sm.uuid, e);
-                let reason = AbortReason::MakerPaymentNotConfirmedInTime(format!("{}", e));
+                let reason = AbortReason::MakerPaymentNotConfirmedInTime(e.to_string());
                 return Self::change_state(
                     TakerFundingRefundRequired::new(
                         self.maker_coin_start_block,
@@ -2115,6 +2119,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             },
         };
         let maker_address = sm.taker_coin.my_addr().await;
+        let taker_taker_coin_pub_bytes = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
+            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+            &sm.taker_coin,
+            sm.maker_coin.ticker(),
+            &sm.taker_volume,
+            &taker_taker_coin_pub_bytes,
+        );
 
         let gen_spend_args = GenTakerPaymentSpendArgs {
             taker_tx: &taker_payment_tx,
@@ -2123,7 +2135,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             maker_pub: &maker_taker_coin_pub,
             maker_address: &maker_address,
             taker_pub: &taker_taker_coin_pub,
-            dex_fee: &DexFee::NoFee,
+            dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
         };
@@ -2160,7 +2172,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             sm.p2p_topic.clone(),
             preimage_msg,
             super::TX_INFO_SEND_INTERVAL,
-            sm.p2p_keypair.clone(),
+            sm.p2p_keypair,
         );
 
         // Wait for maker to spend taker payment (reveals maker secret).
@@ -2290,7 +2302,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         {
             Ok(secret) => secret,
             Err(e) => {
-                let reason = AbortReason::CouldNotExtractSecret(format!("{}", e));
+                let reason = AbortReason::CouldNotExtractSecret(e.to_string());
                 return Self::change_state(Aborted::new(reason), sm).await;
             },
         };
@@ -2362,7 +2374,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                 .maker_coin
                 .wait_for_confirmations(
                     &self.maker_payment_spend,
-                    sm.conf_settings.maker_coin_confs,
+                    confirmation_gate_confs(sm.conf_settings.maker_coin_confs),
                     sm.conf_settings.maker_coin_nota,
                     sm.taker_payment_locktime(),
                     10,
@@ -2371,7 +2383,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                 .await;
             if let Err(e) = confirm_result {
                 warn!("Swap {}: maker payment spend not confirmed in time: {}", sm.uuid, e);
-                let reason = AbortReason::MakerPaymentSpendNotConfirmedInTime(format!("{}", e));
+                let reason = AbortReason::MakerPaymentSpendNotConfirmedInTime(e.to_string());
                 return Self::change_state(
                     TakerPaymentRefundRequired::new(
                         // We don't have taker_payment bytes here; use empty as fallback
@@ -2414,6 +2426,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 return Self::change_state(Aborted::new(reason), sm).await;
             },
         };
+        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
+            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+            &sm.taker_coin,
+            sm.maker_coin.ticker(),
+            &sm.taker_volume,
+            &taker_coin_htlc_pub,
+        );
 
         let refund_args = RefundFundingSecretArgs {
             funding_tx: &funding_tx,
@@ -2423,7 +2443,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             taker_secret: sm.taker_secret.as_slice().try_into().unwrap_or(&[0u8; 32]),
             taker_secret_hash: &taker_secret_hash,
             maker_secret_hash: &self.negotiation_data.maker_secret_hash,
-            dex_fee: &DexFee::NoFee,
+            dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
             swap_unique_data: &unique_data,
@@ -2483,6 +2503,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             }
         }
 
+        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
+            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+            &sm.taker_coin,
+            sm.maker_coin.ticker(),
+            &sm.taker_volume,
+            &taker_coin_htlc_pub,
+        );
         let refund_args = RefundTakerPaymentArgs {
             payment_tx: &self.taker_payment,
             time_lock: sm.taker_payment_locktime(),
@@ -2493,7 +2521,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             },
             swap_unique_data: &unique_data,
             watcher_reward: false,
-            dex_fee: &DexFee::NoFee,
+            dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
         };

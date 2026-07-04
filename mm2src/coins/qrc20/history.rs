@@ -512,6 +512,7 @@ impl Qrc20Coin {
                 },
             };
 
+            let tx_history_records: Vec<_> = tx_hash_history.values().cloned().collect();
             if history_map.insert(tx_hash, tx_hash_history).is_some() {
                 ctx.log.log(
                     "😟",
@@ -519,6 +520,7 @@ impl Qrc20Coin {
                     &format!("'transfer' details of {:?} were reloaded", tx_hash),
                 );
             }
+            crate::tx_history_streaming::publish_tx_history_records(ctx, &self.utxo.conf.ticker, tx_history_records);
 
             mm_counter!(ctx.metrics, "tx.history.response.count", 1, "coin" => self.utxo.conf.ticker.clone(), "method" => "transfer_details_by_hash");
             if transactions_left > 0 {

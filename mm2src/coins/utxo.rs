@@ -36,6 +36,7 @@ pub mod utxo_common;
 pub mod utxo_standard;
 pub mod utxo_standard_swap_v2;
 pub mod utxo_withdraw;
+pub mod wc_integration;
 
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
@@ -47,8 +48,8 @@ use common::first_char_to_upper;
 use common::jsonrpc_client::JsonRpcError;
 use common::now_ms;
 use crypto::trezor::utxo::TrezorUtxoCoin;
-use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, Bip44DerPathError, Bip44PathToAccount, Bip44PathToCoin,
-             ChildNumber, DerivationPath, Secp256k1ExtendedPublicKey};
+use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, Bip44DerPathError, ChildNumber, DerivationPath, HDPathToAccount,
+             HDPathToCoin, Secp256k1ExtendedPublicKey};
 use derive_more::Display;
 #[cfg(not(target_arch = "wasm32"))] use dirs::home_dir;
 use futures::channel::mpsc;
@@ -84,7 +85,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, Weak};
 use utxo_builder::UtxoConfBuilder;
 use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
-use utxo_signer::with_key_pair::sign_tx;
+use utxo_signer::with_key_pair::sign_tx_with_p2pk;
 use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
@@ -1208,12 +1209,110 @@ pub struct UtxoMergeParams {
     pub max_merge_at_once: usize,
 }
 
+/// The Bitcoin difficulty-retarget interval, in blocks. It is also the maximum
+/// number of headers fetched per sync request (a single fetch never spans more
+/// than one retarget window) and the lower bound a configured
+/// `max_stored_block_headers` must exceed on a retargeting chain.
+pub const DIFFICULTY_RETARGET_INTERVAL: u64 = 2016;
+
+/// Chain difficulty-algorithm / header chain-variant selector accepted in the
+/// `spv_conf.validation_params.difficulty_algorithm` field. The string values
+/// are dictated interop and must be accepted verbatim.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub enum DifficultyAlgorithm {
+    #[serde(rename = "Bitcoin Mainnet")]
+    BitcoinMainnet,
+    #[serde(rename = "Bitcoin Testnet")]
+    BitcoinTestnet,
+}
+
+/// The trusted anchor (`spv_conf.starting_block_header`): the height/header from
+/// which header sync and validation begin. Field names are dictated interop.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct UtxoBlockHeaderVerificationParams {
+pub struct SPVBlockHeader {
+    pub height: u64,
+    /// Block hash in the usual displayed (big-endian) hex form.
+    pub hash: String,
+    pub time: u32,
+    pub bits: u32,
+}
+
+/// How fetched headers are validated (`spv_conf.validation_params`). When the
+/// whole object is omitted, headers are stored without proof-of-work /
+/// difficulty validation (trusted-RPC mode).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SPVValidationParams {
     pub difficulty_check: bool,
     pub constant_difficulty: bool,
-    pub blocks_limit_to_check: NonZeroU64,
-    pub check_every: f64,
+    #[serde(default)]
+    pub difficulty_algorithm: Option<DifficultyAlgorithm>,
+}
+
+/// The optional SPV configuration object supplied at coin-activation time under
+/// the coin's `conf` at the key `spv_conf`. Field names are dictated interop and
+/// are accepted verbatim from third-party coin-config files.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SPVConf {
+    pub starting_block_header: SPVBlockHeader,
+    #[serde(default)]
+    pub max_stored_block_headers: Option<NonZeroU64>,
+    #[serde(default)]
+    pub validation_params: Option<SPVValidationParams>,
+}
+
+impl SPVConf {
+    /// Static activation-time validation of the SPV configuration (R37.1.3).
+    /// The RPC-anchor match is performed separately at sync start.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(SPVValidationParams {
+            difficulty_algorithm: Some(algorithm),
+            ..
+        }) = &self.validation_params
+        {
+            match algorithm {
+                DifficultyAlgorithm::BitcoinMainnet => {
+                    if self.starting_block_header.height % DIFFICULTY_RETARGET_INTERVAL != 0 {
+                        return Err(format!(
+                            "starting_block_header height '{}' must be a multiple of the difficulty-retarget \
+                             interval ({})",
+                            self.starting_block_header.height, DIFFICULTY_RETARGET_INTERVAL
+                        ));
+                    }
+                    if let Some(max_stored) = self.max_stored_block_headers {
+                        if max_stored.get() <= DIFFICULTY_RETARGET_INTERVAL {
+                            return Err(format!(
+                                "max_stored_block_headers '{}' must be greater than the difficulty-retarget \
+                                 interval ({})",
+                                max_stored.get(),
+                                DIFFICULTY_RETARGET_INTERVAL
+                            ));
+                        }
+                    }
+                },
+                DifficultyAlgorithm::BitcoinTestnet => {
+                    return Err("'Bitcoin Testnet' difficulty algorithm is not currently supported".to_string());
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether each header's proof-of-work / difficulty is validated. False in
+    /// trusted-RPC mode (no `validation_params`).
+    pub fn difficulty_check(&self) -> bool {
+        self.validation_params
+            .as_ref()
+            .map(|params| params.difficulty_check)
+            .unwrap_or(false)
+    }
+
+    /// Whether the chain uses a fixed (non-retargeting) difficulty.
+    pub fn constant_difficulty(&self) -> bool {
+        self.validation_params
+            .as_ref()
+            .map(|params| params.constant_difficulty)
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1256,7 +1355,11 @@ impl UtxoActivationParams {
             Some("electrum") => {
                 let servers =
                     json::from_value(req["servers"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumServers)?;
-                UtxoRpcMode::Electrum { servers }
+                UtxoRpcMode::Electrum {
+                    servers,
+                    min_connected: None,
+                    max_connected: None,
+                }
             },
             _ => return MmError::err(UtxoFromLegacyReqErr::UnexpectedMethod),
         };
@@ -1298,7 +1401,13 @@ impl UtxoActivationParams {
 #[serde(tag = "rpc", content = "rpc_data")]
 pub enum UtxoRpcMode {
     Native,
-    Electrum { servers: Vec<ElectrumRpcRequest> },
+    Electrum {
+        servers: Vec<ElectrumRpcRequest>,
+        #[serde(default)]
+        min_connected: Option<usize>,
+        #[serde(default)]
+        max_connected: Option<usize>,
+    },
 }
 
 #[derive(Debug)]
@@ -1326,7 +1435,7 @@ pub struct UtxoHDWallet {
     /// This derivation path consists of `purpose` and `coin_type` only
     /// where the full `BIP44` address has the following structure:
     /// `m/purpose'/coin_type'/account'/change/address_index`.
-    pub derivation_path: Bip44PathToCoin,
+    pub derivation_path: HDPathToCoin,
     /// User accounts.
     pub accounts: HDAccountsMutex<UtxoHDAccount>,
     pub gap_limit: u32,
@@ -1349,7 +1458,7 @@ pub struct UtxoHDAccount {
     /// `m/purpose'/coin_type'/account'`.
     pub extended_pubkey: Secp256k1ExtendedPublicKey,
     /// [`UtxoHDWallet::derivation_path`] derived by [`UtxoHDAccount::account_id`].
-    pub account_derivation_path: Bip44PathToAccount,
+    pub account_derivation_path: HDPathToAccount,
     /// The number of addresses that we know have been used by the user.
     /// This is used in order not to check the transaction history for each address,
     /// but to request the balance of addresses whose index is less than `address_number`.
@@ -1372,7 +1481,7 @@ impl HDAccountOps for UtxoHDAccount {
 
 impl UtxoHDAccount {
     pub fn try_from_storage_item(
-        wallet_der_path: &Bip44PathToCoin,
+        wallet_der_path: &HDPathToCoin,
         account_info: &HDAccountStorageItem,
     ) -> HDWalletStorageResult<UtxoHDAccount> {
         const ACCOUNT_CHILD_HARDENED: bool = true;
@@ -1610,6 +1719,8 @@ where
     let my_address = try_tx_s!(coin.as_ref().derivation_method.iguana_or_err());
     let key_pair = try_tx_s!(coin.as_ref().priv_key_policy.key_pair_or_err());
 
+    let p2pk_outpoints = try_tx_s!(electrum_p2pk_outpoints_for_address(coin.as_ref(), my_address).await);
+
     let mut builder = UtxoTxBuilder::new(coin)
         .add_available_inputs(unspents)
         .add_outputs(outputs)
@@ -1635,12 +1746,13 @@ where
     };
 
     let prev_script = Builder::build_p2pkh(&my_address.hash);
-    let signed = try_tx_s!(sign_tx(
+    let signed = try_tx_s!(sign_tx_with_p2pk(
         unsigned,
         key_pair,
         prev_script,
         signature_version,
-        coin.as_ref().conf.fork_id
+        coin.as_ref().conf.fork_id,
+        &p2pk_outpoints,
     ));
 
     try_tx_s!(coin.broadcast_tx(&signed).await, signed);
@@ -1660,6 +1772,47 @@ pub fn output_script(address: &Address, script_type: ScriptType) -> Script {
             ScriptType::P2WSH => Builder::build_witness_script(&address.hash),
         },
     }
+}
+
+/// Returns Electrum P2PK unspents for the given legacy address if the address
+/// belongs to the currently activated keypair.
+///
+/// This is used to discover legacy pay-to-pubkey outputs (`<pubkey> OP_CHECKSIG`)
+/// that are not returned by address-based P2PKH script-hash queries.
+pub(crate) async fn electrum_p2pk_unspents_for_address(
+    utxo: &UtxoCoinFields,
+    address: &Address,
+) -> UtxoRpcResult<Vec<UnspentInfo>> {
+    if !address.addr_format.is_legacy() {
+        return Ok(vec![]);
+    }
+
+    let key_pair = match utxo.priv_key_policy.key_pair() {
+        Some(key_pair) => key_pair,
+        None => return Ok(vec![]),
+    };
+
+    let my_p2pkh_hash = AddressHashEnum::AddressHash(key_pair.public().address_hash());
+    if my_p2pkh_hash != address.hash {
+        return Ok(vec![]);
+    }
+
+    let electrum = match &utxo.rpc_client {
+        UtxoRpcClientEnum::Electrum(electrum) => electrum,
+        UtxoRpcClientEnum::Native(_) => return Ok(vec![]),
+    };
+
+    let p2pk_script = Builder::build_p2pk(key_pair.public());
+    electrum.list_unspent_for_script(&p2pk_script).compat().await
+}
+
+/// Returns outpoints of Electrum P2PK unspents for the given legacy address.
+pub(crate) async fn electrum_p2pk_outpoints_for_address(
+    utxo: &UtxoCoinFields,
+    address: &Address,
+) -> UtxoRpcResult<HashSet<OutPoint>> {
+    let unspents = electrum_p2pk_unspents_for_address(utxo, address).await?;
+    Ok(unspents.into_iter().map(|unspent| unspent.outpoint).collect())
 }
 
 pub fn address_by_conf_and_pubkey_str(

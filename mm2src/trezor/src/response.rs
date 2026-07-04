@@ -29,6 +29,7 @@ pub enum TrezorResponse<'a, 'b, T> {
     Ready(T),
     ButtonRequest(ButtonRequest<'a, 'b, T>),
     PinMatrixRequest(PinMatrixRequest<'a, 'b, T>),
+    PassphraseRequest(PassphraseRequest<'a, 'b, T>),
 }
 
 impl<'a, 'b, T: 'static> TrezorResponse<'a, 'b, T> {
@@ -41,6 +42,9 @@ impl<'a, 'b, T: 'static> TrezorResponse<'a, 'b, T> {
             )),
             TrezorResponse::PinMatrixRequest(_) => MmError::err(TrezorError::UnexpectedInteractionRequest(
                 TrezorUserInteraction::PinMatrix3x3,
+            )),
+            TrezorResponse::PassphraseRequest(_) => MmError::err(TrezorError::UnexpectedInteractionRequest(
+                TrezorUserInteraction::Passphrase,
             )),
         }
     }
@@ -61,6 +65,11 @@ impl<'a, 'b, T: 'static> TrezorResponse<'a, 'b, T> {
                 Self::PinMatrixRequest(_) => {
                     return MmError::err(TrezorError::UnexpectedInteractionRequest(
                         TrezorUserInteraction::PinMatrix3x3,
+                    ));
+                },
+                Self::PassphraseRequest(_) => {
+                    return MmError::err(TrezorError::UnexpectedInteractionRequest(
+                        TrezorUserInteraction::Passphrase,
                     ));
                 },
             };
@@ -90,6 +99,18 @@ impl<'a, 'b, T: 'static> TrezorResponse<'a, 'b, T> {
             result_handler,
         })
     }
+
+    pub(crate) fn new_passphrase_request(
+        session: &'b mut TrezorSession<'a>,
+        message: proto_common::PassphraseRequest,
+        result_handler: ResultHandler<T>,
+    ) -> Self {
+        TrezorResponse::PassphraseRequest(PassphraseRequest {
+            session,
+            message,
+            result_handler,
+        })
+    }
 }
 
 #[async_trait]
@@ -114,6 +135,10 @@ where
                         let pin_response = processor.on_pin_request().await?;
                         pin_req.ack_pin(pin_response.pin).await.mm_err(Into::into)?
                     },
+                    TrezorResponse::PassphraseRequest(passphrase_req) => {
+                        let passphrase = processor.on_passphrase_request().await?;
+                        passphrase_req.ack_passphrase(passphrase).await.mm_err(Into::into)?
+                    },
                 };
             }
         };
@@ -136,7 +161,11 @@ impl<'a, 'b, T> fmt::Debug for ButtonRequest<'a, 'b, T> {
 
 impl<'a, 'b, T: 'static> ButtonRequest<'a, 'b, T> {
     /// The type of button request.
-    pub fn request_type(&self) -> Option<ButtonRequestType> { self.message.code.and_then(ButtonRequestType::from_i32) }
+    pub fn request_type(&self) -> Option<ButtonRequestType> {
+        self.message
+            .code
+            .and_then(|code| ButtonRequestType::try_from(code).ok())
+    }
 
     /// Ack the request and get the next message from the device.
     pub async fn ack(self) -> TrezorResult<TrezorResponse<'a, 'b, T>> {
@@ -164,12 +193,36 @@ impl<'a, 'b, T> fmt::Debug for PinMatrixRequest<'a, 'b, T> {
 impl<'a, 'b, T: 'static> PinMatrixRequest<'a, 'b, T> {
     /// The type of PIN matrix request.
     pub fn request_type(&self) -> Option<PinMatrixRequestType> {
-        self.message.r#type.and_then(PinMatrixRequestType::from_i32)
+        self.message.r#type.and_then(|t| PinMatrixRequestType::try_from(t).ok())
     }
 
     /// Ack the request with a PIN and get the next message from the device.
     pub async fn ack_pin(self, pin: String) -> TrezorResult<TrezorResponse<'a, 'b, T>> {
         let req = proto_common::PinMatrixAck { pin };
+        self.session.call(req, self.result_handler).await
+    }
+
+    pub async fn cancel(self) { self.session.cancel_last_op().await }
+}
+
+/// A passphrase request message sent by the device.
+pub struct PassphraseRequest<'a, 'b, T> {
+    session: &'b mut TrezorSession<'a>,
+    message: proto_common::PassphraseRequest,
+    result_handler: ResultHandler<T>,
+}
+
+impl<'a, 'b, T> fmt::Debug for PassphraseRequest<'a, 'b, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{:?}", self.message) }
+}
+
+impl<'a, 'b, T: 'static> PassphraseRequest<'a, 'b, T> {
+    /// Ack the request with a host-provided passphrase and get the next message from the device.
+    pub async fn ack_passphrase(self, passphrase: String) -> TrezorResult<TrezorResponse<'a, 'b, T>> {
+        let req = proto_common::PassphraseAck {
+            passphrase: Some(passphrase),
+            ..Default::default()
+        };
         self.session.call(req, self.result_handler).await
     }
 

@@ -4,17 +4,17 @@ use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::swap_lock::{SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
 use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_coin_balance_for_swap,
-            compute_dex_fee, get_locked_amount, recv_swap_msg, swap_topic, AtomicSwap, LockedAmount, MySwapInfo,
-            NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction, SavedSwap,
-            SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
+            compute_dex_fee_with_taker_pubkey, get_locked_amount, recv_swap_msg, swap_topic, AtomicSwap, LockedAmount,
+            MySwapInfo, NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction,
+            SavedSwap, SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
 use crate::mm2::lp_ordermatch::{MakerOrderBuilder, OrderConfirmationsSettings};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
-use coins::{CanRefundHtlc, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, TradeFee, TradePreimageValue,
-            TransactionEnum, ValidateFeeArgs, ValidatePaymentInput};
+use coins::{CanRefundHtlc, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions, TradeFee,
+            TradePreimageValue, TransactionEnum, ValidateFeeArgs, ValidatePaymentInput};
 use common::log::{debug, error, warn};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::{bits256, executor::Timer, now_ms};
@@ -35,9 +35,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
-pub const MAKER_SUCCESS_EVENTS: [&str; 11] = [
+pub const MAKER_SUCCESS_EVENTS: [&str; 12] = [
     "Started",
     "Negotiated",
+    "MakerPaymentInstructionsReceived",
     "TakerFeeValidated",
     "MakerPaymentSent",
     "TakerPaymentReceived",
@@ -233,6 +234,8 @@ impl MakerSwap {
                 }
             },
             MakerSwapEvent::NegotiateFailed(err) => self.errors.lock().push(err),
+            // Journal-compat only: this node never emits payment instructions, so there is nothing to apply.
+            MakerSwapEvent::MakerPaymentInstructionsReceived(_) => (),
             MakerSwapEvent::TakerFeeValidated(tx) => self.w().taker_fee = Some(tx),
             MakerSwapEvent::TakerFeeValidateFailed(err) => self.errors.lock().push(err),
             MakerSwapEvent::MakerPaymentSent(tx) => self.w().maker_payment = Some(tx),
@@ -602,13 +605,14 @@ impl MakerSwap {
         log!({ "Taker fee tx {:02x}", hash });
 
         let taker_amount = MmNumber::from(self.taker_amount.clone());
-        let dex_fee = compute_dex_fee(
+        let other_taker_coin_htlc_pub = self.r().other_taker_coin_htlc_pub;
+        let dex_fee = compute_dex_fee_with_taker_pubkey(
             self.net_cfg(),
             &self.taker_coin,
             &self.r().data.maker_coin,
             &taker_amount,
+            &*other_taker_coin_htlc_pub,
         );
-        let other_taker_coin_htlc_pub = self.r().other_taker_coin_htlc_pub;
         let taker_coin_start_block = self.r().data.taker_coin_start_block;
 
         let mut attempts = 0;
@@ -1321,6 +1325,7 @@ pub enum MakerSwapEvent {
     StartFailed(SwapError),
     Negotiated(TakerNegotiationData),
     NegotiateFailed(SwapError),
+    MakerPaymentInstructionsReceived(Option<PaymentInstructions>),
     TakerFeeValidated(TransactionIdentifier),
     TakerFeeValidateFailed(SwapError),
     MakerPaymentSent(TransactionIdentifier),
@@ -1350,6 +1355,7 @@ impl MakerSwapEvent {
             MakerSwapEvent::StartFailed(_) => "Start failed...".to_owned(),
             MakerSwapEvent::Negotiated(_) => "Negotiated...".to_owned(),
             MakerSwapEvent::NegotiateFailed(_) => "Negotiate failed...".to_owned(),
+            MakerSwapEvent::MakerPaymentInstructionsReceived(_) => "Maker payment instructions obtained...".to_owned(),
             MakerSwapEvent::TakerFeeValidated(_) => "Taker fee validated...".to_owned(),
             MakerSwapEvent::TakerFeeValidateFailed(_) => "Taker fee validate failed...".to_owned(),
             MakerSwapEvent::MakerPaymentSent(_) => "Maker payment sent...".to_owned(),
@@ -1391,6 +1397,7 @@ impl MakerSwapEvent {
             self,
             MakerSwapEvent::Started(_)
                 | MakerSwapEvent::Negotiated(_)
+                | MakerSwapEvent::MakerPaymentInstructionsReceived(_)
                 | MakerSwapEvent::TakerFeeValidated(_)
                 | MakerSwapEvent::MakerPaymentSent(_)
                 | MakerSwapEvent::TakerPaymentReceived(_)
@@ -1420,6 +1427,7 @@ impl MakerSavedEvent {
             MakerSwapEvent::StartFailed(_) => Some(MakerSwapCommand::Finish),
             MakerSwapEvent::Negotiated(_) => Some(MakerSwapCommand::WaitForTakerFee),
             MakerSwapEvent::NegotiateFailed(_) => Some(MakerSwapCommand::Finish),
+            MakerSwapEvent::MakerPaymentInstructionsReceived(_) => Some(MakerSwapCommand::WaitForTakerFee),
             MakerSwapEvent::TakerFeeValidated(_) => Some(MakerSwapCommand::SendPayment),
             MakerSwapEvent::TakerFeeValidateFailed(_) => Some(MakerSwapCommand::Finish),
             MakerSwapEvent::MakerPaymentSent(_) => Some(MakerSwapCommand::WaitForTakerPayment),

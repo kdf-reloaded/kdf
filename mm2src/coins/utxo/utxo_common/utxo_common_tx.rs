@@ -1,6 +1,7 @@
 // utxo_common_tx — transaction building, signing, fee estimation, UTXO management
 
 use super::*;
+use utxo_signer::with_key_pair::sign_tx;
 
 pub const DEFAULT_FEE_VOUT: usize = 0;
 
@@ -51,6 +52,23 @@ pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> 
             ((0.75 * base_size as f64) + (0.25 * total_size as f64)) as usize
         },
         _ => transaction_bytes.len() + tx.inputs().len() * additional_len,
+    }
+}
+
+pub(crate) fn trade_preimage_sender_address(coin: &UtxoCoinFields) -> TradePreimageResult<Address> {
+    match coin.derivation_method {
+        DerivationMethod::Iguana(ref my_address) => Ok(my_address.clone()),
+        DerivationMethod::HDWallet(UtxoHDWallet { ref address_format, .. }) => {
+            let my_public_key = my_public_key(coin).mm_err(Into::into)?;
+            Ok(address_from_pubkey(
+                my_public_key,
+                coin.conf.pub_addr_prefix,
+                coin.conf.pub_t_addr_prefix,
+                coin.conf.checksum_type,
+                coin.conf.bech32_hrp.clone(),
+                address_format.clone(),
+            ))
+        },
     }
 }
 
@@ -551,7 +569,7 @@ where
     let tx_fee = coin.get_tx_fee().await.mm_err(Into::into)?;
     // [`FeePolicy::DeductFromOutput`] is used if the value is [`TradePreimageValue::UpperBound`] only
     let is_amount_upper_bound = matches!(fee_policy, FeePolicy::DeductFromOutput(_));
-    let my_address = coin.as_ref().derivation_method.iguana_or_err().mm_err(Into::into)?;
+    let my_address = trade_preimage_sender_address(coin.as_ref())?;
 
     match tx_fee {
         // if it's a dynamic fee, we should generate a swap transaction to get an actual trade fee
@@ -560,11 +578,12 @@ where
             let dynamic_fee = coin.increase_dynamic_fee_by_stage(fee, stage);
 
             let outputs_count = outputs.len();
-            let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
+            let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(&my_address).await.mm_err(Into::into)?;
 
             let actual_tx_fee = ActualTxFee::Dynamic(dynamic_fee);
 
             let mut tx_builder = UtxoTxBuilder::new(coin)
+                .with_from_address(my_address.clone())
                 .add_available_inputs(unspents)
                 .add_outputs(outputs)
                 .with_fee_policy(fee_policy)
@@ -589,9 +608,10 @@ where
         },
         ActualTxFee::FixedPerKb(fee) => {
             let outputs_count = outputs.len();
-            let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(my_address).await.mm_err(Into::into)?;
+            let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(&my_address).await.mm_err(Into::into)?;
 
             let mut tx_builder = UtxoTxBuilder::new(coin)
+                .with_from_address(my_address.clone())
                 .add_available_inputs(unspents)
                 .add_outputs(outputs)
                 .with_fee_policy(fee_policy)
@@ -948,12 +968,18 @@ pub async fn get_all_unspent_ordered_list<'a, T: UtxoCommonOps>(
     address: &Address,
 ) -> UtxoRpcResult<(Vec<UnspentInfo>, RecentlySpentOutPointsGuard<'a>)> {
     let decimals = coin.as_ref().decimals;
-    let unspents = coin
+    let mut unspents = coin
         .as_ref()
         .rpc_client
         .list_unspent(address, decimals)
         .compat()
         .await?;
+
+    // For Electrum legacy addresses also query `<pubkey> OP_CHECKSIG` (P2PK)
+    // script-hash unspents so they are available for selection and spending.
+    let mut p2pk_unspents = crate::utxo::electrum_p2pk_unspents_for_address(coin.as_ref(), address).await?;
+    unspents.append(&mut p2pk_unspents);
+
     let recently_spent = coin.as_ref().recently_spent_outpoints.lock().await;
     let unordered_unspents = recently_spent.replace_spent_outputs_with_cache(unspents.into_iter().collect());
     let ordered_unspents = sort_dedup_unspents(unordered_unspents);

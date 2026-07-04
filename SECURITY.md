@@ -76,7 +76,7 @@ See [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for the full pre-release gati
 
 ## Hardening notes for operators
 
-- Run `mm2` as a non-root user. Restrict access to the RPC port (`7783` by default).
+- Run `kdf` as a non-root user. Restrict access to the RPC port (`7783` by default).
 - Use a strong, unique `rpc_password`.
 - Treat `MM2.json` as secret material — it contains your mnemonic.
 - Take regular backups of your seed phrase via a secure offline channel.

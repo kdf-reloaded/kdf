@@ -18,10 +18,21 @@ cargo test --bins --lib
 We also use [Clippy](https://github.com/rust-lang/rust-clippy) to avoid common mistakes
 and we use [rustfmt](https://github.com/rust-lang/rustfmt) to make our code clear to everyone.
 
-1. Format the code using rustfmt:
+1. Format the code using rustfmt. **This project requires the pinned nightly toolchain** (see `rust-toolchain.toml` for the exact version) for formatting — plain `cargo fmt` will produce a different result and fail CI:
     ```shell
-    cargo fmt
+    # Determine the pinned nightly version:
+    grep channel rust-toolchain.toml
+
+    # Format only the crates you modified (never run on the whole workspace):
+    cargo +nightly-2026-05-08 fmt -p <crate_name>
+
+    # To format all non-patched KDF packages at once:
+    pkgs=$(cargo metadata --no-deps --format-version 1 \
+      | jq -r '.packages[] | select(.manifest_path | test("-patched/") | not) | .name')
+    args=(); for p in $pkgs; do args+=(-p "$p"); done
+    cargo +nightly-2026-05-08 fmt "${args[@]}"
     ```
+    **Important**: never run `cargo fmt` without `-p <crate>` scoping — the workspace contains third-party patched vendor trees that must not be reformatted.
 2. Make sure there are no warnings and errors. Run the Clippy:
     ```shell
     cargo clippy -- -D warnings

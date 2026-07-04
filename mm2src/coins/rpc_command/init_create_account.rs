@@ -71,7 +71,8 @@ impl RpcTaskTypes for InitCreateAccountTask {
     type UserAction = CreateAccountUserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RpcTask for InitCreateAccountTask {
     fn initial_status(&self) -> Self::InProgressStatus { CreateAccountInProgressStatus::Preparing }
 
@@ -90,7 +91,8 @@ impl RpcTask for InitCreateAccountTask {
                 on_connected: CreateAccountInProgressStatus::Preparing,
                 on_connection_failed: CreateAccountInProgressStatus::Finishing,
                 on_button_request: CreateAccountInProgressStatus::WaitingForUserToConfirmPubkey,
-                on_pin_request: CreateAccountAwaitingStatus::WaitForTrezorPin,
+                on_pin_request: CreateAccountAwaitingStatus::EnterTrezorPin,
+                on_passphrase_request: CreateAccountAwaitingStatus::EnterTrezorPassphrase,
                 on_ready: CreateAccountInProgressStatus::RequestingAccountBalance,
             };
             let xpub_extractor = CreateAccountXPubExtractor::new(ctx, task_handle, hw_statuses).mm_err(Into::into)?;
@@ -173,7 +175,7 @@ pub(crate) mod common_impl {
         let hd_wallet = coin.derivation_method().hd_wallet_or_err().mm_err(Into::into)?;
 
         let mut new_account = coin
-            .create_new_account(hd_wallet, xpub_extractor)
+            .create_new_account(hd_wallet, Some(xpub_extractor))
             .await
             .mm_err(Into::into)?;
         let address_scanner = coin.produce_hd_address_scanner().await.mm_err(Into::into)?;

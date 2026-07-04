@@ -79,6 +79,7 @@ cfg_wasm32! {
     pub(crate) use mm2_db::indexed_db::{ConstructibleDb, DbLocked, SharedDb};
     pub(crate) use hd_wallet_storage::HDWalletDb;
     pub(crate) use tx_history_db::TxHistoryDb;
+    pub(crate) use utxo::utxo_indexedb_block_header_storage::BlockHeaderStorageDb;
 
     pub type TxHistoryDbLocked<'a> = DbLocked<'a, TxHistoryDb>;
 }
@@ -249,6 +250,7 @@ pub use solana::{solana_coin_from_conf_and_params, SolanaActivationParams, Solan
 pub mod siacoin;
 pub mod tendermint;
 #[cfg(target_arch = "wasm32")] pub mod tx_history_db;
+pub mod tx_history_streaming;
 pub mod utxo;
 #[cfg(not(target_arch = "wasm32"))] pub mod z_coin;
 

@@ -65,9 +65,9 @@ mod prelude {
 	#[cfg(feature = "hashbrown")]
 	extern crate hashbrown;
 
-	pub use alloc::{vec, vec::Vec, string::String, collections::VecDeque, boxed::Box};
+	pub use alloc::{vec, vec::Vec, string::String};
 	#[cfg(not(feature = "hashbrown"))]
-	pub use std::collections::{HashMap, HashSet, hash_map};
+	pub use std::collections::{HashMap, hash_map};
 	#[cfg(feature = "hashbrown")]
 	pub use self::hashbrown::{HashMap, HashSet, hash_map};
 
@@ -79,7 +79,7 @@ use prelude::*;
 /// Sync compat for std/no_std
 #[cfg(feature = "std")]
 mod sync {
-	pub use ::std::sync::{Mutex, MutexGuard};
+	pub use ::std::sync::Mutex;
 }
 
 /// Sync compat for std/no_std
@@ -843,7 +843,7 @@ impl RawInvoice {
 	///
 	/// (C-not exported) As there is not yet a manual mapping for a FilterMap
 	pub fn known_tagged_fields(&self)
-		-> FilterMap<Iter<RawTaggedField>, fn(&RawTaggedField) -> Option<&TaggedField>>
+		-> FilterMap<Iter<'_, RawTaggedField>, fn(&RawTaggedField) -> Option<&TaggedField>>
 	{
 		// For 1.14.0 compatibility: closures' types can't be written an fn()->() in the
 		// function's type signature.
@@ -1117,7 +1117,7 @@ impl Invoice {
 	///
 	/// (C-not exported) As there is not yet a manual mapping for a FilterMap
 	pub fn tagged_fields(&self)
-		-> FilterMap<Iter<RawTaggedField>, fn(&RawTaggedField) -> Option<&TaggedField>> {
+		-> FilterMap<Iter<'_, RawTaggedField>, fn(&RawTaggedField) -> Option<&TaggedField>> {
 		self.signed_invoice.raw_invoice().known_tagged_fields()
 	}
 
@@ -1129,7 +1129,7 @@ impl Invoice {
 	/// Return the description or a hash of it for longer ones
 	///
 	/// (C-not exported) because we don't yet export InvoiceDescription
-	pub fn description(&self) -> InvoiceDescription {
+	pub fn description(&self) -> InvoiceDescription<'_> {
 		if let Some(ref direct) = self.signed_invoice.description() {
 			return InvoiceDescription::Direct(direct);
 		} else if let Some(ref hash) = self.signed_invoice.description_hash() {

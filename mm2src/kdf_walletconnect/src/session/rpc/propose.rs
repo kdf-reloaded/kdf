@@ -5,6 +5,9 @@ use relay_rpc::rpc::params::{Metadata, Relay};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+/// JSON-RPC `method` for a `wc_sessionPropose` request.
+pub const METHOD: &str = "wc_sessionPropose";
+
 /// IRN relay tags for `wc_sessionPropose`.
 pub const TAG: IrnTag = IrnTag {
     request: 1100,

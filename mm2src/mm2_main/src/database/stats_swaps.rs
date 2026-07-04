@@ -1,4 +1,4 @@
-use crate::mm2::lp_swap::{MakerSavedSwap, SavedSwap, SavedSwapIo, TakerSavedSwap};
+use crate::mm2::lp_swap::{MakerSavedSwap, MakerSwapEvent, SavedSwap, SavedSwapIo, TakerSavedSwap, TakerSwapEvent};
 use common::log::{debug, error};
 use db_common::sqlite::rusqlite::{Connection, OptionalExtension};
 use mm2_core::mm_ctx::MmArc;
@@ -39,8 +39,33 @@ const INSERT_STATS_SWAP: &str = "INSERT INTO stats_swaps (
     finished_at,
     maker_amount,
     taker_amount,
-    is_success
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)";
+    is_success,
+    maker_coin_usd_price,
+    taker_coin_usd_price,
+    maker_pubkey,
+    taker_pubkey,
+    maker_gui,
+    taker_gui,
+    maker_version,
+    taker_version
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)";
+
+pub const ADD_FIAT_SNAPSHOT_COLUMNS: &[&str] = &[
+    "ALTER TABLE stats_swaps ADD COLUMN maker_coin_usd_price DECIMAL;",
+    "ALTER TABLE stats_swaps ADD COLUMN taker_coin_usd_price DECIMAL;",
+];
+
+pub const ADD_PUBKEY_COLUMNS: &[&str] = &[
+    "ALTER TABLE stats_swaps ADD COLUMN maker_pubkey VARCHAR(255);",
+    "ALTER TABLE stats_swaps ADD COLUMN taker_pubkey VARCHAR(255);",
+];
+
+pub const ADD_GUI_AND_VERSION_COLUMNS: &[&str] = &[
+    "ALTER TABLE stats_swaps ADD COLUMN maker_gui VARCHAR(255);",
+    "ALTER TABLE stats_swaps ADD COLUMN taker_gui VARCHAR(255);",
+    "ALTER TABLE stats_swaps ADD COLUMN maker_version VARCHAR(255);",
+    "ALTER TABLE stats_swaps ADD COLUMN taker_version VARCHAR(255);",
+];
 
 const ADD_SPLIT_TICKERS: &[&str] = &[
     "ALTER TABLE stats_swaps ADD COLUMN maker_coin_ticker VARCHAR(255) NOT NULL DEFAULT '';",
@@ -68,6 +93,15 @@ const ADD_SPLIT_TICKERS: &[&str] = &[
 pub const ADD_STARTED_AT_INDEX: &str = "CREATE INDEX timestamp_index ON stats_swaps (started_at);";
 
 const SELECT_ID_BY_UUID: &str = "SELECT id FROM stats_swaps WHERE uuid = ?1";
+const UPDATE_BOTH_PUBKEYS_BY_UUID: &str = "UPDATE stats_swaps SET maker_pubkey = ?1, taker_pubkey = ?2 WHERE uuid = ?3";
+const UPDATE_MAKER_PUBKEY_BY_UUID: &str = "UPDATE stats_swaps SET maker_pubkey = ?1 WHERE uuid = ?2";
+const UPDATE_TAKER_PUBKEY_BY_UUID: &str = "UPDATE stats_swaps SET taker_pubkey = ?1 WHERE uuid = ?2";
+
+#[derive(Clone, Debug)]
+pub struct FiatPriceSnapshot {
+    pub maker_coin_usd_price: String,
+    pub taker_coin_usd_price: String,
+}
 
 /// Returns SQL statements to initially fill stats_swaps table using existing DB with JSON files
 pub async fn create_and_fill_stats_swaps_from_json_statements(ctx: &MmArc) -> Vec<(&'static str, Vec<String>)> {
@@ -101,7 +135,10 @@ fn split_coin(coin: &str) -> (String, String) {
     (ticker, platform)
 }
 
-fn insert_stats_maker_swap_sql(swap: &MakerSavedSwap) -> Option<(&'static str, Vec<String>)> {
+fn insert_stats_maker_swap_sql(
+    swap: &MakerSavedSwap,
+    fiat_snapshot: Option<&FiatPriceSnapshot>,
+) -> Option<(&'static str, Vec<String>)> {
     let swap_data = match swap.swap_data() {
         Ok(d) => d,
         Err(e) => {
@@ -123,6 +160,16 @@ fn insert_stats_maker_swap_sql(swap: &MakerSavedSwap) -> Option<(&'static str, V
     let (maker_coin_ticker, maker_coin_platform) = split_coin(&swap_data.maker_coin);
     let (taker_coin_ticker, taker_coin_platform) = split_coin(&swap_data.taker_coin);
 
+    let (maker_coin_usd_price, taker_coin_usd_price) = fiat_snapshot
+        .map(|snapshot| {
+            (
+                snapshot.maker_coin_usd_price.clone(),
+                snapshot.taker_coin_usd_price.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let (maker_pubkey, taker_pubkey) = maker_swap_pubkeys(swap);
+
     let params = vec![
         swap_data.maker_coin.clone(),
         maker_coin_ticker,
@@ -136,6 +183,14 @@ fn insert_stats_maker_swap_sql(swap: &MakerSavedSwap) -> Option<(&'static str, V
         swap_data.maker_amount.to_string(),
         swap_data.taker_amount.to_string(),
         (is_success as u32).to_string(),
+        maker_coin_usd_price,
+        taker_coin_usd_price,
+        maker_pubkey.unwrap_or_default(),
+        taker_pubkey.unwrap_or_default(),
+        swap.gui.clone().unwrap_or_default(),
+        String::new(),
+        swap.mm_version.clone().unwrap_or_default(),
+        String::new(),
     ];
     Some((INSERT_STATS_SWAP, params))
 }
@@ -172,7 +227,10 @@ fn insert_stats_maker_swap_sql_init(swap: &MakerSavedSwap) -> Option<(&'static s
     Some((INSERT_STATS_SWAP_ON_INIT, params))
 }
 
-fn insert_stats_taker_swap_sql(swap: &TakerSavedSwap) -> Option<(&'static str, Vec<String>)> {
+fn insert_stats_taker_swap_sql(
+    swap: &TakerSavedSwap,
+    fiat_snapshot: Option<&FiatPriceSnapshot>,
+) -> Option<(&'static str, Vec<String>)> {
     let swap_data = match swap.swap_data() {
         Ok(d) => d,
         Err(e) => {
@@ -194,6 +252,16 @@ fn insert_stats_taker_swap_sql(swap: &TakerSavedSwap) -> Option<(&'static str, V
     let (maker_coin_ticker, maker_coin_platform) = split_coin(&swap_data.maker_coin);
     let (taker_coin_ticker, taker_coin_platform) = split_coin(&swap_data.taker_coin);
 
+    let (maker_coin_usd_price, taker_coin_usd_price) = fiat_snapshot
+        .map(|snapshot| {
+            (
+                snapshot.maker_coin_usd_price.clone(),
+                snapshot.taker_coin_usd_price.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let (maker_pubkey, taker_pubkey) = taker_swap_pubkeys(swap);
+
     let params = vec![
         swap_data.maker_coin.clone(),
         maker_coin_ticker,
@@ -207,6 +275,14 @@ fn insert_stats_taker_swap_sql(swap: &TakerSavedSwap) -> Option<(&'static str, V
         swap_data.maker_amount.to_string(),
         swap_data.taker_amount.to_string(),
         (is_success as u32).to_string(),
+        maker_coin_usd_price,
+        taker_coin_usd_price,
+        maker_pubkey.unwrap_or_default(),
+        taker_pubkey.unwrap_or_default(),
+        String::new(),
+        swap.gui.clone().unwrap_or_default(),
+        String::new(),
+        swap.mm_version.clone().unwrap_or_default(),
     ];
     Some((INSERT_STATS_SWAP, params))
 }
@@ -243,7 +319,7 @@ fn insert_stats_taker_swap_sql_init(swap: &TakerSavedSwap) -> Option<(&'static s
     Some((INSERT_STATS_SWAP_ON_INIT, params))
 }
 
-pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap) {
+pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap, fiat_snapshot: Option<&FiatPriceSnapshot>) {
     let params = vec![swap.uuid().to_string()];
     let query_row = conn.query_row(SELECT_ID_BY_UUID, &params, |row| row.get::<_, i64>(0));
     match query_row.optional() {
@@ -258,8 +334,8 @@ pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap) {
     };
 
     let sql_with_params = match swap {
-        SavedSwap::Maker(maker) => insert_stats_maker_swap_sql(maker),
-        SavedSwap::Taker(taker) => insert_stats_taker_swap_sql(taker),
+        SavedSwap::Maker(maker) => insert_stats_maker_swap_sql(maker, fiat_snapshot),
+        SavedSwap::Taker(taker) => insert_stats_taker_swap_sql(taker, fiat_snapshot),
     };
 
     let (sql, params) = match sql_with_params {
@@ -275,6 +351,73 @@ pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap) {
 
 pub fn add_and_split_tickers() -> Vec<(&'static str, Vec<String>)> {
     ADD_SPLIT_TICKERS.iter().map(|sql| (*sql, vec![])).collect()
+}
+
+pub fn add_fiat_snapshot_columns() -> Vec<(&'static str, Vec<String>)> {
+    ADD_FIAT_SNAPSHOT_COLUMNS.iter().map(|sql| (*sql, vec![])).collect()
+}
+
+pub fn add_pubkey_columns() -> Vec<(&'static str, Vec<String>)> {
+    ADD_PUBKEY_COLUMNS.iter().map(|sql| (*sql, vec![])).collect()
+}
+
+pub fn add_gui_and_version_columns() -> Vec<(&'static str, Vec<String>)> {
+    ADD_GUI_AND_VERSION_COLUMNS.iter().map(|sql| (*sql, vec![])).collect()
+}
+
+pub async fn backfill_pubkey_statements(ctx: &MmArc) -> Vec<(&'static str, Vec<String>)> {
+    let maker_swaps = SavedSwap::load_all_from_maker_stats_db(ctx).await.unwrap_or_default();
+    let taker_swaps = SavedSwap::load_all_from_taker_stats_db(ctx).await.unwrap_or_default();
+
+    maker_swaps
+        .iter()
+        .filter_map(|swap| pubkey_update_statement(&swap.uuid.to_string(), maker_swap_pubkeys(swap)))
+        .chain(
+            taker_swaps
+                .iter()
+                .filter_map(|swap| pubkey_update_statement(&swap.uuid.to_string(), taker_swap_pubkeys(swap))),
+        )
+        .collect()
+}
+
+fn pubkey_update_statement(
+    uuid: &str,
+    pubkeys: (Option<String>, Option<String>),
+) -> Option<(&'static str, Vec<String>)> {
+    match pubkeys {
+        (Some(maker_pubkey), Some(taker_pubkey)) => Some((UPDATE_BOTH_PUBKEYS_BY_UUID, vec![
+            maker_pubkey,
+            taker_pubkey,
+            uuid.to_owned(),
+        ])),
+        (Some(maker_pubkey), None) => Some((UPDATE_MAKER_PUBKEY_BY_UUID, vec![maker_pubkey, uuid.to_owned()])),
+        (None, Some(taker_pubkey)) => Some((UPDATE_TAKER_PUBKEY_BY_UUID, vec![taker_pubkey, uuid.to_owned()])),
+        (None, None) => None,
+    }
+}
+
+fn maker_swap_pubkeys(swap: &MakerSavedSwap) -> (Option<String>, Option<String>) {
+    let maker_pubkey = swap.events.first().and_then(|event| match &event.event {
+        MakerSwapEvent::Started(data) => Some(format!("{:02x}", data.my_persistent_pub)),
+        _ => None,
+    });
+    let taker_pubkey = swap.events.iter().find_map(|event| match &event.event {
+        MakerSwapEvent::Negotiated(data) => Some(format!("{:02x}", data.taker_pubkey)),
+        _ => None,
+    });
+    (maker_pubkey, taker_pubkey)
+}
+
+fn taker_swap_pubkeys(swap: &TakerSavedSwap) -> (Option<String>, Option<String>) {
+    let taker_pubkey = swap.events.first().and_then(|event| match &event.event {
+        TakerSwapEvent::Started(data) => Some(format!("{:02x}", data.my_persistent_pub)),
+        _ => None,
+    });
+    let maker_pubkey = swap.events.iter().find_map(|event| match &event.event {
+        TakerSwapEvent::Negotiated(data) => Some(format!("{:02x}", data.maker_pubkey)),
+        _ => None,
+    });
+    (maker_pubkey, taker_pubkey)
 }
 
 #[test]

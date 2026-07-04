@@ -539,7 +539,7 @@ impl<'a> PaymentPath<'a> {
 				cur_hop_fees_msat = self.hops.get(i + 1).unwrap().0.hop_use_fee_msat;
 			}
 
-			let mut cur_hop = &mut self.hops.get_mut(i).unwrap().0;
+			let cur_hop = &mut self.hops.get_mut(i).unwrap().0;
 			cur_hop.next_hops_fee_msat = total_fee_paid_msat;
 			// Overpay in fees if we can't save these funds due to htlc_minimum_msat.
 			// We try to account for htlc_minimum_msat in scoring (add_entry!), so that nodes don't

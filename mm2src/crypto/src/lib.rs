@@ -11,6 +11,7 @@ mod hw_ctx;
 pub mod hw_rpc_task;
 mod key_derivation;
 mod key_pair_ctx;
+pub mod legacy;
 pub mod mnemonic;
 pub mod privkey;
 pub mod secret_hash_algo;
@@ -42,10 +43,11 @@ pub use metamask_ctx::{MetamaskArc, MetamaskError, MetamaskResult, MetamaskWeak}
 #[cfg(target_arch = "wasm32")] pub use mm2_metamask as metamask;
 
 // Re-exports from global_hd_ctx
-pub use global_hd_ctx::{derive_secp256k1_secret, GlobalHDAccountArc};
+pub use global_hd_ctx::{derive_secp256k1_extended_pubkey, derive_secp256k1_secret, GlobalHDAccountArc};
 
 // Re-exports from encrypt/mnemonic
 pub use encrypt::EncryptedData;
+pub use legacy::{legacy_decrypt_mnemonic, legacy_encrypt_mnemonic, LegacyEncryptedMnemonicData};
 pub use mnemonic::{decrypt_mnemonic, encrypt_mnemonic, generate_mnemonic, EncryptedMnemonicData, MnemonicError};
 
 // Re-exports from hw_client

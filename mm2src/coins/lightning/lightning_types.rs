@@ -27,6 +27,9 @@ pub struct LightningCoin {
     /// The mutex storing the addresses of the nodes that the lightning node has open channels with,
     /// these addresses are used for reconnecting.
     pub open_channels_nodes: NodesAddressesMapShared,
+    /// The set of nodes (by public key) from which the lightning node accepts zero-confirmation
+    /// inbound channel funding. Persisted through the coin's persister and reloaded at activation.
+    pub trusted_nodes: TrustedNodesShared,
 }
 
 impl fmt::Debug for LightningCoin {
@@ -166,6 +169,9 @@ pub async fn start_lightning(
         peer_manager.clone(),
     ));
 
+    // Load the persisted set of trusted nodes (zero-conf inbound channel funding is accepted from these).
+    let trusted_nodes = Arc::new(PaMutex::new(persister.get_trusted_nodes().await?));
+
     // Broadcast Node Announcement
     spawn(ln_p2p::ln_node_announcement_loop(
         channel_manager.clone(),
@@ -185,5 +191,6 @@ pub async fn start_lightning(
         invoice_payer,
         persister,
         open_channels_nodes,
+        trusted_nodes,
     })
 }

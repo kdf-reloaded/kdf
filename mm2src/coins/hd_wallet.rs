@@ -393,7 +393,7 @@ pub trait HDWalletCoinOps {
     async fn create_new_account<'a, XPubExtractor>(
         &self,
         hd_wallet: &'a Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync;

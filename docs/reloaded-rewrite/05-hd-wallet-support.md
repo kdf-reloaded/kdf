@@ -333,6 +333,110 @@ substrate MUST NOT introduce a project-specific version-byte
 table; both source and destination tables MUST be the public
 ones.
 
+## 5.9A Bound Software Global-HD Account-Key Derivation
+
+This section binds the **software** (non-hardware) path that makes
+a global-HD account usable by Bitcoin-family (UTXO) coins without a
+hardware device. It complements the per-curve derivation helpers of
+R15 and the policy discriminator of R20–R21: where those bind the
+in-memory master-key machinery, this section binds (a) the
+context-level wallet-identity value that namespaces stored HD
+accounts in software mode, (b) the canonical extended-public-key
+that the in-memory master yields for an account derivation path,
+and (c) the policy-driven selection between the hardware and
+software extended-public-key sources. The coin-side account
+bootstrap, new-address, and scan behaviour that consume this
+surface are bound in Chapter 38 §38.8; this section is the crypto
+substrate those requirements rest on.
+
+**R29.** *Software-HD wallet identity.* The central cryptographic
+context MUST expose, for the `GlobalHDAccount` key-pair policy
+(R20), the 20-byte wallet-identity digest that namespaces
+per-wallet hierarchical-deterministic storage, **derived from the
+in-context software identity, not from a hardware device**. The
+value MUST be the standard `RIPEMD160(SHA256(pubkey))` digest of
+the global-HD identity's internal secp256k1 public key (the same
+daemon-wide public-key-hash the context already derives from the
+active key-pair policy at construction, i.e. the value Chapter 5
+R16 binds for the internal key path and that the central
+application context surfaces as its `rmd160` identity). For a
+software global-HD account this digest is therefore equal to the
+context-wide `mm2_rmd160` identity, matching the on-disk HD-wallet
+identity contract that an HD wallet launched from a passphrase-
+derived master key shares its `mm2_rmd160` and `hd_wallet_rmd160`
+namespacing values. The value MUST be **stable across daemon
+restarts for the same mnemonic** so that stored HD accounts re-bind
+on re-login. When the policy is `Iguana`, no HD wallet-identity is
+available and HD storage MUST remain refused (HD is unsupported in
+Iguana mode); when a hardware-wallet context is active, the
+hardware device's own identity digest is used unchanged (R25).
+Acceptance: in software global-HD mode, an HD UTXO coin's HD
+storage initialises successfully (it MUST NOT be refused on the
+grounds that no hardware HD-wallet identity is present); in Iguana
+mode the same request is refused.
+
+**R30.** *Software account extended-public-key derivation and
+canonical serialisation (dictated interop).* In software global-HD
+mode the account-level extended **public** key for a coin MUST be
+derived **from the in-memory BIP-32 secp256k1 master extended
+private key** held by `GlobalHDAccountCtx` (the master `m` exposed
+by `root_priv_key`, R13/R15), by walking the configured account
+derivation path `purpose'/coin_type'/account'` (Chapter 5 R18
+`HDPathToAccount`, generic over BIP-43 purpose per Chapter 38
+R38.3.3) and taking the extended public key at that node. The
+software path MUST NOT require any `trezor_coin` coins-config field
+and MUST NOT contact a hardware device.
+
+  The derived account extended public key MUST serialise to the
+  **canonical BIP-32 extended-public-key (xpub) form**: a
+  base58check string over the 78-byte BIP-32 serialization whose
+  4-byte version prefix is the standard mainnet public version
+  `0x0488B21E` (the `xpub` prefix). This is the value persisted as
+  the on-disk `account_xpub` schema column (Chapter 44) and is
+  **dictated interop**: it MUST equal, byte-for-byte, the `xpub` a
+  conformant reference wallet computes for the same BIP-39 mnemonic
+  at the same account derivation path. The stored/serialised
+  account xpub MUST use the `xpub` version prefix uniformly and
+  MUST NOT be re-versioned per coin network at this layer
+  (per-network display re-versioning, when required elsewhere, is
+  the separate `XPubConverter` concern of R24). A wrong version
+  prefix or a non-canonical serialization is a conformance failure,
+  because downstream address derivation depends on the exact bytes.
+
+  > **Upstream divergence (informative).** The relicensed substrate
+  > as received carried only a hardware (device) extended-public-key
+  > source; the software derivation above was absent, so a software
+  > global-HD account could not produce an account xpub and HD
+  > activation/address derivation failed. This section binds the
+  > software derivation as first-class. The behaviour is expressed
+  > from the public BIP-32 specification (the master-to-account
+  > public-key walk and the `0x0488B21E` `xpub` serialization are
+  > dictated by BIP-32), not transcribed from any private source.
+
+**R31.** *Extended-public-key source selection by key-pair policy.*
+The extended-public-key source consumed by per-coin account
+extraction MUST be chosen by the active key-pair policy, not by a
+fixed assumption of hardware:
+
+  - when a hardware-wallet context is active, the source is the
+    hardware device (the device extractor of R25, which requires
+    the coin's `trezor_coin` config and performs the device
+    protocol);
+  - when the policy is `GlobalHDAccount` and no hardware context is
+    active, the source is the **in-context software derivation of
+    R30** (the in-memory master), requiring no `trezor_coin` field.
+
+  The per-coin extraction entry point MUST accept "no external
+  (hardware) extractor" as a valid case and, in that case, resolve
+  the account xpub through the software derivation of R30. The
+  selection MUST NOT branch inside coin signing/derivation paths
+  beyond choosing the source; the resulting account xpub is
+  identical in shape (R30) regardless of source. (Per-coin and
+  per-account UTXO consumption is bound in Chapter 38 §38.8;
+  Chapter 5 D1's deferral of per-account activation plumbing is
+  partially discharged here for the extended-public-key source and
+  fully for software UTXO accounts by Chapter 38 §38.8.)
+
 ## 5.10 Bound Hardware-Wallet Path
 
 **R25.** The substrate MUST retain the baseline hardware-wallet
@@ -344,6 +448,89 @@ present and re-exported. When the central context holds a
 device through the existing hardware-wallet protocol; the HD-path
 types from R17 MUST be the same — only the signature computation
 moves off-process.
+
+## 5.10A Bound Trezor Connection-Status Query
+
+**R28.** *Trezor connection-status query — RPC contract.* The
+substrate MUST bind the daemon RPC method
+`trezor_connection_status` (mmrpc 2.0, flat method), routed
+through the version-two RPC dispatcher where the hardware-wallet
+path of R25 is available. The method reports the current
+connection state of the already-initialised Trezor hardware-wallet
+context held by the central cryptographic context (R5 / R25) and
+MUST expose the following wire contract:
+
+- *Request (interop).* The request object has one optional field,
+  `device_pubkey`. When supplied, the value is a hex-encoded
+  20-byte hardware-wallet public-key identifier (the
+  RIPEMD-160-of-SHA-256 digest of the device's extended public
+  key, identical to the identifier the daemon reports for the
+  device elsewhere). The field MAY be omitted when the caller only
+  wants to query the currently initialised Trezor context.
+- *Response (interop).* A successful response object has one
+  field, `status`, whose value is one of two wire-visible
+  discriminant strings: `"Connected"` or `"Unreachable"`.
+  `"Connected"` means the Trezor context is reachable for the
+  daemon's purposes, including the case where it is already in use
+  by a concurrent task. `"Unreachable"` means the initialised
+  context is disconnected or in an incorrect state and SHOULD be
+  re-initialised.
+- *Bound error surface (interop).* The method exposes a
+  type-tagged error enum whose `error_type` tokens are part of
+  the wire contract: `TrezorNotInitialized` (no hardware-wallet
+  context is initialised on the running daemon),
+  `FoundUnexpectedDevice` (the request asserted a device
+  identifier that does not match the initialised Trezor context),
+  and `Internal` (the cryptographic context was unavailable or
+  another internal failure occurred). `TrezorNotInitialized` maps
+  to HTTP 400; `FoundUnexpectedDevice` and `Internal` map to
+  HTTP 500.
+
+**R28A.** *Optional device-identity assertion.* The
+`device_pubkey` field is an assertion by the caller, not a
+selector. Trigger condition: the request supplies a non-null
+`device_pubkey` and the daemon has an initialised Trezor context.
+Required behaviour: before reporting connection status, the method
+MUST compare the supplied identifier with the identifier of the
+initialised Trezor context. If they differ, the method MUST return
+`FoundUnexpectedDevice` and MUST NOT perform a connectivity probe.
+If they match, the method MUST continue to the status resolution
+of R28B. Trigger condition: the request omits `device_pubkey`.
+Required behaviour: the method MUST NOT perform this identity
+assertion and MUST NOT return `FoundUnexpectedDevice` solely
+because the caller did not supply an expected identifier. If no
+Trezor context is initialised, the method returns
+`TrezorNotInitialized` regardless of whether the optional field is
+present.
+
+**R28B.** *Connection-status resolution and concurrent-session
+branch.* After the R28A identity rule has passed or has been
+skipped, the method MUST resolve status from the already-initialised
+hardware-wallet context; it MUST NOT perform initial device
+acquisition, rediscovery, or reconnection. Trigger condition:
+another task already owns the exclusive device session for the
+same Trezor context. Required behaviour: return a successful
+`"Connected"` status without waiting for, stealing, cancelling, or
+otherwise contending for that session. Trigger condition: the
+context is initialised and the exclusive device session is
+available. Required behaviour: perform a non-mutating reachability
+probe through the existing transport/device-call path and return
+`"Connected"` if that probe succeeds or `"Unreachable"` if that
+probe fails. The status RPC MUST NOT impose an additional short
+RPC-level deadline on this probe; completion/failure timing is
+governed by the underlying transport and device-call behaviour.
+
+**R28C.** *Observational status query.* The
+`trezor_connection_status` call MUST be observational with respect
+to wallet/account/key state. It MUST NOT create, remove, or
+rewrite wallet state; MUST NOT derive, sign, export, or display
+user keys or addresses; and MUST NOT start, require, or complete a
+user-confirmation-dependent hardware-wallet operation. The
+reachability probe is limited to connection-state observation and
+MUST NOT request a user confirmation on the device. A failed
+reachability probe MAY update volatile connection-state bookkeeping
+so subsequent calls can report `"Unreachable"` without probing a
+handle already known to be unavailable.
 
 ## 5.11 Bound WebAssembly-Only MetaMask Path
 
@@ -418,13 +605,87 @@ the translator into the `ypub` prefix and back; the test
 asserts both intermediate and final byte representations match
 the public version-byte tables.
 
+**T9.** *Trezor connection-status query — RPC wire contract.* On
+a native target, the version-two RPC dispatcher accepts the flat
+method `trezor_connection_status`. A central context is
+constructed with an initialised Trezor hardware-wallet context
+backed by a test double; a request with no `device_pubkey` is
+issued and the test asserts the successful response has exactly
+the `status` field and that its value is one of the two bound
+discriminant strings (`"Connected"` / `"Unreachable"`). A request
+issued against a context with no hardware-wallet context asserts
+the `TrezorNotInitialized` error token and HTTP 400 mapping.
+
+**T9A.** *Trezor connection-status query — optional device
+identity.* A central context is constructed with an initialised
+Trezor context whose known device identifier is `D`. A request
+that omits `device_pubkey` MUST proceed to status resolution and
+MUST NOT produce `FoundUnexpectedDevice`. A request whose
+`device_pubkey` equals `D` MUST also proceed to status resolution.
+A request whose `device_pubkey` differs from `D` MUST return the
+`FoundUnexpectedDevice` error token with HTTP 500 and the test
+double MUST observe that no reachability probe was attempted after
+the mismatch was detected.
+
+**T9B.** *Trezor connection-status query — concurrent session is
+connected.* A test double initialises a Trezor context and then
+has a separate in-flight task hold the exclusive device session.
+While that session remains owned by the in-flight task, a
+`trezor_connection_status` request is issued. The test asserts the
+request returns a successful `"Connected"` status without waiting
+for the in-flight task to finish, without taking ownership of the
+session, and without cancelling or otherwise affecting the
+in-flight task.
+
+**T9C.** *Trezor connection-status query — available-session
+probe result and observational paths.* With an initialised Trezor
+context whose exclusive device session is available, the test
+double drives one successful reachability probe and one failed
+reachability probe; the test asserts the respective `"Connected"`
+and `"Unreachable"` statuses according to the probe result. The
+test MUST NOT assert a short RPC-level timeout. Across all cases,
+wallet identity, account storage, key material, and
+user-confirmation counters exposed by the test harness remain
+unchanged; only volatile connection-status bookkeeping may change
+after a failed probe.
+
+**T10.** *Software account xpub matches a reference wallet
+(dictated interop).* A central context is constructed in the
+`GlobalHDAccount` policy from a known BIP-39 mnemonic test vector;
+the account-level extended public key is derived in software per
+R30 at a known account derivation path (e.g. `m/84'/<coin_type>'/0'`
+and `m/44'/<coin_type>'/0'`); the test asserts the serialised
+`xpub` (version prefix `0x0488B21E`, base58check) equals,
+byte-for-byte, the published `xpub` a reference wallet derives for
+that mnemonic at that path. The derivation MUST succeed with no
+`trezor_coin` config present.
+
+**T11.** *Software-HD wallet identity is software-derived and
+stable.* In `GlobalHDAccount` policy the wallet-identity digest of
+R29 is materialised and the test asserts (a) it is produced without
+any hardware-wallet handle, (b) it equals the context-wide
+`mm2_rmd160` identity, and (c) two constructions from the same
+mnemonic yield the identical digest (restart stability). In
+`Iguana` policy the HD-storage-identity request is asserted to be
+refused.
+
+**T12.** *Source selection by policy.* With a `GlobalHDAccount`
+policy and no hardware context, per-coin account extraction is
+invoked with no external extractor and the test asserts it resolves
+the account xpub via the software derivation of R30; with a
+hardware context active, the same extraction is asserted to route
+to the device source (R25).
+
 ## 5.14 Deferred Work
 
 **D1.** Per-account hierarchical-deterministic activation
 flows (the substrate binds the per-curve derivation surface and
 the discriminator; the per-coin and per-account activation
 plumbing that consumes them is owned by a sibling activation
-chapter).
+chapter). *Partially discharged:* the software extended-public-key
+source and identity for global-HD accounts are bound in §5.9A
+(R29–R31); the UTXO per-account bootstrap, new-address, and scan
+behaviour are bound in Chapter 38 §38.8.
 
 **D2.** A second password-hashing scheme alongside Argon2id
 (the substrate binds Argon2id as the only password-mode
@@ -515,4 +776,13 @@ surface.
   specification documents; public crate documentation.
 - *Sibling-allowlist consultations:* none beyond the cross-chapter
   references listed in *Inputs*.
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* consulted only for the dictated-interop wire
+  surface and externally observable status semantics of R28–R28C
+  (the `trezor_connection_status` method string, its optional
+  `device_pubkey` request field, its `status` response field with
+  the `"Connected"` / `"Unreachable"` discriminant strings, the
+  method's `error_type` token set with their HTTP-status mapping,
+  and the status-query behaviour for optional identity assertions,
+  concurrent session ownership, and non-mutating reachability
+  probes governed by the underlying transport/device-call
+  behaviour); no protected expression crossed.

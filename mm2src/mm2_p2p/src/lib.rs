@@ -5,6 +5,7 @@ pub mod atomicdex_behaviour;
 pub mod floodsub;
 pub mod gossipsub;
 mod ip_helpers;
+pub mod network_streamer;
 pub mod peers_exchange;
 pub mod relay_address;
 pub mod request_response;

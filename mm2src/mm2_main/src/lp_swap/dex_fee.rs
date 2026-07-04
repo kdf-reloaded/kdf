@@ -9,7 +9,7 @@
 //! not resolve a destination address. Address resolution happens at the
 //! coin-side (see for example `siacoin::SiaCoinBuilder`).
 
-use coins::{DexFee, MmCoinEnum};
+use coins::{DexFee, MmCoin, MmCoinEnum};
 use common::mm_number::MmNumber;
 use common::var;
 use mm2_net_config::NetConfig;
@@ -81,6 +81,15 @@ pub fn dex_fee_amount_from_taker_coin(
     maker_coin: &str,
     trade_amount: &MmNumber,
 ) -> MmNumber {
+    dex_fee_amount_from_taker_coin_ref(net_cfg, &**taker_coin, maker_coin, trade_amount)
+}
+
+pub(crate) fn dex_fee_amount_from_taker_coin_ref(
+    net_cfg: &dyn NetConfig,
+    taker_coin: &dyn MmCoin,
+    maker_coin: &str,
+    trade_amount: &MmNumber,
+) -> MmNumber {
     let min_tx_amount = MmNumber::from(taker_coin.min_tx_amount());
     let threshold = dex_fee_threshold(net_cfg, min_tx_amount);
     dex_fee_amount(net_cfg, taker_coin.ticker(), maker_coin, trade_amount, &threshold)
@@ -101,6 +110,100 @@ pub fn compute_dex_fee(
     maker_coin: &str,
     trade_amount: &MmNumber,
 ) -> DexFee {
-    let total = dex_fee_amount_from_taker_coin(net_cfg, taker_coin, maker_coin, trade_amount);
-    DexFee::new_from_taker_coin(&**taker_coin, net_cfg, total)
+    compute_dex_fee_from_coin(net_cfg, &**taker_coin, maker_coin, trade_amount)
+}
+
+pub(crate) fn compute_dex_fee_from_coin(
+    net_cfg: &dyn NetConfig,
+    taker_coin: &dyn MmCoin,
+    maker_coin: &str,
+    trade_amount: &MmNumber,
+) -> DexFee {
+    let total = dex_fee_amount_from_taker_coin_ref(net_cfg, taker_coin, maker_coin, trade_amount);
+    DexFee::new_from_taker_coin(taker_coin, net_cfg, total)
+}
+
+/// Computes the full [`DexFee`] when the taker's expected sender pubkey is known.
+///
+/// Use this in validation and post-negotiation production paths; the pubkey-blind
+/// [`compute_dex_fee`] remains for pre-negotiation estimates where the relevant
+/// taker pubkey is not available.
+pub fn compute_dex_fee_with_taker_pubkey(
+    net_cfg: &dyn NetConfig,
+    taker_coin: &MmCoinEnum,
+    maker_coin: &str,
+    trade_amount: &MmNumber,
+    taker_pubkey: &[u8],
+) -> DexFee {
+    compute_dex_fee_with_taker_pubkey_from_coin(net_cfg, &**taker_coin, maker_coin, trade_amount, taker_pubkey)
+}
+
+pub(crate) fn compute_dex_fee_with_taker_pubkey_from_coin(
+    net_cfg: &dyn NetConfig,
+    taker_coin: &dyn MmCoin,
+    maker_coin: &str,
+    trade_amount: &MmNumber,
+    taker_pubkey: &[u8],
+) -> DexFee {
+    let total = dex_fee_amount_from_taker_coin_ref(net_cfg, taker_coin, maker_coin, trade_amount);
+    DexFee::new_with_taker_pubkey(taker_coin, net_cfg, total, taker_pubkey)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{compute_dex_fee, compute_dex_fee_with_taker_pubkey};
+    use coins::{DexFee, MarketCoinOps, MmCoinEnum, TestCoin};
+    use common::mm_number::{BigDecimal, MmNumber};
+    use mm2_net_config::net_config_or_panic;
+    use mocktopus::mocking::*;
+
+    fn mock_min_tx_amount() { TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0))); }
+
+    #[test]
+    fn known_taker_pubkey_fee_computation_returns_no_fee_for_burn_pubkey() {
+        mock_min_tx_amount();
+
+        let net_cfg = net_config_or_panic(6133);
+        let taker_coin = MmCoinEnum::Test(TestCoin::new("MORTY"));
+        let trade_amount = MmNumber::from("1");
+        let burn_pubkey = net_cfg.burn_addr_raw_pubkey();
+
+        let aware_fee = compute_dex_fee_with_taker_pubkey(net_cfg, &taker_coin, "RICK", &trade_amount, burn_pubkey);
+        let blind_fee = compute_dex_fee(net_cfg, &taker_coin, "RICK", &trade_amount);
+
+        assert_eq!(aware_fee, DexFee::NoFee);
+        assert_ne!(blind_fee, DexFee::NoFee);
+    }
+
+    #[test]
+    fn t16_4a_v1_known_pubkey_paths_use_pubkey_aware_fee_computation() {
+        let maker_swap = include_str!("maker_swap.rs");
+        let taker_swap = include_str!("taker_swap.rs");
+
+        assert!(maker_swap.contains("compute_dex_fee_with_taker_pubkey("));
+        assert!(maker_swap.contains("other_taker_coin_htlc_pub"));
+        assert!(taker_swap.matches("compute_dex_fee_with_taker_pubkey(").count() >= 2);
+        assert!(taker_swap.contains("my_taker_coin_htlc_keypair"));
+    }
+
+    #[test]
+    fn t16_4b_v2_known_pubkey_paths_use_pubkey_aware_fee_computation() {
+        let maker_swap_v2 = include_str!("maker_swap_v2.rs");
+        let taker_swap_v2 = include_str!("taker_swap_v2.rs");
+
+        assert!(
+            maker_swap_v2
+                .matches("compute_dex_fee_with_taker_pubkey_from_coin(")
+                .count()
+                >= 3
+        );
+        assert!(!maker_swap_v2.contains("dex_fee: &DexFee::NoFee"));
+        assert!(
+            taker_swap_v2
+                .matches("compute_dex_fee_with_taker_pubkey_from_coin(")
+                .count()
+                >= 4
+        );
+        assert!(!taker_swap_v2.contains("dex_fee: &DexFee::NoFee"));
+    }
 }

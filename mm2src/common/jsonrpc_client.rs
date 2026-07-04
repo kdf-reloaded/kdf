@@ -109,6 +109,17 @@ impl fmt::Debug for JsonRpcRequestEnum {
     }
 }
 
+impl fmt::Display for JsonRpcRequestEnum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsonRpcRequestEnum::Single(single) => {
+                write!(f, "{} id={} params={}", single.method, single.id, single.params.len())
+            },
+            JsonRpcRequestEnum::Batch(batch) => write!(f, "batch requests={}", batch.len()),
+        }
+    }
+}
+
 /// Serializable RPC single request.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JsonRpcRequest {
@@ -234,7 +245,25 @@ pub struct JsonRpcError {
 }
 
 impl fmt::Display for JsonRpcError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, "{:?}", self) }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "JsonRpcError {{ client_info: {}, request: {}, error: {} }}",
+            self.client_info, self.request, self.error
+        )
+    }
+}
+
+fn write_compact_message(f: &mut fmt::Formatter<'_>, message: &str) -> fmt::Result {
+    const MAX_DISPLAY_CHARS: usize = 512;
+    if message.chars().count() <= MAX_DISPLAY_CHARS {
+        return write!(f, "{}", message);
+    }
+
+    for ch in message.chars().take(MAX_DISPLAY_CHARS) {
+        write!(f, "{}", ch)?;
+    }
+    write!(f, "... <truncated; use debug logging for full JSON-RPC payload>")
 }
 
 #[derive(Clone, Debug)]
@@ -253,6 +282,42 @@ impl JsonRpcErrorType {
     /// Whether the error type is [`JsonRpcErrorType::Transport`].
     #[inline]
     pub fn is_transport(&self) -> bool { matches!(self, JsonRpcErrorType::Transport(_)) }
+}
+
+impl fmt::Display for JsonRpcErrorType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JsonRpcErrorType::InvalidRequest(error) => {
+                write!(f, "invalid request: ")?;
+                write_compact_message(f, error)
+            },
+            JsonRpcErrorType::Transport(error) => {
+                write!(f, "transport: ")?;
+                write_compact_message(f, error)
+            },
+            JsonRpcErrorType::Parse(addr, error) => {
+                write!(f, "parse from {:?}: ", addr)?;
+                write_compact_message(f, error)
+            },
+            JsonRpcErrorType::Response(addr, response) => {
+                write!(f, "response from {:?}: ", addr)?;
+                match response.as_object() {
+                    Some(obj) => {
+                        if let Some(code) = obj.get("code") {
+                            write!(f, "code={} ", code)?;
+                        }
+                        if let Some(message) = obj.get("message").and_then(|message| message.as_str()) {
+                            write!(f, "message=")?;
+                            write_compact_message(f, message)
+                        } else {
+                            write!(f, "{}", response)
+                        }
+                    },
+                    None => write!(f, "{}", response),
+                }
+            },
+        }
+    }
 }
 
 pub trait JsonRpcClient {

@@ -97,14 +97,14 @@ pub struct SlpOutput {
 }
 
 /// The SLP transaction preimage
-struct SlpTxPreimage {
+pub(crate) struct SlpTxPreimage {
     slp_inputs: Vec<SlpUnspent>,
     available_bch_inputs: Vec<UnspentInfo>,
     outputs: Vec<TransactionOutput>,
 }
 
 #[derive(Debug, Display)]
-enum ValidateHtlcError {
+pub(crate) enum ValidateHtlcError {
     TxLackOfOutputs,
     #[display(fmt = "TxParseError: {:?}", _0)]
     TxParseError(Error),
@@ -134,7 +134,7 @@ impl From<UnexpectedDerivationMethod> for ValidateHtlcError {
 }
 
 #[derive(Debug, Display)]
-enum ValidateDexFeeError {
+pub(crate) enum ValidateDexFeeError {
     TxLackOfOutputs,
     #[display(fmt = "OpReturnParseError: {:?}", _0)]
     OpReturnParseError(ParseSlpScriptError),
@@ -497,7 +497,7 @@ pub fn parse_slp_script(script: &[u8]) -> Result<SlpTxDetails, MmError<ParseSlpS
 }
 
 #[derive(Debug, Display)]
-enum GenSlpSpendErr {
+pub(crate) enum GenSlpSpendErr {
     RpcError(UtxoRpcError),
     TooManyOutputs,
     #[display(

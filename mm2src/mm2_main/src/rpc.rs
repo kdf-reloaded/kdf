@@ -18,6 +18,7 @@
 //
 
 use crate::mm2::rpc::rate_limiter::RateLimitError;
+#[cfg(feature = "unsafe-rpc-wire-dump")] use common::log::trace;
 #[cfg(not(target_arch = "wasm32"))] use common::log::warn;
 use common::log::{error, info};
 use common::{err_to_rpc_json_string, err_tp_rpc_json, HttpStatusCode};
@@ -38,16 +39,28 @@ use serde_json::{self as json, Value as Json};
 use std::borrow::Cow;
 use std::net::SocketAddr;
 
+#[cfg(target_arch = "wasm32")]
+#[path = "rpc/lp_commands/connect_metamask.rs"]
+pub mod connect_metamask;
 #[path = "rpc/dispatcher/dispatcher.rs"] mod dispatcher;
 #[path = "rpc/dispatcher/dispatcher_legacy.rs"]
 mod dispatcher_legacy;
 #[path = "rpc/lp_commands/lp_commands.rs"] pub mod lp_commands;
 #[path = "rpc/lp_commands/lp_commands_legacy.rs"]
 pub mod lp_commands_legacy;
+#[path = "rpc/lp_commands/one_inch/mod.rs"] pub mod one_inch;
 #[path = "rpc/rate_limiter.rs"] mod rate_limiter;
+#[path = "rpc/lp_commands/send_asked_data.rs"]
+pub mod send_asked_data;
+#[path = "rpc/lp_commands/shared_db_id.rs"] pub mod shared_db_id;
 #[path = "rpc/sse_handler.rs"] mod sse_handler;
 #[path = "rpc/streaming_activations/mod.rs"]
 pub mod streaming_activations;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "rpc/lp_commands/trezor.rs"]
+pub mod trezor;
+#[path = "rpc/lp_commands/wallet_connect.rs"]
+pub mod wallet_connect;
 
 /// Lists the RPC method not requiring the "userpass" authentication.  
 /// None is also public to skip auth and display proper error in case of method is missing
@@ -70,6 +83,89 @@ const PUBLIC_METHODS: &[Option<&str>] = &[
     Some("ticker"),
     None,
 ];
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+const RPC_WIRE_DUMP_REDACTED_VALUE: &str = "__MM2_RPC_WIRE_DUMP_REDACTED_SECRET__";
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+const RPC_WIRE_DUMP_MAX_CHARS: usize = 65_536;
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+const RPC_WIRE_DUMP_SECRET_KEY_MARKERS: &[&str] = &[
+    "userpass",
+    "passphrase",
+    "seed",
+    "mnemonic",
+    "private",
+    "priv",
+    "xprv",
+    "wif",
+    "secret",
+    "password",
+    "api_key",
+    "token",
+];
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn rpc_wire_dump_enabled() -> bool { matches!(std::env::var("MM2_RPC_WIRE_DUMP").ok().as_deref(), Some("1")) }
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn rpc_wire_dump_secrets_enabled() -> bool {
+    matches!(std::env::var("MM2_RPC_WIRE_DUMP_SECRETS").ok().as_deref(), Some("1"))
+}
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn rpc_wire_dump_key_is_sensitive(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    RPC_WIRE_DUMP_SECRET_KEY_MARKERS
+        .iter()
+        .any(|marker| lowered == *marker || lowered.contains(marker))
+}
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn redact_rpc_wire_dump_json(value: &mut Json) {
+    match value {
+        Json::Object(map) => {
+            for (key, nested_value) in map.iter_mut() {
+                if rpc_wire_dump_key_is_sensitive(key) {
+                    *nested_value = Json::String(RPC_WIRE_DUMP_REDACTED_VALUE.to_owned());
+                } else {
+                    redact_rpc_wire_dump_json(nested_value);
+                }
+            }
+        },
+        Json::Array(items) => {
+            for item in items {
+                redact_rpc_wire_dump_json(item);
+            }
+        },
+        _ => {},
+    }
+}
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn truncate_rpc_wire_dump(mut s: String) -> String {
+    if s.len() > RPC_WIRE_DUMP_MAX_CHARS {
+        s.truncate(RPC_WIRE_DUMP_MAX_CHARS);
+        s.push_str("...<rpc-wire-dump-truncated>");
+    }
+    s
+}
+
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+fn format_rpc_wire_dump_payload(payload: &[u8], include_secrets: bool) -> String {
+    if let Ok(mut json_value) = json::from_slice::<Json>(payload) {
+        if !include_secrets {
+            redact_rpc_wire_dump_json(&mut json_value);
+        }
+
+        if let Ok(rendered) = json::to_string(&json_value) {
+            return truncate_rpc_wire_dump(rendered);
+        }
+    }
+
+    truncate_rpc_wire_dump(String::from_utf8_lossy(payload).into_owned())
+}
 
 pub type DispatcherResult<T> = Result<T, MmError<DispatcherError>>;
 
@@ -291,9 +387,26 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
     }
     let req_json: Json = try_sf!(json::from_slice(&req_bytes), ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
 
+    #[cfg(feature = "unsafe-rpc-wire-dump")]
+    let wire_dump_enabled = rpc_wire_dump_enabled();
+    #[cfg(feature = "unsafe-rpc-wire-dump")]
+    let wire_dump_include_secrets = wire_dump_enabled && rpc_wire_dump_secrets_enabled();
+    #[cfg(feature = "unsafe-rpc-wire-dump")]
+    if wire_dump_enabled {
+        let request_dump = format_rpc_wire_dump_payload(req_bytes.as_ref(), wire_dump_include_secrets);
+        trace!("[unsafe-rpc-wire-dump] request from {}: {}", client, request_dump);
+    }
+
     let res = try_sf!(process_rpc_request(ctx, req, req_json, client).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
     let (mut parts, body) = res.into_parts();
     parts.headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, rpc_cors);
+
+    #[cfg(feature = "unsafe-rpc-wire-dump")]
+    if wire_dump_enabled {
+        let response_dump = format_rpc_wire_dump_payload(&body, wire_dump_include_secrets);
+        trace!("[unsafe-rpc-wire-dump] response to {}: {}", client, response_dump);
+    }
+
     let body_escaped = match std::str::from_utf8(&body) {
         Ok(body_utf8) => {
             let escaped = escape_answer(body_utf8);
@@ -308,6 +421,51 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
         },
     };
     Response::from_parts(parts, Body::from(body_escaped))
+}
+
+#[cfg(all(test, feature = "unsafe-rpc-wire-dump"))]
+mod wire_dump_tests {
+    use super::*;
+
+    #[test]
+    fn redact_rpc_wire_dump_json_replaces_known_secret_keys() {
+        let mut payload = json::json!({
+            "userpass": "abc",
+            "params": {
+                "passphrase": "seed phrase",
+                "nested": { "private_key": "deadbeef" },
+                "safe": "ok"
+            }
+        });
+
+        redact_rpc_wire_dump_json(&mut payload);
+
+        assert_eq!(payload["userpass"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(payload["params"]["passphrase"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(payload["params"]["nested"]["private_key"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(payload["params"]["safe"], "ok");
+    }
+
+    #[test]
+    fn format_rpc_wire_dump_payload_keeps_json_valid_while_redacting() {
+        let payload = br#"{"userpass":"abc","params":{"token":"123","amount":"1"}}"#;
+        let dumped = format_rpc_wire_dump_payload(payload, false);
+        let parsed: Json = json::from_str(&dumped).expect("expected valid JSON");
+
+        assert_eq!(parsed["userpass"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(parsed["params"]["token"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(parsed["params"]["amount"], "1");
+    }
+
+    #[test]
+    fn format_rpc_wire_dump_payload_keeps_secrets_when_override_enabled() {
+        let payload = br#"{"userpass":"abc","params":{"token":"123"}}"#;
+        let dumped = format_rpc_wire_dump_payload(payload, true);
+        let parsed: Json = json::from_str(&dumped).expect("expected valid JSON");
+
+        assert_eq!(parsed["userpass"], "abc");
+        assert_eq!(parsed["params"]["token"], "123");
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]

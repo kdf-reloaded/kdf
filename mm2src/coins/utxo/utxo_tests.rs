@@ -13,7 +13,7 @@ use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClien
 use crate::utxo::tx_cache::dummy_tx_cache::DummyVerboseCache;
 use crate::utxo::tx_cache::UtxoVerboseCacheOps;
 use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps};
-use crate::utxo::utxo_common::UtxoTxBuilder;
+use crate::utxo::utxo_common::{address_from_pubkey, my_public_key, trade_preimage_sender_address, UtxoTxBuilder};
 use crate::utxo::utxo_common_tests;
 use crate::utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardCoin};
 #[cfg(not(target_arch = "wasm32"))] use crate::WithdrawFee;
@@ -77,7 +77,7 @@ pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
     };
 
     let servers = servers.into_iter().map(|s| json::from_value(s).unwrap()).collect();
-    block_on(builder.electrum_client(args, servers)).unwrap()
+    block_on(builder.electrum_client(args, servers, None, None)).unwrap()
 }
 
 /// Returned client won't work by default, requires some mocks to be usable
@@ -191,6 +191,33 @@ fn utxo_coin_for_test(
     is_segwit_coin: bool,
 ) -> UtxoStandardCoin {
     utxo_coin_from_fields(utxo_coin_fields_for_test(rpc_client, force_seed, is_segwit_coin))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_trade_preimage_sender_address_uses_active_key_for_hd_wallet() {
+    let client = native_client_for_test();
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    let active_pubkey = *my_public_key(&fields).unwrap();
+
+    fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
+        hd_wallet_storage: HDWalletCoinStorage::default(),
+        address_format: UtxoAddressFormat::Standard,
+        derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
+        accounts: HDAccountsMutex::new(HDAccountsMap::new()),
+        gap_limit: 3,
+    });
+
+    let actual = trade_preimage_sender_address(&fields).unwrap();
+    let expected = address_from_pubkey(
+        &active_pubkey,
+        fields.conf.pub_addr_prefix,
+        fields.conf.pub_t_addr_prefix,
+        fields.conf.checksum_type,
+        fields.conf.bech32_hrp.clone(),
+        UtxoAddressFormat::Standard,
+    );
+    assert_eq!(actual, expected);
 }
 
 #[test]
@@ -1015,12 +1042,15 @@ fn test_electrum_rpc_client_error() {
     let empty_hash = H256Json::default();
     let err = client.get_verbose_transaction(&empty_hash).wait().unwrap_err();
 
-    // use the static string instead because the actual error message cannot be obtain
-    // by serde_json serialization
-    let expected = r#"JsonRpcError { client_info: "coin: RICK", request: JsonRpcRequest { jsonrpc: "2.0", id: "1", method: "blockchain.transaction.get", params: [String("0000000000000000000000000000000000000000000000000000000000000000"), Bool(true)] }, error: Response(electrum1.cipig.net:10060, Object({"code": Number(2), "message": String("daemon error: DaemonError({'code': -5, 'message': 'No such mempool or blockchain transaction. Use gettransaction for wallet transactions.'})")})) }"#;
     let actual = format!("{}", err);
+    let debug_actual = format!("{:?}", err);
 
-    assert!(actual.contains(expected));
+    assert!(actual.contains("JsonRpcError { client_info: coin: RICK"));
+    assert!(actual.contains("request: blockchain.transaction.get id=1 params=2"));
+    assert!(actual.contains("response from electrum1.cipig.net:10060"));
+    assert!(actual.contains("No such mempool or blockchain transaction"));
+    assert!(!actual.contains("params: [String("));
+    assert!(debug_actual.contains("params: [String("));
 }
 
 #[test]
@@ -1357,7 +1387,7 @@ fn test_cashaddresses_in_tx_details_by_hash() {
     let req = json!({
          "method": "electrum",
          "servers": [
-             {"url":"electroncash.de:50003"},
+             {"url":"bitcoin-cash.devmole.eu:5001"},
              {"url":"tbch.loping.net:60001"},
              {"url":"blackie.c3-soft.com:60001"},
              {"url":"bch0.kister.net:51001"},
@@ -1404,7 +1434,7 @@ fn test_address_from_str_with_cashaddress_activated() {
     let req = json!({
          "method": "electrum",
          "servers": [
-             {"url":"electroncash.de:50003"},
+             {"url":"bitcoin-cash.devmole.eu:5001"},
              {"url":"tbch.loping.net:60001"},
              {"url":"blackie.c3-soft.com:60001"},
              {"url":"bch0.kister.net:51001"},
@@ -1439,7 +1469,7 @@ fn test_address_from_str_with_legacy_address_activated() {
     let req = json!({
          "method": "electrum",
          "servers": [
-             {"url":"electroncash.de:50003"},
+             {"url":"bitcoin-cash.devmole.eu:5001"},
              {"url":"tbch.loping.net:60001"},
              {"url":"blackie.c3-soft.com:60001"},
              {"url":"bch0.kister.net:51001"},
@@ -1541,6 +1571,10 @@ fn test_spam_rick() {
 }
 
 #[test]
+#[ignore = "deprecated: this test only exercised electrum protocol v1.2 negotiation via \
+            electrum-mona.bitbank.cc:50001, which is offline. Protocol v1.2 is dead; KDF \
+            requires v1.4, and no live server advertises v1.2-only, so this scenario is no \
+            longer reproducible."]
 fn test_one_unavailable_electrum_proto_version() {
     // check if the electrum-mona.bitbank.cc:50001 doesn't support the protocol version 1.4
     let client = electrum_client_for_test(&["electrum-mona.bitbank.cc:50001"]);
@@ -1589,7 +1623,7 @@ fn test_qtum_generate_pod() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1608,7 +1642,7 @@ fn test_qtum_add_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1647,7 +1681,7 @@ fn test_qtum_add_delegation_on_already_delegating() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1677,7 +1711,7 @@ fn test_qtum_get_delegation_infos() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1708,7 +1742,7 @@ fn test_qtum_remove_delegation() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110, "mature_confirmations":1});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1766,7 +1800,7 @@ fn test_qtum_my_balance() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
@@ -1801,7 +1835,7 @@ fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     let conf = json!({"coin":"tQTUM","rpcport":13889,"pubtype":120,"p2shtype":110});
     let req = json!({
         "method": "electrum",
-        "servers": [{"url":"electrum1.cipig.net:10071"}, {"url":"electrum2.cipig.net:10071"}, {"url":"electrum3.cipig.net:10071"}],
+        "servers": [{"url":"s1.qtum.info:50001"}, {"url":"s4.qtum.info:50001"}, {"url":"s1.qtum.info:50001"}],
         "check_utxo_maturity": false,
     });
 
@@ -2477,7 +2511,7 @@ fn test_qtum_is_unspent_mature() {
 #[ignore]
 // TODO it fails at least when fee is 2055837 sat per kbyte, need to investigate
 fn test_get_sender_trade_fee_dynamic_tx_fee() {
-    let rpc_client = electrum_client_for_test(&["electrum1.cipig.net:10071"]);
+    let rpc_client = electrum_client_for_test(&["s1.qtum.info:50001"]);
     let mut coin_fields = utxo_coin_fields_for_test(
         UtxoRpcClientEnum::Electrum(rpc_client),
         Some("bob passphrase max taker vol with dynamic trade fee"),
@@ -2571,7 +2605,7 @@ fn test_validate_fee_bch_70_bytes_signature() {
     let rpc_client = electrum_client_for_test(&[
         "electrum1.cipig.net:10055",
         "electrum2.cipig.net:10055",
-        "electrum3.cipig.net:10055",
+        "cashnode.bch.ninja:50001",
     ]);
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Electrum(rpc_client), None, false);
     // https://blockchair.com/bitcoin-cash/transaction/ccee05a6b5bbc6f50d2a65a5a3a04690d3e2d81082ad57d3ab471189f53dd70d
@@ -2943,7 +2977,7 @@ fn test_tx_details_kmd_rewards_claimed_by_other() {
 #[test]
 fn test_tx_details_bch_no_rewards() {
     let electrum = electrum_client_for_test(&[
-        "electroncash.de:50003",
+        "bitcoin-cash.devmole.eu:5001",
         "tbch.loping.net:60001",
         "blackie.c3-soft.com:60001",
         "bch0.kister.net:51001",
@@ -3285,9 +3319,9 @@ fn test_qtum_without_check_utxo_maturity() {
     let req = json!({
         "method": "electrum",
         "servers": [
-            {"url":"electrum1.cipig.net:10071"},
-            {"url":"electrum2.cipig.net:10071"},
-            {"url":"electrum3.cipig.net:10071"},
+            {"url":"s1.qtum.info:50001"},
+            {"url":"s4.qtum.info:50001"},
+            {"url":"s1.qtum.info:50001"},
         ],
     });
 
@@ -3325,9 +3359,9 @@ fn test_qtum_with_check_utxo_maturity_false() {
     let req = json!({
         "method": "electrum",
         "servers": [
-            {"url":"electrum1.cipig.net:10071"},
-            {"url":"electrum2.cipig.net:10071"},
-            {"url":"electrum3.cipig.net:10071"},
+            {"url":"s1.qtum.info:50001"},
+            {"url":"s4.qtum.info:50001"},
+            {"url":"s1.qtum.info:50001"},
         ],
         "check_utxo_maturity": false,
     });
@@ -3461,21 +3495,21 @@ fn test_account_balance_rpc() {
     hd_accounts.insert(0, UtxoHDAccount {
         account_id: 0,
         extended_pubkey: Secp256k1ExtendedPublicKey::from_str("xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ").unwrap(),
-        account_derivation_path: Bip44PathToAccount::from_str("m/44'/141'/0'").unwrap(),
+        account_derivation_path: HDPathToAccount::from_str("m/44'/141'/0'").unwrap(),
         external_addresses_number: 7,
         internal_addresses_number: 3,
     });
     hd_accounts.insert(1, UtxoHDAccount {
         account_id: 1,
         extended_pubkey: Secp256k1ExtendedPublicKey::from_str("xpub6DEHSksajpRPQq2FdGT6JoieiQZUpTZ3WZn8fcuLJhFVmtCpXbuXxp5aPzaokwcLV2V9LE55Dwt8JYkpuMv7jXKwmyD28WbHYjBH2zhbW2p").unwrap(),
-        account_derivation_path: Bip44PathToAccount::from_str("m/44'/141'/1'").unwrap(),
+        account_derivation_path: HDPathToAccount::from_str("m/44'/141'/1'").unwrap(),
         external_addresses_number: 0,
         internal_addresses_number: 1,
     });
     fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
         hd_wallet_storage: HDWalletCoinStorage::default(),
         address_format: UtxoAddressFormat::Standard,
-        derivation_path: Bip44PathToCoin::from_str("m/44'/141'").unwrap(),
+        derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
         accounts: HDAccountsMutex::new(hd_accounts),
         gap_limit: 3,
     });
@@ -3820,21 +3854,21 @@ fn test_scan_for_new_addresses() {
     hd_accounts.insert(0, UtxoHDAccount {
         account_id: 0,
         extended_pubkey: Secp256k1ExtendedPublicKey::from_str("xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ").unwrap(),
-        account_derivation_path: Bip44PathToAccount::from_str("m/44'/141'/0'").unwrap(),
+        account_derivation_path: HDPathToAccount::from_str("m/44'/141'/0'").unwrap(),
         external_addresses_number: 3,
         internal_addresses_number: 1,
     });
     hd_accounts.insert(1, UtxoHDAccount {
         account_id: 1,
         extended_pubkey: Secp256k1ExtendedPublicKey::from_str("xpub6DEHSksajpRPQq2FdGT6JoieiQZUpTZ3WZn8fcuLJhFVmtCpXbuXxp5aPzaokwcLV2V9LE55Dwt8JYkpuMv7jXKwmyD28WbHYjBH2zhbW2p").unwrap(),
-        account_derivation_path: Bip44PathToAccount::from_str("m/44'/141'/1'").unwrap(),
+        account_derivation_path: HDPathToAccount::from_str("m/44'/141'/1'").unwrap(),
         external_addresses_number: 0,
         internal_addresses_number: 2,
     });
     fields.derivation_method = DerivationMethod::HDWallet(UtxoHDWallet {
         hd_wallet_storage: HDWalletCoinStorage::default(),
         address_format: UtxoAddressFormat::Standard,
-        derivation_path: Bip44PathToCoin::from_str("m/44'/141'").unwrap(),
+        derivation_path: HDPathToCoin::from_str("m/44'/141'").unwrap(),
         accounts: HDAccountsMutex::new(hd_accounts),
         gap_limit: 3,
     });

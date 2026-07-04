@@ -62,7 +62,8 @@ The chapter is structured as:
 | §18.4   | IBC transfer (`MsgTransfer`) wire surface |
 | §18.5   | V1 atomic-swap surface — payment, validation, secret extraction |
 | §18.6   | Multi-denom and CW20-style token support |
-| §18.7   | Deferred sub-features (activation RPC, IBC RPC, balance events, tx history) |
+| §18.6A  | Cosmos staking / delegation RPC surface (implemented) |
+| §18.7   | Deferred + required-not-yet sub-features (activation RPC, IBC RPC, balance events, tx history, IBC swap-routing precondition) |
 | §18.8   | External references |
 | §18.9   | Baseline Verifications |
 | §18.10  | Provenance Footer |
@@ -151,6 +152,14 @@ The pubkey hash is the standard Cosmos `RIPEMD160(SHA256(pubkey))`
 combination (i.e. the same `dhash160` used by Bitcoin); the HRP
 disambiguates chains. Account id is the bech32 string in full,
 case-sensitive.
+
+> **Implemented in reloaded (informative).** In addition to the
+> standard `cosmos.auth.v1beta1.BaseAccount` shape, account-state
+> queries also decode the ethermint account proto variant
+> (`ethermint.types.v1.EthAccount`) used by EVM-compatible Cosmos
+> chains, so that the account number and sequence can be read on
+> those chains. Address derivation itself is unchanged from the
+> bech32 form above.
 
 ---
 
@@ -320,6 +329,44 @@ constructing the right denom string.
 
 ---
 
+## 18.6A Cosmos staking RPC surface
+
+This capability is **implemented in the reloaded baseline** (it is
+not deferred). The Tendermint platform-coin family exposes a
+staking/delegation RPC surface for proof-of-stake chains. Both a
+flat set of method strings and an `experimental::staking::`
+namespaced set route to the same handlers. The dictated JSON-RPC
+method strings are:
+
+| Method (flat) | Namespaced alias | Purpose |
+| --- | --- | --- |
+| `add_delegation` | `experimental::staking::delegate` | build, sign, and broadcast a delegation to a validator |
+| `remove_delegation` | `experimental::staking::undelegate` | begin undelegation (unbonding) of a delegation |
+| `claim_staking_rewards` | `experimental::staking::claim_rewards` | withdraw accrued staking rewards |
+| `validators_info` | `experimental::staking::query::validators` | list validators with metadata and status |
+| `delegations_info` | `experimental::staking::query::delegations` | list the account's active delegations |
+| `ongoing_undelegations_info` | `experimental::staking::query::ongoing_undelegations` | list in-flight unbonding entries |
+| `get_staking_infos` | — | summary staking position for the account |
+
+Binding requirements:
+
+- **R-S1.** The flat method names and the `experimental::staking::`
+  namespaced aliases above MUST both be accepted and MUST route to
+  the same handler, so existing callers and the namespaced surface
+  remain interchangeable.
+- **R-S2.** The delegation-mutating methods MUST construct, sign,
+  and broadcast the corresponding Cosmos SDK staking and
+  distribution messages
+  (`cosmos.staking.v1beta1.MsgDelegate`,
+  `cosmos.staking.v1beta1.MsgUndelegate`, and
+  `cosmos.distribution.v1beta1.MsgWithdrawDelegatorReward`)
+  using the same signing source as ordinary transfers.
+- **R-S3.** The query methods MUST read validator, delegation,
+  reward, and unbonding state from the chain's query endpoints and
+  return decoded amounts in the coin's display precision.
+
+---
+
 ## 18.7 Deferred sub-features
 
 Four sub-features lie within the natural scope of Tendermint support
@@ -378,6 +425,59 @@ entry by its message type (`MsgSend`, `MsgMultiSend`, `MsgCreateHTLC`,
 framework's storage layer. The framework's own chapter is the
 authoritative description of the trait shape; this section records
 only that a Tendermint binding is in scope and not yet written.
+
+### 18.7.5 IBC swap-routing minimum-balance precondition (implemented)
+
+> **STATUS: implemented in reloaded behind the
+> `ibc-routing-for-swaps` feature flag.** Unlike §18.7.1–§18.7.4
+> (informational deferrals), this sub-feature is a binding
+> driving-spec item that is now ported.
+
+When a maker offers an order whose two coins live on different
+IBC-connected Cosmos chains, the swap's hash-time-locked leg is
+settled on one chain and the proceeds are moved over an ICS-20 IBC
+transfer (§18.4). To avoid publishing orders that cannot complete
+for lack of routing funds, an order-making precondition checks
+that the coin which will carry the HTLC leg holds at least a
+configured minimum balance before the order is published.
+
+Binding requirements:
+
+- **R-IBC1.** The capability MUST be guarded by a build-time
+  feature flag named `ibc-routing-for-swaps`; when the flag is
+  off, order-making behaviour is unchanged from the current
+  baseline.
+- **R-IBC2.** A Tendermint coin MUST accept an optional per-coin
+  configuration value `min_balance_for_ibc_routing` (a decimal
+  number). When absent, the default minimum MUST be 2.0 units of
+  the HTLC-carrying coin.
+- **R-IBC3.** At order creation, when the order pairs coins that
+  require IBC routing, the engine MUST compare the HTLC-carrying
+  coin's spendable balance against the configured minimum and MUST
+  reject order creation with a typed insufficient-balance error
+  when the balance is below the minimum. The error MUST identify
+  the HTLC coin ticker, the required minimum, and the current
+  balance.
+
+Acceptance criteria:
+
+- With the feature flag enabled and a per-coin minimum configured
+  (or defaulted to 2.0), creating an order that requires IBC
+  routing while the HTLC coin balance is below the minimum is
+  rejected before publication; raising the balance to or above the
+  minimum allows the order to publish.
+- With the feature flag disabled, order creation ignores the
+  minimum entirely.
+
+> **Implementation note (reloaded):** maker-order creation enforces
+> this check in the ordermatch trading path; `min_balance_for_ibc_routing`
+> is read from coin config (default `2.0`), cross-chain Tendermint pair
+> routing is detected from protocol chain ids, and rejection includes
+> ticker/required/current values.
+
+External inputs that fix the shape: the ICS-20 transfer wire
+surface of §18.4 and the project's existing order-creation
+validation path. The internal decomposition is discretionary.
 
 ---
 

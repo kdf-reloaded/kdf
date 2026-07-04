@@ -27,7 +27,7 @@
 //! V2 paths for NFT-for-fungible swaps, the only kind of NFT swap KDF
 //! supports today).
 
-use ethabi::{Contract, Function, Token};
+use crate::eth::abi::{Contract, Function, Token};
 use ethereum_types::{Address, U256};
 use lazy_static::lazy_static;
 
@@ -190,8 +190,8 @@ impl std::fmt::Display for NftSwapV2Error {
 
 impl std::error::Error for NftSwapV2Error {}
 
-impl From<ethabi::Error> for NftSwapV2Error {
-    fn from(e: ethabi::Error) -> Self { NftSwapV2Error::Abi(e.to_string()) }
+impl From<crate::eth::abi::AbiError> for NftSwapV2Error {
+    fn from(e: crate::eth::abi::AbiError) -> Self { NftSwapV2Error::Abi(e.to_string()) }
 }
 
 /// Arguments that uniquely identify an NFT maker payment lock-up.
@@ -250,6 +250,47 @@ pub struct NftRefundSecretArgs {
     pub token_address: Address,
     pub token_id: U256,
     pub payment_time_lock: u64,
+}
+
+/// Decoded public calldata of an NFT maker-payment transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedNftMakerPayment {
+    pub kind: NftKind,
+    pub swap_id: [u8; 32],
+    pub amount: Option<U256>,
+    pub taker: Address,
+    pub taker_secret_hash: [u8; 32],
+    pub maker_secret_hash: [u8; 32],
+    pub payment_time_lock: u64,
+    pub token_address: Address,
+    pub token_id: U256,
+}
+
+/// Decoded public calldata of a taker spend of an NFT maker payment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedNftSpendMakerPayment {
+    pub kind: NftKind,
+    pub swap_id: [u8; 32],
+    pub amount: Option<U256>,
+    pub maker: Address,
+    pub taker_secret_hash: [u8; 32],
+    pub maker_secret: [u8; 32],
+    pub token_address: Address,
+    pub token_id: U256,
+}
+
+/// NFT maker-operation calldata kinds that can be decoded during production
+/// recovery without guessing the token standard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NftMakerCalldataKind {
+    MakerPayment,
+    SpendMakerPayment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodedNftMakerCalldata {
+    MakerPayment(DecodedNftMakerPayment),
+    SpendMakerPayment(DecodedNftSpendMakerPayment),
 }
 
 fn require_amount(args_amount: Option<U256>, kind: NftKind) -> Result<Option<U256>, NftSwapV2Error> {
@@ -349,6 +390,85 @@ pub fn decode_spend_maker_payment(kind: NftKind, calldata: &[u8]) -> Result<Vec<
     decode_call(kind.spend_fn(), calldata)
 }
 
+/// Decode NFT maker-operation calldata into a typed representation. The caller
+/// must provide `kind`; recovery must park/refuse when the token standard is
+/// unavailable instead of inferring it from calldata shape.
+pub fn decode_nft_maker_calldata(
+    kind: NftKind,
+    calldata_kind: NftMakerCalldataKind,
+    calldata: &[u8],
+) -> Result<DecodedNftMakerCalldata, NftSwapV2Error> {
+    match calldata_kind {
+        NftMakerCalldataKind::MakerPayment => {
+            decode_nft_maker_payment(kind, calldata).map(DecodedNftMakerCalldata::MakerPayment)
+        },
+        NftMakerCalldataKind::SpendMakerPayment => {
+            decode_nft_spend_maker_payment(kind, calldata).map(DecodedNftMakerCalldata::SpendMakerPayment)
+        },
+    }
+}
+
+/// Decode `erc{721,1155}MakerPayment` calldata into typed public fields.
+pub fn decode_nft_maker_payment(kind: NftKind, calldata: &[u8]) -> Result<DecodedNftMakerPayment, NftSwapV2Error> {
+    let decoded = decode_maker_payment(kind, calldata)?;
+    let mut idx = 0usize;
+    let swap_id = read_fixed_bytes32(&decoded, &mut idx, "id")?;
+    let amount = if kind == NftKind::Erc1155 {
+        Some(read_uint(&decoded, &mut idx, "amount")?)
+    } else {
+        None
+    };
+    let taker = read_address(&decoded, &mut idx, "taker")?;
+    let taker_secret_hash = read_fixed_bytes32(&decoded, &mut idx, "takerSecretHash")?;
+    let maker_secret_hash = read_fixed_bytes32(&decoded, &mut idx, "makerSecretHash")?;
+    let payment_time_lock = read_u64(&decoded, &mut idx, "paymentLockTime")?;
+    let token_address = read_address(&decoded, &mut idx, "tokenAddress")?;
+    let token_id = read_uint(&decoded, &mut idx, "tokenId")?;
+
+    Ok(DecodedNftMakerPayment {
+        kind,
+        swap_id,
+        amount,
+        taker,
+        taker_secret_hash,
+        maker_secret_hash,
+        payment_time_lock,
+        token_address,
+        token_id,
+    })
+}
+
+/// Decode `spendErc{721,1155}MakerPayment` calldata into typed public fields.
+pub fn decode_nft_spend_maker_payment(
+    kind: NftKind,
+    calldata: &[u8],
+) -> Result<DecodedNftSpendMakerPayment, NftSwapV2Error> {
+    let decoded = decode_spend_maker_payment(kind, calldata)?;
+    let mut idx = 0usize;
+    let swap_id = read_fixed_bytes32(&decoded, &mut idx, "id")?;
+    let amount = if kind == NftKind::Erc1155 {
+        Some(read_uint(&decoded, &mut idx, "amount")?)
+    } else {
+        None
+    };
+    let maker = read_address(&decoded, &mut idx, "maker")?;
+    let taker_secret_hash = read_fixed_bytes32(&decoded, &mut idx, "takerSecretHash")?;
+    let maker_secret = read_fixed_bytes32(&decoded, &mut idx, "makerSecret")?;
+    let token_address = read_address(&decoded, &mut idx, "tokenAddress")?;
+    let token_id = read_uint(&decoded, &mut idx, "tokenId")?;
+
+    Ok(DecodedNftSpendMakerPayment {
+        kind,
+        swap_id,
+        amount,
+        maker,
+        taker_secret_hash,
+        maker_secret,
+        token_address,
+        token_id,
+    })
+}
+
 fn decode_call(name: &str, calldata: &[u8]) -> Result<Vec<Token>, NftSwapV2Error> {
     if calldata.len() < 4 {
         return Err(NftSwapV2Error::Mismatch {
@@ -369,7 +489,10 @@ fn decode_call(name: &str, calldata: &[u8]) -> Result<Vec<Token>, NftSwapV2Error
             ),
         });
     }
-    Ok(function.decode_input(calldata)?)
+    // ethabi 17's `decode_input` expects parameter bytes WITHOUT the 4-byte
+    // selector (the vendored ethabi 6.1 fork used to strip it internally). The
+    // selector was validated above, so skip it here.
+    Ok(function.decode_input(&calldata[4..])?)
 }
 
 /// Validate decoded `erc{721,1155}MakerPayment` calldata against the
@@ -583,6 +706,58 @@ fn token_at<'a>(decoded: &'a [Token], idx: usize, field: &'static str) -> Result
     })
 }
 
+fn read_fixed_bytes32(decoded: &[Token], idx: &mut usize, field: &'static str) -> Result<[u8; 32], NftSwapV2Error> {
+    match token_at(decoded, *idx, field)? {
+        Token::FixedBytes(bytes) if bytes.len() == 32 => {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(bytes);
+            *idx += 1;
+            Ok(out)
+        },
+        other => Err(NftSwapV2Error::Mismatch {
+            field,
+            detail: format!("expected bytes32, got {other:?}"),
+        }),
+    }
+}
+
+fn read_address(decoded: &[Token], idx: &mut usize, field: &'static str) -> Result<Address, NftSwapV2Error> {
+    match token_at(decoded, *idx, field)? {
+        Token::Address(addr) => {
+            *idx += 1;
+            Ok(*addr)
+        },
+        other => Err(NftSwapV2Error::Mismatch {
+            field,
+            detail: format!("expected address, got {other:?}"),
+        }),
+    }
+}
+
+fn read_uint(decoded: &[Token], idx: &mut usize, field: &'static str) -> Result<U256, NftSwapV2Error> {
+    match token_at(decoded, *idx, field)? {
+        Token::Uint(value) => {
+            *idx += 1;
+            Ok(*value)
+        },
+        other => Err(NftSwapV2Error::Mismatch {
+            field,
+            detail: format!("expected uint256, got {other:?}"),
+        }),
+    }
+}
+
+fn read_u64(decoded: &[Token], idx: &mut usize, field: &'static str) -> Result<u64, NftSwapV2Error> {
+    let value = read_uint(decoded, idx, field)?;
+    if value > U256::from(u64::MAX) {
+        return Err(NftSwapV2Error::Mismatch {
+            field,
+            detail: format!("uint256 value {value} does not fit in u64"),
+        });
+    }
+    Ok(value.low_u64())
+}
+
 fn expect_fixed_bytes(
     decoded: &[Token],
     idx: &mut usize,
@@ -717,6 +892,23 @@ mod tests {
     }
 
     #[test]
+    fn typed_maker_payment_decode_recovers_public_restart_fields() {
+        let args = sample_erc1155_args();
+        let calldata = encode_maker_payment(&args).expect("encode");
+        let decoded = decode_nft_maker_payment(NftKind::Erc1155, &calldata).expect("typed decode");
+
+        assert_eq!(decoded.kind, args.kind);
+        assert_eq!(decoded.swap_id, args.swap_id);
+        assert_eq!(decoded.amount, args.amount);
+        assert_eq!(decoded.taker, args.taker);
+        assert_eq!(decoded.taker_secret_hash, args.taker_secret_hash);
+        assert_eq!(decoded.maker_secret_hash, args.maker_secret_hash);
+        assert_eq!(decoded.payment_time_lock, args.payment_time_lock);
+        assert_eq!(decoded.token_address, args.token_address);
+        assert_eq!(decoded.token_id, args.token_id);
+    }
+
+    #[test]
     fn validate_rejects_wrong_taker() {
         let args = sample_erc721_args();
         let calldata = encode_maker_payment(&args).expect("encode");
@@ -818,6 +1010,34 @@ mod tests {
         let decoded = decode_spend_maker_payment(NftKind::Erc1155, &calldata).expect("decode");
         // Position 1 must be `amount` for ERC-1155 spend.
         assert!(matches!(decoded.get(1), Some(Token::Uint(u)) if *u == U256::from(3u64)));
+    }
+
+    #[test]
+    fn typed_spend_decode_is_available_through_production_calldata_helper() {
+        let args = NftSpendMakerPaymentArgs {
+            kind: NftKind::Erc721,
+            swap_id: hash32(0x41),
+            amount: None,
+            maker: addr(0x78),
+            taker_secret_hash: hash32(0x51),
+            maker_secret: hash32(0x61),
+            token_address: addr(0x89),
+            token_id: U256::from(100u64),
+        };
+        let calldata = encode_spend_maker_payment(&args).expect("encode");
+
+        match decode_nft_maker_calldata(NftKind::Erc721, NftMakerCalldataKind::SpendMakerPayment, &calldata)
+            .expect("decode")
+        {
+            DecodedNftMakerCalldata::SpendMakerPayment(decoded) => {
+                assert_eq!(decoded.swap_id, args.swap_id);
+                assert_eq!(decoded.maker, args.maker);
+                assert_eq!(decoded.maker_secret, args.maker_secret);
+                assert_eq!(decoded.token_address, args.token_address);
+                assert_eq!(decoded.token_id, args.token_id);
+            },
+            other => panic!("expected spend calldata, got {other:?}"),
+        }
     }
 
     #[test]

@@ -5,7 +5,10 @@ use super::*;
 // LP-17: bring alloy `Provider` trait into scope so `RootProvider`'s
 // inherent + trait methods (`client()`, `get_block_number()`, etc.) are
 // callable from the helpers below.
+use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
+use crate::{CoinWithDerivationMethod, CryptoCtx, KeyPairPolicy};
 use alloy::providers::Provider as _;
+use crypto::{Bip44DerivationPath, HDPathToCoin};
 
 #[cfg_attr(test, mockable)]
 pub async fn make_gas_station_request(url: &str) -> GasStationResult {
@@ -27,6 +30,80 @@ impl EthCoinImpl {
     /// [`super::alloy_compat::KdfProvider`]. The provider wraps an
     /// `Arc`-shared transport so cloning is cheap.
     pub(crate) fn alloy_provider(&self) -> super::alloy_compat::KdfProvider { self.web3.clone() }
+
+    /// Reads the per-coin swap gas-fee policy currently in effect (CRD R35.6).
+    pub fn swap_gas_fee_policy(&self) -> SwapGasFeePolicy { *self.swap_gas_fee_policy.lock().unwrap() }
+
+    /// Sets the per-coin swap gas-fee policy (CRD R35.6).
+    pub fn set_swap_gas_fee_policy(&self, policy: SwapGasFeePolicy) {
+        *self.swap_gas_fee_policy.lock().unwrap() = policy;
+    }
+
+    /// Registers an ERC-20 token activated on top of this platform coin so the
+    /// V2 activation result can later report its balance (CRD §35.1.3).
+    pub fn add_erc20_token_info(&self, ticker: String, info: Erc20TokenInfo) {
+        self.erc20_tokens_infos.lock().unwrap().insert(ticker, info);
+    }
+
+    /// Returns a snapshot of the ERC-20 tokens registered on this platform coin.
+    pub fn get_erc20_tokens_infos(&self) -> std::collections::HashMap<String, Erc20TokenInfo> {
+        self.erc20_tokens_infos.lock().unwrap().clone()
+    }
+
+    /// Returns this coin's own ERC-20 token info (contract address + decimals)
+    /// when it is an ERC-20 token coin; `None` for the native gas coin.
+    pub fn erc20_token_info(&self) -> Option<Erc20TokenInfo> {
+        match &self.coin_type {
+            EthCoinType::Erc20 { token_addr, .. } => Some(Erc20TokenInfo {
+                token_addr: *token_addr,
+                decimals: self.decimals,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Returns the wallet public key as a hex string (informative; used to
+    /// populate the V2 activation result address-info records).
+    pub fn display_public_key(&self) -> String { format!("0x{:02x}", self.signer.public()) }
+
+    /// Signs `tx` with the local signing key for the offline-then-broadcast
+    /// send path used by atomic swaps (`sign_and_send_transaction_impl`). For
+    /// the `Local` policy behaviour is identical to the prior
+    /// `tx.sign(key_pair.secret(), chain_id)`. Under the MetaMask policy this
+    /// path is reached only by swap/HTLC sends and is rejected with
+    /// [`EthSignerError::SwapSendUnsupported`] (CRD R47.5.12); the user-facing
+    /// `withdraw` delegated-broadcast path does not use this entrypoint — it
+    /// routes the final step to the wallet via `eth_sendTransaction` directly in
+    /// `withdraw_impl` (CRD R47.5.6).
+    pub(crate) fn sign_tx_for_send(&self, tx: UnSignedEthTx) -> Result<SignedEthTx, EthSignerError> {
+        match &self.signer {
+            EthSigner::Local(key_pair) => Ok(tx.sign(key_pair.secret(), self.chain_id)),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(_) => Err(EthSignerError::SwapSendUnsupported),
+            // CRD R50.24 / R47.5.13: a Trezor device driven only through the
+            // interactive withdrawal task cannot satisfy the swap protocol's
+            // framework-scheduled, non-interactive HTLC signing. Rejected like
+            // MetaMask.
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(_) => Err(EthSignerError::SwapSendUnsupported),
+        }
+    }
+
+    /// Produces an offline-signed raw transaction (no broadcast). Unavailable
+    /// under the MetaMask policy (CRD R47.5.7 / R47.5.12): the wallet never
+    /// yields a detached, re-broadcastable signed raw transaction. For the
+    /// `Local` policy behaviour is identical to the prior offline signing.
+    pub(crate) fn sign_raw_tx_offline(&self, tx: UnSignedEthTx) -> Result<SignedEthTx, EthSignerError> {
+        match &self.signer {
+            EthSigner::Local(key_pair) => Ok(tx.sign(key_pair.secret(), self.chain_id)),
+            #[cfg(target_arch = "wasm32")]
+            EthSigner::Metamask(_) => Err(EthSignerError::OfflineSigningUnsupported),
+            // CRD R50.24 / R47.5.13: a Trezor device never yields a detached,
+            // re-broadcastable signed raw transaction. Rejected like MetaMask.
+            #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+            EthSigner::Trezor(_) => Err(EthSignerError::OfflineSigningUnsupported),
+        }
+    }
 
     /// Gets Transfer events from ERC20 smart contract `addr` between `from_block` and `to_block`
     pub(crate) fn erc20_transfer_events(
@@ -205,9 +282,12 @@ impl EthCoinImpl {
         sha256(&input).to_vec()
     }
 
+    /// The EVM chain id this coin was activated on, when configured.
+    pub fn chain_id(&self) -> Option<u64> { self.chain_id }
+
     /// Returns the token address for contract calls.
     /// ETH → zero address, ERC20 → token contract address.
-    pub(crate) fn get_token_address(&self) -> Result<Address, String> {
+    pub fn get_token_address(&self) -> Result<Address, String> {
         match &self.coin_type {
             EthCoinType::Eth => Ok(Address::default()),
             EthCoinType::Erc20 { token_addr, .. } => Ok(*token_addr),
@@ -293,6 +373,36 @@ impl EthCoinImpl {
     pub fn address_from_str(&self, address: &str) -> Result<Address, String> {
         Ok(try_s!(valid_addr_from_str(address)))
     }
+
+    pub(crate) fn call_request_from(
+        &self,
+        from: Address,
+        to: Address,
+        value: Option<U256>,
+        data: Option<Bytes>,
+    ) -> Web3RpcFut<Bytes> {
+        let request = CallRequest {
+            from: Some(from),
+            to,
+            gas: None,
+            gas_price: None,
+            value,
+            data,
+        };
+
+        let provider = self.alloy_provider();
+        let fut = async move {
+            use crate::eth::alloy_compat::assert_send_future;
+            assert_send_future(
+                provider
+                    .client()
+                    .request::<_, Bytes>("eth_call", (request, BlockNumber::Latest)),
+            )
+            .await
+            .map_err(|e| MmError::new(Web3RpcError::Transport(e.to_string())))
+        };
+        Box::new(fut.boxed().compat())
+    }
 }
 
 pub async fn get_raw_transaction_impl(coin: EthCoin, req: RawTransactionRequest) -> RawTransactionResult {
@@ -321,18 +431,203 @@ pub async fn get_raw_transaction_impl(coin: EthCoin, req: RawTransactionRequest)
     })
 }
 
-pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
-    // TRON uses a dedicated pipeline: its transaction format, address
-    // encoding, signing digest and fee model all differ from the EVM flow.
-    if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
-        let _ = ctx;
-        return crate::eth::tron::withdraw::withdraw_tron(coin, req).await;
+pub(crate) fn validate_evm_withdraw_request(coin: &EthCoin, _req: &WithdrawRequest) -> MmResult<(), WithdrawError> {
+    if !matches!(coin.coin_type, EthCoinType::Eth | EthCoinType::Erc20 { .. }) {
+        return MmError::err(WithdrawError::CoinDoesntSupportInitWithdraw {
+            coin: coin.ticker.clone(),
+        });
     }
 
+    Ok(())
+}
+
+pub(crate) struct EvmWithdrawSender {
+    address: Address,
+    key_pair: Option<KeyPair>,
+}
+
+impl EvmWithdrawSender {
+    pub(crate) fn address(&self) -> Address { self.address }
+
+    fn checksum_address(&self) -> String { checksum_address(&format!("{:#02x}", self.address)) }
+
+    fn sign_tx(&self, coin: &EthCoin, tx: UnSignedEthTx) -> Result<SignedEthTx, EthSignerError> {
+        match self.key_pair {
+            Some(ref key_pair) => Ok(tx.sign(key_pair.secret(), coin.chain_id)),
+            None => coin.sign_tx_for_send(tx),
+        }
+    }
+}
+
+pub(crate) async fn resolve_evm_withdraw_sender(
+    ctx: &MmArc,
+    coin: &EthCoin,
+    req: &WithdrawRequest,
+) -> MmResult<EvmWithdrawSender, WithdrawError> {
+    let from = match req.from.clone() {
+        Some(from) => from,
+        None => {
+            return Ok(EvmWithdrawSender {
+                address: coin.my_address,
+                key_pair: None,
+            })
+        },
+    };
+
+    let hd_wallet = match coin.derivation_method() {
+        DerivationMethod::Iguana(_) => {
+            let error = "'from' is not supported if the EVM coin is initialized with a single private key";
+            return MmError::err(WithdrawError::UnexpectedFromAddress(error.to_owned()));
+        },
+        DerivationMethod::HDWallet(hd_wallet) => hd_wallet,
+    };
+
+    let crate::HDAddressId {
+        account_id,
+        chain,
+        address_id,
+    } = match from {
+        crate::WithdrawFrom::AddressId(id) => id,
+        crate::WithdrawFrom::DerivationPath { derivation_path } => {
+            let derivation_path = Bip44DerivationPath::from_str(&derivation_path)
+                .map_to_mm(|e| WithdrawError::UnexpectedFromAddress(format!("{:?}", e)))?;
+            let coin_type = derivation_path.coin_type();
+            let expected_coin_type = hd_wallet.coin_type();
+            if coin_type != expected_coin_type {
+                let error = format!(
+                    "Derivation path '{}' must have '{}' coin type",
+                    derivation_path, expected_coin_type
+                );
+                return MmError::err(WithdrawError::UnexpectedFromAddress(error));
+            }
+            crate::HDAddressId::from(derivation_path)
+        },
+    };
+
+    let hd_account = hd_wallet
+        .get_account(account_id)
+        .await
+        .or_mm_err(|| WithdrawError::UnknownAccount { account_id })?;
+    let is_address_activated = hd_account
+        .is_address_activated(chain, address_id)
+        .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
+    let hd_address = coin
+        .derive_address(&hd_account, chain, address_id)
+        .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
+    if !is_address_activated {
+        let error = format!("'{}' address is not activated", hd_address.address);
+        return MmError::err(WithdrawError::UnexpectedFromAddress(error));
+    }
+
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+    let global_hd = match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::GlobalHDAccount(global_hd) => global_hd,
+        KeyPairPolicy::Iguana => {
+            let error = "EVM withdrawal with explicit 'from' requires a software-HD wallet";
+            return MmError::err(WithdrawError::UnexpectedFromAddress(error.to_owned()));
+        },
+    };
+    let secret = global_hd
+        .derive_secp256k1_secret(&hd_address.derivation_path)
+        .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
+    let key_pair =
+        KeyPair::from_secret_slice(secret.as_slice()).map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+    if key_pair.address() != hd_address.address {
+        let error = format!(
+            "Derived signer address '{:#02x}' does not match selected HD address '{:#02x}'",
+            key_pair.address(),
+            hd_address.address
+        );
+        return MmError::err(WithdrawError::InternalError(error));
+    }
+
+    Ok(EvmWithdrawSender {
+        address: hd_address.address,
+        key_pair: Some(key_pair),
+    })
+}
+
+#[cfg_attr(test, mockable)]
+pub(crate) fn evm_withdraw_balance(coin: EthCoin, sender: Address) -> BalanceFut<U256> {
+    let fut = async move {
+        use crate::eth::alloy_compat::assert_send_future;
+        match coin.coin_type {
+            EthCoinType::Eth => assert_send_future(
+                coin.web3
+                    .client()
+                    .request::<_, U256>("eth_getBalance", (sender, BlockNumber::Latest)),
+            )
+            .await
+            .map_err(|e| MmError::new(BalanceError::Transport(e.to_string()))),
+            EthCoinType::Erc20 { ref token_addr, .. } => {
+                let function = ERC20_CONTRACT.function("balanceOf")?;
+                let data = function.encode_input(&[Token::Address(sender)])?;
+
+                let res = coin
+                    .call_request_from(sender, *token_addr, None, Some(data.into()))
+                    .compat()
+                    .await
+                    .mm_err(BalanceError::from)?;
+                let decoded = function.decode_output(&res.0)?;
+                match decoded[0] {
+                    Token::Uint(number) => Ok(number),
+                    _ => {
+                        let error = format!("Expected U256 as balanceOf result but got {:?}", decoded);
+                        MmError::err(BalanceError::InvalidResponse(error))
+                    },
+                }
+            },
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => MmError::err(BalanceError::Internal(
+                "TRON balance lookup not wired through EVM withdraw".to_owned(),
+            )),
+        }
+    };
+    Box::new(fut.boxed().compat())
+}
+
+/// The unsigned EVM withdrawal transaction plus the derived metadata every
+/// signing policy needs to assemble the completed `TransactionDetails` (CRD
+/// R49.25 / R50.22). Produced by [`build_evm_withdraw_plan`] and consumed by
+/// both the software / MetaMask path (`withdraw_impl`) and the Trezor
+/// device-signing path (`withdraw_trezor_impl`).
+pub(crate) struct EvmWithdrawPlan {
+    /// Unsigned legacy EIP-155 transaction ready to be signed for `chain_id`.
+    pub(crate) unsigned: UnSignedEthTx,
+    /// Recipient address parsed from `req.to` (used for the `to` field and the
+    /// self-send `received_by_me` check).
+    pub(crate) to_addr: Address,
+    /// The transaction's action target: `to_addr` for a native send, or the
+    /// token contract for an ERC20 transfer.
+    pub(crate) call_addr: Address,
+    /// Withdrawn amount in the coin's smallest unit (post max/fee adjustment).
+    pub(crate) wei_amount: U256,
+    pub(crate) gas: U256,
+    pub(crate) gas_price: U256,
+    /// Ticker the fee is denominated in (the platform coin for ERC20 tokens).
+    pub(crate) fee_coin: String,
+}
+
+/// Shared unsigned-transaction construction for an EVM withdrawal, reused by the
+/// software / MetaMask path and the Trezor device-signing path. Given the
+/// already-resolved `sender_address`, it validates and resolves the recipient,
+/// checks the balance, applies max / amount and fee handling, resolves the gas
+/// and gas price, holds the shared nonce lock while fetching the nonce, and
+/// builds the unsigned legacy EIP-155 transaction. The returned nonce-lock guard
+/// must be held by the caller through signing so a concurrent withdrawal cannot
+/// reuse the selected nonce.
+pub(crate) async fn build_evm_withdraw_plan(
+    ctx: &MmArc,
+    coin: &EthCoin,
+    req: &WithdrawRequest,
+    sender_address: Address,
+) -> MmResult<(EvmWithdrawPlan, common::custom_futures::TimedMutexGuard<'static, ()>), WithdrawError> {
     let to_addr = coin
         .address_from_str(&req.to)
         .map_to_mm(WithdrawError::InvalidAddress)?;
-    let my_balance = coin.my_balance().compat().await.mm_err(Into::into)?;
+    let my_balance = evm_withdraw_balance(coin.clone(), sender_address)
+        .compat()
+        .await
+        .mm_err(Into::into)?;
     let my_balance_dec = u256_to_big_decimal(my_balance, coin.decimals).mm_err(Into::into)?;
 
     let (mut wei_amount, dec_amount) = if req.max {
@@ -349,14 +644,14 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         });
     };
     let (mut eth_value, data, call_addr, fee_coin) = match &coin.coin_type {
-        EthCoinType::Eth => (wei_amount, vec![], to_addr, coin.ticker()),
+        EthCoinType::Eth => (wei_amount, vec![], to_addr, coin.ticker().to_owned()),
         EthCoinType::Erc20 { platform, token_addr } => {
             let function = ERC20_CONTRACT.function("transfer")?;
             let data = function.encode_input(&[Token::Address(to_addr), Token::Uint(wei_amount)])?;
-            (0.into(), data, *token_addr, platform.as_str())
+            (0.into(), data, *token_addr, platform.clone())
         },
-        // TRON is diverted to the dedicated pipeline at the top of this function;
-        // this arm is unreachable but kept for exhaustiveness.
+        // TRON is diverted to the dedicated pipeline before this helper is
+        // reached; this arm is unreachable but kept for exhaustiveness.
         EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
             return MmError::err(WithdrawError::InternalError(
                 "TRON withdraw must route through tron::withdraw::withdraw_tron".to_owned(),
@@ -365,10 +660,10 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
     };
     let eth_value_dec = u256_to_big_decimal(eth_value, coin.decimals).mm_err(Into::into)?;
 
-    let (gas, gas_price) = match req.fee {
+    let (gas, gas_price) = match &req.fee {
         Some(WithdrawFee::EthGas { gas_price, gas }) => {
-            let gas_price = wei_from_big_decimal(&gas_price, 9).mm_err(Into::into)?;
-            (gas.into(), gas_price)
+            let gas_price = wei_from_big_decimal(gas_price, 9).mm_err(Into::into)?;
+            (U256::from(*gas), gas_price)
         },
         Some(fee_policy) => {
             let error = format!("Expected 'EthGas' fee type, found {:?}", fee_policy);
@@ -385,7 +680,7 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
             let estimate_gas_req = CallRequest {
                 value: Some(eth_value_for_estimate),
                 data: Some(data.clone().into()),
-                from: Some(coin.my_address),
+                from: Some(sender_address),
                 to: call_addr,
                 gas: None,
                 // gas price must be supplied because some smart contracts base their
@@ -415,21 +710,21 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         eth_value -= total_fee;
         wei_amount -= total_fee;
     };
-    let _nonce_lock = NONCE_LOCK
+    let nonce_lock = NONCE_LOCK
         .lock(|_start, _now| {
             if ctx.is_stopping() {
-                let error = "MM is stopping, aborting withdraw_impl in NONCE_LOCK".to_owned();
+                let error = "MM is stopping, aborting withdraw in NONCE_LOCK".to_owned();
                 return MmError::err(WithdrawError::InternalError(error));
             }
             Ok(0.5)
         })
         .await?;
-    let nonce_fut = get_addr_nonce(coin.my_address, coin.web3_instances.clone()).compat();
+    let nonce_fut = get_addr_nonce(sender_address, coin.web3_instances.clone()).compat();
     let nonce = match select(nonce_fut, Timer::sleep(30.)).await {
         Either::Left((nonce_res, _)) => nonce_res.map_to_mm(WithdrawError::Transport)?,
         Either::Right(_) => return MmError::err(WithdrawError::Transport("Get address nonce timed out".to_owned())),
     };
-    let tx = UnSignedEthTx {
+    let unsigned = UnSignedEthTx {
         nonce,
         value: eth_value,
         action: Action::Call(call_addr),
@@ -438,29 +733,52 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         gas_price,
     };
 
-    let signed = tx.sign(coin.key_pair.secret(), coin.chain_id);
-    let bytes = rlp::encode(&signed);
-    let amount_decimal = u256_to_big_decimal(wei_amount, coin.decimals).mm_err(Into::into)?;
+    Ok((
+        EvmWithdrawPlan {
+            unsigned,
+            to_addr,
+            call_addr,
+            wei_amount,
+            gas,
+            gas_price,
+            fee_coin,
+        },
+        nonce_lock,
+    ))
+}
+
+/// Assemble the completed `TransactionDetails` from a withdrawal plan and the
+/// final signed-transaction bytes / hash. Shared by the software path and the
+/// Trezor path so both emit the identical completed-payload field set (CRD
+/// R49.25 / R50.22 / R50.23).
+pub(crate) fn build_evm_withdraw_details(
+    coin: &EthCoin,
+    plan: &EvmWithdrawPlan,
+    from_checksum: String,
+    from_addr: Address,
+    tx_hex: BytesJson,
+    tx_hash: String,
+) -> MmResult<TransactionDetails, WithdrawError> {
+    let amount_decimal = u256_to_big_decimal(plan.wei_amount, coin.decimals).mm_err(Into::into)?;
     let mut spent_by_me = amount_decimal.clone();
-    let received_by_me = if to_addr == coin.my_address {
+    let received_by_me = if plan.to_addr == from_addr {
         amount_decimal.clone()
     } else {
         0.into()
     };
-    let fee_details = EthTxFeeDetails::new(gas, gas_price, fee_coin).mm_err(Into::into)?;
+    let fee_details = EthTxFeeDetails::new(plan.gas, plan.gas_price, &plan.fee_coin).mm_err(Into::into)?;
     if coin.coin_type == EthCoinType::Eth {
         spent_by_me += &fee_details.total_fee;
     }
-    let my_address = coin.my_address().map_to_mm(WithdrawError::InternalError)?;
     Ok(TransactionDetails {
-        to: vec![checksum_address(&format!("{:#02x}", to_addr))],
-        from: vec![my_address],
+        to: vec![checksum_address(&format!("{:#02x}", plan.to_addr))],
+        from: vec![from_checksum],
         total_amount: amount_decimal,
         my_balance_change: &received_by_me - &spent_by_me,
         spent_by_me,
         received_by_me,
-        tx_hex: bytes.into(),
-        tx_hash: format!("{:02x}", signed.tx_hash()),
+        tx_hex,
+        tx_hash,
         block_height: 0,
         fee_details: Some(fee_details.into()),
         coin: coin.ticker.clone(),
@@ -469,6 +787,149 @@ pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> W
         kmd_rewards: None,
         transaction_type: Default::default(),
     })
+}
+
+pub async fn withdraw_impl(ctx: MmArc, coin: EthCoin, req: WithdrawRequest) -> WithdrawResult {
+    // TRON uses a dedicated pipeline: its transaction format, address
+    // encoding, signing digest and fee model all differ from the EVM flow.
+    if matches!(coin.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+        // CRD R47.5.6a: the non-EVM-keypair TRON family is rejected under the
+        // MetaMask signing policy as an unsupported withdraw. The delegated
+        // sign-and-broadcast model (`eth_sendTransaction`, R47.5.6) is EVM-only
+        // and cannot drive TRON's distinct transaction format/signing digest,
+        // and the framework holds no local TRON secret under MetaMask. (TRON is
+        // not activated under the MetaMask policy in practice, so this is a
+        // defensive early rejection rather than a reachable runtime path.)
+        #[cfg(target_arch = "wasm32")]
+        if matches!(coin.signer, EthSigner::Metamask(_)) {
+            return MmError::err(WithdrawError::UnsupportedUnderMetamask(
+                "TRON withdraw is not supported under the MetaMask signing policy".to_owned(),
+            ));
+        }
+        let _ = ctx;
+        return crate::eth::tron::withdraw::withdraw_tron(coin, req).await;
+    }
+
+    validate_evm_withdraw_request(&coin, &req)?;
+    let sender = resolve_evm_withdraw_sender(&ctx, &coin, &req).await?;
+    let (plan, _nonce_lock) = build_evm_withdraw_plan(&ctx, &coin, &req, sender.address).await?;
+
+    // CRD R47.5.6/R47.5.7 -- delegated sign-and-broadcast under the MetaMask
+    // policy. Unlike the Local (Iguana) path below -- which signs `tx` offline
+    // and returns re-broadcastable raw bytes for a later `send_raw_transaction`
+    // -- under MetaMask the framework holds no key: it hands the unsigned
+    // EIP-1193 transaction object to the wallet, which SIGNS AND BROADCASTS it
+    // immediately and returns only a transaction hash. There is therefore no
+    // separate broadcast step and NO detached, re-broadcastable raw signed
+    // bytes exist; `tx_hex` is deliberately left empty (the framework must not
+    // fabricate signed bytes).
+    #[cfg(target_arch = "wasm32")]
+    if let EthSigner::Metamask(metamask_arc) = &coin.signer {
+        // CRD R47.5.9 -- re-read the wallet's currently-active account and verify
+        // it still matches the activated account BEFORE any signing/broadcast
+        // request, so the wrong account is never asked to sign.
+        metamask_arc
+            .check_active_eth_account()
+            .await
+            .mm_err(|e| WithdrawError::Transport(e.to_string()))?;
+
+        // CRD R47.5.10 -- ensure the wallet's active chain matches the coin's
+        // EIP-155 chain (requesting a switch otherwise) before broadcasting.
+        if let Some(coin_chain_id) = coin.chain_id {
+            metamask_arc
+                .ensure_active_chain(coin_chain_id)
+                .await
+                .mm_err(|e| WithdrawError::Transport(e.to_string()))?;
+        }
+
+        // CRD R47.5.8 -- build the EIP-1193 transaction object. `from` is the
+        // activated (connected) account; `to`/`value`/`gas`/`gasPrice` reuse the
+        // exact fields the local path computed above. The wallet owns the nonce
+        // for delegated broadcast, so `nonce` is intentionally omitted (the
+        // framework's computed `tx.nonce` is consumed only by the local path).
+        let mut tx_object = serde_json::json!({
+            "from": format!("{:#x}", sender.address),
+            "to": format!("{:#x}", plan.call_addr),
+            "value": format!("{:#x}", plan.unsigned.value),
+            "gas": format!("{:#x}", plan.gas),
+            "gasPrice": format!("{:#x}", plan.gas_price),
+        });
+        if !plan.unsigned.data.is_empty() {
+            tx_object["data"] = serde_json::json!(format!("0x{}", hex::encode(&plan.unsigned.data)));
+        }
+
+        let tx_hash = metamask_arc
+            .eth_send_transaction(tx_object)
+            .await
+            .mm_err(|e| WithdrawError::Transport(e.to_string()))?;
+
+        // CRD R47.5.6a -- best-effort `tx_hex`. The wallet already broadcast the
+        // transaction (R47.5.6), so no detached, re-broadcastable raw signed
+        // bytes were produced by the framework. To still populate `tx_hex` when
+        // possible, poll the node for a bounded window for the broadcast tx to
+        // appear; if found, round-trip the returned web3/alloy `Transaction`
+        // through `signed_tx_from_alloy_tx` (the same helper `get_raw_transaction`
+        // uses, preserving the legacy `SignedEthTx` RLP shape) and rlp-encode it.
+        // If the tx has not appeared before the deadline, leave `tx_hex` empty
+        // (current behaviour) -- withdraw does NOT fail on a poll timeout since
+        // the broadcast already succeeded.
+        let tx_hex: BytesJson = {
+            use crate::eth::alloy_compat::assert_send_future;
+            use alloy::providers::Provider;
+
+            let mut found = BytesJson::from(Vec::new());
+            if let Ok(hash) = H256::from_str(tx_hash.trim_start_matches("0x")) {
+                let alloy_hash = alloy::primitives::B256::from_slice(&hash.0);
+                let provider = coin.alloy_provider();
+                // ~12s overall best-effort window; each attempt is capped so a
+                // hung lookup cannot stall past the deadline.
+                let deadline_ms = now_ms() + 12_000;
+                while now_ms() < deadline_ms {
+                    let lookup = Box::pin(assert_send_future(provider.get_transaction_by_hash(alloy_hash)));
+                    match select(lookup, Timer::sleep(3.)).await {
+                        Either::Left((Ok(Some(alloy_tx)), _)) => {
+                            if let Ok(signed) = signed_tx_from_alloy_tx(alloy_tx) {
+                                found = BytesJson(rlp::encode(&signed).to_vec());
+                            }
+                            break;
+                        },
+                        // Not yet mined / not yet visible / transient transport
+                        // error: brief backoff, then retry until the deadline.
+                        Either::Left((_, _)) => Timer::sleep(1.).await,
+                        // Per-attempt timeout: loop re-checks the overall deadline.
+                        Either::Right(_) => {},
+                    }
+                }
+            }
+            found
+        };
+
+        // CRD R47.5.6/R47.5.6a/R47.5.7: already broadcast by the wallet, so no
+        // detached re-broadcastable bytes exist; `tx_hex` is filled best-effort
+        // from the node above and is empty if the tx had not yet appeared within
+        // the poll window.
+        return build_evm_withdraw_details(
+            &coin,
+            &plan,
+            sender.checksum_address(),
+            sender.address,
+            tx_hex,
+            tx_hash.trim_start_matches("0x").to_lowercase(),
+        );
+    }
+
+    let signed = sender
+        .sign_tx(&coin, plan.unsigned.clone())
+        .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;
+    let bytes = rlp::encode(&signed);
+    build_evm_withdraw_details(
+        &coin,
+        &plan,
+        sender.checksum_address(),
+        sender.address,
+        bytes.into(),
+        format!("{:02x}", signed.tx_hash()),
+    )
 }
 
 pub async fn sign_raw_eth_tx_impl(coin: EthCoin, args: SignRawTransactionRequest) -> RawTransactionResult {
@@ -513,7 +974,9 @@ pub async fn sign_raw_eth_tx_impl(coin: EthCoin, args: SignRawTransactionRequest
         gas_price,
     };
 
-    let signed = tx.sign(coin.key_pair.secret(), coin.chain_id);
+    let signed = coin
+        .sign_raw_tx_offline(tx)
+        .map_to_mm(|e| RawTransactionError::SigningError(e.to_string()))?;
     let bytes = rlp::encode(&signed);
 
     Ok(RawTransactionRes {
@@ -578,7 +1041,7 @@ pub async fn sign_and_send_transaction_impl(
         value,
         data,
     };
-    let signed = tx.sign(coin.key_pair.secret(), coin.chain_id);
+    let signed = try_tx_s!(coin.sign_tx_for_send(tx));
     let bytes = rlp::encode(&signed).to_vec();
     status.status(tags!(), "send_raw_transaction…");
 
@@ -627,6 +1090,113 @@ pub async fn sign_and_send_transaction_impl(
 }
 
 impl EthCoin {
+    /// Queries the on-chain balances of every ERC-20 token registered on this
+    /// platform coin (via `balanceOf`), keyed by token ticker (CRD §35.1.3).
+    pub async fn get_tokens_balance_list(
+        &self,
+    ) -> Result<std::collections::HashMap<String, CoinBalance>, MmError<BalanceError>> {
+        let infos = self.get_erc20_tokens_infos();
+        let mut result = std::collections::HashMap::new();
+        for (ticker, info) in infos {
+            let function = ERC20_CONTRACT
+                .function("balanceOf")
+                .map_to_mm(|e| BalanceError::Internal(e.to_string()))?;
+            let data = function
+                .encode_input(&[Token::Address(self.my_address)])
+                .map_to_mm(|e| BalanceError::Internal(e.to_string()))?;
+            let res = self
+                .call_request(info.token_addr, None, Some(data.into()))
+                .compat()
+                .await
+                .mm_err(BalanceError::from)?;
+            let decoded = function
+                .decode_output(&res.0)
+                .map_to_mm(|e| BalanceError::Internal(e.to_string()))?;
+            let wei: U256 = match decoded.into_iter().next() {
+                Some(Token::Uint(number)) => number,
+                other => {
+                    return MmError::err(BalanceError::InvalidResponse(format!(
+                        "Expected U256 as balanceOf result but got {:?}",
+                        other
+                    )))
+                },
+            };
+            let spendable =
+                u256_to_big_decimal(wei, info.decimals).mm_err(|e| BalanceError::Internal(e.to_string()))?;
+            result.insert(ticker, CoinBalance {
+                spendable,
+                unspendable: BigDecimal::from(0),
+            });
+        }
+        Ok(result)
+    }
+
+    /// Runs the legacy ETH transaction-history loop using this coin's own
+    /// (weakly held) MM context. Used by the V2 platform activation path to
+    /// start background history fetching when `tx_history` is requested.
+    pub async fn process_eth_history_loop(&self) {
+        if let Some(ctx) = MmArc::from_weak(&self.ctx) {
+            let _ = self.process_history_loop(ctx).compat().await;
+        }
+    }
+
+    /// Builds an ERC-20 token `EthCoin` that shares this platform coin's transport
+    /// (web3 instances, key pair, address and swap contracts) but carries the token's
+    /// own ticker, contract address, decimals and confirmation requirement.
+    ///
+    /// Per CRD §35.2.2 the token decimals are taken from the coin configuration; the
+    /// contract is not introspected. Returns an error if the configuration does not
+    /// declare a valid `decimals` value.
+    pub fn erc20_token_from_conf(
+        &self,
+        ticker: String,
+        token_addr: Address,
+        required_confirmations: u64,
+    ) -> Result<EthCoin, String> {
+        let ctx = MmArc::from_weak(&self.ctx).ok_or_else(|| "MM context has been dropped".to_string())?;
+        let conf = crate::coin_conf(&ctx, &ticker);
+        let decimals = match conf["decimals"].as_u64() {
+            Some(d) if d > 0 && d <= 19 => d as u8,
+            _ => {
+                return Err(format!(
+                    "Token {} decimals must be declared in its coin configuration",
+                    ticker
+                ))
+            },
+        };
+        let token_impl = EthCoinImpl {
+            signer: self.signer.clone(),
+            my_address: self.my_address,
+            coin_type: EthCoinType::Erc20 {
+                platform: self.ticker().to_string(),
+                token_addr,
+            },
+            sign_message_prefix: self.sign_message_prefix.clone(),
+            swap_contract_address: self.swap_contract_address,
+            fallback_swap_contract: self.fallback_swap_contract,
+            decimals,
+            ticker,
+            gas_station_url: self.gas_station_url.clone(),
+            gas_station_decimals: self.gas_station_decimals,
+            gas_station_policy: self.gas_station_policy.clone(),
+            web3: self.web3.clone(),
+            web3_instances: self.web3_instances.clone(),
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            ctx: self.ctx.clone(),
+            required_confirmations: required_confirmations.into(),
+            chain_id: self.chain_id,
+            logs_block_range: self.logs_block_range,
+            derivation_method: DerivationMethod::Iguana(self.my_address),
+            swap_v2_contracts: self.swap_v2_contracts,
+            gas_limit_v2: self.gas_limit_v2.clone(),
+            tron_api: None,
+            nft_swap_v2_contract: self.nft_swap_v2_contract,
+            swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
+            erc20_tokens_infos: Default::default(),
+        };
+        Ok(EthCoin(Arc::new(token_impl)))
+    }
+
     /// Downloads and saves ETH transaction history of my_address, relies on Parity trace_filter API
     /// https://wiki.parity.io/JSONRPC-trace-module#trace_filter, this requires tracing to be enabled
     /// in node config. Other ETH clients (Geth, etc.) are `not` supported (yet).
@@ -683,7 +1253,7 @@ impl EthCoin {
                 },
             };
             *self.history_sync_state.lock().unwrap() = HistorySyncState::InProgress(json!({
-                "blocks_left": u64::from(saved_traces.earliest_block),
+                "blocks_left": saved_traces.earliest_block.as_u64(),
             }));
 
             let mut existing_history = match self.load_history_from_file(ctx).compat().await {
@@ -712,8 +1282,8 @@ impl EthCoin {
                     .eth_traces(
                         vec![self.my_address],
                         vec![],
-                        BlockNumber::Number(before_earliest.into()),
-                        BlockNumber::Number((saved_traces.earliest_block).into()),
+                        BlockNumber::Number(before_earliest.as_u64()),
+                        BlockNumber::Number(saved_traces.earliest_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -735,8 +1305,8 @@ impl EthCoin {
                     .eth_traces(
                         vec![],
                         vec![self.my_address],
-                        BlockNumber::Number(before_earliest.into()),
-                        BlockNumber::Number((saved_traces.earliest_block).into()),
+                        BlockNumber::Number(before_earliest.as_u64()),
+                        BlockNumber::Number(saved_traces.earliest_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -774,8 +1344,8 @@ impl EthCoin {
                     .eth_traces(
                         vec![self.my_address],
                         vec![],
-                        BlockNumber::Number((saved_traces.latest_block + 1).into()),
-                        BlockNumber::Number(current_block.into()),
+                        BlockNumber::Number((saved_traces.latest_block + 1).as_u64()),
+                        BlockNumber::Number(current_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -797,8 +1367,8 @@ impl EthCoin {
                     .eth_traces(
                         vec![],
                         vec![self.my_address],
-                        BlockNumber::Number((saved_traces.latest_block + 1).into()),
-                        BlockNumber::Number(current_block.into()),
+                        BlockNumber::Number((saved_traces.latest_block + 1).as_u64()),
+                        BlockNumber::Number(current_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -978,7 +1548,7 @@ impl EthCoin {
                     coin: self.ticker.clone(),
                     fee_details: fee_details.map(|d| d.into()),
                     block_height: trace.block_number,
-                    tx_hash: format!("{:02x}", BytesJson(raw.hash.to_vec())),
+                    tx_hash: format!("{:02x}", BytesJson(raw.hash.as_bytes().to_vec())),
                     tx_hex: BytesJson(rlp::encode(&raw)),
                     internal_id,
                     timestamp: block_ts,
@@ -1074,7 +1644,7 @@ impl EthCoin {
                 },
             };
             *self.history_sync_state.lock().unwrap() = HistorySyncState::InProgress(json!({
-                "blocks_left": u64::from(saved_events.earliest_block),
+                "blocks_left": saved_events.earliest_block.as_u64(),
             }));
 
             // AP: AFAIK ETH RPC doesn't support conditional filters like `get this OR this` so we have
@@ -1092,8 +1662,8 @@ impl EthCoin {
                         token_addr,
                         Some(self.my_address),
                         None,
-                        BlockNumber::Number(before_earliest.into()),
-                        BlockNumber::Number((saved_events.earliest_block - 1).into()),
+                        BlockNumber::Number(before_earliest.as_u64()),
+                        BlockNumber::Number((saved_events.earliest_block - 1).as_u64()),
                         None,
                     )
                     .compat()
@@ -1116,8 +1686,8 @@ impl EthCoin {
                         token_addr,
                         None,
                         Some(self.my_address),
-                        BlockNumber::Number(before_earliest.into()),
-                        BlockNumber::Number((saved_events.earliest_block - 1).into()),
+                        BlockNumber::Number(before_earliest.as_u64()),
+                        BlockNumber::Number((saved_events.earliest_block - 1).as_u64()),
                         None,
                     )
                     .compat()
@@ -1155,8 +1725,8 @@ impl EthCoin {
                         token_addr,
                         Some(self.my_address),
                         None,
-                        BlockNumber::Number((saved_events.latest_block + 1).into()),
-                        BlockNumber::Number(current_block.into()),
+                        BlockNumber::Number((saved_events.latest_block + 1).as_u64()),
+                        BlockNumber::Number(current_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -1179,8 +1749,8 @@ impl EthCoin {
                         token_addr,
                         None,
                         Some(self.my_address),
-                        BlockNumber::Number((saved_events.latest_block + 1).into()),
-                        BlockNumber::Number(current_block.into()),
+                        BlockNumber::Number((saved_events.latest_block + 1).as_u64()),
+                        BlockNumber::Number(current_block.as_u64()),
                         None,
                     )
                     .compat()
@@ -1332,7 +1902,7 @@ impl EthCoin {
                     let provider = self.alloy_provider();
                     match assert_send_future(
                         provider
-                            .get_block_by_number(BlockNumberOrTag::Number(block_number.into()))
+                            .get_block_by_number(BlockNumberOrTag::Number(block_number.as_u64()))
                             .into_future(),
                     )
                     .await
@@ -1366,8 +1936,8 @@ impl EthCoin {
                     from: vec![checksum_address(&format!("{:#02x}", from_addr))],
                     coin: self.ticker.clone(),
                     fee_details: fee_details.map(|d| d.into()),
-                    block_height: block_number.into(),
-                    tx_hash: format!("{:02x}", BytesJson(raw.hash.to_vec())),
+                    block_height: block_number.as_u64(),
+                    tx_hash: format!("{:02x}", BytesJson(raw.hash.as_bytes().to_vec())),
                     tx_hex: BytesJson(rlp::encode(&raw)),
                     internal_id: BytesJson(internal_id.to_vec()),
                     timestamp: block_ts,
@@ -1532,7 +2102,7 @@ impl EthCoin {
         match self.coin_type {
             EthCoinType::Eth => {
                 let payment_func = try_tx_fus!(SWAP_CONTRACT.function("ethPayment"));
-                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data));
+                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data[4..]));
 
                 let state_f = self.payment_status(swap_contract_address, decoded[0].clone());
                 Box::new(
@@ -1570,7 +2140,7 @@ impl EthCoin {
                 token_addr,
             } => {
                 let payment_func = try_tx_fus!(SWAP_CONTRACT.function("erc20Payment"));
-                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data));
+                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data[4..]));
                 let state_f = self.payment_status(swap_contract_address, decoded[0].clone());
 
                 Box::new(
@@ -1619,7 +2189,7 @@ impl EthCoin {
         match self.coin_type {
             EthCoinType::Eth => {
                 let payment_func = try_tx_fus!(SWAP_CONTRACT.function("ethPayment"));
-                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data));
+                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data[4..]));
 
                 let state_f = self.payment_status(swap_contract_address, decoded[0].clone());
                 Box::new(
@@ -1657,7 +2227,7 @@ impl EthCoin {
                 token_addr,
             } => {
                 let payment_func = try_tx_fus!(SWAP_CONTRACT.function("erc20Payment"));
-                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data));
+                let decoded = try_tx_fus!(payment_func.decode_input(&payment.data[4..]));
                 let state_f = self.payment_status(swap_contract_address, decoded[0].clone());
                 Box::new(
                     state_f
@@ -2038,7 +2608,7 @@ impl EthCoin {
                     }
 
                     let function = try_s!(SWAP_CONTRACT.function("ethPayment"));
-                    let decoded = try_s!(function.decode_input(&tx_input));
+                    let decoded = try_s!(function.decode_input(&tx_input[4..]));
                     if decoded[0] != Token::FixedBytes(swap_id.clone()) {
                         return ERR!("Invalid 'swap_id' {:?}, expected {:?}", decoded, swap_id);
                     }
@@ -2080,7 +2650,7 @@ impl EthCoin {
                     }
 
                     let function = try_s!(SWAP_CONTRACT.function("erc20Payment"));
-                    let decoded = try_s!(function.decode_input(&tx_input));
+                    let decoded = try_s!(function.decode_input(&tx_input[4..]));
                     if decoded[0] != Token::FixedBytes(swap_id.clone()) {
                         return ERR!("Invalid 'swap_id' {:?}, expected {:?}", decoded, swap_id);
                     }
@@ -2179,7 +2749,7 @@ impl EthCoin {
         };
 
         let payment_func = try_s!(SWAP_CONTRACT.function(func_name));
-        let decoded = try_s!(payment_func.decode_input(&tx.data));
+        let decoded = try_s!(payment_func.decode_input(&tx.data[4..]));
         let id = match &decoded[0] {
             Token::FixedBytes(bytes) => bytes.clone(),
             _ => panic!(),
@@ -2395,7 +2965,16 @@ pub trait TryToAddress {
 }
 
 impl TryToAddress for BytesJson {
-    fn try_to_address(&self) -> Result<Address, String> { Ok(Address::from(self.0.as_slice())) }
+    fn try_to_address(&self) -> Result<Address, String> {
+        {
+            let s = self.0.as_slice();
+            if s.len() == 20 {
+                Ok(Address::from_slice(s))
+            } else {
+                Err(format!("invalid address length: {}", s.len()))
+            }
+        }
+    }
 }
 
 impl<T: TryToAddress> TryToAddress for Option<T> {
@@ -2409,7 +2988,7 @@ impl<T: TryToAddress> TryToAddress for Option<T> {
 
 pub fn addr_from_raw_pubkey(pubkey: &[u8]) -> Result<Address, String> {
     let pubkey = try_s!(PublicKey::from_slice(pubkey).map_err(|e| ERRL!("{:?}", e)));
-    let eth_public = Public::from(&pubkey.serialize_uncompressed()[1..65]);
+    let eth_public = Public::from_slice(&pubkey.serialize_uncompressed()[1..65]);
     Ok(public_to_address(&eth_public))
 }
 
@@ -2465,7 +3044,7 @@ pub fn wei_to_gwei_decimal(amount: U256) -> NumConversResult<BigDecimal> { u256_
 impl Transaction for SignedEthTx {
     fn tx_hex(&self) -> Vec<u8> { rlp::encode(self).to_vec() }
 
-    fn tx_hash(&self) -> BytesJson { self.hash.to_vec().into() }
+    fn tx_hash(&self) -> BytesJson { self.hash.as_bytes().to_vec().into() }
 }
 
 /// LP-17: alloy-flavoured replacement for the legacy
@@ -2613,10 +3192,35 @@ pub async fn get_token_decimals(web3: &super::alloy_compat::KdfProvider, token_a
         .map_err(|e| ERRL!("{}", e)));
     let tokens = try_s!(function.decode_output(&res.0));
     let decimals: u64 = match tokens[0] {
-        Token::Uint(dec) => dec.into(),
+        Token::Uint(dec) => dec.as_u64(),
         _ => return ERR!("Invalid decimals type {:?}", tokens),
     };
     Ok(decimals as u8)
+}
+
+pub async fn get_token_symbol(web3: &super::alloy_compat::KdfProvider, token_addr: Address) -> Result<String, String> {
+    let function = try_s!(ERC20_CONTRACT.function("symbol"));
+    let data = try_s!(function.encode_input(&[]));
+    let request = CallRequest {
+        from: Some(Address::default()),
+        to: token_addr,
+        gas: None,
+        gas_price: None,
+        value: Some(0.into()),
+        data: Some(data.into()),
+    };
+
+    let res: Bytes = try_s!(web3
+        .client()
+        .request::<_, Bytes>("eth_call", (request, BlockNumber::Latest))
+        .await
+        .map_err(|e| ERRL!("{}", e)));
+    let tokens = try_s!(function.decode_output(&res.0));
+    let symbol = match tokens.into_iter().next() {
+        Some(Token::String(s)) => s,
+        other => return ERR!("Invalid symbol type {:?}", other),
+    };
+    Ok(symbol)
 }
 
 pub fn valid_addr_from_str(addr_str: &str) -> Result<Address, String> {
@@ -2648,6 +3252,40 @@ pub async fn eth_coin_from_conf_and_request(
     priv_key: &[u8],
     protocol: CoinProtocol,
 ) -> Result<EthCoin, String> {
+    let key_pair: KeyPair = try_s!(KeyPair::from_secret_slice(priv_key));
+    eth_coin_from_conf_and_request_with_signer(ctx, ticker, conf, req, EthSigner::Local(key_pair), protocol).await
+}
+
+/// MetaMask-policy EVM activation (CRD §47.5.A). Builds an [`EthCoin`] whose
+/// signer delegates signing and broadcast to the connected browser MetaMask
+/// session (`EthSigner::Metamask`); the framework holds no local key. The
+/// coin's address is the connected account (CRD R47.5.3); the centrally-threaded
+/// `priv_key` is intentionally ignored under this policy.
+#[cfg(target_arch = "wasm32")]
+pub async fn eth_coin_from_conf_and_request_with_metamask(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    req: &Json,
+    metamask_arc: crypto::MetamaskArc,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, String> {
+    eth_coin_from_conf_and_request_with_signer(ctx, ticker, conf, req, EthSigner::Metamask(metamask_arc), protocol)
+        .await
+}
+
+/// Shared EVM-coin builder body: identical for every signing policy except how
+/// the [`EthSigner`] is constructed and where the coin address comes from
+/// (`signer.address()`). The `Local` path is byte-identical to the prior
+/// `eth_coin_from_conf_and_request` behaviour.
+pub(crate) async fn eth_coin_from_conf_and_request_with_signer(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    req: &Json,
+    signer: EthSigner,
+    protocol: CoinProtocol,
+) -> Result<EthCoin, String> {
     // Defensive: TRON activates through a dedicated builder
     // (`tron::tron_coin_from_conf_and_request`); reject any attempt to route
     // TRX/TRC20 through the EVM legacy activator.
@@ -2674,8 +3312,7 @@ pub async fn eth_coin_from_conf_and_request(
         }
     }
 
-    let key_pair: KeyPair = try_s!(KeyPair::from_secret_slice(priv_key));
-    let my_address = key_pair.address();
+    let my_address = signer.address();
 
     let mut web3_instances = vec![];
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
@@ -2708,7 +3345,7 @@ pub async fn eth_coin_from_conf_and_request(
     let web3 = try_s!(super::alloy_compat::build_provider(urls, event_handlers));
 
     let (coin_type, decimals) = match protocol {
-        CoinProtocol::ETH => (EthCoinType::Eth, 18),
+        CoinProtocol::ETH { .. } => (EthCoinType::Eth, 18),
         CoinProtocol::ERC20 {
             platform,
             contract_address,
@@ -2746,7 +3383,7 @@ pub async fn eth_coin_from_conf_and_request(
         json::from_value(req["gas_station_policy"].clone()).unwrap_or_default();
 
     let coin = EthCoinImpl {
-        key_pair,
+        signer,
         my_address,
         coin_type,
         sign_message_prefix,
@@ -2771,6 +3408,8 @@ pub async fn eth_coin_from_conf_and_request(
         // dedicated TRON activation path.
         tron_api: None,
         nft_swap_v2_contract: None,
+        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
+        erc20_tokens_infos: Default::default(),
     };
     Ok(EthCoin(Arc::new(coin)))
 }
@@ -2903,25 +3542,21 @@ pub fn increase_gas_price_by_stage(gas_price: U256, level: &FeeApproxStage) -> U
 // ─── V2 helper functions ────────────────────────────────────────────────────
 
 /// Decodes the input data of a contract function call.
-pub(crate) fn decode_contract_call(func: &ethabi::Function, data: &[u8]) -> Result<Vec<Token>, ethabi::Error> {
+pub(crate) fn decode_contract_call(func: &Function, data: &[u8]) -> Result<Vec<Token>, AbiError> {
     // The first 4 bytes are the function selector
     if data.len() < 4 {
-        return Err(ethabi::ErrorKind::InvalidData.into());
+        return Err(AbiError::InvalidData);
     }
     func.decode_input(&data[4..])
 }
 
 /// Extracts a single token from decoded contract call data by index,
 /// validating the function ABI parameter name at that position.
-pub(crate) fn get_function_input_data(
-    decoded: &[Token],
-    func: &ethabi::Function,
-    index: usize,
-) -> Result<Token, String> {
+pub(crate) fn get_function_input_data(decoded: &[Token], func: &Function, index: usize) -> Result<Token, String> {
     decoded
         .get(index)
         .cloned()
-        .ok_or_else(|| format!("Missing token at index {index} for function {}", func.name))
+        .ok_or_else(|| format!("Missing token at index {index} for function {}", func.name()))
 }
 
 /// Converts a `BigDecimal` amount to `U256` wei using the given decimals.

@@ -19,6 +19,7 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 |------|---------|------------------------|------------------------|------------------|
 | Network selection | `netid` | `8762` or `6133` — GLEEC's default netid `0` is **not supported** | No | [see below](#netid) |
 | WalletConnect session storage | `wc_session_persistence` | `open` *(also the default)* | No | [CRD ch.22 §22.5](reloaded-rewrite/22-walletconnect-v2.md) |
+| Key export | `allow_insecure_key_export` | `true` — enables GLEEC-parity offline / no-activation / HD-range / shielded key export. Default `false`. | Yes | [CRD ch.07 §7.3A](reloaded-rewrite/07-wallet-lifecycle-and-key-export.md) |
 
 ### `netid`
 
@@ -59,6 +60,29 @@ stored sessions are always read and used regardless of the value. Values:
   session key persisted at all.
 - `encrypted` — reserved for a future encrypted-at-rest format; not yet
   available (selecting it stops startup with an explanatory error).
+
+**`allow_insecure_key_export`.** A top-level `MM2.json` boolean, default
+`false`. It governs how much private-key material the node will export.
+
+- `false` *(default)* — the secure posture. The single-coin private-key reveal
+  for one *activated* coin, and the reduced per-activated-coin key export,
+  remain available; own-mnemonic self-export and wallet-password re-encryption
+  remain available. The GLEEC export *superset* — offline export with no coin
+  activation, hierarchical-deterministic per-derivation-path ranges, and
+  shielded (ZHTLC) viewing-key export — is **refused**.
+- `true` — full GLEEC-parity key export: offline / no-activation bulk export,
+  HD per-derivation-path ranges, and protocol-specific formatting for UTXO
+  (WIF), EVM (hex), Tendermint, and shielded ZHTLC viewing keys.
+
+In both states a hardware-wallet session is always rejected (keys are never
+exported off the device), secret material is never logged or persisted in
+plaintext, and the surface is intended for localhost / trusted-channel use.
+This is a **fund-controlling secret**: enabling the switch is a deliberate,
+acknowledged operator act and the node emits a prominent warning when it is
+active. The bounded exposure and rationale are described in CRD chapter 07
+§7.3A. See [`COMPAT_SWITCHES.md`](COMPAT_SWITCHES.md) and
+[`CODING_STANDARDS.md`](CODING_STANDARDS.md) §5.1 for why this is the sole
+fund-controlling-secret carve-out.
 
 ## Future fork chapters
 

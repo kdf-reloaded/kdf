@@ -6,6 +6,16 @@ edition = "2021"
 [features]
 zhtlc-native-tests = []
 zhtlc = []
+# UDP transport for the Trezor emulator (native only, off by default). Lets
+# downstream test builds drive the whole stack against a Trezor emulator. `coins`
+# reaches the `trezor` crate only through `crypto`, so this only forwards to it.
+trezor-udp = ["crypto/trezor-udp"]
+# Emulator-gated EVM Trezor signing integration tests (native only, off by
+# default). Compiles the `#[cfg(test)]` `eth_trezor_emulator_tests` module, which
+# drives a real `task::withdraw` against a running Trezor emulator (chain state is
+# mocked; signing goes to the device). Needs the UDP transport plus the crypto
+# test-helper that installs a hardware-wallet context (CRD §50.8, T50.*).
+trezor-emulator-tests = ["trezor-udp", "crypto/test-helpers"]
 # The lightning `log_*!` macros check `cfg(feature = "max_level_*")` at compile-time.
 # Declaring them avoids unexpected-cfg warnings without enabling any of them.
 max_level_off = []
@@ -29,6 +39,7 @@ bigdecimal = { version = "0.3", features = ["serde"] }
 bip32 = { version = "0.2.2", default-features = false, features = ["alloc", "secp256k1-ffi"] }
 bitcoin = "0.27.1"
 bitcoin_hashes = "0.10.0"
+blake2b_simd = "1"
 kdf_crypto = { path = "../kdf_crypto" }
 bincode = "1.3.3"
 byteorder = "1.3"
@@ -39,6 +50,8 @@ common = { path = "../common" }
 mm2_core = { path = "../mm2_core" }
 mm2_metrics = { path = "../mm2_metrics" }
 mm2_err_handle = { path = "../mm2_err_handle" }
+mm2_event_stream = { path = "../mm2_event_stream" }
+mm2_rpc = { path = "../mm2_rpc" }
 mm2_net = { path = "../mm2_net" }
 mm2_net_config = { path = "../mm2_net_config" }
 mm2_number = { path = "../mm2_number" }
@@ -53,8 +66,12 @@ db_common = { path = "../db_common" }
 derive_more = "0.99"
 ed25519-dalek = "1.0.1"
 ed25519-dalek-bip32 = "0.2.0"
-ethabi = { path = "../ethabi-vendored" }
-ethereum-types = { version = "0.4", default-features = false, features = ["std", "serialize"] }
+# alloy ABI codec (migration target, replacing ethabi). Pinned to the
+# alloy-core 1.5 line already present via the `alloy` umbrella dependency.
+alloy-dyn-abi = "1.5"
+alloy-json-abi = "1.5"
+alloy-primitives = "1.5"
+ethereum-types.workspace = true
 mm2_eth = { path = "../mm2_eth" }
 # Waiting for https://github.com/rust-lang/rust/issues/54725 to use on Stable.
 #enum_dispatch = "0.1"
@@ -67,6 +84,7 @@ hex = "0.4.2"
 http = "0.2"
 itertools = { version = "0.10", features = ["use_std"] }
 jsonrpc-core = "8.0.1"
+kdf_walletconnect = { path = "../kdf_walletconnect" }
 keys = { package = "kdf_keys", path = "../kdf_keys" }
 lazy_static = "1.4"
 libc = "0.2"

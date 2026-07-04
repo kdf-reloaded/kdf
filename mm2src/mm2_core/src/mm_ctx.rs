@@ -24,6 +24,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::data_asker::DataAsker;
+
 cfg_wasm32! {
     use mm2_rpc::wasm_rpc::WasmRpcSender;
     use crate::DbNamespaceId;
@@ -71,6 +73,10 @@ pub struct MmCtx {
     pub metrics: MetricsArc,
     /// Event streaming manager for real-time SSE subscriptions.
     pub event_stream_manager: StreamingManager,
+    /// Interactive data-asker facility (R19): an always-present registry by
+    /// which an internal daemon flow asks an external client for a piece of
+    /// data and awaits the answer over the event stream.
+    pub data_asker: DataAsker,
     /// Set to true after `lp_passphrase_init`, indicating that we have a usable state.
     ///
     /// Should be refactored away in the future. State should always be valid.
@@ -100,6 +106,12 @@ pub struct MmCtx {
     pub crypto_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     /// RIPEMD160(SHA256(x)) where x is secp256k1 pubkey derived from passphrase.
     pub rmd160: Constructible<H160>,
+    /// Process-level shared-database identifier (R18): RIPEMD160(SHA256(x)) where
+    /// x is a secp256k1 pubkey derived from the active seed passphrase combined
+    /// with a fixed namespace salt. Distinct from `rmd160`; names a database
+    /// namespace shared across the wallets and coins activated under the active
+    /// seed. Set once during startup, read-many thereafter.
+    pub shared_db_id: Constructible<H160>,
     /// secp256k1 key pair derived from passphrase.
     /// cf. `key_pair_from_seed`.
     pub secp256k1_key_pair: Constructible<KeyPair>,
@@ -127,6 +139,10 @@ pub struct MmCtx {
     /// Cache for the NFT subsystem context. Populated lazily on first
     /// access via `coins::nft::context::NftCtx::from_mm_ctx`.
     pub nft_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
+    /// The MetaMask connection task-manager context (WASM only):
+    /// `crate::rpc::connect_metamask::ConnectMetamaskCtx`.
+    #[cfg(target_arch = "wasm32")]
+    pub metamask_connect_ctx: Mutex<Option<Arc<dyn Any + 'static + Send + Sync>>>,
     pub abort_handlers: Mutex<Vec<AbortHandle>>,
     #[cfg(target_arch = "wasm32")]
     pub db_namespace: DbNamespaceId,
@@ -139,6 +155,7 @@ impl MmCtx {
             log: log::LogArc::new(log),
             metrics: MetricsArc::new(),
             event_stream_manager: StreamingManager::default(),
+            data_asker: DataAsker::default(),
             initialized: Constructible::default(),
             rpc_started: Constructible::default(),
             stop: Constructible::default(),
@@ -155,6 +172,7 @@ impl MmCtx {
             coins_activation_ctx: Mutex::new(None),
             crypto_ctx: Mutex::new(None),
             rmd160: Constructible::default(),
+            shared_db_id: Constructible::default(),
             secp256k1_key_pair: Constructible::default(),
             coins_needed_for_kick_start: Mutex::new(HashSet::new()),
             swaps_ctx: Mutex::new(None),
@@ -171,6 +189,8 @@ impl MmCtx {
             async_sqlite_connection: OnceLock::default(),
             mm_init_ctx: Mutex::new(None),
             nft_ctx: Mutex::new(None),
+            #[cfg(target_arch = "wasm32")]
+            metamask_connect_ctx: Mutex::new(None),
             abort_handlers: Mutex::new(Vec::new()),
             #[cfg(target_arch = "wasm32")]
             db_namespace: DbNamespaceId::Main,
@@ -182,6 +202,33 @@ impl MmCtx {
             static ref DEFAULT: H160 = [0; 20].into();
         }
         self.rmd160.or(&|| &*DEFAULT)
+    }
+
+    /// Process-level shared-database identifier (R18). Falls back to a lazy
+    /// all-zero `H160` default before the id is pinned, so it never panics.
+    pub fn shared_db_id(&self) -> &H160 {
+        lazy_static! {
+            static ref DEFAULT: H160 = [0; 20].into();
+        }
+        self.shared_db_id.or(&|| &*DEFAULT)
+    }
+
+    /// Ask an external client for a piece of data (R19), forwarding to the
+    /// always-present [`DataAsker`] facility with this context's event-stream
+    /// manager as the outward-event surface.
+    pub async fn ask_for_data<Input, Output>(
+        &self,
+        data_type: &str,
+        data: Input,
+        timeout_secs: f64,
+    ) -> Result<Output, crate::data_asker::AskForDataError>
+    where
+        Input: Serialize,
+        Output: serde::de::DeserializeOwned,
+    {
+        self.data_asker
+            .ask_for_data(&self.event_stream_manager, data_type, data, timeout_secs)
+            .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -226,22 +273,24 @@ impl MmCtx {
         path.join(hex::encode(**self.rmd160()))
     }
 
-    /// Directory for wallet files (encrypted mnemonics).
-    /// Sits at the DB root level (not per-identity), since wallet files must be
-    /// accessible before the passphrase-derived identity is known.
-    pub fn wallets_dir(&self) -> PathBuf {
-        let base = if let Some(dbdir) = self.conf["dbdir"].as_str() {
+    /// The database root directory — the configured `dbdir` (or the default
+    /// relative `DB` directory when unset). This is the **parent** of the
+    /// per-identity hex subdirectories returned by [`MmCtx::dbdir`]; wallet
+    /// files live directly in this root (Chapter 07 §7.5).
+    pub fn db_root(&self) -> PathBuf {
+        if let Some(dbdir) = self.conf["dbdir"].as_str() {
             let dbdir = dbdir.trim();
             if !dbdir.is_empty() {
-                PathBuf::from(dbdir)
-            } else {
-                PathBuf::from("DB")
+                return PathBuf::from(dbdir);
             }
-        } else {
-            PathBuf::from("DB")
-        };
-        base.join("wallets")
+        }
+        PathBuf::from("DB")
     }
+
+    /// Legacy directory for wallet files written by an earlier reloaded build
+    /// (`<db_root>/wallets`). Retained for backward-compatible reads only; new
+    /// wallet records are written directly in [`MmCtx::db_root`].
+    pub fn wallets_dir(&self) -> PathBuf { self.db_root().join("wallets") }
 
     pub fn netid(&self) -> u16 {
         let netid = self.conf["netid"].as_u64().unwrap_or(0);
@@ -254,6 +303,12 @@ impl MmCtx {
     pub fn p2p_in_memory(&self) -> bool { self.conf["p2p_in_memory"].as_bool().unwrap_or(false) }
 
     pub fn p2p_in_memory_port(&self) -> Option<u64> { self.conf["p2p_in_memory_port"].as_u64() }
+
+    /// Whether HD (BIP-39 / BIP-32 global-HD) mode is enabled for the startup
+    /// signing identity. Per CRD R45.4.8 this is the single source of truth that
+    /// selects a global-HD account over the baseline Iguana single-key context;
+    /// it defaults to `false` when absent, null, or of a non-boolean type.
+    pub fn enable_hd(&self) -> bool { self.conf["enable_hd"].as_bool().unwrap_or(false) }
 
     /// Access-Control-Allow-Origin for the SSE endpoint.
     /// Falls back to the `rpccors` config value, then `http://localhost:3000`.

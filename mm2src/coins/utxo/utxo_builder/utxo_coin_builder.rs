@@ -6,17 +6,16 @@ use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
 use crate::utxo::utxo_builder::utxo_conf_builder::{UtxoConfBuilder, UtxoConfError, UtxoConfResult};
 use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, ElectrumProtoVerifier, RecentlySpentOutPoints,
-                  TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode, DEFAULT_GAP_LIMIT,
-                  UTXO_DUST_AMOUNT};
+                  SPVConf, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode,
+                  DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
 use crate::{BlockchainNetwork, CoinTransportMetrics, DerivationMethod, HistorySyncState, PrivKeyBuildPolicy,
             PrivKeyPolicy, RpcClientType, UtxoActivationParams};
 use async_trait::async_trait;
 use chain::TxHashAlgo;
 use common::executor::{spawn, Timer};
-use common::small_rng;
 use crypto::GlobalHDAccountArc;
-use crypto::{Bip32DerPathError, Bip32DerPathOps, Bip44DerPathError, Bip44PathToCoin, CryptoCtx, CryptoCtxError,
-             CryptoInitError, HwWalletType};
+use crypto::{Bip32DerPathError, Bip32DerPathOps, Bip44DerPathError, CryptoCtx, CryptoCtxError, CryptoInitError,
+             HDPathToCoin, HwWalletType};
 use derive_more::Display;
 use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
@@ -28,7 +27,6 @@ pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, Key
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use rand::seq::SliceRandom;
 use serde_json::{self as json, Value as Json};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -69,10 +67,6 @@ pub enum UtxoCoinBuildError {
     #[display(fmt = "Hardware Wallet context is not initialized")]
     HwContextNotInitialized,
     HDWalletStorageError(HDWalletStorageError),
-    #[display(
-        fmt = "Coin should be activated with Hardware Wallet. Please consider using `\"priv_key_policy\": \"Trezor\"` in the activation request"
-    )]
-    CoinShouldBeActivatedWithHw,
     #[display(
         fmt = "Coin doesn't support Trezor hardware wallet. Please consider adding the 'trezor_coin' field to the coins config"
     )]
@@ -142,10 +136,6 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), self.ticker())
             .build()
             .mm_err(Into::into)?;
-
-        if self.is_hw_coin(&conf) {
-            return MmError::err(UtxoCoinBuildError::CoinShouldBeActivatedWithHw);
-        }
 
         let private = Private {
             prefix: conf.wif_prefix,
@@ -372,7 +362,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     async fn load_hd_wallet_accounts(
         &self,
         hd_wallet_storage: &HDWalletCoinStorage,
-        derivation_path: &Bip44PathToCoin,
+        derivation_path: &HDPathToCoin,
     ) -> UtxoCoinBuildResult<HDAccountsMap<UtxoHDAccount>> {
         utxo_common::load_hd_accounts_from_storage(hd_wallet_storage, derivation_path)
             .await
@@ -380,7 +370,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     }
 
     #[inline]
-    fn derivation_path(&self) -> UtxoConfResult<Bip44PathToCoin> {
+    fn derivation_path(&self) -> UtxoConfResult<HDPathToCoin> {
         if self.conf()["derivation_path"].is_null() {
             return MmError::err(UtxoConfError::DerivationPathIsNotSet);
         }
@@ -418,12 +408,17 @@ pub trait UtxoCoinBuilderCommonOps {
 
     #[inline]
     fn block_headers_storage(&self) -> UtxoCoinBuildResult<Option<BlockHeaderStorage>> {
-        let params: Option<_> = json::from_value(self.conf()["block_header_params"].clone())
-            .map_to_mm(|e| UtxoConfError::InvalidBlockHeaderParams(e.to_string()))
+        let conf: Option<SPVConf> = json::from_value(self.conf()["spv_conf"].clone())
+            .map_to_mm(|e| UtxoConfError::InvalidSpvConf(e.to_string()))
             .mm_err(Into::into)?;
-        match params {
+        match conf {
             None => Ok(None),
-            Some(params) => Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), params)),
+            Some(conf) => {
+                conf.validate()
+                    .map_to_mm(UtxoConfError::InvalidSpvConf)
+                    .mm_err(Into::into)?;
+                Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), conf))
+            },
         }
     }
 
@@ -542,8 +537,14 @@ pub trait UtxoCoinBuilderCommonOps {
                     Ok(UtxoRpcClientEnum::Native(native))
                 }
             },
-            UtxoRpcMode::Electrum { servers } => {
-                let electrum = self.electrum_client(ElectrumBuilderArgs::default(), servers).await?;
+            UtxoRpcMode::Electrum {
+                servers,
+                min_connected,
+                max_connected,
+            } => {
+                let electrum = self
+                    .electrum_client(ElectrumBuilderArgs::default(), servers, min_connected, max_connected)
+                    .await?;
                 Ok(UtxoRpcClientEnum::Electrum(electrum))
             },
         }
@@ -553,6 +554,8 @@ pub trait UtxoCoinBuilderCommonOps {
         &self,
         args: ElectrumBuilderArgs,
         mut servers: Vec<ElectrumRpcRequest>,
+        min_connected: Option<usize>,
+        max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
         let (on_connect_tx, on_connect_rx) = mpsc::unbounded();
         let ticker = self.ticker().to_owned();
@@ -568,8 +571,12 @@ pub trait UtxoCoinBuilderCommonOps {
             event_handlers.push(ElectrumProtoVerifier { on_connect_tx }.into_shared());
         }
 
-        let mut rng = small_rng();
-        servers.as_mut_slice().shuffle(&mut rng);
+        let max_connected = max_connected.unwrap_or(servers.len()).max(1);
+        let min_connected = min_connected.unwrap_or(1).max(1).min(max_connected);
+        if servers.len() > max_connected {
+            servers.truncate(max_connected);
+        }
+
         let client = ElectrumClientImpl::new(ticker, event_handlers);
         for server in servers.iter() {
             match client.add_server(server).await {
@@ -579,7 +586,7 @@ pub trait UtxoCoinBuilderCommonOps {
         }
 
         let mut attempts = 0i32;
-        while !client.is_connected().await {
+        while client.count_connected().await < min_connected {
             if attempts >= 10 {
                 return MmError::err(UtxoCoinBuildError::FailedToConnectToElectrums {
                     electrum_servers: servers.clone(),
@@ -699,9 +706,6 @@ pub trait UtxoCoinBuilderCommonOps {
 
     #[inline]
     fn check_utxo_maturity(&self) -> bool { self.activation_params().check_utxo_maturity.unwrap_or_default() }
-
-    #[inline]
-    fn is_hw_coin(&self, conf: &UtxoCoinConf) -> bool { conf.trezor_coin.is_some() }
 
     #[inline]
     #[cfg(target_arch = "wasm32")]

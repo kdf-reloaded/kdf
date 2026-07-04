@@ -3,8 +3,9 @@ name: Build iOS
 # P7.4 — iOS aarch64 static library build.
 #
 # `mm2_bin_lib` is `crate-type = ["cdylib", "rlib"]`. For iOS we build the
-# static library (`libmm2_bin_lib.a`) which the host Swift/Obj-C app links
-# against. Requires a macOS runner and the iOS target toolchain.
+# static library (raw `libmm2_bin_lib.a`, shipped as `libkdf.a`) which the
+# host Swift/Obj-C app links against. Requires a macOS runner and the iOS
+# target toolchain.
 #
 # Manually dispatched until a runner is provisioned.
 
@@ -27,6 +28,12 @@ jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 90
+
+    # Pin the iOS deployment target so the `cc`-compiled C deps and the rustc
+    # link step agree (default mismatch otherwise yields an `___chkstk_darwin`
+    # undefined-symbol link error). Mirrors `.cargo/config.toml [env]`.
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: "14.0"
 
     strategy:
       fail-fast: false
@@ -58,10 +65,14 @@ jobs:
           key: ios-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build mm2_bin_lib staticlib (${{ matrix.target }})
+        # Override the manifest crate-type (cdylib/rlib) with `staticlib` at
+        # build time so cargo emits `libmm2_bin_lib.a` for the iOS host app to
+        # link (mirrors upstream's `cargo rustc --crate-type=staticlib`).
         run: |
-          cargo build -p mm2_bin_lib \
+          cargo rustc -p mm2_bin_lib --lib \
             --target ${{ matrix.target }} \
-            --profile ${{ inputs.profile }}
+            --profile ${{ inputs.profile }} \
+            --crate-type=staticlib
 
       - name: Verify coins crate compiles for ${{ matrix.target }} (P14)
         # P14 modernised the Solana stack to the modular `solana-*` 2.x
@@ -71,8 +82,13 @@ jobs:
         run: |
           cargo check -p coins --target ${{ matrix.target }}
 
+      - name: Rename staticlib to libkdf.a
+        run: |
+          mv target/${{ matrix.target }}/${{ inputs.profile }}/libmm2_bin_lib.a \
+             target/${{ matrix.target }}/${{ inputs.profile }}/libkdf.a
+
       - name: Upload staticlib
         uses: actions/upload-artifact@v7
         with:
-          name: libmm2-${{ matrix.target }}
-          path: target/${{ matrix.target }}/${{ inputs.profile }}/libmm2_bin_lib.a
+          name: libkdf-${{ matrix.target }}
+          path: target/${{ matrix.target }}/${{ inputs.profile }}/libkdf.a

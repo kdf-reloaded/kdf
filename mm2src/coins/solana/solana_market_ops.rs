@@ -91,7 +91,7 @@ impl MarketCoinOps for SolanaCoin {
         Box::new(fut.boxed().compat())
     }
 
-    fn display_priv_key(&self) -> Result<String, String> { Ok(self.key_pair.secret().to_bytes()[..].to_base58()) }
+    fn display_priv_key(&self) -> Result<String, String> { Ok(self.key_pair.secret_bytes()[..].to_base58()) }
 
     fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
 

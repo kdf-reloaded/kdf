@@ -10,6 +10,7 @@
 
 // ─── Imports (pub(crate) so child modules inherit via `use super::*`) ───────
 
+pub(crate) use crate::eth::abi::{Function, Token};
 pub(crate) use crate::eth::{self, u256_to_big_decimal, wei_from_big_decimal, TryToAddress};
 pub(crate) use crate::qrc20::rpc_clients::{LogEntry, Qrc20ElectrumOps, Qrc20NativeOps, Qrc20RpcOps, TopicFilter,
                                            TxReceipt, ViewContractCallType};
@@ -43,7 +44,6 @@ pub(crate) use common::log::{error, warn};
 pub(crate) use common::mm_number::MmNumber;
 pub(crate) use common::now_ms;
 pub(crate) use derive_more::Display;
-pub(crate) use ethabi::{Function, Token};
 pub(crate) use ethereum_types::{H160, U256};
 pub(crate) use futures::compat::Future01CompatExt;
 pub(crate) use futures::{FutureExt, TryFutureExt};

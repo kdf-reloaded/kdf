@@ -1,6 +1,7 @@
 //! MmCoin, ParseCoinAssocTypes, and V2 swap trait implementations for EthCoin.
 
 use super::*;
+use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawInProgressStatus, WithdrawTaskHandle};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct EthTxFeeDetails {
@@ -20,7 +21,7 @@ impl EthTxFeeDetails {
 
         Ok(EthTxFeeDetails {
             coin: coin.to_owned(),
-            gas: gas.into(),
+            gas: gas.as_u64(),
             gas_price,
             total_fee,
         })
@@ -28,8 +29,49 @@ impl EthTxFeeDetails {
 }
 
 #[async_trait]
+impl InitWithdrawCoin for EthCoin {
+    async fn init_withdraw(
+        &self,
+        ctx: MmArc,
+        req: WithdrawRequest,
+        task_handle: &WithdrawTaskHandle,
+    ) -> Result<TransactionDetails, MmError<WithdrawError>> {
+        // CRD §50 / R49.6: an EVM coin under the Trezor signing policy is signed
+        // by the device through the task path; route to the dedicated device flow
+        // (which performs its own validation, incl. the R50.20 TRON rejection).
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if matches!(self.signer, EthSigner::Trezor(_)) {
+            return crate::eth::eth_trezor_withdraw::withdraw_trezor_impl(ctx, self.clone(), req, task_handle).await;
+        }
+        validate_evm_withdraw_request(self, &req)?;
+        task_handle
+            .update_in_progress_status(WithdrawInProgressStatus::GeneratingTransaction)
+            .mm_err(WithdrawError::from)?;
+        withdraw_impl(ctx, self.clone(), req).await
+    }
+}
+
+#[async_trait]
 impl MmCoin for EthCoin {
     fn is_asset_chain(&self) -> bool { false }
+
+    /// CRD R47.5.12 / R47.5.13a -- an EVM coin activated under the MetaMask
+    /// signing policy is a non-swap (balance / address / `withdraw`) account: it
+    /// holds no local secret, so it cannot derive a per-swap HTLC key-pair or
+    /// produce the detached, framework-scheduled signatures atomic swaps require.
+    /// Reporting it as `wallet_only` rejects it from a swap at the earliest
+    /// practical lifecycle point -- order placement (`buy` / `sell` / `setprice`
+    /// all gate on `wallet_only`) -- with a clean structured error, instead of
+    /// letting it reach and abort inside a later HTLC key-derivation / signing
+    /// path. WASM-only: the MetaMask policy exists only on the browser target.
+    fn wallet_only(&self, ctx: &MmArc) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        if matches!(self.signer, EthSigner::Metamask(_)) {
+            return true;
+        }
+        let coin_conf = crate::coin_conf(ctx, self.ticker());
+        coin_conf["wallet_only"].as_bool().unwrap_or(false)
+    }
 
     fn get_raw_transaction(&self, req: RawTransactionRequest) -> RawTransactionFut {
         Box::new(get_raw_transaction_impl(self.clone(), req).boxed().compat())
@@ -37,6 +79,16 @@ impl MmCoin for EthCoin {
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let ctx = try_f!(MmArc::from_weak(&self.ctx).or_mm_err(|| WithdrawError::InternalError("!ctx".to_owned())));
+        // CRD R50.24 / R49.6: the direct legacy `withdraw` method does not support
+        // Trezor user-action signing; clients must use the `task::withdraw` API.
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if matches!(self.signer, EthSigner::Trezor(_)) {
+            return Box::new(futures01::future::err(MmError::new(
+                WithdrawError::UnsupportedUnderTrezor(
+                    "Trezor EVM withdrawals require the 'task::withdraw' API for device user-action signing".to_owned(),
+                ),
+            )));
+        }
         Box::new(Box::pin(withdraw_impl(ctx, self.clone(), req)).compat())
     }
 
@@ -330,10 +382,10 @@ impl ParseCoinAssocTypes for EthCoin {
 
 #[async_trait]
 impl CommonSwapOpsV2 for EthCoin {
-    fn derive_htlc_pubkey_v2(&self, _swap_unique_data: &[u8]) -> Public { self.key_pair.public().clone() }
+    fn derive_htlc_pubkey_v2(&self, _swap_unique_data: &[u8]) -> Public { self.signer.public() }
 
     fn derive_htlc_pubkey_v2_bytes(&self, swap_unique_data: &[u8]) -> Vec<u8> {
-        self.derive_htlc_pubkey_v2(swap_unique_data).to_vec()
+        self.derive_htlc_pubkey_v2(swap_unique_data).as_bytes().to_vec()
     }
 }
 

@@ -3,11 +3,12 @@
 **Status:** driving-spec
 
 > **One-sentence claim:** the project provides an in-tree NFT
-> subsystem that covers five EVM chains, exposes seven JSON-RPC
-> methods (inventory, metadata, transfer history, withdrawal,
-> wipe), embeds no third-party indexer hostnames, and abstracts
-> both its outbound HTTP surface and its on-device storage
-> behind narrow traits with native and browser implementations.
+> subsystem that covers five EVM chains, exposes eight JSON-RPC
+> methods (activation, inventory, metadata, transfer history,
+> withdrawal, wipe), embeds no third-party indexer hostnames,
+> and abstracts both its outbound HTTP surface and its on-device
+> storage behind narrow traits with native and browser
+> implementations.
 
 ## 19.0 Executive Summary
 
@@ -56,7 +57,7 @@ The subsystem is grouped into the following functional regions:
 | Providers -- crawl      | Trait + HTTP implementation                     |
 | Providers -- metadata   | Trait + HTTP implementation                     |
 | Providers -- spam       | Caller-supplied domain-list filtering           |
-| RPC handlers            | Seven JSON-RPC entry points (native; selected   |
+| RPC handlers            | Eight JSON-RPC entry points (native; selected   |
 |                         | are stubbed on the browser target)              |
 | Withdraw                | ERC-721 / ERC-1155 calldata encoding & signing  |
 
@@ -265,12 +266,15 @@ client-side filtering and display masking.
 
 ## 19.6 RPC Wire Surface
 
-The subsystem registers seven JSON-RPC methods in the public
-dispatcher. The native target supports all seven; the browser
-target supports five (with two stubbed as not-yet-supported).
+The subsystem registers eight JSON-RPC methods in the public
+dispatcher. Seven (§19.6.1 onward) are the operational methods;
+the eighth (`enable_nft`, §19.6.2) is the activation entry
+point. The native target supports all eight. Browser-target
+availability is bound only for the operational methods shown below.
 
 | Method                  | Native | Browser | Returns                  |
 |-------------------------|--------|---------|--------------------------|
+| `enable_nft`            | yes    | -       | Owned-NFT snapshot       |
 | `get_nft_list`          | yes    | yes     | Paginated inventory list |
 | `get_nft_metadata`      | yes    | yes     | Single inventory entry   |
 | `get_nft_transfers`     | yes    | yes     | Paginated transfer list  |
@@ -279,7 +283,7 @@ target supports five (with two stubbed as not-yet-supported).
 | `update_nft`            | yes    | stub    | empty success (crawl)    |
 | `withdraw_nft`          | yes    | -       | Transaction details      |
 
-Request payloads:
+Request payloads (operational methods):
 
 - `get_nft_list` -- chains, max-flag, page size, page number,
   spam-protection flag, optional filters.
@@ -303,6 +307,126 @@ Request payloads:
 
 The withdraw request is the only payload whose shape varies per
 token standard.
+
+### 19.6.1 Operational vs Activation Methods
+
+The seven methods above operate on an NFT subsystem that is
+*already active* for a platform coin. They neither create nor
+tear down activation; they read, refresh, wipe, or withdraw
+against active NFT support. Of these, `update_nft` carries the
+crawl-provider base URL and is the method that drives a full
+re-crawl of inventory and transfer history for the requested
+chains.
+
+`enable_nft` (§19.6.2) is distinct: it is the **activation**
+entry point that brings the NFT subsystem into existence for a
+platform coin and performs the initial inventory fetch. It is
+the method the Komodo DeFi SDK and SDK-derived GUIs invoke when
+a user turns NFT support on for an EVM platform coin; its
+absence surfaces to those clients as an NFT-activation runtime
+failure.
+
+### 19.6.2 Bound `enable_nft` Activation
+
+`enable_nft` is a **dictated-interop** method: its wire name,
+envelope, request field shape, and response field shape are
+fixed by the Komodo DeFi SDK / GUI clients that call it, and the
+subsystem must honour that contract verbatim for those clients
+to activate NFT support.
+
+**Envelope and availability.** `enable_nft` is an **mmrpc 2.0**
+method (the structured request/response envelope with top-level
+`mmrpc`, `method`, `params`, and `id` fields). This chapter binds
+the native activation surface.
+
+**Request shape.** The `params` object is the standard
+token-activation envelope specialised for the NFT protocol:
+
+| Field               | Type                       | Req? | Notes                                                       |
+|---------------------|----------------------------|------|------------------------------------------------------------|
+| `ticker`            | string                     | yes  | The configured NFT pseudo-coin ticker whose coin-config protocol entry is of NFT type bound to an EVM platform. |
+| `protocol`          | object (coin-protocol)     | no   | Optional inline protocol descriptor for a custom (non-config) NFT entry; of NFT type carrying the platform-coin ticker. When omitted the protocol is resolved from the coin config keyed by `ticker`. |
+| `activation_params` | object                     | yes  | NFT activation parameters (below).                          |
+
+`activation_params` carries a single required member:
+
+| Field      | Type                       | Req? | Notes                                                   |
+|------------|----------------------------|------|---------------------------------------------------------|
+| `provider` | object (tagged union)      | yes  | The indexer provider descriptor (below).                |
+
+`provider` is a tagged union with an externally-tagged shape:
+a `type` discriminant string selecting the provider variant and
+an `info` object carrying that variant's configuration. The
+single variant in scope carries:
+
+| `info` field   | Type    | Req? | Default | Notes                                                                                   |
+|----------------|---------|------|---------|-----------------------------------------------------------------------------------------|
+| `url`          | string (URL) | yes | --    | Caller-supplied indexer base URL used for the initial inventory crawl. Consistent with R1: no default or embedded value -- the caller supplies it at RPC time. |
+| `komodo_proxy` | boolean | no   | `false` | Signed-proxy flag (the same reserved per-provider signed-proxy flag described in §19.5 / D4). |
+
+The exact `type` discriminant literal is a dictated wire constant
+emitted by SDK/GUI clients. The method must accept that wire value
+for compatibility while keeping the provider `url` caller-supplied.
+
+There is **no** chain field in the request: the platform/ticker
+in `ticker` (and its resolved NFT protocol) identifies the
+single EVM chain whose NFT support is being activated.
+
+**Response shape.** On success the method returns an object with
+two members:
+
+| Field          | Type                         | Notes                                                                 |
+|----------------|------------------------------|-----------------------------------------------------------------------|
+| `nfts`         | object (map)                 | A map keyed by per-token identifier string; each value is an owned-NFT entry (below). Reflects the inventory observed during the initial crawl. |
+| `platform_coin`| string                       | The platform-coin ticker the NFT subsystem was activated under.        |
+
+Each owned-NFT entry carries the public fields:
+
+| Field           | Type           | Notes                                                            |
+|-----------------|----------------|-----------------------------------------------------------------|
+| `token_address` | string (address) | The NFT contract address.                                     |
+| `token_id`      | string         | The token id, serialised as a decimal string.                   |
+| `chain`         | string         | The chain discriminant (the §19.3 upper-case chain values).     |
+| `contract_type` | string         | The token-standard discriminant (ERC-721 / ERC-1155).           |
+| `amount`        | string (decimal) | Owned quantity; meaningful for ERC-1155 multi-supply tokens.  |
+
+**Behavioural contract.**
+
+1. The platform coin named by the resolved NFT protocol (one of
+   the five EVM platform coins of §19.3) **must already be
+   activated**. If it is not, activation fails with a
+   platform-coin-not-activated outcome.
+2. The NFT subsystem must not already be active for that ticker.
+   A second `enable_nft` for an already-active NFT ticker fails
+   with an already-activated outcome.
+3. On success the method marks NFT support active for the resolved
+   platform coin and performs an **initial inventory crawl** against
+   the caller-supplied `url`, populating the owned-NFT snapshot
+   returned in `nfts`.
+4. The method is the activation counterpart to `update_nft`:
+   `enable_nft` brings the subsystem into existence and performs
+   the first inventory fetch; `update_nft` performs subsequent
+   full re-crawls (inventory plus transfer history) against a
+   caller-supplied crawl-provider URL once the subsystem is
+   active. A client that has called `enable_nft` does not need a
+   separate `update_nft` to obtain the initial inventory.
+
+**Error conditions (functional).** The wire surface distinguishes
+at least:
+
+- Platform coin for the requested NFT not activated
+  (client-input error).
+- NFT already activated for the requested ticker
+  (client-input error).
+- NFT ticker has no coin-config entry, or the resolved protocol
+  is not an NFT protocol (client-input / configuration error).
+- The resolved platform coin is not an EVM platform coin
+  (unsupported-platform error).
+- Caller-supplied provider URL invalid or the initial crawl
+  fails to reach the indexer (transport / invalid-payload
+  error).
+- The NFT protocol's declared platform does not match the
+  resolved platform coin (configuration consistency error).
 
 ## 19.7 EVM Withdrawal Path
 
@@ -376,6 +500,20 @@ the time of writing covers:
 - Metadata model: in-place merge semantics for URL fields.
 - HTTP error classification.
 
+The activation entry point has its own acceptance coverage:
+
+T1. **`enable_nft` wire shape.** A conformance test shall verify that
+    the mmrpc-2.0 method name `enable_nft` accepts the §19.6.2 request
+    fields (`ticker`, optional inline NFT `protocol`, and required
+    `activation_params.provider`) and returns the §19.6.2 success fields
+    (`platform_coin` and `nfts`) on a successful native activation.
+
+T2. **`enable_nft` activation failures.** A conformance test shall
+    verify the functional failure categories listed in §19.6.2 for
+    missing backing platform activation, already-active NFT support,
+    invalid NFT ticker/protocol, unsupported platform, provider failure,
+    and protocol/platform mismatch.
+
 End-to-end integration tests against a live indexer are not in
 the test set at the time of writing; they are named as
 follow-on work once a deterministic local test fixture for the
@@ -420,6 +558,31 @@ R6. **Provider pluggability.** The crawl and metadata HTTP
 R7. **Standards-only ABI fragments.** The withdrawal path's
     embedded ABI fragments shall be the public ERC-721 and
     ERC-1155 on-chain interface definitions and nothing more.
+
+R8. **First-class NFT activation entry point.** The subsystem shall
+    expose `enable_nft` as the mmrpc-2.0 activation method for NFT
+    support on the native target. The method shall accept the §19.6.2
+    request shape (`ticker`, optional inline NFT `protocol`, required
+    `activation_params.provider`), and shall
+    return the §19.6.2 response shape (`nfts`, `platform_coin`). The
+    provider base URL shall be caller-supplied at RPC time; the
+    subsystem shall not embed a default indexer URL.
+
+R9. **Activation vs refresh split.** `enable_nft` shall mark NFT
+    support active for the requested NFT pseudo-coin ticker and, on
+    the native target, perform the initial owned-inventory crawl.
+    `update_nft` shall remain the refresh/re-crawl method for an
+    already-active NFT subsystem and shall not be the activation
+    substitute.
+
+R10. **Activation preconditions and failures.** `enable_nft` shall
+     require the resolved backing EVM platform coin to already be
+     activated, shall reject an already-active NFT ticker, shall reject
+     an invalid NFT ticker or non-NFT protocol, shall reject a
+     non-EVM backing platform, and shall reject an inline NFT protocol
+     whose declared platform disagrees with the platform resolved from
+     the ticker. A failed precondition shall not mark the NFT ticker
+     active and shall not persist a partial initial crawl result.
 
 The following are **deferred work** named explicitly in scope
 of this chapter:
@@ -498,19 +661,13 @@ V4. The ABI fragments embedded in §19.7 are byte-identical to
 
 ## 19.12 Provenance Footer
 
-- *Status:* driving-spec.
-- *Version:* v2.
-- *Verified against:* baseline commit
-  `c1d46c0c1592faa0860f704008b2b2381bc3840f`; absence of the
-  NFT subsystem at baseline verified via
-  `git ls-tree -r c1d46c0c1592faa0860f704008b2b2381bc3840f`
-  and tree-wide `git grep` for the storage-trait names against
-  the baseline; chapter 31 (the central application-context
-  substrate the `nft_ctx` sub-context slot is registered on per
-  chapter 31 R7 / R8); ERC-721 and ERC-1155 standards (the on-chain
-  interface definitions used by the withdrawal path); the
-  Ethereum JSON-RPC method `eth_call` (used for the ERC-1155
-  balance query); EIP-1559 (one of the two signing policies);
-  publicly-documented mainnet ticker symbols of the five EVM
-  ecosystems named in §19.3.
+- *Inputs:* baseline commit `c1d46c0c1592faa0860f704008b2b2381bc3840f`;
+  public ERC-721 and ERC-1155 interface standards; Ethereum JSON-RPC
+  `eth_call`; EIP-1559; publicly documented mainnet ticker symbols of
+  the five EVM ecosystems named in §19.3; dictated public SDK/GUI
+  interop facts for `enable_nft`.
+- *Permitted-input classes used:* baseline source; public
+  specification documents; public protocol documentation; public
+  ticker-symbol documentation; dictated-interop wire facts.
+- *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* not consulted.

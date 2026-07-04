@@ -120,6 +120,8 @@ pub struct CoinsContext {
     pub(crate) tx_history_db: SharedDb<TxHistoryDb>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) hd_wallet_db: SharedDb<HDWalletDb>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) block_headers_storage_db: SharedDb<BlockHeaderStorageDb>,
 }
 #[derive(Debug)]
 pub struct CoinIsAlreadyActivatedErr {
@@ -144,6 +146,8 @@ impl CoinsContext {
                 tx_history_db: ConstructibleDb::new_shared(ctx),
                 #[cfg(target_arch = "wasm32")]
                 hd_wallet_db: ConstructibleDb::new_shared(ctx),
+                #[cfg(target_arch = "wasm32")]
+                block_headers_storage_db: ConstructibleDb::new_shared(ctx),
             })
         })))
     }
@@ -302,7 +306,14 @@ pub enum CoinProtocol {
         platform: String,
         contract_address: String,
     },
-    ETH,
+    ETH {
+        /// Optional EVM chain id carried under `protocol_data` in newer coins
+        /// configs. The coin builder reads the authoritative `chain_id` from the
+        /// top-level coin config, so this field is accepted for
+        /// forward-compatibility and is otherwise unused.
+        #[serde(default)]
+        chain_id: Option<u64>,
+    },
     ERC20 {
         platform: String,
         contract_address: String,

@@ -3,6 +3,6 @@
 fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        mm2::mm2_main()
+        kdflib::mm2_main()
     }
 }

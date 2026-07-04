@@ -163,6 +163,20 @@ R13. **Single dispatch predicate.** The dispatch decision
      value (the `is_v2_or_higher` predicate of R3). The
      dispatcher shall not switch on the underlying byte.
 
+> **Reloaded implementation status (informative).** This
+> negotiation substrate ships in the reloaded baseline
+> (placement: the swap-versioning module within the main swap
+> crate). The negotiated value is the exact numeric minimum of
+> the two advertised single-byte versions per R11 — a true
+> pairwise minimum, not an approximation over independent
+> sub-fields — and the legacy fall-back described in R11 is the
+> direct consequence of taking that minimum, requiring no
+> separate code path. The dispatch predicates `is_legacy`,
+> `is_v2_or_higher`, and `is_nft_v2` (R3) and the
+> legacy-returning default constructor (R5) are present as
+> specified. The single-byte values bound by R4 are 1 (legacy),
+> 2 (V2), and 3 (non-fungible-token-extended).
+
 ## 13.6 Tests
 
 The version-negotiation substrate shall be covered by
@@ -192,8 +206,42 @@ T5. **Pair-negotiation corners.** The pair-negotiation
     pairs `(1,1)`, `(2,1)`, `(2,2)`, `(3,2)`, `(3,1)`,
     and `(3,3)`.
 
-These five tests are the negotiation contract; any
-implementation shall keep them passing.
+T6. **Cancel-swap is not an mmrpc 2.0 method.** An authenticated
+    mmrpc 2.0 request whose method is `cancel_swap` and whose
+    `params` member is absent, an empty object, an object carrying a
+    UUID-shaped member, or any other syntactically valid JSON value
+    returns the dispatcher method-not-found error with HTTP status
+    400.
+
+T7. **Cancel-swap has no success response.** No syntactically valid
+    mmrpc 2.0 `cancel_swap` request returns a `result` member. The
+    response is always the dispatcher error path after ordinary
+    authentication and request-envelope parsing have succeeded.
+
+T8. **Cancel-swap does not mutate an active swap.** Given a running
+    swap UUID that appears in `active_swaps`, invoking `cancel_swap`
+    with that UUID in `params` returns the same method-not-found
+    error; a subsequent `active_swaps` call still includes the UUID,
+    and `my_swap_status` reports no cancellation-derived terminal
+    event.
+
+T9. **Cancel-swap scope is role- and version-uniform.** The same
+    method-not-found result and no-mutation invariant hold for maker
+    and taker roles, for legacy and version-two swap records, and for
+    unknown, inactive, or already-finished UUIDs.
+
+T10. **Cancel-swap is not order cancellation.** Invoking
+     `cancel_swap` shall not remove maker orders, taker orders, or
+     matched-order state. Existing order-cancellation RPCs remain the
+     only order-control surface.
+
+T11. **Cancel-swap has no legacy alias.** A legacy-envelope request
+     named `cancel_swap` is not handled as a legacy method. If the
+     request reaches the compatibility fallback into mmrpc 2.0, it
+     still resolves to the same method-not-found result.
+
+These eleven tests are the negotiation and active-swap control
+contract; any implementation shall keep them passing.
 
 ## 13.7 Cross-Subsystem Integration
 
@@ -217,6 +265,10 @@ substrates:
   negotiated version as a top-level field so that
   consumers (GUIs, integrations) can branch on protocol
   level without inspecting the swap's internal payload.
+- The active-swap status surfaces do not expose a swap-cancellation
+  RPC. The non-method behaviour of the reserved-looking
+  `cancel_swap` name is bound in §13.7A so clients do not confuse it
+  with order cancellation or task cancellation.
 
 R14. **Non-fungible-token outcome enum.** Where the
      non-fungible-token-extended path is dispatched, the
@@ -226,6 +278,65 @@ R14. **Non-fungible-token outcome enum.** Where the
      and "no NFT contract configured", so callers can
      distinguish a downgrade decision from a
      mis-configuration.
+
+## 13.7A Non-Method `cancel_swap` Behaviour
+
+R15. **No mmrpc 2.0 route.** The mmrpc 2.0 dispatcher shall not
+     register `cancel_swap` as a callable method. A request with the
+     standard mmrpc 2.0 envelope and method `cancel_swap` reaches only
+     the generic dispatcher miss path after ordinary envelope parsing
+     and authentication have succeeded.
+
+R16. **Params have no schema or effect.** Because there is no
+     `cancel_swap` handler, `params` is not decoded as a
+     method-specific request. An absent `params` member, an empty
+     object, an object carrying a UUID-shaped member, or any other
+     syntactically valid JSON value in `params` shall not change the
+     result.
+
+R17. **Method-not-found error.** An authenticated, well-formed mmrpc
+     2.0 `cancel_swap` request shall return the standard mmrpc 2.0
+     error envelope with `error_type` equal to `NoSuchMethod` and
+     HTTP status 400. There is no successful `cancel_swap` response
+     shape.
+
+R18. **Active and inactive UUIDs are equivalent.** A UUID supplied in
+     `params` is not interpreted. Unknown UUIDs, inactive UUIDs,
+     already-finished swap UUIDs, and UUIDs present in `active_swaps`
+     all produce the same method-not-found result.
+
+R19. **No running-swap cancellation.** A `cancel_swap` request shall
+     not stop, abort, refund, remove, or otherwise advance a running
+     swap state machine. The active-swap index, per-swap runtime
+     tasks, and peer-to-peer swap-message channels shall remain as
+     they were before the request, except for ordinary time-driven
+     progress that would have happened without the request.
+
+R20. **No persistence or status effect.** A `cancel_swap` request
+     shall not append a swap event, mark a swap finished, alter the
+     persisted swap record, or alter the response of
+     `my_swap_status`, `my_recent_swaps`, or `active_swaps` except
+     for ordinary time-driven progress that would have happened
+     without the request.
+
+R21. **Not order cancellation.** `cancel_swap` shall not cancel,
+     remove, or amend maker orders, taker orders, matched-order
+     reservations, or orderbook entries. Order cancellation remains
+     limited to the order-control RPCs specified outside this
+     subsection.
+
+R22. **Legacy and swap-version scope.** The legacy flat dispatcher
+     shall not expose `cancel_swap` as a method alias. If a
+     legacy-style request falls through to mmrpc 2.0 compatibility
+     handling, it still resolves to `NoSuchMethod`. The absence of
+     `cancel_swap` applies uniformly to legacy swap records,
+     version-two swap records, maker roles, and taker roles.
+
+> **Upstream status (informative).** The analysed upstream corpus
+> contains active-swap listing and status surfaces, but no shipped
+> active-swap cancellation RPC. This chapter therefore binds the
+> non-method behaviour above until a future chapter explicitly
+> specifies cancellable swap states and a public cancellation method.
 
 ## 13.8 Invariants
 
@@ -240,6 +351,12 @@ R14. **Non-fungible-token outcome enum.** Where the
 | Negotiation fixed at the request/reservation exchange    | R10       |
 | Element-wise-minimum pair negotiation                    | R11       |
 | Dispatch reduces to single predicate                     | R13       |
+| `cancel_swap` is not an mmrpc 2.0 method                 | R15, R17  |
+| `cancel_swap` has no parameter schema or success response | R16, R17  |
+| `cancel_swap` treats active and inactive UUIDs equally   | R18       |
+| `cancel_swap` does not mutate runtime or persisted status | R19, R20  |
+| `cancel_swap` does not cancel orders                     | R21       |
+| `cancel_swap` has no legacy alias                        | R22       |
 
 ## 13.9 Deferred Work
 
@@ -315,5 +432,10 @@ V3. The five-stage HTLC swap dance is present at the
   semantics (omit-if-default, field-default) that R8
   relies on; the publicly-documented hash-time-locked-
   contract atomic-swap protocol that the legacy value of
-  R4 names.
-- *Forbidden corpus:* not consulted.
+  R4 names; current upstream mmrpc 2.0 and legacy dispatcher
+  surfaces for the absence of a `cancel_swap` route; the
+  upstream analysis corpus for the absence of a shipped
+  active-swap cancellation contract.
+- *Forbidden corpus:* consulted for upstream parity of the
+  `cancel_swap` surface only; no source text, private helper
+  structure, log strings, or internal decomposition copied.

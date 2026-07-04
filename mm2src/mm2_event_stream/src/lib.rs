@@ -30,7 +30,7 @@ mod manager;
 mod streamer;
 
 pub use event::Event;
-pub use manager::StreamingManager;
+pub use manager::{StopStreamError, StreamingManager};
 pub use streamer::{Broadcaster, EventStreamer, NoDataIn, StreamerId};
 
 // Re-export the tokio channel primitives surfaced through `EventStreamer`

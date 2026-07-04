@@ -173,6 +173,8 @@ struct Mm2VersionRes {
 pub enum NetworkInfoRequest {
     /// Get MM2 version of nodes added to stats collection
     GetMm2Version,
+    /// Get current UTC timestamp as unix epoch seconds.
+    CurrentTimestamp,
 }
 
 fn process_get_version_request(ctx: MmArc) -> Result<Option<Vec<u8>>, String> {
@@ -181,10 +183,17 @@ fn process_get_version_request(ctx: MmArc) -> Result<Option<Vec<u8>>, String> {
     Ok(Some(encoded))
 }
 
+fn process_current_timestamp_request() -> Result<Option<Vec<u8>>, String> {
+    let timestamp = now_ms() / 1000;
+    let encoded = try_s!(encode_message(&timestamp));
+    Ok(Some(encoded))
+}
+
 pub fn process_info_request(ctx: MmArc, request: NetworkInfoRequest) -> Result<Option<Vec<u8>>, String> {
     log::debug!("Got stats request {:?}", request);
     match request {
         NetworkInfoRequest::GetMm2Version => process_get_version_request(ctx),
+        NetworkInfoRequest::CurrentTimestamp => process_current_timestamp_request(),
     }
 }
 

@@ -41,11 +41,23 @@ where
     // [`EnableCoinBalanceOps::enable_coin_balance`] won't just use `xpub_extractor`
     // if the coin has been initialized with an Iguana priv key.
     let xpub_extractor = RpcTaskXPubExtractor::new_unchecked(ctx, task_handle, xpub_extractor_rpc_statuses());
+    // Select the extended-public-key source by key-pair policy: the hardware device when a
+    // hardware-wallet context is active, otherwise the in-context software derivation (`None`)
+    // for a software global-HD account.
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|error| InitUtxoStandardError::CoinCreationError {
+        ticker: coin.ticker().to_owned(),
+        error: error.to_string(),
+    })?;
+    let xpub_extractor = if crypto_ctx.hw_ctx().is_some() {
+        Some(&xpub_extractor)
+    } else {
+        None
+    };
     task_handle
         .update_in_progress_status(UtxoStandardInProgressStatus::RequestingWalletBalance)
         .mm_err(Into::into)?;
     let wallet_balance = coin
-        .enable_coin_balance(&xpub_extractor, activation_params.scan_policy)
+        .enable_coin_balance(xpub_extractor, activation_params.scan_policy)
         .await
         .mm_err(|error| InitUtxoStandardError::CoinCreationError {
             ticker: coin.ticker().to_owned(),
@@ -68,7 +80,8 @@ pub fn xpub_extractor_rpc_statuses() -> HwConnectStatuses<UtxoStandardInProgress
         on_connected: UtxoStandardInProgressStatus::ActivatingCoin,
         on_connection_failed: UtxoStandardInProgressStatus::Finishing,
         on_button_request: UtxoStandardInProgressStatus::WaitingForUserToConfirmPubkey,
-        on_pin_request: UtxoStandardAwaitingStatus::WaitForTrezorPin,
+        on_pin_request: UtxoStandardAwaitingStatus::EnterTrezorPin,
+        on_passphrase_request: UtxoStandardAwaitingStatus::EnterTrezorPassphrase,
         on_ready: UtxoStandardInProgressStatus::ActivatingCoin,
     }
 }

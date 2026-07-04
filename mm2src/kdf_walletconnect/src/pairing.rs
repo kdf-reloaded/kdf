@@ -13,6 +13,11 @@ pub struct Pairing {
     pub topic: Topic,
     pub sym_key: SymKey,
     pub expiry: u64,
+    /// Namespace requirements threaded from `wc_new_connection` (chapter 22
+    /// §22.9A.2 RP5); they feed the session proposal this pairing drives.
+    pub required_namespaces: serde_json::Value,
+    /// Optional namespace requirements threaded from `wc_new_connection`.
+    pub optional_namespaces: Option<serde_json::Value>,
 }
 
 impl Pairing {
@@ -25,6 +30,8 @@ impl Pairing {
             topic: Topic::generate(),
             sym_key,
             expiry,
+            required_namespaces: serde_json::Value::Null,
+            optional_namespaces: None,
         }
     }
 

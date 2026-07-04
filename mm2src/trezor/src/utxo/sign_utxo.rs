@@ -51,7 +51,9 @@ impl<'a> TrezorSession<'a> {
         loop {
             extract_serialized_data(&tx_request, &mut result)?;
 
-            let request_type = tx_request.request_type.and_then(ProtoTxRequestType::from_i32);
+            let request_type = tx_request
+                .request_type
+                .and_then(|t| ProtoTxRequestType::try_from(t).ok());
             let request_type = match request_type {
                 Some(ProtoTxRequestType::Txfinished) => return Ok(result),
                 Some(req_type) => req_type,

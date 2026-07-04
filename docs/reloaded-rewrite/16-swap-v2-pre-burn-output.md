@@ -50,6 +50,50 @@ cover the version-two UTXO helper updates and signature-hash
 strategy; R21–R24 cover the activation surface and parallel
 chains.
 
+### 16.1.1 Reloaded policy state (informative)
+
+The data and split substrate of this chapter ships in full in the
+reloaded baseline; the per-network numeric policy that drives it
+is supplied by the dedicated network-configuration crate
+(`mm2_net_config`), with one `NetConfig` implementation per
+network identifier, replacing the hard-coded constants of the
+upstream baseline. The bound policy values exposed through the
+public `NetConfig` accessors are:
+
+- **Network identifier 8762** (original AtomicDEX network): base
+  `dex_fee_rate` = 1/777 (~0.129%); `dex_fee_rate_discounted` =
+  9/7770 (~0.116%, a 10% discount applied to the KMD ticker);
+  `burn_enabled` = false — no pre-burn output is produced on this
+  network.
+- **Network identifier 6133** (GLEEC network): base `dex_fee_rate`
+  = 2/100 (2%); `dex_fee_rate_discounted` = 1/100 (1%, a 50%
+  discount whose `fee_discount_tickers` set is `["GLEEC"]`);
+  `dex_fee_min_threshold` = 1/10000; `burn_enabled` = true with
+  `dex_fee_share` = 3/4 (75% to the fee address, 25% to the burn
+  destination, per the canonical split of §16.1).
+
+> **GLEEC-conformance note (informative).** On network identifier
+> 6133 the burn-destination public key returned by
+> `burn_addr_pubkey` is **deliberately equal** to the
+> fee-collection key returned by `dex_fee_addr_pubkey`. Both are
+> the single compressed secp256k1 key
+> `03a778d9bd346fa704cf3e2508cd074d93a1bbc1e504fbecbb0a8d48e7cccbbf5c`.
+> This is **not a reloaded divergence or a defect**: it reproduces
+> the GLEEC upstream configuration exactly, where the burn key is
+> set equal to the fee key so that the burn is effectively
+> neutralised at the address level — the 75/25 split still
+> executes structurally (a two-output transaction is built per
+> R6/R20), but the burned 25% lands in the same account as the
+> fee. The shared value is retained intentionally as a guard:
+> should the burn path ever be exercised unexpectedly, value is
+> directed to the network's own fee account rather than being
+> destroyed, and a genuinely distinct burn key can be substituted
+> later (here and in upstream) without a code change.
+> Implementations MUST keep these two keys equal on this network
+> to match GLEEC and MUST NOT assume the burn key differs from the
+> fee key. This equality is a required configuration invariant for
+> netid-6133 conformance, not a gap to be closed.
+
 ## 16.2 Subsystem Shape
 
 The substrate occupies a structural seam between four chapters:
@@ -128,7 +172,7 @@ chapter-08 `DexFee` type. The chapter-bound names are:
 | Function                  | Bound role                                                                                                                                 |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `new_from_taker_coin`     | Used at swap initiation, before the taker's public key is known. Decides `Standard` vs `WithBurn` (KMD-OP_RETURN vs burn-account) based on coin and network flags. |
-| `new_with_taker_pubkey`   | Used during validation when the taker's public key is known. Returns `NoFee` iff the taker public key equals the burn public key; otherwise delegates to `new_from_taker_coin`. |
+| `new_with_taker_pubkey`   | Used whenever the taker's public key is known, including validation. Returns `NoFee` iff the taker public key equals the burn public key; otherwise delegates to `new_from_taker_coin`. |
 
 The base-fee computation (chapter-bound name `compute_base_fee`,
 provided by chapter 08's `compute_dex_fee` pipeline) MUST NOT be
@@ -201,6 +245,49 @@ the caller (chapter-15 call sites).
 **R12.** The factory MUST emit one of exactly three `DexFee`
 variants: `Standard`, `WithBurn`, `NoFee`. Substrate MUST NOT
 introduce a fourth variant.
+
+**R12A. Production call-site contract for known taker pubkey.**
+Any production path that constructs an expected dex-fee value and
+already knows the taker's expected sender public key MUST call the
+taker-pubkey-aware factory of R6. It MUST NOT compute the expected
+fee with the pubkey-blind factory or with only the chapter-08
+`compute_dex_fee` pipeline. The trigger condition is the presence
+of the public key that the fee transaction, taker funding, or
+taker payment is expected to be signed by or otherwise bound to.
+Under that condition, a taker whose public key equals the burn
+public key MUST be treated as `NoFee`.
+
+The production call-site contract is:
+
+- V1 maker-side taker-fee validation MUST compute the expected
+  `DexFee` from the taker coin, maker coin ticker, taker amount,
+  and the expected taker sender public key before validating or
+  deciding that no taker-fee transaction is required.
+- V1 taker-side fee estimation, taker-fee send, locked-amount,
+  and trade-preimage paths MUST use the taker-pubkey-aware
+  factory whenever the local taker public key is available; they
+  MAY use the pubkey-blind factory only for max-volume or
+  pre-negotiation estimates where the relevant taker public key is
+  not yet available.
+- V2 maker-side validation of taker funding and V2 maker-side
+  construction/validation of taker-payment spend/refund arguments
+  MUST use the taker-pubkey-aware factory after negotiation has
+  supplied the taker's public key.
+- V2 taker-side construction of taker funding, taker payment
+  spend preimages, funding refunds, and payment refunds MUST use
+  the taker-pubkey-aware factory when the local taker public key
+  is available; it MAY use the pubkey-blind factory only as a
+  conservative estimate before that key is available.
+- Watcher-only validation of an already-identified taker-fee
+  transaction by hash, sender public key, age, confirmation
+  boundary, and fee-output script is not required to recompute the
+  swap-negotiated `DexFee` unless that watcher path also validates
+  the expected swap fee amount or decides whether the fee is
+  absent. If it does, this R12A trigger applies.
+
+A direct unit test of `new_with_taker_pubkey` alone is not
+sufficient acceptance coverage for this requirement; at least one
+production call site MUST be exercised.
 
 ## 16.5 Bound Version-Two UTXO Helper Updates
 
@@ -361,6 +448,24 @@ with the OP_RETURN destination tag.
 fee.* The `new_with_taker_pubkey` factory is called with the
 taker public key set equal to the coin's burn public key; the
 test asserts the `NoFee` variant is returned.
+
+**T4A.** *Known-taker-pubkey production validation uses `NoFee`.*
+Given a burn-enabled UTXO taker coin whose expected taker sender
+public key equals the burn public key, the V1 maker-side
+taker-fee validation path computes its expected `DexFee` with the
+taker-pubkey-aware factory and proceeds through the no-fee branch
+without requiring a taker-fee transaction. The same fixture MUST
+fail if the path computes the expected fee with the pubkey-blind
+factory or with only the base-fee pipeline.
+
+**T4B.** *V2 known-taker-pubkey validation uses `NoFee`.* Given a
+V2 maker-side validation fixture after negotiation, where the
+taker public key is known and equals the burn public key, the
+expected `DexFee` passed to taker-funding validation is `NoFee`.
+The test asserts that a `Standard` or `WithBurn` expectation is a
+failure for this trigger condition. A companion taker-side fixture
+MUST assert that local V2 taker construction uses the same
+`NoFee` expectation when the local taker public key is available.
 
 **T5.** *Three-output preimage for burn-account variant.* The
 preimage builder of R13 is driven with `WithBurn` carrying the

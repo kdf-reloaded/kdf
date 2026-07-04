@@ -190,8 +190,8 @@ pub enum Provider {
     Coinpaprika,
     #[serde(rename = "forex")]
     Forex,
-    #[serde(rename = "nomics")]
-    Nomics,
+    #[serde(rename = "coinmarketcap")]
+    Coinmarketcap,
     #[serde(rename = "unknown", other)]
     #[default]
     Unknown,

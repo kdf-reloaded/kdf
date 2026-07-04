@@ -140,7 +140,13 @@ where
                                 tx_details.block_height = height;
                             }
 
+                            let tx_history_record = tx_details.clone();
                             e.insert(tx_details);
+                            crate::tx_history_streaming::publish_tx_history_records(
+                                &ctx,
+                                &coin.as_ref().conf.ticker,
+                                vec![tx_history_record],
+                            );
                             if transactions_left > 0 {
                                 transactions_left -= 1;
                                 *coin.as_ref().history_sync_state.lock().unwrap() =
@@ -148,13 +154,21 @@ where
                             }
                             updated = true;
                         },
-                        Err(e) => log_tag!(
-                            ctx,
-                            "",
-                            "tx_history",
-                            "coin" => coin.as_ref().conf.ticker;
-                            fmt = "Error {:?} on getting the details of {:?}, skipping the tx", e, txid
-                        ),
+                        Err(e) => {
+                            debug!(
+                                "Full error on getting the details of {:?} for {}: {:?}",
+                                txid,
+                                coin.as_ref().conf.ticker,
+                                e
+                            );
+                            log_tag!(
+                                ctx,
+                                "",
+                                "tx_history",
+                                "coin" => coin.as_ref().conf.ticker;
+                                fmt = "Error {} on getting the details of {:?}, skipping the tx", e, txid
+                            )
+                        },
                     }
                 },
                 Entry::Occupied(mut e) => {
@@ -222,14 +236,31 @@ pub async fn request_tx_history<T>(coin: &T, metrics: MetricsArc) -> RequestTxHi
 where
     T: UtxoCommonOps + MmCoin + MarketCoinOps,
 {
-    let my_address = match coin.my_address() {
-        Ok(addr) => addr,
-        Err(e) => {
-            return RequestTxHistoryResult::CriticalError(ERRL!(
-                "Error on getting self address: {}. Stop tx history",
-                e
-            ))
+    // Resolve the primary address, supporting both Iguana and HD derivation.
+    // For HD wallets this uses the root public-key-derived address (the same one used by
+    // trade_preimage_sender_address). This covers the most common single-address HD use case;
+    // full multi-address HD history scanning would require the v2 tx history path.
+    let coin_fields = coin.as_ref();
+    let my_address_obj: Address = match &coin_fields.derivation_method {
+        DerivationMethod::Iguana(addr) => addr.clone(),
+        DerivationMethod::HDWallet(hd_wallet) => {
+            let pk = match my_public_key(coin_fields) {
+                Ok(pk) => pk,
+                Err(e) => return RequestTxHistoryResult::CriticalError(e.to_string()),
+            };
+            address_from_pubkey(
+                pk,
+                coin_fields.conf.pub_addr_prefix,
+                coin_fields.conf.pub_t_addr_prefix,
+                coin_fields.conf.checksum_type,
+                coin_fields.conf.bech32_hrp.clone(),
+                hd_wallet.address_format.clone(),
+            )
         },
+    };
+    let my_address = match my_address_obj.display_address() {
+        Ok(addr) => addr,
+        Err(e) => return RequestTxHistoryResult::CriticalError(e),
     };
 
     let tx_ids = match &coin.as_ref().rpc_client {
@@ -274,10 +305,7 @@ where
                 .collect()
         },
         UtxoRpcClientEnum::Electrum(client) => {
-            let my_address = match coin.as_ref().derivation_method.iguana_or_err() {
-                Ok(my_address) => my_address,
-                Err(e) => return RequestTxHistoryResult::CriticalError(e.to_string()),
-            };
+            let my_address = &my_address_obj;
             let script = output_script(my_address, ScriptType::P2PKH);
             let script_hash = electrum_script_hash(&script);
 

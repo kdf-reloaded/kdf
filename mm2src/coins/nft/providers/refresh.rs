@@ -215,9 +215,9 @@ mod tests {
     fn sample_nft() -> Nft {
         Nft {
             common: NftCommon {
-                token_address: Address::from("0x00000000000000000000000000000000000000A1"),
+                token_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A1").unwrap()),
                 amount: BigDecimal::from(1u32),
-                owner_of: Address::from("0x00000000000000000000000000000000000000A2"),
+                owner_of: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A2").unwrap()),
                 token_hash: None,
                 collection_name: Some("Old Name".into()),
                 symbol: None,

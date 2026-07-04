@@ -12,11 +12,13 @@ use common::log::{error, info};
 use common::mm_number::BigDecimal;
 use common::state_machine::prelude::*;
 use futures::compat::Future01CompatExt;
+use mm2_core::mm_ctx::MmArc;
 use mm2_metrics::MetricsArc;
 use rpc::v1::types::H256 as H256Json;
 
 struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
     coin: BchCoin,
+    mm_ctx: MmArc,
     storage: Storage,
     metrics: MetricsArc,
     current_balance: BigDecimal,
@@ -312,6 +314,7 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
                 },
             };
 
+            let tx_history_records = tx_details.clone();
             if let Err(e) = ctx
                 .storage
                 .add_transactions_to_history(ctx.coin.ticker(), tx_details)
@@ -319,6 +322,7 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
             {
                 return Self::change_state(Stopped::storage_error(e));
             }
+            crate::tx_history_streaming::publish_tx_history_records(&ctx.mm_ctx, ctx.coin.ticker(), tx_history_records);
 
             // wait for for one second to reduce the number of requests to electrum servers
             Timer::sleep(1.).await;
@@ -395,12 +399,14 @@ impl<T: TxHistoryStorage, E: std::fmt::Debug + Send + 'static> LastState for Sto
 
 pub async fn bch_and_slp_history_loop(
     coin: BchCoin,
+    mm_ctx: MmArc,
     storage: impl TxHistoryStorage,
     metrics: MetricsArc,
     current_balance: BigDecimal,
 ) {
     let ctx = BchAndSlpHistoryCtx {
         coin,
+        mm_ctx,
         storage,
         metrics,
         current_balance,

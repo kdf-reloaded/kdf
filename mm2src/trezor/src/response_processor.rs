@@ -21,6 +21,8 @@ pub trait TrezorRequestProcessor {
 
     async fn on_pin_request(&self) -> MmResult<TrezorPinMatrix3x3Response, TrezorProcessingError<Self::Error>>;
 
+    async fn on_passphrase_request(&self) -> MmResult<String, TrezorProcessingError<Self::Error>>;
+
     async fn on_ready(&self) -> MmResult<(), TrezorProcessingError<Self::Error>>;
 }
 

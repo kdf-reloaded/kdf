@@ -3,7 +3,7 @@ use mm2_test_helpers::for_tests::{enable_bch_with_tokens, enable_slp, my_tx_hist
                                   UtxoRpcMode};
 
 const T_BCH_ELECTRUMS: &[&str] = &[
-    "electroncash.de:50003",
+    "bitcoin-cash.devmole.eu:5001",
     "tbch.loping.net:60001",
     "blackie.c3-soft.com:60001",
     "bch0.kister.net:51001",

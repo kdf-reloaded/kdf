@@ -260,11 +260,11 @@ pub enum MyTxHistoryErrorV2 {
 impl HttpStatusCode for MyTxHistoryErrorV2 {
     fn status_code(&self) -> StatusCode {
         match self {
-            MyTxHistoryErrorV2::CoinIsNotActive(_) => StatusCode::PRECONDITION_REQUIRED,
+            MyTxHistoryErrorV2::CoinIsNotActive(_) => StatusCode::NOT_FOUND,
+            MyTxHistoryErrorV2::NotSupportedFor(_) => StatusCode::BAD_REQUEST,
             MyTxHistoryErrorV2::StorageIsNotInitialized(_)
             | MyTxHistoryErrorV2::StorageError(_)
-            | MyTxHistoryErrorV2::RpcError(_)
-            | MyTxHistoryErrorV2::NotSupportedFor(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            | MyTxHistoryErrorV2::RpcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             #[cfg(target_arch = "wasm32")]
             MyTxHistoryErrorV2::NotSupportedInWasm => StatusCode::BAD_REQUEST,
         }
@@ -319,12 +319,96 @@ impl GetHistoryCoinType for MmCoinEnum {
     }
 }
 
+fn skipped_by_paging(
+    transactions: &[TransactionDetails],
+    paging: &PagingOptionsEnum<BytesJson>,
+    limit: usize,
+) -> Option<usize> {
+    match paging {
+        PagingOptionsEnum::FromId(from_id) => transactions
+            .iter()
+            .position(|item| item.internal_id == *from_id)
+            .map(|idx| idx + 1),
+        PagingOptionsEnum::PageNumber(page_number) => Some((page_number.get() - 1) * limit),
+    }
+}
+
+fn build_response_from_history(
+    request: MyTxHistoryRequestV2,
+    sync_status: HistorySyncState,
+    current_block: u64,
+    history: Vec<TransactionDetails>,
+) -> MyTxHistoryResponseV2 {
+    let total = history.len();
+    let (transactions, skipped) = match skipped_by_paging(&history, &request.paging_options, request.limit) {
+        Some(skipped) => {
+            let transactions = history
+                .into_iter()
+                .skip(skipped)
+                .take(request.limit)
+                .map(|details| {
+                    let confirmations = if details.block_height == 0 || details.block_height > current_block {
+                        0
+                    } else {
+                        current_block + 1 - details.block_height
+                    };
+                    MyTxHistoryDetails { confirmations, details }
+                })
+                .collect();
+            (transactions, skipped)
+        },
+        None => (Vec::new(), 0),
+    };
+
+    MyTxHistoryResponseV2 {
+        coin: request.coin,
+        current_block,
+        transactions,
+        sync_status,
+        limit: request.limit,
+        skipped,
+        total,
+        total_pages: calc_total_pages(total, request.limit),
+        paging_options: request.paging_options,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn build_response_from_runtime_history(
+    ctx: MmArc,
+    request: MyTxHistoryRequestV2,
+    coin: MmCoinEnum,
+) -> Result<MyTxHistoryResponseV2, MmError<MyTxHistoryErrorV2>> {
+    let current_block = coin
+        .current_block()
+        .compat()
+        .await
+        .map_to_mm(MyTxHistoryErrorV2::RpcError)?;
+    let history = coin
+        .load_history_from_file(&ctx)
+        .compat()
+        .await
+        .map_err(|e| MmError::new(MyTxHistoryErrorV2::RpcError(e.to_string())))?;
+    let sync_status = coin.history_sync_status();
+
+    Ok(build_response_from_history(
+        request,
+        sync_status,
+        current_block,
+        history,
+    ))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn my_tx_history_v2_rpc(
     ctx: MmArc,
     request: MyTxHistoryRequestV2,
 ) -> Result<MyTxHistoryResponseV2, MmError<MyTxHistoryErrorV2>> {
     let coin = lp_coinfind_or_err(&ctx, &request.coin).await.mm_err(Into::into)?;
+    if matches!(coin, MmCoinEnum::UtxoCoin(_) | MmCoinEnum::QtumCoin(_)) {
+        return build_response_from_runtime_history(ctx, request, coin).await;
+    }
+
     let tx_history_storage = SqliteTxHistoryStorage(
         ctx.sqlite_connection
             .ok_or(MmError::new(MyTxHistoryErrorV2::StorageIsNotInitialized(
@@ -355,7 +439,7 @@ pub async fn my_tx_history_v2_rpc(
         .await
         .mm_err(Into::into)?;
 
-    let transactions = history
+    let history = history
         .transactions
         .into_iter()
         .map(|mut details| {
@@ -363,26 +447,84 @@ pub async fn my_tx_history_v2_rpc(
             if details.coin != request.coin {
                 details.coin = request.coin.clone();
             }
-            let confirmations = if details.block_height == 0 || details.block_height > current_block {
-                0
-            } else {
-                current_block + 1 - details.block_height
-            };
-            MyTxHistoryDetails { confirmations, details }
+            details
         })
         .collect();
+    let sync_status = coin.history_sync_status();
 
-    Ok(MyTxHistoryResponseV2 {
-        coin: request.coin,
+    Ok(build_response_from_history(
+        request,
+        sync_status,
         current_block,
-        transactions,
-        sync_status: coin.history_sync_status(),
-        limit: request.limit,
-        skipped: history.skipped,
-        total: history.total,
-        total_pages: calc_total_pages(history.total, request.limit),
-        paging_options: request.paging_options,
-    })
+        history,
+    ))
+}
+
+/// Shared-envelope address-scope selector for the shielded history request (R39.8.5).
+///
+/// Accepted for wire-envelope compatibility and, in the forward-spec data path
+/// (§39.8.0b), echoed back unchanged in the response. It does not scope which
+/// shielded transactions are returned. On the current native-only substrate the
+/// method always fails before any response is built (§39.8.0a), so the selector
+/// is validated at the boundary and otherwise unused.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ZCoinTxHistoryTarget {
+    #[default]
+    Iguana,
+    AccountId {
+        account_id: u32,
+    },
+    AddressId(crate::hd_wallet::HDAddressId),
+}
+
+/// Shielded-coin transaction-history request envelope (R39.8.3).
+///
+/// Mirrors the shared v2 history request but keys paging on a signed 64-bit
+/// integer identifier (R39.8.4, R39.8.10) and carries the shared `target`
+/// selector (R39.8.5).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Deserialize)]
+pub struct ZCoinTxHistoryRequest {
+    pub coin: String,
+    #[serde(default = "ten")]
+    pub limit: usize,
+    #[serde(default)]
+    pub paging_options: PagingOptionsEnum<i64>,
+    #[serde(default)]
+    pub target: ZCoinTxHistoryTarget,
+}
+
+/// `z_coin_tx_history` handler — clean-failure contract on the current substrate (R39.8.0a).
+///
+/// Reloaded's `ZCoin` is a native-full-node port with no shielded wallet-history
+/// store, no incoming-viewing-key compact-block scanner, and no signed-integer
+/// `internal_id` keyspace (verdict B, §39.8.0). The shielded history therefore
+/// cannot be produced here without fabricating note ownership, which would be a
+/// correctness and privacy hazard. The method is still dispatched and validates
+/// its input at the boundary:
+/// - an unactivated `coin` resolves to `CoinIsNotActive`;
+/// - an activated non-shielded coin resolves to `NotSupportedFor`;
+/// - an activated shielded coin resolves to `StorageIsNotInitialized`, because
+///   no wallet-history store exists on this substrate.
+///
+/// It never panics, never fabricates or partially synthesizes history entries,
+/// and never emits shielded amounts/addresses it cannot derive. The success
+/// type is the shared v2 envelope (R39.8.10); it is never constructed here.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn z_coin_tx_history_rpc(
+    ctx: MmArc,
+    request: ZCoinTxHistoryRequest,
+) -> Result<MyTxHistoryResponseV2, MmError<MyTxHistoryErrorV2>> {
+    let coin = lp_coinfind_or_err(&ctx, &request.coin).await.mm_err(Into::into)?;
+    match coin {
+        MmCoinEnum::ZCoin(_) => MmError::err(MyTxHistoryErrorV2::StorageIsNotInitialized(format!(
+            "Shielded transaction-history store is not initialized for {}",
+            request.coin
+        ))),
+        _ => MmError::err(MyTxHistoryErrorV2::NotSupportedFor(request.coin)),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -391,4 +533,153 @@ pub async fn my_tx_history_v2_rpc(
     _request: MyTxHistoryRequestV2,
 ) -> Result<MyTxHistoryResponseV2, MmError<MyTxHistoryErrorV2>> {
     MmError::err(MyTxHistoryErrorV2::NotSupportedInWasm)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_coin_tx_history_tests {
+    use super::*;
+    use std::num::NonZeroUsize;
+
+    fn tx_details(id: u8, block_height: u64) -> TransactionDetails {
+        TransactionDetails {
+            tx_hex: vec![id].into(),
+            tx_hash: format!("{id:02x}"),
+            from: vec![],
+            to: vec![],
+            total_amount: BigDecimal::from(0),
+            spent_by_me: BigDecimal::from(0),
+            received_by_me: BigDecimal::from(0),
+            my_balance_change: BigDecimal::from(0),
+            block_height,
+            timestamp: 0,
+            fee_details: None,
+            coin: "RICK".to_owned(),
+            internal_id: vec![id].into(),
+            kmd_rewards: None,
+            transaction_type: TransactionType::StandardTransfer,
+        }
+    }
+
+    #[test]
+    fn from_id_not_found_returns_empty_page_with_total_preserved() {
+        let request = MyTxHistoryRequestV2 {
+            coin: "RICK".to_owned(),
+            limit: 2,
+            paging_options: PagingOptionsEnum::FromId(vec![99u8].into()),
+        };
+        let response = build_response_from_history(request, HistorySyncState::Finished, 100, vec![
+            tx_details(1, 98),
+            tx_details(2, 99),
+            tx_details(3, 100),
+        ]);
+
+        assert_eq!(response.total, 3);
+        assert_eq!(response.skipped, 0);
+        assert!(response.transactions.is_empty());
+    }
+
+    #[test]
+    fn from_id_found_returns_following_records() {
+        let request = MyTxHistoryRequestV2 {
+            coin: "RICK".to_owned(),
+            limit: 2,
+            paging_options: PagingOptionsEnum::FromId(vec![2u8].into()),
+        };
+        let response = build_response_from_history(request, HistorySyncState::Finished, 100, vec![
+            tx_details(1, 97),
+            tx_details(2, 98),
+            tx_details(3, 99),
+            tx_details(4, 100),
+        ]);
+
+        assert_eq!(response.total, 4);
+        assert_eq!(response.skipped, 2);
+        assert_eq!(response.transactions.len(), 2);
+        assert_eq!(response.transactions[0].details.internal_id, vec![3u8].into());
+        assert_eq!(response.transactions[1].details.internal_id, vec![4u8].into());
+        assert_eq!(response.transactions[0].confirmations, 2);
+        assert_eq!(response.transactions[1].confirmations, 1);
+    }
+
+    #[test]
+    fn page_number_paging_uses_expected_offset() {
+        let request = MyTxHistoryRequestV2 {
+            coin: "RICK".to_owned(),
+            limit: 2,
+            paging_options: PagingOptionsEnum::PageNumber(NonZeroUsize::new(2).unwrap()),
+        };
+        let response = build_response_from_history(request, HistorySyncState::Finished, 100, vec![
+            tx_details(1, 97),
+            tx_details(2, 98),
+            tx_details(3, 99),
+            tx_details(4, 100),
+        ]);
+
+        assert_eq!(response.total, 4);
+        assert_eq!(response.skipped, 2);
+        assert_eq!(response.transactions.len(), 2);
+        assert_eq!(response.transactions[0].details.internal_id, vec![3u8].into());
+        assert_eq!(response.transactions[1].details.internal_id, vec![4u8].into());
+    }
+
+    // R39.8.3/R39.8.4/R39.8.5: the request envelope deserializes with `coin`,
+    // `limit`, `paging_options` and the shared `target`, and `paging_options`
+    // keys on a signed 64-bit integer (FromId).
+    #[test]
+    fn deserializes_request_envelope() {
+        // Defaults: omitted limit -> 10, omitted paging_options -> PageNumber(1),
+        // omitted target -> iguana.
+        let req: ZCoinTxHistoryRequest = serde_json::from_str(r#"{"coin":"ZOMBIE"}"#).unwrap();
+        assert_eq!(req.coin, "ZOMBIE");
+        assert_eq!(req.limit, 10);
+        assert_eq!(
+            req.paging_options,
+            PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap())
+        );
+        assert!(matches!(req.target, ZCoinTxHistoryTarget::Iguana));
+
+        // Explicit PageNumber paging with an iguana target.
+        let req: ZCoinTxHistoryRequest = serde_json::from_str(
+            r#"{"coin":"ZOMBIE","limit":25,"paging_options":{"PageNumber":3},"target":{"type":"iguana"}}"#,
+        )
+        .unwrap();
+        assert_eq!(req.limit, 25);
+        assert_eq!(
+            req.paging_options,
+            PagingOptionsEnum::PageNumber(NonZeroUsize::new(3).unwrap())
+        );
+        assert!(matches!(req.target, ZCoinTxHistoryTarget::Iguana));
+
+        // FromId paging carries a signed 64-bit integer (R39.8.4, R39.8.10).
+        let req: ZCoinTxHistoryRequest =
+            serde_json::from_str(r#"{"coin":"ZOMBIE","paging_options":{"FromId":-7}}"#).unwrap();
+        assert_eq!(req.paging_options, PagingOptionsEnum::FromId(-7i64));
+    }
+
+    // R39.8.0a / R39.8.4: the three boundary discriminants serialize to the
+    // documented `error_type` wire names and carry the upstream-aligned HTTP
+    // statuses of the shared v2 tx-history error enum (404 / 400 / 500).
+    #[test]
+    fn error_discriminants_and_status_codes() {
+        let not_active = MyTxHistoryErrorV2::CoinIsNotActive("ZOMBIE".into());
+        assert_eq!(
+            serde_json::to_value(&not_active).unwrap()["error_type"],
+            serde_json::json!("CoinIsNotActive")
+        );
+        assert_eq!(not_active.status_code(), StatusCode::NOT_FOUND);
+
+        let not_supported = MyTxHistoryErrorV2::NotSupportedFor("RICK".into());
+        assert_eq!(
+            serde_json::to_value(&not_supported).unwrap()["error_type"],
+            serde_json::json!("NotSupportedFor")
+        );
+        assert_eq!(not_supported.status_code(), StatusCode::BAD_REQUEST);
+
+        let no_storage = MyTxHistoryErrorV2::StorageIsNotInitialized("ZOMBIE".into());
+        assert_eq!(
+            serde_json::to_value(&no_storage).unwrap()["error_type"],
+            serde_json::json!("StorageIsNotInitialized")
+        );
+        assert_eq!(no_storage.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }

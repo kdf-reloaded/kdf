@@ -418,7 +418,7 @@ mod tests {
     fn call_request_serializes_like_web3() {
         let req = CallRequest {
             from: None,
-            to: H160::from(5),
+            to: H160::from_low_u64_be(5),
             gas: Some(21_000.into()),
             gas_price: None,
             value: Some(5_000_000.into()),

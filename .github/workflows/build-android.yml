@@ -1,10 +1,13 @@
 name: Build Android
 
-# P7.5 — Android (aarch64, armv7) shared library builds.
+# P7.5 — Android (aarch64, armv7) static library builds.
 #
-# Produces `libmm2_bin_lib.so` for each ABI via cargo-ndk. Requires the
-# Android NDK. Host runner is Linux (GitHub-hosted `ubuntu-latest` ships
-# the NDK under `$ANDROID_NDK_ROOT`).
+# Produces a static archive `libkdf.a` (renamed from the raw
+# `libmm2_bin_lib.a`) for each ABI, built with
+# `cargo rustc --crate-type=staticlib` against the Android NDK clang
+# toolchain (mirrors upstream KDF; no cargo-ndk). Requires the Android NDK.
+# Host runner is Linux (GitHub-hosted `ubuntu-latest` ships the NDK under
+# `$ANDROID_NDK_ROOT`).
 #
 # Manually dispatched until verified against a downstream Android project.
 
@@ -31,6 +34,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
+    # NDK clang wrappers (API 21) for the `cc` crate and cargo's linker. Both
+    # ABIs' vars are set unconditionally; only the one matching the build
+    # target is consumed. The wrappers are resolved via PATH (see the
+    # "Verify Android NDK" step). Mirrors upstream: only CC_* and the target
+    # LINKER are exported.
+    env:
+      CC_aarch64_linux_android: aarch64-linux-android21-clang
+      CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER: aarch64-linux-android21-clang
+      CC_armv7_linux_androideabi: armv7a-linux-androideabi21-clang
+      CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER: armv7a-linux-androideabi21-clang
+
     strategy:
       fail-fast: false
       matrix:
@@ -50,9 +64,6 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup target add ${{ matrix.target }}
-
-      - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
 
       - name: Verify Android NDK
         # On GitHub-hosted runners ANDROID_NDK_ROOT is normally exported by
@@ -78,6 +89,11 @@ jobs:
             echo "ANDROID_NDK_ROOT not set or missing"; exit 1;
           }
           echo "NDK: $ANDROID_NDK_ROOT"
+          # Put the NDK LLVM clang wrappers (e.g. aarch64-linux-android21-clang)
+          # on PATH so cargo's linker and the `cc` crate find them in later steps.
+          ndk_bin=$(echo "$ANDROID_NDK_ROOT"/toolchains/llvm/prebuilt/*/bin)
+          test -d "$ndk_bin" || { echo "NDK toolchain bin not found: $ndk_bin"; exit 1; }
+          echo "$ndk_bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -88,11 +104,16 @@ jobs:
             target
           key: android-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build mm2_bin_lib cdylib (${{ matrix.ndk-abi }})
+      - name: Build mm2_bin_lib staticlib (${{ matrix.ndk-abi }})
+        # Override the manifest crate-type (cdylib/rlib) with `staticlib` so
+        # cargo emits `libmm2_bin_lib.a` (mirrors upstream's
+        # `cargo rustc --crate-type=staticlib`). The NDK clang wrappers are
+        # supplied via the job `env:` block and PATH.
         run: |
-          cargo ndk --target ${{ matrix.target }} \
-            --platform 24 \
-            -- build -p mm2_bin_lib --profile ${{ inputs.profile }}
+          cargo rustc -p mm2_bin_lib --lib \
+            --target ${{ matrix.target }} \
+            --profile ${{ inputs.profile }} \
+            --crate-type=staticlib
 
       - name: Verify coins crate compiles for ${{ matrix.target }} (P14)
         # P14 modernised the Solana stack to the modular `solana-*` 2.x
@@ -101,12 +122,15 @@ jobs:
         # This step regression-tests that property without relying on
         # downstream linking.
         run: |
-          cargo ndk --target ${{ matrix.target }} \
-            --platform 24 \
-            -- check -p coins
+          cargo check -p coins --target ${{ matrix.target }}
 
-      - name: Upload shared library
+      - name: Rename staticlib to libkdf.a
+        run: |
+          mv target/${{ matrix.target }}/${{ inputs.profile }}/libmm2_bin_lib.a \
+             target/${{ matrix.target }}/${{ inputs.profile }}/libkdf.a
+
+      - name: Upload staticlib
         uses: actions/upload-artifact@v7
         with:
-          name: libmm2-${{ matrix.ndk-abi }}
-          path: target/${{ matrix.target }}/${{ inputs.profile }}/libmm2_bin_lib.so
+          name: libkdf-${{ matrix.ndk-abi }}
+          path: target/${{ matrix.target }}/${{ inputs.profile }}/libkdf.a

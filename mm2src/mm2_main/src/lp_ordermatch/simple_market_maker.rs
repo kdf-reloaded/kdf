@@ -784,9 +784,33 @@ pub async fn process_price_request(price_url: &str) -> Result<TickerInfosRegistr
 }
 
 async fn fetch_price_tickers(price_url: &str) -> Result<TickerInfosRegistry, MmError<PriceServiceRequestError>> {
-    let model = process_price_request(price_url).await?;
-    debug!("price registry size: {}", model.0.len());
-    Ok(model)
+    let endpoints: Vec<&str> = price_url
+        .split(',')
+        .map(str::trim)
+        .filter(|endpoint| !endpoint.is_empty())
+        .collect();
+
+    if endpoints.is_empty() {
+        return MmError::err(PriceServiceRequestError::Internal(
+            "price_url has no valid endpoints".to_string(),
+        ));
+    }
+
+    let mut last_error: Option<MmError<PriceServiceRequestError>> = None;
+    for endpoint in endpoints {
+        match process_price_request(endpoint).await {
+            Ok(model) => {
+                debug!("price registry size: {}", model.0.len());
+                return Ok(model);
+            },
+            Err(err) => {
+                warn!("Couldn't fetch price from {}: {:?}", endpoint, err);
+                last_error = Some(err);
+            },
+        }
+    }
+
+    Err(last_error.expect("endpoints is not empty"))
 }
 
 pub async fn start_simple_market_maker_bot(ctx: MmArc, req: StartSimpleMakerBotRequest) -> StartSimpleMakerBotResult {

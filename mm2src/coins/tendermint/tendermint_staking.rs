@@ -417,7 +417,7 @@ impl TendermintCoin {
             .map_err(|e| DelegationError::InternalError(e.to_string()))?
             .into();
 
-        Ok(TransactionDetails {
+        let tx_details = TransactionDetails {
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![self.account_id.to_string()],
@@ -438,7 +438,9 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::StakingDelegation,
-        })
+        };
+        self.publish_tx_history_record(self.ticker(), &tx_details);
+        Ok(tx_details)
     }
 
     /// Send an undelegation (unstake) transaction.
@@ -522,7 +524,7 @@ impl TendermintCoin {
             .map_err(|e| DelegationError::InternalError(e.to_string()))?
             .into();
 
-        Ok(TransactionDetails {
+        let tx_details = TransactionDetails {
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![self.account_id.to_string()],
@@ -543,7 +545,9 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::RemoveDelegation,
-        })
+        };
+        self.publish_tx_history_record(self.ticker(), &tx_details);
+        Ok(tx_details)
     }
 
     /// Claim staking rewards from a validator.
@@ -615,7 +619,7 @@ impl TendermintCoin {
             .map_err(|e| DelegationError::InternalError(e.to_string()))?
             .into();
 
-        Ok(TransactionDetails {
+        let tx_details = TransactionDetails {
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![validator_address.to_string()],
@@ -636,6 +640,8 @@ impl TendermintCoin {
             internal_id: tx_hex.clone(),
             kmd_rewards: None,
             transaction_type: TransactionType::ClaimDelegationRewards,
-        })
+        };
+        self.publish_tx_history_record(self.ticker(), &tx_details);
+        Ok(tx_details)
     }
 }

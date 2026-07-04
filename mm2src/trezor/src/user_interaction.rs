@@ -5,6 +5,7 @@ use derive_more::Display;
 pub enum TrezorUserInteraction {
     ButtonRequest,
     PinMatrix3x3,
+    Passphrase,
     Other(String),
 }
 
@@ -16,4 +17,10 @@ pub enum TrezorUserInteraction {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TrezorPinMatrix3x3Response {
     pub pin: String,
+}
+
+/// A host-provided passphrase supplied in answer to a Trezor `PassphraseRequest`.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct TrezorPassphraseResponse {
+    pub passphrase: String,
 }

@@ -179,9 +179,9 @@ mod tests {
                 log_index: 2,
                 value: None,
                 transaction_type: Some("eip1559".into()),
-                token_address: Address::from("0x00000000000000000000000000000000000000A1"),
-                from_address: Address::from("0x00000000000000000000000000000000000000A2"),
-                to_address: Address::from("0x00000000000000000000000000000000000000A3"),
+                token_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A1").unwrap()),
+                from_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A2").unwrap()),
+                to_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000A3").unwrap()),
                 amount: BigDecimal::from(1u32),
                 verified: Some(1),
                 operator: None,
@@ -232,9 +232,9 @@ mod tests {
     fn transfer_meta_extracts_token_metadata() {
         let nft = Nft {
             common: NftCommon {
-                token_address: Address::from("0x00000000000000000000000000000000000000C1"),
+                token_address: Address::from_slice(&hex::decode("00000000000000000000000000000000000000C1").unwrap()),
                 amount: BigDecimal::from(1u32),
-                owner_of: Address::from("0x00000000000000000000000000000000000000C2"),
+                owner_of: Address::from_slice(&hex::decode("00000000000000000000000000000000000000C2").unwrap()),
                 token_hash: None,
                 collection_name: Some("Birds".into()),
                 symbol: None,

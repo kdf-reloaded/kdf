@@ -24,6 +24,8 @@ pub type GetPaymentDetailsResult<T> = Result<T, MmError<GetPaymentDetailsError>>
 pub type CloseChannelResult<T> = Result<T, MmError<CloseChannelError>>;
 pub type ClaimableBalancesResult<T> = Result<T, MmError<ClaimableBalancesError>>;
 pub type SaveChannelClosingResult<T> = Result<T, MmError<SaveChannelClosingError>>;
+pub type TrustedNodeResult<T> = Result<T, MmError<TrustedNodeError>>;
+pub type UpdateChannelResult<T> = Result<T, MmError<UpdateChannelError>>;
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
@@ -119,6 +121,38 @@ impl From<CoinFindError> for ConnectToNodeError {
 
 impl From<std::io::Error> for ConnectToNodeError {
     fn from(err: std::io::Error) -> ConnectToNodeError { ConnectToNodeError::IOError(err.to_string()) }
+}
+
+#[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum TrustedNodeError {
+    #[display(fmt = "Lightning network is not supported for {}", _0)]
+    UnsupportedCoin(String),
+    #[display(fmt = "No such coin {}", _0)]
+    NoSuchCoin(String),
+    #[display(fmt = "Error saving trusted nodes to persistent storage: {}", _0)]
+    SaveTrustedNodesError(String),
+}
+
+impl HttpStatusCode for TrustedNodeError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            TrustedNodeError::UnsupportedCoin(_) | TrustedNodeError::NoSuchCoin(_) => StatusCode::BAD_REQUEST,
+            TrustedNodeError::SaveTrustedNodesError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<CoinFindError> for TrustedNodeError {
+    fn from(e: CoinFindError) -> Self {
+        match e {
+            CoinFindError::NoSuchCoin { coin } => TrustedNodeError::NoSuchCoin(coin),
+        }
+    }
+}
+
+impl From<std::io::Error> for TrustedNodeError {
+    fn from(err: std::io::Error) -> TrustedNodeError { TrustedNodeError::SaveTrustedNodesError(err.to_string()) }
 }
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
@@ -463,6 +497,37 @@ impl From<CoinFindError> for CloseChannelError {
     fn from(e: CoinFindError) -> Self {
         match e {
             CoinFindError::NoSuchCoin { coin } => CloseChannelError::NoSuchCoin(coin),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum UpdateChannelError {
+    #[display(fmt = "Lightning network is not supported for {}", _0)]
+    UnsupportedCoin(String),
+    #[display(fmt = "No such coin {}", _0)]
+    NoSuchCoin(String),
+    #[display(fmt = "Channel with rpc id: {} is not found", _0)]
+    NoSuchChannel(u64),
+    #[display(fmt = "Failure to update channel: {}", _0)]
+    FailureToUpdateChannel(String),
+}
+
+impl HttpStatusCode for UpdateChannelError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            UpdateChannelError::UnsupportedCoin(_) => StatusCode::BAD_REQUEST,
+            UpdateChannelError::NoSuchCoin(_) | UpdateChannelError::NoSuchChannel(_) => StatusCode::NOT_FOUND,
+            UpdateChannelError::FailureToUpdateChannel(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<CoinFindError> for UpdateChannelError {
+    fn from(e: CoinFindError) -> Self {
+        match e {
+            CoinFindError::NoSuchCoin { coin } => UpdateChannelError::NoSuchCoin(coin),
         }
     }
 }

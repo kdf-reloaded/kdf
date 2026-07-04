@@ -30,7 +30,7 @@ use serde_json::{self as json, Value as Json};
 use std::borrow::Cow;
 
 use crate::mm2::lp_dispatcher::{dispatch_lp_event, StopCtxEvent};
-use crate::mm2::lp_network::subscribe_to_topic;
+use crate::mm2::lp_network::{peer_connection_healthcheck as peer_connection_healthcheck_impl, subscribe_to_topic};
 use crate::mm2::lp_ordermatch::{cancel_orders_by, CancelBy};
 use crate::mm2::lp_swap::{active_swaps_using_coin, tx_helper_topic, watcher_topic};
 use crate::mm2::MmVersionResult;
@@ -323,6 +323,21 @@ pub async fn get_my_peer_id(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
         "result": peer_id,
     });
     let res = try_s!(json::to_vec(&result));
+    Ok(try_s!(Response::builder().body(res)))
+}
+
+#[derive(Deserialize)]
+struct PeerConnectionHealthcheckRequest {
+    peer_address: String,
+}
+
+pub async fn peer_connection_healthcheck(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    let req: PeerConnectionHealthcheckRequest = try_s!(json::from_value(req));
+    let result = match peer_connection_healthcheck_impl(ctx, req.peer_address).await {
+        Ok(result) => result,
+        Err(e) => return ERR!("{}", e),
+    };
+    let res = try_s!(json::to_vec(&json!({ "result": result })));
     Ok(try_s!(Response::builder().body(res)))
 }
 

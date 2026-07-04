@@ -54,7 +54,7 @@ pub enum RpcTaskError {
     Internal(String),
 }
 
-#[derive(Clone, Display)]
+#[derive(Clone, Display, Serialize)]
 pub enum TaskStatusError {
     Idle,
     InProgress,

@@ -35,10 +35,11 @@ UTXO version-two implementation.
 
 Bound rules R1–R4 cover the trait surface and associated types;
 R5–R10 cover the three Bitcoin scripts; R11–R20 cover the maker
-trait methods; R21–R35 cover the taker trait methods; R36–R40
+trait methods; R21–R35 cover the taker trait methods; R36–R44
 cover the common-trait derivations, the shared spend-construction
-helper, the helper-inventory boundary, the numeric constants, and
-the state-machine wiring.
+helper, the helper-inventory boundary, the numeric constants, the
+state-machine wiring, the optional confirmation-gate policy, and
+the hierarchical-deterministic trade-preview sender derivation.
 
 ## 15.2 Subsystem Shape
 
@@ -586,7 +587,26 @@ MUST NOT introduce a new swap-type discriminant; the existing
 maker/taker version-two discriminants are coin-agnostic, as is
 the stored database representation.
 
-## 15.12 Tests
+## 15.12 Bound Preview and Confirmation-Gate Policy
+
+**R43.** Every optional version-two confirmation gate controlled
+by a `require_*_confirm` state-machine flag MUST wait for
+`min(configured_confirmations, 1)` confirmations. A configured
+confirmation count of zero MUST remain zero. This policy applies
+only to the optional confirmation gates for taker funding, maker
+payment, taker-payment spend, and maker-payment spend. It MUST
+NOT change the normal non-optional payment confirmation waits
+that enforce the order's configured confirmation policy.
+
+**R44.** UTXO trade-preimage and taker-volume estimation MUST
+derive the sender address from the active derivation method. Under
+Iguana derivation it MUST use the Iguana address. Under
+hierarchical-deterministic derivation it MUST derive the address
+from the active public key and the HD wallet address format. These
+paths MUST NOT reject HD activation solely because an Iguana
+private key or Iguana address is unavailable.
+
+## 15.13 Tests
 
 **T1.** *Script-layout invariants.* Three unit tests build each
 of the three scripts (R8, R9, R10) with known inputs and assert
@@ -627,7 +647,18 @@ Coin-configuration entries for the UTXO version-two path MUST
 be added; the version-two state-machine integration-test
 scaffolding MUST be reused.
 
-## 15.13 Deferred Work
+**T9.** *Optional confirmation-gate cap.* A unit test exercises
+the version-two confirmation-gate helper and asserts that zero
+remains zero, one remains one, and values greater than one are
+capped to one.
+
+**T10.** *HD trade-preview sender derivation.* A unit test
+constructs an HD UTXO coin field set and asserts that
+trade-preimage sender derivation returns the address built from
+the active public key and the HD address format instead of
+requiring Iguana derivation.
+
+## 15.14 Deferred Work
 
 **D1.** Chapter 16's `WithBurn` and `NoFee` arms of R26, R27,
 R28. The substrate emits explicit deferred-variant rejection

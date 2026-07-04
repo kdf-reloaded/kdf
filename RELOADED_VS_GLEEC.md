@@ -34,6 +34,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 - Compatibility convention and central admin chapter for GLEEC-equivalent operation; see [`docs/COMPAT_SWITCHES.md`](docs/COMPAT_SWITCHES.md) and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 - `regtest-netid` Cargo feature exposing test-only netids 8100, 8999, 9000, 9998 (off by default in production builds).
+- `allow_insecure_key_export` `MM2.json` switch (default `false`) gating GLEEC-parity key export (offline / no-activation, HD per-derivation-path ranges, shielded ZHTLC viewing keys); see [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) and CRD chapter 07. The secure default refuses the export superset; the single-coin activated reveal and own-mnemonic self-export remain available regardless.
 - On-demand `Build Linux` GitHub Actions workflow for release-profile binaries.
 - Self-hosted CI runner support ([`docs/CI_RUNNERS.md`](docs/CI_RUNNERS.md)).
 - Split CI: format → matrix unit-tests → docker-tests, with cancel-in-progress concurrency.
@@ -53,7 +54,7 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 
 ### Settings to set for GLEEC-compatible operation
 
-See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). For v0.1.0-alpha.1 the list is empty — no operator configuration is required to match GLEEC KDF behaviour.
+See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). To match GLEEC KDF's full key-export behaviour, set `allow_insecure_key_export` to `true` (default `false`); no other operator configuration is required to match GLEEC KDF behaviour.
 
 ## Detail sections
 
@@ -73,7 +74,7 @@ Detail subsections will be added as features land. Each entry above expands here
 ### Networks
 
 - Production netids supported: **8762** (AtomicDEX), **6133** (GLEEC).
-- Test netids (8100/8999/9000/9998): only available with `--features regtest-netid` and never compiled into production `mm2` binaries.
+- Test netids (8100/8999/9000/9998): only available with `--features regtest-netid` and never compiled into production `kdf` binaries.
 
 ## Forward-compatibility commitment
 

@@ -54,7 +54,11 @@ constructor helper, and the chapter-bound asynchronous SQLite
 slot; R10–R13 cover the chapter-bound construction-and-
 lifecycle discipline; R14–R16 cover the chapter-bound consumer-
 routing pattern; R17 covers the chapter-bound platform-gate
-discipline on chapter-bound platform-specific fields.
+discipline on chapter-bound platform-specific fields; R18 binds
+the chapter-bound process-level shared-database identifier and
+its chapter-bound daemon query; R19 binds the chapter-bound
+interactive data-asker facility and its chapter-bound
+`send_asked_data` daemon query.
 
 ## 31.2 Subsystem Shape
 
@@ -161,6 +165,73 @@ these are chapter-bound owned plain fields set via the chapter-
 bound builder of R10 (chapter-bound `conf` only) or chapter-
 bound default-constructed in `MmCtx::with_log_state(...)`.
 
+## 31.4A Bound Shared-Database Identifier and its Query
+
+**R18.** The chapter-bound owned-state record MUST carry a
+chapter-bound process-level shared-database identifier field —
+chapter-bound distinct from the chapter-bound per-process
+public-key identifier `rmd160` of R3 / R6 — that names a
+chapter-bound database shared across the chapter-bound running
+process (a chapter-bound namespace shared across the chapter-
+bound wallets and coins activated under the chapter-bound active
+seed), and MUST expose it through a chapter-bound read accessor
+returning the chapter-bound identifier value. The chapter-bound
+field MUST follow the chapter-bound once-set lazy-initialisation
+field model of R4 / R5 (chapter-bound set once during chapter-
+bound process startup, chapter-bound read-many thereafter); its
+chapter-bound payload MUST be a chapter-bound twenty-byte `H160`
+hash, and the chapter-bound read accessor MUST surface it as a
+chapter-bound lowercase hexadecimal string when used to name a
+chapter-bound on-disk database namespace.
+
+The chapter-bound shared-database identifier MUST be chapter-
+bound derived deterministically from the chapter-bound active
+seed passphrase by a chapter-bound fixed derivation: the
+chapter-bound passphrase (with any chapter-bound leading `0x`
+prefix removed) is chapter-bound combined with a chapter-bound
+fixed build-constant salt string, the chapter-bound combined
+value is chapter-bound hashed into a chapter-bound secp256k1
+private key, a chapter-bound key-pair is formed from that
+chapter-bound private key, and the chapter-bound identifier is
+the chapter-bound `RIPEMD160(SHA256(public-key))` address hash
+of that chapter-bound key-pair. The chapter-bound derivation
+MUST reject a chapter-bound empty passphrase. Because the
+chapter-bound derivation consumes the chapter-bound seed through
+a chapter-bound fixed salt transform rather than the chapter-
+bound active account key, the chapter-bound resulting identifier
+is chapter-bound stable for a chapter-bound given seed yet
+chapter-bound deliberately distinct from the chapter-bound
+`rmd160` per-account public-key identifier of R3, so the
+chapter-bound shared-database namespace is chapter-bound
+decoupled from the chapter-bound selected account or address.
+The chapter-bound salt-string bytes are chapter-bound
+implementation-defined and chapter-bound not part of any
+chapter-bound third-party interop contract (the chapter-bound
+identifier names only a chapter-bound process-local database
+namespace); reloaded MUST fix a chapter-bound single salt
+constant of its own and MUST NOT reproduce the chapter-bound
+upstream salt expression.
+
+The chapter-bound application-entry crate `mm2_main` MUST expose
+a chapter-bound flat `mmrpc` 2.0 daemon method whose chapter-
+bound method string is `get_shared_db_id` on chapter-bound both
+the chapter-bound non-WebAssembly and the chapter-bound
+WebAssembly target. The chapter-bound request MUST take chapter-
+bound no required parameters — the chapter-bound request payload
+is chapter-bound ignored, so a chapter-bound caller MAY submit a
+chapter-bound empty object and any chapter-bound supplied fields
+are chapter-bound disregarded. The chapter-bound successful
+response MUST carry a chapter-bound single field `shared_db_id`
+whose chapter-bound value is the chapter-bound current shared-
+database identifier serialised as a chapter-bound lowercase
+hexadecimal string of the chapter-bound twenty-byte hash. The
+chapter-bound handler MUST always succeed under chapter-bound
+normal operation: it MUST return the chapter-bound currently
+pinned identifier, or — before the chapter-bound identifier has
+been pinned — a chapter-bound well-defined all-zero default
+identifier; it MUST NOT chapter-bound fail on a chapter-bound
+caller-supplied request shape.
+
 ## 31.5 Bound Sub-Context Slot Substrate
 
 **R7.** The chapter-bound owned-state record MUST carry chapter-
@@ -239,6 +310,116 @@ asynchronous database round-trip into a chapter-bound different
 substrate) so they do not chapter-bound starve other chapter-
 bound consumers of the chapter-bound asynchronous SQLite
 substrate.
+
+## 31.5A Bound Interactive Data-Asker Facility and its Query
+
+**R19.** The chapter-bound owned-state record MUST carry a
+chapter-bound interactive data-asker facility — a chapter-bound
+small concrete facility owned as a chapter-bound always-present
+plain field on the chapter-bound owned-state record (constructed
+by the chapter-bound builder of R10 alongside the chapter-bound
+other always-present plain owned fields of R6's closing note, and
+specifically *not* a chapter-bound once-set lazy-initialisation
+field of R4 / R5, because it MUST be usable immediately after the
+chapter-bound owned-state record is constructed) — by which a
+chapter-bound internal daemon flow ASKS an external graphical-
+user-interface client (or other chapter-bound external client)
+for a chapter-bound piece of data and chapter-bound
+asynchronously awaits the chapter-bound client's answer. The
+chapter-bound facility MUST own a chapter-bound registry of
+chapter-bound in-flight "asks" composed of (a) a chapter-bound
+process-unique monotonically-increasing numeric identifier source
+— the chapter-bound "data id"; a chapter-bound counter that
+yields the chapter-bound next unused identifier on each chapter-
+bound ask — and (b) a chapter-bound mapping from a chapter-bound
+data id to a chapter-bound single-use answer channel, each
+chapter-bound registry entry carrying a chapter-bound per-entry
+expiry so that chapter-bound entries which are never answered are
+chapter-bound reclaimed rather than chapter-bound leaked. The
+chapter-bound required shape is a chapter-bound mutex-guarded map
+keyed by the chapter-bound numeric data id whose chapter-bound
+values are chapter-bound one-shot answer senders, plus a
+chapter-bound process-unique increasing counter that allocates
+each chapter-bound data id.
+
+**Bound ask operation.** The chapter-bound facility MUST expose a
+chapter-bound asynchronous ask operation by which a chapter-bound
+internal caller submits a chapter-bound data-type discriminator
+(a chapter-bound string tag naming the chapter-bound kind of data
+requested), a chapter-bound outgoing payload (a chapter-bound
+serialisable value describing what is needed), and a chapter-
+bound expiry timeout. The chapter-bound operation MUST allocate
+the chapter-bound next data id from the chapter-bound counter,
+register a chapter-bound one-shot waiter under that chapter-bound
+data id with the chapter-bound supplied expiry, EMIT the chapter-
+bound outward data-needed event of this requirement over the
+chapter-10 event-stream substrate (carrying the chapter-bound
+data id, the chapter-bound data-type discriminator, and the
+chapter-bound outgoing payload), and then chapter-bound await the
+chapter-bound matching answer until it chapter-bound arrives or
+the chapter-bound timeout elapses. On a chapter-bound received
+answer the chapter-bound operation MUST deserialise the chapter-
+bound delivered value into the chapter-bound caller's expected
+type and return it; on the chapter-bound timeout elapsing the
+chapter-bound operation MUST remove the chapter-bound pending ask
+from the chapter-bound registry and report a chapter-bound
+timeout outcome. A chapter-bound data-type discriminator that
+contains chapter-bound whitespace MUST be rejected before any
+chapter-bound data id is allocated.
+
+**Bound data-needed outward event (dictated interop).** The
+chapter-bound data-needed event is chapter-bound dictated-interop
+surface: the chapter-bound external client must understand it in
+order to answer it. The chapter-bound event MUST be carried on a
+chapter-bound dedicated event category whose chapter-bound
+wire-identifier string is formed from the chapter-bound fixed
+token `DATA_NEEDED:` concatenated with the chapter-bound data-type
+discriminator, and the chapter-bound event's wire message MUST be
+a chapter-bound JSON object carrying exactly the chapter-bound
+named fields `data_id` (the chapter-bound numeric data id),
+`timeout_secs` (the chapter-bound ask timeout expressed in
+chapter-bound whole seconds), and `data` (the chapter-bound
+outgoing payload). Because reloaded's chapter-10 event-stream
+substrate keys events on a chapter-bound closed event-category
+enumeration (`StreamerId`), reloaded MUST extend that chapter-
+bound enumeration with a chapter-bound new event category (a
+chapter-bound new event kind parameterised by the chapter-bound
+data-type discriminator) to carry the chapter-bound data-needed
+event, and the chapter-bound new category's wire-identifier and
+wire-payload field names MUST match the chapter-bound dictated
+contract above; the chapter-bound event MUST be published through
+the chapter-10 streaming-manager broadcast surface as an
+`Event::new(category, message)` with the chapter-bound message
+being the chapter-bound JSON object named above.
+
+**Bound answer operation and its query.** The chapter-bound
+facility MUST expose a chapter-bound answer operation that, given
+a chapter-bound data id and a chapter-bound answer payload, looks
+up the chapter-bound pending ask under that chapter-bound data id,
+removes it from the chapter-bound registry, hands the chapter-
+bound supplied answer payload to the chapter-bound waiting one-
+shot answer channel, and reports a chapter-bound boolean
+indicating whether a chapter-bound matching pending ask existed
+and was chapter-bound resolved. The chapter-bound application-
+entry crate `mm2_main` MUST expose a chapter-bound flat `mmrpc`
+2.0 daemon method whose chapter-bound method string is
+`send_asked_data` on chapter-bound both the chapter-bound non-
+WebAssembly and the chapter-bound WebAssembly target. The
+chapter-bound request MUST carry exactly two fields: `data_id`,
+the chapter-bound numeric data id of the chapter-bound ask being
+answered, and `data`, the chapter-bound answer payload as a
+chapter-bound arbitrary JSON value. The chapter-bound successful
+response MUST be the chapter-bound bare boolean value `true`
+(not chapter-bound wrapped in a chapter-bound named field). If
+no chapter-bound pending ask exists for the chapter-bound
+supplied data id — because the chapter-bound id was never
+allocated, or because the chapter-bound ask already expired or
+was already answered — the chapter-bound handler MUST report a
+chapter-bound not-found error outcome (HTTP `404 Not Found`); if
+the chapter-bound waiting one-shot answer channel is no longer
+alive (the chapter-bound awaiting caller having already departed)
+the chapter-bound handler MUST report a chapter-bound internal
+error outcome (HTTP `500 Internal Server Error`).
 
 ## 31.6 Bound Construction-and-Lifecycle Discipline
 
@@ -409,6 +590,24 @@ record's chapter-bound lifetime: dropping every chapter-bound
 strong handle while a chapter-bound weak handle remains MUST
 chapter-bound drop the chapter-bound owned-state record.
 
+**T6.** *Shared-database identifier query.* A chapter-bound
+regression test MUST confirm that the chapter-bound
+`get_shared_db_id` query of R18 returns the chapter-bound
+lowercase-hexadecimal twenty-byte identifier pinned on the
+chapter-bound owned-state record, and that two chapter-bound
+queries against the chapter-bound same owned-state record return
+the chapter-bound same identifier.
+
+**T7.** *Data-asker ask-and-answer round trip.* A chapter-bound
+regression test MUST confirm that an chapter-bound ask submitted
+through the chapter-bound data-asker facility of R19 is chapter-
+bound resolved when the chapter-bound `send_asked_data` query of
+R19 delivers a chapter-bound matching data id, returning the
+chapter-bound answer payload to the chapter-bound awaiting caller;
+and that a chapter-bound `send_asked_data` query against a
+chapter-bound data id with no chapter-bound pending ask reports
+the chapter-bound not-found outcome of R19.
+
 ## 31.10 Deferred Work
 
 **D1.** A chapter-bound rationalisation of the chapter-bound
@@ -501,4 +700,15 @@ state record by adding chapter-bound those fields.
   asynchronous-runtime crate (for the chapter-bound
   asynchronous-mutex primitive of R7 and the chapter-bound
   asynchronous-once-cell pattern of R5).
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* consulted only for the chapter-bound
+  dictated-interop wire surface of R18 (the `get_shared_db_id`
+  method string; its chapter-bound empty / ignored request
+  payload; and its `shared_db_id` response field carrying the
+  chapter-bound twenty-byte hash as a chapter-bound lowercase
+  hexadecimal string) and the chapter-bound dictated-interop
+  wire surface of R19 (the `send_asked_data` method string; its
+  request fields `data_id` and `data`; its bare boolean
+  response; and the chapter-bound data-needed outward event's
+  wire-identifier token `DATA_NEEDED:` together with its
+  message fields `data_id`, `timeout_secs`, and `data`); no
+  protected expression crossed.

@@ -153,7 +153,7 @@ impl HwClient {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
     pub(crate) async fn trezor<Processor: TrezorConnectProcessor>(
         processor: &Processor,
     ) -> MmResult<TrezorClient, HwProcessingError<Processor::Error>> {
@@ -161,6 +161,19 @@ impl HwClient {
         use common::executor::Timer;
 
         async fn try_to_connect() -> HwResult<Option<TrezorClient>> {
+            // Test/CI transport shim: when built with the `trezor-udp` feature and the
+            // `TREZOR_EMULATOR_UDP` env var is set (non-empty), talk to the Trezor emulator
+            // over UDP instead of discovering a USB device. The USB path is unchanged otherwise.
+            #[cfg(feature = "trezor-udp")]
+            {
+                if std::env::var("TREZOR_EMULATOR_UDP")
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    let trezor = trezor::transport::udp::trezor_udp_client().mm_err(Into::into)?;
+                    return Ok(Some(trezor));
+                }
+            }
             let mut devices = trezor::transport::usb::find_devices().mm_err(Into::into)?;
             if devices.is_empty() {
                 return Ok(None);
@@ -199,5 +212,16 @@ impl HwClient {
                 MmError::err(HwProcessingError::HwError(HwError::ConnectionTimedOut { timeout }))
             },
         }
+    }
+
+    #[cfg(target_os = "ios")]
+    pub(crate) async fn trezor<Processor: TrezorConnectProcessor>(
+        processor: &Processor,
+    ) -> MmResult<TrezorClient, HwProcessingError<Processor::Error>> {
+        let _timeout = processor.on_connect().await?;
+        processor.on_connection_failed().await?;
+        MmError::err(HwProcessingError::HwError(HwError::TransportNotSupported {
+            transport: "USB".to_owned(),
+        }))
     }
 }

@@ -32,7 +32,7 @@
 //!   [`SWAP_TX_VISIBILITY_GRACE_SECS`].
 
 use coins::lp_coinfind;
-use coins::{MakerCoinSwapOpsV2, MmCoin, MmCoinEnum, TakerCoinSwapOpsV2};
+use coins::{MakerCoinSwapOpsV2, MmCoin, MmCoinEnum, ParseCoinAssocTypes, TakerCoinSwapOpsV2};
 use common::executor::{spawn, Timer};
 use common::log::{error, info, warn};
 use derive_more::Display;
@@ -43,7 +43,11 @@ use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::nft_maker_swap_v2::{select_nft_swap_v2_post_maker_payment_restart_from_tx,
+                               select_nft_swap_v2_pre_maker_payment_restart, NftSwapV2PostMakerPaymentRestart,
+                               NftSwapV2RestartDecision, NftSwapV2TakerAsset};
 use super::swap_lock::{SwapLock, SwapLockOps};
+use super::swap_versioning::{SwapVersion, NFT_SWAP_V2_VERSION};
 use super::{maker_swap_v2::MakerSwapDbRepr, maker_swap_v2::MakerSwapEvent, maker_swap_v2::MakerSwapStateMachine};
 use super::{taker_swap_v2::TakerSwapDbRepr, taker_swap_v2::TakerSwapEvent, taker_swap_v2::TakerSwapStateMachine};
 
@@ -62,6 +66,8 @@ pub const NEGOTIATION_TIMEOUT_SEC: u64 = 90;
 
 /// The topic prefix used for V2 swap P2P messages (canonical definition in lp_swap.rs).
 pub const SWAP_V2_PREFIX: &str = "swapv2";
+
+pub(super) fn confirmation_gate_confs(configured_confs: u64) -> u64 { configured_confs.min(1) }
 
 // Error / abort types --------------------------------------------------------
 
@@ -885,6 +891,102 @@ pub(super) async fn swap_kickstart_handler<
     }
 }
 
+fn latest_maker_payment_from_maker_events(events: &[MakerSwapEvent]) -> Option<&BytesJson> {
+    events.iter().rev().find_map(|event| match event {
+        MakerSwapEvent::MakerPaymentSentFundingSpendGenerated { maker_payment, .. }
+        | MakerSwapEvent::MakerPaymentRefundRequired { maker_payment, .. }
+        | MakerSwapEvent::MakerPaymentRefunded { maker_payment, .. }
+        | MakerSwapEvent::TakerPaymentReceived { maker_payment, .. }
+        | MakerSwapEvent::TakerPaymentReceivedPreimageSkipped { maker_payment, .. }
+        | MakerSwapEvent::TakerPaymentSpent { maker_payment, .. } => Some(maker_payment),
+        MakerSwapEvent::Initialized { .. }
+        | MakerSwapEvent::WaitingForTakerFunding { .. }
+        | MakerSwapEvent::TakerFundingReceived { .. }
+        | MakerSwapEvent::Aborted { .. }
+        | MakerSwapEvent::Completed => None,
+    })
+}
+
+fn latest_maker_payment_from_taker_events(events: &[TakerSwapEvent]) -> Option<&BytesJson> {
+    events.iter().rev().find_map(|event| match event {
+        TakerSwapEvent::MakerPaymentAndFundingSpendPreimgReceived { maker_payment, .. }
+        | TakerSwapEvent::MakerPaymentConfirmed { maker_payment, .. }
+        | TakerSwapEvent::TakerPaymentSent { maker_payment, .. }
+        | TakerSwapEvent::TakerPaymentSentPreimageSendingSkipped { maker_payment, .. }
+        | TakerSwapEvent::TakerPaymentSpent { maker_payment, .. } => Some(maker_payment),
+        TakerSwapEvent::Initialized { .. }
+        | TakerSwapEvent::Negotiated { .. }
+        | TakerSwapEvent::TakerFundingSent { .. }
+        | TakerSwapEvent::TakerFundingRefundRequired { .. }
+        | TakerSwapEvent::TakerPaymentRefundRequired { .. }
+        | TakerSwapEvent::MakerPaymentSpent { .. }
+        | TakerSwapEvent::TakerFundingRefunded { .. }
+        | TakerSwapEvent::TakerPaymentRefunded { .. }
+        | TakerSwapEvent::Aborted { .. }
+        | TakerSwapEvent::Completed => None,
+    })
+}
+
+fn nft_swap_version(version: u8) -> SwapVersion { SwapVersion { version } }
+
+fn nft_v2_restart_decision_for_eth_maker(
+    maker_coin: &coins::eth::EthCoin,
+    swap_version: u8,
+    maker_payment: Option<&BytesJson>,
+) -> NftSwapV2RestartDecision {
+    let Some(maker_payment) = maker_payment else {
+        return select_nft_swap_v2_pre_maker_payment_restart();
+    };
+
+    let maker_payment_tx = match maker_coin.parse_tx(&maker_payment.0) {
+        Ok(tx) => tx,
+        Err(e) => {
+            return NftSwapV2RestartDecision::Park(
+                super::nft_maker_swap_v2::NftSwapV2RestartParkReason::MakerPaymentCalldataMalformed(format!("{:?}", e)),
+            )
+        },
+    };
+
+    let version = nft_swap_version(swap_version);
+    let input = NftSwapV2PostMakerPaymentRestart {
+        maker_version: version,
+        taker_version: version,
+        configured_nft_contract: maker_coin.nft_swap_v2_contract_addr().ok(),
+        taker_asset: NftSwapV2TakerAsset::Fungible,
+        token_standard: None,
+        tx_to: Default::default(),
+        calldata: &[],
+        expected: None,
+    };
+    select_nft_swap_v2_post_maker_payment_restart_from_tx(input, &maker_payment_tx)
+}
+
+fn intercept_nft_v2_maker_restart(
+    uuid: Uuid,
+    role: &str,
+    swap_version: u8,
+    maker_coin: &MmCoinEnum,
+    maker_payment: Option<&BytesJson>,
+) -> bool {
+    if swap_version != NFT_SWAP_V2_VERSION {
+        return false;
+    }
+
+    let decision = match maker_coin {
+        MmCoinEnum::EthCoin(maker_coin) => {
+            nft_v2_restart_decision_for_eth_maker(maker_coin, swap_version, maker_payment)
+        },
+        _ => NftSwapV2RestartDecision::Park(
+            super::nft_maker_swap_v2::NftSwapV2RestartParkReason::PreMakerPaymentNftIdentityUnavailable,
+        ),
+    };
+    warn!(
+        "NFT V2 {} swap {} restart is parked/refused before generic V2 restoration: {:?}",
+        role, uuid, decision
+    );
+    true
+}
+
 /// Kickstart a V2 maker swap: wait for coins, match variants, recreate + resume.
 pub(super) async fn swap_kickstart_handler_for_maker(
     ctx: MmArc,
@@ -893,6 +995,16 @@ pub(super) async fn swap_kickstart_handler_for_maker(
     uuid: Uuid,
 ) {
     if let Some((maker_coin, taker_coin)) = swap_kickstart_coins(&ctx, &swap_repr, &uuid).await {
+        if intercept_nft_v2_maker_restart(
+            uuid,
+            "maker",
+            swap_repr.swap_version,
+            &maker_coin,
+            latest_maker_payment_from_maker_events(&swap_repr.events),
+        ) {
+            return;
+        }
+
         match (maker_coin, taker_coin) {
             (MmCoinEnum::EthCoin(m), MmCoinEnum::EthCoin(t)) => {
                 swap_kickstart_handler::<MakerSwapStateMachine<_, _>, _, _>(swap_repr, storage, uuid, m, t).await
@@ -924,6 +1036,16 @@ pub(super) async fn swap_kickstart_handler_for_taker(
     uuid: Uuid,
 ) {
     if let Some((maker_coin, taker_coin)) = swap_kickstart_coins(&ctx, &swap_repr, &uuid).await {
+        if intercept_nft_v2_maker_restart(
+            uuid,
+            "taker",
+            swap_repr.swap_version,
+            &maker_coin,
+            latest_maker_payment_from_taker_events(&swap_repr.events),
+        ) {
+            return;
+        }
+
         match (maker_coin, taker_coin) {
             (MmCoinEnum::EthCoin(m), MmCoinEnum::EthCoin(t)) => {
                 swap_kickstart_handler::<TakerSwapStateMachine<_, _>, _, _>(swap_repr, storage, uuid, m, t).await
@@ -1027,6 +1149,59 @@ mod tests {
 
         let reason = AbortReason::FailedToSendTx("insufficient funds".into());
         assert!(format!("{}", reason).contains("insufficient funds"));
+    }
+
+    #[test]
+    fn t17_9_10_maker_kickstart_guard_extracts_latest_maker_payment() {
+        let old_payment = BytesJson::from(vec![0x01]);
+        let latest_payment = BytesJson::from(vec![0x02]);
+        let events = vec![
+            MakerSwapEvent::MakerPaymentRefunded {
+                maker_payment: old_payment,
+                maker_payment_refund: BytesJson::from(vec![0xAA]),
+                reason: AbortReason::InternalError("old".into()),
+            },
+            MakerSwapEvent::MakerPaymentRefunded {
+                maker_payment: latest_payment.clone(),
+                maker_payment_refund: BytesJson::from(vec![0xBB]),
+                reason: AbortReason::InternalError("latest".into()),
+            },
+        ];
+
+        assert_eq!(latest_maker_payment_from_maker_events(&events), Some(&latest_payment));
+    }
+
+    #[test]
+    fn t17_9_10_taker_kickstart_guard_extracts_latest_maker_payment() {
+        let old_payment = BytesJson::from(vec![0x11]);
+        let latest_payment = BytesJson::from(vec![0x22]);
+        let negotiation_data = StoredTakerNegotiationData {
+            maker_secret_hash: BytesJson::from(vec![0x01; 32]),
+            maker_coin_htlc_pub: BytesJson::from(vec![0x02; 33]),
+            taker_coin_htlc_pub: BytesJson::from(vec![0x03; 33]),
+            maker_coin_swap_contract: None,
+            taker_coin_swap_contract: None,
+            maker_payment_locktime: 1,
+            taker_coin_address: "0x0".into(),
+        };
+        let events = vec![
+            TakerSwapEvent::TakerPaymentSent {
+                maker_coin_start_block: 1,
+                taker_coin_start_block: 1,
+                negotiation_data: negotiation_data.clone(),
+                taker_payment: BytesJson::from(vec![0xAA]),
+                maker_payment: old_payment,
+            },
+            TakerSwapEvent::TakerPaymentSent {
+                maker_coin_start_block: 2,
+                taker_coin_start_block: 2,
+                negotiation_data,
+                taker_payment: BytesJson::from(vec![0xBB]),
+                maker_payment: latest_payment.clone(),
+            },
+        ];
+
+        assert_eq!(latest_maker_payment_from_taker_events(&events), Some(&latest_payment));
     }
 
     #[test]
@@ -2056,6 +2231,13 @@ mod tests {
             assert_eq!(loaded.conf_settings.maker_coin_nota, true);
             assert_eq!(loaded.conf_settings.taker_coin_confs, 3);
             assert_eq!(loaded.conf_settings.taker_coin_nota, false);
+        }
+
+        #[test]
+        fn confirmation_gate_confs_caps_configured_confs_to_one() {
+            assert_eq!(confirmation_gate_confs(0), 0);
+            assert_eq!(confirmation_gate_confs(1), 1);
+            assert_eq!(confirmation_gate_confs(4), 1);
         }
 
         #[test]

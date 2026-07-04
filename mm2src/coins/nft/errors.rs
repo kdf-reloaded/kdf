@@ -211,6 +211,70 @@ impl HttpStatusCode for UpdateNftError {
     }
 }
 
+/// Errors returned by the `enable_nft` activation endpoint.
+#[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize, SerializeErrorType)]
+#[serde(tag = "error_type", content = "error_data")]
+pub enum EnableNftError {
+    /// The EVM platform coin backing the requested NFT ticker has not been
+    /// enabled yet, so the wallet's owner address is unknown.
+    #[display(fmt = "Platform coin {coin} must be activated before its NFT support")]
+    PlatformCoinIsNotActivated {
+        /// Platform-coin ticker that needs to be enabled first.
+        coin: String,
+    },
+    /// The NFT subsystem is already active for the requested ticker.
+    #[display(fmt = "NFT support is already active for ticker {ticker}")]
+    AlreadyActivated {
+        /// NFT pseudo-coin ticker that is already active.
+        ticker: String,
+    },
+    /// The requested ticker does not resolve to a supported NFT protocol.
+    #[display(fmt = "Ticker {ticker} does not map to a supported NFT protocol")]
+    InvalidNftTicker {
+        /// Ticker that failed to resolve.
+        ticker: String,
+    },
+    /// The resolved platform coin is not an EVM coin.
+    #[display(fmt = "Platform coin {coin} is not an EVM coin and cannot back NFT support")]
+    UnsupportedPlatform {
+        /// Platform-coin ticker that is not EVM.
+        coin: String,
+    },
+    /// The inline protocol's declared platform disagrees with the platform
+    /// resolved from the ticker.
+    #[display(fmt = "Protocol platform {declared} does not match resolved platform {resolved}")]
+    PlatformMismatch {
+        /// Platform ticker carried by the inline protocol.
+        declared: String,
+        /// Platform ticker resolved from the request ticker.
+        resolved: String,
+    },
+    /// The caller-supplied provider URL was invalid or the initial crawl
+    /// could not reach the indexer.
+    #[display(fmt = "Initial inventory crawl failed: {}", _0)]
+    CrawlFailed(String),
+    /// A persistent storage operation failed.
+    #[display(fmt = "DB error: {}", _0)]
+    Storage(String),
+    /// An unexpected internal failure occurred.
+    #[display(fmt = "Internal: {}", _0)]
+    Internal(String),
+}
+
+impl HttpStatusCode for EnableNftError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            EnableNftError::PlatformCoinIsNotActivated { .. }
+            | EnableNftError::AlreadyActivated { .. }
+            | EnableNftError::InvalidNftTicker { .. }
+            | EnableNftError::UnsupportedPlatform { .. }
+            | EnableNftError::PlatformMismatch { .. } => StatusCode::BAD_REQUEST,
+            EnableNftError::CrawlFailed(_) => StatusCode::FAILED_DEPENDENCY,
+            EnableNftError::Storage(_) | EnableNftError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
 /// Errors raised by the spam-protection helpers (regex compilation,
 /// JSON sanitization, …).
 #[derive(Clone, Debug, Deserialize, Display, PartialEq, Serialize)]

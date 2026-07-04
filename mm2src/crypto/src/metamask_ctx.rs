@@ -113,4 +113,27 @@ impl MetamaskCtx {
         let session = MetamaskSession::lock(&self.eip_provider).await;
         session.eth_request_account().await
     }
+
+    /// Hands an unsigned EIP-1193 transaction object to the wallet to **sign and
+    /// broadcast** via `eth_sendTransaction`, returning the broadcast
+    /// transaction hash (CRD R47.5.6 / R47.5.8). The framework holds no key.
+    pub async fn eth_send_transaction(&self, tx: serde_json::Value) -> MetamaskResult<String> {
+        let session = MetamaskSession::lock(&self.eip_provider).await;
+        session.eth_send_transaction(tx).await
+    }
+
+    /// Ensures the wallet's active EIP-155 chain matches `chain_id`, requesting
+    /// a `wallet_switchEthereumChain` switch otherwise (CRD R47.5.10). A
+    /// rejected/failed switch surfaces as an error so the caller never
+    /// broadcasts on the wrong chain.
+    pub async fn ensure_active_chain(&self, chain_id: u64) -> MetamaskResult<()> {
+        let session = MetamaskSession::lock(&self.eip_provider).await;
+        let active_chain_hex = session.eth_chain_id().await?;
+        let active_chain_id = u64::from_str_radix(active_chain_hex.trim_start_matches("0x"), 16)
+            .map_to_mm(|e| MetamaskError::Internal(format!("invalid chainId '{active_chain_hex}': {e}")))?;
+        if active_chain_id != chain_id {
+            session.wallet_switch_ethereum_chain(chain_id).await?;
+        }
+        Ok(())
+    }
 }

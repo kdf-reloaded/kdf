@@ -817,7 +817,7 @@ pub fn tbch_coin_for_test() -> BchCoin {
     let req = json!({
         "method": "electrum",
         "coin": "BCH",
-        "servers": [{"url":"blackie.c3-soft.com:60001"},{"url":"testnet.imaginary.cash:50001"},{"url":"tbch.loping.net:60001"},{"url":"electroncash.de:50003"}],
+        "servers": [{"url":"blackie.c3-soft.com:60001"},{"url":"testnet.imaginary.cash:50001"},{"url":"tbch.loping.net:60001"},{"url":"bitcoin-cash.devmole.eu:5001"}],
         "bchd_urls": ["https://bchd-testnet.electroncash.de:18335"],
         "allow_slp_unsafe_conf": false,
     });
@@ -849,7 +849,7 @@ pub fn bch_coin_for_test() -> BchCoin {
     let req = json!({
         "method": "electrum",
         "coin": "BCH",
-        "servers": [{"url":"electrum1.cipig.net:10055"},{"url":"electrum2.cipig.net:10055"},{"url":"electrum3.cipig.net:10055"}],
+        "servers": [{"url":"electrum1.cipig.net:10055"},{"url":"electrum2.cipig.net:10055"},{"url":"cashnode.bch.ninja:50001"}],
         "bchd_urls": [],
         "allow_slp_unsafe_conf": true,
     });

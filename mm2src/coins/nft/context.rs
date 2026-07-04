@@ -9,6 +9,7 @@
 //! backend will be added together with P10.3.4 once the workspace
 //! `wasm32-unknown-unknown` build is repaired.
 
+use crate::nft::model::Chain;
 #[cfg(target_arch = "wasm32")]
 use crate::nft::store::idb::{IndexedDbNftStore, NftIndexedDb};
 #[cfg(not(target_arch = "wasm32"))]
@@ -16,7 +17,8 @@ use crate::nft::store::sqlite::SqliteNftStore;
 use mm2_core::mm_ctx::{from_ctx, MmArc};
 #[cfg(target_arch = "wasm32")]
 use mm2_db::indexed_db::ConstructibleDb;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 /// Central NFT context held by the application. One instance per
 /// [`MmArc`] is created lazily on first access.
@@ -27,6 +29,10 @@ pub struct NftCtx {
     /// IndexedDB-backed storage handle (WASM target).
     #[cfg(target_arch = "wasm32")]
     store: IndexedDbNftStore,
+    /// Chains for which `enable_nft` has already brought the subsystem
+    /// into existence. Used to reject a second activation of the same
+    /// ticker.
+    activated: Mutex<HashSet<Chain>>,
 }
 
 impl NftCtx {
@@ -51,6 +57,7 @@ impl NftCtx {
             let conn = futures::executor::block_on(conn_handle.lock()).clone();
             Ok(NftCtx {
                 store: SqliteNftStore::new(Arc::new(conn)),
+                activated: Mutex::new(HashSet::new()),
             })
         })
     }
@@ -65,6 +72,7 @@ impl NftCtx {
             let shared = ConstructibleDb::<NftIndexedDb>::new_shared(ctx);
             Ok(NftCtx {
                 store: IndexedDbNftStore::new(shared),
+                activated: Mutex::new(HashSet::new()),
             })
         })
     }
@@ -77,4 +85,22 @@ impl NftCtx {
     /// Borrow the IndexedDB-backed store on `wasm32`.
     #[cfg(target_arch = "wasm32")]
     pub fn store(&self) -> &IndexedDbNftStore { &self.store }
+
+    /// Returns `true` when `enable_nft` has already activated the NFT
+    /// subsystem for `chain`.
+    pub fn is_activated(&self, chain: Chain) -> bool {
+        self.activated
+            .lock()
+            .expect("nft activation set poisoned")
+            .contains(&chain)
+    }
+
+    /// Record `chain` as activated. Returns `true` when this call is the
+    /// one that flipped the chain from inactive to active.
+    pub fn mark_activated(&self, chain: Chain) -> bool {
+        self.activated
+            .lock()
+            .expect("nft activation set poisoned")
+            .insert(chain)
+    }
 }

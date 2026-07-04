@@ -209,8 +209,8 @@ pub enum Qrc20AbiError {
     AbiError(String),
 }
 
-impl From<ethabi::Error> for Qrc20AbiError {
-    fn from(e: ethabi::Error) -> Qrc20AbiError { Qrc20AbiError::AbiError(e.to_string()) }
+impl From<crate::eth::abi::AbiError> for Qrc20AbiError {
+    fn from(e: crate::eth::abi::AbiError) -> Qrc20AbiError { Qrc20AbiError::AbiError(e.to_string()) }
 }
 
 impl From<Qrc20AbiError> for GenerateTxError {

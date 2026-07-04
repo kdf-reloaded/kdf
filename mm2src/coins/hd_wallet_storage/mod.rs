@@ -228,8 +228,11 @@ impl HDWalletCoinStorage {
     pub async fn init(ctx: &MmArc, coin: String) -> HDWalletStorageResult<HDWalletCoinStorage> {
         let inner = Box::new(HDWalletStorageInstance::init(ctx).await?);
         let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(Into::into)?;
+        // Software global-HD wallets are namespaced by the in-context software identity (R29);
+        // hardware wallets by the device identity; Iguana mode has no HD identity (refused).
         let hd_wallet_rmd160 = crypto_ctx
-            .hw_wallet_rmd160()
+            .global_hd_wallet_rmd160()
+            .or_else(|| crypto_ctx.hw_wallet_rmd160())
             .or_mm_err(|| HDWalletStorageError::HDWalletUnavailable)?;
         Ok(HDWalletCoinStorage {
             coin,

@@ -699,13 +699,13 @@ impl ExtractExtendedPubkey for UtxoStandardCoin {
 
     async fn extract_extended_pubkey<XPubExtractor>(
         &self,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         derivation_path: DerivationPath,
     ) -> MmResult<Self::ExtendedPublicKey, HDExtractPubkeyError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        utxo_common::extract_extended_pubkey(&self.utxo_arc.conf, xpub_extractor, derivation_path).await
+        utxo_common::extract_extended_pubkey(self, xpub_extractor, derivation_path).await
     }
 }
 
@@ -728,7 +728,7 @@ impl HDWalletCoinOps for UtxoStandardCoin {
     async fn create_new_account<'a, XPubExtractor>(
         &self,
         hd_wallet: &'a Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
@@ -768,7 +768,7 @@ impl HDWalletBalanceOps for UtxoStandardCoin {
     async fn enable_hd_wallet<XPubExtractor>(
         &self,
         hd_wallet: &Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where

@@ -96,10 +96,20 @@ impl<Task: RpcTask> RpcTaskManager<Task> {
 
     /// Cancel task if it's in progress.
     pub fn cancel_task(&mut self, task_id: TaskId) -> RpcTaskResult<()> {
-        self.tasks
-            .remove(&task_id)
-            .map(|_| ())
-            .or_mm_err(|| self.rpc_task_error_if_not_found(task_id, TaskStatusError::InProgress))
+        match self.tasks.entry(task_id) {
+            Entry::Occupied(entry) => match entry.get() {
+                TaskStatusExt::InProgress { .. } | TaskStatusExt::Awaiting { .. } => {
+                    entry.remove();
+                    Ok(())
+                },
+                TaskStatusExt::Ready(_) => MmError::err(RpcTaskError::UnexpectedTaskStatus {
+                    task_id,
+                    actual: TaskStatusError::Finished,
+                    expected: TaskStatusError::InProgress,
+                }),
+            },
+            Entry::Vacant(_) => MmError::err(RpcTaskError::NoSuchTask(task_id)),
+        }
     }
 
     pub(crate) fn register_task(
@@ -253,4 +263,74 @@ enum TaskStatusExt<Task: RpcTaskTypes> {
         next_in_progress_status: Task::InProgressStatus,
     },
     Ready(FinishedTaskResult<Task::Item, Task::Error>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use derive_more::Display;
+    use mm2_rpc::mm_protocol::MmRpcResult;
+    use ser_error_derive::SerializeErrorType;
+
+    #[allow(dead_code)]
+    #[derive(Clone, Display, Serialize, SerializeErrorType)]
+    #[serde(tag = "error_type", content = "error_data")]
+    enum DummyError {
+        #[display(fmt = "dummy")]
+        Dummy,
+    }
+
+    struct DummyTask;
+
+    impl RpcTaskTypes for DummyTask {
+        type Item = String;
+        type Error = DummyError;
+        type InProgressStatus = &'static str;
+        type AwaitingStatus = &'static str;
+        type UserAction = ();
+    }
+
+    #[async_trait]
+    impl RpcTask for DummyTask {
+        fn initial_status(&self) -> Self::InProgressStatus { "initial" }
+
+        async fn run(self, _task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
+            Ok("done".to_owned())
+        }
+    }
+
+    #[test]
+    fn cancel_in_progress_task_removes_it() {
+        let mut manager = RpcTaskManager::<DummyTask>::default();
+        let (task_id, _abort_handler) = manager
+            .register_task("initial")
+            .unwrap_or_else(|e| panic!("register_task failed: {}", e));
+
+        manager
+            .cancel_task(task_id)
+            .unwrap_or_else(|e| panic!("cancel_task failed: {}", e));
+
+        assert!(!manager.contains(task_id));
+    }
+
+    #[test]
+    fn cancel_finished_task_fails_and_keeps_task_registered() {
+        let mut manager = RpcTaskManager::<DummyTask>::default();
+        let (task_id, _abort_handler) = manager
+            .register_task("initial")
+            .unwrap_or_else(|e| panic!("register_task failed: {}", e));
+        manager
+            .update_task_status(task_id, TaskStatus::Ready(MmRpcResult::ok("done".to_owned())))
+            .unwrap_or_else(|e| panic!("update_task_status failed: {}", e));
+
+        let err = manager.cancel_task(task_id).unwrap_err().into_inner();
+
+        assert!(matches!(err, RpcTaskError::UnexpectedTaskStatus {
+            actual: TaskStatusError::Finished,
+            expected: TaskStatusError::InProgress,
+            ..
+        }));
+        assert!(manager.contains(task_id));
+    }
 }

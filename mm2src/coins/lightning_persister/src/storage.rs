@@ -9,13 +9,14 @@ use lightning::routing::scoring::ProbabilisticScorer;
 use parking_lot::Mutex as PaMutex;
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 pub type NodesAddressesMap = HashMap<PublicKey, SocketAddr>;
 pub type NodesAddressesMapShared = Arc<PaMutex<NodesAddressesMap>>;
+pub type TrustedNodesShared = Arc<PaMutex<HashSet<PublicKey>>>;
 pub type Scorer = ProbabilisticScorer<Arc<NetworkGraph>>;
 #[async_trait]
 pub trait FileSystemStorage {
@@ -29,6 +30,10 @@ pub trait FileSystemStorage {
     async fn get_nodes_addresses(&self) -> Result<HashMap<PublicKey, SocketAddr>, Self::Error>;
 
     async fn save_nodes_addresses(&self, nodes_addresses: NodesAddressesMapShared) -> Result<(), Self::Error>;
+
+    async fn get_trusted_nodes(&self) -> Result<HashSet<PublicKey>, Self::Error>;
+
+    async fn save_trusted_nodes(&self, trusted_nodes: TrustedNodesShared) -> Result<(), Self::Error>;
 
     async fn get_network_graph(&self, network: Network) -> Result<NetworkGraph, Self::Error>;
 

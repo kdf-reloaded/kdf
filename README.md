@@ -26,7 +26,7 @@ For the relationship to other downstream projects (notably the GLEEC fork), see 
 
 KDF Reloaded is currently in **public alpha**. APIs, on-disk formats, and the network protocol may change between alpha releases. Use only with funds you can afford to lose.
 
-- The `mm2` binary is provided for evaluation, testing, and review.
+- The `kdf` binary is provided for evaluation, testing, and review.
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
 - Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc). Signatures on release **binaries** are planned for the alpha cycle. See [`SECURITY.md`](SECURITY.md).
 
@@ -55,10 +55,10 @@ Requirements:
 - A C/C++ toolchain (build-essential / Xcode CLT / MSVC)
 
 ```sh
-cargo build --release --bin mm2
+cargo build --release --bin kdf
 ```
 
-The binary is placed at `target/release/mm2`. For a development environment with full test infrastructure (Docker-based integration tests, electrum mocks, etc.) see [`docs/DEV_ENVIRONMENT.md`](docs/DEV_ENVIRONMENT.md).
+The binary is placed at `target/release/kdf`. For a development environment with full test infrastructure (Docker-based integration tests, electrum mocks, etc.) see [`docs/DEV_ENVIRONMENT.md`](docs/DEV_ENVIRONMENT.md).
 
 For WebAssembly builds, see [`docs/WASM_BUILD.md`](docs/WASM_BUILD.md).
 
@@ -93,7 +93,7 @@ iOS builds are not currently part of the alpha release matrix.
 Launch the daemon:
 
 ```sh
-./mm2
+./kdf
 ```
 
 It exposes a JSON-RPC server on `127.0.0.1:7783` by default. The RPC catalogue is identical to the upstream Komodo DeFi Framework where unchanged; differences are tracked in [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md). RPC namespaces include unprefixed stable methods, `task::*` for long-running operations, `stream::*` for SSE subscriptions, and others.

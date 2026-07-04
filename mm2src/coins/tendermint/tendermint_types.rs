@@ -119,6 +119,7 @@ pub struct TendermintProtocolInfo {
 pub struct ActivatedTokenInfo {
     pub(crate) decimals: u8,
     pub ticker: String,
+    pub(crate) denom: Denom,
 }
 
 pub struct TendermintConf {
@@ -235,10 +236,49 @@ pub struct TendermintCoinImpl {
     pub(super) client: TendermintRpcClient,
     pub ctx: MmWeak,
     pub(crate) protocol_info: TendermintProtocolInfo,
+    /// Whether activation should report balances in its result. Captured at
+    /// activation time because the platform-with-tokens framework builds the
+    /// activation result from `&self` without access to the original request.
+    pub(super) get_balances: bool,
 }
 
 #[derive(Clone)]
 pub struct TendermintCoin(pub(super) Arc<TendermintCoinImpl>);
+
+impl TendermintCoinImpl {
+    /// Assemble the inner coin implementation from already-resolved activation
+    /// inputs. Sets history syncing to `NotEnabled` and starts with no
+    /// activated tokens; tokens are registered later via
+    /// [`TendermintCoin::add_activated_token_info`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        ticker: String,
+        conf: TendermintConf,
+        protocol_info: TendermintProtocolInfo,
+        account_id: AccountId,
+        activation_policy: TendermintActivationPolicy,
+        rpc_clients: Vec<HttpClient>,
+        ctx: MmWeak,
+        get_balances: bool,
+    ) -> Self {
+        TendermintCoinImpl {
+            ticker,
+            avg_blocktime: conf.avg_blocktime,
+            account_id,
+            activation_policy,
+            tokens_info: PaMutex::new(HashMap::new()),
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            client: TendermintRpcClient(AsyncMutex::new(TendermintRpcClientImpl { rpc_clients })),
+            ctx,
+            protocol_info,
+            get_balances,
+        }
+    }
+}
+
+impl From<TendermintCoinImpl> for TendermintCoin {
+    fn from(coin_impl: TendermintCoinImpl) -> Self { TendermintCoin(Arc::new(coin_impl)) }
+}
 
 impl std::fmt::Debug for TendermintCoin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "TendermintCoin({})", self.ticker) }

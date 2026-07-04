@@ -67,7 +67,6 @@ pub trait L2InitialStatus {
 
 pub struct L2ActivationTask<L2: InitL2ActivationOps> {
     ctx: MmArc,
-    ticker: String,
     platform_coin: L2::PlatformCoin,
     validated_params: L2::ValidatedParams,
     protocol_conf: L2::ProtocolInfo,
@@ -82,7 +81,8 @@ impl<L2: InitL2ActivationOps> RpcTaskTypes for L2ActivationTask<L2> {
     type UserAction = L2::UserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<L2> RpcTask for L2ActivationTask<L2>
 where
     L2: InitL2ActivationOps,
@@ -150,7 +150,6 @@ where
         .map_mm_err()?;
     let task = L2ActivationTask::<L2> {
         ctx,
-        ticker,
         platform_coin,
         validated_params,
         protocol_conf,

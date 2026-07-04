@@ -238,7 +238,7 @@ impl SwapOps for EthCoin {
                     }
 
                     let function = try_s!(ERC20_CONTRACT.function("transfer"));
-                    let decoded_input = try_s!(function.decode_input(&tx_input));
+                    let decoded_input = try_s!(function.decode_input(&tx_input[4..]));
 
                     if decoded_input[0] != Token::Address(fee_addr) {
                         return ERR!(
@@ -398,7 +398,7 @@ impl SwapOps for EthCoin {
     fn extract_secret(&self, _secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         let unverified: UnverifiedTransaction = try_s!(rlp::decode(spend_tx));
         let function = try_s!(SWAP_CONTRACT.function("receiverSpend"));
-        let tokens = try_s!(function.decode_input(&unverified.data));
+        let tokens = try_s!(function.decode_input(&unverified.data[4..]));
         if tokens.len() < 3 {
             return ERR!("Invalid arguments in 'receiverSpend' call: {:?}", tokens);
         }
@@ -420,19 +420,19 @@ impl SwapOps for EthCoin {
                 if bytes.len() != 20 {
                     return MmError::err(NegotiateSwapContractAddrErr::InvalidOtherAddrLen(bytes.into()));
                 }
-                let other_addr = Address::from(bytes);
+                let other_addr = Address::from_slice(bytes);
                 if other_addr == self.swap_contract_address {
-                    return Ok(Some(self.swap_contract_address.to_vec().into()));
+                    return Ok(Some(self.swap_contract_address.as_bytes().to_vec().into()));
                 }
 
                 if Some(other_addr) == self.fallback_swap_contract {
-                    return Ok(self.fallback_swap_contract.map(|addr| addr.to_vec().into()));
+                    return Ok(self.fallback_swap_contract.map(|addr| addr.as_bytes().to_vec().into()));
                 }
                 MmError::err(NegotiateSwapContractAddrErr::UnexpectedOtherAddr(bytes.into()))
             },
             None => self
                 .fallback_swap_contract
-                .map(|addr| Some(addr.to_vec().into()))
+                .map(|addr| Some(addr.as_bytes().to_vec().into()))
                 .ok_or_else(|| MmError::new(NegotiateSwapContractAddrErr::NoOtherAddrAndNoFallback)),
         }
     }

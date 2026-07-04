@@ -307,6 +307,39 @@ metadata when the side channel lacks an entry. The map shapes
 are dictated where they cross the wire (§32.7); the in-memory
 reconstruction is behaviour.
 
+**R-W2b (RPC-presentation enrichment, non-wire).** When an
+in-memory order record is projected into the RPC orderbook
+response shape returned to local callers, each entry is further
+annotated with two presentation-only fields that never travel on
+the P2P wire:
+
+- `is_mine` (boolean) — true when the order's maker pubkey matches
+  one of the node's own p2p pubkeys;
+- `age` (signed 64-bit integer, seconds).
+
+> **Upstream divergence (informative).** Despite its name, `age`
+> does not carry an elapsed duration: in the current baseline it
+> is populated with the UNIX timestamp (in seconds) at the moment
+> the RPC entry is built, inherited unchanged from the upstream
+> behaviour. Consumers that need a true elapsed age compute it
+> locally. The field is part of the RPC response contract; its
+> wire name and type MUST be preserved. Correcting its semantics
+> would change observable RPC behaviour, so it is tracked here as
+> a compatibility question rather than silently changed.
+>
+> **Decision (R-W2b.1).** The timestamp-as-`age` behaviour is
+> **kept as-is** for RPC compatibility with existing GLEEC/upstream
+> clients; it MUST NOT be changed in this CRD cycle.
+>
+> **Future reconsideration (R-W2b.2, deferred).** A later RPC
+> revision SHOULD reconsider the semantics. The proposed fix is to
+> add a *new* field carrying the true elapsed age in seconds
+> (`order's creation timestamp` subtracted from `now`), leaving the
+> legacy `age` field populated as today for backward compatibility,
+> and to deprecate the legacy field on a documented schedule. This
+> is intentionally **out of scope now** and recorded as a tracked
+> to-do item.
+
 **R-W2a (dictated side-channel record).** The base/rel protocol-
 info side-channel value carried on the wire MUST be a record of
 two opaque byte strings — one for the base coin, one for the rel
@@ -473,6 +506,16 @@ these variants, serialised as a tagged enum:
 
 All five are *inbound* requests. Outbound replies are typed per
 sub-handler and serialised separately.
+
+> **RPC best-orders filter (informative).** The peer-to-peer
+> `BestOrders`/`BestOrdersByNumber` request variants above carry
+> only coin, action, and target volume/number. Separately, the
+> node-local best-orders RPC request (the GUI-facing v2 request)
+> carries an additional boolean field `exclude_mine` (default
+> `false`); when `true`, the responder omits orders whose maker
+> pubkey is the caller's own from the result set. The filter is
+> applied node-side when building the RPC response and does not
+> change the P2P request shape.
 
 **R-Q2.** A single request dispatcher MUST route each variant to
 its handler and return one of: an encoded reply payload; an

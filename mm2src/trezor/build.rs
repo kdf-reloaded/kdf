@@ -1,9 +1,10 @@
 #[allow(dead_code)]
-const PROTOS: [&str; 4] = [
+const PROTOS: [&str; 5] = [
     "proto/messages.proto",
     "proto/messages-common.proto",
     "proto/messages-management.proto",
     "proto/messages-bitcoin.proto",
+    "proto/messages-ethereum.proto",
 ];
 
 fn main() {

@@ -21,6 +21,7 @@ use serde_json::{self as json, Value as Json};
 use std::convert::TryFrom;
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use testcontainers::clients::Cli;
 use testcontainers::images::generic::{GenericImage, WaitFor};
@@ -51,7 +52,7 @@ impl CoinDockerOps for QtumDockerOps {
 impl QtumDockerOps {
     pub fn new() -> QtumDockerOps {
         let ctx = MmCtxBuilder::new().into_mm_arc();
-        let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+        let confpath = get_qtum_conf_path();
         let conf = json!({"decimals":8,"network":"regtest","confpath":confpath});
         let req = json!({
             "method": "enable",
@@ -64,11 +65,11 @@ impl QtumDockerOps {
 
     pub fn initialize_contracts(&self) {
         let sender = get_address_by_label(&self.coin, QTUM_ADDRESS_LABEL);
-        unsafe {
-            QICK_TOKEN_ADDRESS = Some(self.create_contract(&sender, QRC20_TOKEN_BYTES));
-            QORTY_TOKEN_ADDRESS = Some(self.create_contract(&sender, QRC20_TOKEN_BYTES));
-            QRC20_SWAP_CONTRACT_ADDRESS = Some(self.create_contract(&sender, QRC20_SWAP_CONTRACT_BYTES));
-        }
+        set_qrc20_contract_addresses(
+            self.create_contract(&sender, QRC20_TOKEN_BYTES),
+            self.create_contract(&sender, QRC20_TOKEN_BYTES),
+            self.create_contract(&sender, QRC20_SWAP_CONTRACT_BYTES),
+        );
     }
 
     fn create_contract(&self, sender: &str, hexbytes: &str) -> H160 {
@@ -89,7 +90,7 @@ impl QtumDockerOps {
     }
 }
 
-pub fn qtum_docker_node(docker: &Cli, port: u16) -> UtxoDockerNode {
+pub fn qtum_docker_node(docker: &Cli, port: u16) -> UtxoDockerNode<'_> {
     let args = vec!["-p".into(), format!("127.0.0.1:{}:{}", port, port)];
     let image = GenericImage::new(qtum_regtest_docker_image())
         .with_args(args)
@@ -118,7 +119,7 @@ pub fn qtum_docker_node(docker: &Cli, port: u16) -> UtxoDockerNode {
         assert!(now_ms() < timeout, "Test timed out");
     }
 
-    unsafe { QTUM_CONF_PATH = Some(conf_path) };
+    set_qtum_conf_path(conf_path);
     UtxoDockerNode {
         container,
         ticker: name.to_owned(),
@@ -753,10 +754,11 @@ fn test_wait_for_tx_spend() {
     assert!(err.contains("Waited too long"));
 
     // also spends the maker payment and try to check if the wait_for_tx_spend() returns the correct tx
-    static mut SPEND_TX: Option<TransactionEnum> = None;
+    let spend_tx: Arc<Mutex<Option<TransactionEnum>>> = Arc::new(Mutex::new(None));
 
     let maker_pub_c = maker_pub.to_vec();
     let payment_hex = payment_tx_hex.clone();
+    let spend_tx_c = Arc::clone(&spend_tx);
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(5));
 
@@ -771,7 +773,7 @@ fn test_wait_for_tx_spend() {
             )
             .wait()
             .unwrap();
-        unsafe { SPEND_TX = Some(spend) }
+        *spend_tx_c.lock().unwrap() = Some(spend);
     });
 
     let wait_until = (now_ms() / 1000) + 120;
@@ -785,7 +787,8 @@ fn test_wait_for_tx_spend() {
         .wait()
         .unwrap();
 
-    unsafe { assert_eq!(Some(found), SPEND_TX) }
+    let expected_spend = spend_tx.lock().unwrap().clone();
+    assert_eq!(Some(found), expected_spend);
 }
 
 #[test]
@@ -813,8 +816,8 @@ fn test_check_balance_on_order_post_base_coin_locked() {
     let my_address = coin.my_address().expect("!my_address");
     fill_address(&coin, &my_address, 10.into(), timeout);
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
-    let qick_contract_address = format!("{:#02x}", unsafe { QICK_TOKEN_ADDRESS.expect("!QICK_TOKEN_ADDRESS") });
+    let confpath = get_qtum_conf_path();
+    let qick_contract_address = format!("{:#02x}", get_qrc20_contract_address("QICK"));
     let coins = json!([
         {"coin":"MYCOIN","asset":"MYCOIN","required_confirmations":0,"txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"QICK","required_confirmations":1,"pubtype": 120,"p2shtype": 50,"wiftype": 128,"segwit": true,"mm2": 1,"mature_confirmations": 500,"confpath": confpath,"network":"regtest",
@@ -916,7 +919,7 @@ fn test_check_balance_on_order_post_base_coin_locked() {
 ///
 /// Please note this function should be called before the Qtum balance is filled.
 fn test_get_max_taker_vol_and_trade_with_dynamic_trade_fee(coin: QtumCoin, priv_key: &[u8]) {
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
@@ -1110,7 +1113,7 @@ fn test_trade_preimage_dynamic_fee_not_sufficient_balance() {
     let qtum_balance = MmNumber::from("0.5").to_decimal();
     let (_ctx, _coin, priv_key) = generate_qtum_coin_with_random_privkey("QTUM", qtum_balance.clone(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
@@ -1171,7 +1174,7 @@ fn test_trade_preimage_deduct_fee_from_output_failed() {
     let qtum_balance = MmNumber::from("0.00073").to_decimal();
     let (_ctx, _coin, priv_key) = generate_qtum_coin_with_random_privkey("QTUM", qtum_balance.clone(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
@@ -1231,7 +1234,7 @@ fn test_segwit_native_balance() {
     let (_ctx, _coin, priv_key) =
         generate_segwit_qtum_coin_with_random_privkey("QTUM", BigDecimal::try_from(0.5).unwrap(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
         "mm2":1,"mature_confirmations":500,"network":"regtest","confpath":confpath,"protocol":{"type":"UTXO"},"bech32_hrp":"qcrt","address_format":{"format":"segwit"}},
@@ -1277,7 +1280,7 @@ fn test_withdraw_and_send_from_segwit() {
     let (_ctx, _coin, priv_key) =
         generate_segwit_qtum_coin_with_random_privkey("QTUM", BigDecimal::try_from(0.7).unwrap(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
         "mm2":1,"mature_confirmations":500,"network":"regtest","confpath":confpath,"protocol":{"type":"UTXO"},"bech32_hrp":"qcrt","address_format":{"format":"segwit"}},
@@ -1325,7 +1328,7 @@ fn test_withdraw_and_send_legacy_to_segwit() {
     let (_ctx, _coin, priv_key) =
         generate_qtum_coin_with_random_privkey("QTUM", BigDecimal::try_from(0.7).unwrap(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
         "mm2":1,"mature_confirmations":500,"network":"regtest","confpath":confpath,"protocol":{"type":"UTXO"},"bech32_hrp":"qcrt"},
@@ -1466,7 +1469,7 @@ fn segwit_address_in_the_orderbook() {
     let (_ctx, coin, priv_key) =
         generate_qtum_coin_with_random_privkey("QTUM", BigDecimal::try_from(0.5).unwrap(), Some(0));
 
-    let confpath = unsafe { QTUM_CONF_PATH.as_ref().expect("Qtum config is not set yet") };
+    let confpath = get_qtum_conf_path();
     let coins = json! ([
         {"coin":"QTUM","decimals":8,"pubtype":120,"p2shtype":110,"wiftype":128,"segwit":true,"txfee":0,"txfee_volatility_percent":0.1,
         "mm2":1,"mature_confirmations":500,"network":"regtest","confpath":confpath,"protocol":{"type":"UTXO"},"bech32_hrp":"qcrt"},

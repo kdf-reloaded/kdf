@@ -32,7 +32,6 @@ pub(crate) use common::executor::Timer;
 pub(crate) use common::log::error;
 pub(crate) use common::{now_ms, small_rng};
 pub(crate) use derive_more::Display;
-pub(crate) use ethabi::{Contract, Token};
 pub(crate) use ethereum_types::{Address, H160, H256, U256};
 pub(crate) use futures::compat::Future01CompatExt;
 pub(crate) use futures::future::{join_all, select, Either, FutureExt, TryFutureExt};
@@ -95,13 +94,24 @@ mod eth_impl;
 mod eth_market_ops;
 mod eth_mm_coin;
 mod eth_swap_ops;
+// EVM Trezor hardware-wallet activation (device-sourced address/pubkey). Native,
+// non-iOS only — the Trezor signing policy exists only there (CRD §50).
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+mod eth_trezor_activation;
+// EVM Trezor hardware-wallet withdrawal (device-driven signing). Native, non-iOS
+// only — the Trezor signing policy exists only there (CRD §50).
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+mod eth_trezor_withdraw;
 mod eth_types;
+pub mod wc_integration;
 mod wire_types;
-
 // Re-export split module contents for backward-compatible access paths
 pub use eth_impl::*;
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
+// EVM Trezor activation entrypoints (native, non-iOS).
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+pub use eth_trezor_activation::{eth_coin_activate_with_trezor, eth_coin_from_conf_and_request_with_trezor};
 
 pub(crate) use crate::DerivationMethod;
 pub(crate) use crate::{CommonSwapOpsV2, DexFee, FindPaymentSpendError, FundingTxSpend, GenPreimageResult,
@@ -117,9 +127,24 @@ pub(crate) use eth_hd_wallet::EthHDWallet;
 pub(crate) use mm2_eth::keys::{sign, verify_address};
 pub(crate) use serialization::{CompactInteger, Serializable, Stream};
 
-#[cfg(test)] mod eth_tests;
-#[cfg(target_arch = "wasm32")] mod eth_wasm_tests;
+// Alloy-backed ABI facade — the crate-wide `Contract`/`Token`/`Function`/
+// `AbiError` come from here (replacing ethabi).
+pub(crate) mod abi;
+pub(crate) use abi::{AbiError, Contract, Function, Token};
 
+#[cfg(test)] mod abi_golden_tests;
+#[cfg(test)] mod eth_tests;
+// Emulator-gated EVM Trezor signing integration tests (CRD §50.8). Native,
+// non-iOS, and only when the `trezor-emulator-tests` feature is on; they drive a
+// real `task::withdraw` against a running Trezor emulator.
+#[cfg(all(
+    test,
+    not(target_arch = "wasm32"),
+    not(target_os = "ios"),
+    feature = "trezor-emulator-tests"
+))]
+mod eth_trezor_emulator_tests;
+#[cfg(target_arch = "wasm32")] mod eth_wasm_tests;
 // ─── EthCoin newtype ────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]

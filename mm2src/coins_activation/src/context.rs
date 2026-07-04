@@ -1,5 +1,8 @@
+use crate::eth_with_tokens_activation::EthTaskManagerShared;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::l2::L2TaskManagerShared;
+use crate::sia_activation::SiaTaskManagerShared;
+use crate::tendermint_with_tokens_activation::TendermintTaskManagerShared;
 use crate::utxo_activation::{QtumTaskManagerShared, UtxoStandardTaskManagerShared};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::z_coin_activation::ZcoinTaskManagerShared;
@@ -12,6 +15,9 @@ use std::sync::Arc;
 pub struct CoinsActivationContext {
     pub(crate) init_utxo_standard_task_manager: UtxoStandardTaskManagerShared,
     pub(crate) init_qtum_task_manager: QtumTaskManagerShared,
+    pub(crate) init_sia_task_manager: SiaTaskManagerShared,
+    pub(crate) init_eth_task_manager: EthTaskManagerShared,
+    pub(crate) init_tendermint_task_manager: TendermintTaskManagerShared,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) init_z_coin_task_manager: ZcoinTaskManagerShared,
     #[cfg(not(target_arch = "wasm32"))]
@@ -25,6 +31,9 @@ impl CoinsActivationContext {
             Ok(CoinsActivationContext {
                 init_utxo_standard_task_manager: RpcTaskManager::new_shared(),
                 init_qtum_task_manager: RpcTaskManager::new_shared(),
+                init_sia_task_manager: RpcTaskManager::new_shared(),
+                init_eth_task_manager: RpcTaskManager::new_shared(),
+                init_tendermint_task_manager: RpcTaskManager::new_shared(),
                 #[cfg(not(target_arch = "wasm32"))]
                 init_z_coin_task_manager: RpcTaskManager::new_shared(),
                 #[cfg(not(target_arch = "wasm32"))]

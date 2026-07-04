@@ -5,7 +5,7 @@ variables and `.env` files that the KDF Reloaded build and test suites read.
 Upstream historically documented only the passphrase setup in
 [`DEV_ENVIRONMENT.md`](./DEV_ENVIRONMENT.md); this file lists the full set.
 
-> Runtime configuration (what an operator actually configures to run `mm2`)
+> Runtime configuration (what an operator actually configures to run `kdf`)
 > lives in `MM2.json`, **not** in environment variables or `.env` files. The
 > variables below are for building and testing. See the project
 > [`README.md`](../README.md) for runtime config.

@@ -467,7 +467,7 @@ impl TendermintCoin {
             };
 
             for raw_tx in &response.txs {
-                if let cosmrs::tendermint::abci::Code::Err(code) = raw_tx.tx_result.code {
+                if let cosmrs::tendermint::abci::Code::Err(_) = raw_tx.tx_result.code {
                     continue; // skip failed txs
                 }
 

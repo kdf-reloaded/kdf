@@ -4,8 +4,9 @@ use super::rpc::*;
 use super::tendermint_types::*;
 use super::IRIS_PREFIX;
 use crate::utxo::sat_from_big_decimal;
-use crate::utxo::utxo_common::big_decimal_from_sat;
-use crate::{HistorySyncState, MarketCoinOps, TransactionEnum, TransactionErr, WithdrawFee};
+use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
+use crate::{CoinBalance, HistorySyncState, MarketCoinOps, TransactionDetails, TransactionEnum, TransactionErr,
+            WithdrawFee};
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use common::executor::Timer;
@@ -23,7 +24,9 @@ use crypto::Secp256k1Secret;
 use futures::compat::Future01CompatExt;
 use futures::FutureExt;
 use kdf_crypto::sha256;
+use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::str::FromStr;
 use std::time::Duration;
@@ -72,6 +75,12 @@ impl TendermintCommons for TendermintCoin {
 
 impl TendermintCoin {
     pub fn decimals(&self) -> u8 { self.protocol_info.decimals }
+
+    pub(super) fn publish_tx_history_record(&self, ticker: &str, tx_details: &TransactionDetails) {
+        if let Some(ctx) = MmArc::from_weak(&self.ctx) {
+            crate::tx_history_streaming::publish_tx_history_records(&ctx, ticker, [tx_details.clone()]);
+        }
+    }
 
     pub fn supports_htlc(&self) -> bool {
         matches!(
@@ -165,6 +174,51 @@ impl TendermintCoin {
             .amount
             .parse()
             .map_to_mm(|e| TendermintCoinRpcError::InvalidResponse(format!("balance is not u64, err {e}")))
+    }
+
+    // ————————————————————————————————————————————————————————————
+    // Activation helpers (token registration & balance enumeration)
+    // ————————————————————————————————————————————————————————————
+
+    /// Register a freshly activated token so the platform coin's activation
+    /// result and token-balance enumeration include it.
+    pub fn add_activated_token_info(&self, ticker: String, decimals: u8, denom: Denom) {
+        self.tokens_info.lock().insert(ticker.clone(), ActivatedTokenInfo {
+            decimals,
+            ticker,
+            denom,
+        });
+    }
+
+    /// Whether activation should report balances in its result (the
+    /// `get_balances` activation flag captured at coin creation).
+    pub fn activation_get_balances(&self) -> bool { self.get_balances }
+
+    /// The set of currently activated token tickers.
+    pub fn activated_token_tickers(&self) -> HashSet<String> { self.tokens_info.lock().keys().cloned().collect() }
+
+    /// Query the balance of every activated token, keyed by token ticker.
+    pub async fn get_activated_tokens_balances(
+        &self,
+    ) -> MmResult<HashMap<String, CoinBalance>, TendermintCoinRpcError> {
+        let tokens: Vec<(String, u8, Denom)> = self
+            .tokens_info
+            .lock()
+            .values()
+            .map(|info| (info.ticker.clone(), info.decimals, info.denom.clone()))
+            .collect();
+
+        let mut balances = HashMap::new();
+        for (ticker, decimals, denom) in tokens {
+            let amount = self
+                .account_balance_for_denom(&self.account_id, denom.to_string())
+                .await?;
+            balances.insert(ticker, CoinBalance {
+                spendable: big_decimal_from_sat_unsigned(amount, decimals),
+                unspendable: BigDecimal::default(),
+            });
+        }
+        Ok(balances)
     }
 
     // ————————————————————————————————————————————————————————————
@@ -303,7 +357,11 @@ impl TendermintCoin {
 
             let request = AbciRequest::new(
                 Some(ABCI_SIMULATE_TX_PATH.to_string()),
-                SimulateRequest { tx_bytes, tx: None }.encode_to_vec(),
+                SimulateRequest {
+                    tx_bytes,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
                 ABCI_REQUEST_HEIGHT,
                 ABCI_REQUEST_PROVE,
             );
@@ -372,7 +430,11 @@ impl TendermintCoin {
 
             let request = AbciRequest::new(
                 Some(ABCI_SIMULATE_TX_PATH.to_string()),
-                SimulateRequest { tx_bytes, tx: None }.encode_to_vec(),
+                SimulateRequest {
+                    tx_bytes,
+                    ..Default::default()
+                }
+                .encode_to_vec(),
                 ABCI_REQUEST_HEIGHT,
                 ABCI_REQUEST_PROVE,
             );

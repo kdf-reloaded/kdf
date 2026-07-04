@@ -110,6 +110,15 @@ fn mm_version() -> String {
 }
 
 fn main() {
+    let unsafe_wire_dump_feature_enabled = std::env::var("CARGO_FEATURE_UNSAFE_RPC_WIRE_DUMP").is_ok();
+    let release_override_enabled = std::env::var("CARGO_FEATURE_UNSAFE_RPC_WIRE_DUMP_RELEASE_OVERRIDE").is_ok();
+    let profile = std::env::var("PROFILE").unwrap_or_default();
+    if unsafe_wire_dump_feature_enabled && !release_override_enabled && profile == "release" {
+        panic!(
+            "feature `unsafe-rpc-wire-dump` is forbidden for release profile unless `unsafe-rpc-wire-dump-release-override` is also enabled"
+        );
+    }
+
     println!("cargo:rerun-if-env-changed=MANUAL_MM_VERSION");
     println!("cargo:rerun-if-changed=MM_VERSION");
     println!("cargo:rerun-if-changed=MM_DATETIME");

@@ -136,6 +136,7 @@ where
     match err {
         MetamaskError::EthProviderNotFound => T::metamask_rpc_error(MetamaskRpcError::EthProviderNotFound),
         MetamaskError::UnexpectedAccountSelected => T::metamask_rpc_error(MetamaskRpcError::UnexpectedAccountSelected),
+        MetamaskError::UserCancelled => T::metamask_rpc_error(MetamaskRpcError::UserCancelled),
         other => T::internal(other.to_string()),
     }
 }

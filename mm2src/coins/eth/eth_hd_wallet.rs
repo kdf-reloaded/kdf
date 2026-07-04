@@ -171,7 +171,7 @@ impl HDWalletCoinOps for EthCoin {
     async fn create_new_account<'a, XPubExtractor>(
         &self,
         hd_wallet: &'a Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
     ) -> MmResult<HDAccountMut<'a, Self::HDAccount>, NewAccountCreatingError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
@@ -197,7 +197,7 @@ impl HDWalletCoinOps for EthCoin {
 async fn create_new_account<'a, XPubExtractor>(
     coin: &EthCoin,
     hd_wallet: &'a EthHDWallet,
-    xpub_extractor: &XPubExtractor,
+    xpub_extractor: Option<&XPubExtractor>,
 ) -> MmResult<HDAccountMut<'a, EthHDAccount>, NewAccountCreatingError>
 where
     XPubExtractor: HDXPubExtractor + Sync,
@@ -294,7 +294,7 @@ impl ExtractExtendedPubkey for EthCoin {
 
     async fn extract_extended_pubkey<XPubExtractor>(
         &self,
-        _xpub_extractor: &XPubExtractor,
+        _xpub_extractor: Option<&XPubExtractor>,
         derivation_path: DerivationPath,
     ) -> MmResult<Self::ExtendedPublicKey, HDExtractPubkeyError>
     where
@@ -398,7 +398,7 @@ impl HDWalletBalanceOps for EthCoin {
     async fn enable_hd_wallet<XPubExtractor>(
         &self,
         hd_wallet: &Self::HDWallet,
-        xpub_extractor: &XPubExtractor,
+        xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where

@@ -124,6 +124,29 @@ pub enum ZCoinBuildError {
         path: String,
     },
     Io(std::io::Error),
+    #[display(fmt = "Failed to read Zcash parameter file {} at {}: {}", file, path, error)]
+    ZCashParamsReadError {
+        file: String,
+        path: String,
+        error: std::io::Error,
+    },
+    #[display(
+        fmt = "Zcash parameter file {} failed integrity check at {} (expected {}, actual {})",
+        file,
+        path,
+        expected,
+        actual
+    )]
+    ZCashParamsHashMismatch {
+        file: String,
+        path: String,
+        expected: String,
+        actual: String,
+    },
+    #[display(fmt = "Zcash parameters directory does not exist at {}", path)]
+    ZCashParamsDirNotFound {
+        path: String,
+    },
     ZCashParamsNotFound,
 }
 

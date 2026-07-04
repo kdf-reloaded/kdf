@@ -29,6 +29,9 @@ pub enum WalletConnectError {
     /// A request timed out waiting for the wallet to respond.
     #[display(fmt = "request timed out")]
     Timeout,
+    /// A wallet response was missing, malformed, or of an unexpected shape.
+    #[display(fmt = "invalid wallet response: {}", _0)]
+    InvalidResponse(String),
     /// Serialization / deserialization failure.
     #[display(fmt = "serde error: {}", _0)]
     Serde(String),

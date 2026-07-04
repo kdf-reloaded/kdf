@@ -9,8 +9,8 @@ fn test_best_orders() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -36,22 +36,24 @@ fn test_best_orders() {
     log!({"Bob log path: {}", mm_bob.log_path.display()});
 
     // Enable coins on Bob side. Print the replies in case we need the "address".
-    let bob_coins = block_on(enable_coins_eth_electrum(&mm_bob, &["http://195.201.0.6:8565"]));
+    let bob_coins = block_on(enable_coins_eth_electrum_doc_marty(&mm_bob, &[
+        "http://195.201.0.6:8565",
+    ]));
     log!({ "enable_coins (bob): {:?}", bob_coins });
     // issue sell request on Bob side by setting base/rel price
     log!("Issue bob sell requests");
 
     let bob_orders = [
         // (base, rel, price, volume, min_volume)
-        ("RICK", "MORTY", "0.9", "0.9", None),
-        ("RICK", "MORTY", "0.8", "0.9", None),
-        ("RICK", "MORTY", "0.7", "0.9", Some("0.9")),
-        ("RICK", "ETH", "0.8", "0.9", None),
-        ("MORTY", "RICK", "0.8", "0.9", None),
-        ("MORTY", "RICK", "0.9", "0.9", None),
-        ("ETH", "RICK", "0.8", "0.9", None),
-        ("MORTY", "ETH", "0.8", "0.8", None),
-        ("MORTY", "ETH", "0.7", "0.8", Some("0.8")),
+        ("DOC", "MARTY", "0.9", "0.9", None),
+        ("DOC", "MARTY", "0.8", "0.9", None),
+        ("DOC", "MARTY", "0.7", "0.9", Some("0.9")),
+        ("DOC", "ETH", "0.8", "0.9", None),
+        ("MARTY", "DOC", "0.8", "0.9", None),
+        ("MARTY", "DOC", "0.9", "0.9", None),
+        ("ETH", "DOC", "0.8", "0.9", None),
+        ("MARTY", "ETH", "0.8", "0.8", None),
+        ("MARTY", "ETH", "0.7", "0.8", Some("0.8")),
     ];
     for (base, rel, price, volume, min_volume) in bob_orders.iter() {
         let rc = block_on(mm_bob.rpc(&json! ({
@@ -95,14 +97,14 @@ fn test_best_orders() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "0.1",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     assert_eq!(1, best_morty_orders.len());
     let expected_price: BigDecimal = "0.8".parse().unwrap();
     assert_eq!(expected_price, best_morty_orders[0].price);
@@ -110,7 +112,7 @@ fn test_best_orders() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "1.7",
     })))
@@ -118,9 +120,9 @@ fn test_best_orders() {
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
     // MORTY
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     let expected_price: BigDecimal = "0.7".parse().unwrap();
-    let bob_morty_addr = addr_from_enable(&bob_coins, "MORTY");
+    let bob_morty_addr = addr_from_enable(&bob_coins, "MARTY");
     assert_eq!(expected_price, best_morty_orders[0].price);
     assert_eq!(bob_morty_addr, best_morty_orders[0].address);
     let expected_price: BigDecimal = "0.8".parse().unwrap();
@@ -134,7 +136,7 @@ fn test_best_orders() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "sell",
         "volume": "0.1",
     })))
@@ -144,7 +146,7 @@ fn test_best_orders() {
 
     let expected_price: BigDecimal = "1.25".parse().unwrap();
 
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     assert_eq!(expected_price, best_morty_orders[0].price);
     assert_eq!(1, best_morty_orders.len());
 
@@ -164,9 +166,9 @@ fn test_best_orders() {
 
     let expected_price: BigDecimal = "1.25".parse().unwrap();
 
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     assert_eq!(expected_price, best_morty_orders[0].price);
-    assert_eq!("MORTY", best_morty_orders[0].coin);
+    assert_eq!("MARTY", best_morty_orders[0].coin);
     assert_eq!(1, best_morty_orders.len());
 
     block_on(mm_bob.stop()).unwrap();
@@ -179,8 +181,8 @@ fn test_best_orders_duplicates_after_update() {
     let eve_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
     ]);
 
     // start bob as a seednode
@@ -222,7 +224,7 @@ fn test_best_orders_duplicates_after_update() {
     log!({"Bob log path: {}", mm_bob.log_path.display()});
 
     // Enable coins on Eve side. Print the replies in case we need the "address".
-    let eve_coins = block_on(enable_coins_rick_morty_electrum(&mm_eve));
+    let eve_coins = block_on(enable_coins_doc_marty_electrum(&mm_eve));
     log!({ "enable_coins (eve): {:?}", eve_coins });
     // issue sell request on Eve side by setting base/rel price
     log!("Issue eve sell request");
@@ -230,8 +232,8 @@ fn test_best_orders_duplicates_after_update() {
     let rc = block_on(mm_eve.rpc(&json! ({
         "userpass": mm_eve.userpass,
         "method": "setprice",
-        "base": "RICK",
-        "rel": "MORTY",
+        "base": "DOC",
+        "rel": "MARTY",
         "price": "1",
         "volume": "1",
     })))
@@ -266,14 +268,14 @@ fn test_best_orders_duplicates_after_update() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "0.1",
     })))
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     assert_eq!(1, best_morty_orders.len());
     let expected_price: BigDecimal = "1".parse().unwrap();
     assert_eq!(expected_price, best_morty_orders[0].price);
@@ -305,7 +307,7 @@ fn test_best_orders_duplicates_after_update() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "500",
     })))
@@ -313,7 +315,7 @@ fn test_best_orders_duplicates_after_update() {
 
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MORTY").unwrap();
+    let best_morty_orders = response.result.get("MARTY").unwrap();
     assert_eq!(1, best_morty_orders.len());
     let expected_price: BigDecimal = "1.2".parse().unwrap();
     assert_eq!(expected_price, best_morty_orders[0].price);
@@ -329,16 +331,16 @@ fn test_best_orders_filter_response() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
 
     // alice defined MORTY as "wallet_only" in config
     let alice_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MORTY","asset":"MORTY","rpcport":11608,"wallet_only": true,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"wallet_only": true,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -364,22 +366,24 @@ fn test_best_orders_filter_response() {
     log!({"Bob log path: {}", mm_bob.log_path.display()});
 
     // Enable coins on Bob side. Print the replies in case we need the "address".
-    let bob_coins = block_on(enable_coins_eth_electrum(&mm_bob, &["http://195.201.0.6:8565"]));
+    let bob_coins = block_on(enable_coins_eth_electrum_doc_marty(&mm_bob, &[
+        "http://195.201.0.6:8565",
+    ]));
     log!({ "enable_coins (bob): {:?}", bob_coins });
     // issue sell request on Bob side by setting base/rel price
     log!("Issue bob sell requests");
 
     let bob_orders = [
         // (base, rel, price, volume, min_volume)
-        ("RICK", "MORTY", "0.9", "0.9", None),
-        ("RICK", "MORTY", "0.8", "0.9", None),
-        ("RICK", "MORTY", "0.7", "0.9", Some("0.9")),
-        ("RICK", "ETH", "0.8", "0.9", None),
-        ("MORTY", "RICK", "0.8", "0.9", None),
-        ("MORTY", "RICK", "0.9", "0.9", None),
-        ("ETH", "RICK", "0.8", "0.9", None),
-        ("MORTY", "ETH", "0.8", "0.8", None),
-        ("MORTY", "ETH", "0.7", "0.8", Some("0.8")),
+        ("DOC", "MARTY", "0.9", "0.9", None),
+        ("DOC", "MARTY", "0.8", "0.9", None),
+        ("DOC", "MARTY", "0.7", "0.9", Some("0.9")),
+        ("DOC", "ETH", "0.8", "0.9", None),
+        ("MARTY", "DOC", "0.8", "0.9", None),
+        ("MARTY", "DOC", "0.9", "0.9", None),
+        ("ETH", "DOC", "0.8", "0.9", None),
+        ("MARTY", "ETH", "0.8", "0.8", None),
+        ("MARTY", "ETH", "0.7", "0.8", Some("0.8")),
     ];
     for (base, rel, price, volume, min_volume) in bob_orders.iter() {
         let rc = block_on(mm_bob.rpc(&json! ({
@@ -423,7 +427,7 @@ fn test_best_orders_filter_response() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "0.1",
     })))
@@ -431,7 +435,7 @@ fn test_best_orders_filter_response() {
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
     let empty_vec = Vec::new();
-    let best_morty_orders = response.result.get("MORTY").unwrap_or(&empty_vec);
+    let best_morty_orders = response.result.get("MARTY").unwrap_or(&empty_vec);
     assert_eq!(0, best_morty_orders.len());
     let best_eth_orders = response.result.get("ETH").unwrap();
     assert_eq!(1, best_eth_orders.len());
@@ -446,12 +450,12 @@ fn test_best_orders_address_and_confirmations() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"},"address_format":{"format":"segwit"}}
     ]);
 
     let alice_coins_config = json!([
-        {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"}}
     ]);
 
@@ -479,7 +483,7 @@ fn test_best_orders_address_and_confirmations() {
         "userpass": "pass",
         "method": "electrum",
         "coin": "tBTC",
-        "servers": [{"url":"electrum1.cipig.net:10068"},{"url":"electrum2.cipig.net:10068"},{"url":"electrum3.cipig.net:10068"}],
+        "servers": [{"url":"blockstream.info:143"},{"url":"blackie.c3-soft.com:57005"},{"url":"testnet.qtornado.com:51001"}],
         "address_format":{"format":"segwit"},
         "mm2": 1,
     }))).unwrap();
@@ -497,7 +501,7 @@ fn test_best_orders_address_and_confirmations() {
     let electrum = block_on(mm_bob.rpc(&json!({
         "userpass": "pass",
         "method": "electrum",
-        "coin": "RICK",
+        "coin": "DOC",
         "servers": [{"url":"electrum1.cipig.net:10017"},{"url":"electrum2.cipig.net:10017"},{"url":"electrum3.cipig.net:10017"}],
         "mm2": 1,
     }))).unwrap();
@@ -517,8 +521,8 @@ fn test_best_orders_address_and_confirmations() {
 
     let bob_orders = [
         // (base, rel, price, volume, min_volume)
-        ("tBTC", "RICK", "0.7", "0.0002", Some("0.00015")),
-        ("RICK", "tBTC", "0.7", "0.0002", Some("0.00015")),
+        ("tBTC", "DOC", "0.7", "0.0002", Some("0.00015")),
+        ("DOC", "tBTC", "0.7", "0.0002", Some("0.00015")),
     ];
     for (base, rel, price, volume, min_volume) in bob_orders.iter() {
         let rc = block_on(mm_bob.rpc(&json! ({
@@ -559,7 +563,7 @@ fn test_best_orders_address_and_confirmations() {
     }))
     .unwrap();
 
-    // checking buy and sell best_orders against ("tBTC", "RICK", "0.7", "0.0002", Some("0.00015"))
+    // checking buy and sell best_orders against ("tBTC", "DOC", "0.7", "0.0002", Some("0.00015"))
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
@@ -570,9 +574,9 @@ fn test_best_orders_address_and_confirmations() {
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_orders = response.result.get("RICK").unwrap();
+    let best_orders = response.result.get("DOC").unwrap();
     assert_eq!(1, best_orders.len());
-    assert_eq!(best_orders[0].coin, "RICK");
+    assert_eq!(best_orders[0].coin, "DOC");
     assert_eq!(best_orders[0].address, rick_address);
     assert_eq!(best_orders[0].base_confs, 5);
     assert_eq!(best_orders[0].base_nota, false);
@@ -582,7 +586,7 @@ fn test_best_orders_address_and_confirmations() {
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "sell",
         "volume": "0.0002",
     })))
@@ -598,11 +602,11 @@ fn test_best_orders_address_and_confirmations() {
     assert_eq!(best_orders[0].rel_confs, 5);
     assert_eq!(best_orders[0].rel_nota, false);
 
-    // checking buy and sell best_orders against ("RICK", "tBTC", "0.7", "0.0002", Some("0.00015"))
+    // checking buy and sell best_orders against ("DOC", "tBTC", "0.7", "0.0002", Some("0.00015"))
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
         "method": "best_orders",
-        "coin": "RICK",
+        "coin": "DOC",
         "action": "buy",
         "volume": "0.0002",
     })))
@@ -628,9 +632,9 @@ fn test_best_orders_address_and_confirmations() {
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_orders = response.result.get("RICK").unwrap();
+    let best_orders = response.result.get("DOC").unwrap();
     assert_eq!(1, best_orders.len());
-    assert_eq!(best_orders[0].coin, "RICK");
+    assert_eq!(best_orders[0].coin, "DOC");
     assert_eq!(best_orders[0].address, rick_address);
     assert_eq!(best_orders[0].base_confs, 5);
     assert_eq!(best_orders[0].base_nota, false);
@@ -648,7 +652,7 @@ fn zhtlc_best_orders() {
     let alice_passphrase = get_passphrase!(".env.client", "ALICE_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"RICK","asset":"RICK","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC"},"required_confirmations":0}
     ]);
 
@@ -680,14 +684,14 @@ fn zhtlc_best_orders() {
     log!("bob_zombie_cache_path "(bob_zombie_cache_path.display()));
     std::fs::copy("./mm2src/coins/for_tests/ZOMBIE_CACHE.db", bob_zombie_cache_path).unwrap();
 
-    block_on(enable_electrum_json(&mm_bob, "RICK", false, rick_electrums()));
+    block_on(enable_electrum_json(&mm_bob, "DOC", false, doc_electrums()));
     block_on(enable_z_coin(&mm_bob, "ZOMBIE"));
 
     let set_price_json = json!({
         "userpass": mm_bob.userpass,
         "method": "setprice",
         "base": "ZOMBIE",
-        "rel": "RICK",
+        "rel": "DOC",
         "price": 1,
         "volume": "1",
     });
@@ -720,7 +724,7 @@ fn zhtlc_best_orders() {
     let (_alice_dump_log, _alice_dump_dashboard) = mm_alice.mm_dump();
     log!({"Alice log path: {}", mm_alice.log_path.display()});
 
-    let best_orders = block_on(best_orders_v2(&mm_alice, "RICK", "sell", "1"));
+    let best_orders = block_on(best_orders_v2(&mm_alice, "DOC", "sell", "1"));
     let best_orders: RpcV2Response<BestOrdersV2Response> = json::from_value(best_orders).unwrap();
     let zombie_best_orders = best_orders.result.orders.get("ZOMBIE").unwrap();
 
@@ -732,7 +736,7 @@ fn zhtlc_best_orders() {
 
     let best_orders = block_on(best_orders_v2(&mm_alice, "ZOMBIE", "buy", "1"));
     let best_orders: RpcV2Response<BestOrdersV2Response> = json::from_value(best_orders).unwrap();
-    let rick_best_orders = best_orders.result.orders.get("RICK").unwrap();
+    let rick_best_orders = best_orders.result.orders.get("DOC").unwrap();
 
     assert_eq!(1, rick_best_orders.len());
     rick_best_orders

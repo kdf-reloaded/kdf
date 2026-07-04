@@ -57,6 +57,8 @@ A different case arises when matching GLEEC / upstream behaviour requires a *les
 
 The reduced-security cost must be stated in the per-setting documentation and in `GLEEC_COMPATIBILITY.md`. A stronger-security value of the same setting should be offered as an alternative where practical. Because the compatible value is the default here, the entry is **not** acknowledgement-gated; a runtime warning and acknowledgement key become appropriate only if and when the stronger-security value is made the default.
 
+**Fund-controlling-secret carve-out.** The exclusion above (wallet seeds and private keys keep their stronger protection regardless of compatibility) has exactly one CRD-authorised exception: the `allow_insecure_key_export` switch governed by CRD chapter 07. Unlike the security-versus-compatibility case described in this section, this switch **keeps the secure value as the default** (`false`, the GLEEC export superset refused) and reaches GLEEC parity only through an explicit operator opt-in. Because the less-secure value is *not* the default, the entry **is** acknowledgement-gated and the node emits a prominent warning when the switch is enabled. No other compatibility setting may relax the protection of a fund-controlling secret.
+
 ## What this convention is not
 
 - **Not** a JSON schema. There is no `compatibility: {}` object in `MM2.json`.

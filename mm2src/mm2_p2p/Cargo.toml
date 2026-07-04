@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Unified P2P networking for AtomicDEX — gossipsub, floodsub, peer exchange, request-response"
 
+[features]
+default = []
+application = []
+
 [dependencies]
 async-trait = { workspace = true }
 async-std = { version = "1.6.2", features = ["unstable"] }
@@ -21,6 +25,7 @@ futures-rustls = { version = "0.21.1" }
 hex = { workspace = true }
 lazy_static = { workspace = true }
 log = "0.4.8"
+mm2_event_stream = { path = "../mm2_event_stream" }
 num-bigint = { version = "0.4", features = ["serde", "std"] }
 num-rational = { version = "0.4", features = ["serde"] }
 prost = { workspace = true }
@@ -30,6 +35,7 @@ rmp-serde = "0.14.3"
 secp256k1 = { version = "0.20", features = ["rand"] }
 serde = { workspace = true }
 serde_bytes = "0.11.5"
+serde_json = { workspace = true }
 sha2 = "0.9"
 smallvec = "1.1.0"
 unsigned-varint = { version = "0.4.0", features = ["futures-codec"] }
@@ -38,15 +44,12 @@ wasm-timer = "0.2.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.7", features = ["rt-multi-thread", "macros"] }
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["dns-tokio", "floodsub", "mplex", "noise", "ping", "request-response", "secp256k1", "tcp-tokio", "websocket"] }
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["dns-tokio", "floodsub", "noise", "ping", "request-response", "secp256k1", "tcp-tokio", "websocket", "yamux"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["floodsub", "mplex", "noise", "ping", "request-response", "secp256k1", "wasm-ext", "wasm-ext-websocket"] }
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["floodsub", "noise", "ping", "request-response", "secp256k1", "wasm-ext", "wasm-ext-websocket", "yamux"] }
 wasm-bindgen-futures = "0.4.21"
 
 [build-dependencies]
 prost-build = "0.12"
-
-[dev-dependencies]
-serde_json = { workspace = true }

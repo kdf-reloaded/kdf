@@ -4,6 +4,7 @@ use crate::{lp_coinfind_or_err, CoinsContext, MmCoinEnum};
 use async_trait::async_trait;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
+use mm2_rpc::mm_protocol::MmRpcResult;
 use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest};
 use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
 
@@ -32,6 +33,20 @@ pub struct InitAccountBalanceParams {
 #[derive(Clone, Serialize)]
 pub enum AccountBalanceInProgressStatus {
     RequestingAccountBalance,
+}
+
+/// Compatibility wire format for `task::account_balance::status` expected by the SDK.
+///
+/// The SDK expects `"Ok"` / `"Error"` / `"InProgress"` as status values, and `details`
+/// to be a flat object (not wrapped in `{"result": ...}`).
+#[derive(Serialize)]
+#[serde(tag = "status", content = "details")]
+pub enum AccountBalanceCompatStatus {
+    /// Task completed successfully; `details` is the flat `HDAccountBalance` JSON object.
+    Ok(HDAccountBalance),
+    /// Task failed; `details` is a human-readable error string.
+    Error(String),
+    InProgress(AccountBalanceInProgressStatus),
 }
 
 /// We can't use `std::convert::Infallible` as [`RpcTaskTypes::UserAction`] because it doesn't implement `Serialize`.
@@ -65,7 +80,8 @@ impl RpcTaskTypes for InitAccountBalanceTask {
     type UserAction = AccountBalanceUserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RpcTask for InitAccountBalanceTask {
     fn initial_status(&self) -> Self::InProgressStatus { AccountBalanceInProgressStatus::RequestingAccountBalance }
 
@@ -94,15 +110,26 @@ pub async fn init_account_balance(
 pub async fn init_account_balance_status(
     ctx: MmArc,
     req: RpcTaskStatusRequest,
-) -> MmResult<AccountBalanceRpcTaskStatus, RpcTaskStatusError> {
+) -> MmResult<AccountBalanceCompatStatus, RpcTaskStatusError> {
     let coins_ctx = CoinsContext::from_ctx(&ctx).map_to_mm(RpcTaskStatusError::Internal)?;
     let mut task_manager = coins_ctx
         .account_balance_task_manager
         .lock()
         .map_to_mm(|e| RpcTaskStatusError::Internal(e.to_string()))?;
-    task_manager
+    let raw_status = task_manager
         .task_status(req.task_id, req.forget_if_finished)
-        .or_mm_err(|| RpcTaskStatusError::NoSuchTask(req.task_id))
+        .or_mm_err(|| RpcTaskStatusError::NoSuchTask(req.task_id))?;
+    let compat = match raw_status {
+        RpcTaskStatus::Ready(result) => match result {
+            MmRpcResult::Ok { result: balance } => AccountBalanceCompatStatus::Ok(balance),
+            MmRpcResult::Err(e) => AccountBalanceCompatStatus::Error(format!("{}", e.get_inner())),
+        },
+        RpcTaskStatus::InProgress(s) => AccountBalanceCompatStatus::InProgress(s),
+        RpcTaskStatus::UserActionRequired(_) => {
+            AccountBalanceCompatStatus::Error("Unexpected user action required".to_owned())
+        },
+    };
+    Ok(compat)
 }
 
 pub(crate) mod common_impl {

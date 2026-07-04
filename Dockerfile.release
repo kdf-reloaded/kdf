@@ -1,6 +1,29 @@
-FROM ubuntu:bionic
+# Runtime image for the release `kdf` binary. The release workflow
+# (.github/workflows/release.yml, `docker` job) places the pre-built Linux
+# binary as `kdf` in the build context before building this image.
+#
+# Base is a *supported* Ubuntu LTS: the previous `ubuntu:bionic` (18.04) was
+# EOL, so it could not receive fixes for issues such as gnupg CVE-2025-68973 or
+# systemd CVE-2021-33910 without an Ubuntu Pro/ESM subscription — an in-place
+# `apt dist-upgrade` on an EOL release fetches nothing. 24.04 (noble) is under
+# standard security support, so `apt upgrade` delivers the patched base
+# packages. The binary is built against Debian 11's glibc (2.31), which runs
+# forward-compatibly on 24.04's newer glibc.
+FROM ubuntu:24.04
+
+# Pull the latest security patches and keep only what a runtime needs
+# (ca-certificates for TLS root verification). gnupg is an apt keyring tool with
+# no role at runtime, so drop it to remove that attack surface entirely.
+RUN apt-get update \
+ && apt-get -y upgrade \
+ && apt-get -y install --no-install-recommends ca-certificates \
+ && apt-get -y purge gnupg gpgv 2>/dev/null || true \
+ && apt-get -y autoremove --purge \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /mm2
-COPY target-xenial/release/mm2 /app/mm2
+COPY kdf /app/kdf
 EXPOSE 7783
 ENV PATH="/app:${PATH}"
-CMD mm2
+CMD kdf

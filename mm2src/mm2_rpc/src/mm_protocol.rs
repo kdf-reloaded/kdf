@@ -16,6 +16,7 @@ pub enum MmRpcVersion {
 #[serde(deny_unknown_fields)]
 pub struct MmRpcRequest {
     pub mmrpc: MmRpcVersion,
+    #[serde(alias = "rpc_pass")]
     pub userpass: Option<String>,
     pub method: String,
     #[serde(default)]
@@ -174,7 +175,7 @@ mod tests {
     use serde_json as json;
     use serde_json::{json, Value as Json};
 
-    use crate::mm_protocol::{MmRpcBuilder, MmRpcResponse};
+    use crate::mm_protocol::{MmRpcBuilder, MmRpcRequest, MmRpcResponse};
 
     #[derive(Display, Serialize, SerializeErrorType)]
     #[serde(tag = "error_type", content = "error_data")]
@@ -249,5 +250,18 @@ mod tests {
             .expect("Expected 'error' field")
             .contains("Internal error: Couldn't serialize an RPC response: An expected error"));
         assert_eq!(value["error_type"].as_str(), Some("InternalError"));
+    }
+
+    #[test]
+    fn test_mm_rpc_request_accepts_rpc_pass_alias() {
+        let request: MmRpcRequest = json::from_value(json!({
+            "mmrpc": "2.0",
+            "rpc_pass": "secret",
+            "method": "active_swaps",
+            "params": {}
+        }))
+        .unwrap();
+
+        assert_eq!(request.userpass.as_deref(), Some("secret"));
     }
 }

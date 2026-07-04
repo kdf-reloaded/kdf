@@ -1,12 +1,17 @@
 name: Build Linux
 
-# Linux x86_64 release build.
+# Linux x86_64 build, produced inside a pinned Debian 11 (glibc 2.31) container
+# so the resulting binary runs on any host with glibc >= 2.31 (Debian 11/12,
+# Ubuntu 20.04+, RHEL/Rocky 9, ...). Building on a newer base (e.g. the
+# ubuntu-latest image, glibc 2.39) would raise the glibc floor and make the
+# binary refuse to start on those still-common hosts.
 #
-# Manually dispatched (and callable from `dev-build.yml`). We don't run
-# this on every push — `test.yml` already exercises the Linux compile
-# path via `cargo test`, and Linux release artifacts aren't needed on
-# every commit. Trigger this when you actually want a downloadable
-# binary, or when a downstream Docker / packaging step needs one.
+# Both pipelines reuse this workflow via `workflow_call`, so BOTH the signed
+# release builds (release.yml) AND the unsigned dev/staging snapshots
+# (dev-build.yml) inherit the same low glibc floor and stay backwards-compatible.
+#
+# Also callable manually via workflow_dispatch. `profile` selects the cargo
+# profile (release / dev).
 
 on:
   workflow_dispatch:
@@ -25,16 +30,33 @@ on:
 
 jobs:
   build:
-    # GitHub-hosted Ubuntu runner; Rust stable (host target
-    # x86_64-unknown-linux-gnu) is preinstalled on the image.
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    container:
+      image: debian:11
+    timeout-minutes: 120
 
     steps:
+      # The debian:11 image is minimal: install everything the build needs.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev protobuf-compiler cmake \
+            clang libclang-dev git curl ca-certificates
+          rm -rf /var/lib/apt/lists/*
+
+      # The container runs as root; mark the checkout dir safe for git.
+      - name: Trust workspace for git
+        run: git config --global --add safe.directory '*'
+
       - uses: actions/checkout@v7
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # Install the toolchain via rustup; rust-toolchain.toml pins the version.
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Check Rust toolchain
         run: rustc --version && cargo --version
@@ -46,13 +68,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: linux-${{ hashFiles('**/Cargo.lock') }}
+          key: linux-debian11-${{ inputs.profile }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-debian11-${{ inputs.profile }}-
 
-      - name: Build mm2
-        run: cargo build --bin mm2 --target x86_64-unknown-linux-gnu --profile ${{ inputs.profile }}
+      - name: Build kdf
+        run: cargo build --bin kdf --target x86_64-unknown-linux-gnu --profile ${{ inputs.profile }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mm2-x86_64-unknown-linux-gnu
-          path: target/x86_64-unknown-linux-gnu/${{ inputs.profile }}/mm2
+          name: kdf-x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/${{ inputs.profile }}/kdf

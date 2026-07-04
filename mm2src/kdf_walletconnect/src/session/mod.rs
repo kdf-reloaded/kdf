@@ -169,6 +169,7 @@ pub struct SessionRecord {
     #[serde(default)]
     pub active_chain_id: Option<String>,
     /// Negotiated transport encoding (hex / base64).
+    #[serde(default)]
     pub encoding_algo: EncodingAlgo,
 }
 
@@ -250,12 +251,44 @@ impl Session {
     }
 }
 
+/// The public `session-info` wire record (chapter 22 §22.8.1.5 / §22.9A.2 RP6).
+///
+/// Returned by the `wc_get_session` / `wc_get_sessions` RPC handlers. The five
+/// top-level field spellings are dictated by §22.8.1.5 and are exhaustive: the
+/// per-account `sessionProperties.keys` detail (§22.8.1.6) is delivered at
+/// session-settle and consumed internally by the signing integrations, not
+/// emitted in this record.
+#[derive(Clone, Serialize)]
+pub struct SessionInfo {
+    /// Session topic.
+    pub topic: String,
+    /// Wallet-reported WC2 app metadata.
+    pub metadata: Metadata,
+    /// Originating pairing topic.
+    pub pairing_topic: String,
+    /// Map: agreed CAIP namespace → WC2 namespace record.
+    pub namespaces: SettleNamespaces,
+    /// Session expiry, Unix epoch seconds.
+    pub expiry: u64,
+}
+
+impl From<&Session> for SessionInfo {
+    fn from(session: &Session) -> Self {
+        SessionInfo {
+            topic: session.topic.to_string(),
+            metadata: session.metadata.clone(),
+            pairing_topic: session.pairing_topic.to_string(),
+            namespaces: session.namespaces.clone(),
+            expiry: session.expiry,
+        }
+    }
+}
+
 /// In-memory index of live sessions, keyed by topic.
 #[derive(Default)]
 pub struct SessionManager {
     sessions: Mutex<HashMap<Topic, Session>>,
 }
-
 impl SessionManager {
     pub fn new() -> Self { Self::default() }
 
@@ -273,6 +306,26 @@ impl SessionManager {
 
     /// The topics of all live sessions.
     pub fn topics(&self) -> Vec<Topic> { self.sessions.lock().keys().cloned().collect() }
+
+    /// Builds the [`SessionInfo`] wire record for a single session, looked up by
+    /// its topic. When `include_pairing` is set, a session is also matched if
+    /// `topic` equals its pairing topic (chapter 22 §22.9A.2 AC3).
+    pub fn session_info(&self, topic: &Topic, include_pairing: bool) -> Option<SessionInfo> {
+        let guard = self.sessions.lock();
+        let session = guard.get(topic).or_else(|| {
+            if include_pairing {
+                guard.values().find(|session| &session.pairing_topic == topic)
+            } else {
+                None
+            }
+        })?;
+        Some(SessionInfo::from(session))
+    }
+
+    /// Builds the [`SessionInfo`] wire records for every live session.
+    pub fn all_session_info(&self) -> Vec<SessionInfo> {
+        self.sessions.lock().values().map(SessionInfo::from).collect()
+    }
 
     /// The transport material needed to encrypt/decrypt traffic on a session:
     /// its symmetric key and the negotiated payload encoding. `None` when no
@@ -294,5 +347,105 @@ impl SessionManager {
             },
             None => false,
         }
+    }
+
+    /// Resolves the topic of a settled session whose negotiated namespaces grant
+    /// the given CAIP-2 chain id (e.g. `eip155:1`).
+    ///
+    /// This is the lookup behind the §22.3 integration trait's session-pointer
+    /// method: a coin support module knows only its own CAIP-2 chain id and asks
+    /// the subsystem which settled session may carry signing requests for it. A
+    /// session grants a chain when any of its agreed namespace entries lists the
+    /// chain in its `chains` set or carries a CAIP-10 account under that chain
+    /// (§22.8.1.4). The first matching session (by topic order) is returned.
+    pub fn session_topic_for_chain(&self, chain_id: &str) -> Option<Topic> {
+        self.sessions
+            .lock()
+            .values()
+            .find(|session| session_grants_chain(&session.namespaces, chain_id))
+            .map(|session| session.topic.clone())
+    }
+
+    /// Resolves, for the session on `topic`, the wallet's WC2 app-metadata `name`
+    /// and the `sessionProperties.keys` entry matching the signing account
+    /// `address` (matched against the entry's `bech32Address` or raw `address`).
+    ///
+    /// Both outputs are dictated wire signals consumed by a coin integration: the
+    /// metadata `name` drives the Cosmos binary-field encoding rule (chapter 22
+    /// §22.8.1.2 — `Keplr` ⇒ base64, otherwise hex) and the matched entry's
+    /// `isNanoLedger` flag drives the amino-vs-direct selection (§22.8.1.7). The
+    /// return is intentionally the generic WC types ([`KeyInfo`]), never a
+    /// chain-family type, so this stays coin-agnostic.
+    ///
+    /// Returns `None` only when no session is registered for `topic`; a session
+    /// without a matching keys entry yields `(name, None)`.
+    pub fn signing_account_details(&self, topic: &Topic, address: &str) -> Option<(String, Option<KeyInfo>)> {
+        let guard = self.sessions.lock();
+        let session = guard.get(topic)?;
+        let name = session.metadata.name.clone();
+        let entry = session
+            .properties
+            .as_ref()
+            .and_then(|props| props.keys.as_ref())
+            .and_then(|keys| {
+                keys.iter()
+                    .find(|key| key.bech32_address == address || key.address == address)
+                    .cloned()
+            });
+        Some((name, entry))
+    }
+}
+
+/// Whether a session's agreed namespaces grant the given CAIP-2 chain id.
+///
+/// A chain is granted when any namespace entry lists it in `chains`, or carries
+/// a CAIP-10 account (`<namespace>:<reference>:<address>`) under it.
+fn session_grants_chain(namespaces: &SettleNamespaces, chain_id: &str) -> bool {
+    let account_prefix = format!("{chain_id}:");
+    namespaces.values().any(|namespace| {
+        let in_chains = namespace
+            .chains
+            .as_ref()
+            .map_or(false, |chains| chains.contains(chain_id));
+        let in_accounts = namespace.accounts.as_ref().map_or(false, |accounts| {
+            accounts.iter().any(|account| account.starts_with(&account_prefix))
+        });
+        in_chains || in_accounts
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_grants_chain;
+    use relay_rpc::rpc::params::session::{Namespace, SettleNamespaces};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn namespaces_with(chains: &[&str], accounts: &[&str]) -> SettleNamespaces {
+        let namespace = Namespace {
+            chains: Some(chains.iter().map(|c| c.to_string()).collect::<BTreeSet<_>>()),
+            accounts: Some(accounts.iter().map(|a| a.to_string()).collect::<BTreeSet<_>>()),
+            methods: BTreeSet::new(),
+            events: BTreeSet::new(),
+        };
+        let mut map = BTreeMap::new();
+        map.insert("eip155".to_string(), namespace);
+        SettleNamespaces(map)
+    }
+
+    #[test]
+    fn grants_chain_via_chains_set() {
+        let namespaces = namespaces_with(&["eip155:1", "eip155:137"], &[]);
+        assert!(session_grants_chain(&namespaces, "eip155:1"));
+        assert!(session_grants_chain(&namespaces, "eip155:137"));
+        assert!(!session_grants_chain(&namespaces, "eip155:56"));
+        assert!(!session_grants_chain(&namespaces, "cosmos:cosmoshub-4"));
+    }
+
+    #[test]
+    fn grants_chain_via_caip10_account() {
+        let namespaces = namespaces_with(&[], &["eip155:1:0x1111111111111111111111111111111111111111"]);
+        assert!(session_grants_chain(&namespaces, "eip155:1"));
+        // A prefix that is not a CAIP-10 chain boundary must not match.
+        assert!(!session_grants_chain(&namespaces, "eip155:11"));
     }
 }

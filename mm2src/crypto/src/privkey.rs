@@ -20,6 +20,7 @@ use ed25519_dalek_bip32::{DerivationPath as Ed25519DerivationPath, Error as Ed25
 use kdf_crypto::{sha256, ChecksumType};
 use keys::{Error as KeysError, KeyPair, Private, Secret as Secp256k1Secret};
 use mm2_err_handle::prelude::*;
+use primitives::hash::H160;
 use rustc_hex::FromHexError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -51,6 +52,8 @@ pub enum PrivKeyError {
     ExpectedCompressedKeys,
     #[error("key_pair_from_seed: Failed to create KeyPair from Private {0}")]
     PrivateIntoKeyPair(KeysError),
+    #[error("shared_db_id_from_seed: passphrase must not be empty")]
+    EmptyPassphrase,
 }
 
 fn private_from_seed(seed: &str) -> PrivKeyResult<Private> {
@@ -119,6 +122,29 @@ pub fn key_pair_from_secret(secret: &[u8]) -> PrivKeyResult<KeyPair> {
         checksum_type: ChecksumType::DSHA256,
     };
     Ok(KeyPair::from_private(private).map_err(PrivKeyError::KeyPairFromSecret)?)
+}
+
+/// Reloaded-chosen namespace salt for the process-level shared-database
+/// identifier derivation (R18). This names only a process-local on-disk database
+/// namespace; it is NOT part of any third-party interop contract and is
+/// deliberately a fresh reloaded-branded constant (it does not reproduce any
+/// upstream salt expression).
+const SHARED_DB_ID_SALT: &str = "kdf-reloaded-shared-db-id-namespace-v1";
+
+/// Derives the 20-byte process-level shared-database identifier from the active
+/// seed passphrase (R18): strip a leading `0x` prefix, combine the passphrase
+/// with [`SHARED_DB_ID_SALT`], hash the combined value into a secp256k1 private
+/// key, form a key-pair, and take its `RIPEMD160(SHA256(public_key))` address
+/// hash. Rejects an empty passphrase.
+pub fn shared_db_id_from_seed(passphrase: &str) -> PrivKeyResult<H160> {
+    if passphrase.is_empty() {
+        return MmError::err(PrivKeyError::EmptyPassphrase);
+    }
+    let stripped = passphrase.strip_prefix("0x").unwrap_or(passphrase);
+    let salted = format!("{SHARED_DB_ID_SALT}{stripped}");
+    let secret = secp_privkey_from_hash(sha256(salted.as_bytes()));
+    let key_pair = key_pair_from_secret(secret.as_slice())?;
+    Ok(key_pair.public().address_hash())
 }
 
 /// Derives a 64-byte BIP39 seed from a mnemonic phrase.
@@ -202,4 +228,25 @@ fn serializable_secp256k1_keypair_test() {
     let invalid_privkey_serialized = json::to_string(&invalid_privkey).unwrap();
     let err = json::from_str::<SerializableSecp256k1Keypair>(&invalid_privkey_serialized).unwrap_err();
     println!("{err}");
+}
+
+#[test]
+fn shared_db_id_from_seed_rejects_empty_passphrase() {
+    let err = shared_db_id_from_seed("").unwrap_err();
+    assert!(matches!(err.into_inner(), PrivKeyError::EmptyPassphrase));
+}
+
+#[test]
+fn shared_db_id_from_seed_is_deterministic_and_seed_specific() {
+    let a = shared_db_id_from_seed("my secret seed phrase").unwrap();
+    let b = shared_db_id_from_seed("my secret seed phrase").unwrap();
+    assert_eq!(a, b);
+
+    let other = shared_db_id_from_seed("a different seed phrase").unwrap();
+    assert_ne!(a, other);
+
+    // A leading `0x` prefix is stripped before derivation.
+    let prefixed = shared_db_id_from_seed("0xdeadbeef").unwrap();
+    let unprefixed = shared_db_id_from_seed("deadbeef").unwrap();
+    assert_eq!(prefixed, unprefixed);
 }

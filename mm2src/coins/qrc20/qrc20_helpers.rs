@@ -236,7 +236,8 @@ impl Qrc20Coin {
         let params = function.encode_input(&[Token::Address(to_addr), Token::Uint(amount)])?;
 
         let script_pubkey =
-            generate_contract_call_script_pubkey(&params, gas_limit, gas_price, &self.contract_address)?.to_bytes();
+            generate_contract_call_script_pubkey(&params, gas_limit, gas_price, self.contract_address.as_bytes())?
+                .to_bytes();
 
         Ok(ContractCallOutput {
             value: OUTPUT_QTUM_AMOUNT,

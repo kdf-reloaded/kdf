@@ -19,6 +19,7 @@
 //! The IndexedDB backend and RPC handlers are added in subsequent
 //! P10.3.x phases.
 
+pub mod activation;
 pub mod context;
 pub mod errors;
 pub mod model;
@@ -30,7 +31,9 @@ pub mod store;
 
 pub use context::NftCtx;
 
-pub use errors::{ClearNftDbError, GetNftInfoError, LockDbError, MetadataFetchError, ParseChainError,
+pub use activation::{enable_nft, EnableNftRequest, EnableNftResponse, NftActivationParams, NftActivationProtocol,
+                     NftProtocolData, NftProvider, NftProviderInfo};
+pub use errors::{ClearNftDbError, EnableNftError, GetNftInfoError, LockDbError, MetadataFetchError, ParseChainError,
                  ParseContractTypeError, ParseTransferStatusError, SpamFilterError, TransferConfirmationsError,
                  UpdateNftError, UpdateSpamPhishingError};
 pub use model::{Chain, ChainTicker, ClearNftDbReq, ContractType, Nft, NftCommon, NftInfo, NftList, NftListFilters,

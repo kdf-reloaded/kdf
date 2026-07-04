@@ -114,7 +114,8 @@ impl RpcTaskTypes for InitHwTask {
     type UserAction = InitHwUserAction;
 }
 
-#[async_trait]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl RpcTask for InitHwTask {
     fn initial_status(&self) -> Self::InProgressStatus { InitHwInProgressStatus::Initializing }
 
@@ -128,7 +129,8 @@ impl RpcTask for InitHwTask {
                     on_connected: InitHwInProgressStatus::Initializing,
                     on_connection_failed: InitHwInProgressStatus::Initializing,
                     on_button_request: InitHwInProgressStatus::ReadPublicKeyFromTrezor,
-                    on_pin_request: InitHwAwaitingStatus::WaitForTrezorPin,
+                    on_pin_request: InitHwAwaitingStatus::EnterTrezorPin,
+                    on_passphrase_request: InitHwAwaitingStatus::EnterTrezorPassphrase,
                     on_ready: InitHwInProgressStatus::Initializing,
                 })
                 .with_connect_timeout(TREZOR_CONNECT_TIMEOUT)

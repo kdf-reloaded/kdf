@@ -2,8 +2,12 @@ extern crate serde_derive;
 
 use crate::{NumConversResult, SolanaCoin, SolanaFeeDetails, TransactionDetails, TransactionType};
 use bigdecimal::BigDecimal;
-use solana_native_token::lamports_to_sol;
 use std::convert::TryFrom;
+
+/// `solana_native_token::lamports_to_sol` is deprecated (its note points callers
+/// at a CLI display helper); this is the identical lamports -> SOL conversion it
+/// performed (`lamports / LAMPORTS_PER_SOL`).
+fn lamports_to_sol(lamports: u64) -> f64 { lamports as f64 / solana_native_token::LAMPORTS_PER_SOL as f64 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SolanaConfirmedTransaction {

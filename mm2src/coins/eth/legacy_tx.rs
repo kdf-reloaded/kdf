@@ -356,6 +356,64 @@ impl SignedTransaction {
     pub fn tx_hash(&self) -> H256 { self.transaction.hash }
 }
 
+/// Assemble a signed EIP-155 legacy transaction from a device-returned signature.
+///
+/// `v`, `r`, `s` are the raw signature components returned by an external signer
+/// (e.g. a Trezor device). The device applies EIP-155 replay protection when
+/// computing `v`, so this helper normalizes `v` back to the canonical recovery
+/// parameter (`0` / `1`) and then re-applies EIP-155 replay protection through
+/// [`Transaction::with_signature`] with the same `chain_id`, producing a signed
+/// transaction whose RLP encoding and hash are byte-identical to the local
+/// signer's output for the same unsigned transaction and chain id (CRD R50.7 /
+/// R50.12 / R50.22).
+///
+/// `r` and `s` are big-endian, minimally trimmed (`<= 32` bytes) as returned by
+/// the device. A structurally invalid recovery value or oversized component
+/// yields [`EthKeyError::InvalidSignature`] (CRD R50.18); a signature that does
+/// not recover a public key is surfaced by [`SignedTransaction::new`].
+pub fn signed_eth_tx_from_rsv(
+    unsigned: Transaction,
+    v: u32,
+    r: &[u8],
+    s: &[u8],
+    chain_id: Option<u64>,
+) -> Result<SignedTransaction, EthKeyError> {
+    let standard_v = normalize_recovery_v(v, chain_id)?;
+    let r_h256 = h256_from_be_slice(r)?;
+    let s_h256 = h256_from_be_slice(s)?;
+    let sig = Signature::from_rsv(&r_h256, &s_h256, standard_v);
+    SignedTransaction::new(unsigned.with_signature(sig, chain_id))
+}
+
+/// Normalize a device-returned recovery value to the canonical `0` / `1` form.
+///
+/// For an EIP-155 chain id `n`, `standard_v = v - (2n + 35)`. For a pre-EIP-155
+/// signature (`chain_id == None`), `standard_v = v - 27`. Any value that does not
+/// fall in `{0, 1}` after normalization is treated as an invalid recovery value
+/// (CRD R50.7 / R50.18).
+fn normalize_recovery_v(v: u32, chain_id: Option<u64>) -> Result<u8, EthKeyError> {
+    let v = v as u64;
+    let standard = match chain_id {
+        Some(n) => v.checked_sub(2u64.saturating_mul(n).saturating_add(35)),
+        None => v.checked_sub(27),
+    };
+    match standard {
+        Some(sv @ 0..=1) => Ok(sv as u8),
+        _ => Err(EthKeyError::InvalidSignature),
+    }
+}
+
+/// Left-pad a big-endian, minimally-trimmed byte slice (`<= 32` bytes) into an
+/// `H256`. An oversized slice is rejected as an invalid signature component.
+fn h256_from_be_slice(bytes: &[u8]) -> Result<H256, EthKeyError> {
+    if bytes.len() > 32 {
+        return Err(EthKeyError::InvalidSignature);
+    }
+    let mut buf = [0u8; 32];
+    buf[32 - bytes.len()..].copy_from_slice(bytes);
+    Ok(H256::from(buf))
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 fn keccak256_h256(bytes: &[u8]) -> H256 {
@@ -491,5 +549,62 @@ mod tests {
         let decoded = UnverifiedTransaction::decode(&mut slice).unwrap();
         assert_eq!(decoded.action, Action::Create);
         assert_eq!(decoded.data, vec![0x60, 0x80, 0x60, 0x40, 0x52]);
+    }
+
+    /// Feeding the local signer's own `(v, r, s)` back through
+    /// `signed_eth_tx_from_rsv` must reproduce byte-identical RLP and hash
+    /// (CRD R50.7 / R50.12 / R50.22).
+    #[test]
+    fn signed_eth_tx_from_rsv_matches_local_signer() {
+        let secret = Secret::from_str("4646464646464646464646464646464646464646464646464646464646464646").unwrap();
+        let to = Address::from_str("3535353535353535353535353535353535353535").unwrap();
+        let chain_id = Some(1u64);
+        let tx = Transaction {
+            nonce: U256::from(9u64),
+            gas_price: U256::from(20_000_000_000u64),
+            gas: U256::from(21000u64),
+            action: Action::Call(to),
+            value: U256::from(1_000_000_000_000_000_000u64),
+            data: Vec::new(),
+        };
+
+        let local = tx.clone().sign(&secret, chain_id);
+        // The local signed tx carries the EIP-155-adjusted `v` (device-equivalent
+        // recovery value) and the `r`/`s` components in big-endian form.
+        let mut r_be = [0u8; 32];
+        let mut s_be = [0u8; 32];
+        local.transaction.r.to_big_endian(&mut r_be);
+        local.transaction.s.to_big_endian(&mut s_be);
+        let device_v = local.transaction.v as u32;
+
+        let assembled = signed_eth_tx_from_rsv(tx, device_v, &r_be, &s_be, chain_id).unwrap();
+
+        assert_eq!(
+            alloy::rlp::encode(&assembled),
+            alloy::rlp::encode(&local),
+            "RLP must be byte-identical to the local signer"
+        );
+        assert_eq!(
+            assembled.tx_hash(),
+            local.tx_hash(),
+            "tx_hash must match the local signer"
+        );
+        assert_eq!(assembled.sender(), local.sender(), "recovered sender must match");
+    }
+
+    /// A structurally invalid recovery value must be rejected (CRD R50.18).
+    #[test]
+    fn signed_eth_tx_from_rsv_rejects_invalid_recovery() {
+        let tx = Transaction {
+            nonce: U256::from(0u64),
+            gas_price: U256::from(1u64),
+            gas: U256::from(21000u64),
+            action: Action::Call(Address::from([1u8; 20])),
+            value: U256::from(0u64),
+            data: Vec::new(),
+        };
+        // For chain_id 1 the valid device `v` values are `2*1 + 35 + {0,1}` = 37/38.
+        let err = signed_eth_tx_from_rsv(tx, 99, &[1u8], &[1u8], Some(1)).unwrap_err();
+        assert!(matches!(err, EthKeyError::InvalidSignature));
     }
 }

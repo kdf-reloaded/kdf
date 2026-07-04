@@ -3,6 +3,7 @@
 use super::*;
 
 const MIN_BTC_TRADING_VOL: &str = "0.00777";
+const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
 
 /// Requests balance of the given `address`.
 pub async fn address_balance<T>(coin: &T, address: &Address) -> BalanceResult<CoinBalance>
@@ -21,8 +22,19 @@ where
         .compat()
         .await?;
 
+    // Electrum `display_balance` tracks the address script-hash (P2PKH/P2SH)
+    // and doesn't include legacy pay-to-pubkey outputs. Add P2PK script-level
+    // unspents for this address when applicable.
+    let p2pk_extra = crate::utxo::electrum_p2pk_unspents_for_address(coin.as_ref(), address)
+        .await
+        .mm_err(Into::into)?
+        .into_iter()
+        .fold(BigDecimal::default(), |acc, unspent| {
+            acc + big_decimal_from_sat_unsigned(unspent.value, coin.as_ref().decimals)
+        });
+
     Ok(CoinBalance {
-        spendable: balance,
+        spendable: balance + p2pk_extra,
         unspendable: BigDecimal::from(0),
     })
 }
@@ -212,12 +224,21 @@ pub fn my_balance<T>(coin: T) -> BalanceFut<CoinBalance>
 where
     T: UtxoCommonOps + GetUtxoListOps + MarketCoinOps,
 {
-    let my_address = try_f!(coin
-        .as_ref()
-        .derivation_method
-        .iguana_or_err()
-        .mm_err(BalanceError::from))
-    .clone();
+    let my_address = match &coin.as_ref().derivation_method {
+        DerivationMethod::Iguana(my_address) => my_address.clone(),
+        DerivationMethod::HDWallet(_) => {
+            let my_public_key = try_f!(my_public_key(coin.as_ref()).mm_err(BalanceError::from));
+            let conf = &coin.as_ref().conf;
+            address_from_pubkey(
+                my_public_key,
+                conf.pub_addr_prefix,
+                conf.pub_t_addr_prefix,
+                conf.checksum_type,
+                conf.bech32_hrp.clone(),
+                addr_format(&coin).clone(),
+            )
+        },
+    };
     let fut = async move { address_balance(&coin, &my_address).await };
     Box::new(fut.boxed().compat())
 }
@@ -310,8 +331,28 @@ pub fn min_trading_vol(coin: &UtxoCoinFields) -> MmNumber {
     if coin.conf.ticker == "BTC" {
         return MmNumber::from(MIN_BTC_TRADING_VOL);
     }
-    let dust_multiplier = MmNumber::from(10);
-    dust_multiplier * min_tx_amount(coin).into()
+
+    let min_vol_sat = non_btc_min_trading_vol_sat(coin.dust_amount, &coin.tx_fee);
+    big_decimal_from_sat_unsigned(min_vol_sat, coin.decimals).into()
+}
+
+fn non_btc_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
+    let dust_based = dust_amount.saturating_mul(10);
+
+    let fee_based = match tx_fee {
+        TxFee::Dynamic(_) => 0,
+        // Fixed-fee policy uses a representative tx size (~496 bytes) and
+        // rounds up to avoid underestimating required trading volume.
+        TxFee::FixedPerKb(fee_per_kb) => {
+            let fee_for_repr_tx = fee_per_kb
+                .saturating_mul(FIXED_FEE_MIN_VOL_TX_SIZE_BYTES)
+                .saturating_add(KILO_BYTE - 1)
+                / KILO_BYTE;
+            fee_for_repr_tx.saturating_mul(10)
+        },
+    };
+
+    std::cmp::max(dust_based, fee_based)
 }
 
 pub fn is_asset_chain(coin: &UtxoCoinFields) -> bool { coin.conf.asset_chain }
@@ -347,7 +388,18 @@ where
         + CoinWithDerivationMethod
         + GetWithdrawSenderAddress<Address = Address, Pubkey = Public>,
 {
+    validate_task_withdraw_sender(&coin, &req)?;
     InitUtxoWithdraw::new(ctx, coin, req, task_handle).await?.build().await
+}
+
+fn validate_task_withdraw_sender<T>(coin: &T, req: &WithdrawRequest) -> MmResult<(), WithdrawError>
+where
+    T: CoinWithDerivationMethod,
+{
+    if matches!(coin.derivation_method(), DerivationMethod::HDWallet(_)) && req.from.is_none() {
+        return MmError::err(WithdrawError::FromAddressNotFound);
+    }
+    Ok(())
 }
 
 pub async fn get_withdraw_from_address<T>(
@@ -581,5 +633,77 @@ where
                 })
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DummyDerivationCoin {
+        derivation_method: DerivationMethod<String, ()>,
+    }
+
+    impl CoinWithDerivationMethod for DummyDerivationCoin {
+        type Address = String;
+        type HDWallet = ();
+
+        fn derivation_method(&self) -> &DerivationMethod<Self::Address, Self::HDWallet> { &self.derivation_method }
+    }
+
+    fn withdraw_req(from: Option<WithdrawFrom>) -> WithdrawRequest {
+        WithdrawRequest::new("RICK".to_owned(), from, "receiver".to_owned(), 1.into(), false, None)
+    }
+
+    #[test]
+    fn non_btc_min_trading_vol_dynamic_is_dust_based() {
+        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::Dynamic(EstimateFeeMethod::Standard));
+        assert_eq!(min_sat, 10_000);
+    }
+
+    #[test]
+    fn non_btc_min_trading_vol_fixed_uses_max_of_dust_and_fee_based() {
+        // fee_per_kb=1000 -> ceil(1000*496/1000)=496, then *10=4960 < dust-based 10000
+        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1000));
+        assert_eq!(min_sat, 10_000);
+
+        // fee_per_kb=5000 -> ceil(5000*496/1000)=2480, then *10=24800 > dust-based 10000
+        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::FixedPerKb(5000));
+        assert_eq!(min_sat, 24_800);
+    }
+
+    #[test]
+    fn task_withdraw_hd_wallet_requires_explicit_sender() {
+        let coin = DummyDerivationCoin {
+            derivation_method: DerivationMethod::HDWallet(()),
+        };
+        let err = validate_task_withdraw_sender(&coin, &withdraw_req(None))
+            .unwrap_err()
+            .into_inner();
+
+        assert!(matches!(err, WithdrawError::FromAddressNotFound));
+    }
+
+    #[test]
+    fn task_withdraw_hd_wallet_accepts_explicit_address_id_sender() {
+        let coin = DummyDerivationCoin {
+            derivation_method: DerivationMethod::HDWallet(()),
+        };
+        let from = WithdrawFrom::AddressId(HDAddressId {
+            account_id: 0,
+            chain: Bip44Chain::External,
+            address_id: 0,
+        });
+
+        validate_task_withdraw_sender(&coin, &withdraw_req(Some(from))).unwrap();
+    }
+
+    #[test]
+    fn task_withdraw_iguana_does_not_require_sender() {
+        let coin = DummyDerivationCoin {
+            derivation_method: DerivationMethod::Iguana("sender".to_owned()),
+        };
+
+        validate_task_withdraw_sender(&coin, &withdraw_req(None)).unwrap();
     }
 }

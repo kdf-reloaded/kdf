@@ -14,6 +14,7 @@ pub enum Error {
     Bech32(bech32::Error),
     EmptyBech32Payload,
     InvalidWitnessVersion(u8),
+    UnsupportedWitnessVersion(u8),
     InvalidWitnessProgramLength(usize),
     InvalidSegwitV0ProgramLength(usize),
     UncompressedPubkey,
@@ -26,6 +27,11 @@ impl fmt::Display for Error {
             Error::Bech32(e) => write!(f, "bech32: {}", e),
             Error::EmptyBech32Payload => f.write_str("the bech32 payload was empty"),
             Error::InvalidWitnessVersion(v) => write!(f, "invalid witness script version: {}", v),
+            Error::UnsupportedWitnessVersion(v) => write!(
+                f,
+                "unsupported witness version {} (only segwit v0 is supported; witness v1 / Taproot bech32m addresses are not supported)",
+                v
+            ),
             Error::InvalidWitnessProgramLength(l) => {
                 write!(
                     f,
@@ -133,10 +139,16 @@ impl FromStr for SegwitAddress {
         if version.to_u8() > 16 {
             return Err(Error::InvalidWitnessVersion(version.to_u8()));
         }
+        // KDF only supports spending segwit v0 outputs. Witness v1 (Taproot,
+        // bech32m, `bc1p...`) and any other non-zero version must be rejected
+        // here rather than silently mis-encoded as a v0 P2WSH downstream.
+        if version.to_u8() != 0 {
+            return Err(Error::UnsupportedWitnessVersion(version.to_u8()));
+        }
         if program.len() < 2 || program.len() > 40 {
             return Err(Error::InvalidWitnessProgramLength(program.len()));
         }
-        if version.to_u8() == 0 && program.len() != 20 && program.len() != 32 {
+        if program.len() != 20 && program.len() != 32 {
             return Err(Error::InvalidSegwitV0ProgramLength(program.len()));
         }
 
@@ -176,5 +188,27 @@ mod tests {
             "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3"
         );
         assert_eq!(addr.address_type(), Some(AddressType::P2wsh));
+    }
+
+    #[test]
+    fn taproot_v1_address_is_rejected() {
+        // BIP-86 account 0, first receiving address (a real published mainnet
+        // P2TR / Taproot test vector). It is a bech32m witness-v1 address with a
+        // 32-byte program. Parsing must FAIL rather than silently produce a
+        // (mis-encoded) v0 P2WSH address.
+        let taproot = "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr";
+
+        // Sanity-check the raw decode: witness version 1, 32-byte program.
+        let (_, payload, _) = bech32::decode(taproot).unwrap();
+        let (v_slice, rest) = payload.split_at(1);
+        assert_eq!(v_slice[0].to_u8(), 1, "expected witness version 1 (Taproot)");
+        let program: Vec<u8> = bech32::FromBase32::from_base32(rest).unwrap();
+        assert_eq!(program.len(), 32, "expected a 32-byte witness program");
+
+        let parsed = SegwitAddress::from_str(taproot);
+        assert!(
+            matches!(parsed, Err(Error::UnsupportedWitnessVersion(1))),
+            "expected UnsupportedWitnessVersion(1), got Ok or wrong error"
+        );
     }
 }

@@ -181,6 +181,8 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             ZcoinRpcMode::Native => UtxoRpcMode::Native,
             ZcoinRpcMode::Light { electrum_servers, .. } => UtxoRpcMode::Electrum {
                 servers: electrum_servers.clone(),
+                min_connected: None,
+                max_connected: None,
             },
         };
         let utxo_params = UtxoActivationParams {

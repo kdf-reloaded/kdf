@@ -8,5 +8,8 @@ pub const TAG: IrnTag = IrnTag {
     response: 1115,
 };
 
+/// JSON-RPC `method` name for a session-ping request.
+pub const METHOD: &str = "wc_sessionPing";
+
 /// `wc_sessionPing` carries no parameters; the unit type stands in for it.
 pub type PingRequest = ();

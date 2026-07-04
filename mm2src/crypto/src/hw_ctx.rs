@@ -96,6 +96,26 @@ impl HardwareWalletCtx {
 
     pub fn rmd160(&self) -> H160 { dhash160(self.hw_internal_pubkey.as_slice()) }
 
+    /// Probe the current connection state of the device handle without
+    /// contending for the session or enqueuing a user-interaction task.
+    ///
+    /// Returns `true` when the device is reachable — currently usable, or
+    /// already in use by a concurrent task — and `false` when the handle is
+    /// flagged disconnected or a lightweight connectivity check fails.
+    pub async fn is_connected(&self) -> bool {
+        // Don't contend for the init lock: a concurrent (re)connection means the
+        // device is in use → reachable.
+        let client = match self.hw_wallet.try_lock() {
+            Some(guard) => match guard.deref() {
+                Some(HwClient::Trezor(client)) => client.clone(),
+                // The handle is flagged disconnected (no active client).
+                None => return false,
+            },
+            None => return true,
+        };
+        client.is_connected().await
+    }
+
     pub(crate) async fn trezor_mm_internal_pubkey<Processor>(
         trezor: &mut TrezorSession<'_>,
         processor: &Processor,
@@ -135,5 +155,45 @@ impl HardwareWalletCtx {
             }));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::block_on;
+
+    fn ctx_with_pubkey(pubkey_hex: &str) -> HardwareWalletCtx {
+        HardwareWalletCtx {
+            hw_internal_pubkey: H264::from_str(pubkey_hex).unwrap(),
+            hw_wallet_type: HwWalletType::Trezor,
+            hw_wallet: AsyncMutex::new(None),
+        }
+    }
+
+    #[test]
+    fn rmd160_is_a_stable_device_identifier() {
+        let a = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let b = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let c = ctx_with_pubkey("03774ae7f858a9411e5ef4246b70c65aac5649980be5c17891bbec17895da008cb");
+        // 20-byte identifier, deterministic for a given pubkey, distinct across devices.
+        assert_eq!(a.rmd160().as_slice().len(), 20);
+        assert_eq!(a.rmd160(), b.rmd160());
+        assert_ne!(a.rmd160(), c.rmd160());
+    }
+
+    #[test]
+    fn disconnected_handle_is_unreachable() {
+        let ctx = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        // No active client → the probe reports the device as unreachable.
+        assert!(!block_on(ctx.is_connected()));
+    }
+
+    #[test]
+    fn busy_hardware_wallet_context_reports_connected_without_waiting() {
+        let ctx = ctx_with_pubkey("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let _held_context = block_on(ctx.hw_wallet.lock());
+
+        assert!(block_on(ctx.is_connected()));
     }
 }

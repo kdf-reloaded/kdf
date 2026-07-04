@@ -3,8 +3,8 @@ use crate::NetworkInfo;
 use futures::StreamExt;
 use libp2p::swarm::NetworkBehaviour;
 use libp2p::{multiaddr::{Multiaddr, Protocol},
-             request_response::{ProtocolName, ProtocolSupport, RequestResponse, RequestResponseConfig,
-                                RequestResponseEvent, RequestResponseMessage},
+             request_response::{InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestResponse,
+                                RequestResponseConfig, RequestResponseEvent, RequestResponseMessage},
              swarm::{NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters},
              NetworkBehaviour, PeerId};
 use log::{error, info, warn};
@@ -21,13 +21,13 @@ pub type PeerAddresses = HashSet<Multiaddr>;
 
 #[derive(Debug, Clone)]
 pub enum PeersExchangeProtocol {
-    Version1,
+    Version2,
 }
 
 impl ProtocolName for PeersExchangeProtocol {
     fn protocol_name(&self) -> &[u8] {
         match self {
-            PeersExchangeProtocol::Version1 => b"/peers-exchange/1",
+            PeersExchangeProtocol::Version2 => b"/peers-exchange/2",
         }
     }
 }
@@ -91,7 +91,7 @@ pub struct PeersExchange {
 impl PeersExchange {
     pub fn new(network_info: NetworkInfo) -> Self {
         let codec = Codec::default();
-        let protocol = iter::once((PeersExchangeProtocol::Version1, ProtocolSupport::Full));
+        let protocol = iter::once((PeersExchangeProtocol::Version2, ProtocolSupport::Full));
         let config = RequestResponseConfig::default();
         let request_response = RequestResponse::new(codec, protocol, config);
         PeersExchange {
@@ -252,10 +252,6 @@ impl PeersExchange {
     }
 
     fn validate_get_known_peers_response(&self, response: &HashMap<PeerIdSerde, PeerAddresses>) -> bool {
-        if response.is_empty() {
-            return false;
-        }
-
         if response.len() > DEFAULT_PEERS_NUM {
             return false;
         }
@@ -298,6 +294,14 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeersExchangeRequest, Pee
             RequestResponseEvent::Message { message, peer } => match message {
                 RequestResponseMessage::Request { request, channel, .. } => match request {
                     PeersExchangeRequest::GetKnownPeers { num } => {
+                        if num > DEFAULT_PEERS_NUM {
+                            info!(
+                                "Skipping peers-exchange response to {:?} because requested peer count {} exceeds limit {}",
+                                peer, num, DEFAULT_PEERS_NUM
+                            );
+                            return;
+                        }
+
                         let response = PeersExchangeResponse::KnownPeers {
                             peers: self.get_random_known_peers(num),
                         };
@@ -328,21 +332,67 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeersExchangeRequest, Pee
                 request_id,
                 error,
             } => {
-                error!(
-                    "Outbound failure {:?} while requesting {:?} to peer {}",
-                    error, request_id, peer
-                );
-                self.forget_peer(&peer);
-                self.request_known_peers_from_random_peer();
+                if error == OutboundFailure::UnsupportedProtocols {
+                    info!(
+                        "Peer {} does not support peers-exchange protocol for request {:?}",
+                        peer, request_id
+                    );
+                } else {
+                    error!(
+                        "Outbound failure {:?} while requesting {:?} to peer {}",
+                        error, request_id, peer
+                    );
+                    self.forget_peer(&peer);
+                    self.request_known_peers_from_random_peer();
+                }
             },
             RequestResponseEvent::InboundFailure { peer, error, .. } => {
-                error!(
-                    "Inbound failure {:?} while processing request from peer {}",
-                    error, peer
-                );
+                if error == InboundFailure::UnsupportedProtocols {
+                    info!("Peer {} requested unsupported peers-exchange protocol", peer);
+                } else {
+                    error!(
+                        "Inbound failure {:?} while processing request from peer {}",
+                        error, peer
+                    );
+                }
             },
             RequestResponseEvent::ResponseSent { .. } => (),
         }
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::{PeerAddresses, PeerIdSerde, PeersExchange, PeersExchangeProtocol, ProtocolName};
+    use crate::{NetworkInfo, NetworkPorts, PeerId};
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn protocol_name_is_version2() {
+        assert_eq!(PeersExchangeProtocol::Version2.protocol_name(), b"/peers-exchange/2");
+    }
+
+    #[test]
+    fn validate_accepts_empty_response() {
+        let network_info = NetworkInfo::Distributed {
+            network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
+        };
+        let behaviour = PeersExchange::new(network_info);
+        let response: HashMap<PeerIdSerde, PeerAddresses> = HashMap::new();
+        assert!(behaviour.validate_get_known_peers_response(&response));
+    }
+
+    #[test]
+    fn validate_rejects_too_many_entries() {
+        let network_info = NetworkInfo::Distributed {
+            network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
+        };
+        let behaviour = PeersExchange::new(network_info);
+        let mut response = HashMap::new();
+        for _ in 0..21 {
+            response.insert(PeerIdSerde(PeerId::random()), HashSet::new());
+        }
+        assert!(!behaviour.validate_get_known_peers_response(&response));
     }
 }
 
@@ -369,7 +419,7 @@ mod tests {
         };
         let behaviour = PeersExchange::new(network_info);
         let response = HashMap::default();
-        assert!(!behaviour.validate_get_known_peers_response(&response));
+        assert!(behaviour.validate_get_known_peers_response(&response));
 
         let response = HashMap::from_iter(vec![(PeerIdSerde(PeerId::random()), HashSet::new())]);
         assert!(!behaviour.validate_get_known_peers_response(&response));

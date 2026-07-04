@@ -24,6 +24,9 @@ max_level_warn = []
 max_level_info = []
 max_level_debug = []
 max_level_trace = []
+# `strict` is an upstream opt-in that turns warnings into errors (deny(warnings)).
+# Declared to avoid unexpected-cfg warnings without enabling it.
+strict = []
 
 [dependencies]
 bech32 = { version = "0.8", default-features = false }

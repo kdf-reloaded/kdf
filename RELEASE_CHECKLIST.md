@@ -41,8 +41,8 @@ For each behavioural divergence from GLEEC KDF introduced in this release (see [
 
 ## Release artifacts
 
-- [ ] Linux x86-64 release binary built via `.github/workflows/build-linux.yml` and uploaded.
-- [ ] Other-platform binaries built via the umbrella `dev-build.yml` if they are part of this release's matrix.
+- [ ] Linux x86-64 release binary built via `.github/workflows/build-linux.yml` (Debian 11 container, glibc 2.31 floor for broad backwards compatibility) and uploaded.
+- [ ] Other-platform binaries built via the umbrella `dev-build.yml` if they are part of this release's matrix. Note: `dev`/`staging` `v*` tags auto-trigger the unsigned `dev-build.yml` snapshot; only `main` `v*` tags trigger the signed `release.yml`.
 - [ ] Artifact filenames include the version tag.
 - [ ] SHA-256 checksums published alongside artifacts.
 

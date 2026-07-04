@@ -1,0 +1,53 @@
+name: Staging Build (all platforms)
+
+# Unsigned staging snapshot builds — AUTOMATIC on every push to `staging`.
+#
+# `staging` is the feature-frozen, stabilizing pre-release line (see
+# docs/GIT_FLOW_AND_WORKING_PROCESS.md). Every push produces a fresh, unsigned
+# binary set so testers/QA always have current beta/rc artifacts without anyone
+# clicking a button. These are NOT checksummed, NOT signed, and NOT published as
+# a GitHub Release — signed public releases are cut only from `main` `v*` tags
+# via release.yml. Also runnable manually via workflow_dispatch.
+#
+# This is the automatic counterpart to the manual `dev-build.yml`. Both reuse
+# the per-platform build workflows via `workflow_call`; Linux builds inside a
+# Debian 11 container (glibc 2.31) so staging binaries stay broadly
+# backwards-compatible. If a downstream job fails (missing runner, toolchain,
+# etc.) the others still complete and upload their artifacts.
+
+on:
+  push:
+    branches:
+      - staging
+  workflow_dispatch:
+
+jobs:
+  linux:
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: release
+
+  macos:
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      profile: release
+
+  windows:
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      profile: release
+
+  ios:
+    uses: ./.github/workflows/build-ios.yml
+    with:
+      profile: release
+
+  android:
+    uses: ./.github/workflows/build-android.yml
+    with:
+      profile: release
+
+  wasm:
+    uses: ./.github/workflows/build-wasm.yml
+    with:
+      profile: dev

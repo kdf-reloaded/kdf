@@ -746,6 +746,87 @@ pub async fn close_channel(ctx: MmArc, req: CloseChannelReq) -> CloseChannelResu
     Ok(format!("Initiated closing of channel: {:?}", req.channel_id))
 }
 
+#[derive(Deserialize)]
+pub struct UpdateChannelReq {
+    pub coin: String,
+    pub rpc_channel_id: u64,
+    pub channel_options: ChannelOptions,
+}
+
+/// The publicly exposed subset of per-channel options echoed back by `update_channel`.
+/// Only the five forwarding-policy / fee parameters are part of the public contract; the
+/// internal `force_close_avoidance_max_fee_satoshis` field is exposed on the wire under the
+/// shorter `force_close_avoidance_max_fee_sats` name.
+#[derive(Serialize)]
+pub struct ChannelOptionsForRPC {
+    pub proportional_fee_in_millionths_sats: Option<u32>,
+    pub base_fee_msat: Option<u32>,
+    pub cltv_expiry_delta: Option<u16>,
+    pub max_dust_htlc_exposure_msat: Option<u64>,
+    pub force_close_avoidance_max_fee_sats: Option<u64>,
+}
+
+impl From<ChannelOptions> for ChannelOptionsForRPC {
+    fn from(options: ChannelOptions) -> Self {
+        ChannelOptionsForRPC {
+            proportional_fee_in_millionths_sats: options.proportional_fee_in_millionths_sats,
+            base_fee_msat: options.base_fee_msat,
+            cltv_expiry_delta: options.cltv_expiry_delta,
+            max_dust_htlc_exposure_msat: options.max_dust_htlc_exposure_msat,
+            force_close_avoidance_max_fee_sats: options.force_close_avoidance_max_fee_sats,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct UpdateChannelResponse {
+    channel_options: ChannelOptionsForRPC,
+}
+
+/// Mutates the configurable parameters (fees, CLTV delta, dust cap, force-close fee ceiling) of a
+/// single live channel on the running channel manager and re-advertises the channel's forwarding
+/// policy. The effective option set (coin defaults overlaid with the request) is applied,
+/// persisted, and echoed back.
+pub async fn update_channel(ctx: MmArc, req: UpdateChannelReq) -> UpdateChannelResult<UpdateChannelResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    let ln_coin = match coin {
+        MmCoinEnum::LightningCoin(c) => c,
+        _ => return MmError::err(UpdateChannelError::UnsupportedCoin(coin.ticker().to_string())),
+    };
+
+    // Resolve the channel to its live counterparty node id and channel id.
+    let channel_details = ln_coin
+        .channel_manager
+        .list_channels()
+        .into_iter()
+        .find(|chan| chan.user_channel_id == req.rpc_channel_id)
+        .ok_or(UpdateChannelError::NoSuchChannel(req.rpc_channel_id))?;
+    let counterparty_node_id = channel_details.counterparty.node_id;
+    let channel_id = channel_details.channel_id;
+
+    // Merge base: the coin's configured channel-option defaults, overlaid with the request
+    // options. Where the coin carries no defaults, the request itself is the base.
+    let mut channel_options = ln_coin
+        .conf
+        .channel_options
+        .clone()
+        .unwrap_or_else(|| req.channel_options.clone());
+    channel_options.update(req.channel_options);
+
+    let channel_config: ChannelConfig = channel_options.clone().into();
+    let channel_manager = ln_coin.channel_manager.clone();
+    async_blocking(move || {
+        channel_manager
+            .update_channel_config(&counterparty_node_id, &[channel_id], &channel_config)
+            .map_to_mm(|e| UpdateChannelError::FailureToUpdateChannel(format!("{:?}", e)))
+    })
+    .await?;
+
+    Ok(UpdateChannelResponse {
+        channel_options: channel_options.into(),
+    })
+}
+
 /// Details about the balance(s) available for spending once the channel appears on chain.
 #[derive(Serialize)]
 pub enum ClaimableBalance {
@@ -857,4 +938,139 @@ pub async fn get_claimable_balances(
         .collect();
 
     Ok(claimable_balances)
+}
+
+#[derive(Deserialize)]
+pub struct AddTrustedNodeReq {
+    pub coin: String,
+    pub node_id: PublicKeyForRPC,
+}
+
+#[derive(Serialize)]
+pub struct AddTrustedNodeResponse {
+    pub added_node: PublicKeyForRPC,
+}
+
+/// Adds a node to the set of trusted nodes from which zero-confirmation inbound channel funding is accepted.
+pub async fn add_trusted_node(ctx: MmArc, req: AddTrustedNodeReq) -> TrustedNodeResult<AddTrustedNodeResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    let ln_coin = match coin {
+        MmCoinEnum::LightningCoin(c) => c,
+        _ => return MmError::err(TrustedNodeError::UnsupportedCoin(coin.ticker().to_string())),
+    };
+
+    ln_coin.trusted_nodes.lock().insert(req.node_id.clone().into());
+
+    ln_coin
+        .persister
+        .save_trusted_nodes(ln_coin.trusted_nodes.clone())
+        .await?;
+
+    Ok(AddTrustedNodeResponse {
+        added_node: req.node_id,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct RemoveTrustedNodeReq {
+    pub coin: String,
+    pub node_id: PublicKeyForRPC,
+}
+
+#[derive(Serialize)]
+pub struct RemoveTrustedNodeResponse {
+    pub removed_node: PublicKeyForRPC,
+}
+
+/// Removes a node from the set of trusted nodes from which zero-confirmation inbound channel funding is accepted.
+pub async fn remove_trusted_node(
+    ctx: MmArc,
+    req: RemoveTrustedNodeReq,
+) -> TrustedNodeResult<RemoveTrustedNodeResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    let ln_coin = match coin {
+        MmCoinEnum::LightningCoin(c) => c,
+        _ => return MmError::err(TrustedNodeError::UnsupportedCoin(coin.ticker().to_string())),
+    };
+
+    ln_coin.trusted_nodes.lock().remove(&req.node_id.clone().into());
+
+    ln_coin
+        .persister
+        .save_trusted_nodes(ln_coin.trusted_nodes.clone())
+        .await?;
+
+    Ok(RemoveTrustedNodeResponse {
+        removed_node: req.node_id,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ListTrustedNodesReq {
+    pub coin: String,
+}
+
+#[derive(Serialize)]
+pub struct ListTrustedNodesResponse {
+    pub trusted_nodes: Vec<String>,
+}
+
+/// Lists the node public keys currently in the coin's trusted-node set.
+pub async fn list_trusted_nodes(ctx: MmArc, req: ListTrustedNodesReq) -> TrustedNodeResult<ListTrustedNodesResponse> {
+    let coin = lp_coinfind_or_err(&ctx, &req.coin).await.mm_err(Into::into)?;
+    let ln_coin = match coin {
+        MmCoinEnum::LightningCoin(c) => c,
+        _ => return MmError::err(TrustedNodeError::UnsupportedCoin(coin.ticker().to_string())),
+    };
+
+    let trusted_nodes = ln_coin
+        .trusted_nodes
+        .lock()
+        .iter()
+        .map(|pubkey| pubkey.to_string())
+        .collect();
+
+    Ok(ListTrustedNodesResponse { trusted_nodes })
+}
+
+#[cfg(test)]
+mod update_channel_tests {
+    use super::*;
+
+    #[test]
+    fn update_channel_response_serializes_force_close_avoidance_with_sats_suffix() {
+        let resp = UpdateChannelResponse {
+            channel_options: ChannelOptionsForRPC {
+                proportional_fee_in_millionths_sats: Some(7),
+                base_fee_msat: Some(11),
+                cltv_expiry_delta: Some(72),
+                max_dust_htlc_exposure_msat: Some(5_000_000),
+                force_close_avoidance_max_fee_sats: Some(1000),
+            },
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        let opts = &json["channel_options"];
+        // The wire contract exposes the shorter `_sats` spelling, not the internal `_satoshis`.
+        assert!(opts.get("force_close_avoidance_max_fee_sats").is_some());
+        assert!(opts.get("force_close_avoidance_max_fee_satoshis").is_none());
+        assert_eq!(opts["proportional_fee_in_millionths_sats"], 7);
+        assert_eq!(opts["base_fee_msat"], 11);
+        assert_eq!(opts["cltv_expiry_delta"], 72);
+        assert_eq!(opts["max_dust_htlc_exposure_msat"], 5_000_000);
+        assert_eq!(opts["force_close_avoidance_max_fee_sats"], 1000);
+    }
+
+    #[test]
+    fn update_channel_request_accepts_partial_channel_options() {
+        let raw = serde_json::json!({
+            "coin": "tBTC-lightning",
+            "rpc_channel_id": 3,
+            "channel_options": { "base_fee_msat": 1 }
+        });
+        let req: UpdateChannelReq = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.rpc_channel_id, 3);
+        assert_eq!(req.channel_options.base_fee_msat, Some(1));
+        assert_eq!(req.channel_options.proportional_fee_in_millionths_sats, None);
+        assert_eq!(req.channel_options.force_close_avoidance_max_fee_sats, None);
+    }
 }

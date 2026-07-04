@@ -7,7 +7,7 @@ edition = "2021"
 doctest = false
 
 [dependencies]
-ethereum-types = { version = "0.4", default-features = false, features = ["std", "serialize"] }
+ethereum-types.workspace = true
 hex.workspace = true
 indexmap = { version = "1.7", features = ["serde-1"] }
 mm2_err_handle.workspace = true

@@ -306,7 +306,7 @@ impl MmCoin for TendermintCoin {
             let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
             let internal_id = tx_hash_to_internal_id(&tx_hash);
 
-            Ok(TransactionDetails {
+            let tx_details = TransactionDetails {
                 tx_hex: tx_bytes.into(),
                 tx_hash,
                 from: vec![account_id.to_string()],
@@ -327,7 +327,9 @@ impl MmCoin for TendermintCoin {
                 internal_id,
                 kmd_rewards: None,
                 transaction_type: TransactionType::StandardTransfer,
-            })
+            };
+            coin.publish_tx_history_record(coin.ticker(), &tx_details);
+            Ok(tx_details)
         };
         Box::new(fut.boxed().compat())
     }

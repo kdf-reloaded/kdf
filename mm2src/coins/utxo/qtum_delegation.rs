@@ -1,3 +1,4 @@
+use crate::eth::abi::{Contract, Token};
 use crate::qrc20::rpc_clients::Qrc20ElectrumOps;
 use crate::qrc20::script_pubkey::generate_contract_call_script_pubkey;
 use crate::qrc20::{contract_addr_into_rpc_format, ContractCallOutput, GenerateQrc20TxResult, Qrc20AbiError,
@@ -13,7 +14,6 @@ use bigdecimal::Zero;
 use common::mm_number::BigDecimal;
 use common::now_ms;
 use derive_more::Display;
-use ethabi::{Contract, Token};
 use ethereum_types::H160;
 use futures::compat::Future01CompatExt;
 use futures::{FutureExt, TryFutureExt};
@@ -67,12 +67,12 @@ impl From<QtumStakingAbiError> for DelegationError {
     fn from(e: QtumStakingAbiError) -> Self { DelegationError::CannotInteractWithSmartContract(e.to_string()) }
 }
 
-impl From<ethabi::Error> for QtumStakingAbiError {
-    fn from(e: ethabi::Error) -> QtumStakingAbiError { QtumStakingAbiError::AbiError(e.to_string()) }
+impl From<crate::eth::abi::AbiError> for QtumStakingAbiError {
+    fn from(e: crate::eth::abi::AbiError) -> QtumStakingAbiError { QtumStakingAbiError::AbiError(e.to_string()) }
 }
 
-impl From<ethabi::Error> for DelegationError {
-    fn from(e: ethabi::Error) -> Self { DelegationError::from(QtumStakingAbiError::from(e)) }
+impl From<crate::eth::abi::AbiError> for DelegationError {
+    fn from(e: crate::eth::abi::AbiError) -> Self { DelegationError::from(QtumStakingAbiError::from(e)) }
 }
 
 impl From<Qrc20AbiError> for DelegationError {
@@ -349,12 +349,16 @@ impl QtumCoin {
     }
 
     fn remove_delegation_output(&self, gas_limit: u64, gas_price: u64) -> QtumStakingAbiResult<ContractCallOutput> {
-        let function: &ethabi::Function = QTUM_DELEGATE_CONTRACT.function("removeDelegation")?;
+        let function: &crate::eth::abi::Function = QTUM_DELEGATE_CONTRACT.function("removeDelegation")?;
         let params = function.encode_input(&[])?;
-        let script_pubkey =
-            generate_contract_call_script_pubkey(&params, gas_limit, gas_price, &QTUM_DELEGATE_CONTRACT_ADDRESS)
-                .mm_err(Into::into)?
-                .to_bytes();
+        let script_pubkey = generate_contract_call_script_pubkey(
+            &params,
+            gas_limit,
+            gas_price,
+            QTUM_DELEGATE_CONTRACT_ADDRESS.as_bytes(),
+        )
+        .mm_err(Into::into)?
+        .to_bytes();
         Ok(ContractCallOutput {
             value: OUTPUT_QTUM_AMOUNT,
             script_pubkey,
@@ -371,7 +375,7 @@ impl QtumCoin {
         gas_limit: u64,
         gas_price: u64,
     ) -> Result<ContractCallOutput, MmError<DelegationError>> {
-        let function: &ethabi::Function = QTUM_DELEGATE_CONTRACT.function("addDelegation")?;
+        let function: &crate::eth::abi::Function = QTUM_DELEGATE_CONTRACT.function("addDelegation")?;
         let pod = self.generate_pod(addr_hash)?;
         let params = function.encode_input(&[
             Token::Address(to_addr),
@@ -379,10 +383,14 @@ impl QtumCoin {
             Token::Bytes(pod.into()),
         ])?;
 
-        let script_pubkey =
-            generate_contract_call_script_pubkey(&params, gas_limit, gas_price, &QTUM_DELEGATE_CONTRACT_ADDRESS)
-                .mm_err(Into::into)?
-                .to_bytes();
+        let script_pubkey = generate_contract_call_script_pubkey(
+            &params,
+            gas_limit,
+            gas_price,
+            QTUM_DELEGATE_CONTRACT_ADDRESS.as_bytes(),
+        )
+        .mm_err(Into::into)?
+        .to_bytes();
         Ok(ContractCallOutput {
             value: OUTPUT_QTUM_AMOUNT,
             script_pubkey,

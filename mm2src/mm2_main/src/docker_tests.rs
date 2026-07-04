@@ -276,7 +276,7 @@ mod docker_tests {
             &conf,
             &req,
             &*keypair.private().secret,
-            CoinProtocol::ETH,
+            CoinProtocol::ETH { chain_id: None },
         ))
         .unwrap()
     }

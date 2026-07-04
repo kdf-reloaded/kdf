@@ -54,12 +54,30 @@ enum TargetArch {
     Other(String),
 }
 
+enum TargetOs {
+    Windows,
+    #[allow(dead_code)]
+    Other(String),
+}
+
 impl TargetArch {
     fn detect() -> Option<TargetArch> {
         match env::var("CARGO_CFG_TARGET_ARCH") {
             Ok(arch) => Some(TargetArch::from(arch)),
             Err(e) => {
                 eprintln!("Error on get CARGO_CFG_TARGET_ARCH env: {}", e);
+                None
+            },
+        }
+    }
+}
+
+impl TargetOs {
+    fn detect() -> Option<TargetOs> {
+        match env::var("CARGO_CFG_TARGET_OS") {
+            Ok(os) => Some(TargetOs::from(os)),
+            Err(e) => {
+                eprintln!("Error on get CARGO_CFG_TARGET_OS env: {}", e);
                 None
             },
         }
@@ -75,6 +93,15 @@ impl From<String> for TargetArch {
     }
 }
 
+impl From<String> for TargetOs {
+    fn from(os: String) -> Self {
+        match os.as_str() {
+            "windows" => TargetOs::Windows,
+            _ => TargetOs::Other(os),
+        }
+    }
+}
+
 /// Build helper C code.
 ///
 /// I think "git clone ... && cargo build" should be enough to start hacking on the Rust code.
@@ -86,7 +113,7 @@ fn build_c_code() {
         return;
     }
 
-    if cfg!(windows) {
+    if let Some(TargetOs::Windows) = TargetOs::detect() {
         // Link in the Windows-specific crash handling code.
         let lm_seh = last_modified_sec(&"seh.c").expect("Can't stat seh.c");
         let out_dir = env::var("OUT_DIR").expect("!OUT_DIR");

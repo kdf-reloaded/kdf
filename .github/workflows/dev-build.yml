@@ -1,12 +1,17 @@
 name: Dev Build (all platforms)
 
-# P7.6 — Umbrella workflow that triggers the per-platform builds in
-# parallel. Runs on manual dispatch so we can snapshot a dev binary set
-# from `reloaded-gplv2-base` without waiting for release tagging.
+# Unsigned dev/staging snapshot builds — MANUAL only (workflow_dispatch).
 #
-# Each platform job delegates to its dedicated workflow file via
-# `workflow_call`. If a downstream job fails (missing runner, missing
-# toolchain, etc.) the others still complete and upload their artifacts.
+# Use the "Run workflow" button to produce a downloadable, unsigned binary set
+# from whatever ref you pick. These are disposable snapshots: not checksummed,
+# not signed, and not published as a GitHub Release. Signed, public releases are
+# cut only from `main` `v*` tags via release.yml.
+#
+# Each platform job delegates to its dedicated per-platform workflow via
+# `workflow_call`. Linux reuses build-linux.yml, which builds inside a Debian 11
+# container (glibc 2.31) so even dev snapshots stay broadly backwards-compatible.
+# If a downstream job fails (missing runner, toolchain, etc.) the others still
+# complete and upload their artifacts.
 
 on:
   workflow_dispatch:

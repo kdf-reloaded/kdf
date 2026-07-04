@@ -27,6 +27,7 @@ pub struct SettleNamespace {
 
 /// The controlling peer's identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Controller {
     pub public_key: String,
     pub metadata: Metadata,

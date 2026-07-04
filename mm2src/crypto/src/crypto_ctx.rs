@@ -1,19 +1,24 @@
 use crate::global_hd_ctx::{GlobalHDAccountArc, GlobalHDAccountCtx};
+#[cfg(feature = "test-helpers")]
+use crate::hw_client::{HwClient, HwWalletType};
 use crate::hw_client::{HwError, HwProcessingError, TrezorConnectProcessor};
 use crate::hw_ctx::{HardwareWalletArc, HardwareWalletCtx};
 #[cfg(target_arch = "wasm32")]
 use crate::metamask_ctx::{MetamaskArc, MetamaskCtx, MetamaskError};
-use crate::privkey::{key_pair_from_seed, PrivKeyError};
+use crate::privkey::{key_pair_from_seed, shared_db_id_from_seed, PrivKeyError};
 use arrayref::array_ref;
 use common::bits256;
 use common::log::info;
 use derive_more::Display;
+#[cfg(feature = "test-helpers")]
+use futures::lock::Mutex as AsyncMutex;
 use hw_common::primitives::EcdsaCurve;
 use keys::{KeyPair, Public as PublicKey, Secret as Secp256k1Secret};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use parking_lot::RwLock;
 use primitives::hash::H160;
+#[cfg(feature = "test-helpers")] use primitives::hash::H264;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -164,6 +169,20 @@ impl CryptoCtx {
     #[inline]
     pub fn hw_wallet_rmd160(&self) -> Option<H160> { self.hw_ctx.read().to_option().map(|hw_ctx| hw_ctx.rmd160()) }
 
+    /// Returns the software global-HD wallet-identity digest (`RIPEMD160(SHA256(pubkey))`)
+    /// for the active key-pair policy, or `None` in Iguana mode.
+    ///
+    /// In `GlobalHDAccount` mode this is the internal secp256k1 public-key hash, equal to the
+    /// daemon-wide `mm2_rmd160` identity. It namespaces per-wallet HD-account storage without
+    /// requiring a hardware device, and is stable across restarts for the same mnemonic.
+    #[inline]
+    pub fn global_hd_wallet_rmd160(&self) -> Option<H160> {
+        match self.key_pair_policy {
+            KeyPairPolicy::GlobalHDAccount(_) => Some(self.secp256k1_key_pair.public().address_hash()),
+            KeyPairPolicy::Iguana => None,
+        }
+    }
+
     /// Initialize with a legacy Iguana passphrase (hashed to a single key pair).
     pub fn init_with_iguana_passphrase(ctx: MmArc, passphrase: &str) -> CryptoInitResult<Arc<CryptoCtx>> {
         Self::init_crypto_ctx_with_policy_builder(ctx, passphrase, KeyPairPolicyBuilder::Iguana)
@@ -207,6 +226,22 @@ impl CryptoCtx {
 
     /// Resets the hardware wallet context to uninitialized state.
     pub fn reset_hw_ctx(&self) { *self.hw_ctx.write() = HardwareWalletCtxState::NotInitialized; }
+
+    /// Test helper: installs a Trezor hardware-wallet context without probing a physical device.
+    #[cfg(feature = "test-helpers")]
+    pub fn init_trezor_ctx_for_tests(
+        &self,
+        hw_internal_pubkey: H264,
+        hw_wallet: Option<HwClient>,
+    ) -> HardwareWalletArc {
+        let hw_ctx = HardwareWalletArc::new(HardwareWalletCtx {
+            hw_internal_pubkey,
+            hw_wallet_type: HwWalletType::Trezor,
+            hw_wallet: AsyncMutex::new(hw_wallet),
+        });
+        *self.hw_ctx.write() = HardwareWalletCtxState::Ready(hw_ctx.clone());
+        hw_ctx
+    }
 
     /// Returns the MetaMask context if initialized (WASM only).
     #[cfg(target_arch = "wasm32")]
@@ -279,6 +314,14 @@ impl CryptoCtx {
             .pin(secp256k1_key_pair_for_legacy)
             .map_to_mm(CryptoInitError::Internal)?;
         ctx.rmd160.pin(rmd160).map_to_mm(CryptoInitError::Internal)?;
+
+        // Pin the process-level shared-database identifier (R18), derived from the
+        // active seed passphrase through a fixed salt transform (distinct from the
+        // per-account `rmd160`). Set for both the iguana and HD login paths.
+        let shared_db_id = shared_db_id_from_seed(passphrase).mm_err(Into::into)?;
+        ctx.shared_db_id
+            .pin(shared_db_id)
+            .map_to_mm(CryptoInitError::Internal)?;
 
         info!("Public key hash: {rmd160}");
         Ok(result)

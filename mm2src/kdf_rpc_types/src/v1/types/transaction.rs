@@ -471,6 +471,26 @@ mod tests {
         assert_eq!(parsed.vout[0].script.script_type, ScriptType::Call);
     }
 
+    /// Verus / VRSC-family verbose responses use the `cryptocondition` script label.
+    #[test]
+    fn parses_verus_cryptocondition_script_pubkey() {
+        let json = r#"{
+            "hex":"01",
+            "txid":"09d0ab79a668ae95ef4ab0ff9c8c9419b641a097c7acec5fcf1a862bdde39a92",
+            "version":4,
+            "locktime":0,
+            "vin":[],
+            "vout":[{"value":0.0,"n":0,"scriptPubKey":{"asm":"0403000101 OP_CHECKCRYPTOCONDITION 04030d0101 OP_DROP","hex":"270403000101cc4c75","reqSigs":1,"type":"cryptocondition","addresses":["RKLN7wFhbrJFkPG8XkKteErAe5CjqoddTm"]}}],
+            "blockhash":"00000000000834c580bc7ce98e14c7ce487d435957ad4b3324b5c58b09cbafb7",
+            "height":510665,
+            "confirmations":1,
+            "time":1743720786,
+            "blocktime":1743720786
+        }"#;
+        let parsed: Transaction = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.vout[0].script.script_type, ScriptType::CryptoCondition);
+    }
+
     #[test]
     fn parses_firo_sigma_input() {
         let json = r#"{
@@ -487,5 +507,43 @@ mod tests {
         }"#;
         let parsed: Transaction = serde_json::from_str(json).unwrap();
         assert!(matches!(parsed.vin[0], TransactionInputEnum::Sigma(_)));
+    }
+
+    #[test]
+    fn parses_firo_lelantus_jmint_output() {
+        let json = r#"{
+            "hex":"01",
+            "txid":"06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba8",
+            "version":1,
+            "locktime":368918,
+            "vin":[],
+            "vout":[{"value":0.0,"n":1,"scriptPubKey":{"asm":"OP_LELANTUSJMINT","hex":"c6","type":"lelantusjmint","addresses":["Lelantusjmint"]}}],
+            "blockhash":"0000000000000000000000000000000000000000000000000000000000000000",
+            "confirmations":1,
+            "time":1,
+            "blocktime":1
+        }"#;
+
+        let parsed: Transaction = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.vout[0].script.script_type, ScriptType::LelantusJMint);
+    }
+
+    #[test]
+    fn parses_firo_sparkmint_output() {
+        let json = r#"{
+            "hex":"01",
+            "txid":"06ed4b75010edcf404a315be70903473f44050c978bc37fbcee90e0b49114ba1",
+            "version":1,
+            "locktime":368919,
+            "vin":[],
+            "vout":[{"value":0.0,"n":1,"scriptPubKey":{"asm":"OP_SPARKMINT","hex":"c7","type":"sparkmint","addresses":["Sparkmint"]}}],
+            "blockhash":"0000000000000000000000000000000000000000000000000000000000000000",
+            "confirmations":1,
+            "time":1,
+            "blocktime":1
+        }"#;
+
+        let parsed: Transaction = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.vout[0].script.script_type, ScriptType::SparkMint);
     }
 }

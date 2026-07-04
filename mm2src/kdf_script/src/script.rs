@@ -32,6 +32,7 @@ pub enum ScriptType {
     NullData,
     WitnessScript,
     WitnessKey,
+    WitnessV1Taproot,
     // Qtum AAL (account-abstraction layer) scripts.
     CallSender,
     CreateSender,
@@ -130,6 +131,13 @@ impl Script {
         self.data.len() == 34 && self.data[0] == Opcode::OP_0 as u8 && self.data[1] == Opcode::OP_PUSHBYTES_32 as u8
     }
 
+    /// `OP_1 <32>` — a witness v1 (Taproot, BIP-341) output. Recognition
+    /// only: KDF does not yet spend Taproot inputs, but it must classify
+    /// such outputs so verbose transactions carrying them parse cleanly.
+    pub fn is_pay_to_witness_v1_taproot(&self) -> bool {
+        self.data.len() == 34 && self.data[0] == Opcode::OP_1 as u8 && self.data[1] == Opcode::OP_PUSHBYTES_32 as u8
+    }
+
     /// Decode a witness program: returns `Some((version, program_bytes))`
     /// for any 4..=42-byte script whose layout matches `OP_n PUSHBYTES_k <k bytes>`
     /// where `n` is the witness version and the push length matches the trailing payload.
@@ -225,6 +233,8 @@ impl Script {
             ScriptType::WitnessKey
         } else if self.is_pay_to_witness_script_hash() {
             ScriptType::WitnessScript
+        } else if self.is_pay_to_witness_v1_taproot() {
+            ScriptType::WitnessV1Taproot
         } else {
             ScriptType::NonStandard
         }
@@ -429,9 +439,11 @@ impl Script {
                 Ok(out)
             },
             // Qtum AAL types are recognized at the type level but
-            // currently have no address recovery in KDF.
+            // currently have no address recovery in KDF. Witness v1
+            // (Taproot) is likewise recognition-only for now.
             ScriptType::NullData
             | ScriptType::NonStandard
+            | ScriptType::WitnessV1Taproot
             | ScriptType::CallSender
             | ScriptType::CreateSender
             | ScriptType::Call
@@ -570,6 +582,16 @@ mod tests {
         assert!(pkh.is_pay_to_witness_key_hash());
         let wsh: Script = "00203b80842f4ea32806ce5e723a255ddd6490cfd28dac38c58bf9254c0577330693".into();
         assert!(wsh.is_pay_to_witness_script_hash());
+    }
+
+    #[test]
+    fn detects_and_classifies_p2tr() {
+        // BIP-86 account 0, first receive address: `OP_1 <32-byte output key>`.
+        // scriptPubKey = 5120 || tweaked output key.
+        let p2tr: Script = "5120a60869f0dbcf1dc659c9cecbaf8050135ea9e8cdc487053f1dc6880949dc684c".into();
+        assert!(p2tr.is_pay_to_witness_v1_taproot());
+        assert!(!p2tr.is_pay_to_witness_script_hash());
+        assert_eq!(p2tr.script_type(), ScriptType::WitnessV1Taproot);
     }
 
     #[test]

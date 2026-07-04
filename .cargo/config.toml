@@ -12,6 +12,19 @@
 # - mocktopus, mocktopus_macros: test mocking framework (nightly only)
 RUSTC_BOOTSTRAP = "common,mm2_err_handle,mm2_state_machine,docker_tests,mocktopus,mocktopus_macros"
 
+# Pin the iOS deployment target for every cargo-driven build (CI, local, and
+# downstream consumers that build these crates).
+#
+# Without this, the `cc`-compiled C deps (secp256k1-sys, ring, libsqlite3-sys,
+# libz-sys) default to the host SDK's deployment target (e.g. iOS 18.5), while
+# rustc links the `aarch64-apple-ios` image at that target's built-in default
+# (iOS 10.0). The C objects then reference `___chkstk_darwin`, which libSystem
+# only exports from iOS 12+, so the iOS-10.0 link fails with
+# "Undefined symbols: ___chkstk_darwin". Pinning a single modern minimum makes
+# `cc` and rustc agree, resolves the symbol, and clears the version-skew
+# linker warnings. Ignored on non-iOS Apple targets and on all other platforms.
+IPHONEOS_DEPLOYMENT_TARGET = "14.0"
+
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner-0.2.78'
 rustflags = ["--cfg=web_sys_unstable_apis"]

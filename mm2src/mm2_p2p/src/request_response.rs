@@ -6,8 +6,9 @@ use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
 use futures::StreamExt;
 use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed};
-use libp2p::request_response::{ProtocolName, ProtocolSupport, RequestId, RequestResponse, RequestResponseCodec,
-                               RequestResponseConfig, RequestResponseEvent, RequestResponseMessage, ResponseChannel};
+use libp2p::request_response::{InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId,
+                               RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
+                               RequestResponseMessage, ResponseChannel};
 use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters};
 use libp2p::NetworkBehaviour;
 use libp2p::PeerId;
@@ -27,7 +28,7 @@ pub type RequestResponseSender = mpsc::UnboundedSender<(PeerId, PeerRequest, one
 /// Build a request-response network behaviour.
 pub fn build_request_response_behaviour() -> RequestResponseBehaviour {
     let config = RequestResponseConfig::default();
-    let protocol = iter::once((Protocol::Version1, ProtocolSupport::Full));
+    let protocol = iter::once((Protocol::Version2, ProtocolSupport::Full));
     let inner = RequestResponse::new(Codec::default(), protocol, config);
 
     let (tx, rx) = mpsc::unbounded();
@@ -172,7 +173,12 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeerRequest, PeerResponse
         let (peer_id, message) = match event {
             RequestResponseEvent::Message { peer, message } => (peer, message),
             RequestResponseEvent::InboundFailure { error, .. } => {
-                error!("Error on receive a request: {:?}", error);
+                match error {
+                    InboundFailure::UnsupportedProtocols => {
+                        debug!("Remote peer requested unsupported request-response protocol; keeping connection")
+                    },
+                    error => error!("Error on receive a request: {:?}", error),
+                }
                 return;
             },
             RequestResponseEvent::OutboundFailure {
@@ -180,7 +186,13 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeerRequest, PeerResponse
                 request_id,
                 error,
             } => {
-                error!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error);
+                match &error {
+                    OutboundFailure::UnsupportedProtocols => debug!(
+                        "Peer {:?} does not support request-response protocol for request {:?}",
+                        peer, request_id
+                    ),
+                    _ => error!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error),
+                }
                 let err_response = PeerResponse::Err {
                     err: format!("{:?}", error),
                 };
@@ -221,7 +233,7 @@ impl<Proto, Req, Res> Default for Codec<Proto, Req, Res> {
 
 #[derive(Debug, Clone)]
 pub enum Protocol {
-    Version1,
+    Version2,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -248,8 +260,18 @@ macro_rules! try_io {
 impl ProtocolName for Protocol {
     fn protocol_name(&self) -> &[u8] {
         match self {
-            Protocol::Version1 => b"/request-response/1",
+            Protocol::Version2 => b"/request-response/2",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Protocol, ProtocolName};
+
+    #[test]
+    fn protocol_name_is_version2() {
+        assert_eq!(Protocol::Version2.protocol_name(), b"/request-response/2");
     }
 }
 

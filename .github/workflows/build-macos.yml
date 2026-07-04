@@ -54,14 +54,14 @@ jobs:
             target
           key: macos-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build mm2 (${{ matrix.target }})
-        run: cargo build --bin mm2 --target ${{ matrix.target }} --profile ${{ inputs.profile }}
+      - name: Build kdf (${{ matrix.target }})
+        run: cargo build --bin kdf --target ${{ matrix.target }} --profile ${{ inputs.profile }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mm2-${{ matrix.target }}
-          path: target/${{ matrix.target }}/${{ inputs.profile }}/mm2
+          name: kdf-${{ matrix.target }}
+          path: target/${{ matrix.target }}/${{ inputs.profile }}/kdf
 
   universal:
     needs: build
@@ -71,25 +71,25 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: mm2-x86_64-apple-darwin
+          name: kdf-x86_64-apple-darwin
           path: artifacts/x86_64
 
       - uses: actions/download-artifact@v8
         with:
-          name: mm2-aarch64-apple-darwin
+          name: kdf-aarch64-apple-darwin
           path: artifacts/aarch64
 
       - name: Build universal binary via lipo
         run: |
-          chmod +x artifacts/x86_64/mm2 artifacts/aarch64/mm2
+          chmod +x artifacts/x86_64/kdf artifacts/aarch64/kdf
           mkdir -p dist
-          lipo -create -output dist/mm2-universal \
-            artifacts/x86_64/mm2 \
-            artifacts/aarch64/mm2
-          lipo -info dist/mm2-universal
+          lipo -create -output dist/kdf-universal \
+            artifacts/x86_64/kdf \
+            artifacts/aarch64/kdf
+          lipo -info dist/kdf-universal
 
       - name: Upload universal binary
         uses: actions/upload-artifact@v7
         with:
-          name: mm2-universal-apple-darwin
-          path: dist/mm2-universal
+          name: kdf-universal-apple-darwin
+          path: dist/kdf-universal

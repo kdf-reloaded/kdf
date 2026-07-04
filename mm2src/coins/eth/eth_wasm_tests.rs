@@ -35,8 +35,8 @@ async fn test_send() {
         coin_type: EthCoinType::Eth,
         my_address: key_pair.address(),
         sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        key_pair: key_pair.clone(),
-        swap_contract_address: Address::from("0x7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94"),
+        signer: EthSigner::Local(key_pair.clone()),
+        swap_contract_address: Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap(),
         fallback_swap_contract: None,
         swap_v2_contracts: None,
         gas_limit_v2: EthGasLimitV2::default(),
@@ -57,6 +57,8 @@ async fn test_send() {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         tron_api: None,
         nft_swap_v2_contract: None,
+        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
+        erc20_tokens_infos: Default::default(),
     }));
     let tx = coin
         .send_maker_payment(

@@ -1,4 +1,5 @@
 use super::*;
+use script::Script;
 
 // Response/request data types and the `electrum_script_hash` helper live in
 // the sibling `electrum_types` module (carved out via P13.5 follow-up to keep
@@ -317,6 +318,16 @@ impl ElectrumClientImpl {
 
     pub async fn count_connections(&self) -> usize { self.connections.lock().await.len() }
 
+    pub async fn count_connected(&self) -> usize {
+        let mut connected = 0;
+        for connection in self.connections.lock().await.iter() {
+            if connection.is_connected().await {
+                connected += 1;
+            }
+        }
+        connected
+    }
+
     /// Check if the protocol version was checked for one of the spawned connections.
     pub async fn is_protocol_version_checked(&self) -> bool {
         for connection in self.connections.lock().await.iter() {
@@ -544,6 +555,32 @@ impl ElectrumClient {
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-transaction-get-merkle
     pub fn blockchain_transaction_get_merkle(&self, txid: H256Json, height: u64) -> RpcRes<TxMerkleBranch> {
         rpc_func!(self, "blockchain.transaction.get_merkle", txid, height)
+    }
+
+    /// Lists unspent outputs locked by the given `script`.
+    ///
+    /// `list_unspent` only queries the P2PKH script of an address, so non-standard outputs such as
+    /// pay-to-pubkey (P2PK) are never discovered through it. This helper queries an arbitrary
+    /// scriptPubKey (whose full form is known only where the wallet pubkey is available).
+    pub fn list_unspent_for_script(&self, script: &Script) -> UtxoRpcFut<Vec<UnspentInfo>> {
+        let script_hash = electrum_script_hash(script);
+        Box::new(
+            self.scripthash_list_unspent(&hex::encode(script_hash))
+                .map_to_mm_fut(UtxoRpcError::from)
+                .map(move |unspents| {
+                    unspents
+                        .iter()
+                        .map(|unspent| UnspentInfo {
+                            outpoint: OutPoint {
+                                hash: unspent.tx_hash.reversed().into(),
+                                index: unspent.tx_pos,
+                            },
+                            value: unspent.value,
+                            height: unspent.height,
+                        })
+                        .collect()
+                }),
+        )
     }
 }
 

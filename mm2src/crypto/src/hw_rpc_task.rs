@@ -7,7 +7,7 @@ use serde::Serialize;
 use std::convert::{TryFrom, TryInto};
 use std::time::Duration;
 use trezor::trezor_rpc_task::{RpcTask, RpcTaskError, RpcTaskHandle, TrezorRequestStatuses, TrezorRpcTaskProcessor};
-use trezor::{TrezorProcessingError, TrezorRequestProcessor};
+use trezor::{TrezorPassphraseResponse, TrezorProcessingError, TrezorRequestProcessor};
 
 const CONNECT_DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -17,7 +17,8 @@ pub type HwRpcTaskUserActionRequest = RpcTaskUserActionRequest<HwRpcTaskUserActi
 /// The status says to the user that he should pass a Trezor PIN to continue the pending RPC task.
 #[derive(Clone, Serialize)]
 pub enum HwRpcTaskAwaitingStatus {
-    WaitForTrezorPin,
+    EnterTrezorPin,
+    EnterTrezorPassphrase,
 }
 
 /// When it comes to interacting with a HW device,
@@ -26,6 +27,7 @@ pub enum HwRpcTaskAwaitingStatus {
 #[serde(tag = "action_type")]
 pub enum HwRpcTaskUserAction {
     TrezorPin(TrezorPinMatrix3x3Response),
+    TrezorPassphrase(TrezorPassphraseResponse),
 }
 
 impl TryFrom<HwRpcTaskUserAction> for TrezorPinMatrix3x3Response {
@@ -34,6 +36,22 @@ impl TryFrom<HwRpcTaskUserAction> for TrezorPinMatrix3x3Response {
     fn try_from(value: HwRpcTaskUserAction) -> Result<Self, Self::Error> {
         match value {
             HwRpcTaskUserAction::TrezorPin(pin) => Ok(pin),
+            HwRpcTaskUserAction::TrezorPassphrase(_) => Err(RpcTaskError::Internal(
+                "Unexpected user action: expected 'TrezorPin'".to_string(),
+            )),
+        }
+    }
+}
+
+impl TryFrom<HwRpcTaskUserAction> for TrezorPassphraseResponse {
+    type Error = RpcTaskError;
+
+    fn try_from(value: HwRpcTaskUserAction) -> Result<Self, Self::Error> {
+        match value {
+            HwRpcTaskUserAction::TrezorPassphrase(passphrase) => Ok(passphrase),
+            HwRpcTaskUserAction::TrezorPin(_) => Err(RpcTaskError::Internal(
+                "Unexpected user action: expected 'TrezorPassphrase'".to_string(),
+            )),
         }
     }
 }
@@ -45,6 +63,7 @@ pub struct HwConnectStatuses<InProgressStatus, AwaitingStatus> {
     pub on_connection_failed: InProgressStatus,
     pub on_button_request: InProgressStatus,
     pub on_pin_request: AwaitingStatus,
+    pub on_passphrase_request: AwaitingStatus,
     pub on_ready: InProgressStatus,
 }
 
@@ -57,6 +76,7 @@ where
         TrezorRequestStatuses {
             on_button_request: self.on_button_request.clone(),
             on_pin_request: self.on_pin_request.clone(),
+            on_passphrase_request: self.on_passphrase_request.clone(),
             on_ready: self.on_ready.clone(),
         }
     }
@@ -74,7 +94,8 @@ pub struct TrezorRpcTaskConnectProcessor<'a, Task: RpcTask> {
 impl<'a, Task> TrezorRequestProcessor for TrezorRpcTaskConnectProcessor<'a, Task>
 where
     Task: RpcTask,
-    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>,
+    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>
+        + TryInto<TrezorPassphraseResponse, Error = RpcTaskError>,
 {
     type Error = RpcTaskError;
 
@@ -86,6 +107,10 @@ where
         self.request_processor.on_pin_request().await
     }
 
+    async fn on_passphrase_request(&self) -> MmResult<String, TrezorProcessingError<Self::Error>> {
+        self.request_processor.on_passphrase_request().await
+    }
+
     async fn on_ready(&self) -> MmResult<(), TrezorProcessingError<Self::Error>> {
         self.request_processor.on_ready().await
     }
@@ -95,7 +120,8 @@ where
 impl<'a, Task> TrezorConnectProcessor for TrezorRpcTaskConnectProcessor<'a, Task>
 where
     Task: RpcTask,
-    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>,
+    Task::UserAction: TryInto<TrezorPinMatrix3x3Response, Error = RpcTaskError>
+        + TryInto<TrezorPassphraseResponse, Error = RpcTaskError>,
 {
     async fn on_connect(&self) -> MmResult<Duration, HwProcessingError<RpcTaskError>> {
         self.request_processor
@@ -127,6 +153,7 @@ impl<'a, Task: RpcTask> TrezorRpcTaskConnectProcessor<'a, Task> {
         let request_statuses = TrezorRequestStatuses {
             on_button_request: statuses.on_button_request,
             on_pin_request: statuses.on_pin_request,
+            on_passphrase_request: statuses.on_passphrase_request,
             on_ready: statuses.on_ready,
         };
         let request_processor = TrezorRpcTaskProcessor::new(task_handle, request_statuses);

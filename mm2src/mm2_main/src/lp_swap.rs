@@ -90,8 +90,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "lp_swap/check_balance.rs"] mod check_balance;
 #[path = "lp_swap/dex_fee.rs"] mod dex_fee;
-pub use dex_fee::{compute_dex_fee, dex_fee_amount, dex_fee_amount_from_taker_coin};
-pub(crate) use dex_fee::{dex_fee_rate, dex_fee_threshold};
+#[allow(unused_imports)]
+pub use dex_fee::{compute_dex_fee, compute_dex_fee_with_taker_pubkey, dex_fee_amount, dex_fee_amount_from_taker_coin};
+pub(crate) use dex_fee::{compute_dex_fee_with_taker_pubkey_from_coin, dex_fee_rate, dex_fee_threshold};
 #[path = "lp_swap/maker_swap.rs"] mod maker_swap;
 #[path = "lp_swap/maker_swap_v2.rs"] pub mod maker_swap_v2;
 #[path = "lp_swap/max_maker_vol_rpc.rs"] mod max_maker_vol_rpc;
@@ -126,13 +127,12 @@ pub use swap_msg::*;
 
 #[path = "lp_swap/swap_rpc.rs"] mod swap_rpc;
 use keys::{KeyPair, SECP_SIGN, SECP_VERIFY};
-use maker_swap::MakerSwapEvent;
 pub use maker_swap::{calc_max_maker_vol, check_balance_for_maker_swap, maker_swap_trade_preimage, run_maker_swap,
-                     MakerSavedEvent, MakerSavedSwap, MakerSwap, MakerSwapStatusChanged, MakerTradePreimage,
-                     RunMakerSwapInput};
+                     MakerSavedEvent, MakerSavedSwap, MakerSwap, MakerSwapEvent, MakerSwapStatusChanged,
+                     MakerTradePreimage, RunMakerSwapInput};
 pub use max_maker_vol_rpc::max_maker_vol;
 use my_swaps_storage::{MySwapsOps, MySwapsStorage};
-use pubkey_banning::BanReason;
+use pubkey_banning::BannedPubkey;
 pub use pubkey_banning::{ban_pubkey_rpc, is_pubkey_banned, list_banned_pubkeys_rpc, unban_pubkeys_rpc};
 pub use recreate_swap_data::recreate_swap_data;
 #[allow(unused_imports)]
@@ -141,11 +141,11 @@ use std::num::NonZeroUsize;
 pub use swap_rpc::*;
 #[allow(unused_imports)]
 pub use swap_watcher::{process_watcher_msg, watcher_topic, SwapWatcherMsg, TakerSwapWatcherData, WATCHER_PREFIX};
-use taker_swap::TakerSwapEvent;
 #[allow(unused_imports)]
 pub use taker_swap::{calc_max_taker_vol, check_balance_for_taker_swap, max_taker_vol, max_taker_vol_from_available,
-                     run_taker_swap, taker_swap_trade_preimage, RunTakerSwapInput, TakerSavedSwap, TakerSwap,
-                     TakerSwapPreparedParams, TakerTradePreimage};
+                     max_taker_vol_v2, min_trading_vol_v2, run_taker_swap, taker_swap_trade_preimage,
+                     RunTakerSwapInput, TakerSavedSwap, TakerSwap, TakerSwapEvent, TakerSwapPreparedParams,
+                     TakerTradePreimage};
 pub use trade_preimage::trade_preimage_rpc;
 
 pub const SWAP_PREFIX: TopicPrefix = "swap";
@@ -316,7 +316,7 @@ impl SwapV2MsgStore {
 
 struct SwapsContext {
     running_swaps: Mutex<Vec<Weak<dyn AtomicSwap>>>,
-    banned_pubkeys: Mutex<HashMap<H256Json, BanReason>>,
+    banned_pubkeys: Mutex<HashMap<H256Json, BannedPubkey>>,
     /// The cloneable receiver of multi-consumer async channel awaiting for shutdown_tx.send() to be
     /// invoked to stop all running swaps.
     /// MM2 is used as static lib on some platforms e.g. iOS so it doesn't run as separate process.
@@ -536,6 +536,13 @@ pub fn active_swaps_using_coin(ctx: &MmArc, coin: &str) -> Result<Vec<Uuid>, Str
             if swap.maker_coin() == coin || swap.taker_coin() == coin {
                 uuids.push(*swap.uuid())
             }
+        }
+    }
+    drop(swaps);
+
+    for swap in swap_ctx.active_swaps_v2_snapshot() {
+        if swap.maker_coin == coin || swap.taker_coin == coin {
+            uuids.push(swap.uuid);
         }
     }
     Ok(uuids)

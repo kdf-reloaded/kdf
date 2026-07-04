@@ -20,12 +20,12 @@
 use coins::register_balance_update_handler;
 use common::executor::{spawn, spawn_boxed, Timer};
 use common::log::{error, info, warn};
-use crypto::{CryptoCtx, CryptoInitError, HwError, HwProcessingError};
+use crypto::{CryptoCtx, CryptoInitError, EncryptedMnemonicData, HwError, HwProcessingError};
 use derive_more::Display;
 use kdf_crypto::sha256;
 use mm2_core::mm_ctx::{MmArc, MmCtx};
 use mm2_err_handle::prelude::*;
-use mm2_net_config::{net_config_for, net_config_or_panic, SUPPORTED_NETIDS};
+use mm2_net_config::{net_config_for, NetConfig, SUPPORTED_NETIDS};
 use mm2_p2p::{spawn_gossipsub, AdexBehaviourError, NodeType, RelayAddress, RelayAddressError, WssCerts};
 use rpc_task::RpcTaskError;
 use serde_json::{self as json};
@@ -38,7 +38,8 @@ use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mm2::database::init_and_migrate_db;
 use crate::mm2::lp_message_service::{init_message_service, InitMessageServiceError};
-use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, NetIdError, P2PContext};
+use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe_to_own_peer_healthcheck_topic,
+                             NetIdError, P2PContext};
 use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_memory_loop, init_ordermatch_context,
                                 lp_ordermatch_loop, orders_kick_start, BalanceUpdateOrdermatchHandler,
                                 OrdermatchInitError};
@@ -78,6 +79,8 @@ pub enum P2PInitError {
     InvalidNetId(NetIdError),
     #[display(fmt = "Invalid relay address: '{}'", _0)]
     InvalidRelayAddress(RelayAddressError),
+    #[display(fmt = "Error listening on P2P address '{}': {}", address, error)]
+    ErrorListeningOnAddress { address: String, error: String },
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     #[display(fmt = "WASM node can be a seed if only 'p2p_in_memory' is true")]
     WasmNodeCannotBeSeed,
@@ -93,6 +96,7 @@ impl From<AdexBehaviourError> for P2PInitError {
     fn from(e: AdexBehaviourError) -> Self {
         match e {
             AdexBehaviourError::ParsingRelayAddress(e) => P2PInitError::InvalidRelayAddress(e),
+            AdexBehaviourError::ListenOn { address, error } => P2PInitError::ErrorListeningOnAddress { address, error },
         }
     }
 }
@@ -246,34 +250,99 @@ impl MmInitError {
     }
 }
 
-/// Returns compile-time seed nodes from NetConfig for the given netid.
-/// Falls back to an empty list for unknown netids (which shouldn't happen
-/// because startup validation rejects unknown netids).
-#[cfg(target_arch = "wasm32")]
-fn default_seednodes(netid: u16) -> Vec<RelayAddress> {
+fn validate_netid_range(conf: &json::Value) -> MmInitResult<()> {
+    if let Some(netid) = conf["netid"].as_u64() {
+        if netid > u16::MAX as u64 {
+            return MmError::err(MmInitError::ErrorDeserializingConfig {
+                field: "netid".to_owned(),
+                error: format!("netid {} exceeds u16::MAX ({})", netid, u16::MAX),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn startup_net_config(netid: u16) -> MmInitResult<&'static dyn NetConfig> {
     match net_config_for(netid) {
-        Some(cfg) => cfg
-            .seed_nodes()
-            .iter()
-            .map(|seed| RelayAddress::Dns(seed.to_string()))
-            .collect(),
-        None => Vec::new(),
+        Some(cfg) => Ok(cfg),
+        None => MmError::err(MmInitError::UnsupportedNetId {
+            netid,
+            supported: SUPPORTED_NETIDS,
+        }),
     }
 }
 
+/// The three mutually-exclusive forms the configuration `passphrase` field may
+/// take, recognised purely by structural shape (R26). Defined here (rather than
+/// in the native-only `lp_wallet` module) because the startup handshake must
+/// recognise the field on both native and WASM targets.
+#[derive(Debug)]
+pub(crate) enum PassphraseForm {
+    /// The field is missing or JSON `null`.
+    Absent,
+    /// A JSON string carrying the mnemonic in clear.
+    Plaintext(String),
+    /// A JSON object matching the encrypted-mnemonic envelope.
+    Encrypted(EncryptedMnemonicData),
+}
+
+/// Parses the configuration `passphrase` field into one of the three forms of
+/// R26. The object (encrypted) form is recognised before the string (plaintext)
+/// form; an object that is not a well-formed envelope is a configuration error.
+pub(crate) fn parse_passphrase_form(conf: &json::Value) -> MmInitResult<PassphraseForm> {
+    let value = &conf["passphrase"];
+    if value.is_null() {
+        return Ok(PassphraseForm::Absent);
+    }
+    if value.is_object() {
+        let data: EncryptedMnemonicData =
+            json::from_value(value.clone()).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
+                field: "passphrase".to_owned(),
+                error: format!("passphrase object is not a well-formed encrypted envelope: {e}"),
+            })?;
+        return Ok(PassphraseForm::Encrypted(data));
+    }
+    let plaintext: String = json::from_value(value.clone()).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
+        field: "passphrase".to_owned(),
+        error: e.to_string(),
+    })?;
+    Ok(PassphraseForm::Plaintext(plaintext))
+}
+
+fn default_seednode_from_str(netid: u16, seed: &str) -> Option<RelayAddress> {
+    match seed.parse() {
+        Ok(RelayAddress::IPv4(ipv4)) => Some(RelayAddress::IPv4(ipv4)),
+        Ok(RelayAddress::Dns(dns)) => Some(RelayAddress::Dns(dns)),
+        Ok(RelayAddress::Memory(_)) => {
+            error!(
+                "Invalid default P2P seednode '{}' for netid {}: registry seednodes must be IPv4 or DNS hosts",
+                seed, netid
+            );
+            None
+        },
+        Err(e) => {
+            error!("Invalid default P2P seednode '{}' for netid {}: {}", seed, netid, e);
+            None
+        },
+    }
+}
+
+fn default_seednodes_from_strings(netid: u16, seed_nodes: &[&str]) -> Vec<RelayAddress> {
+    seed_nodes
+        .iter()
+        .filter_map(|seed| default_seednode_from_str(netid, seed))
+        .collect()
+}
+
 /// Returns compile-time seed nodes from NetConfig for the given netid,
-/// resolving DNS hostnames to IPv4 addresses.
-#[cfg(not(target_arch = "wasm32"))]
-fn default_seednodes(netid: u16) -> Vec<RelayAddress> {
-    use crate::mm2::lp_network::addr_to_ipv4_string;
+/// preserving hostnames so libp2p can resolve them and report seed-level diagnostics.
+fn default_seednodes(netid: u16) -> P2PResult<Vec<RelayAddress>> {
     match net_config_for(netid) {
-        Some(cfg) => cfg
-            .seed_nodes()
-            .iter()
-            .filter_map(|seed| addr_to_ipv4_string(seed).ok())
-            .map(RelayAddress::IPv4)
-            .collect(),
-        None => Vec::new(),
+        Some(cfg) => Ok(default_seednodes_from_strings(netid, cfg.seed_nodes())),
+        None => MmError::err(P2PInitError::Internal(format!(
+            "No compiled network configuration for netid {}",
+            netid
+        ))),
     }
 }
 
@@ -400,63 +469,87 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
 pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     info!("Version: {} DT {}", MM_VERSION, MM_DATETIME);
 
+    validate_netid_range(&ctx.conf)?;
+
     // Validate netid against compiled network configurations ("deny except config exists").
     let netid = ctx.netid();
-    if net_config_for(netid).is_none() {
-        let supported_desc: Vec<String> = SUPPORTED_NETIDS
-            .iter()
-            .filter_map(|&id| net_config_for(id).map(|cfg| format!("  netid {} — {}", id, cfg.network_name())))
-            .collect();
-        if netid == 0 {
-            error!(
-                "No 'netid' specified in MM2.json. You must set a supported network ID.\nSupported networks:\n{}",
-                supported_desc.join("\n")
-            );
-        } else {
-            error!(
-                "Unsupported netid {}: no compiled configuration.\nSupported networks:\n{}",
-                netid,
-                supported_desc.join("\n")
-            );
-        }
-        return MmError::err(MmInitError::UnsupportedNetId {
-            netid,
-            supported: SUPPORTED_NETIDS,
-        });
-    }
-    let net_cfg = net_config_or_panic(netid);
+    let net_cfg = match startup_net_config(netid) {
+        Ok(net_cfg) => net_cfg,
+        Err(err) => {
+            let supported_desc: Vec<String> = SUPPORTED_NETIDS
+                .iter()
+                .filter_map(|&id| net_config_for(id).map(|cfg| format!("  netid {} — {}", id, cfg.network_name())))
+                .collect();
+            if netid == 0 {
+                error!(
+                    "No 'netid' specified in MM2.json. You must set a supported network ID.\nSupported networks:\n{}",
+                    supported_desc.join("\n")
+                );
+            } else {
+                error!(
+                    "Unsupported netid {}: no compiled configuration.\nSupported networks:\n{}",
+                    netid,
+                    supported_desc.join("\n")
+                );
+            }
+            return Err(err);
+        },
+    };
     info!("Network: {} (netid {})", net_cfg.network_name(), netid);
 
-    if ctx.conf["passphrase"].is_null() && ctx.conf["hw_wallet"].is_null() {
-        return MmError::err(MmInitError::FieldNotFoundInConfig {
-            field: "passphrase".to_owned(),
-        });
-    }
+    // Recognise the three forms of the configured `passphrase` field (R26):
+    // absent/null, an encrypted envelope object, or a plaintext mnemonic string.
+    let passphrase_form = parse_passphrase_form(&ctx.conf)?;
 
-    let passphrase: String =
-        json::from_value(ctx.conf["passphrase"].clone()).map_to_mm(|e| MmInitError::ErrorDeserializingConfig {
-            field: "passphrase".to_owned(),
-            error: e.to_string(),
-        })?;
-
-    // Optionally persist the passphrase as an encrypted wallet file.
-    // If wallet_name is set in config, the passphrase is encrypted with wallet_password
-    // and saved (or verified against an existing wallet file).
+    // Resolve the signing-identity seed from the startup wallet handshake per the
+    // R27 decision matrix. On native targets this consults the on-disk wallet
+    // store (load-and-use on re-login, generate/first-save/import, or confirm); on
+    // WASM there is no store, so only the anonymous and legacy-plaintext rows apply.
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    let resolved_seed = {
         let wallet_name = ctx.conf["wallet_name"].as_str();
         let wallet_password = ctx.conf["wallet_password"].as_str();
-        crate::mm2::lp_wallet::initialize_wallet_passphrase(&ctx, &passphrase, wallet_name, wallet_password)
+        crate::mm2::lp_wallet::initialize_wallet_passphrase(&ctx, passphrase_form, wallet_name, wallet_password)
             .await
-            .map_err(|e| MmError::new(MmInitError::WalletError(e.to_string())))?;
-    }
+            .map_err(|e| MmError::new(MmInitError::WalletError(e.to_string())))?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let resolved_seed = match passphrase_form {
+        PassphraseForm::Absent => None,
+        PassphraseForm::Plaintext(seed) => Some(seed),
+        PassphraseForm::Encrypted(_) => {
+            return MmError::err(MmInitError::WalletError(
+                "An encrypted passphrase requires the native wallet store and is unsupported on this target"
+                    .to_string(),
+            ));
+        },
+    };
 
-    CryptoCtx::init_with_iguana_passphrase(ctx.clone(), &passphrase).mm_err(Into::into)?;
+    // Identity invariant (R28): every resolved plaintext seed — including the pure
+    // re-login load-and-use path — initialises the node's signing identity. Only
+    // the anonymous row leaves the node without an identity. Per R45.4.8 this is
+    // the single startup site that consumes the resolved seed, so `enable_hd`
+    // selects the key-pair policy here for every resolved-seed path: a truthy
+    // `enable_hd` binds the seed to a global-HD account, otherwise to the
+    // baseline Iguana single-key context.
+    if let Some(passphrase) = resolved_seed {
+        if ctx.enable_hd() {
+            CryptoCtx::init_with_global_hd_account(ctx.clone(), &passphrase).mm_err(Into::into)?;
+        } else {
+            CryptoCtx::init_with_iguana_passphrase(ctx.clone(), &passphrase).mm_err(Into::into)?;
+        }
+    }
     lp_init_continue(ctx.clone()).await?;
 
     let ctx_id = ctx.ffi_handle().map_to_mm(MmInitError::Internal)?;
 
     spawn_rpc(ctx_id);
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    if let Err(err) =
+        crate::mm2::rpc::streaming_activations::shutdown_signal::install_shutdown_signal_listener(ctx.clone())
+    {
+        warn!("Could not install shutdown-signal listener: {}", err);
+    }
     let ctx_c = ctx.clone();
     spawn(async move {
         if let Err(err) = ctx_c.init_metrics() {
@@ -500,6 +593,12 @@ async fn kick_start(ctx: MmArc) -> MmInitResult<()> {
 
 async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     let i_am_seed = ctx.conf["i_am_seed"].as_bool().unwrap_or(false);
+
+    if i_am_seed && ctx.secp256k1_key_pair.as_option().is_none() {
+        return MmError::err(P2PInitError::Internal(
+            "i_am_seed requires an initialized signing identity".to_owned(),
+        ));
+    }
 
     let seednodes = seednodes(&ctx)?;
 
@@ -558,24 +657,59 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     ctx.peer_id.pin(peer_id.to_string()).map_to_mm(P2PInitError::Internal)?;
     let p2p_context = P2PContext::new(cmd_tx);
     p2p_context.store_to_mm_arc(&ctx);
+    subscribe_to_own_peer_healthcheck_topic(&ctx, &peer_id.to_string());
     spawn(p2p_event_process_loop(ctx.weak(), event_rx, i_am_seed));
 
     Ok(())
 }
 
-fn seednodes(ctx: &MmArc) -> P2PResult<Vec<RelayAddress>> {
-    if ctx.conf["seednodes"].is_null() {
-        if ctx.p2p_in_memory() {
+fn resolve_bootstrap_relays<F>(
+    conf: &json::Value,
+    netid: u16,
+    p2p_in_memory: bool,
+    registry_seednodes: F,
+) -> P2PResult<Vec<RelayAddress>>
+where
+    F: FnOnce(u16) -> P2PResult<Vec<RelayAddress>>,
+{
+    if conf["seednodes"].is_null() {
+        if p2p_in_memory {
             // If the network is in memory, there is no need to use default seednodes.
+            info!("P2P in-memory network selected; no seednodes will be used");
             return Ok(Vec::new());
         }
-        return Ok(default_seednodes(ctx.netid()));
+        let seednodes = registry_seednodes(netid)?;
+        if seednodes.is_empty() {
+            warn!(
+                "No default P2P seednodes configured for netid {}; relay discovery will rely on already known peers",
+                netid
+            );
+        } else {
+            info!(
+                "Using {} default P2P seednodes for netid {}: {:?}",
+                seednodes.len(),
+                netid,
+                seednodes
+            );
+        }
+        return Ok(seednodes);
     }
 
-    json::from_value(ctx.conf["seednodes"].clone()).map_to_mm(|e| P2PInitError::ErrorDeserializingConfig {
-        field: "seednodes".to_owned(),
-        error: e.to_string(),
-    })
+    let seednodes: Vec<RelayAddress> =
+        json::from_value(conf["seednodes"].clone()).map_to_mm(|e| P2PInitError::ErrorDeserializingConfig {
+            field: "seednodes".to_owned(),
+            error: e.to_string(),
+        })?;
+    if seednodes.is_empty() {
+        warn!("The 'seednodes' config field is present but empty; relay discovery may not find peers");
+    } else {
+        info!("Using {} P2P seednodes from config: {:?}", seednodes.len(), seednodes);
+    }
+    Ok(seednodes)
+}
+
+fn seednodes(ctx: &MmArc) -> P2PResult<Vec<RelayAddress>> {
+    resolve_bootstrap_relays(&ctx.conf, ctx.netid(), ctx.p2p_in_memory(), default_seednodes)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -691,4 +825,220 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
         "Certificate, DER-encoded X.509 format".to_owned(),
     )?;
     Ok(Some(WssCerts { server_priv_key, certs }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{default_seednodes, default_seednodes_from_strings, parse_passphrase_form, resolve_bootstrap_relays,
+                startup_net_config, validate_netid_range, MmInitError, P2PInitError, PassphraseForm};
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::mm2::lp_network::lp_network_ports;
+    #[cfg(not(target_arch = "wasm32"))] use mm2_p2p::NetworkInfo;
+    use mm2_p2p::RelayAddress;
+    use serde_json::json;
+
+    #[test]
+    fn passphrase_absent_is_absent_form() {
+        let conf = json!({});
+        let form = parse_passphrase_form(&conf).expect("passphrase resolution should succeed");
+        assert!(matches!(form, PassphraseForm::Absent));
+
+        let null_conf = json!({ "passphrase": null });
+        let form = parse_passphrase_form(&null_conf).expect("passphrase resolution should succeed");
+        assert!(matches!(form, PassphraseForm::Absent));
+    }
+
+    #[test]
+    fn passphrase_unexpected_types_refuse_cleanly() {
+        let num_conf = json!({ "passphrase": 1 });
+        let err = parse_passphrase_form(&num_conf).unwrap_err();
+        assert!(matches!(
+            err.get_inner(),
+            MmInitError::ErrorDeserializingConfig { field, .. } if field == "passphrase"
+        ));
+
+        let bool_conf = json!({ "passphrase": true });
+        let err = parse_passphrase_form(&bool_conf).unwrap_err();
+        assert!(matches!(
+            err.get_inner(),
+            MmInitError::ErrorDeserializingConfig { field, .. } if field == "passphrase"
+        ));
+    }
+
+    #[test]
+    fn malformed_passphrase_envelope_refuses_cleanly() {
+        let conf = json!({ "passphrase": { "foo": "bar" } });
+        let err = parse_passphrase_form(&conf).unwrap_err();
+        assert!(matches!(
+            err.get_inner(),
+            MmInitError::ErrorDeserializingConfig { field, .. } if field == "passphrase"
+        ));
+    }
+
+    #[test]
+    fn empty_string_passphrase_is_plaintext() {
+        let conf = json!({ "passphrase": "" });
+        let form = parse_passphrase_form(&conf).expect("passphrase resolution should succeed");
+        assert!(matches!(form, PassphraseForm::Plaintext(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn well_formed_envelope_is_encrypted_form() {
+        let envelope = crypto::encrypt_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "pw",
+        )
+        .unwrap();
+        let conf = json!({ "passphrase": serde_json::to_value(&envelope).unwrap() });
+        let form = parse_passphrase_form(&conf).expect("passphrase resolution should succeed");
+        assert!(matches!(form, PassphraseForm::Encrypted(_)));
+    }
+
+    #[test]
+    fn out_of_range_netid_refuses_cleanly() {
+        let conf = json!({ "netid": u16::MAX as u64 + 1 });
+        let err = validate_netid_range(&conf).unwrap_err();
+        assert!(matches!(
+            err.get_inner(),
+            MmInitError::ErrorDeserializingConfig { field, .. } if field == "netid"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_resolution_operator_seednodes_win_over_registry_fixture() {
+        let conf = json!({ "seednodes": ["operator.seed.example", "198.51.100.20"] });
+        let registry_seednodes = ["registry.seed.example", "203.0.113.7"];
+        let actual = resolve_bootstrap_relays(&conf, 6133, false, |netid| {
+            panic!(
+                "registry fallback must not be consulted for netid {} when operator seednodes exist: {:?}",
+                netid, registry_seednodes
+            )
+        })
+        .expect("operator seednodes should parse");
+
+        assert_eq!(actual, vec![
+            RelayAddress::Dns("operator.seed.example".to_owned()),
+            RelayAddress::IPv4("198.51.100.20".to_owned()),
+        ]);
+    }
+
+    #[test]
+    fn bootstrap_resolution_explicit_empty_seednodes_suppress_registry_fallback() {
+        let conf = json!({ "seednodes": [] });
+        let actual = resolve_bootstrap_relays(&conf, 6133, false, |_| {
+            panic!("registry fallback must not be consulted when seednodes is explicitly empty")
+        })
+        .expect("explicit empty seednodes should be accepted");
+
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_resolution_absent_or_null_seednodes_use_registry_fallback() {
+        let registry_seednodes = ["203.0.113.8", "registry.seed.example"];
+        let omitted_conf = json!({});
+        let null_conf = json!({ "seednodes": null });
+        let expected = vec![
+            RelayAddress::IPv4("203.0.113.8".to_owned()),
+            RelayAddress::Dns("registry.seed.example".to_owned()),
+        ];
+
+        let omitted_actual = resolve_bootstrap_relays(&omitted_conf, 6133, false, |netid| {
+            Ok(default_seednodes_from_strings(netid, &registry_seednodes))
+        })
+        .expect("omitted seednodes should use registry fallback");
+        let null_actual = resolve_bootstrap_relays(&null_conf, 6133, false, |netid| {
+            Ok(default_seednodes_from_strings(netid, &registry_seednodes))
+        })
+        .expect("null seednodes should use registry fallback");
+
+        assert_eq!(omitted_actual, expected);
+        assert_eq!(null_actual, expected);
+    }
+
+    #[test]
+    fn bootstrap_resolution_empty_registry_fallback_is_allowed() {
+        let conf = json!({});
+        let actual = resolve_bootstrap_relays(&conf, 6133, false, |_| Ok(Vec::new()))
+            .expect("empty registry fallback should not refuse startup");
+
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_resolution_in_memory_omits_registry_fallback() {
+        let conf = json!({});
+        let actual = resolve_bootstrap_relays(&conf, 6133, true, |_| {
+            panic!("registry fallback must not be consulted for in-memory P2P")
+        })
+        .expect("in-memory P2P should resolve to no bootstrap relays");
+
+        assert!(actual.is_empty());
+    }
+
+    #[test]
+    fn registry_seednode_strings_accept_only_ipv4_or_dns_hosts() {
+        let actual = default_seednodes_from_strings(6133, &[
+            "203.0.113.9",
+            "registry.seed.example",
+            "/memory/123",
+            "/ip4/203.0.113.9/tcp/9999",
+        ]);
+
+        assert_eq!(actual, vec![
+            RelayAddress::IPv4("203.0.113.9".to_owned()),
+            RelayAddress::Dns("registry.seed.example".to_owned()),
+        ]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_registry_hosts_use_netid_tcp_port_not_wss() {
+        let netid = 6133;
+        let registry_seednodes = ["203.0.113.10", "registry.seed.example"];
+        let relays = resolve_bootstrap_relays(&json!({}), netid, false, |netid| {
+            Ok(default_seednodes_from_strings(netid, &registry_seednodes))
+        })
+        .expect("registry fallback hosts should parse");
+        let network_ports = lp_network_ports(netid).expect("netid should map to P2P ports");
+        assert_ne!(network_ports.tcp, network_ports.wss);
+
+        let network_info = NetworkInfo::Distributed { network_ports };
+        let multiaddrs: Vec<String> = relays
+            .iter()
+            .map(|relay| {
+                relay
+                    .try_to_multiaddr(network_info)
+                    .expect("registry host should normalize")
+                    .to_string()
+            })
+            .collect();
+
+        assert_eq!(multiaddrs, vec![
+            format!("/ip4/203.0.113.10/tcp/{}", network_ports.tcp),
+            format!("/dns/registry.seed.example/tcp/{}", network_ports.tcp),
+        ]);
+        assert!(!multiaddrs
+            .iter()
+            .any(|addr| addr.ends_with(&format!("/tcp/{}", network_ports.wss))));
+    }
+
+    #[test]
+    fn startup_net_config_rejects_unknown_netid_before_seed_resolution() {
+        let unsupported_netid = 9999;
+        let err = startup_net_config(unsupported_netid)
+            .err()
+            .expect("unsupported netid should be rejected");
+        assert!(matches!(
+            err.get_inner(),
+            MmInitError::UnsupportedNetId { netid, .. } if *netid == unsupported_netid
+        ));
+
+        let err = resolve_bootstrap_relays(&json!({}), unsupported_netid, false, default_seednodes)
+            .expect_err("unknown netid must not resolve to an empty bootstrap list");
+        assert!(matches!(
+            err.get_inner(),
+            P2PInitError::Internal(msg) if msg.contains("No compiled network configuration for netid 9999")
+        ));
+    }
 }

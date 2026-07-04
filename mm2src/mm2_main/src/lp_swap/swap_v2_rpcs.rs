@@ -29,8 +29,8 @@ use super::maker_swap_v2::MakerSwapEvent;
 use super::my_swaps_storage::{MySwapsError, MySwapsOps, MySwapsStorage};
 use super::taker_swap::TakerSavedSwap;
 use super::taker_swap_v2::TakerSwapEvent;
-use super::{active_swaps, MySwapsFilter, SavedSwap, SavedSwapError, SavedSwapIo, LEGACY_SWAP_TYPE, MAKER_SWAP_V2_TYPE,
-            TAKER_SWAP_V2_TYPE};
+use super::{active_swaps, active_swaps_using_coin, MySwapsFilter, SavedSwap, SavedSwapError, SavedSwapIo,
+            LEGACY_SWAP_TYPE, MAKER_SWAP_V2_TYPE, TAKER_SWAP_V2_TYPE};
 use common::log::{error, warn};
 use common::mm_number::{BigDecimal, MmNumber, MmNumberMultiRepr};
 use common::{calc_total_pages, HttpStatusCode, PagingOptions};
@@ -156,6 +156,8 @@ pub(crate) struct MySwapForRpc<T> {
     taker_coin_confs: i64,
     taker_coin_nota: bool,
     swap_version: u8,
+    maker_coin_usd_price: String,
+    taker_coin_usd_price: String,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -194,6 +196,8 @@ impl<T: DeserializeOwned> MySwapForRpc<T> {
             taker_coin_confs: row.get(13)?,
             taker_coin_nota: row.get(14)?,
             swap_version: row.get(15)?,
+            maker_coin_usd_price: row.get(16)?,
+            taker_coin_usd_price: row.get(17)?,
         })
     }
 }
@@ -265,6 +269,8 @@ pub(super) async fn get_maker_swap_data_for_rpc(
         taker_coin_confs: repr.conf_settings.taker_coin_confs as i64,
         taker_coin_nota: repr.conf_settings.taker_coin_nota,
         swap_version: repr.swap_version,
+        maker_coin_usd_price: String::new(),
+        taker_coin_usd_price: String::new(),
     }))
 }
 
@@ -295,6 +301,8 @@ pub(super) async fn get_taker_swap_data_for_rpc(
         taker_coin_confs: repr.conf_settings.taker_coin_confs as i64,
         taker_coin_nota: repr.conf_settings.taker_coin_nota,
         swap_version: repr.swap_version,
+        maker_coin_usd_price: String::new(),
+        taker_coin_usd_price: String::new(),
     }))
 }
 
@@ -551,6 +559,7 @@ pub(crate) async fn my_recent_swaps_rpc(
 pub(crate) struct ActiveSwapsRequest {
     #[serde(default)]
     include_status: bool,
+    coin: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -580,7 +589,14 @@ pub(crate) async fn active_swaps_rpc(
     ctx: MmArc,
     req: ActiveSwapsRequest,
 ) -> MmResult<ActiveSwapsResponse, ActiveSwapsErr> {
-    let uuids_with_types = active_swaps(&ctx).map_to_mm(ActiveSwapsErr::Internal)?;
+    let mut uuids_with_types = active_swaps(&ctx).map_to_mm(ActiveSwapsErr::Internal)?;
+    if let Some(coin) = req.coin {
+        let allowed: std::collections::HashSet<_> = active_swaps_using_coin(&ctx, &coin)
+            .map_to_mm(ActiveSwapsErr::Internal)?
+            .into_iter()
+            .collect();
+        uuids_with_types.retain(|(uuid, _)| allowed.contains(uuid));
+    }
 
     let statuses = if req.include_status {
         let mut acc = HashMap::with_capacity(uuids_with_types.len());

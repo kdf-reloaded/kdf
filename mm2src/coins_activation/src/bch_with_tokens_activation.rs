@@ -181,7 +181,8 @@ impl From<PrivKeyNotAllowed> for BchWithTokensActivationError {
     fn from(e: PrivKeyNotAllowed) -> Self { BchWithTokensActivationError::PrivKeyNotAllowed(e.to_string()) }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl PlatformWithTokensActivationOps for BchCoin {
     type ActivationRequest = BchWithTokensActivationRequest;
     type PlatformProtocolInfo = BchProtocolInfo;
@@ -276,6 +277,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
 
     fn start_history_background_fetching(
         &self,
+        ctx: MmArc,
         metrics: MetricsArc,
         storage: impl TxHistoryStorage + 'static,
         initial_balance: BigDecimal,
@@ -283,6 +285,7 @@ impl PlatformWithTokensActivationOps for BchCoin {
         let ticker = self.ticker().to_owned();
         let (fut, abort_handle) = abortable(bch_and_slp_history_loop(
             self.clone(),
+            ctx,
             storage,
             metrics,
             initial_balance,

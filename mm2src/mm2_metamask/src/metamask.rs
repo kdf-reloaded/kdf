@@ -125,4 +125,40 @@ impl<'a> MetamaskSession<'a> {
 
         Ok((hash, signature))
     }
+
+    /// Hands an unsigned transaction to the wallet to **sign and broadcast**
+    /// via `eth_sendTransaction`, returning the broadcast transaction hash as a
+    /// hex string (CRD R47.5.6/R47.5.8). The framework holds no key; the wallet
+    /// signs with the account's own key and broadcasts it itself.
+    ///
+    /// `tx` is the EIP-1193 transaction object — `from`, `to`, `value`, `data`,
+    /// `gas`, and either `gasPrice` or `maxFeePerGas`/`maxPriorityFeePerGas`
+    /// (`nonce` optional). It is passed through verbatim as the single request
+    /// parameter, mirroring the `call_method` pattern used elsewhere here.
+    pub async fn eth_send_transaction(&self, tx: Json) -> MetamaskResult<String> {
+        self.transport
+            .call_method("eth_sendTransaction", vec![tx])
+            .await
+            .map_to_mm(MetamaskError::from)
+    }
+
+    /// Reads the wallet's currently-connected accounts via `eth_accounts`
+    /// (read-only; does not prompt). Used for the per-operation active-account
+    /// consistency re-check (CRD R47.5.9).
+    pub async fn eth_accounts(&self) -> MetamaskResult<Vec<String>> {
+        self.transport
+            .call_method("eth_accounts", vec![])
+            .await
+            .map_to_mm(MetamaskError::from)
+    }
+
+    /// Reads the wallet's active EIP-155 chain id via `eth_chainId` (hex
+    /// quantity string, e.g. `"0x1"`). Used for the chain-consistency check
+    /// before broadcast (CRD R47.5.10).
+    pub async fn eth_chain_id(&self) -> MetamaskResult<String> {
+        self.transport
+            .call_method("eth_chainId", vec![])
+            .await
+            .map_to_mm(MetamaskError::from)
+    }
 }

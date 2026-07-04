@@ -2,9 +2,12 @@
 
 KDF-Reloaded supports multiple network identifiers (netids). Each netid has its own
 fee parameters, discount rules, and (optionally) seed nodes compiled into the binary.
+Production networks are always available. Test-only networks are compiled in only when
+the `regtest-netid` Cargo feature is enabled.
 
 The `"netid"` field in MM2.json is **required**. If omitted or set to an unsupported
-value, the application will refuse to start and print the list of supported networks.
+value for the active build, the application will refuse to start and print the list of
+supported networks.
 
 ## Supported Networks
 
@@ -37,6 +40,21 @@ The GLEEC decentralized exchange network.
 Netid 7777 was the original Komodo DEX network. It is **no longer supported** and
 the application will reject it at startup. Migrate to netid 8762.
 
+## Test-only Networks
+
+The following netids are used by the test harnesses and are available only when the
+binary is built with `--features regtest-netid`:
+
+| Netid | Typical use |
+|---|---|
+| 9998 | Default fixture for most unit and integration tests |
+| 9000 | Docker test harness regtest network |
+| 8999 | Tendermint / QRC20-focused test paths |
+| 8100 | Targeted startup / bootstrap test scenarios |
+
+These networks are intentionally not part of the production surface and must not be
+relied on by release builds unless the regtest feature is enabled explicitly.
+
 ## Configuration
 
 ### Minimal MM2.json
@@ -52,8 +70,8 @@ the application will reject it at startup. Migrate to netid 8762.
 
 ### Seed Nodes
 
-Neither network ships with hardcoded seed nodes. You must provide them via the
-`"seednodes"` field in MM2.json, or run the node as a seed itself (`"i_am_seed": true`).
+Neither production network ships with hardcoded seed nodes. You must provide them via
+the `"seednodes"` field in MM2.json, or run the node as a seed itself (`"i_am_seed": true`).
 
 ```json
 {

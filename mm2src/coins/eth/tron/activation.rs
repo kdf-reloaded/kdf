@@ -15,8 +15,8 @@
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
 
-use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimitV2,
-                 ETH_GAS_STATION_DECIMALS};
+use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimitV2, EthSigner,
+                 SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState};
 
 use common::log::warn;
@@ -138,7 +138,7 @@ pub async fn tron_coin_from_conf_and_request(
     let coin = EthCoinImpl {
         ticker: ticker.into(),
         coin_type,
-        key_pair,
+        signer: EthSigner::Local(key_pair),
         my_address,
         sign_message_prefix: json::from_value(conf["sign_message_prefix"].clone()).unwrap_or(None),
         // TRON has no EtomicSwap contract today — leave as zero address. Swap
@@ -161,6 +161,8 @@ pub async fn tron_coin_from_conf_and_request(
         gas_limit_v2: EthGasLimitV2::default(),
         tron_api: Some(tron_api),
         nft_swap_v2_contract: None,
+        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
+        erc20_tokens_infos: Default::default(),
     };
     Ok(EthCoin(Arc::new(coin)))
 }

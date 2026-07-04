@@ -4,7 +4,7 @@
 //! TRC20 token transfers. The caller is responsible for signing the
 //! resulting `TransactionRaw` via [`super::sign::sign_transaction_raw`].
 
-use ethabi::Token;
+use crate::eth::abi::Token;
 
 use super::address::TronAddress;
 use super::proto::{ContractType, TaposBlockData, TransactionContract, TransactionRaw, TransferContract,
@@ -20,7 +20,7 @@ pub fn abi_encode_trc20_transfer(to: &TronAddress, amount_sun: u64) -> Vec<u8> {
     // TRC20 uses the same ABI as ERC20: transfer(address,uint256)
     // Selector: 0xa9059cbb
     let selector: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
-    let tokens = ethabi::encode(&[Token::Address(to.to_evm_address()), Token::Uint(amount_sun.into())]);
+    let tokens = crate::eth::abi::encode(&[Token::Address(to.to_evm_address()), Token::Uint(amount_sun.into())]);
     let mut data = Vec::with_capacity(4 + tokens.len());
     data.extend_from_slice(&selector);
     data.extend_from_slice(&tokens);

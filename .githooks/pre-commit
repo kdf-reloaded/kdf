@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Pre-commit hook: verify Rust formatting with the project's required nightly toolchain.
+#
+# Install once per clone:
+#   git config core.hooksPath .githooks
+#
+# The hook only checks packages that are part of the KDF source tree
+# (excludes *-patched vendor directories).
+
+set -euo pipefail
+
+TOOLCHAIN="nightly-2026-05-08"
+
+# Collect non-patched package names via cargo metadata.
+pkgs=$(cargo metadata --no-deps --format-version 1 \
+  | jq -r '.packages[] | select(.manifest_path | test("-patched/") | not) | .name')
+
+args=()
+for p in $pkgs; do args+=(-p "$p"); done
+
+echo "[pre-commit] Running cargo +${TOOLCHAIN} fmt --check ..."
+if ! cargo "+${TOOLCHAIN}" fmt "${args[@]}" -- --check 2>&1; then
+  echo ""
+  echo "[pre-commit] Formatting check FAILED."
+  echo "  Fix with: cargo +${TOOLCHAIN} fmt -p <crate>"
+  echo "  Then 'git add' the reformatted files and retry the commit."
+  exit 1
+fi
+
+echo "[pre-commit] Formatting OK."

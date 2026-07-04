@@ -1743,11 +1743,7 @@ fn pubkey_and_secret_for_test(passphrase: &str) -> (String, [u8; 32]) {
 fn p2p_context_mock() -> (mpsc::Sender<AdexBehaviourCmd>, mpsc::Receiver<AdexBehaviourCmd>) {
     let (cmd_tx, cmd_rx) = mpsc::channel(10);
     let cmd_sender = cmd_tx.clone();
-    P2PContext::fetch_from_mm_arc.mock_safe(move |_| {
-        MockResult::Return(Arc::new(P2PContext {
-            cmd_tx: PaMutex::new(cmd_sender.clone()),
-        }))
-    });
+    P2PContext::fetch_from_mm_arc.mock_safe(move |_| MockResult::Return(Arc::new(P2PContext::new(cmd_sender.clone()))));
     (cmd_tx, cmd_rx)
 }
 
