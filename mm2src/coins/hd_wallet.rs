@@ -545,7 +545,7 @@ pub mod common_impl {
                 address: address.to_string(),
                 derivation_path: RpcDerivationPath(derivation_path),
                 chain,
-                balance,
+                balance: crate::coin_balance::coin_balance_map_for_ticker(coin.ticker(), balance),
             },
         })
     }

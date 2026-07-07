@@ -5,7 +5,6 @@ use common::SuccessResponse;
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction, HwRpcTaskUserActionRequest};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use mm2_rpc::mm_protocol::MmRpcResult;
 use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest, RpcTaskUserActionError};
 use rpc_task::RpcTaskError;
 use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatusAlias, RpcTaskTypes};
@@ -74,10 +73,8 @@ pub async fn withdraw_status(
         .or_mm_err(|| WithdrawStatusError::NoSuchTask(req.task_id))?;
 
     let compat_status = match status {
-        rpc_task::RpcTaskStatus::Ready(result) => match result {
-            MmRpcResult::Ok { result: tx_details } => WithdrawCompatRpcStatus::Ok(tx_details),
-            MmRpcResult::Err(e) => WithdrawCompatRpcStatus::Error(e.into_inner()),
-        },
+        rpc_task::RpcTaskStatus::Ok(tx_details) => WithdrawCompatRpcStatus::Ok(tx_details),
+        rpc_task::RpcTaskStatus::Error(e) => WithdrawCompatRpcStatus::Error(e.into_inner()),
         rpc_task::RpcTaskStatus::InProgress(in_progress) => WithdrawCompatRpcStatus::InProgress(in_progress),
         rpc_task::RpcTaskStatus::UserActionRequired(awaiting_status) => {
             WithdrawCompatRpcStatus::UserActionRequired(awaiting_status)

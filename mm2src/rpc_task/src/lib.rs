@@ -67,6 +67,11 @@ impl From<TimeoutError> for RpcTaskError {
 }
 
 /// We can't simplify the generic types because there are places where the [`RpcTaskStatus::map_err`] method is used.
+///
+/// The `status`/`details` wire representation must stay aligned with the canonical KDF API that GUI
+/// clients expect: a finished task reports `{"status": "Ok", "details": <item>}` on success and
+/// `{"status": "Error", "details": <error>}` on failure. Collapsing both into a single terminal
+/// variant breaks clients that treat `Ok` as the completion signal.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", content = "details")]
 pub enum RpcTaskStatus<Item, Error, InProgressStatus, AwaitingStatus>
@@ -74,7 +79,8 @@ where
     Item: Serialize,
     Error: SerMmErrorType,
 {
-    Ready(FinishedTaskResult<Item, Error>),
+    Ok(Item),
+    Error(MmError<Error>),
     InProgress(InProgressStatus),
     UserActionRequired(AwaitingStatus),
 }
@@ -90,7 +96,8 @@ where
         NewError: SerMmErrorType,
     {
         match self {
-            RpcTaskStatus::Ready(result) => RpcTaskStatus::Ready(result.map_err(f)),
+            RpcTaskStatus::Ok(item) => RpcTaskStatus::Ok(item),
+            RpcTaskStatus::Error(error) => RpcTaskStatus::Error(error.map(f)),
             RpcTaskStatus::InProgress(in_progress) => RpcTaskStatus::InProgress(in_progress),
             RpcTaskStatus::UserActionRequired(awaiting) => RpcTaskStatus::UserActionRequired(awaiting),
         }

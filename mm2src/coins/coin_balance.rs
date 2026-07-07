@@ -14,6 +14,32 @@ use std::ops::Range;
 
 pub type AddressIdRange = Range<u32>;
 
+/// A ticker-keyed map of balances, e.g. `{ "RIN": { "spendable": "..", "unspendable": ".." } }`.
+/// Used for HD/v2 balance responses so that clients can parse balances as a map keyed by ticker.
+pub type CoinBalanceMap = std::collections::HashMap<String, CoinBalance>;
+
+/// Wraps a single `CoinBalance` into a ticker-keyed map with a single entry.
+pub fn coin_balance_map_for_ticker(ticker: &str, balance: CoinBalance) -> CoinBalanceMap {
+    let mut map = CoinBalanceMap::new();
+    map.insert(ticker.to_string(), balance);
+    map
+}
+
+/// Sums per-ticker balances across the given HD address balances into a single ticker-keyed total map.
+pub fn sum_hd_address_balances<'a, I>(balances: I) -> CoinBalanceMap
+where
+    I: IntoIterator<Item = &'a HDAddressBalance>,
+{
+    let mut total = CoinBalanceMap::new();
+    for addr_balance in balances {
+        for (ticker, balance) in &addr_balance.balance {
+            let entry = total.entry(ticker.clone()).or_default();
+            *entry = entry.clone() + balance.clone();
+        }
+    }
+    total
+}
+
 #[derive(Display)]
 pub enum EnableCoinBalanceError {
     NewAccountCreatingError(NewAccountCreatingError),
@@ -50,7 +76,7 @@ pub struct HDWalletBalance {
 pub struct HDAccountBalance {
     pub account_index: u32,
     pub derivation_path: RpcDerivationPath,
-    pub total_balance: CoinBalance,
+    pub total_balance: CoinBalanceMap,
     pub addresses: Vec<HDAddressBalance>,
 }
 
@@ -59,7 +85,7 @@ pub struct HDAddressBalance {
     pub address: String,
     pub derivation_path: RpcDerivationPath,
     pub chain: Bip44Chain,
-    pub balance: CoinBalance,
+    pub balance: CoinBalanceMap,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -165,6 +191,7 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
         address_ids: Ids,
     ) -> BalanceResult<Vec<HDAddressBalance>>
     where
+        Self: MarketCoinOps,
         Self::Address: fmt::Display + Clone,
         Ids: Iterator<Item = u32> + Send,
     {
@@ -193,7 +220,7 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
                 address: address.to_string(),
                 derivation_path: RpcDerivationPath(derivation_path),
                 chain,
-                balance,
+                balance: coin_balance_map_for_ticker(self.ticker(), balance),
             })
             .collect();
         Ok(balances)
@@ -251,7 +278,7 @@ pub mod common_impl {
         scan_new_addresses: bool,
     ) -> MmResult<HDAccountBalance, EnableCoinBalanceError>
     where
-        Coin: HDWalletBalanceOps + Sync,
+        Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
     {
         let gap_limit = hd_wallet.gap_limit();
         let mut addresses = coin.all_known_addresses_balances(hd_account).await.mm_err(Into::into)?;
@@ -263,9 +290,7 @@ pub mod common_impl {
             );
         }
 
-        let total_balance = addresses.iter().fold(CoinBalance::default(), |total, addr_balance| {
-            total + addr_balance.balance.clone()
-        });
+        let total_balance = sum_hd_address_balances(&addresses);
         let account_balance = HDAccountBalance {
             account_index: hd_account.account_id(),
             derivation_path: RpcDerivationPath(hd_account.account_derivation_path()),

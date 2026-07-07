@@ -351,6 +351,22 @@ decryption and observing whether the authentication tag verifies; a wrong
 password produces a clean authentication failure mapped to `InvalidPassword`
 and never produces a usable-but-corrupt plaintext.
 
+**R9A.** *Read-only legacy-format fallback.* An earlier reloaded build wrote
+wallets to `<db_root>/wallets/<wallet_name>.wallet` using a two-field
+encryption envelope (a superseded draft of §7.5/§7.7). To avoid stranding
+wallets created by that build, the read paths (`read_encrypted_passphrase`,
+`read_all_wallet_names`, `delete_wallet`) MUST additionally recognise that
+legacy location and envelope, and both envelope shapes MUST decrypt to a
+plaintext mnemonic through the same interface. New writes are ALWAYS the
+canonical `.json` record (R8); the legacy `.wallet` form is **never written**
+and exists on the read side only. A legacy wallet is therefore resolved to the
+same plaintext seed as a canonical wallet and follows the identical
+identity-initialisation path (R28) — the on-disk format does **not** by itself
+select HD versus single-address signing, which is governed by the active
+signing policy (`enable_hd` and per-coin activation), not by the storage
+format. This read-only fallback has no analogue in the original build, which
+never produced the `.wallet` form.
+
 ## 7.6 Bound Wallet-Name Grammar
 
 **R10.** Wallet names accepted by `create_wallet` and `delete_wallet` MUST

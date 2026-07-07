@@ -188,9 +188,28 @@ where
 
         let tx_history = self.request.activation_params.tx_history();
 
-        lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams { ticker, tx_history })
-            .await
-            .mm_err(Into::into)?;
+        // `lp_register_coin` intentionally allows concurrent activations of the same ticker to
+        // race (to keep activation fast). If another in-flight activation of this coin won the
+        // race and already registered it, our freshly built instance loses and registration
+        // returns `CoinIsInitializedAlready`. In that case the coin is active and the activation
+        // result we computed (block height, balances) is still valid, so report success instead
+        // of surfacing a task-level error. Clients treat a terminal task `Error` as a hard
+        // activation failure, whereas an already-active coin should be an idempotent success.
+        match lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
+            ticker: ticker.clone(),
+            tx_history,
+        })
+        .await
+        {
+            Ok(()) => {},
+            Err(e) if matches!(e.get_inner(), RegisterCoinError::CoinIsInitializedAlready { .. }) => {
+                log::debug!(
+                    "Coin '{}' was concurrently activated by another request; returning the computed activation result",
+                    ticker
+                );
+            },
+            Err(e) => return Err(e.map(Into::into)),
+        }
 
         Ok(result)
     }

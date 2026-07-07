@@ -1,7 +1,7 @@
 use crate::coin_balance::HDAddressBalance;
 use crate::hd_wallet::HDWalletCoinOps;
 use crate::rpc_command::hd_account_balance_rpc_error::HDAccountBalanceRpcError;
-use crate::{lp_coinfind_or_err, CoinBalance, CoinWithDerivationMethod, MmCoinEnum};
+use crate::{lp_coinfind_or_err, CoinBalance, CoinWithDerivationMethod, MarketCoinOps, MmCoinEnum};
 use async_trait::async_trait;
 use common::PagingOptionsEnum;
 use crypto::{Bip44Chain, RpcDerivationPath};
@@ -70,7 +70,10 @@ pub mod common_impl {
         params: AccountBalanceParams,
     ) -> MmResult<HDAccountBalanceResponse, HDAccountBalanceRpcError>
     where
-        Coin: HDWalletBalanceOps + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet> + Sync,
+        Coin: HDWalletBalanceOps
+            + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet>
+            + MarketCoinOps
+            + Sync,
         <Coin as HDWalletCoinOps>::Address: fmt::Display + Clone,
     {
         let account_id = params.account_index;
@@ -94,7 +97,8 @@ pub mod common_impl {
             .await
             .mm_err(Into::into)?;
         let page_balance = addresses.iter().fold(CoinBalance::default(), |total, addr_balance| {
-            total + addr_balance.balance.clone()
+            let addr_balance = addr_balance.balance.get(coin.ticker()).cloned().unwrap_or_default();
+            total + addr_balance
         });
 
         let result = HDAccountBalanceResponse {

@@ -3389,7 +3389,10 @@ fn test_account_balance_rpc() {
                 address: $address.to_string(),
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
-                balance: CoinBalance::new(BigDecimal::from($balance)),
+                balance: crate::coin_balance::coin_balance_map_for_ticker(
+                    TEST_COIN_NAME,
+                    CoinBalance::new(BigDecimal::from($balance)),
+                ),
             })
         };
     }
@@ -3726,7 +3729,10 @@ fn test_scan_for_new_addresses() {
                 address: $address.to_string(),
                 derivation_path: RpcDerivationPath(DerivationPath::from_str($der_path).unwrap()),
                 chain: $chain,
-                balance: CoinBalance::new(BigDecimal::from(balance.unwrap_or(0))),
+                balance: crate::coin_balance::coin_balance_map_for_ticker(
+                    TEST_COIN_NAME,
+                    CoinBalance::new(BigDecimal::from(balance.unwrap_or(0))),
+                ),
             });
             if balance.is_some() {
                 non_empty_addresses.push($address.to_string());

@@ -7,6 +7,7 @@ use common::log::{debug, warn};
 use futures::channel::oneshot;
 use futures::future::{select, Either};
 use mm2_err_handle::prelude::*;
+use mm2_rpc::mm_protocol::MmRpcResult;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -79,8 +80,13 @@ impl<Task: RpcTask> RpcTaskManager<Task> {
             TaskStatusExt::InProgress { status, .. } => RpcTaskStatus::InProgress(status.clone()),
             TaskStatusExt::Awaiting { status, .. } => RpcTaskStatus::UserActionRequired(status.clone()),
             TaskStatusExt::Ready(ready) => {
-                // I prefer cloning `ready` instead of removing `TaskStatusX` and matching/unwrapping it again.
-                let rpc_status = RpcTaskStatus::Ready(ready.clone());
+                // Split the stored terminal result into the canonical `Ok`/`Error` statuses so the
+                // serialized `status` field matches what GUI clients expect (`Ok` on success,
+                // `Error` on failure) instead of a single non-standard terminal status.
+                let rpc_status = match ready.clone() {
+                    MmRpcResult::Ok { result } => RpcTaskStatus::Ok(result),
+                    MmRpcResult::Err(e) => RpcTaskStatus::Error(e),
+                };
                 if forget_if_ready {
                     entry.remove();
                 }

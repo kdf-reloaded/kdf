@@ -41,7 +41,8 @@ pub use utxo_common_swap::*;
 pub(crate) use super::rpc_clients::TxMerkleBranch;
 pub(crate) use super::*;
 
-pub(crate) use crate::coin_balance::{AddressBalanceStatus, HDAddressBalance, HDWalletBalanceOps};
+pub(crate) use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, HDAddressBalance,
+                                     HDWalletBalanceOps};
 pub(crate) use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
 pub(crate) use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, HDAccountMut, HDAccountsMap,
                                   NewAccountCreatingError};

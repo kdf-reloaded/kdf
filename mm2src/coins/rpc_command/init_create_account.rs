@@ -1,7 +1,7 @@
 use crate::coin_balance::HDAccountBalance;
 use crate::hd_pubkey::{HDXPubExtractor, RpcTaskXPubExtractor};
 use crate::hd_wallet::HDWalletRpcError;
-use crate::{lp_coinfind_or_err, CoinBalance, CoinWithDerivationMethod, CoinsContext, MmCoinEnum};
+use crate::{lp_coinfind_or_err, CoinWithDerivationMethod, CoinsContext, MmCoinEnum};
 use async_trait::async_trait;
 use common::{true_f, SuccessResponse};
 use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction, HwRpcTaskUserActionRequest};
@@ -191,11 +191,7 @@ pub(crate) mod common_impl {
             Vec::new()
         };
 
-        let total_balance = addresses
-            .iter()
-            .fold(CoinBalance::default(), |total_balance, address_balance| {
-                total_balance + address_balance.balance.clone()
-            });
+        let total_balance = crate::coin_balance::sum_hd_address_balances(&addresses);
 
         Ok(HDAccountBalance {
             account_index,

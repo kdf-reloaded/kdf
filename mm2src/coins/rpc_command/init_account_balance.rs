@@ -4,7 +4,6 @@ use crate::{lp_coinfind_or_err, CoinsContext, MmCoinEnum};
 use async_trait::async_trait;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use mm2_rpc::mm_protocol::MmRpcResult;
 use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest};
 use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
 
@@ -120,10 +119,8 @@ pub async fn init_account_balance_status(
         .task_status(req.task_id, req.forget_if_finished)
         .or_mm_err(|| RpcTaskStatusError::NoSuchTask(req.task_id))?;
     let compat = match raw_status {
-        RpcTaskStatus::Ready(result) => match result {
-            MmRpcResult::Ok { result: balance } => AccountBalanceCompatStatus::Ok(balance),
-            MmRpcResult::Err(e) => AccountBalanceCompatStatus::Error(format!("{}", e.get_inner())),
-        },
+        RpcTaskStatus::Ok(balance) => AccountBalanceCompatStatus::Ok(balance),
+        RpcTaskStatus::Error(e) => AccountBalanceCompatStatus::Error(format!("{}", e.get_inner())),
         RpcTaskStatus::InProgress(s) => AccountBalanceCompatStatus::InProgress(s),
         RpcTaskStatus::UserActionRequired(_) => {
             AccountBalanceCompatStatus::Error("Unexpected user action required".to_owned())
@@ -136,7 +133,7 @@ pub(crate) mod common_impl {
     use super::*;
     use crate::coin_balance::HDWalletBalanceOps;
     use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
-    use crate::{CoinBalance, CoinWithDerivationMethod};
+    use crate::{CoinWithDerivationMethod, MarketCoinOps};
     use crypto::RpcDerivationPath;
     use std::fmt;
 
@@ -145,7 +142,10 @@ pub(crate) mod common_impl {
         params: InitAccountBalanceParams,
     ) -> MmResult<HDAccountBalance, HDAccountBalanceRpcError>
     where
-        Coin: HDWalletBalanceOps + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet> + Sync,
+        Coin: HDWalletBalanceOps
+            + CoinWithDerivationMethod<HDWallet = <Coin as HDWalletCoinOps>::HDWallet>
+            + MarketCoinOps
+            + Sync,
         <Coin as HDWalletCoinOps>::Address: fmt::Display + Clone,
     {
         let account_id = params.account_index;
@@ -160,9 +160,7 @@ pub(crate) mod common_impl {
             .await
             .mm_err(Into::into)?;
 
-        let total_balance = addresses.iter().fold(CoinBalance::default(), |total, addr_balance| {
-            total + addr_balance.balance.clone()
-        });
+        let total_balance = crate::coin_balance::sum_hd_address_balances(&addresses);
 
         Ok(HDAccountBalance {
             account_index: account_id,

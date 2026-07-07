@@ -1,4 +1,5 @@
-use crate::coin_balance::{AddressBalanceStatus, HDAddressBalance, HDAddressBalanceScanner, HDWalletBalanceOps};
+use crate::coin_balance::{coin_balance_map_for_ticker, AddressBalanceStatus, HDAddressBalance,
+                          HDAddressBalanceScanner, HDWalletBalanceOps};
 use crate::hd_pubkey::{ExtractExtendedPubkey, HDExtractPubkeyError, HDXPubExtractor};
 use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, AsyncMutexGuard, GetNewHDAddressParams,
                        GetNewHDAddressResponse, HDAccountMut, HDAccountOps, HDAccountsMutex, HDAddress,
@@ -7,7 +8,7 @@ use crate::hd_wallet::{AccountUpdatingError, AddressDerivingError, AsyncMutexGua
 use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletCoinWithStorageOps,
                                HDWalletStorageResult};
 use crate::{coin_balance, hd_wallet, BalanceError, BalanceResult, CoinBalance, CoinWithDerivationMethod,
-            DerivationMethod};
+            DerivationMethod, MarketCoinOps};
 use async_trait::async_trait;
 use bip32::ChildNumber;
 use crypto::{Bip32DerPathOps, Bip44Chain, Bip44PathToAccount, Bip44PathToCoin, CryptoCtx, DerivationPath,
@@ -502,14 +503,14 @@ async fn scan_for_new_addresses_impl(
                         address: format!("{:#02x}", empty_address.address),
                         derivation_path: RpcDerivationPath(empty_address.derivation_path),
                         chain,
-                        balance: CoinBalance::default(),
+                        balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
                     });
                 }
                 balances.push(HDAddressBalance {
                     address: format!("{:#02x}", checking_address),
                     derivation_path: RpcDerivationPath(checking_address_der_path),
                     chain,
-                    balance: non_empty_balance,
+                    balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),
                 });
                 unused_addresses_counter = 0;
             },

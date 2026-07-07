@@ -594,7 +594,7 @@ pub struct HDWalletBalance {
 pub struct HDAccountBalance {
     pub account_index: u32,
     pub derivation_path: String,
-    pub total_balance: CoinBalance,
+    pub total_balance: std::collections::HashMap<String, CoinBalance>,
     pub addresses: Vec<HDAddressBalance>,
 }
 
@@ -604,7 +604,7 @@ pub struct HDAddressBalance {
     pub address: String,
     pub derivation_path: String,
     pub chain: Bip44Chain,
-    pub balance: CoinBalance,
+    pub balance: std::collections::HashMap<String, CoinBalance>,
 }
 
 #[derive(Debug, Deserialize)]

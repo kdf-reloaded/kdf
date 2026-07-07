@@ -392,13 +392,14 @@ where
     InitUtxoWithdraw::new(ctx, coin, req, task_handle).await?.build().await
 }
 
-fn validate_task_withdraw_sender<T>(coin: &T, req: &WithdrawRequest) -> MmResult<(), WithdrawError>
+fn validate_task_withdraw_sender<T>(_coin: &T, _req: &WithdrawRequest) -> MmResult<(), WithdrawError>
 where
     T: CoinWithDerivationMethod,
 {
-    if matches!(coin.derivation_method(), DerivationMethod::HDWallet(_)) && req.from.is_none() {
-        return MmError::err(WithdrawError::FromAddressNotFound);
-    }
+    // Compatibility divergence from upstream: an omitted `from` for an HD wallet is intentionally
+    // NOT rejected here. `get_withdraw_hd_sender` resolves a missing `from` to the single enabled
+    // address (account 0 / External / 0) so clients that don't send `from` can still preview and
+    // withdraw. Upstream rejects an omitted `from`; this default keeps basic withdraw flows working.
     Ok(())
 }
 
@@ -673,15 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn task_withdraw_hd_wallet_requires_explicit_sender() {
+    fn task_withdraw_hd_wallet_allows_omitted_sender() {
+        // An omitted `from` is accepted at the validation gate; the sender is resolved to the
+        // enabled address (account 0 / External / 0) later by `get_withdraw_hd_sender`.
         let coin = DummyDerivationCoin {
             derivation_method: DerivationMethod::HDWallet(()),
         };
-        let err = validate_task_withdraw_sender(&coin, &withdraw_req(None))
-            .unwrap_err()
-            .into_inner();
 
-        assert!(matches!(err, WithdrawError::FromAddressNotFound));
+        validate_task_withdraw_sender(&coin, &withdraw_req(None)).unwrap();
     }
 
     #[test]

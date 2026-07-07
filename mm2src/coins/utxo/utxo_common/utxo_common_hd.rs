@@ -144,7 +144,7 @@ pub async fn scan_for_new_addresses<T>(
     gap_limit: u32,
 ) -> BalanceResult<Vec<HDAddressBalance>>
 where
-    T: HDWalletBalanceOps + Sync,
+    T: HDWalletBalanceOps + MarketCoinOps + Sync,
     T::Address: std::fmt::Display,
 {
     let mut addresses = scan_for_new_addresses_impl(
@@ -182,7 +182,7 @@ pub async fn scan_for_new_addresses_impl<T>(
     gap_limit: u32,
 ) -> BalanceResult<Vec<HDAddressBalance>>
 where
-    T: HDWalletBalanceOps + Sync,
+    T: HDWalletBalanceOps + MarketCoinOps + Sync,
     T::Address: std::fmt::Display,
 {
     let mut balances = Vec::with_capacity(gap_limit as usize);
@@ -217,7 +217,7 @@ where
                         address: empty_address.address.to_string(),
                         derivation_path: RpcDerivationPath(empty_address.derivation_path),
                         chain,
-                        balance: CoinBalance::default(),
+                        balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
                     });
                 }
 
@@ -225,7 +225,7 @@ where
                     address: checking_address.to_string(),
                     derivation_path: RpcDerivationPath(checking_address_der_path),
                     chain,
-                    balance: non_empty_balance,
+                    balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),
                 });
                 // Reset the counter of unused addresses to zero since we found a non-empty address.
                 unused_addresses_counter = 0;
@@ -253,7 +253,7 @@ pub async fn all_known_addresses_balances<T>(
     hd_account: &T::HDAccount,
 ) -> BalanceResult<Vec<HDAddressBalance>>
 where
-    T: HDWalletBalanceOps + Sync,
+    T: HDWalletBalanceOps + MarketCoinOps + Sync,
     T::Address: std::fmt::Display + Clone,
 {
     let external_addresses = hd_account
@@ -366,36 +366,18 @@ where
             },
         },
         None => {
-            let default_account_id = 0;
-            let default_chain = Bip44Chain::External;
-
+            // Compatibility divergence from upstream: when `from` is omitted for an HD wallet,
+            // default to the single enabled/active address (account 0, External chain, address 0)
+            // — the same address used for balance and swaps — so clients that don't send `from`
+            // can still preview and withdraw. Upstream rejects an omitted `from`.
             let default_account = hd_wallet
-                .get_account(default_account_id)
+                .get_account(0)
                 .await
                 .or_mm_err(|| WithdrawError::FromAddressNotFound)?;
-
-            let external_addresses_number = default_account
-                .known_addresses_number(default_chain)
-                .mm_err(|e| WithdrawError::InternalError(e.to_string()))?;
-
-            if external_addresses_number == 0 {
-                // No addresses have been discovered yet (e.g. address discovery hasn't run).
-                // Derive address 0 directly as a best-effort fallback so the user can still
-                // withdraw without needing to run account_balance first.
-                let hd_address = coin
-                    .derive_address(&default_account, default_chain, 0)
-                    .mm_err(Into::into)?;
-                return Ok(WithdrawSenderAddress::from(hd_address));
-            }
-
-            // Prefer the last activated external address instead of hardcoding index 0.
-            let default_address_id = external_addresses_number - 1;
-
-            HDAddressId {
-                account_id: default_account_id,
-                chain: default_chain,
-                address_id: default_address_id,
-            }
+            let hd_address = coin
+                .derive_address(&default_account, Bip44Chain::External, 0)
+                .mm_err(Into::into)?;
+            return Ok(WithdrawSenderAddress::from(hd_address));
         },
     };
 
