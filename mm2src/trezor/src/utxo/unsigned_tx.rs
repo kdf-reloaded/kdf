@@ -107,29 +107,40 @@ impl UnsignedTxInput {
 }
 
 /// Missing fields:
-/// * address_n - BIP-32 path to derive the key from master node | TODO consider adding the field
 /// * multisig - defines multisig address; script_type must be PAYTOMULTISIG
-/// * op_return_data - defines op_return data; script_type must be PAYTOOPRETURN, amount must be 0
 /// * orig_hash - tx_hash of the original transaction where this output was present (used when creating a replacement transaction)
 /// * orig_index - index of the output in the original transaction (used when creating a replacement transaction)
 pub struct TxOutput {
     /// Destination address in Base58 encoding; script_type must be PAYTOADDRESS.
     pub address: String,
+    /// BIP-32 path for change outputs controlled by the device.
+    pub address_derivation_path: Option<DerivationPath>,
     /// Amount to spend in satoshis.
     pub amount: u64,
     /// Output script type.
     pub script_type: TrezorOutputScriptType,
+    /// OP_RETURN payload. Required when `script_type` is PAYTOOPRETURN.
+    pub op_return_data: Option<Vec<u8>>,
 }
 
 impl TxOutput {
     fn to_proto(&self) -> proto_bitcoin::TxAckOutput {
+        let address_n = match self.address_derivation_path {
+            Some(ref address_n) => serialize_derivation_path(address_n),
+            None => Vec::new(),
+        };
+        let address = if address_n.is_empty() && matches!(self.script_type, TrezorOutputScriptType::PayToAddress) {
+            Some(self.address.clone())
+        } else {
+            None
+        };
         let output = proto_bitcoin::TxOutput {
-            address: Some(self.address.clone()),
-            address_n: Vec::new(),
+            address,
+            address_n,
             amount: self.amount,
             script_type: Some(proto_bitcoin::OutputScriptType::from(self.script_type) as i32),
             multisig: None,
-            op_return_data: None,
+            op_return_data: self.op_return_data.clone(),
             orig_hash: None,
             orig_index: None,
         };

@@ -9,7 +9,7 @@ use mm2_core::mm_ctx::{from_ctx, MmArc};
 use mm2_err_handle::prelude::*;
 use mm2_p2p::{encode_message, NetworkInfo, PeerId, RelayAddress, RelayAddressError};
 use serde_json::{self as json, Value as Json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::mm2::lp_network::{add_reserved_peer_addresses, lp_network_ports, request_peers, NetIdError, P2PRequest,
@@ -162,11 +162,6 @@ pub async fn remove_node_from_version_stat(ctx: MmArc, req: Json) -> NodeVersion
     delete_node_info_from_db(&ctx, node_name).map_to_mm(NodeVersionError::DatabaseError)?;
 
     Ok("success".into())
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct Mm2VersionRes {
-    nodes: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]

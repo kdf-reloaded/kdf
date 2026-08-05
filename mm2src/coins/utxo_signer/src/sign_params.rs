@@ -28,11 +28,40 @@ pub enum SpendingInputInfo {
 /// An additional info of a sending output.
 pub struct SendingOutputInfo {
     pub destination_address: String,
+    pub address_derivation_path: Option<DerivationPath>,
+    pub script_type: TrezorOutputScriptType,
+    pub op_return_data: Option<Vec<u8>>,
 }
 
 impl SendingOutputInfo {
-    /// For now, returns [`TrezorOutputScriptType::PayToAddress`] since we don't support SLP tokens yet.
-    pub fn trezor_output_script_type(&self) -> TrezorOutputScriptType { TrezorOutputScriptType::PayToAddress }
+    pub fn external_address(destination_address: String) -> SendingOutputInfo {
+        SendingOutputInfo {
+            destination_address,
+            address_derivation_path: None,
+            script_type: TrezorOutputScriptType::PayToAddress,
+            op_return_data: None,
+        }
+    }
+
+    pub fn change_address(destination_address: String, address_derivation_path: DerivationPath) -> SendingOutputInfo {
+        SendingOutputInfo {
+            destination_address,
+            address_derivation_path: Some(address_derivation_path),
+            script_type: TrezorOutputScriptType::PayToAddress,
+            op_return_data: None,
+        }
+    }
+
+    pub fn op_return(data: Vec<u8>) -> SendingOutputInfo {
+        SendingOutputInfo {
+            destination_address: String::new(),
+            address_derivation_path: None,
+            script_type: TrezorOutputScriptType::PayToOpReturn,
+            op_return_data: Some(data),
+        }
+    }
+
+    pub fn trezor_output_script_type(&self) -> TrezorOutputScriptType { self.script_type }
 }
 
 pub struct UtxoSignTxParamsBuilder {

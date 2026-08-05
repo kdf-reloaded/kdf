@@ -17,20 +17,20 @@ use bitcoin::blockdata::transaction::Transaction;
 
 /// An interface to send a transaction to the Bitcoin network.
 pub trait BroadcasterInterface {
-	/// Sends a transaction out to (hopefully) be mined.
-	fn broadcast_transaction(&self, tx: &Transaction);
+    /// Sends a transaction out to (hopefully) be mined.
+    fn broadcast_transaction(&self, tx: &Transaction);
 }
 
 /// An enum that represents the speed at which we want a transaction to confirm used for feerate
 /// estimation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmationTarget {
-	/// We are happy with this transaction confirming slowly when feerate drops some.
-	Background,
-	/// We'd like this transaction to confirm without major delay, but 12-18 blocks is fine.
-	Normal,
-	/// We'd like this transaction to confirm in the next few blocks.
-	HighPriority,
+    /// We are happy with this transaction confirming slowly when feerate drops some.
+    Background,
+    /// We'd like this transaction to confirm without major delay, but 12-18 blocks is fine.
+    Normal,
+    /// We'd like this transaction to confirm in the next few blocks.
+    HighPriority,
 }
 
 /// A trait which should be implemented to provide feerate information on a number of time
@@ -39,15 +39,15 @@ pub enum ConfirmationTarget {
 /// Note that all of the functions implemented here *must* be reentrant-safe (obviously - they're
 /// called from inside the library in response to chain events, P2P events, or timer events).
 pub trait FeeEstimator {
-	/// Gets estimated satoshis of fee required per 1000 Weight-Units.
-	///
-	/// Must return a value no smaller than 253 (ie 1 satoshi-per-byte rounded up to ensure later
-	/// round-downs don't put us below 1 satoshi-per-byte).
-	///
-	/// This method can be implemented with the following unit conversions:
-	///  * max(satoshis-per-byte * 250, 253)
-	///  * max(satoshis-per-kbyte / 4, 253)
-	fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32;
+    /// Gets estimated satoshis of fee required per 1000 Weight-Units.
+    ///
+    /// Must return a value no smaller than 253 (ie 1 satoshi-per-byte rounded up to ensure later
+    /// round-downs don't put us below 1 satoshi-per-byte).
+    ///
+    /// This method can be implemented with the following unit conversions:
+    ///  * max(satoshis-per-byte * 250, 253)
+    ///  * max(satoshis-per-kbyte / 4, 253)
+    fn get_est_sat_per_1000_weight(&self, confirmation_target: ConfirmationTarget) -> u32;
 }
 
 /// Minimum relay fee as required by bitcoin network mempool policy.

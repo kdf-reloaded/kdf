@@ -4,11 +4,11 @@
 //! production `mm2` binary never enables this feature, so these netids
 //! are unreachable in shipped builds.
 //!
-//! Each test netid shares the same fee parameters as netid 8762
-//! (AtomicDEX) so the regtest harness exercises the same code paths
-//! as the default network. The DEX fee receivers are intentionally
-//! the netid-8762 ones — regtest coins have no real value, so the
-//! addresses are inert.
+//! Each test netid shares the same fee-rate and recipient parameters as netid
+//! 8762 (AtomicDEX), while leaving burn disabled so existing regtest fixtures
+//! retain their single-output fee transactions. The DEX fee receivers are
+//! intentionally the netid-8762 ones — regtest coins have no real value, so
+//! the addresses are inert.
 //!
 //! Why so many: the upstream test fixtures use four distinct numeric
 //! netids depending on the test suite (`docker_tests` use 9000;
@@ -54,8 +54,6 @@ macro_rules! define_test_netid {
             fn fee_discount_tickers(&self) -> &'static [&'static str] { &["KMD"] }
 
             fn dex_fee_rate_discounted(&self) -> BigRational { BigRational::new(9.into(), 7770.into()) }
-
-            fn dex_fee_min_threshold(&self) -> BigRational { BigRational::new(1.into(), 10000.into()) }
 
             fn seed_nodes(&self) -> &'static [&'static str] { SEED_NODES }
         }

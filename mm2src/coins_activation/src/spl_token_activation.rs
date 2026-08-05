@@ -76,7 +76,8 @@ impl From<SplInitError> for EnableTokenError {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl TokenActivationOps for SplToken {
     type PlatformCoin = SolanaCoin;
     type ActivationParams = SplActivationRequest;

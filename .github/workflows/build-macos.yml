@@ -14,12 +14,21 @@ on:
         description: "cargo profile"
         required: false
         default: "release"
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       profile:
         description: "cargo profile"
         required: false
         default: "release"
+        type: string
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -55,7 +64,13 @@ jobs:
           key: macos-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build kdf (${{ matrix.target }})
-        run: cargo build --bin kdf --target ${{ matrix.target }} --profile ${{ inputs.profile }}
+        run: |
+          FEATURES_FLAG=""
+          if [ -n "${{ inputs.features }}" ]; then
+            FEATURES_FLAG="--features ${{ inputs.features }}"
+          fi
+          cd mm2src
+          cargo build --bin kdf --target ${{ matrix.target }} --profile ${{ inputs.profile }} $FEATURES_FLAG
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

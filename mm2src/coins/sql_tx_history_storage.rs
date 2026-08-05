@@ -4,7 +4,7 @@ use crate::{TransactionDetails, TransactionType};
 use async_trait::async_trait;
 use common::{async_blocking, PagingOptionsEnum};
 use db_common::sqlite::rusqlite::types::Type;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row, NO_PARAMS};
+use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Row};
 use db_common::sqlite::sql_builder::SqlBuilder;
 use db_common::sqlite::{offset_by_id, query_single_row, string_from_row, validate_table_name, CHECK_TABLE_EXISTS_SQL};
 use mm2_err_handle::prelude::*;
@@ -195,7 +195,7 @@ impl SqliteTxHistoryStorage {
         validate_table_name(table_name).unwrap();
         let sql = format!("SELECT COUNT(id) FROM {};", table_name);
         let conn = self.0.lock().unwrap();
-        let rows_count: u32 = conn.query_row(&sql, NO_PARAMS, |row| row.get(0)).unwrap();
+        let rows_count: u32 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
         rows_count == 0
     }
 }
@@ -217,8 +217,8 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         let sql_cache = create_tx_cache_table_sql(for_coin)?;
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            conn.execute(&sql_history, NO_PARAMS).map(|_| ())?;
-            conn.execute(&sql_cache, NO_PARAMS).map(|_| ())?;
+            conn.execute(&sql_history, []).map(|_| ())?;
+            conn.execute(&sql_cache, []).map(|_| ())?;
             Ok(())
         })
         .await
@@ -279,7 +279,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                     tx_json,
                 ];
 
-                sql_transaction.execute(&insert_tx_in_history_sql(&for_coin)?, &params)?;
+                sql_transaction.execute(&insert_tx_in_history_sql(&for_coin)?, params)?;
             }
             sql_transaction.commit()?;
             Ok(())
@@ -298,7 +298,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
 
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            conn.execute(&sql, &params)
+            conn.execute(&sql, params)
                 .map(|rows_num| {
                     if rows_num > 0 {
                         RemoveTxResult::TxRemoved
@@ -333,7 +333,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
 
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            let count_unconfirmed = conn.query_row::<u32, _, _>(&sql, NO_PARAMS, |row| row.get(0))?;
+            let count_unconfirmed = conn.query_row::<u32, _, _>(&sql, [], |row| row.get(0))?;
             Ok(count_unconfirmed > 0)
         })
         .await
@@ -349,7 +349,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
             let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query(NO_PARAMS)?;
+            let rows = stmt.query([])?;
             let result = rows.mapped(tx_details_from_row).collect::<Result<_, _>>()?;
             Ok(result)
         })
@@ -392,7 +392,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         let selfi = self.clone();
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            let count: u32 = conn.query_row(&sql, NO_PARAMS, |row| row.get(0))?;
+            let count: u32 = conn.query_row(&sql, [], |row| row.get(0))?;
             Ok(count as usize)
         })
         .await
@@ -443,6 +443,12 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
         paging: PagingOptionsEnum<BytesJson>,
         limit: usize,
     ) -> Result<GetHistoryResult, MmError<Self::Error>> {
+        if let HistoryCoinType::L2 { platform } = &coin_type {
+            return MmError::err(SqlError::InvalidParameterName(format!(
+                "HistoryCoinType::L2 for platform {platform} is not supported by SQL tx history storage"
+            )));
+        }
+
         let selfi = self.clone();
 
         async_blocking(move || {
@@ -452,7 +458,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                 HistoryCoinType::Token { platform, token_id } => {
                     (get_history_builder_preimage(&platform)?, format!("{:02x}", token_id))
                 },
-                HistoryCoinType::L2 { .. } => unimplemented!("Not implemented yet for HistoryCoinType::L2"),
+                HistoryCoinType::L2 { .. } => unreachable!("L2 history is rejected before entering async_blocking"),
             };
 
             let mut total_builder = sql_builder.clone();
@@ -795,6 +801,23 @@ mod sql_tx_history_storage_tests {
         assert_eq!(5, result.skipped);
         assert_eq!(121, result.total);
         assert_eq!(expected_internal_ids, actual_ids);
+    }
+
+    #[test]
+    fn get_history_l2_returns_error_without_panicking() {
+        let storage = SqliteTxHistoryStorage::in_memory();
+        let coin_type = HistoryCoinType::L2 {
+            platform: "ETH".to_owned(),
+        };
+        let paging = PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap());
+        let limit = 4;
+
+        let err = match block_on(storage.get_history(coin_type, paging, limit)) {
+            Ok(_) => panic!("L2 history must be unsupported"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("HistoryCoinType::L2"));
     }
 
     #[test]

@@ -596,7 +596,10 @@ impl MarketCoinOps for SlpToken {
         slp_address.encode()
     }
 
-    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
+    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> {
+        let pubkey = utxo_common::my_public_key(self.as_ref())?;
+        Ok(pubkey.to_string())
+    }
 
     fn sign_message_hash(&self, message: &str) -> Option<[u8; 32]> {
         utxo_common::sign_message_hash(self.as_ref(), message)

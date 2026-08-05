@@ -37,6 +37,23 @@ where
     Box::new(fut.boxed().compat().map(|tx| tx.into()))
 }
 
+/// Sends outputs while allowing one protocol-defined output to bypass the
+/// generic spendable-output dust check.
+///
+/// This is intentionally crate-private and is used only by the legacy KMD
+/// direct-burn taker-fee path. Change handling still uses the coin's dust.
+pub(crate) fn send_outputs_from_my_address_with_underdust_output<T>(
+    coin: T,
+    outputs: Vec<TransactionOutput>,
+    output_index: usize,
+) -> TransactionFut
+where
+    T: UtxoCommonOps + GetUtxoListOps,
+{
+    let fut = send_outputs_from_my_address_impl_with_underdust_output(coin, outputs, Some(output_index));
+    Box::new(fut.boxed().compat().map(|tx| tx.into()))
+}
+
 pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> usize {
     let transaction_bytes = serialize(tx);
     // 2 bytes are used to indicate the length of signature and pubkey
@@ -55,20 +72,17 @@ pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> 
     }
 }
 
-pub(crate) fn trade_preimage_sender_address(coin: &UtxoCoinFields) -> TradePreimageResult<Address> {
-    match coin.derivation_method {
-        DerivationMethod::Iguana(ref my_address) => Ok(my_address.clone()),
-        DerivationMethod::HDWallet(UtxoHDWallet { ref address_format, .. }) => {
-            let my_public_key = my_public_key(coin).mm_err(Into::into)?;
-            Ok(address_from_pubkey(
-                my_public_key,
-                coin.conf.pub_addr_prefix,
-                coin.conf.pub_t_addr_prefix,
-                coin.conf.checksum_type,
-                coin.conf.bech32_hrp.clone(),
-                address_format.clone(),
-            ))
-        },
+pub(crate) async fn trade_preimage_sender_address(coin: &UtxoCoinFields) -> TradePreimageResult<Address> {
+    match &coin.derivation_method {
+        DerivationMethod::Iguana(my_address) => Ok(my_address.clone()),
+        DerivationMethod::HDWallet(hd_wallet) => crate::utxo::utxo_standard_swap_v2::enabled_hd_address_info(
+            coin,
+            hd_wallet,
+            "UTXO trade preimage sender address selection",
+        )
+        .await
+        .map(|info| info.address)
+        .map_to_mm(TradePreimageError::InternalError),
     }
 }
 
@@ -87,6 +101,7 @@ pub struct UtxoTxBuilder<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> {
     tx_fee: u64,
     min_relay_fee: Option<u64>,
     dust: Option<u64>,
+    allowed_underdust_output: Option<usize>,
 }
 
 impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
@@ -105,6 +120,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             tx_fee: 0,
             min_relay_fee: None,
             dust: None,
+            allowed_underdust_output: None,
         }
     }
 
@@ -115,6 +131,16 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
 
     pub fn with_dust(mut self, dust_amount: u64) -> Self {
         self.dust = Some(dust_amount);
+        self
+    }
+
+    /// Permits one protocol-defined output to be positive but below the
+    /// generic spendable-output dust threshold.
+    ///
+    /// This does not change the dust threshold used for any other output or
+    /// for change construction.
+    pub(crate) fn allow_underdust_output(mut self, output_index: usize) -> Self {
+        self.allowed_underdust_output = Some(output_index);
         self
     }
 
@@ -256,13 +282,17 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         true_or!(!self.tx.outputs.is_empty(), GenerateTxError::EmptyOutputs);
 
         let mut received_by_me = 0;
-        for output in self.tx.outputs.iter() {
+        for (output_index, output) in self.tx.outputs.iter().enumerate() {
             let script: Script = output.script_pubkey.clone().into();
+            let is_allowed_underdust_output = self.allowed_underdust_output == Some(output_index);
             if script.opcodes().next() != Some(Ok(Opcode::OP_RETURN)) {
-                true_or!(output.value >= dust, GenerateTxError::OutputValueLessThanDust {
-                    value: output.value,
-                    dust
-                });
+                true_or!(
+                    output.value >= dust || (is_allowed_underdust_output && output.value > 0),
+                    GenerateTxError::OutputValueLessThanDust {
+                        value: output.value,
+                        dust
+                    }
+                );
             }
             self.sum_outputs_value += output.value;
             if output.script_pubkey == change_script_pubkey {
@@ -569,7 +599,7 @@ where
     let tx_fee = coin.get_tx_fee().await.mm_err(Into::into)?;
     // [`FeePolicy::DeductFromOutput`] is used if the value is [`TradePreimageValue::UpperBound`] only
     let is_amount_upper_bound = matches!(fee_policy, FeePolicy::DeductFromOutput(_));
-    let my_address = trade_preimage_sender_address(coin.as_ref())?;
+    let my_address = trade_preimage_sender_address(coin.as_ref()).await?;
 
     match tx_fee {
         // if it's a dynamic fee, we should generate a swap transaction to get an actual trade fee
@@ -591,18 +621,32 @@ where
             if let Some(gas) = gas_fee {
                 tx_builder = tx_builder.with_gas_fee(gas);
             }
-            let (tx, data) = tx_builder
+            let (tx, _data) = tx_builder
                 .build()
                 .await
                 .mm_err(|e| TradePreimageError::from_generate_tx_error(e, ticker, decimals, is_amount_upper_bound))?;
 
-            let total_fee = if tx.outputs.len() == outputs_count {
-                // take into account the change output
-                data.fee_amount + (dynamic_fee * P2PKH_OUTPUT_LEN) / KILO_BYTE
-            } else {
-                // the change output is included already
-                data.fee_amount
-            };
+            // The estimate must be identical whether the amount is expressed as a
+            // `TradePreimageValue::UpperBound` or the equivalent `Exact` value (the
+            // max-taker-volume fixed point). The builder folds a change-output allowance
+            // into its fee inconsistently across fee policies and rounding boundaries: in
+            // the `SendExact` path the allowance can consume the change below dust so that
+            // no change output is materialised, yet the allowance stays in the fee — and
+            // the old `tx.outputs.len() == outputs_count` test then added a *second*
+            // allowance, over-counting by one P2PKH output for some fee rates.
+            //
+            // Recompute here from the built transaction size, always including exactly one
+            // P2PKH change output (a real swap tx carries one) with a single rounding step.
+            // This is an estimate used for display and max-volume math only; it does not
+            // build the broadcast transaction.
+            let tx = UtxoTx::from(tx);
+            let mut v_size = tx_size_in_v_bytes(&my_address.addr_format, &tx) as u64;
+            if tx.outputs.len() != outputs_count {
+                // a change output was materialised by the builder; drop it so the base
+                // size is change-free before adding the single allowance below
+                v_size = v_size.saturating_sub(P2PKH_OUTPUT_LEN);
+            }
+            let total_fee = (dynamic_fee * (v_size + P2PKH_OUTPUT_LEN)) / KILO_BYTE;
 
             Ok(big_decimal_from_sat(total_fee as i64, decimals))
         },

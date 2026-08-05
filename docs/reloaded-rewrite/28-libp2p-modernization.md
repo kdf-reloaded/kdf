@@ -28,14 +28,81 @@ all become submodules of the consolidated substrate. The application
 layer and every other substrate that needs P2P facilities targets the
 single consolidated crate.
 
-The substrate is *not* a libp2p version bump: both before and after, the
-underlying libp2p revision is the same pinned external-dependency commit,
-with the same per-target feature flags. The change is a crate-layout consolidation
-plus the small set of post-substrate-introduction additions that hang off
-it: the proxy-signature substrate (Chapter 27), the network-id scoping
-substrate (Chapter 06), and the helpers that used to live in the glue
-crate (relay-address parser, peers-exchange wrapper, ping-with-disconnect
-wrapper, request-response wrapper, swarm runtime helpers, IP helpers).
+This refresh **also** binds a libp2p dependency change. Reloaded's
+baseline pins the *public* upstream `libp2p/rust-libp2p` git repository at
+revision `ef2afcd4` (a ~0.45-era commit). That revision transitively
+pulls a set of advisory-flagged crates (`webpki`, `rustls`,
+`rustls-webpki`, `ring`, `mio`, `idna`, `remove_dir_all`, `owning_ref`).
+The current corpus has moved off that pin entirely: it depends on the
+`KomodoPlatform/rust-libp2p` **fork** at tag `k-0.52.12` (a ~0.52.x
+lineage). This substrate binds that fork/tag as the target dependency for
+reloaded, so the earlier chapter statement that the consolidation is
+"*not* a libp2p version bump" is **corrected**: adopting the corpus's P2P
+substrate is *both* a crate-layout consolidation *and* a libp2p version
+bump to the fork. The exact dependency binding, the per-target feature
+flags, and their consequences are bound in §28.1A (R0a–R0d).
+
+Beyond the dependency change, the consolidation is a crate-layout
+consolidation plus the small set of post-substrate-introduction additions
+that hang off it: the proxy-signature substrate (Chapter 27), the
+network-id scoping substrate (Chapter 06), and the helpers that used to
+live in the glue crate (relay-address parser, peers-exchange wrapper,
+ping-with-disconnect wrapper, request-response wrapper, swarm runtime
+helpers, IP helpers).
+
+> **Upstream divergence (informative).** In the current corpus the
+> relay-mesh gossipsub extension and the flood-based pub/sub protocol are
+> delivered **by the `KomodoPlatform/rust-libp2p` fork itself** — enabled
+> through the fork's `gossipsub` and `floodsub` feature flags — rather
+> than as in-tree vendored crates. The relay-mesh API additions
+> (`i_am_relay` configuration, the relay-mesh accessor, and the
+> `IAmRelay` control message) are part of that fork's public gossipsub
+> surface. Reloaded currently vendors gossipsub in-tree because its
+> ~0.45-era public pin does not carry the extension. When reloaded adopts
+> the fork per §28.1A, the in-tree vendored gossipsub SHOULD be dropped in
+> favour of the fork's `gossipsub` feature; whether to retain any in-tree
+> gossipsub during a transition is an implementation choice (see open
+> question OQ1 in §28.11A). The relay-mesh *functional* semantics bound in
+> R10–R14 are identical either way.
+
+## 28.1A Bound External libp2p Dependency
+
+**R0a.** The substrate MUST depend on the `KomodoPlatform/rust-libp2p`
+fork, pinned by the git tag `k-0.52.12`, with `default-features = false`.
+This replaces reloaded's baseline pin of the public
+`libp2p/rust-libp2p` repository at revision `ef2afcd4` (~0.45). The pin
+MUST be declared once as a workspace dependency and referenced by member
+crates with `workspace = true`, rather than repeated per crate.
+
+**R0b.** The per-build-target feature set enabled on the fork is bound:
+
+| Target | Bound libp2p feature set |
+| ------ | ------------------------ |
+| Native (`cfg(not(target_arch = "wasm32"))`) | `dns`, `identify`, `floodsub`, `gossipsub`, `noise`, `ping`, `request-response`, `secp256k1`, `tcp`, `tokio`, `websocket`, `macros`, `yamux` |
+| WASM (`cfg(target_arch = "wasm32")`) | `identify`, `floodsub`, `noise`, `gossipsub`, `ping`, `request-response`, `secp256k1`, `wasm-ext`, `wasm-ext-websocket`, `macros`, `yamux` |
+
+The runtime-transport feature naming follows the fork's 0.52.x scheme
+(`dns` + `tcp` + `tokio`), *not* reloaded's baseline 0.45-era naming
+(`dns-tokio` + `tcp-tokio`). The `gossipsub` and `floodsub` protocol
+families are now supplied by the fork's feature flags (see the §28.1
+divergence note). The `macros` feature is required for the
+`#[derive(NetworkBehaviour)]` used by R6.
+
+**R0c.** The `identify` feature is enabled at the crate level on both
+targets even though Identify is deliberately absent from the composed
+behaviour of R6/R7. Enabling the feature flag is not a violation of
+R7: R7 constrains the *composed behaviour*, and Identify MUST NOT appear
+as a sub-behaviour of the composed `NetworkBehaviour`. The feature is
+enabled to satisfy other substrate consumers (peer-address bookkeeping /
+the central-context substrate) that link the fork with `identify`.
+
+**R0d.** The motivating outcome of R0a is bound as a requirement: moving
+to the `k-0.52.12` fork MUST eliminate reloaded's transitive dependency
+on the advisory-flagged crates pulled by the ~0.45 pin (`webpki`,
+`rustls`, `rustls-webpki`, `ring`, `mio`, `idna`, `remove_dir_all`,
+`owning_ref`). If adopting the fork leaves any of those advisories
+unresolved, that residue MUST be recorded as an open question rather than
+silently accepted.
 
 ## 28.2 Subsystem Shape
 
@@ -53,10 +120,13 @@ peers-exchange-only; NAT traversal is solved structurally (R24) by
 always having a small set of globally-routable relay nodes in the
 bootstrap list.
 
-The vendored gossipsub carries a relay-mesh extension that the standard
-gossipsub specification does not have (R10–R13). This is the structural
-reason the substrate uses a vendored gossipsub rather than the standard
-libp2p implementation directly.
+The gossipsub used by the substrate carries a relay-mesh extension that
+the standard gossipsub specification does not have (R10–R13). This
+extension is the structural reason the substrate cannot use a plain
+upstream gossipsub: in reloaded's baseline it is supplied by an in-tree
+vendored copy, and in the target fork (§28.1A) it is supplied by the
+fork's `gossipsub` feature. Either way the relay-mesh semantics of
+R10–R14 apply.
 
 ## 28.3 Bound Crate Boundary
 
@@ -200,18 +270,27 @@ expose:
   sequence-number, so duplicate payloads collapse to a single
   message id;
 - the three mesh-size watermarks (`mesh_n_low`, `mesh_n`,
-  `mesh_n_high`), with substrate-level defaults differing between
-  client and relay roles;
+   `mesh_n_high`), with substrate-level values differing between
+   client and relay roles. The bound per-role triples are
+   `(mesh_n_low, mesh_n, mesh_n_high) = (4, 8, 12)` for a relay node
+   and `(2, 4, 6)` for a client node, selected on the `i_am_relay`
+   flag of R12. Any watermark triple chosen MUST satisfy the gossipsub
+   configuration invariant `mesh_n_low ≤ mesh_n ≤ mesh_n_high` and the
+   outbound-mesh constraint that the effective `mesh_outbound_min`
+   does not exceed `mesh_n_low` (the fork's config builder rejects
+   triples that violate these);
 - a manual-propagation flag — when set, the consumer is responsible
   for invoking the substrate's propagate-message method after
   validating a message, which gives the application the ability to
   drop invalid messages before forwarding;
 - a maximum transmit size bound at slightly under 1 MiB.
 
-**R14.** The substrate MUST NOT carry the peer-scoring / reputation
-extension present in later revisions of the standard gossipsub
-implementation. Abusive-peer handling falls to the consumer's manual-
-disconnect logic and to R9's force-disconnect.
+**R14.** The substrate MUST NOT enable the peer-scoring / reputation
+extension present in the standard gossipsub implementation. Abusive-peer
+handling falls to the consumer's manual-disconnect logic and to R9's
+force-disconnect. (The fork's gossipsub may expose peer scoring as an
+optional capability; the substrate contract is that it stays
+unconfigured.)
 
 ## 28.7 Bound Topic and Application-Payload Signing Surface
 
@@ -567,9 +646,13 @@ disconnected.
 > driving-spec requirements an implementer MUST land. The items below
 > are genuine deferrals.
 
-**D1.** A libp2p version bump (and the accompanying touch on every
-sub-behaviour and the swarm-builder code) is deferred. The substrate
-preserves the baseline libp2p revision pin and feature flags.
+**D1.** ~~A libp2p version bump is deferred.~~ **Superseded by §28.1A.**
+The libp2p version bump is *no longer deferred*: adopting the
+`KomodoPlatform/rust-libp2p` fork at tag `k-0.52.12` (R0a) is a binding
+requirement of this refresh, driven by the advisory-clearing goal in
+R0d. The accompanying touch on the sub-behaviours and the swarm-builder
+code to compile against the fork's 0.52.x API is part of that required
+work, not a deferral.
 
 **D2.** Removal of the retained pre-substrate peer-discovery crate
 (R4) from the workspace is deferred. Its retention costs build time
@@ -581,10 +664,9 @@ deferred. The two key spaces and threat models are currently kept
 separate by design.
 
 **D4.** Addition of peer-scoring / reputation extensions to the
-vendored gossipsub (or migration to a modern standard gossipsub
-implementation that carries them) is deferred. The current substrate
-handles abusive peers via manual-disconnect logic plus R9 force-
-disconnect.
+gossipsub behaviour (whether the fork's optional peer scoring or a
+separate mechanism) is deferred. The current substrate handles abusive
+peers via manual-disconnect logic plus R9 force-disconnect.
 
 **D5.** Addition of libp2p relay-v2 plus DCUtR fallback for clients
 whose only path to a relay is blocked is deferred. The substrate
@@ -594,13 +676,40 @@ currently degrades to "no connection" for such clients.
 remain responsible for supplying reachable relay addresses when the binary
 does not carry a usable registry fallback for the selected netid.
 
+## 28.11A Open Questions
+
+**OQ1.** When reloaded adopts the fork (R0a), it MAY drop the in-tree
+vendored gossipsub entirely in favour of the fork's `gossipsub` feature,
+or keep an in-tree copy during a transition. This chapter binds the
+relay-mesh *semantics* (R10–R14) but does not mandate which physical
+source provides them. The chosen approach should be recorded when the
+port lands.
+
+**OQ2.** R0d requires the fork adoption to clear the enumerated
+advisory-flagged transitive crates. **Resolved at adoption (2026-07):**
+adopting the `k-0.52.12` fork did **not** clear the cluster. Only
+`owning_ref` (RUSTSEC-2022-0040) was eliminated. The remaining crates —
+`rustls`, `rustls-webpki`, `webpki`, `ring`, `mio`, `idna`,
+`remove_dir_all` — still resolve, now pulled by the **fork's own
+0.52-era transitive deps** (its WSS/TLS, trust-dns and tempfile stack)
+instead of the old `ef2afcd4` pin; the WSS `rustls`/`ring`/`webpki` line
+is additionally coupled to reloaded's `futures-rustls` transport binding.
+Separately, `ed25519-dalek 1.x` / `curve25519-dalek 3.x` persist via
+`solana-keypair` (Solana SDK), independent of libp2p. Per R0d this
+residue is **not silently accepted**: it is recorded here and formally
+accepted with per-advisory rationale in `deny.toml` (upstream-blocked —
+awaiting KomodoPlatform fork modernization / Solana SDK bumps), and the
+reloaded-owned roots (`libsqlite3-sys` via rusqlite; `metrics-util`) are
+tracked as scheduled migrations.
+
 ## 28.12 External References
 
-- *libp2p* — the underlying networking substrate; the substrate pins
-  to the project's existing external-dependency revision (the pin
-  itself is workspace-side metadata, not bound here).
-- *libp2p gossipsub specification* — the basis the vendored gossipsub
-  extends with R10–R13.
+- *libp2p* — the underlying networking substrate. The target dependency
+  bound by this chapter (§28.1A) is the `KomodoPlatform/rust-libp2p`
+  fork at tag `k-0.52.12`, replacing reloaded's baseline pin of the
+  public `libp2p/rust-libp2p` repository at revision `ef2afcd4` (~0.45).
+- *libp2p gossipsub specification* — the basis the relay-mesh gossipsub
+  extension extends with R10–R13.
 - *libp2p floodsub specification* — the basis of the substrate's
   flood-based topic.
 - *libp2p multistream-select specification* — the bound upgrade
@@ -638,14 +747,15 @@ preserves the shape, only consolidates its location). A `git grep`
 for the bound sub-behaviour names against the baseline glue crate's
 behaviour module MUST confirm all five.
 
-**V3.** The baseline libp2p revision pin and per-target feature flags
-MUST be confirmed identical to the substrate's pin and flags. The
-bound substrate is a crate-layout consolidation, not a libp2p version
-bump:
-
-```
-git -C <baseline> show c1d46c0:<root>/<glue-crate>/Cargo.toml | grep -E 'libp2p|features'
-```
+**V3.** The baseline libp2p pin MUST be confirmed to be the *public*
+`libp2p/rust-libp2p` repository at revision `ef2afcd4` (~0.45), with the
+baseline 0.45-era per-target feature naming. This confirms the starting
+point that R0a supersedes. The refreshed substrate is **not** identical
+to the baseline pin: it is a deliberate move to the
+`KomodoPlatform/rust-libp2p` fork at tag `k-0.52.12` with the feature
+sets bound in R0b. A verification MUST show the baseline pin/flags, and
+a separate check MUST confirm the adopted pin matches R0a/R0b once the
+port lands.
 
 ## 28.14 Provenance Footer
 

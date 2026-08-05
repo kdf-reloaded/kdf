@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn sign_message_result_parse() {
-        let signature_b64 = base64::encode([0xab, 0xcd, 0xef].as_ref());
+        let signature_b64 = base64::encode(&[0xab_u8, 0xcd, 0xef]);
         let result = json!({ "signature": signature_b64, "address": "bc1qexampleaddr" });
         let parsed = parse_sign_message_result(&result).expect("valid result");
         assert_eq!(parsed.signature, vec![0xab, 0xcd, 0xef]);

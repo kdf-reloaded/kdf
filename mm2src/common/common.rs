@@ -1031,41 +1031,50 @@ pub fn writeln(line: &str) {
     });
 }
 
-#[cfg(target_arch = "wasm32")]
-static mut PROCESS_LOG_TAIL: [u8; 0x10000] = [0; 0x10000];
-
-#[cfg(target_arch = "wasm32")]
-static TAIL_CUR: AtomicUsize = AtomicUsize::new(0);
-
-/// Keep a tail of the log in RAM for the integration tests.
-#[cfg(target_arch = "wasm32")]
-pub fn append_log_tail(line: &str) {
-    unsafe {
-        if line.len() < PROCESS_LOG_TAIL.len() {
-            let posⁱ = TAIL_CUR.load(Ordering::Relaxed);
-            let posⱼ = posⁱ + line.len();
-            let (posˢ, posⱼ) = if posⱼ > PROCESS_LOG_TAIL.len() {
-                (0, line.len())
-            } else {
-                (posⁱ, posⱼ)
-            };
-            if TAIL_CUR
-                .compare_exchange(posⁱ, posⱼ, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                for (cur, ix) in (posˢ..posⱼ).zip(0..line.len()) {
-                    PROCESS_LOG_TAIL[cur] = line.as_bytes()[ix]
-                }
-            }
-        }
-    }
-}
+// TODO(PRODUCTION): Resolve this disabled legacy WASM test buffer before the
+// production release. No Rust, JavaScript, or test consumer remains in this
+// repository, and neither the static nor the plain Rust function is exported
+// to the browser console. The recommended resolution is deletion. If a real
+// consumer is discovered during beta testing, replace this `static mut`
+// implementation with a safe owned ring buffer before re-enabling it. The
+// historical implementation is kept commented out temporarily for reference.
+//
+// #[cfg(target_arch = "wasm32")]
+// static mut PROCESS_LOG_TAIL: [u8; 0x10000] = [0; 0x10000];
+//
+// #[cfg(target_arch = "wasm32")]
+// static TAIL_CUR: AtomicUsize = AtomicUsize::new(0);
+//
+// /// Keep a tail of the log in RAM for the integration tests.
+// #[cfg(target_arch = "wasm32")]
+// pub fn append_log_tail(line: &str) {
+//     unsafe {
+//         if line.len() < PROCESS_LOG_TAIL.len() {
+//             let posⁱ = TAIL_CUR.load(Ordering::Relaxed);
+//             let posⱼ = posⁱ + line.len();
+//             let (posˢ, posⱼ) = if posⱼ > PROCESS_LOG_TAIL.len() {
+//                 (0, line.len())
+//             } else {
+//                 (posⁱ, posⱼ)
+//             };
+//             if TAIL_CUR
+//                 .compare_exchange(posⁱ, posⱼ, Ordering::Relaxed, Ordering::Relaxed)
+//                 .is_ok()
+//             {
+//                 for (cur, ix) in (posˢ..posⱼ).zip(0..line.len()) {
+//                     PROCESS_LOG_TAIL[cur] = line.as_bytes()[ix]
+//                 }
+//             }
+//         }
+//     }
+// }
 
 #[cfg(target_arch = "wasm32")]
 pub fn writeln(line: &str) {
     use web_sys::console;
     console::log_1(&line.into());
-    append_log_tail(line);
+    // `append_log_tail(line)` is intentionally disabled with the legacy
+    // implementation above. Browser-console logging remains active.
 }
 
 pub fn small_rng() -> SmallRng { SmallRng::seed_from_u64(now_ms()) }

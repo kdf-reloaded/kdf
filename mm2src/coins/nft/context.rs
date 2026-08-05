@@ -44,6 +44,7 @@ impl NftCtx {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn from_mm_ctx(ctx: &MmArc) -> Result<Arc<NftCtx>, String> {
         from_ctx(&ctx.nft_ctx, move || {
+            ensure_async_sqlite_connection(ctx)?;
             let conn_handle = ctx
                 .async_sqlite_connection
                 .get()
@@ -102,5 +103,44 @@ impl NftCtx {
             .lock()
             .expect("nft activation set poisoned")
             .insert(chain)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_async_sqlite_connection(ctx: &MmArc) -> Result<(), String> {
+    if ctx.async_sqlite_connection.get().is_some() {
+        return Ok(());
+    }
+
+    match futures::executor::block_on(ctx.init_async_sqlite_connection()) {
+        Ok(()) => Ok(()),
+        Err(err) if err == "Already initialized" && ctx.async_sqlite_connection.get().is_some() => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod native_tests {
+    use super::*;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn from_mm_ctx_initialises_async_sqlite_connection() {
+        let namespace = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+            .to_string();
+        let db_root = std::env::temp_dir().join(format!("kdf-nft-context-{namespace}"));
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "dbdir": db_root.to_string_lossy() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(ctx.dbdir()).expect("create dbdir");
+
+        assert!(ctx.async_sqlite_connection.get().is_none());
+        let _nft_ctx = NftCtx::from_mm_ctx(&ctx).expect("lazy NFT context");
+        assert!(ctx.async_sqlite_connection.get().is_some());
     }
 }

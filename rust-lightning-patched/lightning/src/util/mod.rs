@@ -15,24 +15,24 @@ pub(crate) mod fuzz_wrappers;
 #[macro_use]
 pub(crate) mod ser_macros;
 
-pub mod events;
 pub mod errors;
-pub mod ser;
-pub mod message_signing;
+pub mod events;
 pub mod invoice;
+pub mod message_signing;
+pub mod ser;
 
 pub(crate) mod atomic_counter;
 pub(crate) mod byte_utils;
 pub(crate) mod chacha20;
+pub(crate) mod chacha20poly1305rfc;
+#[cfg(not(fuzzing))]
+pub(crate) mod poly1305;
+pub(crate) mod scid_utils;
+pub(crate) mod transaction_utils;
 #[cfg(fuzzing)]
 pub mod zbase32;
 #[cfg(not(fuzzing))]
 pub(crate) mod zbase32;
-#[cfg(not(fuzzing))]
-pub(crate) mod poly1305;
-pub(crate) mod chacha20poly1305rfc;
-pub(crate) mod transaction_utils;
-pub(crate) mod scid_utils;
 
 /// Logging macro utilities.
 #[macro_use]
@@ -42,8 +42,8 @@ pub(crate) mod macro_logger;
 pub(crate) mod crypto;
 
 // These have to come after macro_logger to build
-pub mod logger;
 pub mod config;
+pub mod logger;
 
 #[cfg(any(test, fuzzing, feature = "_test_utils"))]
 pub mod test_utils;
@@ -52,4 +52,3 @@ pub mod test_utils;
 /// machine errors and used in fuzz targets and tests.
 #[cfg(any(test, fuzzing, feature = "_test_utils"))]
 pub mod enforcing_trait_impls;
-

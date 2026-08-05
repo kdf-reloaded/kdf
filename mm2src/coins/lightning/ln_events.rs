@@ -397,7 +397,7 @@ impl LightningEventHandler {
         let min_wait_time = time_forwardable.as_millis() as u32;
         let channel_manager = self.channel_manager.clone();
         spawn(async move {
-            let millis_to_sleep = rand::thread_rng().gen_range(min_wait_time, min_wait_time * 5);
+            let millis_to_sleep = rand::thread_rng().gen_range(min_wait_time..min_wait_time * 5);
             Timer::sleep_ms(millis_to_sleep).await;
             channel_manager.process_pending_htlc_forwards();
         });

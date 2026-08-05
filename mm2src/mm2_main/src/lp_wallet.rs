@@ -568,7 +568,7 @@ async fn persist_passphrase(
 /// stored seed surfaces as `InvalidRequest` (passphrase mismatch). Every refusal
 /// returns an error so startup fails closed before serving (R30).
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn initialize_wallet_passphrase(
+pub(crate) async fn initialize_wallet_passphrase(
     ctx: &MmArc,
     passphrase: PassphraseForm,
     wallet_name: Option<&str>,

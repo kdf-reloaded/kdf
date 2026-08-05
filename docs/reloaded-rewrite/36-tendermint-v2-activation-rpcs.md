@@ -180,9 +180,9 @@ mmrpc-2.0 `params` object carries:
   it must still be present.
 
 R36.2.2 The token's platform binding, decimals, and on-chain denomination
-(`denom`) are taken from coin configuration (the token-protocol descriptor names
-the platform, decimals, and denom). Activation resolves the token against the
-named active platform coin and reads its balance.
+(`denom`) are taken from the token's `TENDERMINTTOKEN` `protocol_data` (§36.3.2):
+`platform`, `decimals`, and `denom`. Activation resolves the token against the
+named active platform coin and reads its balance over the platform's connection.
 
 R36.2.3 The success `result` shall report:
 - `balances` -- a map of the activated address to its token balance object; and
@@ -209,21 +209,125 @@ A token whose platform coin is not active shall be rejected with
 
 ---
 
-## 36.3 Token-protocol descriptor (dictated config contract)
+## 36.3 Coin-protocol `protocol_data` descriptors (dictated config contract)
 
-R36.3.1 The Tendermint token-protocol descriptor used by coin configuration (and
-resolved during token activation) follows the project's public coin-protocol JSON
-contract. The Tendermint token case carries `platform` (string -- the platform
-coin ticker the token belongs to), `decimals` (integer -- the token's decimal
-precision), and `denom` (string -- the Cosmos / IBC on-chain denomination, e.g. a
-`u<base>` bank denom or an `ibc/<HASH>` IBC denom). The `platform`, `decimals`,
-and `denom` field names and the IBC denom format are the dictated public config /
-interop contract; the Rust types that deserialise them are discretionary.
+The Tendermint platform coin and Tendermint token are each selected in coin
+configuration by a `protocol` object whose `type` string is `TENDERMINT` or
+`TENDERMINTTOKEN` respectively, and whose `protocol_data` object carries the
+protocol-specific fields distilled below. The `type` tag string, the
+`protocol_data` container, and every field name and value form listed here are
+the dictated public coin-config / Cosmos-interop contract; the Rust types that
+deserialise them are discretionary. The `protocol_data` fields are **the source
+of the platform coin's and token's chain parameters** -- they are *not* read from
+the top-level coin-conf object nor from the activation request. Activation MUST
+therefore parse them from `protocol_data` and MUST NOT drop fields it later needs.
 
-R36.3.2 The Tendermint platform-protocol descriptor carries the chain
-identification (chain id and address prefix) and the average-block-time metadata
-required to compute swap lock-time and confirmation behaviour. The chain id and
-address prefix are dictated by the target Cosmos chain, not by this chapter.
+### 36.3.1 `TENDERMINT` platform `protocol_data`
+
+R36.3.1 The `TENDERMINT` `protocol_data` object shall carry the following fields.
+Each row states the wire key, its JSON type, whether it is required, and the
+functional role activation must give it.
+
+| `protocol_data` key | JSON type | Required? | Functional role |
+| --- | --- | --- | --- |
+| `denom` | string | **required** | The platform chain's native base denomination (the smallest-unit bank denom, e.g. `uatom`, `uiris`, `uosmo`). It is the denom the platform coin queries for its own balance, denominates transaction fees in, and signs bank/HTLC/IBC messages against. Without it the platform coin has no base unit and cannot report balance, build fees, or sign. |
+| `decimals` | integer | **required** | The number of decimal places between the base denom and one whole coin. Used to convert base-unit balances and amounts to and from human-readable decimal values. It must be **18 or lower**; a value above 18 shall fail activation as invalid protocol data (a bounded-input check, not a free-form message). Without it, all balance and amount conversion for the platform coin is undefined. |
+| `account_prefix` | string | **required** | The bech32 human-readable prefix (HRP) of the chain's account addresses (e.g. `cosmos`, `iaa`, `osmo`, per BIP-173). Used to derive the activated account address from the public key. Without it no address can be formed, so the coin cannot activate. |
+| `chain_id` | string | **required** | The Cosmos/Tendermint chain identifier (e.g. `cosmoshub-4`, `irishub-1`, `osmosis-1`). Bound into the signing document for every transaction and into the WalletConnect/Keplr session. Without it transactions cannot be signed or broadcast to the correct chain. |
+| `gas_price` | number (float) | optional | The default gas price (in the base denom per gas unit) used for fee estimation when a withdraw/transaction does not override it. When absent, a built-in default gas price applies. Its absence is **benign** -- activation and all operations still succeed using the default. |
+| `ibc_channels` | object (map) | optional | A map whose **keys are the bech32 account-prefix (HRP) of a target chain** and whose **values are integer IBC channel numbers** on this chain's transfer port toward that target (the integer `N` corresponds to the ICS-20 channel identifier `channel-N`). Used to resolve the outbound IBC transfer channel for a given destination prefix during IBC transfer / cross-chain HTLC routing. When absent it defaults to an empty map. Its absence disables *manually-configured* channel lookup for a destination prefix; a healthy-channel discovery path may still resolve channels at runtime, so absence degrades but does not categorically break IBC routing. |
+| `chain_registry_name` | string | optional / informational | The chain's canonical name in the Cosmos chain registry (e.g. `cosmoshub`, `irishub`, `osmosis`). It is **not consumed by any activation or swap code path** distilled here; it is carried in config for external/registry-driven tooling. Its absence is benign for all in-framework functional paths. |
+
+> **Note (extra config keys).** Real coin configs may also carry additional
+> Tendermint tuning keys in `protocol_data` (e.g. a minimum-balance-for-IBC-routing
+> hint). Any such field is optional and, when consumed, only adjusts a threshold
+> with a built-in default; unknown/unconsumed keys must not cause activation to
+> fail. The coin-protocol deserialiser therefore must **not** be locked to
+> reject unknown `protocol_data` fields for these arms.
+
+R36.3.2 During platform activation the fields of R36.3.1 shall be consumed as
+follows: `account_prefix` derives the activated address; `denom` + `decimals`
+denominate and scale the platform balance reported in the activation result and
+every later balance/amount conversion; `chain_id` parameterises transaction
+signing and the external-signer session; `gas_price` seeds fee estimation (or the
+default when omitted); and `ibc_channels` seeds the destination-prefix -> channel
+map used by the IBC/HTLC layer of ch. 18. `chain_registry_name` is retained by
+config but need not be consumed. A `TENDERMINT` `protocol_data` missing any of the
+four required fields (`denom`, `decimals`, `account_prefix`, `chain_id`), or with
+`decimals` above 18, shall fail activation with an invalid-protocol-data error
+under the R36.1.6 contract and shall not partially activate the coin.
+
+### 36.3.2 `TENDERMINTTOKEN` token `protocol_data`
+
+R36.3.3 The `TENDERMINTTOKEN` `protocol_data` object shall carry the following
+fields.
+
+| `protocol_data` key | JSON type | Required? | Functional role |
+| --- | --- | --- | --- |
+| `platform` | string | **required** | The ticker of the `TENDERMINT` platform coin the token rides on. Token activation resolves the token against this already-active platform; a mismatch or inactive platform is rejected (R36.2.4). |
+| `decimals` | integer | **required** | The token's decimal precision, used to scale its base-denom balance to a human value. |
+| `denom` | string | **required** | The token's on-chain base denomination -- either a native bank denom or an IBC denom of the form `ibc/<HASH>` (the IBC-derived denom hash). It is the denom the token queries for its balance and transacts against on the platform's connection. |
+| `gas_price` | number (float) | optional / informational | A per-token gas-price hint. Tendermint tokens transact over the **platform coin's** connection and use the platform coin's gas/fee settings, so this key is **not consumed** by token activation or token operation in the behaviour distilled here. Its presence or absence is benign. |
+
+R36.3.4 During token activation the token is constructed from `decimals` and
+`denom` and bound to the platform named by `platform`; the token's balance is then
+read on the platform coin's connection and returned per R36.2.3. The token does
+**not** open its own chain connection and does **not** source `denom`/`decimals`
+from anywhere other than its own `protocol_data`.
+
+### 36.3.3 Reloaded status and required additions
+
+> **Upstream divergence (informative).** Reloaded currently under-captures both
+> Tendermint `protocol_data` arms and, because the coin-protocol enum does not
+> reject unknown fields, silently **drops** the surplus config keys rather than
+> erroring on them. The functional impact of each dropped field is:
+>
+> - **`TENDERMINT.denom` (dropped -> functional gap, MUST add):** reloaded's
+>   `TENDERMINT` arm captures only `account_prefix` and `chain_id`, so the
+>   platform coin has **no base denomination**. Without `denom` the platform coin
+>   cannot query its own balance, denominate fees, or sign bank/HTLC/IBC messages.
+>   `denom` is required and must be added.
+> - **`TENDERMINT.decimals` (dropped -> functional gap, MUST add):** likewise
+>   dropped by reloaded. Without it, platform balance/amount scaling is undefined
+>   (and the `decimals <= 18` bound cannot be enforced). Required; must be added.
+> - **`TENDERMINT.ibc_channels` (dropped -> partial gap, SHOULD add):** without
+>   the configured destination-prefix -> channel map, manually-configured IBC
+>   channel resolution is unavailable; runtime healthy-channel discovery may still
+>   cover some routes, but configured IBC transfer/HTLC routing toward a given
+>   destination prefix is not guaranteed. Add to restore configured IBC routing.
+> - **`TENDERMINT.gas_price` (dropped -> benign):** absence falls back to the
+>   built-in default gas price; activation and operations still succeed. Adding it
+>   only restores per-chain fee tuning; safe to defer.
+> - **`TENDERMINT.chain_registry_name` (dropped -> benign):** not consumed by any
+>   distilled functional path; safe to ignore.
+> - **`TENDERMINTTOKEN.gas_price` (dropped -> benign):** tokens use the platform
+>   coin's fee settings; the token-level key is not consumed. Safe to ignore.
+> - **`TENDERMINTTOKEN.platform` / `decimals` / `denom`:** already captured by
+>   reloaded and consumed correctly (R36.3.3--R36.3.4); no change needed.
+>
+> Net: reloaded's `TENDERMINT` arm must be extended to carry `denom` and
+> `decimals` (required) and `ibc_channels` (recommended); `gas_price` and
+> `chain_registry_name` are optional/benign. The `TENDERMINTTOKEN` arm needs no
+> functional change. The enum must continue to tolerate unknown `protocol_data`
+> keys (no `deny_unknown_fields`) so benign surplus keys do not fail activation.
+
+> **Status update (reloaded).** Implemented (commit 40645ebad). The `TENDERMINT`
+> arm now carries all three required/recommended fields:
+>
+> - **`denom` (required):** platform coin base denomination (e.g., `"uatom"`);
+>   passed to `TendermintProtocolInfo` and consumed by balance queries, fee
+>   calculations, and bank/HTLC/IBC message construction.
+> - **`decimals` (required):** platform coin display decimals, bounded by a custom
+>   deserializer at ≤18; enables correct scaling of amounts and fee representation.
+> - **`ibc_channels` (recommended):** optional map from destination bech32 HRP to
+>   ICS-20 channel number; passed to `TendermintProtocolInfo.ibc_channels` and
+>   available to the IBC/HTLC layer via `ibc_channel_for_prefix()` for configured
+>   channel routing (ch. 18 §18.4). Defaults to empty when absent.
+>
+> The `TENDERMINTTOKEN` arm captures `platform`, `decimals`, and `denom` correctly
+> (no change needed). Benign fields (`gas_price`, `chain_registry_name`) continue
+> to be silently dropped; the enum still tolerates unknown `protocol_data` keys
+> so surplus config does not fail activation.
 
 ---
 
@@ -316,8 +420,23 @@ task variant share a single activation path.
 - Both methods are driven by the generic platform-coin-with-tokens / single-token
   activators (R36.0, R36.5) and carry the generic activation `error_type`
   discriminants and HTTP statuses of R36.1.6 and R36.2.4.
-- The token-protocol descriptor resolves `platform`, `decimals`, and `denom` from
-  coin configuration, accepting both bank and IBC (`ibc/<HASH>`) denoms (R36.3).
+- A `TENDERMINT` platform coin activates only when its `protocol_data` supplies
+  all four required fields -- `denom`, `decimals`, `account_prefix`, `chain_id` --
+  and `decimals <= 18`; the platform balance is reported in the correct base
+  denom scaled by `decimals`, the address uses the `account_prefix` HRP, and
+  transactions sign against `chain_id`. A `protocol_data` missing any required
+  field, or with `decimals > 18`, fails activation without partially activating
+  (R36.3.1--R36.3.2).
+- A `TENDERMINT` coin whose `protocol_data` supplies `ibc_channels` can resolve
+  an outbound IBC transfer channel for a configured destination account-prefix
+  (mapping prefix -> integer channel number `N` -> `channel-N`); omitting
+  `gas_price` or `chain_registry_name` does not prevent activation or operation
+  (R36.3.1).
+- The `TENDERMINTTOKEN` protocol resolves `platform`, `decimals`, and `denom`
+  from its `protocol_data`, accepting both bank and IBC (`ibc/<HASH>`) denoms; a
+  token-level `gas_price` key, if present, is accepted and ignored (R36.3.2).
+- Surplus/unknown `protocol_data` keys on either arm do not cause activation to
+  fail (R36.3.3).
 - Both method strings are routed and build on native **and** WASM targets (R36.5).
 - The task-based `task::enable_tendermint::*` family is delivered via the shared
   platform-coin task-activation framework of ch. 48, wrapping the one-shot

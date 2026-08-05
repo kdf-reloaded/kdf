@@ -15,7 +15,7 @@ use chain::TxHashAlgo;
 use common::executor::{spawn, Timer};
 use crypto::GlobalHDAccountArc;
 use crypto::{Bip32DerPathError, Bip32DerPathOps, Bip44DerPathError, CryptoCtx, CryptoCtxError, CryptoInitError,
-             HDPathToCoin, HwWalletType};
+             HDPathToCoin, HardwareWalletArc, HwWalletType};
 use derive_more::Display;
 use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
@@ -29,6 +29,52 @@ use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
 use serde_json::{self as json, Value as Json};
 use std::sync::{Arc, Mutex, Weak};
+
+async fn add_next_electrum_server(
+    client: &ElectrumClientImpl,
+    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
+    active_servers: &mut Vec<ElectrumRpcRequest>,
+    max_connected: usize,
+) -> bool {
+    while active_servers.len() < max_connected {
+        let Some(server) = pending_servers.next() else { break };
+        match client.add_server(&server).await {
+            Ok(_) => {
+                active_servers.push(server);
+                return true;
+            },
+            Err(e) => log!("Error " (e) " connecting to " [server] ". Address won't be used"),
+        };
+    }
+
+    false
+}
+
+fn first_disconnected_electrum_server_index(statuses: &[Option<bool>]) -> Option<usize> {
+    statuses.iter().position(|status| *status == Some(false))
+}
+
+async fn replace_disconnected_electrum_server(
+    client: &ElectrumClientImpl,
+    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
+    active_servers: &mut Vec<ElectrumRpcRequest>,
+    max_connected: usize,
+) -> bool {
+    while active_servers.len() >= max_connected {
+        let mut statuses = Vec::with_capacity(active_servers.len());
+        for server in active_servers.iter() {
+            statuses.push(client.is_server_connected(&server.url).await);
+        }
+        let disconnected_index = first_disconnected_electrum_server_index(&statuses);
+        let Some(index) = disconnected_index else { break };
+        let server = active_servers.remove(index);
+        if let Err(e) = client.remove_server(&server.url).await {
+            log!("Error " (e) " removing disconnected Electrum server " [server] " during failover");
+        }
+    }
+
+    add_next_electrum_server(client, pending_servers, active_servers, max_connected).await
+}
 
 cfg_native! {
     use crate::utxo::coin_daemon_data_dir;
@@ -175,6 +221,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
             dust_amount,
             rpc_client,
             priv_key_policy,
+            hw_ctx: None,
             derivation_method,
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
@@ -282,6 +329,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
             dust_amount,
             rpc_client,
             priv_key_policy,
+            hw_ctx: None,
             derivation_method,
             history_sync_state: Mutex::new(initial_history_state),
             tx_cache,
@@ -306,7 +354,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         if !self.supports_trezor(&conf) {
             return MmError::err(UtxoCoinBuildError::CoinDoesntSupportTrezor);
         }
-        self.check_if_trezor_is_initialized()?;
+        let hw_ctx = self.trezor_hw_ctx()?;
 
         // For now, use a default script pubkey.
         // TODO change the type of `recently_spent_outpoints` to `AsyncMutex<HashMap<Bytes, RecentlySpentOutPoints>>`
@@ -347,6 +395,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
             dust_amount,
             rpc_client,
             priv_key_policy: PrivKeyPolicy::Trezor,
+            hw_ctx: Some(hw_ctx),
             derivation_method: DerivationMethod::HDWallet(hd_wallet),
             history_sync_state: Mutex::new(initial_history_state),
             block_headers_storage,
@@ -385,13 +434,13 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     fn supports_trezor(&self, conf: &UtxoCoinConf) -> bool { conf.trezor_coin.is_some() }
 
     #[inline]
-    fn check_if_trezor_is_initialized(&self) -> UtxoCoinBuildResult<()> {
+    fn trezor_hw_ctx(&self) -> UtxoCoinBuildResult<HardwareWalletArc> {
         let crypto_ctx = CryptoCtx::from_ctx(self.ctx()).mm_err(Into::into)?;
         let hw_ctx = crypto_ctx
             .hw_ctx()
             .or_mm_err(|| UtxoCoinBuildError::HwContextNotInitialized)?;
         match hw_ctx.hw_wallet_type() {
-            HwWalletType::Trezor => Ok(()),
+            HwWalletType::Trezor => Ok(hw_ctx.clone()),
         }
     }
 }
@@ -553,7 +602,7 @@ pub trait UtxoCoinBuilderCommonOps {
     async fn electrum_client(
         &self,
         args: ElectrumBuilderArgs,
-        mut servers: Vec<ElectrumRpcRequest>,
+        servers: Vec<ElectrumRpcRequest>,
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
@@ -571,25 +620,32 @@ pub trait UtxoCoinBuilderCommonOps {
             event_handlers.push(ElectrumProtoVerifier { on_connect_tx }.into_shared());
         }
 
+        let all_servers = servers.clone();
         let max_connected = max_connected.unwrap_or(servers.len()).max(1);
         let min_connected = min_connected.unwrap_or(1).max(1).min(max_connected);
-        if servers.len() > max_connected {
-            servers.truncate(max_connected);
-        }
 
         let client = ElectrumClientImpl::new(ticker, event_handlers);
-        for server in servers.iter() {
-            match client.add_server(server).await {
-                Ok(_) => (),
-                Err(e) => log!("Error " (e) " connecting to " [server] ". Address won't be used"),
-            };
-        }
+        let mut pending_servers = servers.into_iter();
+        let mut active_servers = Vec::new();
+        while add_next_electrum_server(&client, &mut pending_servers, &mut active_servers, max_connected).await {}
 
         let mut attempts = 0i32;
         while client.count_connected().await < min_connected {
             if attempts >= 10 {
+                if replace_disconnected_electrum_server(
+                    &client,
+                    &mut pending_servers,
+                    &mut active_servers,
+                    max_connected,
+                )
+                .await
+                {
+                    attempts = 0;
+                    continue;
+                }
+
                 return MmError::err(UtxoCoinBuildError::FailedToConnectToElectrums {
-                    electrum_servers: servers.clone(),
+                    electrum_servers: all_servers.clone(),
                     seconds: 5,
                 });
             }
@@ -612,7 +668,7 @@ pub trait UtxoCoinBuilderCommonOps {
 
         if args.spawn_ping {
             let weak_client = Arc::downgrade(&client);
-            spawn_electrum_ping_loop(weak_client, servers);
+            spawn_electrum_ping_loop(weak_client, active_servers);
         }
 
         Ok(ElectrumClient(client))
@@ -892,4 +948,18 @@ async fn wait_for_protocol_version_checked(client: &ElectrumClientImpl) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_first_disconnected_electrum_server_index() {
+        assert_eq!(
+            first_disconnected_electrum_server_index(&[Some(true), Some(false), None]),
+            Some(1)
+        );
+        assert_eq!(first_disconnected_electrum_server_index(&[Some(true), None]), None);
+    }
 }

@@ -11,12 +11,8 @@
 
 # If 1 or more target triples (and optionally, target_features) are specified,
 # only the specified targets will be checked when running `cargo deny check`.
-# This means, if a particular package is only ever used as a target specific
-# dependency, such as, for example, the `nix` crate only being used via the
-# `target_family = "unix"` configuration, that only having windows targets in
-# this list would mean the nix crate, as well as any of its exclusive
-# dependencies not shared by any other crates, would be ignored, as the target
-# list here is effectively saying which targets you are building for.
+# (cargo-deny schema v2 moved this key from the top level into [graph].)
+[graph]
 targets = [
     # The triple can be any string, but only the target triples built in to
     # rustc (as of 1.40) can be checked against actual config expressions
@@ -35,25 +31,61 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 # The url(s) of the advisory databases to use
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# The lint level for security vulnerabilities
-vulnerability = "deny"
-# The lint level for unmaintained crates
-unmaintained = "warn"
-# The lint level for crates that have been yanked from their source registry
+# cargo-deny schema v2 (>= 0.16): vulnerabilities and unsound/notice advisories
+# are hard errors unless listed in `ignore` below. Only `unmaintained` and
+# `yanked` remain tunable.
+#
+# We do NOT fail on unmaintained-crate advisories: this gate targets actual
+# vulnerabilities, and the tree carries ~30 transitively-unmaintained crates
+# (aes-soft, atty, bincode, async-std, ...) that are not independently
+# actionable. Yanked crates only warn so a mid-flight yank does not wedge CI.
+unmaintained = "none"
 yanked = "warn"
-# The lint level for crates with security notices. Note that as of
-# 2019-12-17 there are no security notice advisories in
-# https://github.com/rustsec/advisory-db
-notice = "warn"
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
-
-# RUSTSEC-2021-0113 is related to metrics-util crate that is not actively used for now despite being still present in deps tree
-# RUSTSEC-2020-0071 is related to time crate, which is used only by chrono in our deps tree, remove when https://github.com/chronotope/chrono/issues/700 is resolved
+#
+# Each accepted advisory is grouped by its root cause and the reason it cannot
+# currently be resolved. Entries marked "scheduled" are reloaded-owned roots
+# with dedicated migration work planned; the rest are upstream-blocked (they
+# live in third-party / forked dependencies we do not control). See
+# docs/reloaded-rewrite/28-libp2p-modernization.md (OQ2) for the libp2p residue.
 ignore = [
-    "RUSTSEC-2021-0113",
-    "RUSTSEC-2020-0071",
-    #"RUSTSEC-0000-0000",
+    # --- libp2p 0.52 fork (KomodoPlatform/rust-libp2p k-0.52.12) ---
+    # The fork's own 0.52-era WSS/TLS + trust-dns + tempfile stack pulls these.
+    # We must stay on the fork for the relay-mesh gossipsub extension; clearing
+    # them requires upstream fork modernization. The WSS rustls/ring/webpki line
+    # is additionally coupled to reloaded's futures-rustls transport binding.
+    "RUSTSEC-2024-0336", # rustls (fork WSS/TLS)
+    "RUSTSEC-2026-0049", # rustls-webpki
+    "RUSTSEC-2026-0098", # rustls-webpki
+    "RUSTSEC-2026-0099", # rustls-webpki
+    "RUSTSEC-2026-0104", # rustls-webpki
+    "RUSTSEC-2023-0052", # webpki
+    "RUSTSEC-2025-0009", # ring
+    "RUSTSEC-2024-0019", # mio
+    "RUSTSEC-2024-0421", # idna
+    "RUSTSEC-2023-0018", # remove_dir_all
+
+    # --- Solana SDK (via solana-keypair) ---
+    # Old ed25519/curve25519 persist through the Solana SDK, independent of
+    # libp2p; cleared only by an upstream Solana SDK bump.
+    "RUSTSEC-2022-0093", # ed25519-dalek 1.x (double public key signing oracle)
+    "RUSTSEC-2024-0344", # curve25519-dalek (timing variability)
+
+    # --- WalletConnect (via tungstenite) ---
+    "RUSTSEC-2023-0065", # tungstenite DoS on large frames
+
+    # --- Unsound advisories (transitive) ---
+    # cargo-deny schema v2 treats `unsound` advisories as hard errors; under the
+    # prior tooling these were non-blocking warnings. Accepted here to preserve
+    # that policy.
+    # - rmp-serde (RUSTSEC-2022-0092): a *direct* dependency, but the patched 1.x
+    #   line changes the MessagePack enum encoding (integer variant index ->
+    #   variant name), which would break P2P wire compatibility with GLEEC and
+    #   existing nodes. Blocked pending a custom integer-variant serializer.
+    # - secp256k1 0.20 (RUSTSEC-2022-0070): pinned by deeper dependencies.
+    "RUSTSEC-2022-0092", # rmp-serde Raw/RawRef unsound
+    "RUSTSEC-2022-0070", # secp256k1 0.20 use-after-free in safe code
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
@@ -69,36 +101,17 @@ ignore = [
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
 [licenses]
-# The lint level for crates which do not have a detectable license
-unlicensed = "deny"
-# List of explictly allowed licenses
-# See https://spdx.org/licenses/ for list of possible licenses
-# [possible values: any SPDX 3.11 short identifier (+ optional exception)].
+# cargo-deny schema v2: the pre-0.16 keys `unlicensed`, `deny`, `copyleft`,
+# `allow-osi-fsf-free` and `default` were removed (see cargo-deny PR #611).
+# Under v2 every license not in `allow` is denied. Our CI only runs
+# `cargo deny check advisories`, so this list is intentionally left empty;
+# populate `allow` before enabling `cargo deny check licenses`.
+# See https://spdx.org/licenses/ for valid SPDX identifiers.
 allow = [
     #"MIT",
     #"Apache-2.0",
     #"Apache-2.0 WITH LLVM-exception",
 ]
-# List of explictly disallowed licenses
-# See https://spdx.org/licenses/ for list of possible licenses
-# [possible values: any SPDX 3.11 short identifier (+ optional exception)].
-deny = [
-    #"Nokia",
-]
-# Lint level for licenses considered copyleft
-copyleft = "warn"
-# Blanket approval or denial for OSI-approved or FSF Free/Libre licenses
-# * both - The license will be approved if it is both OSI-approved *AND* FSF
-# * either - The license will be approved if it is either OSI-approved *OR* FSF
-# * osi-only - The license will be approved if is OSI-approved *AND NOT* FSF
-# * fsf-only - The license will be approved if is FSF *AND NOT* OSI-approved
-# * neither - This predicate is ignored and the default lint level is used
-allow-osi-fsf-free = "neither"
-# Lint level used when no other predicates are matched
-# 1. License isn't in the allow or deny lists
-# 2. License isn't copyleft
-# 3. License isn't OSI/FSF, or allow-osi-fsf-free = "neither"
-default = "deny"
 # The confidence threshold for detecting a license from license text.
 # The higher the value, the more closely the license text must be to the
 # canonical license text of a valid SPDX license file.

@@ -44,6 +44,17 @@ pub trait InitStandaloneCoinActivationOps: Into<MmCoinEnum> + Send + Sync + 'sta
 
     fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &InitStandaloneCoinTaskManagerShared<Self>;
 
+    /// Optionally acquires a guard held for the complete activation task,
+    /// including result construction and coin registration. Standalone coins
+    /// whose activation mutates shared persistent state can override this to
+    /// serialize same-ticker requests without delaying unrelated tickers.
+    async fn acquire_activation_guard(
+        _ctx: MmArc,
+        _ticker: &str,
+    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
+        Ok(None)
+    }
+
     /// Initialization of the standalone coin spawned as `RpcTask`.
     async fn init_standalone_coin(
         ctx: MmArc,
@@ -171,6 +182,7 @@ where
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
         let ticker = self.request.ticker.clone();
+        let _activation_guard = Standalone::acquire_activation_guard(self.ctx.clone(), &ticker).await?;
         let coin = Standalone::init_standalone_coin(
             self.ctx.clone(),
             ticker.clone(),

@@ -20,8 +20,12 @@ The original AtomicDEX network.
 | Base DEX fee rate | 1/777 (~0.129%) |
 | Discounted tickers | KMD |
 | Discounted fee rate | 9/7770 (~0.116%, 10% discount) |
-| Burn | Disabled |
+| Minimum fee | Taker coin's minimum transaction amount (no additional network floor) |
+| Burn | KMD taker only — 75% fee output, 25% OP_RETURN output |
 | Hardcoded seed nodes | None — provide `"seednodes"` in MM2.json |
+
+Swap fee behavior on this network is pinned to the `v2.6.0-beta` compatibility
+reference. Non-KMD takers keep the standard single-output fee transaction.
 
 ### netid 6133 — GLEEC DEX
 
@@ -32,8 +36,13 @@ The GLEEC decentralized exchange network.
 | Base DEX fee rate | 2/100 (2%) |
 | Discounted tickers | GLEEC |
 | Discounted fee rate | 1/100 (1%, 50% discount) |
-| Burn | Enabled — 75% to fee address, 25% burned |
+| Minimum fee | Taker coin's minimum transaction amount (no additional network floor) |
+| Burn | Disabled — all takers use a single standard fee output |
 | Hardcoded seed nodes | None — provide `"seednodes"` in MM2.json |
+
+Swap fee behavior on this network follows the applicable unreleased v3/dev
+compatibility reference. The configured inactive burn key is retained as a
+compatibility value but does not enable a burn transaction.
 
 ### netid 7777 — Deprecated
 

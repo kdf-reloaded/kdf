@@ -315,17 +315,16 @@ where
             address_derivation_path: self.from_derivation_path.clone(),
             address_pubkey: self.from_pubkey,
         }));
-        sign_params.add_outputs_infos(once(SendingOutputInfo {
-            destination_address: self.req.to.clone(),
-        }));
+        sign_params.add_outputs_infos(once(SendingOutputInfo::external_address(self.req.to.clone())));
         match unsigned_tx.outputs.len() {
             // There is no change output.
             1 => (),
             // There is a change output.
             2 => {
-                sign_params.add_outputs_infos(once(SendingOutputInfo {
-                    destination_address: self.from_address_string.clone(),
-                }));
+                sign_params.add_outputs_infos(once(SendingOutputInfo::change_address(
+                    self.from_address_string.clone(),
+                    self.from_derivation_path.clone(),
+                )));
             },
             unexpected => {
                 let error = format!("Unexpected number of outputs: {}", unexpected);

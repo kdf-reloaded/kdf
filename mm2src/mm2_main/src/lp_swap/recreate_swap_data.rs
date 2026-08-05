@@ -481,8 +481,10 @@ fn convert_maker_to_taker_events(
             | MakerSwapEvent::TakerPaymentSpendConfirmFailed(_)
             // We don't know the reason at the moment, so we rely on the errors handling above.
             | MakerSwapEvent::MakerPaymentWaitRefundStarted { .. }
+            | MakerSwapEvent::MakerPaymentRefundStarted
             | MakerSwapEvent::MakerPaymentRefunded(_)
             | MakerSwapEvent::MakerPaymentRefundFailed(_)
+            | MakerSwapEvent::MakerPaymentRefundFinished
             | MakerSwapEvent::MakerPaymentInstructionsReceived(_)
             | MakerSwapEvent::Finished => {}
         }

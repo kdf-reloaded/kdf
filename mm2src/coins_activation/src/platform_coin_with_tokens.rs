@@ -33,7 +33,8 @@ pub struct TokenActivationParams<Req, Protocol> {
     pub(crate) protocol: Protocol,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TokenInitializer {
     type Token: TokenOf;
     type TokenActivationRequest: Send;
@@ -52,7 +53,8 @@ pub trait TokenInitializer {
     fn platform_coin(&self) -> &<Self::Token as TokenOf>::PlatformCoin;
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TokenAsMmCoinInitializer: Send + Sync {
     type PlatformCoin;
     type ActivationRequest;
@@ -96,7 +98,8 @@ impl From<std::convert::Infallible> for InitTokensAsMmCoinsError {
     fn from(e: Infallible) -> Self { match e {} }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<T> TokenAsMmCoinInitializer for T
 where
     T: TokenInitializer + Send + Sync,

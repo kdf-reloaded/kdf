@@ -236,6 +236,21 @@ Two provenance statements were tightened after an external audit:
   shipped code's residual expressive similarity remains deferred to the R35
   gate (ch30 D1) per the locked review order.
 
+### 2026-08-04 — stable Zcash crates and narrow compatibility patches
+
+- The obsolete `librustzcash-patched/` 0.5-era workspace dependency was
+  replaced by exact published stable crates. The unused broad subtree was
+  removed rather than retained as a second, stale implementation source.
+- Three published crate sources are retained under `vendor-patches/` because
+  Cargo's patch mechanism requires the patched package source in-tree. Each
+  directory preserves its crates.io package metadata and MIT/Apache-2.0 license
+  files and contains a `KDF-PATCH.md` describing the local delta.
+- `zcash_client_backend 0.23.0` has a manifest-only change removing the obsolete
+  exact `time-core 0.1.2` resolver workaround. `zcash_primitives 0.28.0` and
+  `zcash_transparent 0.8.0` carry only the transaction-builder/P2SH extensions
+  needed to preserve deployed KDF transaction bytes. Chapter 39 binds the
+  resulting schema, scan, and transaction compatibility tests.
+
 ## 34.3 Entries
 
 ### Generated artifacts
@@ -248,8 +263,8 @@ Two provenance statements were tightened after an external audit:
 
 | Destination | Classification | Source reference | License basis | Notes |
 |---|---|---|---|---|
-| `mm2src/coins/z_coin/service.proto` | interop-reuse | `zcash/lightwalletd` upstream `walletrpc/service.proto`. | MIT (Zcash developers). | Third-party MIT-licensed protocol spec, redistributed with original copyright header preserved. |
-| `mm2src/coins/z_coin/compact_formats.proto` | interop-reuse | `zcash/lightwalletd` upstream `walletrpc/compact_formats.proto`. | MIT (Zcash developers). | Same as above. Upstream MIT header was missing in earlier history; restored in step 2.3. |
+| `mm2src/coins/z_coin/service.proto` | interop-reuse | `PirateNetwork/lightwalletd` upstream `walletrpc/service.proto`. | MIT (Zcash developers; Pirate Chain developers). | Third-party MIT-licensed protocol spec. The `pirate.wallet.sdk.rpc` package is required for ARRR lightwalletd wire compatibility. |
+| `mm2src/coins/z_coin/compact_formats.proto` | interop-reuse | `PirateNetwork/lightwalletd` upstream `walletrpc/compact_formats.proto`. | MIT (Zcash developers; Pirate Chain developers). | Same as above; compact block messages must share the same `pirate.wallet.sdk.rpc` package as the service. |
 | `mm2src/coins/utxo/bchrpc.proto` | interop-reuse | `gcash/bchd` upstream `bchrpc/pb/bchrpc.proto` (Bitcoin Cash node RPC). | ISC (gcash/bchd project license). | Drives `mm2src/coins/utxo/pb.rs` generation. Upstream file does not carry a per-file copyright header; project license applies. |
 | `mm2src/coins/eth/maker_swap_v2_abi.json` | interop-reuse | ABI of the deployed `EtomicSwapMakerV2` Solidity contract. | Derived from the deployed bytecode; ABI is a public derivation. | Bytes must match the deployed contract or `ethabi` calls fail at runtime. |
 | `mm2src/coins/eth/taker_swap_v2_abi.json` | interop-reuse | ABI of the deployed `EtomicSwapTakerV2` Solidity contract. | Same as above. | Same as above. |
@@ -423,7 +438,9 @@ Distinct from the in-tree fragment scheme.
 |---|---|---|---|---|
 | `mm2src/ethabi-vendored/` | vendored-subtree | Upstream `rust-ethereum/ethabi` lineage (see in-tree crate metadata). | MIT/Apache-2 style upstream licensing. | Vendored for dependency control and compatibility. |
 | `mm2src/testcontainers-vendored/` | vendored-subtree | Upstream `testcontainers-rs` lineage (see in-tree crate metadata). | Upstream permissive licensing per crate metadata. | Vendored for deterministic CI behaviour. |
-| `librustzcash-patched/` | vendored-subtree | Upstream `librustzcash` lineage (see subtree metadata/headers). | Upstream open-source license terms. | Patched fork used for build/runtime constraints. |
+| `vendor-patches/zcash_client_backend-0.23.0/` | vendored-subtree | Published crates.io `zcash_client_backend 0.23.0`. | MIT OR Apache-2.0; both license texts retained in-tree. | Manifest-only removal of the obsolete exact `time-core 0.1.2` dependency; see `KDF-PATCH.md`. |
+| `vendor-patches/zcash_primitives-0.28.0/` | vendored-subtree | Published crates.io `zcash_primitives 0.28.0`. | MIT OR Apache-2.0; both license texts retained in-tree. | Narrow transaction-builder compatibility extension; see `KDF-PATCH.md`. |
+| `vendor-patches/zcash_transparent-0.8.0/` | vendored-subtree | Published crates.io `zcash_transparent 0.8.0`. | MIT OR Apache-2.0; both license texts retained in-tree. | Narrow KDF P2SH/raw-output compatibility extension; see `KDF-PATCH.md`. |
 
 ## 34.4 Operating rules
 

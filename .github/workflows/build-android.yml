@@ -18,12 +18,21 @@ on:
         description: "cargo profile"
         required: false
         default: "release"
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       profile:
         description: "cargo profile"
         required: false
         default: "release"
+        type: string
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -110,17 +119,26 @@ jobs:
         # `cargo rustc --crate-type=staticlib`). The NDK clang wrappers are
         # supplied via the job `env:` block and PATH.
         run: |
+          FEATURES_FLAG=""
+          if [ -n "${{ inputs.features }}" ]; then
+            # Transform comma-separated features to mm2_main/feat1,mm2_main/feat2 format
+            FEATURES_TRANSFORMED="mm2_main/${{ inputs.features }}"
+            FEATURES_TRANSFORMED="${FEATURES_TRANSFORMED//,/,mm2_main/}"
+            FEATURES_FLAG="--features $FEATURES_TRANSFORMED"
+          fi
           cargo rustc -p mm2_bin_lib --lib \
             --target ${{ matrix.target }} \
             --profile ${{ inputs.profile }} \
-            --crate-type=staticlib
+            --crate-type=staticlib $FEATURES_FLAG
 
       - name: Verify coins crate compiles for ${{ matrix.target }} (P14)
         # P14 modernised the Solana stack to the modular `solana-*` 2.x
         # crates, removing the `solana-remote-wallet` -> `hidapi` ->
         # `libudev` chain that previously broke Android cross-builds.
         # This step regression-tests that property without relying on
-        # downstream linking.
+        # downstream linking. Package-qualified `mm2_main/*` feature flags
+        # from callers are intentionally not passed here because this is a
+        # coins-only check.
         run: |
           cargo check -p coins --target ${{ matrix.target }}
 

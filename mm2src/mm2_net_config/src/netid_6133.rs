@@ -11,7 +11,7 @@
 //!
 //! - Base rate:  2/100  (2%)
 //! - GLEEC rate: 1/100  (1%, 50% discount)
-//! - Burn: 25% of DEX fee (DEX_FEE_SHARE = 0.75)
+//! - Burn: disabled
 
 use lazy_static::lazy_static;
 use num_rational::BigRational;
@@ -21,10 +21,11 @@ use crate::NetConfig;
 /// DEX fee recipient public key (compressed, hex) — GLEEC fee address.
 const DEX_FEE_ADDR_PUBKEY: &str = "03a778d9bd346fa704cf3e2508cd074d93a1bbc1e504fbecbb0a8d48e7cccbbf5c";
 
-/// Public key for the pre-burn address (compressed, hex).
-/// Receives the burn portion of DEX fees on non-KMD coins.
-/// Currently set to the same address as the fee address (burn effectively
-/// disabled at the address level — can be changed to a distinct key later).
+/// Inactive compatibility key for the historical pre-burn account.
+///
+/// Netid 6133 currently disables burn structurally. The key remains equal to
+/// the fee key so persisted/configuration-facing compatibility values do not
+/// drift if the dormant account-burn substrate is inspected.
 const BURN_ADDR_PUBKEY: &str = "03a778d9bd346fa704cf3e2508cd074d93a1bbc1e504fbecbb0a8d48e7cccbbf5c";
 
 /// Z-address for shielded DEX fee (Zcash-based coins).
@@ -74,18 +75,6 @@ impl NetConfig for Netid6133 {
     fn dex_fee_rate_discounted(&self) -> BigRational {
         // 1/100 = 1% (50% discount for GLEEC trades)
         BigRational::new(1.into(), 100.into())
-    }
-
-    fn dex_fee_min_threshold(&self) -> BigRational {
-        // 0.0001
-        BigRational::new(1.into(), 10000.into())
-    }
-
-    fn burn_enabled(&self) -> bool { true }
-
-    fn dex_fee_share(&self) -> BigRational {
-        // 3/4 = 0.75 → 75% to fee address, 25% burned
-        BigRational::new(3.into(), 4.into())
     }
 
     fn burn_addr_pubkey(&self) -> &'static str { BURN_ADDR_PUBKEY }

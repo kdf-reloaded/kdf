@@ -22,7 +22,7 @@ use bitcoin::hash_types::{BlockHash, Txid};
 use bitcoin::hashes::hex::{FromHex, ToHex};
 use bitcoin::Network;
 use common::{async_blocking, now_ms, PagingOptionsEnum};
-use db_common::sqlite::rusqlite::{Error as SqlError, Row, ToSql, NO_PARAMS};
+use db_common::sqlite::rusqlite::{params_from_iter, Error as SqlError, Row, ToSql};
 use db_common::sqlite::sql_builder::SqlBuilder;
 use db_common::sqlite::{h256_option_slice_from_row, h256_slice_from_row, offset_by_id, query_single_row,
                         sql_text_conversion_err, string_from_row, validate_table_name, SqliteConnShared,
@@ -992,8 +992,8 @@ impl DbStorage for LightningPersister {
         let sql_payments_history = create_payments_history_table_sql(self.storage_ticker.as_str())?;
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
-            conn.execute(&sql_channels_history, NO_PARAMS).map(|_| ())?;
-            conn.execute(&sql_payments_history, NO_PARAMS).map(|_| ())?;
+            conn.execute(&sql_channels_history, []).map(|_| ())?;
+            conn.execute(&sql_payments_history, []).map(|_| ())?;
             Ok(())
         })
         .await
@@ -1023,7 +1023,7 @@ impl DbStorage for LightningPersister {
 
         async_blocking(move || {
             let conn = sqlite_connection.lock().unwrap();
-            let count: u32 = conn.query_row(&sql, NO_PARAMS, |r| r.get(0))?;
+            let count: u32 = conn.query_row(&sql, [], |r| r.get(0))?;
             Ok(count)
         })
         .await
@@ -1055,7 +1055,7 @@ impl DbStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&insert_channel_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&insert_channel_sql(&for_coin)?, params_from_iter(params.iter()))?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1087,7 +1087,7 @@ impl DbStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_funding_tx_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_funding_tx_sql(&for_coin)?, params_from_iter(params.iter()))?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1103,7 +1103,7 @@ impl DbStorage for LightningPersister {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
             let params = [&generated_in_block as &dyn ToSql, &funding_tx as &dyn ToSql];
-            sql_transaction.execute(&update_funding_tx_block_height_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_funding_tx_block_height_sql(&for_coin)?, params)?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1122,7 +1122,10 @@ impl DbStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_channel_to_closed_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(
+                &update_channel_to_closed_sql(&for_coin)?,
+                params_from_iter(params.iter()),
+            )?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1141,7 +1144,7 @@ impl DbStorage for LightningPersister {
 
             let mut stmt = conn.prepare(&sql)?;
             let result = stmt
-                .query_map_named(&[], channel_details_from_row)?
+                .query_map([], channel_details_from_row)?
                 .collect::<Result<_, _>>()?;
             Ok(result)
         })
@@ -1159,7 +1162,7 @@ impl DbStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_closing_tx_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_closing_tx_sql(&for_coin)?, params_from_iter(params.iter()))?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1182,7 +1185,7 @@ impl DbStorage for LightningPersister {
         async_blocking(move || {
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&update_claiming_tx_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&update_claiming_tx_sql(&for_coin)?, params_from_iter(params.iter()))?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1216,7 +1219,7 @@ impl DbStorage for LightningPersister {
             let mut total_builder = sql_builder.clone();
             total_builder.count("id");
             let total_sql = total_builder.sql().expect("valid sql");
-            let total: isize = conn.query_row(&total_sql, NO_PARAMS, |row| row.get(0))?;
+            let total: isize = conn.query_row(&total_sql, [], |row| row.get(0))?;
             let total = total.try_into().expect("count should be always above zero");
 
             let offset = match paging {
@@ -1255,7 +1258,7 @@ impl DbStorage for LightningPersister {
             let sql = sql_builder.sql().expect("valid sql");
             let mut stmt = conn.prepare(&sql)?;
             let channels = stmt
-                .query_map_named(params_as_trait.as_slice(), channel_details_from_row)?
+                .query_map(params_as_trait.as_slice(), channel_details_from_row)?
                 .collect::<Result<_, _>>()?;
             let result = GetClosedChannelsResult {
                 channels,
@@ -1300,7 +1303,7 @@ impl DbStorage for LightningPersister {
             ];
             let mut conn = sqlite_connection.lock().unwrap();
             let sql_transaction = conn.transaction()?;
-            sql_transaction.execute(&upsert_payment_sql(&for_coin)?, &params)?;
+            sql_transaction.execute(&upsert_payment_sql(&for_coin)?, params)?;
             sql_transaction.commit()?;
             Ok(())
         })
@@ -1334,7 +1337,7 @@ impl DbStorage for LightningPersister {
             let mut total_builder = sql_builder.clone();
             total_builder.count("id");
             let total_sql = total_builder.sql().expect("valid sql");
-            let total: isize = conn.query_row(&total_sql, NO_PARAMS, |row| row.get(0))?;
+            let total: isize = conn.query_row(&total_sql, [], |row| row.get(0))?;
             let total = total.try_into().expect("count should be always above zero");
 
             let offset = match paging {
@@ -1373,7 +1376,7 @@ impl DbStorage for LightningPersister {
             let sql = sql_builder.sql().expect("valid sql");
             let mut stmt = conn.prepare(&sql)?;
             let payments = stmt
-                .query_map_named(params_as_trait.as_slice(), payment_info_from_row)?
+                .query_map(params_as_trait.as_slice(), payment_info_from_row)?
                 .collect::<Result<_, _>>()?;
             let result = GetPaymentsResult {
                 payments,
@@ -1449,7 +1452,15 @@ mod tests {
                     rng.fill_bytes(&mut bytes);
                     Some(hex::encode(bytes))
                 },
-                closure_reason: { Some(rng.sample_iter(&Alphanumeric).take(30).collect::<String>()) },
+                closure_reason: {
+                    Some(
+                        (&mut rng)
+                            .sample_iter(&Alphanumeric)
+                            .map(char::from)
+                            .take(30)
+                            .collect::<String>(),
+                    )
+                },
                 claiming_tx: {
                     rng.fill_bytes(&mut bytes);
                     Some(hex::encode(bytes))
@@ -1490,7 +1501,7 @@ mod tests {
             } else {
                 HTLCStatus::Failed
             };
-            let description: String = rng.sample_iter(&Alphanumeric).take(30).collect();
+            let description: String = (&mut rng).sample_iter(&Alphanumeric).map(char::from).take(30).collect();
             let info = PaymentInfo {
                 payment_hash: {
                     rng.fill_bytes(&mut bytes);

@@ -8,7 +8,7 @@ pub mod my_orders;
 
 use crate::CREATE_MY_SWAPS_TABLE;
 use common::log::{debug, error, info};
-use db_common::sqlite::rusqlite::{Result as SqlResult, NO_PARAMS};
+use db_common::sqlite::rusqlite::{params_from_iter, Result as SqlResult};
 use mm2_core::mm_ctx::MmArc;
 
 use my_swaps::{fill_my_swaps_from_json_statements, mark_finished_swaps_from_json_statements};
@@ -70,13 +70,13 @@ const CREATE_STATS_SWAPS_GLEEC_STATE_15_TABLE: &str = "CREATE TABLE stats_swaps 
 
 fn get_current_migration(ctx: &MmArc) -> SqlResult<i64> {
     let conn = ctx.sqlite_connection();
-    conn.query_row(SELECT_MIGRATION, NO_PARAMS, |row| row.get(0))
+    conn.query_row(SELECT_MIGRATION, [], |row| row.get(0))
 }
 
 fn table_has_column(ctx: &MmArc, table: &str, column: &str) -> SqlResult<bool> {
     let conn = ctx.sqlite_connection();
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
-    let mut rows = stmt.query(NO_PARAMS)?;
+    let mut rows = stmt.query([])?;
     while let Some(row) = rows.next()? {
         let name: String = row.get(1)?;
         if name == column {
@@ -383,11 +383,11 @@ async fn repair_legacy_reloaded_schema(ctx: &MmArc, current_migration: i64) -> S
 
     for (statement, params) in mark_finished_statements {
         debug!("Executing SQL statement {:?} with params {:?}", statement, params);
-        transaction.execute(statement, params)?;
+        transaction.execute(statement, params_from_iter(params.iter()))?;
     }
     for (statement, params) in backfill_pubkey_statements {
         debug!("Executing SQL statement {:?} with params {:?}", statement, params);
-        transaction.execute(statement, params)?;
+        transaction.execute(statement, params_from_iter(params.iter()))?;
     }
     for migration in (current_migration + 1)..=15 {
         transaction.execute(INSERT_MIGRATION, [migration])?;
@@ -430,7 +430,7 @@ pub async fn migrate_sqlite_database(ctx: &MmArc, mut current_migration: i64) ->
         let transaction = conn.unchecked_transaction()?;
         for (statement, params) in statements_with_params {
             debug!("Executing SQL statement {:?} with params {:?}", statement, params);
-            transaction.execute(statement, params)?;
+            transaction.execute(statement, params_from_iter(params.iter()))?;
         }
         current_migration += 1;
         transaction.execute(INSERT_MIGRATION, [current_migration])?;
@@ -458,7 +458,7 @@ mod tests {
     fn table_column_specs(ctx: &MmArc, table: &str) -> Vec<(String, String)> {
         let conn = ctx.sqlite_connection();
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table)).unwrap();
-        stmt.query_map(NO_PARAMS, |row| Ok((row.get(1)?, row.get(2)?)))
+        stmt.query_map([], |row| Ok((row.get(1)?, row.get(2)?)))
             .unwrap()
             .collect::<SqlResult<Vec<(String, String)>>>()
             .unwrap()
@@ -469,7 +469,7 @@ mod tests {
         let mut stmt = conn
             .prepare("SELECT current_migration FROM migration ORDER BY current_migration")
             .unwrap();
-        stmt.query_map(NO_PARAMS, |row| row.get(0))
+        stmt.query_map([], |row| row.get(0))
             .unwrap()
             .collect::<SqlResult<Vec<i64>>>()
             .unwrap()
@@ -505,12 +505,12 @@ mod tests {
         }
 
         for statement in stats_swaps::add_and_split_tickers() {
-            conn.execute(statement.0, NO_PARAMS).unwrap();
+            conn.execute(statement.0, []).unwrap();
         }
-        conn.execute(stats_swaps::ADD_STARTED_AT_INDEX, NO_PARAMS).unwrap();
-        conn.execute(my_orders::CREATE_MY_ORDERS_TABLE, NO_PARAMS).unwrap();
-        conn.execute(stats_nodes::CREATE_NODES_TABLE, NO_PARAMS).unwrap();
-        conn.execute(stats_nodes::CREATE_STATS_NODES_TABLE, NO_PARAMS).unwrap();
+        conn.execute(stats_swaps::ADD_STARTED_AT_INDEX, []).unwrap();
+        conn.execute(my_orders::CREATE_MY_ORDERS_TABLE, []).unwrap();
+        conn.execute(stats_nodes::CREATE_NODES_TABLE, []).unwrap();
+        conn.execute(stats_nodes::CREATE_STATS_NODES_TABLE, []).unwrap();
 
         for statement in [
             "ALTER TABLE my_swaps ADD COLUMN swap_type INTEGER NOT NULL DEFAULT 0;",
@@ -533,7 +533,7 @@ mod tests {
             "ALTER TABLE my_swaps ADD COLUMN other_p2p_pub BLOB NOT NULL DEFAULT X'';",
             "ALTER TABLE my_swaps ADD COLUMN swap_version INTEGER NOT NULL DEFAULT 0;",
         ] {
-            conn.execute(statement, NO_PARAMS).unwrap();
+            conn.execute(statement, []).unwrap();
         }
 
         if current_migration == 9 {
@@ -543,7 +543,7 @@ mod tests {
                 "ALTER TABLE stats_swaps ADD COLUMN maker_coin_usd_price VARCHAR(255) NOT NULL DEFAULT '';",
                 "ALTER TABLE stats_swaps ADD COLUMN taker_coin_usd_price VARCHAR(255) NOT NULL DEFAULT '';",
             ] {
-                conn.execute(statement, NO_PARAMS).unwrap();
+                conn.execute(statement, []).unwrap();
             }
         }
 
@@ -677,7 +677,7 @@ mod tests {
         let (swap_type, maker_volume, dex_fee_burn, swap_version): (i64, String, String, i64) = conn
             .query_row(
                 "SELECT swap_type, maker_volume, dex_fee_burn, swap_version FROM my_swaps WHERE uuid = 'legacy-swap'",
-                NO_PARAMS,
+                [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
@@ -690,7 +690,7 @@ mod tests {
             .query_row(
                 "SELECT CAST(maker_coin_usd_price AS TEXT), CAST(taker_coin_usd_price AS TEXT) \
                  FROM stats_swaps WHERE uuid = 'legacy-swap'",
-                NO_PARAMS,
+                [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();

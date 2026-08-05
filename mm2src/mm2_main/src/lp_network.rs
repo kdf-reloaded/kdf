@@ -320,7 +320,7 @@ async fn process_p2p_message(
     let mut to_propagate = false;
     let mut orderbook_pairs = vec![];
 
-    for topic in message.topics {
+    for topic in std::iter::once(&message.topic) {
         let mut split = topic.as_str().split(TOPIC_SEPARATOR);
         match split.next() {
             Some(lp_ordermatch::ORDERBOOK_PREFIX) => {
@@ -672,8 +672,8 @@ pub fn lp_network_ports(netid: u16) -> Result<NetworkPorts, MmError<NetIdError>>
 }
 
 pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<DecodingError>> {
-    let public_key = Libp2pSecpPublic::decode(secp_public)?;
-    Ok(PeerId::from_public_key(&Libp2pPublic::Secp256k1(public_key)))
+    let public_key = Libp2pSecpPublic::try_from_bytes(secp_public)?;
+    Ok(PeerId::from_public_key(&Libp2pPublic::from(public_key)))
 }
 
 #[cfg(test)]

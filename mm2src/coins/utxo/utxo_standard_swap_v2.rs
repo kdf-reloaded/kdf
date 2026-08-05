@@ -3,14 +3,15 @@
 //
 //  This module is intentionally `include!`d into `utxo_standard.rs` so the
 //  trait impls live on the same type without bloating the parent file.
-//  Method bodies for the maker/taker V2 swap ops are stubbed with
-//  `unimplemented!("ch15 phase 2: ...")` — script builders, dispatch
-//  surface and trait wiring compile, but on-chain semantics are deferred.
+//  Maker/taker V2 swap ops delegate into the chapter-bound UTXO helpers.
+//  Deferred variants must fail explicitly instead of panicking or falling back
+//  to unrelated key material.
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::hd_wallet::{HDAccountOps, HDAddress, HDWalletOps};
 use crate::utxo::utxo_common;
 use crate::utxo::utxo_standard::UtxoStandardCoin;
-use crate::utxo::{UtxoCoinFields, UtxoTx};
+use crate::utxo::{UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoTx};
 use crate::{CommonSwapOpsV2, DerivationMethod, DexFee, FindPaymentSpendError, FundingTxSpend, GenPreimageResult,
             GenTakerFundingSpendArgs, GenTakerPaymentSpendArgs, MakerCoinSwapOpsV2, ParseCoinAssocTypes,
             PrivKeyPolicy, RefundFundingSecretArgs, RefundMakerPaymentSecretArgs, RefundMakerPaymentTimelockArgs,
@@ -19,8 +20,10 @@ use crate::{CommonSwapOpsV2, DerivationMethod, DexFee, FindPaymentSpendError, Fu
             ValidateMakerPaymentArgs, ValidateSwapV2TxResult, ValidateTakerFundingArgs,
             ValidateTakerFundingSpendPreimageResult, ValidateTakerPaymentSpendPreimageResult};
 use async_trait::async_trait;
+use crypto::{Bip32DerPathOps, Bip44Chain, ChildNumber};
 use keys::{Address, Error as KeysError, Public, Signature};
 use mm2_err_handle::prelude::*;
+use primitives::hash::H264;
 use script::TransactionInputSigner;
 use serialization::{deserialize, serialize, Error as SerError};
 use std::str::FromStr;
@@ -44,6 +47,115 @@ impl ToBytes for UtxoTxPreimage {
     }
 }
 
+pub(crate) fn trezor_v2_htlc_error() -> String { trezor_v2_unsupported_script_signing_error() }
+
+pub(crate) fn trezor_v2_address_error() -> String {
+    trezor_v2_missing_derivation_metadata_error("UTXO Standard Swap V2 local address selection")
+}
+
+pub(crate) fn trezor_v2_unsupported_script_signing_error() -> String {
+    "hardware_wallet:unsupported_script_signing_mode: UTXO Standard Swap V2 P2SH HTLC input signing is not supported by the current Trezor UTXO signer".to_owned()
+}
+
+pub(crate) fn trezor_v2_missing_derivation_metadata_error(context: &str) -> String {
+    format!(
+        "hardware_wallet:missing_derivation_metadata: enabled hardware HD address metadata is unavailable for {}",
+        context
+    )
+}
+
+pub(crate) fn trezor_v2_unsupported_coin_mapping_error(ticker: &str) -> String {
+    format!(
+        "hardware_wallet:unsupported_coin_mapping: '{}' has no Trezor UTXO coin mapping",
+        ticker
+    )
+}
+
+pub(crate) fn trezor_v2_invalid_response_error(context: &str) -> String {
+    format!("hardware_wallet:invalid_response: {}", context)
+}
+
+fn address_from_pubkey(fields: &UtxoCoinFields, public: &Public, addr_format: keys::AddressFormat) -> Address {
+    utxo_common::address_from_pubkey(
+        public,
+        fields.conf.pub_addr_prefix,
+        fields.conf.pub_t_addr_prefix,
+        fields.conf.checksum_type,
+        fields.conf.bech32_hrp.clone(),
+        addr_format,
+    )
+}
+
+pub(crate) fn enabled_hd_address_info_from_account(
+    fields: &UtxoCoinFields,
+    addr_format: &keys::AddressFormat,
+    hd_account: &UtxoHDAccount,
+    context: &str,
+) -> Result<HDAddress<Address, Public>, String> {
+    let is_enabled = hd_account
+        .is_address_activated(Bip44Chain::External, 0)
+        .map_err(|e| format!("Failed to inspect enabled HD address for {}: {}", context, e))?;
+    if !is_enabled {
+        return Err(format!("No enabled HD address found for {}", context));
+    }
+
+    let change_child = Bip44Chain::External.to_child_number();
+    let address_id_child = ChildNumber::from(0);
+    let derived_pubkey = hd_account
+        .extended_pubkey
+        .derive_child(change_child)
+        .and_then(|account_pubkey| account_pubkey.derive_child(address_id_child))
+        .map_err(|e| format!("Failed to derive enabled HD address for {}: {}", context, e))?;
+    let public = Public::Compressed(H264::from(derived_pubkey.public_key().serialize()));
+    let address = address_from_pubkey(fields, &public, addr_format.clone());
+
+    let mut derivation_path = hd_account.account_derivation_path.to_derivation_path();
+    derivation_path.push(change_child);
+    derivation_path.push(address_id_child);
+
+    Ok(HDAddress {
+        address,
+        pubkey: public,
+        derivation_path,
+    })
+}
+
+pub(crate) fn enabled_hd_address_from_account(
+    fields: &UtxoCoinFields,
+    addr_format: &keys::AddressFormat,
+    hd_account: &UtxoHDAccount,
+    context: &str,
+) -> Result<Address, String> {
+    enabled_hd_address_info_from_account(fields, addr_format, hd_account, context).map(|info| info.address)
+}
+
+pub(crate) async fn enabled_hd_address_info(
+    fields: &UtxoCoinFields,
+    hd_wallet: &UtxoHDWallet,
+    context: &str,
+) -> Result<HDAddress<Address, Public>, String> {
+    let accounts = hd_wallet.accounts.lock().await;
+    let default_account = accounts
+        .get(&0)
+        .ok_or_else(|| format!("No enabled HD account found for {}", context))?;
+    enabled_hd_address_info_from_account(fields, &hd_wallet.address_format, default_account, context)
+}
+
+pub(crate) fn try_enabled_hd_address_info(
+    fields: &UtxoCoinFields,
+    hd_wallet: &UtxoHDWallet,
+    context: &str,
+) -> Result<HDAddress<Address, Public>, String> {
+    let accounts = hd_wallet
+        .accounts
+        .try_lock()
+        .ok_or_else(|| format!("HD accounts lock is busy for {}", context))?;
+    let default_account = accounts
+        .get(&0)
+        .ok_or_else(|| format!("No enabled HD account found for {}", context))?;
+    enabled_hd_address_info_from_account(fields, &hd_wallet.address_format, default_account, context)
+}
+
 #[async_trait]
 impl ParseCoinAssocTypes for UtxoStandardCoin {
     type Address = Address;
@@ -58,14 +170,19 @@ impl ParseCoinAssocTypes for UtxoStandardCoin {
     type SigParseError = KeysError;
 
     async fn my_addr(&self) -> Self::Address {
+        self.try_my_addr()
+            .await
+            .expect("UtxoStandardCoin V2 address selection invariant failed")
+    }
+
+    async fn try_my_addr(&self) -> Result<Self::Address, String> {
         let fields: &UtxoCoinFields = self.as_ref();
-        match fields.derivation_method {
-            DerivationMethod::Iguana(ref addr) => addr.clone(),
-            // HD-wallet V2 swaps require a deterministic per-swap HTLC address;
-            // until that path is wired (ch15 phase 2) panic loudly so a misuse
-            // surfaces in tests rather than silently signing the wrong tx.
-            DerivationMethod::HDWallet(_) => {
-                unimplemented!("ch15 phase 2: my_addr for UtxoStandardCoin in HD-wallet mode")
+        match (&fields.derivation_method, &fields.priv_key_policy) {
+            (DerivationMethod::Iguana(addr), _) => Ok(addr.clone()),
+            (DerivationMethod::HDWallet(utxo_hd_wallet), _) => {
+                enabled_hd_address_info(fields, utxo_hd_wallet, "UTXO Standard Swap V2 address selection")
+                    .await
+                    .map(|info| info.address)
             },
         }
     }
@@ -90,22 +207,36 @@ impl ParseCoinAssocTypes for UtxoStandardCoin {
 
 #[async_trait]
 impl CommonSwapOpsV2 for UtxoStandardCoin {
-    fn derive_htlc_pubkey_v2(&self, _swap_unique_data: &[u8]) -> Public {
-        // Mirror the V1 convention: if the priv-key policy yields a keypair,
-        // use its public key. For Trezor/HD modes a per-swap derivation
-        // (ch15 phase 2) will replace this stub.
+    fn derive_htlc_pubkey_v2(&self, swap_unique_data: &[u8]) -> Public {
+        self.try_derive_htlc_pubkey_v2(swap_unique_data)
+            .expect("UtxoStandardCoin V2 HTLC public-key derivation invariant failed")
+    }
+
+    fn try_derive_htlc_pubkey_v2(&self, _swap_unique_data: &[u8]) -> Result<Public, String> {
         let fields: &UtxoCoinFields = self.as_ref();
-        match fields.priv_key_policy {
-            PrivKeyPolicy::KeyPair(ref kp) => *kp.public(),
-            PrivKeyPolicy::HDWallet { ref activated_key, .. } => *activated_key.public(),
-            PrivKeyPolicy::Trezor => {
-                unimplemented!("ch15 phase 2: derive_htlc_pubkey_v2 under Trezor priv-key policy")
+        match (&fields.derivation_method, &fields.priv_key_policy) {
+            (_, PrivKeyPolicy::KeyPair(kp)) => Ok(*kp.public()),
+            (DerivationMethod::HDWallet(hd_wallet), PrivKeyPolicy::HDWallet { .. })
+            | (DerivationMethod::HDWallet(hd_wallet), PrivKeyPolicy::Trezor) => {
+                try_enabled_hd_address_info(fields, hd_wallet, "UTXO Standard Swap V2 HTLC public-key derivation")
+                    .map(|info| info.pubkey)
             },
+            (DerivationMethod::Iguana(_), PrivKeyPolicy::HDWallet { .. }) => {
+                Err("UTXO Standard Swap V2 HD HTLC public-key derivation requires an HD derivation method".to_owned())
+            },
+            (DerivationMethod::Iguana(_), PrivKeyPolicy::Trezor) => Err(trezor_v2_missing_derivation_metadata_error(
+                "UTXO Standard Swap V2 HTLC public-key derivation",
+            )),
         }
     }
 
     fn derive_htlc_pubkey_v2_bytes(&self, swap_unique_data: &[u8]) -> Vec<u8> {
         self.derive_htlc_pubkey_v2(swap_unique_data).to_vec()
+    }
+
+    fn try_derive_htlc_pubkey_v2_bytes(&self, swap_unique_data: &[u8]) -> Result<Vec<u8>, String> {
+        self.try_derive_htlc_pubkey_v2(swap_unique_data)
+            .map(|pubkey| pubkey.to_vec())
     }
 }
 

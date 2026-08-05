@@ -194,7 +194,7 @@ pub enum DexFeeBurnDestination {
 /// burned) configured per-network via `NetConfig::dex_fee_share()`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DexFee {
-    /// No fee required (taker is the fee pubkey itself — rare edge case).
+    /// No fee required (taker is an active burn-account pubkey — rare edge case).
     NoFee,
     /// Standard single-output fee: the entire amount goes to the DEX fee address.
     Standard(MmNumber),
@@ -250,16 +250,21 @@ impl fmt::Display for DexFee {
     }
 }
 
-/// KMD path: total fee goes into a zero-value `OP_RETURN`. The
-/// `min_tx_amount` dust check applies only to the fee itself; if the entire
-/// fee is dust, fall back to `Standard` so the trade can still proceed.
-pub fn calc_dex_fee_for_op_return(fee: MmNumber, min_tx_amount: MmNumber) -> DexFee {
+/// KMD path: split the fee between the fee address and an `OP_RETURN` burn
+/// output. The `min_tx_amount` check applies to the total fee; if the entire
+/// fee is below that minimum, fall back to `Standard`.
+pub fn calc_dex_fee_for_op_return(fee: MmNumber, min_tx_amount: MmNumber, fee_share: MmNumber) -> DexFee {
     if fee < min_tx_amount {
         return DexFee::Standard(fee);
     }
+    let fee_part = &fee * &fee_share;
+    let burn_part = &fee - &fee_part;
+    if fee_part <= MmNumber::from(0) || burn_part <= MmNumber::from(0) {
+        return DexFee::Standard(fee);
+    }
     DexFee::WithBurn {
-        fee_amount: MmNumber::from(0),
-        burn_amount: fee,
+        fee_amount: fee_part,
+        burn_amount: burn_part,
         burn_destination: DexFeeBurnDestination::KmdOpReturn,
     }
 }
@@ -274,7 +279,11 @@ pub fn calc_dex_fee_for_burn_account(
 ) -> DexFee {
     let fee_part = &fee * &fee_share;
     let burn_part = &fee - &fee_part;
-    if burn_part < min_tx_amount || fee_part < min_tx_amount {
+    if fee_part <= MmNumber::from(0)
+        || burn_part <= MmNumber::from(0)
+        || burn_part < min_tx_amount
+        || fee_part < min_tx_amount
+    {
         return DexFee::Standard(fee);
     }
     DexFee::WithBurn {
@@ -292,36 +301,45 @@ impl DexFee {
         net_cfg: &dyn mm2_net_config::NetConfig,
         base_fee: MmNumber,
     ) -> DexFee {
-        if !net_cfg.burn_enabled() || !taker_coin.should_burn_dex_fee() {
+        if !net_cfg.burn_enabled() {
             return DexFee::Standard(base_fee);
         }
         let min_tx_amount = MmNumber::from(taker_coin.min_tx_amount());
+        let fee_share: MmNumber = net_cfg.dex_fee_share().into();
         if taker_coin.should_burn_directly() {
-            return calc_dex_fee_for_op_return(base_fee, min_tx_amount);
+            return calc_dex_fee_for_op_return(base_fee, min_tx_amount, fee_share);
+        }
+        if !taker_coin.should_burn_dex_fee() {
+            return DexFee::Standard(base_fee);
         }
         let burn_pubkey = match taker_coin.burn_pubkey() {
             ref v if !v.is_empty() => v.clone(),
             _ => net_cfg.burn_addr_raw_pubkey().to_vec(),
         };
-        let fee_share: MmNumber = net_cfg.dex_fee_share().into();
+        if burn_pubkey.is_empty() {
+            return DexFee::Standard(base_fee);
+        }
         calc_dex_fee_for_burn_account(base_fee, min_tx_amount, fee_share, burn_pubkey)
     }
 
-    /// Validation-time variant. Returns `NoFee` when the taker is the burn
-    /// pubkey itself (it is not charged a fee on its own trades). Otherwise
-    /// delegates to `new_from_taker_coin`.
+    /// Validation-time variant. Returns `NoFee` when an active account-burn
+    /// coin is itself the taker; inactive network keys and direct OP_RETURN
+    /// burns do not waive the fee. Otherwise delegates to
+    /// `new_from_taker_coin`.
     pub fn new_with_taker_pubkey(
         taker_coin: &dyn MmCoin,
         net_cfg: &dyn mm2_net_config::NetConfig,
         base_fee: MmNumber,
         taker_pubkey: &[u8],
     ) -> DexFee {
-        let burn_pubkey = match taker_coin.burn_pubkey() {
-            ref v if !v.is_empty() => v.clone(),
-            _ => net_cfg.burn_addr_raw_pubkey().to_vec(),
-        };
-        if !burn_pubkey.is_empty() && burn_pubkey.as_slice() == taker_pubkey {
-            return DexFee::NoFee;
+        if net_cfg.burn_enabled() && !taker_coin.should_burn_directly() && taker_coin.should_burn_dex_fee() {
+            let burn_pubkey = match taker_coin.burn_pubkey() {
+                ref v if !v.is_empty() => v.clone(),
+                _ => net_cfg.burn_addr_raw_pubkey().to_vec(),
+            };
+            if !burn_pubkey.is_empty() && burn_pubkey.as_slice() == taker_pubkey {
+                return DexFee::NoFee;
+            }
         }
         DexFee::new_from_taker_coin(taker_coin, net_cfg, base_fee)
     }

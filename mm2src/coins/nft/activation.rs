@@ -42,6 +42,16 @@ pub struct EnableNftRequest {
     pub protocol: Option<NftActivationProtocol>,
     /// NFT activation parameters.
     pub activation_params: NftActivationParams,
+    /// Legacy activation envelopes can duplicate the provider at the top
+    /// level. The canonical provider remains `activation_params.provider`.
+    #[serde(default)]
+    provider: Option<NftProvider>,
+    /// Legacy coin-activation field accepted for wire compatibility.
+    #[serde(default)]
+    requires_notarization: Option<bool>,
+    /// Legacy coin-activation field accepted for wire compatibility.
+    #[serde(default)]
+    priv_key_policy: Option<serde_json::Value>,
 }
 
 /// Inline NFT protocol descriptor. Left lenient (no `deny_unknown_fields`)
@@ -69,6 +79,12 @@ pub struct NftProtocolData {
 pub struct NftActivationParams {
     /// Indexer provider descriptor used for the initial inventory crawl.
     pub provider: NftProvider,
+    /// Legacy coin-activation field accepted for wire compatibility.
+    #[serde(default)]
+    requires_notarization: Option<bool>,
+    /// Legacy coin-activation field accepted for wire compatibility.
+    #[serde(default)]
+    priv_key_policy: Option<serde_json::Value>,
 }
 
 /// Indexer provider descriptor. Externally tagged: a `type` discriminant
@@ -235,6 +251,32 @@ mod tests {
         }))
         .unwrap();
         let NftProvider::Moralis(info) = &req.activation_params.provider;
+        assert!(info.komodo_proxy);
+    }
+
+    #[test]
+    fn parses_legacy_activation_fields_from_wallet_request() {
+        let req: EnableNftRequest = serde_json::from_value(json!({
+            "ticker": "NFT_ETH",
+            "requires_notarization": false,
+            "priv_key_policy": "Iguana",
+            "provider": {
+                "type": "Moralis",
+                "info": { "url": "https://top-level.example/", "komodo_proxy": true }
+            },
+            "activation_params": {
+                "requires_notarization": false,
+                "priv_key_policy": "Iguana",
+                "provider": {
+                    "type": "Moralis",
+                    "info": { "url": "https://indexer.example.com/", "komodo_proxy": true }
+                }
+            }
+        }))
+        .unwrap();
+
+        let NftProvider::Moralis(info) = &req.activation_params.provider;
+        assert_eq!(info.url.as_str(), "https://indexer.example.com/");
         assert!(info.komodo_proxy);
     }
 

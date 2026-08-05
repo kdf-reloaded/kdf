@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chain::{BlockHeader, BlockHeaderBits};
 use common::async_blocking;
 use db_common::{sqlite::rusqlite::Error as SqlError,
-                sqlite::rusqlite::{Connection, Row, ToSql, NO_PARAMS},
+                sqlite::rusqlite::{Connection, Row, ToSql},
                 sqlite::string_from_row,
                 sqlite::validate_table_name,
                 sqlite::CHECK_TABLE_EXISTS_SQL};
@@ -198,7 +198,7 @@ impl SqliteBlockHeadersStorage {
                 })
             })?;
             let rows = stmt
-                .query_map(NO_PARAMS, |row| {
+                .query_map([], |row| {
                     let height: i64 = row.get(0)?;
                     let hex: String = row.get(1)?;
                     Ok((height, hex))
@@ -245,12 +245,12 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
         let sql_cache = create_block_header_cache_table_sql(for_coin)?;
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            conn.execute(&sql_cache, NO_PARAMS).map(|_| ()).map_err(|e| {
-                BlockHeaderStorageError::InitializationError {
+            conn.execute(&sql_cache, [])
+                .map(|_| ())
+                .map_err(|e| BlockHeaderStorageError::InitializationError {
                     ticker,
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
             Ok(())
         })
         .await
@@ -343,7 +343,7 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
         let selfi = self.clone();
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
-            let count: i64 = conn.query_row(&sql, NO_PARAMS, |row| row.get(0)).map_err(|e| {
+            let count: i64 = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
                 MmError::new(BlockHeaderStorageError::QueryError {
                     query: sql.clone(),
                     reason: e.to_string(),
@@ -360,7 +360,7 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
         async_blocking(move || {
             let conn = selfi.0.lock().unwrap();
             // `MAX(block_height)` over an empty table yields SQL NULL -> deserialized as `None`.
-            let height: Option<i64> = conn.query_row(&sql, NO_PARAMS, |row| row.get(0)).map_err(|e| {
+            let height: Option<i64> = conn.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
                 MmError::new(BlockHeaderStorageError::QueryError {
                     query: sql.clone(),
                     reason: e.to_string(),
@@ -431,7 +431,7 @@ impl SqliteBlockHeadersStorage {
         validate_table_name(table_name).unwrap();
         let sql = "SELECT COUNT(block_height) FROM ".to_owned() + table_name + ";";
         let conn = self.0.lock().unwrap();
-        let rows_count: u32 = conn.query_row(&sql, NO_PARAMS, |row| row.get(0)).unwrap();
+        let rows_count: u32 = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
         rows_count == 0
     }
 }

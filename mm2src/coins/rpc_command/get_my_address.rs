@@ -109,7 +109,7 @@ pub async fn get_my_address_rpc(
         )));
     }
 
-    let protocol: CoinProtocol = serde_json::from_value(conf["protocol"].clone()).map_to_mm(|e| {
+    let protocol: CoinProtocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).map_to_mm(|e| {
         GetMyAddressError::CoinsConfCheckError(format!("Failed to parse protocol of {}: {}", req.coin, e))
     })?;
 

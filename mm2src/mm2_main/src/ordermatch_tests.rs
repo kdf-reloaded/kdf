@@ -1701,6 +1701,34 @@ fn make_ctx_for_tests() -> (MmArc, String, [u8; 32]) {
     (ctx, pubkey, secret)
 }
 
+#[test]
+fn test_orderbook_address_handles_non_utxo_protocols_without_panic() {
+    let (ctx, pubkey, _secret) = make_ctx_for_tests();
+    let tendermint_conf = json::json!({
+        "protocol": {
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "uiris",
+                "decimals": 6,
+                "account_prefix": "iaa",
+                "chain_id": "irishub-1"
+            }
+        }
+    });
+    let address = orderbook_address(&ctx, "IRIS", &tendermint_conf, &pubkey, UtxoAddressFormat::Standard)
+        .expect("Tendermint address must derive from order pubkey");
+    match address {
+        OrderbookAddress::Transparent(addr) => assert!(addr.starts_with("iaa")),
+        OrderbookAddress::Shielded => panic!("Tendermint orderbook address must be transparent"),
+    }
+
+    let sia_conf = json::json!({ "protocol": { "type": "SIA" } });
+    let err = orderbook_address(&ctx, "SC", &sia_conf, &pubkey, UtxoAddressFormat::Standard)
+        .expect_err("Sia orderbook address must be unsupported without panicking")
+        .into_inner();
+    assert!(matches!(err, OrderbookAddrErr::CoinIsNotSupported(coin) if coin == "SC"));
+}
+
 pub(super) fn make_random_orders(
     pubkey: String,
     _secret: &[u8; 32],
@@ -1711,7 +1739,7 @@ pub(super) fn make_random_orders(
     let mut rng = rand::thread_rng();
     let mut orders = Vec::with_capacity(n);
     for _i in 0..n {
-        let numer: u64 = rng.gen_range(2000, 10000000);
+        let numer: u64 = rng.gen_range(2000..10000000);
         let order = new_protocol::MakerOrderCreated {
             uuid: Uuid::new_v4().into(),
             base: base.clone(),
@@ -2500,9 +2528,10 @@ fn test_process_sync_pubkey_orderbook_state_after_orders_removed() {
 
     let mut old_mem_db = clone_orderbook_memory_db(&ctx);
 
-    // pick 10 orders at random and remove them
-    let mut rng = thread_rng();
-    let to_remove = orders.choose_multiple(&mut rng, 10);
+    // Remove deterministic non-tail orders. Removing the latest inserted order can
+    // legitimately return the trie to a previous root and make sync fall back to
+    // FullTrie instead of the delta path this test is asserting.
+    let to_remove = orders.iter().take(10);
     for order in to_remove {
         remove_order(&ctx, order.uuid);
     }

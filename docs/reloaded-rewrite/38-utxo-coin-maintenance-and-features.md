@@ -253,7 +253,25 @@ MUST work for both BIP-44 (legacy/P2PKH) and BIP-84 (native segwit / P2WPKH)
 UTXO coins; the only per-coin difference is the address encoding, not the
 derivation or gap accounting.
 
-R38.8.5 **Tests (two-direction, observable).**
+R38.8.5 **Minimum activation address count and empty-balance shape.** The
+API-v2 UTXO activation parameters accept the optional non-negative integer
+field `min_addresses_number`. In HD mode, after applying `scan_policy`, each
+loaded or newly created HD account MUST have at least that many known
+external-chain addresses. Missing addresses are derived at the next contiguous
+indices, their known-address count is persisted, and their address,
+`derivation_path`, `chain`, and ticker-keyed balance are included in the
+activation result. Accounts that already meet the requested minimum MUST NOT
+advance. An omitted or zero minimum MUST preserve the existing count and MUST
+NOT force an address to be generated. The field has no effect in Iguana mode.
+
+Every HD account's `total_balance` MUST contain the activated coin's ticker
+even when the account has no known addresses or every balance is zero. The
+empty-account representation is therefore a one-entry ticker-keyed map whose
+value is a zero `CoinBalance`, not an untyped empty object. This preserves the
+wire shape consumed by wallet SDKs and keeps an intentionally empty HD wallet
+distinguishable from a malformed balance response.
+
+R38.8.6 **Tests (two-direction, observable).**
 - *Segwit (BIP-84) software-HD activation & advance.* A software-HD UTXO segwit
   coin configured with an `m/84'/<coin_type>'` `derivation_path` activates,
   exposes account `0`, and successive `get_new_address` calls return successive
@@ -267,6 +285,13 @@ R38.8.5 **Tests (two-direction, observable).**
 - *Negative (Iguana refusal).* With the daemon in Iguana (non-HD) mode, an HD
   request — coin activation in HD mode or `get_new_address` — is refused (HD is
   unavailable in Iguana mode); no software HD account is created.
+- *Minimum-address activation.* Deserialising an HD UTXO activation with
+  `min_addresses_number: 1` and enabling an account with zero known addresses
+  persists and returns external address `0`. Re-enabling an account that
+  already meets the minimum does not advance it; omitting the field or setting
+  it to zero does not create an address.
+- *Empty-balance response.* Aggregating no HD address balances still returns
+  the activated ticker mapped to a zero `CoinBalance`.
 
 ## 38.7 Acceptance criteria (chapter)
 
@@ -275,7 +300,9 @@ R38.8.5 **Tests (two-direction, observable).**
 - Each Part-B item (R38.6.1--R38.6.8) is implemented with the acceptance test
   stated inline, and its coins-config keys / RPC field additions are documented
   alongside the implementation.
-- §38.8 software global-HD UTXO behaviour (R38.8.1--R38.8.5) is implemented: a
+- §38.8 software global-HD UTXO behaviour (R38.8.1--R38.8.6) is implemented: a
   software-HD UTXO coin (BIP-84 and BIP-44) activates without a hardware device,
-  exposes account `0`, and `get_new_address` returns successive external
-  addresses matching a reference wallet; Iguana-mode HD requests stay refused.
+  exposes account `0`, honours the requested minimum external-address count,
+  returns ticker-keyed balances even for empty accounts, and `get_new_address`
+  returns successive external addresses matching a reference wallet;
+  Iguana-mode HD requests stay refused.

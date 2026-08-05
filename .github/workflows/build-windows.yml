@@ -12,12 +12,21 @@ on:
         description: "cargo profile"
         required: false
         default: "release"
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       profile:
         description: "cargo profile"
         required: false
         default: "release"
+        type: string
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -46,7 +55,13 @@ jobs:
 
       - name: Build kdf
         shell: powershell
-        run: cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }}
+        run: |
+          cd mm2src
+          if ("${{ inputs.features }}") {
+            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }} --features ${{ inputs.features }}
+          } else {
+            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }}
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7

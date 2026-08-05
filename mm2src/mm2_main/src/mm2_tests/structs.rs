@@ -617,8 +617,19 @@ pub enum EnableCoinBalance {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ZcoinActivationResult {
+    pub ticker: String,
     pub current_block: u64,
     pub wallet_balance: EnableCoinBalance,
+    #[serde(default)]
+    pub first_sync_block: Option<FirstSyncBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirstSyncBlock {
+    pub requested: u64,
+    pub is_pre_sapling: bool,
+    pub actual: u64,
 }
 
 #[derive(Debug, Deserialize)]

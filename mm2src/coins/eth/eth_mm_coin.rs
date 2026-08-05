@@ -171,6 +171,12 @@ impl MmCoin for EthCoin {
         value: TradePreimageValue,
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
+        if matches!(self.coin_type, EthCoinType::Tron | EthCoinType::Trc20 { .. }) {
+            return MmError::err(TradePreimageError::InternalError(
+                "TRON V1 sender trade fee is not supported".to_string(),
+            ));
+        }
+
         let gas_price = self.get_gas_price().compat().await.mm_err(Into::into)?;
         let gas_price = increase_gas_price_by_stage(gas_price, &stage);
         let gas_limit = match self.coin_type {
@@ -209,11 +215,7 @@ impl MmCoin for EthCoin {
                     U256::from(300_000)
                 }
             },
-            // Trade-fee preimage for V1 ETH-style HTLC swaps; TRON uses a
-            // bandwidth/energy fee model handled separately. Wired in P10.2.5.
-            EthCoinType::Tron | EthCoinType::Trc20 { .. } => {
-                unimplemented!("TRON V1 sender trade fee not wired (pending P10.2.5)")
-            },
+            EthCoinType::Tron | EthCoinType::Trc20 { .. } => unreachable!("TRON rejected before gas-price request"),
         };
 
         let total_fee = gas_limit * gas_price;
@@ -298,13 +300,32 @@ impl MmCoin for EthCoin {
             gas_price: Some(gas_price),
         };
 
-        // Please note if the wallet's balance is insufficient to withdraw, then `estimate_gas` may fail with the `Exception` error.
-        // Ideally we should determine the case when we have the insufficient balance and return `TradePreimageError::NotSufficientBalance` error.
-        let gas_limit = self
-            .estimate_gas(estimate_gas_req)
-            .compat()
-            .await
-            .mm_err(TradePreimageError::from)?;
+        // `estimate_gas` reverts (e.g. Geth `-32016 "The execution failed due to an
+        // exception."`) when the wallet cannot afford the transfer it is asked to
+        // preimage. The exact RPC error text is provider-specific, so instead of
+        // matching it we check the actual balance: if it cannot cover the amount
+        // being sent, surface a precise `NotSufficientBalance`; otherwise the failure
+        // is unrelated and the original error is propagated unchanged.
+        let gas_limit = match self.estimate_gas(estimate_gas_req).compat().await {
+            Ok(gas_limit) => gas_limit,
+            Err(estimate_err) => {
+                let balance = self
+                    .my_balance()
+                    .compat()
+                    .await
+                    .mm_err(|balance_err| TradePreimageError::InternalError(balance_err.to_string()))?;
+                if balance < dex_fee_amount {
+                    let available = u256_to_big_decimal(balance, self.decimals).mm_err(Into::into)?;
+                    let required = u256_to_big_decimal(dex_fee_amount, self.decimals).mm_err(Into::into)?;
+                    return MmError::err(TradePreimageError::NotSufficientBalance {
+                        coin: self.ticker.clone(),
+                        available,
+                        required,
+                    });
+                }
+                return Err(estimate_err).mm_err(TradePreimageError::from);
+            },
+        };
         let total_fee = gas_limit * gas_price;
         let amount = u256_to_big_decimal(total_fee, 18).mm_err(Into::into)?;
         Ok(TradeFee {
@@ -327,9 +348,7 @@ impl MmCoin for EthCoin {
         log!("Warning: set_requires_notarization doesn't take any effect on ETH/ERC20 coins");
     }
 
-    fn swap_contract_address(&self) -> Option<BytesJson> {
-        Some(BytesJson::from(self.swap_contract_address.0.as_ref()))
-    }
+    fn swap_contract_address(&self) -> Option<BytesJson> { Some(BytesJson::from(&self.swap_contract_address.0[..])) }
 
     fn mature_confirmations(&self) -> Option<u32> { None }
 

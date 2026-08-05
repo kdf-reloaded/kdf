@@ -55,7 +55,7 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
             r#""protocol" field is missing in coins file. The file format is deprecated, please execute ./mm2 update_config command to convert it or download a new one"#
         );
     }
-    let protocol: CoinProtocol = try_s!(json::from_value(coins_en["protocol"].clone()));
+    let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(coins_en["protocol"].clone()));
 
     let coin: MmCoinEnum = match &protocol {
         CoinProtocol::UTXO => {
@@ -107,7 +107,7 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
             token.into()
         },
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::ZHTLC => return ERR!("ZHTLC protocol is not supported by lp_coininit"),
+        CoinProtocol::ZHTLC(_) => return ERR!("ZHTLC protocol is not supported by lp_coininit"),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::LIGHTNING { .. } => return ERR!("Lightning protocol is not supported by lp_coininit"),
         #[cfg(not(target_arch = "wasm32"))]
@@ -130,6 +130,9 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
             return ERR!(
                 "TENDERMINTTOKEN protocol is not supported by lp_coininit - use enable_tendermint_token instead"
             )
+        },
+        CoinProtocol::NFT { .. } => {
+            return ERR!("NFT protocol is not supported by lp_coininit - use enable_nft instead")
         },
         // TRON activation routes through a dedicated builder that populates
         // `EthCoin.tron_api`. P10.2 wiring.
@@ -739,7 +742,7 @@ pub fn address_by_coin_conf_and_pubkey_str(
     pubkey: &str,
     addr_format: UtxoAddressFormat,
 ) -> Result<String, String> {
-    let protocol: CoinProtocol = try_s!(json::from_value(conf["protocol"].clone()));
+    let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(conf["protocol"].clone()));
     match protocol {
         CoinProtocol::ERC20 { .. } | CoinProtocol::ETH { .. } => eth::addr_from_pubkey_str(pubkey),
         CoinProtocol::UTXO | CoinProtocol::QTUM | CoinProtocol::QRC20 { .. } | CoinProtocol::BCH { .. } => {
@@ -751,7 +754,8 @@ pub fn address_by_coin_conf_and_pubkey_str(
                 return ERR!("platform {} conf is null", platform);
             }
             // TODO is there any way to make it better without duplicating the prefix in the SLP conf?
-            let platform_protocol: CoinProtocol = try_s!(json::from_value(platform_conf["protocol"].clone()));
+            let platform_protocol: CoinProtocol =
+                try_s!(CoinProtocol::from_conf_json(platform_conf["protocol"].clone()));
             match platform_protocol {
                 CoinProtocol::BCH { slp_prefix } => {
                     slp_addr_from_pubkey_str(pubkey, &slp_prefix).map_err(|e| ERRL!("{}", e))
@@ -768,13 +772,16 @@ pub fn address_by_coin_conf_and_pubkey_str(
             ERR!("Solana pubkey is the public address - you do not need to use this rpc call.")
         },
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::ZHTLC => ERR!("address_by_coin_conf_and_pubkey_str is not supported for ZHTLC protocol!"),
+        CoinProtocol::ZHTLC(_) => ERR!("address_by_coin_conf_and_pubkey_str is not supported for ZHTLC protocol!"),
         CoinProtocol::SIA => ERR!("address_by_coin_conf_and_pubkey_str is not supported for SIA protocol!"),
         CoinProtocol::TENDERMINT { .. } | CoinProtocol::TENDERMINTTOKEN { .. } => {
             ERR!("address_by_coin_conf_and_pubkey_str is not supported for Tendermint protocol!")
         },
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => {
             ERR!("address_by_coin_conf_and_pubkey_str is not supported for TRON protocol!")
+        },
+        CoinProtocol::NFT { .. } => {
+            ERR!("address_by_coin_conf_and_pubkey_str is not supported for NFT protocol - use enable_nft instead!")
         },
     }
 }

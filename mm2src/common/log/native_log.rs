@@ -7,6 +7,20 @@ use std::str::FromStr;
 
 const DEFAULT_CONSOLE_FORMAT: &str = "[{d(%Y-%m-%d %H:%M:%S %Z)(utc)} {h({l})} {M}:{f}:{L}] {m}\n";
 const DEFAULT_LEVEL_FILTER: LogLevel = LogLevel::Info;
+const RUSTLS_REDUNDANT_HANDSHAKE_WARNING: &str =
+    "Received a ServerHelloDone handshake message while expecting [CertificateRequest]";
+const RUSTLS_REDUNDANT_BAD_CERTIFICATE_ALERT: &str = "Sending fatal alert BadCertificate";
+
+fn is_redundant_rustls_diagnostic(target: &str, message: &str) -> bool {
+    if !target.starts_with("rustls") {
+        return false;
+    }
+
+    matches!(
+        message,
+        RUSTLS_REDUNDANT_HANDSHAKE_WARNING | RUSTLS_REDUNDANT_BAD_CERTIFICATE_ALERT
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 pub enum LogLevel {
@@ -125,6 +139,14 @@ struct MmLogAppender;
 
 impl append::Append for MmLogAppender {
     fn append(&self, record: &Record) -> anyhow::Result<()> {
+        // These rustls 0.x internals repeat for every Electrum TLS attempt. KDF's
+        // Electrum layer records the endpoint and actionable transport/certificate error.
+        if record.target().starts_with("rustls") {
+            let message = record.args().to_string();
+            if is_redundant_rustls_diagnostic(record.target(), &message) {
+                return Ok(());
+            }
+        }
         let as_string = format_record(record);
         let level = LogLevel::from(record.metadata().level());
         chunk2log(as_string, level);
@@ -132,4 +154,29 @@ impl append::Append for MmLogAppender {
     }
 
     fn flush(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_only_known_redundant_rustls_diagnostics() {
+        assert!(is_redundant_rustls_diagnostic(
+            "rustls::check",
+            RUSTLS_REDUNDANT_HANDSHAKE_WARNING
+        ));
+        assert!(is_redundant_rustls_diagnostic(
+            "rustls::conn",
+            RUSTLS_REDUNDANT_BAD_CERTIFICATE_ALERT
+        ));
+        assert!(!is_redundant_rustls_diagnostic(
+            "rustls::client",
+            "certificate validation failed for example.test"
+        ));
+        assert!(!is_redundant_rustls_diagnostic(
+            "coins::electrum_rpc_client",
+            RUSTLS_REDUNDANT_BAD_CERTIFICATE_ALERT
+        ));
+    }
 }

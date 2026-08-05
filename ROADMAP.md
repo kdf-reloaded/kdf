@@ -24,6 +24,9 @@ Goal: stabilise APIs and on-disk formats; broaden platform coverage.
 - Track GLEEC KDF evolution; populate `docs/GLEEC_COMPATIBILITY.md` as divergent behaviours land.
 - Reproducible builds for Linux x86-64 and ARM64.
 - WASM build kept in CI; documented integration story for downstream GUIs.
+- Bump the vendored `librustzcash` (anchor-era 2022) to a modern release with
+  batched note decryption and `shardtree` witnesses, to speed up shielded
+  (ARRR/ZHTLC) sync. Workload analysis: `docs/plans/librustzcash-upgrade.md`.
 
 ## Stable (v1.0.0)
 

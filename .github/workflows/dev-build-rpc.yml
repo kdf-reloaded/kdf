@@ -1,0 +1,58 @@
+name: Dev Build with RPC Dump (all platforms)
+
+# Development snapshot builds with RPC wire-dump debugging features enabled.
+#
+# This is a variant of dev-build.yml that includes the unsafe-rpc-wire-dump and
+# unsafe-rpc-wire-dump-release-override Cargo features in all builds, allowing
+# operators to capture and analyze RPC request/response wire traffic for
+# debugging purposes.
+#
+# USAGE:
+#   - Set MM2_RPC_WIRE_DUMP=1 at runtime to enable RPC dumping (secrets redacted by default)
+#   - Set MM2_RPC_WIRE_DUMP_SECRETS=1 to dump unredacted (caution: sensitive data)
+#
+# These are disposable snapshots: not checksummed, not signed, and not published
+# as a GitHub Release. Signed, public releases are cut only from `main` `v*`
+# tags via release.yml.
+#
+# Manual trigger only (workflow_dispatch).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      profile: release
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"
+
+  macos:
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      profile: release
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"
+
+  windows:
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      profile: release
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"
+
+  ios:
+    uses: ./.github/workflows/build-ios.yml
+    with:
+      profile: release
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"
+
+  android:
+    uses: ./.github/workflows/build-android.yml
+    with:
+      profile: release
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"
+
+  wasm:
+    uses: ./.github/workflows/build-wasm.yml
+    with:
+      profile: dev
+      features: "unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override"

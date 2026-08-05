@@ -940,7 +940,10 @@ pub(crate) async fn process_maker_reserved(ctx: MmArc, from_pubkey: H256Json, re
                 };
                 my_order
                     .matches
-                    .insert(taker_match.reserved.maker_order_uuid, taker_match);
+                    .insert(taker_match.reserved.maker_order_uuid, taker_match.clone());
+                let _ = ctx.event_stream_manager.send_fn(&StreamerId::OrderStatus, || {
+                    order_events::OrderStatusEvent::TakerMatch(taker_match)
+                });
                 MyOrdersStorage::new(ctx)
                     .update_active_taker_order(my_order)
                     .await
@@ -981,6 +984,9 @@ pub(crate) async fn process_maker_connected(ctx: MmArc, from_pubkey: H256Json, c
         return;
     }
     // alice
+    let _ = ctx.event_stream_manager.send_fn(&StreamerId::OrderStatus, || {
+        order_events::OrderStatusEvent::TakerConnected(order_match.clone())
+    });
     lp_connected_alice(ctx.clone(), my_order_entry.get().clone(), order_match.clone());
     // remove the matched order immediately
     let order = my_order_entry.remove();
@@ -1112,6 +1118,9 @@ pub(crate) async fn process_taker_connect(ctx: MmArc, sender_pubkey: H256Json, c
         order_match.connect = Some(connect_msg);
         order_match.connected = Some(connected.clone());
         let order_match = order_match.clone();
+        let _ = ctx.event_stream_manager.send_fn(&StreamerId::OrderStatus, || {
+            order_events::OrderStatusEvent::MakerConnected(order_match.clone())
+        });
         my_order.started_swaps.push(order_match.request.uuid);
         lp_connect_start_bob(ctx.clone(), order_match, my_order.clone());
         let topic = my_order.orderbook_topic();

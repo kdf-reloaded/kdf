@@ -14,6 +14,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  RUST_BACKTRACE: "1"
+
 jobs:
   fmt:
     # Cheap fast-feedback job. Keeps a fmt-only failure from forcing a
@@ -367,6 +370,21 @@ jobs:
           # seeds (no mainnet funds), safe to keep fixed. See docs/TEST_ENV_VARS.md.
           BOB_PASSPHRASE: "also shoot benefit prefer juice shell elder veteran woman mimic image kidney"
           ALICE_PASSPHRASE: "spice describe gravity federal blast come thank unfair canal monkey style afraid"
+
+      - name: Run Polygon check_if_my_payment_sent against a live RPC
+        # Read-only Polygon mainnet test. It verifies check_if_my_payment_sent
+        # both finds a known 2021 payment (fixed historical block) and returns
+        # None for a recent window. It is NOT #[ignore]d: it skips itself when
+        # POLYGON_RPC_URL is unset, so it is a no-op in every other job and only
+        # actually runs here, where the secret is provided. A free-tier archive
+        # RPC (Ankr/Alchemy) is sufficient — no funds and no writes. When the
+        # secret is absent (e.g. on forks) the test skips and this step passes.
+        # See docs/TEST_ENV_VARS.md.
+        continue-on-error: true
+        run: cargo test -p coins --lib polygon_check_if_my_payment_sent -- --nocapture
+        env:
+          RUST_LOG: debug
+          POLYGON_RPC_URL: ${{ secrets.POLYGON_RPC_URL }}
 
       - name: Upload mm2 logs
         if: always()

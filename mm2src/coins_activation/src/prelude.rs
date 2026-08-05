@@ -65,7 +65,7 @@ pub fn coin_conf_with_protocol<T: TryFromCoinProtocol>(
         return MmError::err(CoinConfWithProtocolError::ConfigIsNotFound(coin.into()));
     }
 
-    let coin_protocol: CoinProtocol = json::from_value(conf["protocol"].clone()).map_to_mm(|err| {
+    let coin_protocol: CoinProtocol = CoinProtocol::from_conf_json(conf["protocol"].clone()).map_to_mm(|err| {
         CoinConfWithProtocolError::CoinProtocolParseError {
             ticker: coin.into(),
             err,

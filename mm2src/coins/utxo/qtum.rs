@@ -705,7 +705,10 @@ impl MarketCoinOps for QtumCoin {
 
     fn my_address(&self) -> Result<String, String> { utxo_common::my_address(self) }
 
-    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> { unimplemented!() }
+    fn get_public_key(&self) -> Result<String, MmError<UnexpectedDerivationMethod>> {
+        let pubkey = utxo_common::my_public_key(self.as_ref())?;
+        Ok(pubkey.to_string())
+    }
 
     fn sign_message_hash(&self, message: &str) -> Option<[u8; 32]> {
         utxo_common::sign_message_hash(self.as_ref(), message)
@@ -987,11 +990,13 @@ impl HDWalletBalanceOps for QtumCoin {
         hd_wallet: &Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy).await
+        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
+            .await
     }
 
     async fn scan_for_new_addresses(

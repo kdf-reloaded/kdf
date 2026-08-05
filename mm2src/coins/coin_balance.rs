@@ -26,11 +26,13 @@ pub fn coin_balance_map_for_ticker(ticker: &str, balance: CoinBalance) -> CoinBa
 }
 
 /// Sums per-ticker balances across the given HD address balances into a single ticker-keyed total map.
-pub fn sum_hd_address_balances<'a, I>(balances: I) -> CoinBalanceMap
+///
+/// The activated coin's ticker is present even when `balances` is empty.
+pub fn sum_hd_address_balances<'a, I>(ticker: &str, balances: I) -> CoinBalanceMap
 where
     I: IntoIterator<Item = &'a HDAddressBalance>,
 {
-    let mut total = CoinBalanceMap::new();
+    let mut total = coin_balance_map_for_ticker(ticker, CoinBalance::default());
     for addr_balance in balances {
         for (ticker, balance) in &addr_balance.balance {
             let entry = total.entry(ticker.clone()).or_default();
@@ -110,6 +112,7 @@ pub trait EnableCoinBalanceOps {
         &self,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync;
@@ -128,6 +131,7 @@ where
         &self,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<EnableCoinBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
@@ -145,7 +149,7 @@ where
                 })
                 .mm_err(EnableCoinBalanceError::from),
             DerivationMethod::HDWallet(hd_wallet) => self
-                .enable_hd_wallet(hd_wallet, xpub_extractor, scan_policy)
+                .enable_hd_wallet(hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
                 .await
                 .map(EnableCoinBalance::HD),
         }
@@ -166,6 +170,7 @@ pub trait HDWalletBalanceOps: HDWalletCoinOps {
         hd_wallet: &Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync;
@@ -276,9 +281,11 @@ pub mod common_impl {
         hd_account: &mut Coin::HDAccount,
         address_scanner: &Coin::HDAddressScanner,
         scan_new_addresses: bool,
+        min_addresses_number: u32,
     ) -> MmResult<HDAccountBalance, EnableCoinBalanceError>
     where
         Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
+        Coin::Address: fmt::Display + Clone,
     {
         let gap_limit = hd_wallet.gap_limit();
         let mut addresses = coin.all_known_addresses_balances(hd_account).await.mm_err(Into::into)?;
@@ -289,8 +296,11 @@ pub mod common_impl {
                     .mm_err(Into::into)?,
             );
         }
+        ensure_minimum_external_addresses(coin, hd_wallet, hd_account, min_addresses_number, &mut addresses)
+            .await
+            .mm_err(Into::into)?;
 
-        let total_balance = sum_hd_address_balances(&addresses);
+        let total_balance = sum_hd_address_balances(coin.ticker(), &addresses);
         let account_balance = HDAccountBalance {
             account_index: hd_account.account_id(),
             derivation_path: RpcDerivationPath(hd_account.account_derivation_path()),
@@ -301,14 +311,56 @@ pub mod common_impl {
         Ok(account_balance)
     }
 
+    pub(crate) async fn ensure_minimum_external_addresses<Coin>(
+        coin: &Coin,
+        hd_wallet: &Coin::HDWallet,
+        hd_account: &mut Coin::HDAccount,
+        min_addresses_number: u32,
+        addresses: &mut Vec<HDAddressBalance>,
+    ) -> BalanceResult<()>
+    where
+        Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
+        Coin::Address: fmt::Display + Clone,
+    {
+        let known_addresses_number = hd_account
+            .known_addresses_number(Bip44Chain::External)
+            .mm_err(|error| BalanceError::Internal(error.to_string()))?;
+        if known_addresses_number >= min_addresses_number {
+            return Ok(());
+        }
+        if min_addresses_number >= crypto::ChildNumber::HARDENED_FLAG {
+            return MmError::err(
+                crate::hd_wallet::AccountUpdatingError::AddressLimitReached {
+                    max_addresses_number: crypto::ChildNumber::HARDENED_FLAG,
+                }
+                .into(),
+            );
+        }
+
+        let new_addresses = coin
+            .known_addresses_balances_with_ids(
+                hd_account,
+                Bip44Chain::External,
+                known_addresses_number..min_addresses_number,
+            )
+            .await?;
+        coin.set_known_addresses_number(hd_wallet, hd_account, Bip44Chain::External, min_addresses_number)
+            .await
+            .mm_err(Into::into)?;
+        addresses.extend(new_addresses);
+        Ok(())
+    }
+
     pub(crate) async fn enable_hd_wallet<Coin, XPubExtractor>(
         coin: &Coin,
         hd_wallet: &Coin::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         Coin: HDWalletBalanceOps + MarketCoinOps + Sync,
+        Coin::Address: fmt::Display + Clone,
         XPubExtractor: HDXPubExtractor + Sync,
     {
         let mut accounts = hd_wallet.get_accounts_mut().await;
@@ -336,8 +388,15 @@ pub mod common_impl {
                 EnableCoinScanPolicy::ScanIfNewWallet | EnableCoinScanPolicy::Scan
             );
 
-            let account_balance =
-                enable_hd_account(coin, hd_wallet, &mut new_account, &address_scanner, scan_new_addresses).await?;
+            let account_balance = enable_hd_account(
+                coin,
+                hd_wallet,
+                &mut new_account,
+                &address_scanner,
+                scan_new_addresses,
+                min_addresses_number,
+            )
+            .await?;
             result.accounts.push(account_balance);
             return Ok(result);
         }
@@ -349,11 +408,30 @@ pub mod common_impl {
         );
         let scan_new_addresses = matches!(scan_policy, EnableCoinScanPolicy::Scan);
         for (_account_id, hd_account) in accounts.iter_mut() {
-            let account_balance =
-                enable_hd_account(coin, hd_wallet, hd_account, &address_scanner, scan_new_addresses).await?;
+            let account_balance = enable_hd_account(
+                coin,
+                hd_wallet,
+                hd_account,
+                &address_scanner,
+                scan_new_addresses,
+                min_addresses_number,
+            )
+            .await?;
             result.accounts.push(account_balance);
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_hd_balance_keeps_ticker_key() {
+        let total = sum_hd_address_balances("KMD", std::iter::empty::<&HDAddressBalance>());
+
+        assert_eq!(total, coin_balance_map_for_ticker("KMD", CoinBalance::default()));
     }
 }

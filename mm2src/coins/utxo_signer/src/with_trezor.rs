@@ -82,8 +82,10 @@ impl<TxP: TxProvider + Send + Sync> TrezorTxSigner<TxP> {
     fn get_trezor_output(&self, tx_output: &TransactionOutput, output_info: &SendingOutputInfo) -> TxOutput {
         TxOutput {
             address: output_info.destination_address.clone(),
+            address_derivation_path: output_info.address_derivation_path.clone(),
             amount: tx_output.value,
             script_type: output_info.trezor_output_script_type(),
+            op_return_data: output_info.op_return_data.clone(),
         }
     }
 

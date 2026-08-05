@@ -27,4 +27,10 @@ IPHONEOS_DEPLOYMENT_TARGET = "14.0"
 
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner-0.2.78'
-rustflags = ["--cfg=web_sys_unstable_apis"]
+# `--cfg=web_sys_unstable_apis`: gated web-sys APIs used by the WASM build.
+# `getrandom_backend="wasm_js"`: getrandom 0.3 (pulled transitively via rand_core
+# 0.9 / uuid) refuses to build for wasm32-unknown-unknown unless its backend is
+# selected explicitly. This cfg plus the `wasm_js` feature (enabled in
+# mm2src/common/Cargo.toml) are BOTH required. See
+# https://docs.rs/getrandom/0.3/#webassembly-support
+rustflags = ["--cfg=web_sys_unstable_apis", '--cfg=getrandom_backend="wasm_js"']

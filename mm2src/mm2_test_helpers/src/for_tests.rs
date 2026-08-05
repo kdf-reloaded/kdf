@@ -573,7 +573,7 @@ impl MarketMakerIt {
                 if attempts > 128 {
                     return ERR!("Out of local IPs?");
                 }
-                let ip4 = Ipv4Addr::new(127, 0, 0, rng.gen_range(1, 255));
+                let ip4 = Ipv4Addr::new(127, 0, 0, rng.gen_range(1..255));
                 let ip = IpAddr::from(ip4);
                 let mut mm_ips = try_s!(MM_IPS.lock());
                 if mm_ips.contains_key(&ip) {
@@ -860,8 +860,9 @@ pub async fn enable_native(mm: &MarketMakerIt, coin: &str, urls: &[&str]) -> Jso
             "method": "enable",
             "coin": coin,
             "urls": urls,
-            // Dev chain swap contract address
-            "swap_contract_address": "0xa09ad3cd7e96586ebd05a2607ee56b56fb2db8fd",
+            // Dev chain swap contract address (EIP-55 checksummed; the ETH enable path
+            // validates the checksum via `valid_addr_from_str`, so a lowercase form is rejected).
+            "swap_contract_address": "0xa09aD3cD7e96586eBd05A2607EE56b56Fb2dB8FD",
             "mm2": 1,
         }))
         .await

@@ -58,16 +58,18 @@ mod order_requests_tracker_tests {
     use super::*;
     use std::{thread::sleep, time::Duration};
 
-    // TODO investigate why this fails on MacOS
+    // Deterministic: five requests issued back-to-back are all inside the
+    // one-second window, so the limit must read as reached. (The earlier version
+    // slept 100ms between requests and relied on the cumulative ~500ms staying
+    // under 1s, which was flaky on platforms with coarser sleep granularity,
+    // e.g. macOS. The time-window expiry is covered by `test_limit_reached_false`.)
     #[test]
-    #[ignore]
     fn test_limit_reached_true() {
         let limit = NonZeroUsize::new(5).unwrap();
         let mut tracker = OrderRequestsTracker::new(limit);
         let peer = "peer";
         for _ in 0..5 {
             tracker.peer_requested(peer);
-            sleep(Duration::from_millis(100));
         }
 
         assert!(tracker.limit_reached(peer));

@@ -23,7 +23,7 @@ async fn call_success_test() -> AsyncConnResult<()> {
         .call(|conn| {
             conn.execute(
                 "CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-                rusqlite::NO_PARAMS,
+                [],
             )
             .map_err(|e| e.into())
         })
@@ -42,7 +42,7 @@ async fn call_unwrap_success_test() -> AsyncConnResult<()> {
         .call_unwrap(|conn| {
             conn.execute(
                 "CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-                rusqlite::NO_PARAMS,
+                [],
             )
             .unwrap()
         })
@@ -58,13 +58,14 @@ async fn call_failure_test() -> AsyncConnResult<()> {
     let conn = AsyncConnection::open_in_memory().await?;
 
     let result = conn
-        .call(|conn| conn.execute("Invalid sql", rusqlite::NO_PARAMS).map_err(|e| e.into()))
+        .call(|conn| conn.execute("Invalid sql", []).map_err(|e| e.into()))
         .await;
 
     assert!(match result.unwrap_err() {
-        AsyncConnError::Rusqlite(e) => {
-            matches!(e, rusqlite::Error::SqliteFailure(_, _))
-        },
+        AsyncConnError::Rusqlite(e) => matches!(
+            e,
+            rusqlite::Error::SqliteFailure(_, _) | rusqlite::Error::SqlInputError { .. }
+        ),
         _ => false,
     });
 
@@ -101,7 +102,7 @@ async fn close_call_test() -> AsyncConnResult<()> {
     assert!(conn.close().await.is_ok());
 
     let result = conn2
-        .call(|conn| conn.execute("SELECT 1;", rusqlite::NO_PARAMS).map_err(|e| e.into()))
+        .call(|conn| conn.execute("SELECT 1;", []).map_err(|e| e.into()))
         .await;
 
     assert!(matches!(result.unwrap_err(), AsyncConnError::ConnectionClosed));
@@ -118,10 +119,7 @@ async fn close_call_unwrap_test() {
 
     assert!(conn.close().await.is_ok());
 
-    conn2
-        .call_unwrap(|conn| conn.execute("SELECT 1;", rusqlite::NO_PARAMS))
-        .await
-        .unwrap();
+    conn2.call_unwrap(|conn| conn.execute("SELECT 1;", [])).await.unwrap();
 }
 
 #[tokio::test]
@@ -131,7 +129,7 @@ async fn close_failure_test() -> AsyncConnResult<()> {
     conn.call(|conn| {
         conn.execute(
             "CREATE TABLE person(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-            rusqlite::NO_PARAMS,
+            [],
         )
         .map_err(|e| e.into())
     })

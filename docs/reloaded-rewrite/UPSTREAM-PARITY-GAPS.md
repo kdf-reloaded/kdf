@@ -1,6 +1,7 @@
 # Upstream Parity Gaps — TODO Tracker
 
-**Status:** active backlog.
+**Status:** active backlog plus recent parity completions awaiting wallet/CI
+soak testing.
 
 This document tracks confirmed functional gaps between the reloaded tree and
 the upstream Komodo DeFi Framework wire surface, as established by the changelog
@@ -8,12 +9,15 @@ parity audit (Jan 2022 → present) cross-referenced against
 [`rpc-method-census.md`](./rpc-method-census.md) (the upstream wire-method
 parity reference) and the reloaded dispatcher routing.
 
-Each gap below has been confirmed at **both** the CRD-specification level and the
-reloaded-code level (the audit method and evidence are recorded inline). Items
-are numbered to match the parity report delivered to the maintainer.
+Each unresolved gap below has been confirmed at **both** the
+CRD-specification level and the reloaded-code level (the audit method and
+evidence are recorded inline). Items are numbered to match the parity report
+delivered to the maintainer.
 
-Branch hierarchy for remediation: each item gets its own feature branch cut from
-`dev`; branches are left local (not pushed/merged) pending review.
+Resolved chapters are normally removed from this active tracker. The resolved
+chapters retained below are intentionally still present because their
+implementation or documentation changed in the current two-day proving window
+and still needs ordinary wallet/CI soak testing before archival.
 
 ---
 
@@ -146,6 +150,104 @@ R21. The superset has been removed; all three shapes now agree.
   the success payload is exactly `{ "streamer_id": "<token>" }`, matching upstream
   and the corrected R21. Done on `dev` (commit `fd075e66e`); the shared struct and
   all activation handlers compile and the streaming_activations tests pass.
+
+## Runtime-stub backlog — unfinished / TODO
+
+The following items were found during the runtime-stub and wallet-log hardening
+pass. They are tracked here so they are not lost, but they are not marked as
+resolved until their owning CRD chapter and implementation are both updated.
+
+### UTXO Standard Swap V2 HD/Trezor stubs — **PARTIALLY RESOLVED**
+
+CRD reference: [`15-swap-v2-utxo-path.md`](./15-swap-v2-utxo-path.md).
+
+The clean-room chapter-15 pass confirmed that software-HD and Trezor-backed UTXO
+Standard Swap V2 address and HTLC public-key identity must use the enabled HD
+address record. That record now carries the display address, compressed public
+key, and full derivation path. Wallet-funded maker-payment and taker-funding
+transactions use the enabled address path for Trezor P2PKH input signing, with
+P2SH HTLC and OP_RETURN outputs marked external and change marked by path when
+the signer can represent it.
+
+- [x] Promote/confirm the chapter-15 HD/Trezor requirements with a clean-room
+  Spec Reader pass and Dirty Gate pass.
+- [x] Replace the HD local-address runtime stub with enabled-HD-address
+  behavior.
+- [x] Replace the Trezor address/public-key deferral with enabled hardware-HD
+  address metadata selection.
+- [x] Add structured Trezor wallet-funded signing failures for unsupported coin
+  mapping/script mode, missing derivation metadata, user rejection/cancel,
+  transport/disconnect, unexpected device, and invalid device responses.
+- [x] Add unit coverage for HD trade-preimage sender derivation, HD V2 local
+  address selection, missing enabled HD address errors, Trezor enabled address
+  pubkey selection, and unsupported Trezor HTLC script signing.
+- [ ] Future work: extend the Trezor UTXO signer to support the V2 arbitrary
+  P2SH HTLC input scripts, then add emulator-backed wallet-funded and HTLC spend
+  coverage. The current signer only supports standard P2PKH inputs, so V2 HTLC
+  spend/finalization fails at the first local HTLC-signing step with a
+  structured `hardware_wallet:unsupported_script_signing_mode` error and never
+  falls back to host private keys.
+
+### Solana / SPL swap and history surface — **TODO**
+
+CRD reference: [`40-solana-coin.md`](./40-solana-coin.md).
+
+The Solana/SPL modules still contain broad unimplemented areas around market
+operations, swap operations, history, raw transaction handling, and fee
+preimage/conversion flows.
+
+- [ ] Decide whether Solana/SPL is in scope for the current release.
+- [ ] If in scope, run a clean-room CRD pass before implementation.
+- [ ] If out of scope, mark the unsupported RPC/swap paths explicitly and return
+  structured errors instead of panics.
+
+### Lightning Network market/swap/history surface — **TODO**
+
+CRD reference: [`41-lightning-network.md`](./41-lightning-network.md).
+
+Lightning support still contains large feature stubs in market operations, swap
+operations, and transaction-history-style surfaces.
+
+- [ ] Decide whether Lightning is in scope for the current release.
+- [ ] If in scope, split implementation into activation, payment/channel, swap,
+  and history work packages.
+- [ ] If out of scope, bind the unsupported behavior in the CRD and make runtime
+  paths return structured errors.
+
+### Ledger APDU transport — **TODO**
+
+CRD reference: [`50-evm-trezor-signing.md`](./50-evm-trezor-signing.md) for the
+current hardware-wallet policy surface. A separate Ledger chapter may be needed
+if Ledger support is brought into scope.
+
+- [ ] Decide whether Ledger transport support is in scope.
+- [ ] If in scope, define the public hardware-wallet transport contract and add
+  simulator or mock-device tests.
+- [ ] If out of scope, ensure any runtime entry point reports unsupported
+  hardware transport instead of panicking.
+
+### Low-S signature verification helper — **TODO**
+
+The `kdf_keys` low-S helper is crypto-sensitive and currently not on an active
+KDF call path.
+
+- [ ] Confirm whether any enabled signing or verification path requires this
+  helper.
+- [ ] If required, implement against the public secp256k1 rule and add boundary
+  tests.
+- [ ] If not required, document it as intentionally unavailable until the owning
+  feature is implemented.
+
+### Wallet app sequencing warnings — **TODO / needs reproduction**
+
+Wallet logs still show transient-looking conditions such as duplicate activation
+requests, balance polling before activation completion, inactive stream polling,
+and bad external provider endpoints.
+
+- [ ] Re-test with a current KDF build.
+- [ ] If still reproducible, classify each symptom as KDF compatibility behavior,
+  app call-ordering behavior, or external-provider failure.
+- [ ] Fix only the KDF-owned compatibility cases in this repository.
 
 ---
 

@@ -2,8 +2,6 @@
 
 mod adex_ping;
 pub mod atomicdex_behaviour;
-pub mod floodsub;
-pub mod gossipsub;
 mod ip_helpers;
 pub mod network_streamer;
 pub mod peers_exchange;
@@ -17,9 +15,9 @@ use secp256k1::{Message as SecpMessage, PublicKey as Secp256k1Pubkey, Secp256k1,
 use sha2::{Digest, Sha256};
 
 pub use atomicdex_behaviour::{spawn_gossipsub, AdexBehaviourError, NodeType, WssCerts};
-pub use gossipsub::{GossipsubEvent, GossipsubMessage, MessageId};
-pub use libp2p::identity::error::DecodingError;
+pub use libp2p::gossipsub::{Event as GossipsubEvent, Message as GossipsubMessage, MessageId};
 pub use libp2p::identity::secp256k1::PublicKey as Libp2pSecpPublic;
+pub use libp2p::identity::DecodingError;
 pub use libp2p::identity::PublicKey as Libp2pPublic;
 pub use libp2p::{Multiaddr, PeerId};
 pub use peers_exchange::PeerAddresses;

@@ -16,8 +16,9 @@ use mm2_net_config::NetConfig;
 
 /// Returns the effective DEX-fee floor for a swap.
 ///
-/// Whichever is larger of the network's configured minimum DEX fee
-/// (`NetConfig::dex_fee_min_threshold`) and the taker coin's `min_tx_amount`.
+/// Whichever is larger of the optional network override and the taker coin's
+/// `min_tx_amount`. Both production reference networks leave the override at
+/// zero, making the coin minimum the effective floor.
 pub(crate) fn dex_fee_threshold(net_cfg: &dyn NetConfig, min_tx_amount: MmNumber) -> MmNumber {
     let min_fee: MmNumber = net_cfg.dex_fee_min_threshold().into();
     if min_fee < min_tx_amount {
@@ -99,11 +100,12 @@ pub(crate) fn dex_fee_amount_from_taker_coin_ref(
 /// from the network configuration.
 ///
 /// If `NetConfig::burn_enabled()` is false, returns `DexFee::Standard`.
-/// Otherwise, splits the total fee according to `NetConfig::dex_fee_share()`:
-///   - `fee_amount = total * share` (goes to DEX fee address)
-///   - `burn_amount = total - fee_amount` (goes to OP_RETURN / burn address)
+/// Otherwise, the coin policy selects a direct OP_RETURN burn, an account
+/// burn, or the standard single-output form.
 ///
-/// The burn destination is `KmdOpReturn` for KMD, `PreBurnAccount` for others.
+/// Active production policy burns only KMD on netid 8762, splitting 75% to the
+/// fee address and 25% to OP_RETURN. Netid 6133 and non-KMD netid-8762 takers
+/// use the standard form.
 pub fn compute_dex_fee(
     net_cfg: &dyn NetConfig,
     taker_coin: &MmCoinEnum,
@@ -160,7 +162,7 @@ mod tests {
     fn mock_min_tx_amount() { TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0))); }
 
     #[test]
-    fn known_taker_pubkey_fee_computation_returns_no_fee_for_burn_pubkey() {
+    fn burn_disabled_network_does_not_waive_fee_for_burn_pubkey() {
         mock_min_tx_amount();
 
         let net_cfg = net_config_or_panic(6133);
@@ -171,8 +173,8 @@ mod tests {
         let aware_fee = compute_dex_fee_with_taker_pubkey(net_cfg, &taker_coin, "RICK", &trade_amount, burn_pubkey);
         let blind_fee = compute_dex_fee(net_cfg, &taker_coin, "RICK", &trade_amount);
 
-        assert_eq!(aware_fee, DexFee::NoFee);
-        assert_ne!(blind_fee, DexFee::NoFee);
+        assert_eq!(aware_fee, DexFee::Standard(MmNumber::from((2, 100))));
+        assert_eq!(aware_fee, blind_fee);
     }
 
     #[test]

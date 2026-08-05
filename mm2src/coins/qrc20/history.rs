@@ -15,6 +15,13 @@ type TxTransferMap = HashMap<TxInternalId, TransactionDetails>;
 type HistoryMapByHash = HashMap<H256Json, TxTransferMap>;
 type TxIds = Vec<(H256Json, u64)>;
 
+const HISTORY_RETRY_INITIAL_DELAY_SECS: u64 = 10;
+const HISTORY_RETRY_MAX_DELAY_SECS: u64 = 300;
+
+fn next_history_retry_delay(current_delay_secs: u64) -> u64 {
+    current_delay_secs.saturating_mul(2).min(HISTORY_RETRY_MAX_DELAY_SECS)
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TxInternalId {
     tx_hash: H256Json,
@@ -89,6 +96,7 @@ impl Qrc20Coin {
 
         let mut my_balance: Option<CoinBalance> = None;
         let mut success_iteration = 0i32;
+        let mut history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
         loop {
             if ctx.is_stopping() {
                 break;
@@ -129,9 +137,10 @@ impl Qrc20Coin {
                     ctx.log.log(
                         "",
                         &[&"tx_history", &self.utxo.conf.ticker],
-                        &ERRL!("{}, retrying", error),
+                        &ERRL!("{}, retrying in {} seconds", error, history_retry_delay_secs),
                     );
-                    Timer::sleep(10.).await;
+                    Timer::sleep(history_retry_delay_secs as f64).await;
+                    history_retry_delay_secs = next_history_retry_delay(history_retry_delay_secs);
                     continue;
                 },
                 RequestTxHistoryResult::HistoryTooLarge => {
@@ -155,6 +164,7 @@ impl Qrc20Coin {
                     break;
                 },
             };
+            history_retry_delay_secs = HISTORY_RETRY_INITIAL_DELAY_SECS;
 
             let updated = self.process_tx_ids(&ctx, &mut history_map, tx_ids).await;
             if success_iteration == 0 {
@@ -833,6 +843,18 @@ mod tests {
     use mm2_metrics::{MetricType, MetricsJson, MetricsOps};
     use mm2_test_helpers::for_tests::find_metrics_in_json;
     use qrc20_tests::qrc20_coin_for_test;
+
+    #[test]
+    fn history_retry_delay_backs_off_and_is_bounded() {
+        let mut delay = HISTORY_RETRY_INITIAL_DELAY_SECS;
+        let mut observed = vec![delay];
+        for _ in 0..6 {
+            delay = next_history_retry_delay(delay);
+            observed.push(delay);
+        }
+
+        assert_eq!(observed, vec![10, 20, 40, 80, 160, 300, 300]);
+    }
 
     #[test]
     fn test_tx_internal_id() {

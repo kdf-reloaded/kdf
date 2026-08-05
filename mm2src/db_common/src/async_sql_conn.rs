@@ -132,7 +132,7 @@ impl AsyncConnection {
     pub async fn open_with_flags_and_vfs<P: AsRef<Path>>(path: P, flags: OpenFlags, vfs: &str) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let vfs = vfs.to_owned();
-        start(move || rusqlite::Connection::open_with_flags_and_vfs(path, flags, &vfs)).await
+        start(move || rusqlite::Connection::open_with_flags_and_vfs(path, flags, vfs.as_str())).await
     }
 
     /// Open a new AsyncConnection to an in-memory SQLite database.
@@ -159,7 +159,7 @@ impl AsyncConnection {
     /// string or if the underlying SQLite open call fails.
     pub async fn open_in_memory_with_flags_and_vfs(flags: OpenFlags, vfs: &str) -> Result<Self> {
         let vfs = vfs.to_owned();
-        start(move || rusqlite::Connection::open_in_memory_with_flags_and_vfs(flags, &vfs)).await
+        start(move || rusqlite::Connection::open_in_memory_with_flags_and_vfs(flags, vfs.as_str())).await
     }
 
     /// Call a function in background thread and get the result asynchronously.

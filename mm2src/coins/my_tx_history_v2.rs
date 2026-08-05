@@ -1,7 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
-use crate::{lp_coinfind_or_err, BlockHeightAndTime, CoinFindError, HistorySyncState, MarketCoinOps, MmCoinEnum,
-            Transaction, TransactionDetails, TransactionType, TxFeeDetails};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::z_coin::z_coin_wallet_db::ZCoinTxHistoryDetails;
+use crate::{lp_coinfind_or_err, BlockHeightAndTime, CoinFindError, HistorySyncState, MarketCoinOps, MmCoin,
+            MmCoinEnum, Transaction, TransactionDetails, TransactionType, TxFeeDetails};
 use async_trait::async_trait;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, ten, HttpStatusCode, PagingOptionsEnum, StatusCode};
@@ -253,6 +255,7 @@ pub enum MyTxHistoryErrorV2 {
     StorageError(String),
     RpcError(String),
     NotSupportedFor(String),
+    InvalidTarget(String),
     #[cfg(target_arch = "wasm32")]
     NotSupportedInWasm,
 }
@@ -261,7 +264,7 @@ impl HttpStatusCode for MyTxHistoryErrorV2 {
     fn status_code(&self) -> StatusCode {
         match self {
             MyTxHistoryErrorV2::CoinIsNotActive(_) => StatusCode::NOT_FOUND,
-            MyTxHistoryErrorV2::NotSupportedFor(_) => StatusCode::BAD_REQUEST,
+            MyTxHistoryErrorV2::NotSupportedFor(_) | MyTxHistoryErrorV2::InvalidTarget(_) => StatusCode::BAD_REQUEST,
             MyTxHistoryErrorV2::StorageIsNotInitialized(_)
             | MyTxHistoryErrorV2::StorageError(_)
             | MyTxHistoryErrorV2::RpcError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -409,6 +412,10 @@ pub async fn my_tx_history_v2_rpc(
         return build_response_from_runtime_history(ctx, request, coin).await;
     }
 
+    let history_coin_type = match coin.get_history_coin_type() {
+        Some(t) => t,
+        None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
+    };
     let tx_history_storage = SqliteTxHistoryStorage(
         ctx.sqlite_connection
             .ok_or(MmError::new(MyTxHistoryErrorV2::StorageIsNotInitialized(
@@ -416,10 +423,6 @@ pub async fn my_tx_history_v2_rpc(
             )))?
             .clone(),
     );
-    let history_coin_type = match coin.get_history_coin_type() {
-        Some(t) => t,
-        None => return MmError::err(MyTxHistoryErrorV2::NotSupportedFor(coin.ticker().to_owned())),
-    };
     let is_storage_init = tx_history_storage
         .is_initialized_for(history_coin_type.storage_ticker())
         .await
@@ -462,13 +465,10 @@ pub async fn my_tx_history_v2_rpc(
 
 /// Shared-envelope address-scope selector for the shielded history request (R39.8.5).
 ///
-/// Accepted for wire-envelope compatibility and, in the forward-spec data path
-/// (§39.8.0b), echoed back unchanged in the response. It does not scope which
-/// shielded transactions are returned. On the current native-only substrate the
-/// method always fails before any response is built (§39.8.0a), so the selector
-/// is validated at the boundary and otherwise unused.
+/// Accepted for wire-envelope compatibility and echoed back unchanged in the
+/// response. It does not scope which shielded transactions are returned.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ZCoinTxHistoryTarget {
     #[default]
@@ -496,33 +496,59 @@ pub struct ZCoinTxHistoryRequest {
     pub target: ZCoinTxHistoryTarget,
 }
 
-/// `z_coin_tx_history` handler — clean-failure contract on the current substrate (R39.8.0a).
-///
-/// Reloaded's `ZCoin` is a native-full-node port with no shielded wallet-history
-/// store, no incoming-viewing-key compact-block scanner, and no signed-integer
-/// `internal_id` keyspace (verdict B, §39.8.0). The shielded history therefore
-/// cannot be produced here without fabricating note ownership, which would be a
-/// correctness and privacy hazard. The method is still dispatched and validates
-/// its input at the boundary:
-/// - an unactivated `coin` resolves to `CoinIsNotActive`;
-/// - an activated non-shielded coin resolves to `NotSupportedFor`;
-/// - an activated shielded coin resolves to `StorageIsNotInitialized`, because
-///   no wallet-history store exists on this substrate.
-///
-/// It never panics, never fabricates or partially synthesizes history entries,
-/// and never emits shielded amounts/addresses it cannot derive. The success
-/// type is the shared v2 envelope (R39.8.10); it is never constructed here.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Serialize)]
+pub struct ZCoinTxHistoryResponse {
+    coin: String,
+    target: ZCoinTxHistoryTarget,
+    current_block: u64,
+    transactions: Vec<ZCoinTxHistoryDetails>,
+    sync_status: HistorySyncState,
+    limit: usize,
+    skipped: usize,
+    total: usize,
+    total_pages: usize,
+    paging_options: PagingOptionsEnum<i64>,
+}
+
+/// `z_coin_tx_history` handler backed by the initialized shielded wallet database (R39.8).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn z_coin_tx_history_rpc(
     ctx: MmArc,
     request: ZCoinTxHistoryRequest,
-) -> Result<MyTxHistoryResponseV2, MmError<MyTxHistoryErrorV2>> {
+) -> Result<ZCoinTxHistoryResponse, MmError<MyTxHistoryErrorV2>> {
     let coin = lp_coinfind_or_err(&ctx, &request.coin).await.mm_err(Into::into)?;
     match coin {
-        MmCoinEnum::ZCoin(_) => MmError::err(MyTxHistoryErrorV2::StorageIsNotInitialized(format!(
-            "Shielded transaction-history store is not initialized for {}",
-            request.coin
-        ))),
+        MmCoinEnum::ZCoin(z_coin) => {
+            let current_block = z_coin
+                .current_block()
+                .compat()
+                .await
+                .map_to_mm(MyTxHistoryErrorV2::RpcError)?;
+            let page = z_coin
+                .shielded_history()
+                .load_page(
+                    &request.coin,
+                    &z_coin.my_z_address_encoded(),
+                    z_coin.decimals(),
+                    current_block,
+                    &request.paging_options,
+                    request.limit,
+                )
+                .map_err(|e| MmError::new(MyTxHistoryErrorV2::StorageError(e)))?;
+            Ok(ZCoinTxHistoryResponse {
+                coin: request.coin,
+                target: request.target,
+                current_block,
+                transactions: page.transactions,
+                sync_status: z_coin.history_sync_status(),
+                limit: request.limit,
+                skipped: page.skipped,
+                total: page.total,
+                total_pages: page.total_pages,
+                paging_options: request.paging_options,
+            })
+        },
         _ => MmError::err(MyTxHistoryErrorV2::NotSupportedFor(request.coin)),
     }
 }

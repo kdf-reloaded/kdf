@@ -95,7 +95,6 @@ keys = { package = "kdf_keys", path = "../kdf_keys" }
 lazy_static = "1.4"
 # ledger = { path = "../ledger" }
 libc = "0.2"
-metrics = "0.12"
 mm2_p2p = { path = "../mm2_p2p", features = ["application"] }
 num-traits = "0.2"
 rpc = { package = "kdf_rpc_types", path = "../kdf_rpc_types" }
@@ -104,7 +103,7 @@ parking_lot = { version = "0.12.0" }
 parity-util-mem = "0.11"
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 prost = { workspace = true }
-rand = { version = "0.7", features = ["std", "small_rng"] }
+rand = { version = "0.8", features = ["std", "small_rng"] }
 rand6 = { version = "0.6", package = "rand" }
 rmp-serde = "0.14.3"
 # TODO: Reduce the size of regex by disabling the features we don't use.

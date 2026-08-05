@@ -157,7 +157,10 @@ pub fn init_crash_reports() {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub fn init_crash_reports() { unimplemented!() }
+pub fn init_crash_reports() {
+    // Browser/wasm hosts provide their own panic surfaces; there is no native
+    // signal/SEH handler to install here.
+}
 
 // Make sure Rust panics still work in the presence of the VEH handler.
 #[test]

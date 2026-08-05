@@ -17,7 +17,3 @@ hdrhistogram = { version = "7.0", default-features = false, features = ["sync"] 
 http.workspace = true
 hyper = { version = "0.14.11", features = ["server", "http1", "tcp"] }
 itertools.workspace = true
-metrics = { version = "0.12" }
-metrics-core = { version = "0.5" }
-metrics-runtime = { version = "0.13", default-features = false, features = ["metrics-observer-prometheus"] }
-metrics-util = { version = "0.3" }

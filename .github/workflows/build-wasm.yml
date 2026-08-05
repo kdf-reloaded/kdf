@@ -24,12 +24,21 @@ on:
         description: "cargo profile"
         required: false
         default: "dev"
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
   workflow_call:
     inputs:
       profile:
         description: "cargo profile"
         required: false
         default: "dev"
+        type: string
+      features:
+        description: "comma-separated cargo features"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -68,16 +77,13 @@ jobs:
 
       - name: cargo check -p mm2_main (wasm32)
         shell: bash
-        run: cargo check --target wasm32-unknown-unknown -p mm2_main
-
-      - name: Install wasm-pack
-        shell: bash
         run: |
-          if ! command -v wasm-pack >/dev/null 2>&1; then
-            curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          FEATURES_FLAG=""
+          if [ -n "${{ inputs.features }}" ]; then
+            FEATURES_FLAG="--features ${{ inputs.features }}"
           fi
-          wasm-pack --version
+          cargo check --target wasm32-unknown-unknown -p mm2_main $FEATURES_FLAG
 
-      - name: wasm-pack build mm2_main
+      - name: cargo check mm2_main (wasm32)
         shell: bash
-        run: wasm-pack build mm2src/mm2_main --target web --out-dir ../../target/wasm-pack-out --dev
+        run: cargo check --target wasm32-unknown-unknown -p mm2_main

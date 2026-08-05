@@ -17,9 +17,8 @@ to a single fee-collection address, a configurable share is *burned*
 coin families) or by recording it in an `OP_RETURN` script
 (KMD-only, provably unspendable). The split ratio is governed by a
 network-level numeric (chapter 06 surface; the chapter-bound name
-is the chapter-08 accessor `dex_fee_share`); the canonical split
-documented for the bound network identifier is 75% to the fee
-address and 25% to the burn destination.
+is the chapter-08 accessor `dex_fee_share`); the active netid-8762
+split is 75% to the fee address and 25% to the burn destination.
 
 The substrate landed by chapter 08 binds the *data* layer (`DexFee`
 enum, `DexFeeBurnDestination` enum, the seven network-level
@@ -52,47 +51,33 @@ chains.
 
 ### 16.1.1 Reloaded policy state (informative)
 
-The data and split substrate of this chapter ships in full in the
-reloaded baseline; the per-network numeric policy that drives it
-is supplied by the dedicated network-configuration crate
-(`mm2_net_config`), with one `NetConfig` implementation per
-network identifier, replacing the hard-coded constants of the
-upstream baseline. The bound policy values exposed through the
-public `NetConfig` accessors are:
+The split substrate is shared, while the active policy is selected
+by the dedicated network-configuration crate:
 
-- **Network identifier 8762** (original AtomicDEX network): base
-  `dex_fee_rate` = 1/777 (~0.129%); `dex_fee_rate_discounted` =
-  9/7770 (~0.116%, a 10% discount applied to the KMD ticker);
-  `burn_enabled` = false — no pre-burn output is produced on this
-  network.
-- **Network identifier 6133** (GLEEC network): base `dex_fee_rate`
-  = 2/100 (2%); `dex_fee_rate_discounted` = 1/100 (1%, a 50%
-  discount whose `fee_discount_tickers` set is `["GLEEC"]`);
-  `dex_fee_min_threshold` = 1/10000; `burn_enabled` = true with
-  `dex_fee_share` = 3/4 (75% to the fee address, 25% to the burn
-  destination, per the canonical split of §16.1).
+- **Network identifier 8762** is pinned to the `v2.6.0-beta`
+  swap contract. The base rate is 1/777 and the discounted rate is
+  9/7770 when either side of the pair is the exact ticker `"KMD"`.
+  Coin dust is the sole fee floor. A KMD taker uses a two-output
+  `WithBurn` descriptor: 75% to the fee address and 25% to the
+  `KmdOpReturn` destination. The direct-burn predicate is evaluated
+  before the inactive general burn-account predicate. Every
+  non-KMD taker uses the single-output `Standard` descriptor.
+- **Network identifier 6133** follows the applicable v3/dev swap
+  contract. The base rate is 2/100 and the discounted rate is
+  1/100 when either side is the exact ticker `"GLEEC"`. Coin dust
+  is again the sole floor. Burn is disabled, so KMD and non-KMD
+  takers both use `Standard`.
 
-> **GLEEC-conformance note (informative).** On network identifier
-> 6133 the burn-destination public key returned by
-> `burn_addr_pubkey` is **deliberately equal** to the
-> fee-collection key returned by `dex_fee_addr_pubkey`. Both are
-> the single compressed secp256k1 key
-> `03a778d9bd346fa704cf3e2508cd074d93a1bbc1e504fbecbb0a8d48e7cccbbf5c`.
-> This is **not a reloaded divergence or a defect**: it reproduces
-> the GLEEC upstream configuration exactly, where the burn key is
-> set equal to the fee key so that the burn is effectively
-> neutralised at the address level — the 75/25 split still
-> executes structurally (a two-output transaction is built per
-> R6/R20), but the burned 25% lands in the same account as the
-> fee. The shared value is retained intentionally as a guard:
-> should the burn path ever be exercised unexpectedly, value is
-> directed to the network's own fee account rather than being
-> destroyed, and a genuinely distinct burn key can be substituted
-> later (here and in upstream) without a code change.
-> Implementations MUST keep these two keys equal on this network
-> to match GLEEC and MUST NOT assume the burn key differs from the
-> fee key. This equality is a required configuration invariant for
-> netid-6133 conformance, not a gap to be closed.
+The issue-1 failure demonstrates why the descriptor shape is part
+of the wire contract. For a 15.86 KMD trade on netid 8762, the
+discounted total converts to 1,837,065 base units at eight
+decimals. A legacy taker places 1,377,799 in the fee output and
+459,266 in the OP_RETURN output. Treating the expected fee as one
+1,837,065-unit standard output rejects that valid transaction.
+
+The netid-6133 burn key remains equal to its fee key as an inactive
+compatibility constant. Equality of those keys MUST NOT enable a
+split or the `NoFee` case while the network burn gate is false.
 
 ## 16.2 Subsystem Shape
 
@@ -124,8 +109,8 @@ chapter-bound method names and bound semantics are:
 | Method                                  | Bound semantics                                                                                                              |
 | --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `burn_pubkey() -> Vec<u8>`              | The compressed public key bytes of the network-designated burn account for this coin family; an empty vector when no burn account is configured. |
-| `should_burn_directly() -> bool`        | `true` iff the burn portion MUST be recorded in an `OP_RETURN` script rather than sent to a P2PKH burn address (R20).        |
-| `should_burn_dex_fee() -> bool`         | `true` iff this coin participates in the pre-burn split at all. When `false`, the factory of R6 MUST emit the standard variant. |
+| `should_burn_directly() -> bool`        | `true` iff this coin uses the direct `OP_RETURN` burn path (R20). This predicate is independent of, and has precedence over, the general burn-account predicate. |
+| `should_burn_dex_fee() -> bool`         | `true` iff this coin participates in the general burn-account path. It does not disable a direct burn selected by `should_burn_directly`. |
 
 **R2.** All three methods MUST have default implementations on
 the coin trait. The defaults MUST be: empty vector, `false`,
@@ -138,10 +123,10 @@ implementation in the workspace.
 
 | Coin family                                     | `burn_pubkey()`                                                          | `should_burn_directly()`                | `should_burn_dex_fee()`                            |
 | ----------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------- | -------------------------------------------------- |
-| UTXO standard                                   | empty (defers to the network-level burn-account public-key accessor at the factory layer per R4) | `true` for the chapter-bound ticker literal `KMD`, `false` otherwise | `true`                                             |
-| UTXO Bitcoin-Cash family / SLP / QRC20          | inherits the UTXO-standard override                                      | always `false`                          | inherits the UTXO-standard override                |
+| UTXO standard                                   | empty (defers to the network-level burn-account public-key accessor at the factory layer per R4) | `true` for the chapter-bound ticker literal `KMD`, `false` otherwise | `false`                                            |
+| UTXO Bitcoin-Cash family / SLP / QRC20          | empty                                                                    | `false`                                 | `false`                                            |
 | EVM (Ethereum, ERC-20)                          | empty                                                                    | `false`                                 | `false`                                            |
-| Tendermint                                      | already configured by its own swap-operations module; the substrate MUST NOT regress it | `false`                                 | already returns `true` when configured by the module |
+| Tendermint                                      | empty; its swap-operations module can still consume an explicitly supplied descriptor | `false`                                 | `false`                                            |
 | Lightning / NFT / SLP-token / Sia / Solana / Z-coin | empty                                                                    | `false`                                 | `false`                                            |
 
 Substrate MUST NOT introduce a fourth burn-policy method, a
@@ -151,13 +136,16 @@ per-coin booleans.
 **R4.** The factory of R6 MUST honour a two-layer split between
 coin-level opt-in and network-level gating:
 
-- the coin's `should_burn_dex_fee` is the *coin-layer* opt-in;
-- the network-level `burn_enabled` accessor is the *network-layer*
-  gate (R6's first decision step);
+- the network-level `burn_enabled` accessor is the first,
+  network-layer gate;
+- after that gate, `should_burn_directly` selects the direct
+  OP_RETURN path before the factory considers the general
+  `should_burn_dex_fee` burn-account opt-in;
 - when the coin returns an empty `burn_pubkey`, the factory MUST
   fall back to the network-level burn-account public-key
   accessor; when the coin returns a non-empty value, the factory
-  MUST prefer the coin's value.
+  MUST prefer the coin's value; an empty resolved key disables the
+  burn-account path.
 
 **R5.** The chapter MUST NOT modify the network-level accessor
 set bound by chapter 06. The chapter consumes them through the
@@ -172,7 +160,7 @@ chapter-08 `DexFee` type. The chapter-bound names are:
 | Function                  | Bound role                                                                                                                                 |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `new_from_taker_coin`     | Used at swap initiation, before the taker's public key is known. Decides `Standard` vs `WithBurn` (KMD-OP_RETURN vs burn-account) based on coin and network flags. |
-| `new_with_taker_pubkey`   | Used whenever the taker's public key is known, including validation. Returns `NoFee` iff the taker public key equals the burn public key; otherwise delegates to `new_from_taker_coin`. |
+| `new_with_taker_pubkey`   | Used whenever the taker's public key is known, including validation. Returns `NoFee` only for an active burn-account path whose taker public key equals the burn public key; otherwise delegates to `new_from_taker_coin`. |
 
 The base-fee computation (chapter-bound name `compute_base_fee`,
 provided by chapter 08's `compute_dex_fee` pipeline) MUST NOT be
@@ -187,36 +175,44 @@ unchanged in either form.
 exactly:
 
 1. compute the base fee for the trade;
-2. if the network-level `burn_enabled` accessor returns `false`
-   *or* the coin's `should_burn_dex_fee` returns `false`, return
-   the standard single-output variant carrying the entire base
-   fee;
-3. otherwise, if the coin's `should_burn_directly` returns
+2. if the network-level `burn_enabled` accessor returns `false`,
+   return the standard single-output variant carrying the entire
+   base fee;
+3. if the coin's `should_burn_directly` returns
    `true`, delegate to the OP_RETURN split helper of R8;
-4. otherwise, delegate to the burn-account split helper of R9.
+4. if the coin's `should_burn_dex_fee` returns `false`, return
+   the standard variant;
+5. otherwise resolve the burn-account key per R4; if it is empty,
+   return the standard variant, and if it is non-empty delegate to
+   the burn-account split helper of R9.
 
 The bound decision tree for `new_with_taker_pubkey` MUST be
 exactly:
 
-1. if the byte sequence of the coin's `burn_pubkey` (or its
-   network-level fallback per R4) equals the taker public key,
-   return `NoFee`;
+1. if the network burn gate and the coin's general burn-account
+   predicate are true, its direct-burn predicate is false, and
+   the resolved non-empty burn-account public key equals the taker
+   public key, return `NoFee`;
 2. otherwise, delegate to `new_from_taker_coin`.
 
 The `NoFee` short-circuit guarantees the burn account itself is
 not charged a fee on its own trades (R17 handles its
 helper-branch semantics).
 
-**R8.** The OP_RETURN split path MUST take exactly the base fee and
-the coin's minimum-transmissible amount. If the entire fee would
-be below the minimum-transmissible amount, it MUST return
-the standard variant carrying the fee unchanged (dust fallback,
-R10). Otherwise it MUST return the `WithBurn` variant with:
+**R8.** The OP_RETURN split path MUST take the base fee, the coin's
+minimum-transmissible amount, and the network-level fee-share
+numeric. If the entire fee is below the minimum-transmissible
+amount, or if either split component is non-positive, it MUST
+return the standard variant carrying the fee unchanged. Otherwise
+it MUST return the `WithBurn` variant with:
 
-- a zero fee-amount component;
-- the entire base fee as the burn-amount component;
+- fee amount `base_fee × fee_share`;
+- burn amount `base_fee − fee_amount`;
 - the OP_RETURN destination tag from the chapter-08
   `DexFeeBurnDestination` enumeration.
+
+Netid 8762 supplies a share of 3/4, producing the required 75/25
+KMD split.
 
 **R9.** The burn-account split path MUST take the base fee, the
 coin's minimum-transmissible amount, the network-level fee-share
@@ -229,12 +225,17 @@ Otherwise it MUST return the `WithBurn` variant with the
 computed fee-amount and burn-amount components and the
 burn-account destination tag carrying the burn public key.
 
-**R10.** Dust fallback MUST be uniform: both R8 and R9 MUST fall
-back to the standard variant when the variant they would emit
-contains any output below the coin's minimum-transmissible
-amount. The substrate MUST NOT carry a separate dust
-configuration; the coin's `min_tx_amount` accessor (a pre-existing
-coin-trait method) MUST be the sole authority.
+**R10.** The coin's `min_tx_amount` accessor is the sole
+minimum-transmissible-amount authority. The direct OP_RETURN path
+applies it to the unsplit total, preserving the netid-8762 legacy
+contract. The burn-account path applies it to both split
+components. Both paths MUST fall back for a non-positive
+component. The substrate MUST NOT carry a separate dust
+configuration. Consequently, once a direct-path descriptor is
+`WithBurn`, coin-layer taker-fee construction MUST preserve it even
+when base-unit conversion leaves its positive fee-collection leg
+below `min_tx_amount`; the narrowly scoped builder exception is
+bound by chapter 08 R15A.
 
 **R11.** The factory and the two split helpers MUST be pure with
 respect to the coin and the network configuration: they MUST NOT
@@ -255,7 +256,9 @@ fee with the pubkey-blind factory or with only the chapter-08
 of the public key that the fee transaction, taker funding, or
 taker payment is expected to be signed by or otherwise bound to.
 Under that condition, a taker whose public key equals the burn
-public key MUST be treated as `NoFee`.
+public key MUST be treated as `NoFee` only when the burn-account
+path is active under R7. An inactive network key MUST NOT waive a
+standard fee.
 
 The production call-site contract is:
 
@@ -426,46 +429,44 @@ atomic delivery).
 
 ## 16.7 Tests
 
-**T1.** *Burn-enabled coin produces the split variant.* The
-factory of R6 is called with a mock coin returning
-`should_burn_dex_fee = true` and a non-default burn public key;
-the test asserts the returned variant is `WithBurn` with the
-burn-account destination tag, fee-amount equal to the fee-share
-fraction of the total, and burn-amount equal to the remainder.
+**T1.** *Netid-8762 compatibility matrix.* A KMD UTXO taker MUST
+produce `WithBurn` with the OP_RETURN destination and a 75/25
+split, while a non-KMD UTXO taker MUST produce `Standard`.
 
-**T2.** *Dust fallback emits the standard variant.* The factory
-is called with a trade amount small enough that the burn leg
-would fall below the coin's minimum-transmissible amount; the
-test asserts the standard variant carrying the full fee is
-returned.
+**T2.** *Exact issue-1 regression.* For netid 8762, taker KMD,
+maker CHTA, trade amount 15.86, and eight coin decimals, the test
+MUST assert total 1,837,065 base units, fee leg 1,377,799, and burn
+leg 459,266 after the coin-layer conversion.
 
-**T3.** *KMD ticker emits OP_RETURN destination.* A mock coin
-returning `should_burn_directly = true` is passed to the
-factory; the test asserts the returned variant is `WithBurn`
-with the OP_RETURN destination tag.
+**T2A.** *Small direct-burn regression.* For netid 8762, taker
+KMD, trade amount 0.01, and eight coin decimals, the test MUST
+assert fee leg 868 and OP_RETURN burn leg 289 after conversion and
+MUST prove that the chapter-08 R15A policy permits that exact
+two-output transaction without disabling ordinary UTXO dust or
+change handling.
 
-**T4.** *Taker public key equals burn public key yields no
-fee.* The `new_with_taker_pubkey` factory is called with the
-taker public key set equal to the coin's burn public key; the
-test asserts the `NoFee` variant is returned.
+**T3.** *Netid-6133 compatibility matrix.* KMD and non-KMD takers
+MUST both produce `Standard`; the inactive burn key and direct-burn
+coin predicate MUST have no effect while the network gate is
+false.
 
-**T4A.** *Known-taker-pubkey production validation uses `NoFee`.*
-Given a burn-enabled UTXO taker coin whose expected taker sender
-public key equals the burn public key, the V1 maker-side
-taker-fee validation path computes its expected `DexFee` with the
-taker-pubkey-aware factory and proceeds through the no-fee branch
-without requiring a taker-fee transaction. The same fixture MUST
-fail if the path computes the expected fee with the pubkey-blind
-factory or with only the base-fee pipeline.
+**T4.** *Burn-account substrate remains guarded.* Direct helper
+tests MUST cover the dormant burn-account 75/25 split and its
+per-component dust fallback. A pubkey-aware factory test MUST
+confirm that equality with an inactive network burn key does not
+produce `NoFee`.
 
-**T4B.** *V2 known-taker-pubkey validation uses `NoFee`.* Given a
-V2 maker-side validation fixture after negotiation, where the
-taker public key is known and equals the burn public key, the
-expected `DexFee` passed to taker-funding validation is `NoFee`.
-The test asserts that a `Standard` or `WithBurn` expectation is a
-failure for this trigger condition. A companion taker-side fixture
-MUST assert that local V2 taker construction uses the same
-`NoFee` expectation when the local taker public key is available.
+**T4A.** *Known-taker-pubkey production validation uses the aware
+factory.* V1 maker and taker paths that know the relevant public
+key MUST call the pubkey-aware factory. A synthetic active
+burn-account fixture MAY additionally assert `NoFee`; production
+netids currently exercise the standard result.
+
+**T4B.** *V2 known-taker-pubkey paths use the aware factory.* V2
+maker and taker construction/validation paths after negotiation
+MUST call the pubkey-aware factory. A synthetic active
+burn-account fixture MAY exercise `NoFee`; neither production
+network currently activates that account-burn branch.
 
 **T5.** *Three-output preimage for burn-account variant.* The
 preimage builder of R13 is driven with `WithBurn` carrying the
@@ -504,7 +505,8 @@ chapter 17.
 
 **D2.** A network-level numeric burn-share override per coin
 family (currently the bound network-level fee-share numeric
-applies uniformly to every burn-enabled coin via R9).
+applies uniformly to every active direct-burn or account-burn
+path).
 
 **D3.** End-to-end broadcast coverage on a containerised UTXO
 test chain. The bound tests of 16.7 are unit-level; the
@@ -542,6 +544,9 @@ and `NoFee` arms per R14, R16, R17, R18.
 
 ## 16.10 External References
 
+- KDF Reloaded issue #1 and its attached public swap-failure record —
+  observable netid-8762 KMD/CHTA validation failure,
+  <https://github.com/kdf-reloaded/kdf/issues/1>.
 - Bitcoin script `OP_RETURN` semantics — standard transaction
   relay rules,
   <https://github.com/bitcoin/bips/blob/master/bip-0011.mediawiki>.
@@ -561,7 +566,8 @@ and `NoFee` arms per R14, R16, R17, R18.
   three version-two UTXO taker-payment-spend helpers and their
   deferred-variant rejection arms); chapter 17 (the parallel
   version-two EVM path, sibling-allowlist reference for D1);
-  public Bitcoin script and signature-hash documentation.
+  public Bitcoin script and signature-hash documentation; KDF
+  Reloaded issue #1 and its public swap-failure attachment.
 - *Permitted-input classes used:* baseline source; bound substrate
   identifiers introduced with in-chapter justification; public
   protocol documentation.

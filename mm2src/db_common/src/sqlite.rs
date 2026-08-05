@@ -5,14 +5,11 @@
 //! conversions, and `Send`/`Sync` newtype wrappers.
 //!
 //! # External binding
-//! Structurally bound to the `rusqlite` 0.27 API contract
-//! (<https://docs.rs/rusqlite/0.27>). We are pinned to this version
-//! because of upstream MSRV/dependency constraints elsewhere in the
-//! workspace; the older API surface (e.g. `rusqlite::NO_PARAMS`,
-//! absence of `params_from_iter`) explains some of the call-site
-//! shape that differs from newer `rusqlite` users.
-
-#![allow(deprecated)] // TODO: remove this once rusqlite is >= 0.29
+//! Structurally bound to the `rusqlite` 0.37 API contract
+//! (<https://docs.rs/rusqlite/0.37>). Dynamic positional parameters are
+//! adapted with `params_from_iter`; named parameter slices use the regular
+//! query methods introduced after the deprecated named-method split was
+//! removed.
 
 pub use rusqlite;
 pub use rusqlite::types::Value as SqlValue;
@@ -71,7 +68,7 @@ where
     P::Item: ToSql,
     F: FnOnce(&Row<'_>) -> Result<T, SqlError>,
 {
-    let maybe_result = conn.query_row(query, params, map_fn);
+    let maybe_result = conn.query_row(query, rusqlite::params_from_iter(params), map_fn);
     if let Err(SqlError::QueryReturnedNoRows) = maybe_result {
         return Ok(None);
     }
@@ -89,7 +86,7 @@ pub fn query_single_row_with_named_params<T, F>(
 where
     F: FnOnce(&Row<'_>) -> Result<T, SqlError>,
 {
-    let maybe_result = conn.query_row_named(query, params, map_fn);
+    let maybe_result = conn.query_row(query, params.as_slice(), map_fn);
     if let Err(SqlError::QueryReturnedNoRows) = maybe_result {
         return Ok(None);
     }
@@ -164,7 +161,7 @@ pub fn validate_table_name(table_name: &str) -> SqlResult<()> {
     let validation_error = || {
         SqlError::SqliteFailure(
             rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::APIMisuse,
+                code: rusqlite::ErrorCode::ApiMisuse,
                 extended_code: rusqlite::ffi::SQLITE_MISUSE,
             },
             None,
@@ -247,7 +244,7 @@ pub fn offset_by_uuid(
     );
 
     let mut stmt = conn.prepare(&external_query)?;
-    let offset: isize = stmt.query_row_named(params_as_trait.as_slice(), |row| row.get(0))?;
+    let offset: isize = stmt.query_row(params_as_trait.as_slice(), |row| row.get(0))?;
     Ok(offset.try_into().expect("row index should be always above zero"))
 }
 
@@ -284,7 +281,7 @@ where
     );
 
     let mut stmt = conn.prepare(&external_query)?;
-    let maybe_offset = stmt.query_row(params, |row| row.get::<_, isize>(0));
+    let maybe_offset = stmt.query_row(rusqlite::params_from_iter(params), |row| row.get::<_, isize>(0));
     if let Err(SqlError::QueryReturnedNoRows) = maybe_offset {
         return Ok(None);
     }
@@ -331,12 +328,10 @@ where
 /// be safe to use, while giving great speed boost.
 /// With these, Mac and Linux have comparable SQLite performance.
 pub fn run_optimization_pragmas(conn: &Connection) -> Result<(), SqlError> {
-    conn.query_row("pragma journal_mode = WAL;", rusqlite::NO_PARAMS, |row| {
-        row.get::<_, String>(0)
-    })?;
-    conn.execute("pragma synchronous = normal;", rusqlite::NO_PARAMS)?;
-    conn.execute("pragma temp_store = memory;", rusqlite::NO_PARAMS)?;
-    conn.execute("pragma foreign_keys = ON;", rusqlite::NO_PARAMS)?;
+    conn.query_row("pragma journal_mode = WAL;", [], |row| row.get::<_, String>(0))?;
+    conn.execute("pragma synchronous = normal;", [])?;
+    conn.execute("pragma temp_store = memory;", [])?;
+    conn.execute("pragma foreign_keys = ON;", [])?;
     Ok(())
 }
 
@@ -447,7 +442,7 @@ where
     let validation_error = || {
         SqlError::SqliteFailure(
             rusqlite::ffi::Error {
-                code: rusqlite::ErrorCode::APIMisuse,
+                code: rusqlite::ErrorCode::ApiMisuse,
                 extended_code: rusqlite::ffi::SQLITE_MISUSE,
             },
             None,

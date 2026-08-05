@@ -147,13 +147,6 @@ pub trait MyActiveOrders {
 
     async fn load_active_taker_orders(&self) -> MyOrdersResult<Vec<TakerOrder>>;
 
-    async fn save_new_active_order(&self, order: &Order) -> MyOrdersResult<()> {
-        match order {
-            Order::Maker(maker) => self.save_new_active_maker_order(maker).await,
-            Order::Taker(taker) => self.save_new_active_taker_order(taker).await,
-        }
-    }
-
     async fn save_new_active_maker_order(&self, order: &MakerOrder) -> MyOrdersResult<()>;
 
     async fn save_new_active_taker_order(&self, order: &TakerOrder) -> MyOrdersResult<()>;
@@ -183,13 +176,6 @@ pub trait MyOrdersFilteringHistory {
     ) -> MyOrdersResult<RecentOrdersSelectResult>;
 
     async fn select_order_status(&self, uuid: Uuid) -> MyOrdersResult<String>;
-
-    async fn save_order_in_filtering_history(&self, order: &Order) -> MyOrdersResult<()> {
-        match order {
-            Order::Maker(maker) => self.save_maker_order_in_filtering_history(maker).await,
-            Order::Taker(taker) => self.save_taker_order_in_filtering_history(taker).await,
-        }
-    }
 
     async fn save_maker_order_in_filtering_history(&self, order: &MakerOrder) -> MyOrdersResult<()>;
 

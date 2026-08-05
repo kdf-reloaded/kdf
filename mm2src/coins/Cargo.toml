@@ -64,8 +64,8 @@ crypto = { path = "../crypto" }
 cosmrs = { workspace = true }
 db_common = { path = "../db_common" }
 derive_more = "0.99"
-ed25519-dalek = "1.0.1"
-ed25519-dalek-bip32 = "0.2.0"
+ed25519-dalek = "2"
+ed25519-dalek-bip32 = "0.3.0"
 # alloy ABI codec (migration target, replacing ethabi). Pinned to the
 # alloy-core 1.5 line already present via the `alloy` umbrella dependency.
 alloy-dyn-abi = "1.5"
@@ -91,14 +91,16 @@ libc = "0.2"
 lightning = { path = "../../rust-lightning-patched/lightning" }
 lightning-background-processor = { path = "lightning_background_processor" }
 lightning-invoice = { path = "../../rust-lightning-patched/lightning-invoice" }
-metrics = "0.12"
 mocktopus = "0.8.0"
 num-traits = "0.2"
 parking_lot = { version = "0.12.0" }
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 prost = { workspace = true }
+# `zcash_client_backend` 0.23 uses prost 0.14 for compact-block messages,
+# while KDF's existing gRPC surface remains on prost 0.12.
+prost_14 = { package = "prost", version = "=0.14.4" }
 prost-types = { workspace = true }
-rand = { version = "0.7", features = ["std", "small_rng"] }
+rand = { version = "0.8", features = ["std", "small_rng"] }
 rmp-serde = "0.14.3"
 rpc = { package = "kdf_rpc_types", path = "../kdf_rpc_types" }
 rpc_task = { path = "../rpc_task" }
@@ -128,6 +130,15 @@ alloy = { workspace = true }
 tower = { workspace = true }
 winapi = "0.3"
 zbase32 = "0.1.2"
+incrementalmerkletree = { version = "=0.8.2", features = ["legacy-api", "std"] }
+zcash_keys = { version = "=0.14.0", default-features = false, features = ["sapling", "std", "unstable"] }
+zcash_protocol = "=0.9.0"
+zcash_script = "=0.4.5"
+zcash_transparent = { version = "=0.8.0", features = ["transparent-inputs"] }
+zip32 = "=0.2.1"
+
+[dev-dependencies]
+zcash_note_encryption = "=0.4.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.27" }
@@ -138,6 +149,12 @@ wasm-bindgen = { version = "0.2.50" }
 wasm-bindgen-futures = { version = "0.4.1" }
 wasm-bindgen-test = { version = "0.3.2" }
 web-sys = { version = "0.3.55", features = ["console", "Headers", "Request", "RequestInit", "RequestMode", "Response", "Window"] }
+# R39.6.1: zcash_primitives (shielded types) and zcash_client_backend (note
+# trial-decryption) are needed on WASM for sapling state sync and balance
+# reporting.  zcash_proofs (LocalTxProver) remains native-only.
+zcash_client_backend = { version = "=0.23.0", default-features = false, features = ["transparent-inputs"] }
+sapling = { package = "sapling-crypto", version = "=0.7.0", default-features = false, features = ["std"] }
+zcash_primitives = { version = "=0.28.0", default-features = false, features = ["non-standard-fees", "std", "transparent-inputs"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 dirs = { version = "1" }
@@ -149,12 +166,14 @@ rust-ini = { version = "0.13" }
 rustls = { version = "0.20", features = ["dangerous_configuration"] }
 tokio = { version = "1.7" }
 tokio-rustls = { version = "0.23" }
-tonic = { version = "0.11", features = ["tls", "channel"] }
+tonic = { version = "0.11", features = ["tls", "tls-webpki-roots", "channel"] }
 webpki-roots = { version = "0.22" }
-zcash_client_backend = { path = "../../librustzcash-patched/zcash_client_backend" }
-zcash_client_sqlite = { path = "../../librustzcash-patched/zcash_client_sqlite" }
-zcash_primitives = { features = ["transparent-inputs"], path = "../../librustzcash-patched/zcash_primitives" }
-zcash_proofs = { path = "../../librustzcash-patched/zcash_proofs" }
+zcash_client_backend = { version = "=0.23.0", features = ["transparent-inputs", "zcash_proofs"] }
+zcash_client_sqlite = { version = "=0.21.1", features = ["transparent-inputs"] }
+sapling = { package = "sapling-crypto", version = "=0.7.0" }
+zcash_primitives = { version = "=0.28.0", features = ["non-standard-fees", "transparent-inputs"] }
+zcash_proofs = "=0.28.0"
+zcash_secp256k1 = { package = "secp256k1", version = "=0.29.1" }
 
 # Solana stack — modular `solana-*` 2.x crates plus `spl-token` 8 and
 # the `spl-associated-token-account-client` helper. The legacy

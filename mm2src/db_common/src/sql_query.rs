@@ -403,8 +403,8 @@ mod tests {
     );";
 
     fn init_table_for_test(conn: &Connection) {
-        conn.execute(CREATE_TX_HISTORY_TABLE, rusqlite::NO_PARAMS).unwrap();
-        conn.execute(CREATE_TX_ADDRESS_TABLE, rusqlite::NO_PARAMS).unwrap();
+        conn.execute(CREATE_TX_HISTORY_TABLE, []).unwrap();
+        conn.execute(CREATE_TX_ADDRESS_TABLE, []).unwrap();
 
         let history_items = vec![
             ("tx_hash_1", 699545, 23, Some(0.5)),

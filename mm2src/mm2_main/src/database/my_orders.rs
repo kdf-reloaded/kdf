@@ -4,7 +4,7 @@ use crate::mm2::lp_ordermatch::{FilteringOrder, MakerOrder, MyOrdersFilter, Rece
 use common::log::debug;
 use common::{now_ms, PagingOptions};
 use db_common::sqlite::offset_by_uuid;
-use db_common::sqlite::rusqlite::{Connection, Error as SqlError, Result as SqlResult, ToSql};
+use db_common::sqlite::rusqlite::{params_from_iter, Connection, Error as SqlError, Result as SqlResult, ToSql};
 use db_common::sqlite::sql_builder::SqlBuilder;
 use mm2_core::mm_ctx::MmArc;
 use std::convert::TryInto;
@@ -54,7 +54,8 @@ pub fn insert_maker_order(ctx: &MmArc, uuid: Uuid, order: &MakerOrder) -> SqlRes
         "Created".to_string(),
     ];
     let conn = ctx.sqlite_connection();
-    conn.execute(INSERT_MY_ORDER, &params).map(|_| ())
+    conn.execute(INSERT_MY_ORDER, params_from_iter(params.iter()))
+        .map(|_| ())
 }
 
 pub fn insert_taker_order(ctx: &MmArc, uuid: Uuid, order: &TakerOrder) -> SqlResult<()> {
@@ -78,12 +79,13 @@ pub fn insert_taker_order(ctx: &MmArc, uuid: Uuid, order: &TakerOrder) -> SqlRes
         "Created".to_string(),
     ];
     let conn = ctx.sqlite_connection();
-    conn.execute(INSERT_MY_ORDER, &params).map(|_| ())
+    conn.execute(INSERT_MY_ORDER, params_from_iter(params.iter()))
+        .map(|_| ())
 }
 
 pub fn update_maker_order(ctx: &MmArc, uuid: Uuid, order: &MakerOrder) -> SqlResult<()> {
     debug!("Updating order {} in the SQLite database", uuid);
-    let params = vec![
+    let params = [
         uuid.to_string(),
         order.price.to_decimal().to_string(),
         order.max_base_vol.to_decimal().to_string(),
@@ -91,26 +93,29 @@ pub fn update_maker_order(ctx: &MmArc, uuid: Uuid, order: &MakerOrder) -> SqlRes
         "Updated".to_string(),
     ];
     let conn = ctx.sqlite_connection();
-    conn.execute(UPDATE_MY_ORDER, &params).map(|_| ())
+    conn.execute(UPDATE_MY_ORDER, params_from_iter(params.iter()))
+        .map(|_| ())
 }
 
 pub fn update_was_taker(ctx: &MmArc, uuid: Uuid) -> SqlResult<()> {
     debug!("Updating order {} in the SQLite database", uuid);
-    let params = vec![
+    let params = [
         uuid.to_string(),
         "Maker".to_string(),
         now_ms().to_string(),
         1.to_string(),
     ];
     let conn = ctx.sqlite_connection();
-    conn.execute(UPDATE_WAS_TAKER, &params).map(|_| ())
+    conn.execute(UPDATE_WAS_TAKER, params_from_iter(params.iter()))
+        .map(|_| ())
 }
 
 pub fn update_order_status(ctx: &MmArc, uuid: Uuid, status: String) -> SqlResult<()> {
     debug!("Updating order {} in the SQLite database", uuid);
-    let params = vec![uuid.to_string(), now_ms().to_string(), status];
+    let params = [uuid.to_string(), now_ms().to_string(), status];
     let conn = ctx.sqlite_connection();
-    conn.execute(UPDATE_ORDER_STATUS, &params).map(|_| ())
+    conn.execute(UPDATE_ORDER_STATUS, params_from_iter(params.iter()))
+        .map(|_| ())
 }
 
 /// Adds where clauses determined by MyOrdersFilter
@@ -211,7 +216,7 @@ pub fn select_orders_by_filter(
     debug!("Trying to execute SQL query {} with params {:?}", count_query, params);
 
     let params_as_trait: Vec<_> = params.iter().map(|(key, value)| (*key, value as &dyn ToSql)).collect();
-    let total_count: isize = conn.query_row_named(&count_query, params_as_trait.as_slice(), |row| row.get(0))?;
+    let total_count: isize = conn.query_row(&count_query, params_as_trait.as_slice(), |row| row.get(0))?;
     let total_count = total_count.try_into().expect("COUNT should always be >= 0");
     if total_count == 0 {
         return Ok(RecentOrdersSelectResult::default());
@@ -250,7 +255,7 @@ pub fn select_orders_by_filter(
     debug!("Trying to execute SQL query {} with params {:?}", uuids_query, params);
     let mut stmt = conn.prepare(&uuids_query)?;
     let orders = stmt
-        .query_map_named(params_as_trait.as_slice(), |row| {
+        .query_map(params_as_trait.as_slice(), |row| {
             Ok(FilteringOrder {
                 uuid: row.get(0)?,
                 order_type: row.get(1)?,
@@ -275,6 +280,8 @@ pub fn select_orders_by_filter(
 }
 
 pub fn select_status_by_uuid(conn: &Connection, uuid: &Uuid) -> Result<String, SqlError> {
-    let params = vec![uuid.to_string()];
-    conn.query_row(SELECT_STATUS_BY_UUID, &params, |row| row.get::<_, String>(0))
+    let params = [uuid.to_string()];
+    conn.query_row(SELECT_STATUS_BY_UUID, params_from_iter(params.iter()), |row| {
+        row.get::<_, String>(0)
+    })
 }

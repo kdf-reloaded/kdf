@@ -47,7 +47,7 @@ parking_lot_core = { version = "0.6" }
 paste = "1.0"
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 prost = { workspace = true }
-rand = { version = "0.7", features = ["std", "small_rng", "wasm-bindgen"] }
+rand = { version = "0.8", features = ["std", "small_rng"] }
 regex = "1"
 rustc-hex = "2"
 serde = "1"
@@ -65,6 +65,10 @@ winapi = "0.3"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 chrono = { version = "0.4", features = ["wasmbind"] }
 getrandom = { version = "0.2", features = ["js"] } # see https://docs.rs/getrandom/0.2.0/getrandom/#webassembly-support
+# getrandom 0.3 is pulled transitively (rand_core 0.9 / uuid) and must have its
+# wasm backend enabled. This feature plus the `--cfg getrandom_backend="wasm_js"`
+# rustflag in .cargo/config.toml are BOTH required on wasm32-unknown-unknown.
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 gstuff = { version = "0.7" }
 js-sys = "0.3.27"
 serde-wasm-bindgen = "0.4.3"

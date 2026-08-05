@@ -23,13 +23,16 @@ futures = { workspace = true }
 futures_codec = "0.4.0"
 futures-rustls = { version = "0.21.1" }
 hex = { workspace = true }
+# The fork's gossipsub uses `PeerId::random()`, which the crates.io `libp2p-identity`
+# gates behind its `rand` feature. Enable it here so the shared identity crate compiles.
+libp2p-identity = { version = "0.2", features = ["rand"] }
 lazy_static = { workspace = true }
 log = "0.4.8"
 mm2_event_stream = { path = "../mm2_event_stream" }
 num-bigint = { version = "0.4", features = ["serde", "std"] }
 num-rational = { version = "0.4", features = ["serde"] }
 prost = { workspace = true }
-rand = { package = "rand", version = "0.7", features = ["std", "wasm-bindgen"] }
+rand = { package = "rand", version = "0.8", features = ["std"] }
 regex = "1"
 rmp-serde = "0.14.3"
 secp256k1 = { version = "0.20", features = ["rand"] }
@@ -44,11 +47,11 @@ wasm-timer = "0.2.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.7", features = ["rt-multi-thread", "macros"] }
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["dns-tokio", "floodsub", "noise", "ping", "request-response", "secp256k1", "tcp-tokio", "websocket", "yamux"] }
+libp2p = { workspace = true, features = ["dns", "identify", "floodsub", "gossipsub", "noise", "ping", "request-response", "secp256k1", "tcp", "tokio", "websocket", "macros", "yamux"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["floodsub", "noise", "ping", "request-response", "secp256k1", "wasm-ext", "wasm-ext-websocket", "yamux"] }
+libp2p = { workspace = true, features = ["identify", "floodsub", "gossipsub", "noise", "ping", "request-response", "secp256k1", "wasm-ext", "wasm-ext-websocket", "macros", "yamux"] }
 wasm-bindgen-futures = "0.4.21"
 
 [build-dependencies]

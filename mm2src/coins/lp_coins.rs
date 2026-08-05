@@ -223,7 +223,7 @@ pub mod hd_pubkey;
 pub mod hd_wallet;
 pub mod hd_wallet_storage;
 #[cfg(not(target_arch = "wasm32"))] pub mod lightning;
-#[cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
+// R39.6.1: z_coin is available on WASM (with IndexedDB storage backend).
 pub mod my_tx_history_v2;
 pub mod nft;
 pub mod qrc20;
@@ -236,6 +236,7 @@ pub mod sql_tx_history_storage;
 #[doc(hidden)]
 #[allow(unused_variables)]
 pub mod test_coin;
+pub mod z_coin;
 pub use test_coin::TestCoin;
 
 #[doc(hidden)]
@@ -252,7 +253,7 @@ pub mod tendermint;
 #[cfg(target_arch = "wasm32")] pub mod tx_history_db;
 pub mod tx_history_streaming;
 pub mod utxo;
-#[cfg(not(target_arch = "wasm32"))] pub mod z_coin;
+// z_coin is declared above (R39.6.1); the duplicate cfg-gated line below was removed.
 
 pub(crate) use eth::{eth_coin_from_conf_and_request, EthCoin, EthTxFeeDetails, SignedEthTx};
 pub(crate) use hd_wallet::{HDAddress, HDAddressId};
@@ -273,7 +274,7 @@ pub(crate) use utxo::utxo_common::big_decimal_from_sat_unsigned;
 pub(crate) use utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardCoin};
 pub(crate) use utxo::UtxoActivationParams;
 pub(crate) use utxo::{BlockchainNetwork, GenerateTxError, UtxoFeeDetails, UtxoTx};
-#[cfg(not(target_arch = "wasm32"))] pub(crate) use z_coin::ZCoin;
+pub(crate) use z_coin::{ZCoin, ZcoinProtocolInfo};
 
 // ---- Split sub-modules (extracted from monolithic lp_coins.rs) ----
 mod lp_coins_context;

@@ -2107,7 +2107,7 @@ pub(crate) fn orderbook_address(
     pubkey: &str,
     addr_format: UtxoAddressFormat,
 ) -> Result<OrderbookAddress, MmError<OrderbookAddrErr>> {
-    let protocol: CoinProtocol = json::from_value(conf["protocol"].clone())?;
+    let protocol: CoinProtocol = CoinProtocol::from_conf_json(conf["protocol"].clone())?;
     match protocol {
         CoinProtocol::ERC20 { .. } | CoinProtocol::ETH { .. } => coins::eth::addr_from_pubkey_str(pubkey)
             .map(OrderbookAddress::Transparent)
@@ -2123,7 +2123,7 @@ pub(crate) fn orderbook_address(
                 return MmError::err(OrderbookAddrErr::PlatformCoinConfIsNull(platform));
             }
             // TODO is there any way to make it better without duplicating the prefix in the SLP conf?
-            let platform_protocol: CoinProtocol = json::from_value(platform_conf["protocol"].clone())?;
+            let platform_protocol: CoinProtocol = CoinProtocol::from_conf_json(platform_conf["protocol"].clone())?;
             match platform_protocol {
                 CoinProtocol::BCH { slp_prefix } => coins::utxo::slp::slp_addr_from_pubkey_str(pubkey, &slp_prefix)
                     .map(OrderbookAddress::Transparent)
@@ -2132,15 +2132,37 @@ pub(crate) fn orderbook_address(
             }
         },
         #[cfg(not(target_arch = "wasm32"))]
-        // TODO ask Slyris
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => unimplemented!(),
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => {
+            MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned()))
+        },
+        CoinProtocol::SIA => MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned())),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::LIGHTNING { .. } => MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned())),
         #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::ZHTLC => Ok(OrderbookAddress::Shielded),
-        CoinProtocol::SIA | CoinProtocol::TENDERMINT { .. } | CoinProtocol::TENDERMINTTOKEN { .. } => todo!(),
+        CoinProtocol::ZHTLC(_) => Ok(OrderbookAddress::Shielded),
+        CoinProtocol::TENDERMINT { account_prefix, .. } => {
+            coins::tendermint::account_id_from_pubkey_hex(&account_prefix, pubkey)
+                .map(|addr| OrderbookAddress::Transparent(addr.to_string()))
+                .map_to_mm(|e| OrderbookAddrErr::AddrFromPubkeyError(e.to_string()))
+        },
+        CoinProtocol::TENDERMINTTOKEN { platform, .. } => {
+            let platform_conf = coin_conf(ctx, &platform);
+            if platform_conf.is_null() {
+                return MmError::err(OrderbookAddrErr::PlatformCoinConfIsNull(platform));
+            }
+            let platform_protocol: CoinProtocol = CoinProtocol::from_conf_json(platform_conf["protocol"].clone())?;
+            match platform_protocol {
+                CoinProtocol::TENDERMINT { account_prefix, .. } => {
+                    coins::tendermint::account_id_from_pubkey_hex(&account_prefix, pubkey)
+                        .map(|addr| OrderbookAddress::Transparent(addr.to_string()))
+                        .map_to_mm(|e| OrderbookAddrErr::AddrFromPubkeyError(e.to_string()))
+                },
+                _ => MmError::err(OrderbookAddrErr::InvalidPlatformCoinProtocol(platform)),
+            }
+        },
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => coins::eth::tron::addr_from_pubkey_str(pubkey)
             .map(OrderbookAddress::Transparent)
             .map_to_mm(OrderbookAddrErr::AddrFromPubkeyError),
+        CoinProtocol::NFT { .. } => MmError::err(OrderbookAddrErr::CoinIsNotSupported(coin.to_owned())),
     }
 }

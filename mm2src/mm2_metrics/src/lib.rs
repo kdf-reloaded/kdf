@@ -12,8 +12,7 @@ use std::sync::{Arc, Weak};
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{prometheus, Clock, Metrics, TrySink};
 // Re-export Label so macros can reference it via $crate::MetricLabel.
-#[cfg(not(target_arch = "wasm32"))]
-pub use metrics_core::Label as MetricLabel;
+#[cfg(not(target_arch = "wasm32"))] pub use native::MetricLabel;
 
 #[cfg(target_arch = "wasm32")] mod wasm;
 #[cfg(target_arch = "wasm32")] pub use wasm::{Clock, Metrics};

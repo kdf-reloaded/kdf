@@ -328,6 +328,12 @@ impl ElectrumClientImpl {
         connected
     }
 
+    pub async fn is_server_connected(&self, server_addr: &str) -> Option<bool> {
+        let connections = self.connections.lock().await;
+        let connection = connections.iter().find(|connection| connection.addr == server_addr)?;
+        Some(connection.is_connected().await)
+    }
+
     /// Check if the protocol version was checked for one of the spawned connections.
     pub async fn is_protocol_version_checked(&self) -> bool {
         for connection in self.connections.lock().await.iter() {
@@ -917,7 +923,31 @@ fn increase_delay(delay: &AtomicU64) {
     }
 }
 
+fn replace_if_connection_error_changed(last_error: &mut Option<String>, current_error: &str) -> bool {
+    if last_error.as_deref() == Some(current_error) {
+        false
+    } else {
+        *last_error = Some(current_error.to_owned());
+        true
+    }
+}
+
 macro_rules! try_loop {
+    ($e:expr, $addr: ident, $delay: ident, $last_error: ident) => {
+        match $e {
+            Ok(res) => res,
+            Err(e) => {
+                let error_text = format!("{:?}", e);
+                if replace_if_connection_error_changed(&mut $last_error, &error_text) {
+                    error!("{:?} error {}", $addr, error_text);
+                } else {
+                    common::log::debug!("{:?} repeated connection error {}", $addr, error_text);
+                }
+                increase_delay(&$delay);
+                continue;
+            },
+        }
+    };
     ($e:expr, $addr: ident, $delay: ident) => {
         match $e {
             Ok(res) => res,
@@ -1037,6 +1067,7 @@ async fn connect_loop(
     event_handlers: Vec<RpcTransportEventHandlerShared>,
 ) -> Result<(), ()> {
     let delay = Arc::new(AtomicU64::new(0));
+    let mut last_connect_error = None;
 
     loop {
         let current_delay = delay.load(AtomicOrdering::Relaxed);
@@ -1044,7 +1075,7 @@ async fn connect_loop(
             Timer::sleep(current_delay as f64).await;
         };
 
-        let socket_addr = try_loop!(addr_to_socket_addr(&addr), addr, delay);
+        let socket_addr = try_loop!(addr_to_socket_addr(&addr), addr, delay, last_connect_error);
 
         let connect_f = match config.clone() {
             ElectrumConfig::TCP => Either::Left(TcpStream::connect(&socket_addr).map_ok(ElectrumStream::Tcp)),
@@ -1068,10 +1099,16 @@ async fn connect_loop(
             },
         };
 
-        let stream = try_loop!(connect_f.await, addr, delay);
-        try_loop!(stream.as_ref().set_nodelay(true), addr, delay);
+        let stream = try_loop!(connect_f.await, addr, delay, last_connect_error);
+        try_loop!(stream.as_ref().set_nodelay(true), addr, delay, last_connect_error);
         info!("Electrum client connected to {}", addr);
-        try_loop!(event_handlers.on_connected(addr.clone()), addr, delay);
+        try_loop!(
+            event_handlers.on_connected(addr.clone()),
+            addr,
+            delay,
+            last_connect_error
+        );
+        last_connect_error = None;
         let last_chunk = Arc::new(AtomicU64::new(now_ms()));
         let mut last_chunk_f = electrum_last_chunk_loop(last_chunk.clone()).boxed().fuse();
 
@@ -1287,13 +1324,15 @@ fn electrum_request(
     timeout: u64,
 ) -> Box<dyn Future<Item = JsonRpcResponseEnum, Error = String> + Send + 'static> {
     let send_fut = async move {
-        let mut json = try_s!(json::to_string(&request));
+        let json = try_s!(json::to_string(&request));
         #[cfg(not(target_arch = "wasm32"))]
-        {
+        let json = {
+            let mut json = json;
             // Electrum request and responses must end with \n
             // https://electrumx.readthedocs.io/en/latest/protocol-basics.html#message-stream
             json.push('\n');
-        }
+            json
+        };
 
         let (req_tx, resp_rx) = async_oneshot::channel();
         responses.lock().await.insert(request.rpc_id(), req_tx);
@@ -1327,4 +1366,32 @@ pub(crate) fn address_balance_from_unspent_map(
     unspents.iter().fold(BigDecimal::from(0), |sum, unspent| {
         sum + big_decimal_from_sat_unsigned(unspent.value, decimals)
     })
+}
+
+#[cfg(test)]
+mod connection_error_tests {
+    use super::replace_if_connection_error_changed;
+
+    #[test]
+    fn identical_connection_errors_are_reported_once_until_state_changes() {
+        let mut last_error = None;
+        assert!(replace_if_connection_error_changed(
+            &mut last_error,
+            "certificate error"
+        ));
+        assert!(!replace_if_connection_error_changed(
+            &mut last_error,
+            "certificate error"
+        ));
+        assert!(replace_if_connection_error_changed(
+            &mut last_error,
+            "connection refused"
+        ));
+
+        last_error = None;
+        assert!(replace_if_connection_error_changed(
+            &mut last_error,
+            "certificate error"
+        ));
+    }
 }

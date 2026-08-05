@@ -53,12 +53,16 @@ pub trait NetConfig: Send + Sync + 'static {
     /// Discounted DEX fee rate for the tickers above.
     fn dex_fee_rate_discounted(&self) -> BigRational;
 
-    /// Minimum DEX fee floor (e.g. 0.0001).
-    fn dex_fee_min_threshold(&self) -> BigRational;
+    /// Optional network-level DEX fee floor.
+    ///
+    /// The production reference networks do not define an additional floor,
+    /// so the default is zero and the taker coin's `min_tx_amount` remains the
+    /// effective minimum.
+    fn dex_fee_min_threshold(&self) -> BigRational { BigRational::from_integer(0.into()) }
 
     // ── Burn ─────────────────────────────────────────────────────────
 
-    /// Whether this network burns a portion of the DEX fee.
+    /// Whether this network permits a coin-specific DEX-fee burn path.
     fn burn_enabled(&self) -> bool { false }
 
     /// Share of the DEX fee that goes to the fee address (1.0 = no burn).
@@ -157,26 +161,23 @@ mod tests {
     }
 
     #[test]
-    fn test_netid_8762_no_burn() {
+    fn test_netid_8762_has_kmd_burn_policy() {
         let cfg = net_config_for(8762).unwrap();
-        assert!(!cfg.burn_enabled());
-        // Non-burn networks should have empty burn pubkey (defaults)
+        assert!(cfg.burn_enabled());
+        assert_eq!(cfg.dex_fee_share(), BigRational::new(3.into(), 4.into()));
+        // Netid 8762 burns KMD directly via OP_RETURN and has no account-burn key.
         assert!(cfg.burn_addr_pubkey().is_empty());
         assert!(cfg.burn_addr_raw_pubkey().is_empty());
     }
 
     #[test]
-    fn test_netid_6133_has_burn() {
+    fn test_netid_6133_disables_burn() {
         let cfg = net_config_for(6133).unwrap();
-        assert!(cfg.burn_enabled());
-        // DEX_FEE_SHARE = 0.75 means 75% to fee address, 25% burned
-        let share = cfg.dex_fee_share();
-        let expected = BigRational::new(3.into(), 4.into()); // 3/4 = 0.75
-        assert_eq!(share, expected);
-        // Burn pubkey should be non-empty on burn-enabled networks
+        assert!(!cfg.burn_enabled());
+        assert_eq!(cfg.dex_fee_share(), BigRational::from_integer(1.into()));
+        // The inactive compatibility key remains well-formed.
         assert!(!cfg.burn_addr_pubkey().is_empty());
         assert!(!cfg.burn_addr_raw_pubkey().is_empty());
-        // Burn raw pubkey should match hex decode
         let decoded = hex::decode(cfg.burn_addr_pubkey()).expect("burn pubkey hex should be valid");
         assert_eq!(cfg.burn_addr_raw_pubkey(), decoded.as_slice());
     }
@@ -187,7 +188,7 @@ mod tests {
             let cfg = net_config_for(netid).unwrap();
             assert!(cfg.dex_fee_rate() > BigRational::from_integer(0.into()));
             assert!(cfg.dex_fee_rate_discounted() > BigRational::from_integer(0.into()));
-            assert!(cfg.dex_fee_min_threshold() > BigRational::from_integer(0.into()));
+            assert_eq!(cfg.dex_fee_min_threshold(), BigRational::from_integer(0.into()));
             // Discounted rate should be <= base rate
             assert!(cfg.dex_fee_rate_discounted() <= cfg.dex_fee_rate());
         }

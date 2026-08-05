@@ -49,7 +49,7 @@ pub fn insert_new_swap(
 ) -> SqlResult<()> {
     debug!("Inserting new swap {} to the SQLite database", uuid);
     let conn = ctx.sqlite_connection();
-    conn.execute(INSERT_MY_SWAP, &[
+    conn.execute(INSERT_MY_SWAP, [
         my_coin,
         other_coin,
         uuid,
@@ -143,7 +143,7 @@ pub fn select_uuids_by_my_swaps_filter(
     debug!("Trying to execute SQL query {} with params {:?}", count_query, params);
 
     let params_as_trait: Vec<_> = params.iter().map(|(key, value)| (*key, value as &dyn ToSql)).collect();
-    let total_count: isize = conn.query_row_named(&count_query, params_as_trait.as_slice(), |row| row.get(0))?;
+    let total_count: isize = conn.query_row(&count_query, params_as_trait.as_slice(), |row| row.get(0))?;
     let total_count = total_count.try_into().expect("COUNT should always be >= 0");
     if total_count == 0 {
         return Ok(MyRecentSwapsUuids::default());
@@ -172,7 +172,7 @@ pub fn select_uuids_by_my_swaps_filter(
     debug!("Trying to execute SQL query {} with params {:?}", uuids_query, params);
     let mut stmt = conn.prepare(&uuids_query)?;
     let uuids_and_types = stmt
-        .query_map_named(params_as_trait.as_slice(), |row| {
+        .query_map(params_as_trait.as_slice(), |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?
         .collect::<SqlResult<Vec<(String, i64)>>>()?;

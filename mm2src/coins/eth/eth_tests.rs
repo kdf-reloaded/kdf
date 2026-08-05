@@ -326,156 +326,7 @@ fn test_wei_from_big_decimal() {
 }
 
 #[test]
-#[ignore]
-/// temporary ignore, will refactor later to use dev chain and properly check transaction statuses
-fn send_and_refund_erc20_payment() {
-    let key_pair = KeyPair::from_secret_slice(
-        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
-    )
-    .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
-    let ctx = MmCtxBuilder::new().into_mm_arc();
-    let my_addr = key_pair.address();
-    let coin = EthCoin(Arc::new(EthCoinImpl {
-        ticker: "ETH".into(),
-        coin_type: EthCoinType::Erc20 {
-            platform: "ETH".to_string(),
-            token_addr: Address::from_slice(&hex::decode("c0eb7AeD740E1796992A08962c15661bDEB58003").unwrap()),
-        },
-        my_address: my_addr,
-        sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        signer: EthSigner::Local(key_pair),
-        swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
-        fallback_swap_contract: None,
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
-        web3,
-        decimals: 18,
-        gas_station_url: None,
-        gas_station_decimals: ETH_GAS_STATION_DECIMALS,
-        gas_station_policy: GasStationPricePolicy::MeanAverageFast,
-        history_sync_state: Mutex::new(HistorySyncState::NotStarted),
-        ctx: ctx.weak(),
-        required_confirmations: 1.into(),
-        tron_api: None,
-        nft_swap_v2_contract: None,
-        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
-        erc20_tokens_infos: Default::default(),
-        chain_id: None,
-        logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
-        derivation_method: DerivationMethod::Iguana(my_addr),
-        swap_v2_contracts: None,
-        gas_limit_v2: EthGasLimitV2::default(),
-    }));
-
-    let payment = coin
-        .send_maker_payment(
-            (now_ms() / 1000) as u32 - 200,
-            &[],
-            test_dex_fee_addr_raw_pubkey(),
-            &[1; 20],
-            "0.001".parse().unwrap(),
-            &coin.swap_contract_address(),
-        )
-        .wait()
-        .unwrap();
-
-    log!([payment]);
-
-    block_on(Timer::sleep(60.));
-
-    let refund = coin
-        .send_maker_refunds_payment(
-            &payment.tx_hex(),
-            (now_ms() / 1000) as u32 - 200,
-            test_dex_fee_addr_raw_pubkey(),
-            &[1; 20],
-            &[],
-            &coin.swap_contract_address(),
-        )
-        .wait()
-        .unwrap();
-
-    log!([refund]);
-}
-
-#[test]
-#[ignore]
-/// temporary ignore, will refactor later to use dev chain and properly check transaction statuses
-fn send_and_refund_eth_payment() {
-    let key_pair = KeyPair::from_secret_slice(
-        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
-    )
-    .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
-    let ctx = MmCtxBuilder::new().into_mm_arc();
-    let my_addr = key_pair.address();
-    let coin = EthCoin(Arc::new(EthCoinImpl {
-        ticker: "ETH".into(),
-        coin_type: EthCoinType::Eth,
-        my_address: my_addr,
-        sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        signer: EthSigner::Local(key_pair),
-        swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
-        fallback_swap_contract: None,
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
-        web3,
-        decimals: 18,
-        gas_station_url: None,
-        gas_station_decimals: ETH_GAS_STATION_DECIMALS,
-        gas_station_policy: GasStationPricePolicy::MeanAverageFast,
-        history_sync_state: Mutex::new(HistorySyncState::NotStarted),
-        ctx: ctx.weak(),
-        required_confirmations: 1.into(),
-        tron_api: None,
-        nft_swap_v2_contract: None,
-        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
-        erc20_tokens_infos: Default::default(),
-        chain_id: None,
-        logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
-        derivation_method: DerivationMethod::Iguana(my_addr),
-        swap_v2_contracts: None,
-        gas_limit_v2: EthGasLimitV2::default(),
-    }));
-
-    let payment = coin
-        .send_maker_payment(
-            (now_ms() / 1000) as u32 - 200,
-            &[],
-            test_dex_fee_addr_raw_pubkey(),
-            &[1; 20],
-            "0.001".parse().unwrap(),
-            &coin.swap_contract_address(),
-        )
-        .wait()
-        .unwrap();
-
-    log!([payment]);
-
-    block_on(Timer::sleep(60.));
-
-    let refund = coin
-        .send_maker_refunds_payment(
-            &payment.tx_hex(),
-            (now_ms() / 1000) as u32 - 200,
-            test_dex_fee_addr_raw_pubkey(),
-            &[1; 20],
-            &[],
-            &coin.swap_contract_address(),
-        )
-        .wait()
-        .unwrap();
-
-    log!([refund]);
-}
-
-#[test]
-#[ignore]
+#[ignore = "network + funded testnet account: Ropsten is decommissioned (both the Infura and linkpool URLs are dead) and ethgasstation.info is gone; this test also broadcasts a real tx. Re-enabling requires porting to a live testnet (e.g. Sepolia) with a funded key and working gas estimation, run in a network-gated job."]
 fn test_nonce_several_urls() {
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
@@ -1261,20 +1112,30 @@ fn test_get_fee_to_send_taker_fee() {
 /// if the balance is insufficient.
 /// So [`EthCoin::get_fee_to_send_taker_fee`] must return [`TradePreimageError::NotSufficientBalance`].
 ///
-/// Please note this test doesn't work correctly now,
-/// because as of now [`EthCoin::get_fee_to_send_taker_fee`] doesn't process the `Exception` web3 error correctly.
+/// `estimate_gas` and `my_balance` are mocked so the check runs offline and deterministically:
+/// `estimate_gas` reverts the way an insufficient-balance transfer does, and the mocked balance
+/// cannot cover the dex fee, so the code must classify it as `NotSufficientBalance`.
 #[test]
-#[ignore]
 fn test_get_fee_to_send_taker_fee_insufficient_balance() {
     const DEX_FEE_AMOUNT: u64 = 100_000_000_000;
+    const GAS_PRICE: u64 = 40;
 
-    EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(40.into()))));
+    EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    // Reproduce the revert some ERC20 tokens raise when the sender can't afford the transfer.
+    EthCoinImpl::estimate_gas.mock_safe(|_, _| {
+        MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
+            "error code -32016: The execution failed due to an exception.".to_string(),
+        )))))
+    });
+    // The wallet holds fewer tokens than the dex fee it is asked to send.
+    EthCoin::my_balance.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::from(1u64)))));
+
     let (_ctx, coin) = eth_coin_for_test(
         EthCoinType::Erc20 {
             platform: "ETH".to_string(),
             token_addr: Address::from_slice(&hex::decode("aD22f63404f7305e4713CcBd4F296f34770513f4").unwrap()),
         },
-        vec!["http://eth1.cipig.net:8555".into()],
+        vec!["http://dummy.dummy".into()],
         None,
     );
     let dex_fee_amount = u256_to_big_decimal(DEX_FEE_AMOUNT.into(), 18).expect("!u256_to_big_decimal");
@@ -1503,8 +1364,18 @@ fn test_negotiate_swap_contract_addr_has_fallback() {
 }
 
 #[test]
-#[ignore]
 fn polygon_check_if_my_payment_sent() {
+    // Network-gated: set POLYGON_RPC_URL to run it (Alchemy or Ankr free tier is
+    // fine). Skipped otherwise so the offline suite stays green; a network CI job
+    // runs it by setting the secret.
+    let url = match std::env::var("POLYGON_RPC_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            log!("skipping polygon_check_if_my_payment_sent: set POLYGON_RPC_URL to run it");
+            return;
+        },
+    };
+
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let conf = json!({
       "coin": "MATIC",
@@ -1515,6 +1386,10 @@ fn polygon_check_if_my_payment_sent() {
       "chain_id": 137,
       "avg_blocktime": 0.03,
       "required_confirmations": 3,
+      // Small log-scan chunk so the very first eth_getLogs call is tiny and stays
+      // within free-tier getLogs range limits (Alchemy/Ankr free tiers reject wide
+      // ranges).
+      "logs_block_range": 5,
       "protocol": {
         "type": "ETH"
       }
@@ -1523,7 +1398,7 @@ fn polygon_check_if_my_payment_sent() {
     let request = json!({
         "method": "enable",
         "coin": "MATIC",
-        "urls": ["https://polygon-mainnet.g.alchemy.com/v2/9YYl6iMLmXXLoflMPHnMTC4Dcm2L2tFH"],
+        "urls": [url],
         "swap_contract_address": "0x9130b257d37a52e52f21054c4da3450c72f595ce",
     });
 
@@ -1538,24 +1413,67 @@ fn polygon_check_if_my_payment_sent() {
     ))
     .unwrap();
 
-    println!("{:02x}", coin.my_address);
+    // A known, immutable historical maker payment on Polygon mainnet (Dec 2021),
+    // emitted in block 22_185_152. We start the scan two blocks before it with a
+    // small `logs_block_range` (see conf) so `check_if_my_payment_sent` finds the
+    // PaymentSent event in its very first getLogs chunk and returns immediately —
+    // no crawl toward chain head, and the query stays within free-tier limits.
+    //
+    // `from_block` is a fixed historical constant, deliberately NOT derived from
+    // the coin's own `current_block()` (the method the tested code uses), so the
+    // fixture stays independent of the code under test. Because the event is found
+    // in that first bounded chunk, the outcome does not depend on `current_block()`.
+    // This verifies the real found-path (locating and reconstructing the payment
+    // tx) and never goes stale, since the history is immutable.
+    const PAYMENT_BLOCK: u64 = 22_185_152;
+    let from_block = PAYMENT_BLOCK - 2;
 
     let secret_hash = hex::decode("fc33114b389f0ee1212abf2867e99e89126f4860").unwrap();
-    let swap_contract_address = "9130b257d37a52e52f21054c4da3450c72f595ce".into();
+    let swap_contract_address: BytesJson = "9130b257d37a52e52f21054c4da3450c72f595ce".into();
     let my_payment = coin
         .check_if_my_payment_sent(
             1638764369,
             &[],
             &[],
             &secret_hash,
-            22185109,
-            &Some(swap_contract_address),
+            from_block,
+            &Some(swap_contract_address.clone()),
         )
         .wait()
         .unwrap()
         .unwrap();
     let expected_hash = BytesJson::from("69a20008cea0c15ee483b5bbdff942752634aa072dfd2ff715fe87eec302de11");
     assert_eq!(expected_hash, my_payment.tx_hash());
+
+    // Negative case: crawl only the last several blocks for the same payment id.
+    // Its PaymentSent event is in 2021, so scanning a recent window must NOT find
+    // it — this exercises the "scanned the whole window, nothing found -> None"
+    // branch. The head is read via the alloy provider directly, NOT the coin's
+    // `current_block()` (the method the tested code uses), so the fixture stays
+    // independent of the code under test. The window is small (a handful of
+    // `logs_block_range` chunks), so it stays within free-tier getLogs limits.
+    let recent_head = {
+        use alloy::providers::Provider as _;
+        block_on(coin.alloy_provider().get_block_number()).unwrap()
+    };
+    let recent_from_block = recent_head.saturating_sub(20);
+    let not_found = coin
+        .check_if_my_payment_sent(
+            1638764369,
+            &[],
+            &[],
+            &secret_hash,
+            recent_from_block,
+            &Some(swap_contract_address),
+        )
+        .wait()
+        .unwrap();
+    assert!(
+        not_found.is_none(),
+        "payment must not be found in the recent {}..{} window",
+        recent_from_block,
+        recent_head
+    );
 }
 
 #[test]
@@ -1865,4 +1783,26 @@ fn trezor_withdraw_rejects_tron_without_device() {
     let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Tron);
     let err = crate::eth::eth_trezor_withdraw::ensure_trezor_withdraw_supported(&coin).unwrap_err();
     assert!(matches!(err.into_inner(), WithdrawError::UnsupportedUnderTrezor(_)));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[test]
+fn tron_v1_sender_trade_fee_returns_error_without_network() {
+    let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Tron);
+    let err = block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
+        .unwrap_err();
+    assert!(
+        matches!(err.into_inner(), TradePreimageError::InternalError(msg) if msg.contains("TRON V1 sender trade fee"))
+    );
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[test]
+fn tron_v1_wait_for_tx_spend_returns_error_without_decoding() {
+    let (_ctx, coin) = trezor_eth_coin_for_test(EthCoinType::Tron);
+    let err = coin
+        .wait_for_tx_spend(&[], 0, 0, &coin.swap_contract_address())
+        .wait()
+        .unwrap_err();
+    assert!(matches!(err, TransactionErr::Plain(msg) if msg.contains("TRON V1 swap spend watchers")));
 }

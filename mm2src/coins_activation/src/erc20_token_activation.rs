@@ -76,7 +76,8 @@ pub struct Erc20InitResult {
     required_confirmations: u64,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl TokenActivationOps for EthCoin {
     type PlatformCoin = EthCoin;
     type ActivationParams = Erc20ActivationRequest;
@@ -100,7 +101,8 @@ impl TokenActivationOps for EthCoin {
             .unwrap_or_else(|| platform_coin.required_confirmations());
 
         let token = platform_coin
-            .erc20_token_from_conf(ticker, token_addr, required_confirmations)
+            .erc20_token_from_conf_or_contract(ticker, token_addr, required_confirmations)
+            .await
             .map_to_mm(EnableTokenError::Internal)?;
 
         // Register the token on the platform coin so the platform's balance

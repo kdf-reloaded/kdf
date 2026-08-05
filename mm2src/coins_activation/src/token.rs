@@ -16,7 +16,8 @@ pub trait TokenProtocolParams {
     fn platform_coin_ticker(&self) -> &str;
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait TokenActivationOps: Into<MmCoinEnum> {
     type PlatformCoin: TryPlatformCoinFromMmCoinEnum;
     type ActivationParams;

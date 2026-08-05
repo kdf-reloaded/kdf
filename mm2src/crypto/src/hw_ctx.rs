@@ -21,6 +21,15 @@ pub(crate) const MM2_TREZOR_INTERNAL_COIN: TrezorUtxoCoin = TrezorUtxoCoin::Komo
 #[derive(Clone)]
 pub struct HardwareWalletArc(Arc<HardwareWalletCtx>);
 
+impl std::fmt::Debug for HardwareWalletArc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HardwareWalletArc")
+            .field("hw_internal_pubkey", &self.hw_internal_pubkey)
+            .field("hw_wallet_type", &self.hw_wallet_type)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Deref for HardwareWalletArc {
     type Target = HardwareWalletCtx;
 

@@ -52,20 +52,51 @@ impl TendermintCommons for TendermintCoin {
 
     async fn rpc_client(&self) -> MmResult<HttpClient, TendermintCoinRpcError> {
         let mut client_impl = self.client.0.lock().await;
+        let mut errors = Vec::new();
         for (i, client) in client_impl.rpc_clients.clone().into_iter().enumerate() {
             match client.perform(HealthRequest).await {
                 Ok(_) => {
                     client_impl.rpc_clients.rotate_left(i);
                     return Ok(client);
                 },
-                Err(rpc_error) => {
-                    debug!("Healthcheck failed on RPC node {}: {}", i, rpc_error);
+                Err(health_error) => {
+                    debug!(
+                        "Healthcheck failed on Tendermint RPC node {} ({}): {}",
+                        i,
+                        client.uri(),
+                        health_error
+                    );
+                    match client.abci_info().await {
+                        Ok(_) => {
+                            debug!(
+                                "Tendermint RPC node {} ({}) accepted by abci_info fallback",
+                                i,
+                                client.uri()
+                            );
+                            client_impl.rpc_clients.rotate_left(i);
+                            return Ok(client);
+                        },
+                        Err(abci_error) => {
+                            errors.push(format!(
+                                "node {} ({}): health={}, abci_info={}",
+                                i,
+                                client.uri(),
+                                health_error,
+                                abci_error
+                            ));
+                        },
+                    }
                 },
             }
         }
-        MmError::err(TendermintCoinRpcError::RpcClientError(
-            "All RPC nodes are unavailable.".to_string(),
-        ))
+        let details = if errors.is_empty() {
+            String::new()
+        } else {
+            format!(" Details: {}", errors.join("; "))
+        };
+        MmError::err(TendermintCoinRpcError::RpcClientError(format!(
+            "All RPC nodes are unavailable.{details}"
+        )))
     }
 }
 

@@ -62,7 +62,7 @@ impl SwapOps for ZCoin {
         htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        let tx = try_tx_fus!(ZTransaction::read(taker_payment_tx));
+        let tx = try_tx_fus!(ZTransaction::read(taker_payment_tx, BranchId::Sapling));
         let key_pair = try_tx_fus!(key_pair_from_secret(htlc_privkey));
         let redeem_script = payment_script(
             time_lock,
@@ -100,7 +100,7 @@ impl SwapOps for ZCoin {
         htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        let tx = try_tx_fus!(ZTransaction::read(maker_payment_tx));
+        let tx = try_tx_fus!(ZTransaction::read(maker_payment_tx, BranchId::Sapling));
         let key_pair = try_tx_fus!(key_pair_from_secret(htlc_privkey));
         let redeem_script = payment_script(
             time_lock,
@@ -138,7 +138,7 @@ impl SwapOps for ZCoin {
         htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        let tx = try_tx_fus!(ZTransaction::read(taker_payment_tx));
+        let tx = try_tx_fus!(ZTransaction::read(taker_payment_tx, BranchId::Sapling));
         let key_pair = try_tx_fus!(key_pair_from_secret(htlc_privkey));
         let redeem_script = payment_script(
             time_lock,
@@ -173,7 +173,7 @@ impl SwapOps for ZCoin {
         htlc_privkey: &[u8],
         _swap_contract_address: &Option<BytesJson>,
     ) -> TransactionFut {
-        let tx = try_tx_fus!(ZTransaction::read(maker_payment_tx));
+        let tx = try_tx_fus!(ZTransaction::read(maker_payment_tx, BranchId::Sapling));
         let key_pair = try_tx_fus!(key_pair_from_secret(htlc_privkey));
         let redeem_script = payment_script(
             time_lock,
@@ -211,7 +211,7 @@ impl SwapOps for ZCoin {
 
         let coin = self.clone();
         let fut = async move {
-            let tx_hash = H256::from(z_tx.txid().0).reversed();
+            let tx_hash = H256::from(*z_tx.txid().as_ref()).reversed();
             let tx_from_rpc = try_s!(
                 coin.rpc_client()
                     .get_verbose_transaction(&tx_hash.into())
@@ -239,17 +239,22 @@ impl SwapOps for ZCoin {
                 None => H0,
             };
 
-            for shielded_out in z_tx.shielded_outputs.iter() {
-                if let Some((note, address, memo)) =
-                    try_sapling_output_recovery(&ARRRConsensusParams {}, block_height, &DEX_FEE_OVK, shielded_out)
-                {
+            let Some(sapling_bundle) = z_tx.sapling_bundle() else {
+                return ERR!("The dex fee tx {:?} has no Sapling bundle", z_tx);
+            };
+            for shielded_out in sapling_bundle.shielded_outputs() {
+                if let Some((note, address, memo)) = try_sapling_output_recovery(
+                    &DEX_FEE_OVK,
+                    shielded_out,
+                    zcash_primitives::transaction::components::sapling::zip212_enforcement(
+                        &coin.z_fields.consensus_params,
+                        block_height,
+                    ),
+                ) {
                     if address != coin.z_fields.dex_fee_addr {
-                        let encoded =
-                            encode_payment_address(z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS, &address);
-                        let expected = encode_payment_address(
-                            z_mainnet_constants::HRP_SAPLING_PAYMENT_ADDRESS,
-                            &coin.z_fields.dex_fee_addr,
-                        );
+                        let hrp = coin.z_fields.consensus_params.hrp_sapling_payment_address();
+                        let encoded = encode_payment_address(hrp, &address);
+                        let expected = encode_payment_address(hrp, &coin.z_fields.dex_fee_addr);
                         return ERR!(
                             "Dex fee was sent to the invalid address {}, expected {}",
                             encoded,
@@ -257,11 +262,15 @@ impl SwapOps for ZCoin {
                         );
                     }
 
-                    if note.value != amount_sat {
-                        return ERR!("Dex fee has invalid amount {}, expected {}", note.value, amount_sat);
+                    if note.value().inner() != amount_sat {
+                        return ERR!(
+                            "Dex fee has invalid amount {}, expected {}",
+                            note.value().inner(),
+                            amount_sat
+                        );
                     }
 
-                    if memo != expected_memo {
+                    if memo.as_slice() != expected_memo.as_array() {
                         return ERR!("Dex fee has invalid memo {:?}, expected {:?}", memo, expected_memo);
                     }
 

@@ -2,7 +2,7 @@ use super::*;
 use crate::solana::spl::{SplToken, SplTokenConf};
 use bip39::Language;
 use crypto::privkey::key_pair_from_seed;
-use ed25519_dalek_bip32::{DerivationPath, ExtendedSecretKey};
+use ed25519_dalek_bip32::{DerivationPath, ExtendedSigningKey};
 use mm2_core::mm_ctx::MmCtxBuilder;
 use std::str::FromStr;
 
@@ -26,29 +26,19 @@ pub fn generate_key_pair_from_seed(seed: String) -> Keypair {
     let seed = bip39::Seed::new(&mnemonic, "");
     let seed_bytes: &[u8] = seed.as_bytes();
 
-    let ext = ExtendedSecretKey::from_seed(seed_bytes)
+    let ext = ExtendedSigningKey::from_seed(seed_bytes)
         .unwrap()
         .derive(&derivation_path)
         .unwrap();
-    let ref priv_key = ext.secret_key;
-    let pub_key = ext.public_key();
-    let pair = ed25519_dalek::Keypair {
-        secret: ext.secret_key,
-        public: pub_key,
-    };
 
-    solana_keypair::keypair_from_seed(pair.to_bytes().as_ref()).unwrap()
+    solana_keypair::keypair_from_seed(ext.signing_key.to_keypair_bytes().as_ref()).unwrap()
 }
 
 pub fn generate_key_pair_from_iguana_seed(seed: String) -> Keypair {
     let key_pair = key_pair_from_seed(seed.as_str()).unwrap();
-    let secret_key = ed25519_dalek::SecretKey::from_bytes(key_pair.private().secret.as_slice()).unwrap();
-    let public_key = ed25519_dalek::PublicKey::from(&secret_key);
-    let other_key_pair = ed25519_dalek::Keypair {
-        secret: secret_key,
-        public: public_key,
-    };
-    solana_keypair::keypair_from_seed(other_key_pair.to_bytes().as_ref()).unwrap()
+    let secret: [u8; 32] = key_pair.private().secret.as_slice().try_into().unwrap();
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+    solana_keypair::keypair_from_seed(signing_key.to_keypair_bytes().as_ref()).unwrap()
 }
 
 pub fn spl_coin_for_test(

@@ -124,7 +124,7 @@ mod tests {
         kmd_rewards REAL
     );";
 
-    fn init_table_for_test(conn: &Connection) { conn.execute(CREATE_TX_HISTORY_TABLE, rusqlite::NO_PARAMS).unwrap(); }
+    fn init_table_for_test(conn: &Connection) { conn.execute(CREATE_TX_HISTORY_TABLE, []).unwrap(); }
 
     #[test]
     fn test_update_all_records() {

@@ -13,10 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["secp256k1", "tcp-tokio"] }
+libp2p = { workspace = true, features = ["secp256k1", "ed25519", "tcp", "tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["secp256k1", "wasm-ext"] }
+libp2p = { workspace = true, features = ["secp256k1", "ed25519", "wasm-ext"] }
 
 [dev-dependencies]
-rand = { version = "0.7", features = ["std", "small_rng"] }
+rand = { version = "0.8", features = ["std", "small_rng"] }

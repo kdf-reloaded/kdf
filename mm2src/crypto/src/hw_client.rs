@@ -89,7 +89,7 @@ impl<E> From<TrezorProcessingError<E>> for HwProcessingError<E> {
     }
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 pub enum HwWalletType {
     Trezor,
 }

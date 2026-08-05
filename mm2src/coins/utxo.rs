@@ -47,9 +47,13 @@ use chain::{OutPoint, TransactionOutput, TxHashAlgo};
 use common::first_char_to_upper;
 use common::jsonrpc_client::JsonRpcError;
 use common::now_ms;
+use crypto::privkey::key_pair_from_secret;
 use crypto::trezor::utxo::TrezorUtxoCoin;
-use crypto::{Bip32DerPathOps, Bip32Error, Bip44Chain, Bip44DerPathError, ChildNumber, DerivationPath, HDPathToAccount,
-             HDPathToCoin, Secp256k1ExtendedPublicKey};
+use crypto::trezor::{OperationFailure, TrezorError, TrezorPinMatrix3x3Response, TrezorProcessingError,
+                     TrezorRequestProcessor};
+use crypto::{derive_secp256k1_secret, Bip32DerPathOps, Bip32Error, Bip44Chain, Bip44DerPathError, ChildNumber,
+             DerivationPath, HDPathToAccount, HDPathToCoin, HardwareWalletArc, HwError, HwProcessingError,
+             Secp256k1ExtendedPublicKey, TrezorConnectProcessor};
 use derive_more::Display;
 #[cfg(not(target_arch = "wasm32"))] use dirs::home_dir;
 use futures::channel::mpsc;
@@ -68,7 +72,7 @@ use mm2_metrics::MetricsArc;
 use num_traits::ToPrimitive;
 use primitives::hash::{H256, H264};
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
-use script::{Builder, Script, SignatureVersion, TransactionInputSigner};
+use script::{Builder, Opcode, Script, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
 use serialization::{serialize, serialize_with_flags, SERIALIZE_TRANSACTION_WITNESS};
 use spv_validation::helpers_validation::SPVError;
@@ -83,9 +87,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 use utxo_builder::UtxoConfBuilder;
 use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
+use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
+use utxo_signer::with_trezor::TrezorTxSigner;
 use utxo_signer::{TxProvider, TxProviderError, UtxoSignTxError, UtxoSignTxResult};
 
 use self::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumRpcRequest, EstimateFeeMethod, EstimateFeeMode,
@@ -540,6 +547,8 @@ pub struct UtxoCoinFields {
     pub rpc_client: UtxoRpcClientEnum,
     /// Either ECDSA key pair or a Hardware Wallet info.
     pub priv_key_policy: PrivKeyPolicy<KeyPair>,
+    /// Initialized hardware-wallet context for hardware-backed coins.
+    pub hw_ctx: Option<HardwareWalletArc>,
     /// Either an Iguana address or an info about last derived account/address.
     pub derivation_method: DerivationMethod<Address, UtxoHDWallet>,
     pub history_sync_state: Mutex<HistorySyncState>,
@@ -1325,6 +1334,9 @@ pub struct UtxoActivationParams {
     pub requires_notarization: Option<bool>,
     pub address_format: Option<UtxoAddressFormat>,
     pub gap_limit: Option<u32>,
+    /// Minimum number of known external addresses to expose for every HD account.
+    #[serde(default)]
+    pub min_addresses_number: Option<u32>,
     #[serde(default)]
     pub scan_policy: EnableCoinScanPolicy,
     #[serde(default = "PrivKeyActivationPolicy::context_priv_key")]
@@ -1390,6 +1402,7 @@ impl UtxoActivationParams {
             requires_notarization,
             address_format,
             gap_limit: None,
+            min_addresses_number: None,
             scan_policy,
             priv_key_policy,
             check_utxo_maturity,
@@ -1692,6 +1705,318 @@ pub fn sat_from_big_decimal(amount: &BigDecimal, decimals: u8) -> NumConversResu
         })
 }
 
+const SWAP_V2_TREZOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Clone)]
+struct ActiveUtxoAddress {
+    address: Address,
+    pubkey: Option<Public>,
+    derivation_path: Option<DerivationPath>,
+}
+
+struct SwapV2TrezorProcessor;
+
+#[async_trait]
+impl TrezorRequestProcessor for SwapV2TrezorProcessor {
+    type Error = String;
+
+    async fn on_button_request(&self) -> MmResult<(), TrezorProcessingError<Self::Error>> { Ok(()) }
+
+    async fn on_pin_request(&self) -> MmResult<TrezorPinMatrix3x3Response, TrezorProcessingError<Self::Error>> {
+        MmError::err(TrezorProcessingError::ProcessorError(
+            "hardware_wallet:user_cancelled_or_unavailable: Trezor PIN entry is unavailable in the UTXO Swap V2 signing path".to_owned(),
+        ))
+    }
+
+    async fn on_passphrase_request(&self) -> MmResult<String, TrezorProcessingError<Self::Error>> {
+        MmError::err(TrezorProcessingError::ProcessorError(
+            "hardware_wallet:user_cancelled_or_unavailable: Trezor passphrase entry is unavailable in the UTXO Swap V2 signing path".to_owned(),
+        ))
+    }
+
+    async fn on_ready(&self) -> MmResult<(), TrezorProcessingError<Self::Error>> { Ok(()) }
+}
+
+#[async_trait]
+impl TrezorConnectProcessor for SwapV2TrezorProcessor {
+    async fn on_connect(&self) -> MmResult<Duration, HwProcessingError<Self::Error>> {
+        Ok(SWAP_V2_TREZOR_CONNECT_TIMEOUT)
+    }
+
+    async fn on_connected(&self) -> MmResult<(), HwProcessingError<Self::Error>> { Ok(()) }
+
+    async fn on_connection_failed(&self) -> MmResult<(), HwProcessingError<Self::Error>> { Ok(()) }
+}
+
+async fn active_utxo_sender_address(coin: &UtxoCoinFields, context: &str) -> Result<ActiveUtxoAddress, String> {
+    match (&coin.derivation_method, &coin.priv_key_policy) {
+        (DerivationMethod::Iguana(address), PrivKeyPolicy::KeyPair(key_pair)) => Ok(ActiveUtxoAddress {
+            address: address.clone(),
+            pubkey: Some(*key_pair.public()),
+            derivation_path: None,
+        }),
+        (DerivationMethod::Iguana(address), PrivKeyPolicy::HDWallet { activated_key, .. }) => Ok(ActiveUtxoAddress {
+            address: address.clone(),
+            pubkey: Some(*activated_key.public()),
+            derivation_path: None,
+        }),
+        (DerivationMethod::Iguana(_), PrivKeyPolicy::Trezor) => Err(
+            utxo_standard_swap_v2::trezor_v2_missing_derivation_metadata_error(context),
+        ),
+        (DerivationMethod::HDWallet(hd_wallet), _) => {
+            let info = utxo_standard_swap_v2::enabled_hd_address_info(coin, hd_wallet, context).await?;
+            Ok(ActiveUtxoAddress {
+                address: info.address,
+                pubkey: Some(info.pubkey),
+                derivation_path: Some(info.derivation_path),
+            })
+        },
+    }
+}
+
+fn active_sender_key_pair(coin: &UtxoCoinFields, sender: &ActiveUtxoAddress) -> Result<KeyPair, String> {
+    match &coin.priv_key_policy {
+        PrivKeyPolicy::KeyPair(key_pair) => Ok(*key_pair),
+        PrivKeyPolicy::HDWallet {
+            bip39_secp_priv_key, ..
+        } => {
+            let derivation_path = sender.derivation_path.as_ref().ok_or_else(|| {
+                utxo_standard_swap_v2::trezor_v2_missing_derivation_metadata_error("UTXO Swap V2 HD software signing")
+            })?;
+            let secret =
+                derive_secp256k1_secret(bip39_secp_priv_key.clone(), derivation_path).map_err(|e| e.to_string())?;
+            key_pair_from_secret(secret.as_slice()).map_err(|e| e.to_string())
+        },
+        PrivKeyPolicy::Trezor => Err(utxo_standard_swap_v2::trezor_v2_unsupported_script_signing_error()),
+    }
+}
+
+fn map_trezor_error(trezor: TrezorError) -> String {
+    match trezor {
+        TrezorError::DeviceDisconnected => "hardware_wallet:transport_failure: Trezor device disconnected".to_owned(),
+        TrezorError::Failure(OperationFailure::InvalidPin) => {
+            "hardware_wallet:user_rejected_or_cancelled: Trezor PIN was rejected".to_owned()
+        },
+        TrezorError::Failure(OperationFailure::Other(error)) => {
+            format!(
+                "hardware_wallet:user_rejected_or_cancelled: Trezor operation failed: {}",
+                error
+            )
+        },
+        TrezorError::UnexpectedInteractionRequest(req) => {
+            format!(
+                "hardware_wallet:invalid_response: unexpected Trezor interaction request: {:?}",
+                req
+            )
+        },
+        TrezorError::TransportNotSupported { transport } => {
+            format!(
+                "hardware_wallet:transport_failure: '{}' transport is not supported",
+                transport
+            )
+        },
+        TrezorError::ErrorRequestingAccessPermission(error) | TrezorError::UnderlyingError(error) => {
+            format!("hardware_wallet:transport_failure: {}", error)
+        },
+        TrezorError::ProtocolError(error) | TrezorError::Internal(error) => {
+            format!("hardware_wallet:invalid_response: {}", error)
+        },
+        TrezorError::UnexpectedMessageType(message) => {
+            format!(
+                "hardware_wallet:invalid_response: unexpected Trezor message type: {:?}",
+                message
+            )
+        },
+    }
+}
+
+fn map_hw_error(hw: HwError) -> String {
+    match hw {
+        HwError::NoTrezorDeviceAvailable | HwError::ConnectionTimedOut { .. } => {
+            format!("hardware_wallet:transport_failure: {}", hw)
+        },
+        HwError::CannotChooseDevice { .. } | HwError::FoundUnexpectedDevice { .. } => {
+            format!("hardware_wallet:unexpected_device: {}", hw)
+        },
+        HwError::DeviceDisconnected | HwError::TransportNotSupported { .. } | HwError::UnderlyingError(_) => {
+            format!("hardware_wallet:transport_failure: {}", hw)
+        },
+        HwError::UnexpectedUserInteractionRequest(req) => {
+            format!(
+                "hardware_wallet:invalid_response: unexpected Trezor interaction request: {:?}",
+                req
+            )
+        },
+        HwError::Failure(error) => format!("hardware_wallet:user_rejected_or_cancelled: {}", error),
+        HwError::ProtocolError(error) | HwError::Internal(error) => {
+            format!("hardware_wallet:invalid_response: {}", error)
+        },
+        HwError::InvalidXpub(error) => format!("hardware_wallet:invalid_response: {}", error),
+    }
+}
+
+fn map_hw_processing_error(error: HwProcessingError<String>) -> String {
+    match error {
+        HwProcessingError::HwError(hw) => map_hw_error(hw),
+        HwProcessingError::ProcessorError(processor) => processor,
+    }
+}
+
+fn map_utxo_sign_error(ticker: &str, error: UtxoSignTxError) -> String {
+    match error {
+        UtxoSignTxError::CoinNotSupportedWithTrezor { .. } => {
+            utxo_standard_swap_v2::trezor_v2_unsupported_coin_mapping_error(ticker)
+        },
+        UtxoSignTxError::TrezorDoesntSupportP2WPKH => {
+            "hardware_wallet:unsupported_script_signing_mode: Trezor UTXO signer does not support this address/script mode".to_owned()
+        },
+        UtxoSignTxError::TrezorError(trezor) => map_trezor_error(trezor),
+        UtxoSignTxError::InvalidSignParam { param, description } => format!(
+            "hardware_wallet:missing_derivation_metadata: invalid Trezor signing parameter '{}': {}",
+            param, description
+        ),
+        UtxoSignTxError::InvalidSignaturesNumber { actual, expected } => format!(
+            "hardware_wallet:invalid_response: Trezor returned {} signatures for {} inputs",
+            actual, expected
+        ),
+        UtxoSignTxError::Transport(error) => format!("hardware_wallet:transport_failure: {}", error),
+        UtxoSignTxError::Internal(error) => format!("hardware_wallet:invalid_response: {}", error),
+        sign_error @ UtxoSignTxError::MismatchScript { .. } | sign_error @ UtxoSignTxError::ErrorSigning(_) => format!(
+            "hardware_wallet:invalid_response: Trezor-signed transaction failed local signature assembly: {}",
+            sign_error
+        ),
+    }
+}
+
+fn op_return_data_from_script(script: &Script) -> Result<Option<Vec<u8>>, String> {
+    if script.opcodes().next() != Some(Ok(Opcode::OP_RETURN)) {
+        return Ok(None);
+    }
+
+    let mut data = Vec::new();
+    for instruction in script.iter().skip(1) {
+        let instruction =
+            instruction.map_err(|e| format!("Invalid OP_RETURN output script for Trezor signing: {:?}", e))?;
+        match instruction.data {
+            Some(bytes) => data.extend_from_slice(bytes),
+            None => {
+                return Err(
+                    "Invalid OP_RETURN output script for Trezor signing: non-push opcode after OP_RETURN".to_owned(),
+                )
+            },
+        }
+    }
+    Ok(Some(data))
+}
+
+fn trezor_output_info_for_output<T>(
+    coin: &T,
+    output: &TransactionOutput,
+    sender: &ActiveUtxoAddress,
+) -> Result<SendingOutputInfo, String>
+where
+    T: UtxoCommonOps,
+{
+    let script: Script = output.script_pubkey.clone().into();
+    if let Some(data) = op_return_data_from_script(&script)? {
+        return Ok(SendingOutputInfo::op_return(data));
+    }
+
+    let change_script = output_script(&sender.address, ScriptType::P2PKH).to_bytes();
+    if output.script_pubkey == change_script {
+        if let Some(derivation_path) = sender.derivation_path.clone() {
+            let address = sender.address.display_address()?;
+            return Ok(SendingOutputInfo::change_address(address, derivation_path));
+        }
+        let address = sender.address.display_address()?;
+        return Ok(SendingOutputInfo::external_address(address));
+    }
+
+    let addresses = coin.addresses_from_script(&script)?;
+    if addresses.len() != 1 {
+        return Err(format!(
+            "hardware_wallet:invalid_response: expected one output address for Trezor signing, found {}",
+            addresses.len()
+        ));
+    }
+    Ok(SendingOutputInfo::external_address(addresses[0].display_address()?))
+}
+
+async fn sign_generated_tx_with_trezor<T>(
+    coin: &T,
+    sender: &ActiveUtxoAddress,
+    unsigned: TransactionInputSigner,
+) -> Result<UtxoTx, TransactionErr>
+where
+    T: UtxoCommonOps,
+{
+    let fields = coin.as_ref();
+    let trezor_coin = fields.conf.trezor_coin.ok_or_else(|| {
+        TransactionErr::Plain(utxo_standard_swap_v2::trezor_v2_unsupported_coin_mapping_error(
+            &fields.conf.ticker,
+        ))
+    })?;
+    let address_pubkey = sender.pubkey.ok_or_else(|| {
+        TransactionErr::Plain(utxo_standard_swap_v2::trezor_v2_missing_derivation_metadata_error(
+            "UTXO Swap V2 Trezor input signing",
+        ))
+    })?;
+    let address_derivation_path = sender.derivation_path.clone().ok_or_else(|| {
+        TransactionErr::Plain(utxo_standard_swap_v2::trezor_v2_missing_derivation_metadata_error(
+            "UTXO Swap V2 Trezor input signing",
+        ))
+    })?;
+    let hw_ctx = fields.hw_ctx.as_ref().ok_or_else(|| {
+        TransactionErr::Plain(
+            "hardware_wallet:transport_failure: initialized hardware wallet context is unavailable".to_owned(),
+        )
+    })?;
+
+    let signature_version = match &sender.address.addr_format {
+        UtxoAddressFormat::Segwit => SignatureVersion::WitnessV0,
+        _ => fields.conf.signature_version,
+    };
+
+    let mut sign_params = UtxoSignTxParamsBuilder::new();
+    sign_params
+        .add_inputs_infos(unsigned.inputs.iter().map(|_| SpendingInputInfo::P2PKH {
+            address_derivation_path: address_derivation_path.clone(),
+            address_pubkey,
+        }))
+        .add_outputs_infos(
+            unsigned
+                .outputs
+                .iter()
+                .map(|output| trezor_output_info_for_output(coin, output, sender))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(TransactionErr::Plain)?,
+        )
+        .with_signature_version(signature_version)
+        .with_unsigned_tx(unsigned)
+        .with_prev_script(Builder::build_p2pkh(&sender.address.hash));
+    let sign_params = sign_params
+        .build()
+        .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))?;
+
+    let processor = SwapV2TrezorProcessor;
+    let trezor = hw_ctx
+        .trezor(&processor)
+        .await
+        .map_err(|e| TransactionErr::Plain(map_hw_processing_error(e.into_inner())))?;
+    let signer = TrezorTxSigner {
+        trezor,
+        tx_provider: fields.rpc_client.clone(),
+        trezor_coin,
+        params: sign_params,
+        fork_id: fields.conf.fork_id,
+        branch_id: fields.conf.consensus_branch_id,
+    };
+    signer
+        .sign_tx()
+        .await
+        .map_err(|e| TransactionErr::Plain(map_utxo_sign_error(&fields.conf.ticker, e.into_inner())))
+}
+
 async fn send_outputs_from_my_address_impl<T>(
     coin: T,
     outputs: Vec<TransactionOutput>,
@@ -1699,9 +2024,99 @@ async fn send_outputs_from_my_address_impl<T>(
 where
     T: UtxoCommonOps + GetUtxoListOps,
 {
-    let my_address = try_tx_s!(coin.as_ref().derivation_method.iguana_or_err());
-    let (unspents, recently_sent_txs) = try_tx_s!(coin.get_unspent_ordered_list(my_address).await);
-    generate_and_send_tx(&coin, unspents, None, FeePolicy::SendExact, recently_sent_txs, outputs).await
+    send_outputs_from_my_address_impl_with_underdust_output(coin, outputs, None).await
+}
+
+async fn send_outputs_from_my_address_impl_with_underdust_output<T>(
+    coin: T,
+    outputs: Vec<TransactionOutput>,
+    allowed_underdust_output: Option<usize>,
+) -> Result<UtxoTx, TransactionErr>
+where
+    T: UtxoCommonOps + GetUtxoListOps,
+{
+    let sender = try_tx_s!(
+        active_utxo_sender_address(coin.as_ref(), "UTXO Swap V2 wallet-funded transaction sender selection").await
+    );
+    let (unspents, recently_sent_txs) = try_tx_s!(coin.get_unspent_ordered_list(&sender.address).await);
+    generate_and_send_tx_from_sender(
+        &coin,
+        sender,
+        unspents,
+        None,
+        FeePolicy::SendExact,
+        recently_sent_txs,
+        outputs,
+        allowed_underdust_output,
+    )
+    .await
+}
+
+/// Generates and sends tx from an already-selected active address. This is used
+/// by V2 swap wallet-funded HTLC creation so HD/Trezor activation does not fall
+/// back to the Iguana address/keypair path.
+async fn generate_and_send_tx_from_sender<T>(
+    coin: &T,
+    sender: ActiveUtxoAddress,
+    unspents: Vec<UnspentInfo>,
+    required_inputs: Option<Vec<UnspentInfo>>,
+    fee_policy: FeePolicy,
+    mut recently_spent: RecentlySpentOutPointsGuard<'_>,
+    outputs: Vec<TransactionOutput>,
+    allowed_underdust_output: Option<usize>,
+) -> Result<UtxoTx, TransactionErr>
+where
+    T: UtxoCommonOps,
+{
+    let mut builder = UtxoTxBuilder::new(coin)
+        .with_from_address(sender.address.clone())
+        .add_available_inputs(unspents)
+        .add_outputs(outputs)
+        .with_fee_policy(fee_policy);
+    if let Some(output_index) = allowed_underdust_output {
+        builder = builder.allow_underdust_output(output_index);
+    }
+    if let Some(required) = required_inputs {
+        builder = builder.add_required_inputs(required);
+    }
+    let (unsigned, _) = try_tx_s!(builder.build().await);
+
+    let spent_unspents = unsigned
+        .inputs
+        .iter()
+        .map(|input| UnspentInfo {
+            outpoint: input.previous_output,
+            value: input.amount,
+            height: None,
+        })
+        .collect();
+
+    let signed = match coin.as_ref().priv_key_policy {
+        PrivKeyPolicy::Trezor => sign_generated_tx_with_trezor(coin, &sender, unsigned).await?,
+        _ => {
+            let key_pair = try_tx_s!(active_sender_key_pair(coin.as_ref(), &sender));
+            let p2pk_outpoints = try_tx_s!(electrum_p2pk_outpoints_for_address(coin.as_ref(), &sender.address).await);
+            let signature_version = match &sender.address.addr_format {
+                UtxoAddressFormat::Segwit => SignatureVersion::WitnessV0,
+                _ => coin.as_ref().conf.signature_version,
+            };
+            let prev_script = Builder::build_p2pkh(&sender.address.hash);
+            try_tx_s!(sign_tx_with_p2pk(
+                unsigned,
+                &key_pair,
+                prev_script,
+                signature_version,
+                coin.as_ref().conf.fork_id,
+                &p2pk_outpoints,
+            ))
+        },
+    };
+
+    try_tx_s!(coin.broadcast_tx(&signed).await, signed);
+
+    recently_spent.add_spent(spent_unspents, signed.hash(), signed.outputs.clone());
+
+    Ok(signed)
 }
 
 /// Generates and sends tx using unspents and outputs adding new record to the recently_spent in case of success
@@ -1830,6 +2245,7 @@ pub fn address_by_conf_and_pubkey_str(
         requires_notarization: None,
         address_format: None,
         gap_limit: None,
+        min_addresses_number: None,
         scan_policy: EnableCoinScanPolicy::default(),
         priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
         check_utxo_maturity: None,

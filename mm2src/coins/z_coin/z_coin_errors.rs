@@ -3,16 +3,22 @@ use crate::utxo::utxo_builder::UtxoCoinBuildError;
 use crate::WithdrawError;
 use crate::{NumConversError, PrivKeyNotAllowed};
 use bigdecimal::BigDecimal;
+#[cfg(not(target_arch = "wasm32"))]
 use db_common::sqlite::rusqlite::Error as SqliteError;
 use derive_more::Display;
 use rpc::v1::types::Bytes as BytesJson;
-use zcash_primitives::transaction::builder::Error as ZTxBuilderError;
+#[cfg(not(target_arch = "wasm32"))]
+type ZTxBuilderError = zcash_primitives::transaction::builder::Error<std::convert::Infallible>;
 
 #[derive(Debug, Display)]
 pub enum GenTxError {
     DecryptedOutputNotFound,
     GetWitnessErr(GetUnspentWitnessErr),
     FailedToGetMerklePath,
+    #[display(fmt = "ZCoin light-mode transaction generation supports shielded outputs only")]
+    UnsupportedLightWalletOutput,
+    #[display(fmt = "ZCoin shielded wallet DB error: {}", _0)]
+    ShieldedWalletDb(String),
     #[display(
         fmt = "Not enough {} to generate a tx: available {}, required at least {}",
         coin,
@@ -27,6 +33,7 @@ pub enum GenTxError {
     NumConversion(NumConversError),
     Rpc(UtxoRpcError),
     PrevTxNotConfirmed,
+    #[cfg(not(target_arch = "wasm32"))]
     TxBuilderError(ZTxBuilderError),
     #[display(fmt = "Failed to read ZCash tx from bytes {:?} with error {}", hex, err)]
     TxReadError {
@@ -47,6 +54,7 @@ impl From<UtxoRpcError> for GenTxError {
     fn from(err: UtxoRpcError) -> GenTxError { GenTxError::Rpc(err) }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<ZTxBuilderError> for GenTxError {
     fn from(err: ZTxBuilderError) -> GenTxError { GenTxError::TxBuilderError(err) }
 }
@@ -69,8 +77,11 @@ impl From<GenTxError> for WithdrawError {
             | GenTxError::PrevTxNotConfirmed
             | GenTxError::GetWitnessErr(_)
             | GenTxError::NumConversion(_)
-            | GenTxError::TxBuilderError(_)
+            | GenTxError::UnsupportedLightWalletOutput
+            | GenTxError::ShieldedWalletDb(_)
             | GenTxError::TxReadError { .. } => WithdrawError::InternalError(gen_tx.to_string()),
+            #[cfg(not(target_arch = "wasm32"))]
+            GenTxError::TxBuilderError(_) => WithdrawError::InternalError(gen_tx.to_string()),
         }
     }
 }
@@ -106,19 +117,28 @@ pub enum GetUnspentWitnessErr {
     EmptyDbResult,
     TreeOrWitnessAppendFailed,
     OutputCmuNotFoundInCache,
-    Sql(SqliteError),
+    StorageError(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<SqliteError> for GetUnspentWitnessErr {
-    fn from(err: SqliteError) -> GetUnspentWitnessErr { GetUnspentWitnessErr::Sql(err) }
+    fn from(err: SqliteError) -> GetUnspentWitnessErr { GetUnspentWitnessErr::StorageError(err.to_string()) }
 }
 
 #[derive(Debug, Display)]
 pub enum ZCoinBuildError {
     UtxoBuilderError(UtxoCoinBuildError),
     GetAddressError,
+    #[cfg(not(target_arch = "wasm32"))]
     SqliteError(SqliteError),
     Rpc(UtxoRpcError),
+    #[display(fmt = "Sapling cache storage error: {}", _0)]
+    SaplingCacheError(String),
+    #[display(fmt = "Shielded database schema error at {}: {}", path, reason)]
+    ShieldedDbSchema {
+        path: String,
+        reason: String,
+    },
     #[display(fmt = "Sapling cache DB does not exist at {}. Please download it.", path)]
     SaplingCacheDbDoesNotExist {
         path: String,
@@ -148,8 +168,11 @@ pub enum ZCoinBuildError {
         path: String,
     },
     ZCashParamsNotFound,
+    #[display(fmt = "HD shielded key derivation failed: {}", _0)]
+    HdDerivationError(String),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<SqliteError> for ZCoinBuildError {
     fn from(err: SqliteError) -> ZCoinBuildError { ZCoinBuildError::SqliteError(err) }
 }

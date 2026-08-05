@@ -21,19 +21,16 @@
 #![cfg_attr(not(any(test, fuzzing, feature = "_test_utils")), deny(missing_docs))]
 #![cfg_attr(not(any(test, fuzzing, feature = "_test_utils")), forbid(unsafe_code))]
 #![deny(broken_intra_doc_links)]
-
 // In general, rust is absolutely horrid at supporting users doing things like,
 // for example, compiling Rust code for real environments. Disable useless lints
 // that don't do anything but annoy us and cant actually ever be resolved.
 #![allow(bare_trait_objects)]
 #![allow(ellipsis_inclusive_range_patterns)]
-
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
-
 #![cfg_attr(all(not(feature = "std"), not(test)), no_std)]
-
 #![cfg_attr(all(any(test, feature = "_test_utils"), feature = "_bench_unstable"), feature(test))]
-#[cfg(all(any(test, feature = "_test_utils"), feature = "_bench_unstable"))] extern crate test;
+#[cfg(all(any(test, feature = "_test_utils"), feature = "_bench_unstable"))]
+extern crate test;
 
 #[cfg(not(any(feature = "std", feature = "no-std")))]
 compile_error!("at least one of the `std` or `no-std` features must be enabled");
@@ -47,10 +44,13 @@ extern crate bitcoin;
 #[cfg(any(test, feature = "std"))]
 extern crate core;
 
-#[cfg(any(test, feature = "_test_utils"))] extern crate hex;
-#[cfg(any(test, fuzzing, feature = "_test_utils"))] extern crate regex;
+#[cfg(any(test, feature = "_test_utils"))]
+extern crate hex;
+#[cfg(any(test, fuzzing, feature = "_test_utils"))]
+extern crate regex;
 
-#[cfg(not(feature = "std"))] extern crate core2;
+#[cfg(not(feature = "std"))]
+extern crate core2;
 
 #[macro_use]
 pub mod util;
@@ -58,94 +58,97 @@ pub mod chain;
 pub mod ln;
 pub mod routing;
 
-#[cfg(feature = "std")]
-use std::io;
 #[cfg(not(feature = "std"))]
 use core2::io;
+#[cfg(feature = "std")]
+use std::io;
 
 #[cfg(not(feature = "std"))]
 mod io_extras {
-	use core2::io::{self, Read, Write};
+    use core2::io::{self, Read, Write};
 
-	/// A writer which will move data into the void.
-	pub struct Sink {
-		_priv: (),
-	}
+    /// A writer which will move data into the void.
+    pub struct Sink {
+        _priv: (),
+    }
 
-	/// Creates an instance of a writer which will successfully consume all data.
-	pub const fn sink() -> Sink {
-		Sink { _priv: () }
-	}
+    /// Creates an instance of a writer which will successfully consume all data.
+    pub const fn sink() -> Sink {
+        Sink { _priv: () }
+    }
 
-	impl core2::io::Write for Sink {
-		#[inline]
-		fn write(&mut self, buf: &[u8]) -> core2::io::Result<usize> {
-			Ok(buf.len())
-		}
+    impl core2::io::Write for Sink {
+        #[inline]
+        fn write(&mut self, buf: &[u8]) -> core2::io::Result<usize> {
+            Ok(buf.len())
+        }
 
-		#[inline]
-		fn flush(&mut self) -> core2::io::Result<()> {
-			Ok(())
-		}
-	}
+        #[inline]
+        fn flush(&mut self) -> core2::io::Result<()> {
+            Ok(())
+        }
+    }
 
-	pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> Result<u64, io::Error>
-		where
-		R: Read,
-		W: Write,
-	{
-		let mut count = 0;
-		let mut buf = [0u8; 64];
+    pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> Result<u64, io::Error>
+    where
+        R: Read,
+        W: Write,
+    {
+        let mut count = 0;
+        let mut buf = [0u8; 64];
 
-		loop {
-			match reader.read(&mut buf) {
-				Ok(0) => break,
-				Ok(n) => { writer.write_all(&buf[0..n])?; count += n as u64; },
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {},
-				Err(e) => return Err(e.into()),
-			};
-		}
-		Ok(count)
-	}
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    writer.write_all(&buf[0..n])?;
+                    count += n as u64;
+                },
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {},
+                Err(e) => return Err(e.into()),
+            };
+        }
+        Ok(count)
+    }
 
-	pub fn read_to_end<D: io::Read>(mut d: D) -> Result<alloc::vec::Vec<u8>, io::Error> {
-		let mut result = vec![];
-		let mut buf = [0u8; 64];
-		loop {
-			match d.read(&mut buf) {
-				Ok(0) => break,
-				Ok(n) => result.extend_from_slice(&buf[0..n]),
-				Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {},
-				Err(e) => return Err(e.into()),
-			};
-		}
-		Ok(result)
-	}
+    pub fn read_to_end<D: io::Read>(mut d: D) -> Result<alloc::vec::Vec<u8>, io::Error> {
+        let mut result = vec![];
+        let mut buf = [0u8; 64];
+        loop {
+            match d.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => result.extend_from_slice(&buf[0..n]),
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {},
+                Err(e) => return Err(e.into()),
+            };
+        }
+        Ok(result)
+    }
 }
 
 #[cfg(feature = "std")]
 mod io_extras {
-	pub fn read_to_end<D: ::std::io::Read>(mut d: D) -> Result<Vec<u8>, ::std::io::Error> {
-		let mut buf = Vec::new();
-		d.read_to_end(&mut buf)?;
-		Ok(buf)
-	}
+    pub fn read_to_end<D: ::std::io::Read>(mut d: D) -> Result<Vec<u8>, ::std::io::Error> {
+        let mut buf = Vec::new();
+        d.read_to_end(&mut buf)?;
+        Ok(buf)
+    }
 
-	pub use std::io::{copy, sink};
+    pub use std::io::{copy, sink};
 }
 
 mod prelude {
-	#[cfg(feature = "hashbrown")]
-	extern crate hashbrown;
+    #[cfg(feature = "hashbrown")]
+    extern crate hashbrown;
 
-	pub use alloc::{vec, vec::Vec, string::String, collections::VecDeque, boxed::Box};
-	#[cfg(not(feature = "hashbrown"))]
-	pub use std::collections::{HashMap, HashSet, hash_map};
-	#[cfg(feature = "hashbrown")]
-	pub use self::hashbrown::{HashMap, HashSet, hash_map};
+    #[cfg(feature = "hashbrown")]
+    pub use self::hashbrown::{hash_map, HashMap, HashSet};
+    pub use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
+    #[cfg(not(feature = "hashbrown"))]
+    pub use std::collections::{hash_map, HashMap, HashSet};
 
-	pub use alloc::borrow::ToOwned;
-	pub use alloc::string::ToString;
+    pub use alloc::borrow::ToOwned;
+    pub use alloc::string::ToString;
 }
 
 #[cfg(all(feature = "std", test))]
@@ -155,10 +158,10 @@ extern crate backtrace;
 
 #[cfg(feature = "std")]
 mod sync {
-	#[cfg(test)]
-	pub use debug_sync::*;
-	#[cfg(not(test))]
-	pub use ::std::sync::{Arc, Mutex, Condvar, MutexGuard, RwLock, RwLockReadGuard};
+    #[cfg(test)]
+    pub use debug_sync::*;
+    #[cfg(not(test))]
+    pub use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 }
 
 #[cfg(not(feature = "std"))]

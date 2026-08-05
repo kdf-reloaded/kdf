@@ -51,13 +51,30 @@ where
     ));
 
     let outputs = try_tx_fus!(generate_taker_fee_tx_outputs(&coin, dex_fee, &fee_address));
-    send_outputs_from_my_address(coin, outputs)
+    match taker_fee_allowed_underdust_output(dex_fee) {
+        Some(output_index) => send_outputs_from_my_address_with_underdust_output(coin, outputs, output_index),
+        None => send_outputs_from_my_address(coin, outputs),
+    }
+}
+
+/// The stable netid-8762 KMD implementation applies dust to the unsplit DEX
+/// fee, then preserves both positive 75/25 split legs on the wire. Therefore
+/// only the fee-collection output of that exact descriptor may bypass the
+/// generic per-output dust check.
+pub(crate) fn taker_fee_allowed_underdust_output(dex_fee: &DexFee) -> Option<usize> {
+    match dex_fee {
+        DexFee::WithBurn {
+            burn_destination: DexFeeBurnDestination::KmdOpReturn,
+            ..
+        } => Some(DEFAULT_FEE_VOUT),
+        DexFee::NoFee | DexFee::Standard(_) | DexFee::WithBurn { .. } => None,
+    }
 }
 
 /// Builds the transaction outputs for a taker fee payment.
 ///
 /// Returns 0 outputs for `NoFee`, 1 for `Standard`, or 2 for `WithBurn`.
-fn generate_taker_fee_tx_outputs(
+pub(crate) fn generate_taker_fee_tx_outputs(
     coin: &impl UtxoCommonOps,
     dex_fee: &DexFee,
     fee_address: &Address,
@@ -1136,20 +1153,74 @@ use crate::{FindPaymentSpendError, FundingTxSpend, GenPreimageResult, GenTakerFu
             ValidateMakerPaymentArgs, ValidateSwapV2TxError, ValidateSwapV2TxResult, ValidateTakerFundingArgs,
             ValidateTakerFundingSpendPreimageError, ValidateTakerFundingSpendPreimageResult,
             ValidateTakerPaymentSpendPreimageError, ValidateTakerPaymentSpendPreimageResult};
+use crypto::derive_secp256k1_secret;
 
-/// Derives the maker/taker per-swap HTLC keypair for V2 swaps.
+/// Derives the maker/taker per-swap HTLC public key for V2 swaps.
 ///
-/// For Iguana / HD-wallet policies the activated keypair is returned. The
-/// `_swap_unique_data` argument is accepted to match the future per-swap
-/// derivation surface, but is not consulted yet (ch15 phase 3).
+/// For single-key activation this is the activated public key. For HD and
+/// hardware activation this is the enabled external address public key cached
+/// in the HD account metadata. The `_swap_unique_data` argument is accepted to
+/// match the future per-swap derivation surface, but is not consulted yet.
+pub fn get_htlc_pubkey_v2<T>(coin: &T, _swap_unique_data: &[u8]) -> Result<Public, String>
+where
+    T: AsRef<UtxoCoinFields>,
+{
+    let fields = coin.as_ref();
+    match (&fields.derivation_method, &fields.priv_key_policy) {
+        (_, PrivKeyPolicy::KeyPair(kp)) => Ok(*kp.public()),
+        (DerivationMethod::HDWallet(hd_wallet), PrivKeyPolicy::HDWallet { .. })
+        | (DerivationMethod::HDWallet(hd_wallet), PrivKeyPolicy::Trezor) => {
+            crate::utxo::utxo_standard_swap_v2::try_enabled_hd_address_info(
+                fields,
+                hd_wallet,
+                "UTXO Standard Swap V2 HTLC public-key derivation",
+            )
+            .map(|info| info.pubkey)
+        },
+        (DerivationMethod::Iguana(_), PrivKeyPolicy::HDWallet { .. }) => {
+            Err("UTXO Standard Swap V2 HD HTLC public-key derivation requires an HD derivation method".to_owned())
+        },
+        (DerivationMethod::Iguana(_), PrivKeyPolicy::Trezor) => Err(
+            crate::utxo::utxo_standard_swap_v2::trezor_v2_missing_derivation_metadata_error(
+                "UTXO Standard Swap V2 HTLC public-key derivation",
+            ),
+        ),
+    }
+}
+
+/// Derives the maker/taker per-swap HTLC software keypair for V2 local spends.
+///
+/// Hardware-backed swaps intentionally do not expose or synthesize host private
+/// keys. Until the Trezor signer supports arbitrary P2SH HTLC script inputs,
+/// the first local HTLC signing step fails with a structured unsupported mode.
 pub fn get_htlc_key_pair_v2<T>(coin: &T, _swap_unique_data: &[u8]) -> Result<KeyPair, String>
 where
     T: AsRef<UtxoCoinFields>,
 {
-    match &coin.as_ref().priv_key_policy {
-        PrivKeyPolicy::KeyPair(kp) => Ok(*kp),
-        PrivKeyPolicy::HDWallet { activated_key, .. } => Ok(*activated_key),
-        PrivKeyPolicy::Trezor => Err("get_htlc_key_pair_v2 not implemented for Trezor (ch15 phase 3)".to_string()),
+    let fields = coin.as_ref();
+    match (&fields.derivation_method, &fields.priv_key_policy) {
+        (_, PrivKeyPolicy::KeyPair(kp)) => Ok(*kp),
+        (
+            DerivationMethod::HDWallet(hd_wallet),
+            PrivKeyPolicy::HDWallet {
+                bip39_secp_priv_key, ..
+            },
+        ) => {
+            let active = crate::utxo::utxo_standard_swap_v2::try_enabled_hd_address_info(
+                fields,
+                hd_wallet,
+                "UTXO Standard Swap V2 HTLC software key derivation",
+            )?;
+            let secret = derive_secp256k1_secret(bip39_secp_priv_key.clone(), &active.derivation_path)
+                .map_err(|e| e.to_string())?;
+            key_pair_from_secret(secret.as_slice()).map_err(|e| e.to_string())
+        },
+        (DerivationMethod::Iguana(_), PrivKeyPolicy::HDWallet { .. }) => {
+            Err("UTXO Standard Swap V2 HD HTLC key derivation requires an HD derivation method".to_owned())
+        },
+        (_, PrivKeyPolicy::Trezor) => {
+            Err(crate::utxo::utxo_standard_swap_v2::trezor_v2_unsupported_script_signing_error())
+        },
     }
 }
 
@@ -1161,12 +1232,12 @@ pub async fn send_maker_payment_v2<T>(
 where
     T: UtxoCommonOps + GetUtxoListOps,
 {
-    let htlc_kp = try_tx_s!(get_htlc_key_pair_v2(&coin, args.swap_unique_data));
+    let htlc_pub = try_tx_s!(get_htlc_pubkey_v2(&coin, args.swap_unique_data));
     let redeem = maker_payment_script(
         args.time_lock as u32,
         args.maker_secret_hash,
         args.taker_secret_hash,
-        htlc_kp.public(),
+        &htlc_pub,
         args.taker_pub,
     );
     let amount_sat = try_tx_s!(sat_from_big_decimal(&args.amount, coin.as_ref().decimals));
@@ -1202,13 +1273,13 @@ where
     // No — validators know both pubs from the swap context. Per §15.4.2 the
     // verifier passes maker_pub and reconstructs the taker pub from
     // its own HTLC keypair (the validator is the taker).
-    let taker_htlc_kp =
-        get_htlc_key_pair_v2(coin, args.swap_unique_data).map_to_mm(ValidateSwapV2TxError::InternalError)?;
+    let taker_htlc_pub =
+        get_htlc_pubkey_v2(coin, args.swap_unique_data).map_to_mm(ValidateSwapV2TxError::InternalError)?;
     let tx_type = SwapTxTypeWithSecretHash::MakerPaymentV2 {
         maker_secret_hash: args.maker_secret_hash,
         taker_secret_hash: args.taker_secret_hash,
     };
-    let expected_redeem = tx_type.redeem_script(args.time_lock as u32, args.maker_pub, taker_htlc_kp.public());
+    let expected_redeem = tx_type.redeem_script(args.time_lock as u32, args.maker_pub, &taker_htlc_pub);
     let expected_script_pubkey: Bytes = Builder::build_p2sh(&dhash160(&expected_redeem).into()).into();
 
     let actual = args
@@ -1247,7 +1318,20 @@ where
 {
     let mut prev_tx: UtxoTx = try_tx_s!(deserialize(prev_tx_bytes).map_err(|e| ERRL!("{:?}", e)));
     prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
-    let my_address = try_tx_s!(coin.as_ref().derivation_method.iguana_or_err()).clone();
+    let my_address = match &coin.as_ref().derivation_method {
+        DerivationMethod::Iguana(address) => address.clone(),
+        DerivationMethod::HDWallet(hd_wallet) => {
+            try_tx_s!(
+                crate::utxo::utxo_standard_swap_v2::enabled_hd_address_info(
+                    coin.as_ref(),
+                    hd_wallet,
+                    "UTXO Standard Swap V2 HTLC spend output address selection",
+                )
+                .await
+            )
+            .address
+        },
+    };
 
     let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
     let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
@@ -1394,12 +1478,12 @@ pub async fn send_taker_funding<T>(coin: T, args: SendTakerFundingArgs<'_>) -> R
 where
     T: UtxoCommonOps + GetUtxoListOps,
 {
-    let htlc_kp = try_tx_s!(get_htlc_key_pair_v2(&coin, args.swap_unique_data));
+    let htlc_pub = try_tx_s!(get_htlc_pubkey_v2(&coin, args.swap_unique_data));
     let maker_pub = try_tx_s!(Public::from_slice(args.maker_pub));
     let redeem = taker_funding_script(
         args.funding_time_lock as u32,
         args.taker_secret_hash,
-        htlc_kp.public(),
+        &htlc_pub,
         &maker_pub,
     );
     let total = &args.trading_amount + &args.premium_amount + &args.dex_fee.fee_amount().to_decimal();
@@ -1428,13 +1512,13 @@ pub async fn validate_taker_funding<T>(
 where
     T: UtxoCommonOps,
 {
-    let maker_htlc_kp =
-        get_htlc_key_pair_v2(coin, args.swap_unique_data).map_to_mm(ValidateSwapV2TxError::InternalError)?;
+    let maker_htlc_pub =
+        get_htlc_pubkey_v2(coin, args.swap_unique_data).map_to_mm(ValidateSwapV2TxError::InternalError)?;
     let expected_redeem = taker_funding_script(
         args.funding_time_lock as u32,
         args.taker_secret_hash,
         args.taker_pub,
-        maker_htlc_kp.public(),
+        &maker_htlc_pub,
     );
     let expected_script_pubkey: Bytes = Builder::build_p2sh(&dhash160(&expected_redeem).into()).into();
 
@@ -1834,8 +1918,8 @@ where
 
     // Verify the supplied signature against the counterparty's pub. The
     // caller's own keypair tells us which side they are.
-    let htlc_kp = get_htlc_key_pair_v2(coin, b"").map_to_mm(ValidateTakerFundingSpendPreimageError::InternalError)?;
-    let counterparty_pub = if htlc_kp.public() == gen_args.taker_pub {
+    let htlc_pub = get_htlc_pubkey_v2(coin, b"").map_to_mm(ValidateTakerFundingSpendPreimageError::InternalError)?;
+    let counterparty_pub = if &htlc_pub == gen_args.taker_pub {
         gen_args.maker_pub
     } else {
         gen_args.taker_pub

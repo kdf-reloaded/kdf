@@ -160,9 +160,7 @@ impl MmCoin for Qrc20Coin {
         utxo_common::set_requires_notarization(&self.utxo, requires_nota)
     }
 
-    fn swap_contract_address(&self) -> Option<BytesJson> {
-        Some(BytesJson::from(self.swap_contract_address.0.as_ref()))
-    }
+    fn swap_contract_address(&self) -> Option<BytesJson> { Some(BytesJson::from(&self.swap_contract_address.0[..])) }
 
     fn mature_confirmations(&self) -> Option<u32> { Some(self.utxo.conf.mature_confirmations) }
 

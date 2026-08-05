@@ -401,11 +401,13 @@ impl HDWalletBalanceOps for EthCoin {
         hd_wallet: &Self::HDWallet,
         xpub_extractor: Option<&XPubExtractor>,
         scan_policy: EnableCoinScanPolicy,
+        min_addresses_number: u32,
     ) -> MmResult<HDWalletBalance, EnableCoinBalanceError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
-        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy).await
+        coin_balance::common_impl::enable_hd_wallet(self, hd_wallet, xpub_extractor, scan_policy, min_addresses_number)
+            .await
     }
 
     async fn scan_for_new_addresses(

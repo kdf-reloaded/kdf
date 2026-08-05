@@ -62,14 +62,19 @@ impl TxHistory for TendermintActivationParams {
     fn tx_history(&self) -> bool { self.tx_history }
 }
 
-/// Tendermint platform protocol info resolved from coin configuration. The
-/// authoritative chain identity / denom / decimals are read from the coin
-/// config's `protocol_data` by the coin builder; this holder only validates
-/// that the configured protocol is `TENDERMINT`.
+/// Tendermint platform protocol info resolved from coin configuration
+/// (R36.3.1). The authoritative chain identity / denom / decimals / IBC channels
+/// are sourced from the coin config's `protocol_data`; the coin builder reads the
+/// same `protocol_data` block when assembling the platform coin. This holder both
+/// validates that the configured protocol is `TENDERMINT` and carries the parsed
+/// fields for callers that need them.
 #[allow(dead_code)]
 pub struct TendermintPlatformProtocolInfo {
     account_prefix: String,
     chain_id: String,
+    denom: String,
+    decimals: u8,
+    ibc_channels: HashMap<String, u64>,
 }
 
 impl TryFromCoinProtocol for TendermintPlatformProtocolInfo {
@@ -81,9 +86,15 @@ impl TryFromCoinProtocol for TendermintPlatformProtocolInfo {
             coins::CoinProtocol::TENDERMINT {
                 account_prefix,
                 chain_id,
+                denom,
+                decimals,
+                ibc_channels,
             } => Ok(TendermintPlatformProtocolInfo {
                 account_prefix,
                 chain_id,
+                denom,
+                decimals,
+                ibc_channels,
             }),
             proto => MmError::err(proto),
         }
@@ -96,7 +107,8 @@ pub struct TendermintTokenInitializer {
     platform_coin: TendermintCoin,
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl TokenInitializer for TendermintTokenInitializer {
     type Token = TendermintToken;
     type TokenActivationRequest = TendermintTokenActivationParams;
@@ -384,13 +396,21 @@ mod tests {
 
     #[test]
     fn protocol_info_from_tendermint_coin_protocol() {
+        let mut ibc_channels = HashMap::new();
+        ibc_channels.insert("osmo".to_owned(), 141u64);
         let parsed = TendermintPlatformProtocolInfo::try_from_coin_protocol(coins::CoinProtocol::TENDERMINT {
             account_prefix: "cosmos".to_owned(),
             chain_id: "cosmoshub-4".to_owned(),
+            denom: "uatom".to_owned(),
+            decimals: 6,
+            ibc_channels,
         })
         .unwrap();
         assert_eq!(parsed.account_prefix, "cosmos");
         assert_eq!(parsed.chain_id, "cosmoshub-4");
+        assert_eq!(parsed.denom, "uatom");
+        assert_eq!(parsed.decimals, 6);
+        assert_eq!(parsed.ibc_channels.get("osmo"), Some(&141u64));
     }
 
     #[test]

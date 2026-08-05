@@ -1171,9 +1171,27 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
 
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
         let unique_data = sm.unique_data();
-        let maker_coin_htlc_pub = sm.maker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
-        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
-        let taker_coin_address = format!("{}", sm.taker_coin.my_addr().await);
+        let maker_coin_htlc_pub = match sm.maker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive maker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
+        let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
+        let taker_coin_address = match sm.taker_coin.try_my_addr().await {
+            Ok(address) => format!("{}", address),
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
 
         let negotiation_msg = SwapMessage {
             inner: Some(swap_message::Inner::MakerNegotiation(MakerNegotiation {
@@ -1416,7 +1434,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
         }
 
         // Step 4: Generate funding-spend preimage.
-        let maker_taker_coin_pub = sm.taker_coin.derive_htlc_pubkey_v2(&unique_data);
+        let maker_taker_coin_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason =
+                    AbortReason::InternalError(format!("Failed to derive maker taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
         let gen_args = coins::GenTakerFundingSpendArgs {
             funding_tx: &taker_funding,
             maker_pub: &maker_taker_coin_pub,
@@ -1774,8 +1799,40 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             },
         };
 
-        let taker_coin_maker_pub = sm.taker_coin.derive_htlc_pubkey_v2(&unique_data);
-        let taker_coin_maker_addr = sm.taker_coin.my_addr().await;
+        let taker_coin_maker_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    MakerPaymentRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.maker_payment.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_coin_maker_addr = match sm.taker_coin.try_my_addr().await {
+            Ok(address) => address,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
+                return Self::change_state(
+                    MakerPaymentRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.maker_payment.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
         let taker_htlc_pub = match sm.taker_coin.parse_pubkey(&self.negotiation_data.taker_coin_htlc_pub) {
             Ok(p) => p,
             Err(e) => {
@@ -1947,8 +2004,40 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             },
         };
 
-        let taker_coin_maker_pub = sm.taker_coin.derive_htlc_pubkey_v2(&unique_data);
-        let taker_coin_maker_addr = sm.taker_coin.my_addr().await;
+        let taker_coin_maker_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    MakerPaymentRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.maker_payment.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_coin_maker_addr = match sm.taker_coin.try_my_addr().await {
+            Ok(address) => address,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
+                return Self::change_state(
+                    MakerPaymentRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.maker_payment.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
         let taker_htlc_pub = match sm.taker_coin.parse_pubkey(&self.negotiation_data.taker_coin_htlc_pub) {
             Ok(p) => p,
             Err(e) => {

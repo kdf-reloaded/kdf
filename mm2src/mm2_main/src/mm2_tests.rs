@@ -21,8 +21,12 @@ use std::thread;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[cfg(not(target_arch = "wasm32"))]
+use coins::eth::checksum_address;
 #[cfg(all(feature = "zhtlc-native-tests", not(target_arch = "wasm32")))]
 use mm2_test_helpers::for_tests::{init_z_coin, init_z_coin_status};
+#[cfg(not(target_arch = "wasm32"))]
+use mm2_test_helpers::geth_dev::{GethDev, TEST_ERC20_BYTECODE};
 
 #[cfg(all(feature = "zhtlc-native-tests", not(target_arch = "wasm32")))]
 async fn enable_z_coin(mm: &MarketMakerIt, coin: &str) -> ZcoinActivationResult {
@@ -962,7 +966,7 @@ async fn trade_base_rel_electrum(
         {"coin":"DOC","asset":"DOC","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"MARTY","asset":"MARTY","required_confirmations":0,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"}},
-        {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC"},"required_confirmations":0},
+        {"coin":"ZOMBIE","asset":"ZOMBIE","fname":"ZOMBIE (TESTCOIN)","txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"ZHTLC","protocol_data":{"consensus_params":{"overwinter_activation_height":0,"sapling_activation_height":1,"blossom_activation_height":null,"heartwood_activation_height":null,"canopy_activation_height":null,"coin_type":133,"hrp_sapling_extended_spending_key":"secret-extended-key-main","hrp_sapling_extended_full_viewing_key":"zxviews","hrp_sapling_payment_address":"zs","b58_pubkey_address_prefix":[28,184],"b58_script_address_prefix":[28,189]},"z_derivation_path":"m/32'/133'"}},"required_confirmations":0},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
 
@@ -1223,6 +1227,55 @@ async fn trade_test_rick_and_morty() {
     trade_base_rel_electrum(pairs, 1, 1, 0.0001).await;
 }
 
+/// Builds `transfer(address,uint256)` calldata for the ERC20 test fixture.
+#[cfg(not(target_arch = "wasm32"))]
+fn erc20_transfer_call(to_hex: &str, amount: u128) -> Vec<u8> {
+    let mut data = hex::decode("a9059cbb").unwrap();
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(&hex::decode(to_hex.trim_start_matches("0x")).unwrap());
+    let mut word = [0u8; 32];
+    word[16..].copy_from_slice(&amount.to_be_bytes());
+    data.extend_from_slice(&word);
+    data
+}
+
+/// Withdraws `amount` ETH through the RPC, broadcasts it, and asserts the recipient
+/// received exactly `amount` on the local geth chain. Fee-agnostic: geth --dev has a
+/// non-zero base fee, so the sender's exact balance change can't be asserted.
+#[cfg(not(target_arch = "wasm32"))]
+fn withdraw_eth_and_verify_on_geth(mm: &MarketMakerIt, to: &str, amount: f64, geth: &GethDev) {
+    let withdraw = block_on(mm.rpc(&json! ({
+        "mmrpc": "2.0",
+        "userpass": mm.userpass,
+        "method": "withdraw",
+        "params": { "coin": "ETH", "to": to, "amount": amount },
+        "id": 0,
+    })))
+    .unwrap();
+    assert!(withdraw.0.is_success(), "!ETH withdraw: {}", withdraw.1);
+    let res: RpcSuccessResponse<TransactionDetails> =
+        json::from_str(&withdraw.1).expect("Expected 'RpcSuccessResponse<TransactionDetails>'");
+    let tx_details = res.result;
+    assert_eq!(tx_details.to, vec![to.to_owned()]);
+
+    let send = block_on(mm.rpc(&json! ({
+        "userpass": mm.userpass,
+        "method": "send_raw_transaction",
+        "coin": "ETH",
+        "tx_hex": tx_details.tx_hex,
+    })))
+    .unwrap();
+    assert!(send.0.is_success(), "!ETH send: {}", send.1);
+    let send_json: Json = json::from_str(&send.1).unwrap();
+    let tx_hash = send_json["tx_hash"].as_str().expect("tx_hash");
+    geth.wait_receipt(&format!("0x{}", tx_hash.trim_start_matches("0x")));
+
+    // The recipient (starting from zero) now holds exactly `amount` ETH.
+    let expected = format!("0x{:x}", (amount * 1e18).round() as u128);
+    let bal = geth.rpc("eth_getBalance", json!([to, "latest"]));
+    assert_eq!(bal.as_str(), Some(expected.as_str()), "recipient eth balance");
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn withdraw_and_send(
     mm: &MarketMakerIt,
@@ -1278,7 +1331,7 @@ fn withdraw_and_send(
 // exercised by the dedicated allow-to-fail `external-network-tests` CI
 // job invoked with `--ignored`.
 #[test]
-#[ignore = "external network: requires live cipig DOC/MARTY electrums and ETH dev chain"]
+#[ignore = "external network: requires live cipig DOC/MARTY electrums (ETH/JST run against a local geth --dev)"]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_and_send() {
     let (alice_file_passphrase, _alice_file_userpass) = from_env_file(slurp(&".env.client").unwrap());
@@ -1288,12 +1341,26 @@ fn test_withdraw_and_send() {
         .or(alice_file_passphrase)
         .expect("No ALICE_PASSPHRASE or .env.client/PASSPHRASE");
 
+    // Stand up a throwaway geth --dev chain for the EVM coins (ETH/JST) and deploy
+    // the JST ERC20 fixture on it. Skip the whole test when geth isn't installed so
+    // the default offline suite stays green.
+    let geth = match GethDev::start() {
+        Some(geth) => geth,
+        None => {
+            log!("geth binary not available; skipping test_withdraw_and_send");
+            return;
+        },
+    };
+    // The ERC20 enable path validates the token address checksum (`valid_addr_from_str`),
+    // so the lowercase address returned by geth must be EIP-55 checksummed.
+    let jst_addr = checksum_address(&geth.deploy(TEST_ERC20_BYTECODE, ""));
+
     let coins = json! ([
         {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"MARTY","asset":"MARTY","rpcport":52592,"txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"MARTY_SEGWIT","asset":"MORTY_SEGWIT","txversion":4,"overwintered":1,"segwit":true,"txfee":1000,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"}},
-        {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
+        {"coin":"JST","name":"jst","protocol":{"type":"ERC20","protocol_data":{"platform":"ETH","contract_address": jst_addr}}}
     ]);
 
     let mm_alice = MarketMakerIt::start(
@@ -1321,9 +1388,7 @@ fn test_withdraw_and_send() {
     // wait until RPC API is active
 
     // Enable coins. Print the replies in case we need the address.
-    let mut enable_res = block_on(enable_coins_eth_electrum_doc_marty(&mm_alice, &[
-        "http://195.201.0.6:8565",
-    ]));
+    let mut enable_res = block_on(enable_coins_eth_electrum_doc_marty(&mm_alice, &[geth.rpc_url.as_str()]));
     enable_res.insert(
         "MARTY_SEGWIT",
         block_on(enable_electrum(&mm_alice, "MARTY_SEGWIT", false, &[
@@ -1334,6 +1399,16 @@ fn test_withdraw_and_send() {
     );
 
     log!("enable_coins (alice): "[enable_res]);
+
+    // Fund the passphrase-derived ETH address on the local geth chain: ETH for gas
+    // and the 0.001 withdraw, and JST tokens for the 0.001 JST withdraw.
+    let eth_addr = addr_from_enable(&enable_res, "ETH").to_owned();
+    geth.fund_eth(&eth_addr, 1_000_000_000_000_000_000); // 1 ETH
+    geth.send_call(
+        &jst_addr,
+        &erc20_transfer_call(&eth_addr, 1000u128 * 1_000_000_000_000_000_000),
+    );
+
     withdraw_and_send(
         &mm_alice,
         "MARTY",
@@ -1342,15 +1417,9 @@ fn test_withdraw_and_send() {
         "-0.00101",
         0.001,
     );
-    // dev chain gas price is 0 so ETH expected balance change doesn't include the fee
-    withdraw_and_send(
-        &mm_alice,
-        "ETH",
-        "0x657980d55733B41c0C64c06003864e1aAD917Ca7",
-        &enable_res,
-        "-0.001",
-        0.001,
-    );
+    // geth --dev charges a non-zero base fee, so the ETH sender balance change
+    // cannot be asserted exactly; verify the recipient received the amount instead.
+    withdraw_eth_and_verify_on_geth(&mm_alice, "0x657980d55733B41c0C64c06003864e1aAD917Ca7", 0.001, &geth);
     withdraw_and_send(
         &mm_alice,
         "JST",
@@ -1641,8 +1710,7 @@ fn test_withdraw_segwit() {
             "wiftype": 239,
             "segwit": true,
             "bech32_hrp": "tb",
-            "txfee": 0,
-            "estimate_fee_mode": "ECONOMICAL",
+            "txfee": 1000,
             "mm2": 1,
             "required_confirmations": 0,
             "protocol": {

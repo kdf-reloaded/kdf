@@ -1,8 +1,9 @@
 use crate::{lp_coinfind_or_err, CoinsContext, MmCoinEnum, WithdrawError};
-use crate::{TransactionDetails, WithdrawRequest};
+use crate::{MmCoin, TransactionDetails, WithdrawRequest};
 use async_trait::async_trait;
 use common::SuccessResponse;
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction, HwRpcTaskUserActionRequest};
+use futures::compat::Future01CompatExt;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest, RpcTaskUserActionError};
@@ -162,12 +163,50 @@ impl RpcTask for WithdrawTask {
                 standard_utxo.init_withdraw(self.ctx, self.request, task_handle).await
             },
             MmCoinEnum::QtumCoin(ref qtum) => qtum.init_withdraw(self.ctx, self.request, task_handle).await,
+            MmCoinEnum::Qrc20Coin(ref qrc20) => init_legacy_withdraw(qrc20, self.request, task_handle).await,
             MmCoinEnum::EthCoin(ref eth) => eth.init_withdraw(self.ctx, self.request, task_handle).await,
-            _ => MmError::err(WithdrawError::CoinDoesntSupportInitWithdraw {
+            MmCoinEnum::Bch(ref bch) => init_legacy_withdraw(bch, self.request, task_handle).await,
+            MmCoinEnum::SlpToken(ref slp) => init_legacy_withdraw(slp, self.request, task_handle).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            MmCoinEnum::ZCoin(ref z_coin) => z_coin.init_withdraw(self.ctx, self.request, task_handle).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            MmCoinEnum::SolanaCoin(ref solana) => init_legacy_withdraw(solana, self.request, task_handle).await,
+            #[cfg(not(target_arch = "wasm32"))]
+            MmCoinEnum::SplToken(ref spl) => init_legacy_withdraw(spl, self.request, task_handle).await,
+            MmCoinEnum::SiaCoin(ref sia) => init_legacy_withdraw(sia, self.request, task_handle).await,
+            MmCoinEnum::TendermintCoin(ref tendermint) => {
+                init_legacy_withdraw(tendermint, self.request, task_handle).await
+            },
+            MmCoinEnum::TendermintToken(ref tendermint_token) => {
+                init_legacy_withdraw(tendermint_token, self.request, task_handle).await
+            },
+            // Lightning has no withdraw operation (invoices are used instead), and Test is scaffolding.
+            #[cfg(not(target_arch = "wasm32"))]
+            MmCoinEnum::LightningCoin(_) | MmCoinEnum::Test(_) => {
+                MmError::err(WithdrawError::CoinDoesntSupportInitWithdraw {
+                    coin: self.coin.ticker().to_owned(),
+                })
+            },
+            #[cfg(target_arch = "wasm32")]
+            MmCoinEnum::Test(_) => MmError::err(WithdrawError::CoinDoesntSupportInitWithdraw {
                 coin: self.coin.ticker().to_owned(),
             }),
         }
     }
+}
+
+async fn init_legacy_withdraw<C>(
+    coin: &C,
+    req: WithdrawRequest,
+    task_handle: &WithdrawTaskHandle,
+) -> Result<TransactionDetails, MmError<WithdrawError>>
+where
+    C: MmCoin + ?Sized,
+{
+    task_handle
+        .update_in_progress_status(WithdrawInProgressStatus::GeneratingTransaction)
+        .mm_err(WithdrawError::from)?;
+    coin.withdraw(req).compat().await
 }
 
 #[cfg(test)]
@@ -230,5 +269,35 @@ mod tests {
             actual: rpc_task::TaskStatusError::Finished,
             expected: rpc_task::TaskStatusError::InProgress,
         }));
+    }
+
+    #[test]
+    fn task_withdraw_reports_structured_unsupported_for_explicitly_unsupported_variant() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::Test(crate::test_coin::TestCoin::new("TEST")))).unwrap();
+        let req = WithdrawRequest::new("TEST".to_owned(), None, "receiver".to_owned(), 1.into(), false, None);
+        let init = block_on(init_withdraw(ctx.clone(), req)).unwrap();
+        let mut terminal_status = None;
+        for _ in 0..100 {
+            let status = match block_on(withdraw_status(ctx.clone(), WithdrawStatusRequest {
+                task_id: init.task_id,
+                forget_if_finished: false,
+            })) {
+                Ok(status) => status,
+                Err(e) => panic!("withdraw_status failed: {}", e),
+            };
+            if !matches!(status, WithdrawCompatRpcStatus::InProgress(_)) {
+                terminal_status = Some(status);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let status = terminal_status.expect("withdraw task did not reach a terminal status");
+
+        assert!(matches!(
+            status,
+            WithdrawCompatRpcStatus::Error(WithdrawError::CoinDoesntSupportInitWithdraw { coin }) if coin == "TEST"
+        ));
     }
 }

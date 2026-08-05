@@ -70,11 +70,6 @@ pub async fn insert_new_swap_to_db_with_type(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn add_swap_to_db_index(ctx: &MmArc, swap: &SavedSwap) {
-    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, None)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn save_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
     let fiat_snapshot = fetch_completion_fiat_snapshot(swap).await;
 
@@ -299,6 +294,24 @@ pub enum MyRecentSwapsErr {
 
 pub type MyRecentSwapsResult = Result<MyRecentSwapsResponse, MmError<MyRecentSwapsErr>>;
 
+fn recent_swap_or_log(uuid: &Uuid, loaded: SavedSwapResult<Option<SavedSwap>>) -> Option<SavedSwap> {
+    match loaded {
+        Ok(Some(swap)) => Some(swap),
+        Ok(None) => {
+            error!("No such swap with the uuid '{}'", uuid);
+            None
+        },
+        Err(e) => {
+            error!("Error loading a swap with the uuid '{}': {}", uuid, e);
+            None
+        },
+    }
+}
+
+fn recent_swap_status_json(uuid: &Uuid, loaded: SavedSwapResult<Option<SavedSwap>>) -> Option<Json> {
+    recent_swap_or_log(uuid, loaded).map(|swap| json::to_value(MySwapStatusResponse::from(&swap)).unwrap())
+}
+
 pub async fn my_recent_swaps(ctx: MmArc, req: MyRecentSwapsReq) -> MyRecentSwapsResult {
     let db_result = match MySwapsStorage::new(ctx.clone())
         .my_recent_swaps_with_filters(&req.filter, Some(&req.paging_options))
@@ -310,15 +323,9 @@ pub async fn my_recent_swaps(ctx: MmArc, req: MyRecentSwapsReq) -> MyRecentSwaps
 
     let mut swaps = Vec::with_capacity(db_result.uuids_and_types.len());
     for (uuid, _swap_type) in db_result.uuids_and_types.iter() {
-        let swap = match SavedSwap::load_my_swap_from_db(&ctx, *uuid).await {
-            Ok(Some(swap)) => swap,
-            Ok(None) => {
-                error!("No such swap with the uuid '{}'", uuid);
-                continue;
-            },
-            Err(e) => return Err(MmError::new(MyRecentSwapsErr::UnableToLoadSavedSwaps(e.into_inner()))),
-        };
-        swaps.push(swap);
+        if let Some(swap) = recent_swap_or_log(uuid, SavedSwap::load_my_swap_from_db(&ctx, *uuid).await) {
+            swaps.push(swap);
+        }
     }
 
     Ok(MyRecentSwapsResponse {
@@ -345,18 +352,9 @@ pub async fn my_recent_swaps_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u
     // iterate over uuids trying to parse the corresponding files content and add to result vector
     let mut swaps = Vec::with_capacity(db_result.uuids_and_types.len());
     for (uuid, _swap_type) in db_result.uuids_and_types.iter() {
-        let swap_json = match SavedSwap::load_my_swap_from_db(&ctx, *uuid).await {
-            Ok(Some(swap)) => json::to_value(MySwapStatusResponse::from(&swap)).unwrap(),
-            Ok(None) => {
-                error!("No such swap with the uuid '{}'", uuid);
-                Json::Null
-            },
-            Err(e) => {
-                error!("Error loading a swap with the uuid '{}': {}", uuid, e);
-                Json::Null
-            },
-        };
-        swaps.push(swap_json);
+        if let Some(swap_json) = recent_swap_status_json(uuid, SavedSwap::load_my_swap_from_db(&ctx, *uuid).await) {
+            swaps.push(swap_json);
+        }
     }
 
     let res_js = json!({
@@ -654,7 +652,8 @@ pub async fn active_swaps_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>
 
 #[cfg(test)]
 mod lp_swap_tests {
-    use coins::{DexFee, DexFeeBurnDestination, MarketCoinOps, MmCoinEnum, TestCoin};
+    use coins::utxo::sat_from_big_decimal;
+    use coins::{DexFee, DexFeeBurnDestination, MarketCoinOps, MmCoin, MmCoinEnum, TestCoin};
     use mm2_net_config::NetConfig;
     use mocktopus::mocking::*;
     use serialization::{deserialize, serialize};
@@ -663,6 +662,21 @@ mod lp_swap_tests {
 
     /// Tests use the legacy mainnet netid 8762 fee parameters.
     fn test_net_cfg() -> &'static dyn NetConfig { mm2_net_config::net_config_or_panic(8762) }
+
+    #[test]
+    fn recent_swap_status_json_skips_missing_swap() {
+        let uuid = Uuid::new_v4();
+
+        assert!(recent_swap_status_json(&uuid, Ok(None)).is_none());
+    }
+
+    #[test]
+    fn recent_swap_status_json_skips_unloadable_swap() {
+        let uuid = Uuid::new_v4();
+        let load_result = MmError::err(SavedSwapError::ErrorDeserializing("missing field `data`".into()));
+
+        assert!(recent_swap_status_json(&uuid, load_result).is_none());
+    }
 
     #[test]
     fn test_dex_fee_amount() {
@@ -1004,41 +1018,35 @@ mod lp_swap_tests {
         assert!(display.starts_with("WithBurn("));
     }
 
-    /// Netid 8762 has burn_enabled=false, so compute_dex_fee should always return Standard.
+    /// Netid 8762 enables the KMD-only 75/25 OP_RETURN burn policy.
     #[test]
-    fn test_dex_fee_netid_8762_always_standard() {
+    fn should_configure_kmd_burn_on_netid_8762() {
         let net_cfg = mm2_net_config::net_config_or_panic(8762);
-        assert!(!net_cfg.burn_enabled());
-
-        let total = dex_fee_amount(net_cfg, "BTC", "ETH", &MmNumber::from(1), &MmNumber::from("0.0001"));
-        // On netid 8762, compute_dex_fee cannot be called without MmCoinEnum,
-        // but we can verify the config invariant:
-        // burn_enabled=false means any code path through compute_dex_fee
-        // would return DexFee::Standard(total).
-        assert!(total > MmNumber::from(0));
+        assert!(net_cfg.burn_enabled());
+        assert_eq!(MmNumber::from(net_cfg.dex_fee_share()), MmNumber::from((3, 4)));
+        assert!(net_cfg.burn_addr_raw_pubkey().is_empty());
     }
 
-    /// Netid 6133 has burn_enabled=true with dex_fee_share=3/4.
+    /// The v3/netid-6133 reference emits a single standard fee output.
     #[test]
-    fn test_dex_fee_netid_6133_burn_config() {
+    fn should_disable_burn_on_netid_6133() {
         let net_cfg = mm2_net_config::net_config_or_panic(6133);
-        assert!(net_cfg.burn_enabled());
-        // dex_fee_share should be 3/4 (75% fee, 25% burn)
-        let expected_share: MmNumber = (3, 4).into();
-        let actual_share: MmNumber = net_cfg.dex_fee_share().into();
-        assert_eq!(actual_share, expected_share);
+        assert!(!net_cfg.burn_enabled());
+        assert_eq!(MmNumber::from(net_cfg.dex_fee_share()), MmNumber::from(1));
     }
 
     /// Helper: create a TestCoin wrapped in MmCoinEnum with min_tx_amount mocked.
     fn mock_taker_coin(ticker: &'static str) -> MmCoinEnum {
         TestCoin::ticker.mock_safe(move |_| MockResult::Return(ticker));
         TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from_str("0.00001").unwrap()));
+        TestCoin::should_burn_directly.mock_safe(|_| MockResult::Return(false));
+        TestCoin::should_burn_dex_fee.mock_safe(|_| MockResult::Return(false));
         MmCoinEnum::Test(TestCoin::new(ticker))
     }
 
-    /// On netid 8762 (burn_enabled=false), compute_dex_fee must return DexFee::Standard.
+    /// Non-KMD takers on netid 8762 retain the legacy single-output fee form.
     #[test]
-    fn test_compute_dex_fee_standard_on_8762() {
+    fn should_compute_standard_fee_for_non_kmd_taker_on_8762() {
         let net_cfg = mm2_net_config::net_config_or_panic(8762);
         let taker_coin = mock_taker_coin("BTC");
         let trade_amount = MmNumber::from(1);
@@ -1055,76 +1063,64 @@ mod lp_swap_tests {
         }
     }
 
-    /// On netid 6133 (burn_enabled=true, share=3/4), compute_dex_fee should produce
-    /// DexFee::WithBurn with fee_amount = total*3/4, burn_amount = total*1/4.
+    /// All takers on netid 6133 use the v3 single-output fee form.
     #[test]
-    fn test_compute_dex_fee_with_burn_on_6133() {
+    fn should_compute_standard_fee_on_6133() {
         let net_cfg = mm2_net_config::net_config_or_panic(6133);
         let taker_coin = mock_taker_coin("BTC");
         let trade_amount = MmNumber::from(1);
 
         let fee = compute_dex_fee(net_cfg, &taker_coin, "ETH", &trade_amount);
+        match fee {
+            DexFee::Standard(amount) => assert_eq!(amount, &trade_amount * &MmNumber::from((2, 100))),
+            other => panic!("expected DexFee::Standard on netid 6133, got {:?}", other),
+        }
+    }
+
+    /// Regression for issue #1: a v2.6.0-beta KMD taker on netid 8762 sends
+    /// 75% to the fee address and 25% to a second OP_RETURN output.
+    #[test]
+    fn should_match_v2_6_0_beta_kmd_fee_split_on_8762() {
+        let net_cfg = mm2_net_config::net_config_or_panic(8762);
+        let taker_coin = mock_taker_coin("KMD");
+        TestCoin::should_burn_directly.mock_safe(|_| MockResult::Return(true));
+        let trade_amount = MmNumber::from("15.86");
+
+        let fee = compute_dex_fee(net_cfg, &taker_coin, "CHTA", &trade_amount);
+        let total = &trade_amount * &MmNumber::from((9, 7770));
+        let expected_fee = &total * &MmNumber::from((3, 4));
+        let expected_burn = &total - &expected_fee;
         match &fee {
             DexFee::WithBurn {
                 fee_amount,
                 burn_amount,
                 burn_destination,
             } => {
-                // Total = fee_amount + burn_amount
-                let total = fee_amount + burn_amount;
-                assert!(total > MmNumber::from(0), "total fee should be positive");
-                // share = 3/4, so fee_amount = total * 3/4
-                let share: MmNumber = (3, 4).into();
-                assert_eq!(*fee_amount, &total * &share);
-                assert_eq!(*burn_amount, &total - fee_amount);
-                // BTC is not KMD, so burn goes to PreBurnAccount
-                match burn_destination {
-                    DexFeeBurnDestination::PreBurnAccount { burn_pubkey } => {
-                        let net_cfg = mm2_net_config::net_config_or_panic(6133);
-                        assert_eq!(burn_pubkey.as_slice(), net_cfg.burn_addr_raw_pubkey());
-                    },
-                    other => panic!("expected PreBurnAccount, got {:?}", other),
-                }
-            },
-            other => panic!("expected DexFee::WithBurn on netid 6133, got {:?}", other),
-        }
-    }
-
-    /// On netid 6133 with KMD as taker coin (discount rate), burn goes to KmdOpReturn.
-    #[test]
-    fn test_compute_dex_fee_kmd_burn_destination() {
-        let net_cfg = mm2_net_config::net_config_or_panic(6133);
-        let taker_coin = mock_taker_coin("KMD");
-        let trade_amount = MmNumber::from(10);
-
-        let fee = compute_dex_fee(net_cfg, &taker_coin, "BTC", &trade_amount);
-        match &fee {
-            DexFee::WithBurn { burn_destination, .. } => {
+                assert_eq!(*fee_amount, expected_fee);
+                assert_eq!(*burn_amount, expected_burn);
                 assert_eq!(*burn_destination, DexFeeBurnDestination::KmdOpReturn);
+                assert_eq!(sat_from_big_decimal(&total.to_decimal(), 8).unwrap(), 1_837_065);
+                assert_eq!(sat_from_big_decimal(&fee_amount.to_decimal(), 8).unwrap(), 1_377_799);
+                assert_eq!(sat_from_big_decimal(&burn_amount.to_decimal(), 8).unwrap(), 459_266);
             },
-            other => panic!("expected DexFee::WithBurn for KMD on netid 6133, got {:?}", other),
+            other => panic!("expected KMD OP_RETURN split on netid 8762, got {:?}", other),
         }
     }
 
-    /// When trade amount is tiny enough that burn portion < min_tx_amount,
-    /// compute_dex_fee should fall back to DexFee::Standard even on a burn-enabled netid.
+    /// A product between coin dust and the old 1/10000 override must pass
+    /// through unchanged; the reference implementations use only coin dust.
     #[test]
-    fn test_compute_dex_fee_fallback_to_standard_on_tiny_amount() {
-        let net_cfg = mm2_net_config::net_config_or_panic(6133);
-        // Use a very high min_tx_amount so the burn portion is below it
-        TestCoin::ticker.mock_safe(|_| MockResult::Return("BTC"));
-        TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(100)));
-        let taker_coin = MmCoinEnum::Test(TestCoin::new("BTC"));
+    fn should_not_apply_network_fee_floor_above_coin_dust() {
+        let net_cfg = mm2_net_config::net_config_or_panic(8762);
+        let taker_coin = mock_taker_coin("BTC");
+        let trade_amount = MmNumber::from("0.02");
+        let expected = &trade_amount / &MmNumber::from(777);
+        assert!(expected > MmNumber::from("0.00001"));
+        assert!(expected < MmNumber::from("0.0001"));
 
-        // With trade_amount=1, total fee ≈ 1/777 ≈ 0.001287.
-        // burn portion (25%) ≈ 0.000322, way below min_tx_amount=100.
-        // Should fall back to Standard.
-        let trade_amount = MmNumber::from(1);
         let fee = compute_dex_fee(net_cfg, &taker_coin, "ETH", &trade_amount);
-        match &fee {
-            DexFee::Standard(amount) => {
-                assert!(*amount > MmNumber::from(0));
-            },
+        match fee {
+            DexFee::Standard(amount) => assert_eq!(amount, expected),
             other => panic!("expected DexFee::Standard fallback, got {:?}", other),
         }
     }

@@ -498,10 +498,11 @@ not justify deleting the saved record or marking the swap finished. The
 preferred failure mode is to retain the raw saved history and surface that the
 swap cannot be replayed by this binary.
 
-> **Upstream divergence (informative).** The active RELOADED tree's legacy
-> event parser may be narrower than the historical persisted event family. This
-> chapter binds the broader persisted JSON family so existing saved swaps can
-> be loaded, replayed, or retained without data loss.
+> **Implementation note (informative).** The RELOADED compatibility parser
+> accepts the broader historical persisted event family bound above, including
+> unit refund-start and refund-finish milestones. It also tolerates the known
+> maker refund-start form carrying a `wait_until` payload, preserving that
+> deadline as the wait-refund milestone.
 
 ## 44.9 Creation/Migration Interaction
 
@@ -572,6 +573,10 @@ lineage and a conversion rule for existing `MM2.db` files.
   `MakerPaymentSpendConfirmed` loads without an unknown-variant failure; replay
   either resumes from the last accepted event or preserves the raw history when
   replay is not possible.
+- Legacy maker saved-swap JSON containing data-less `MakerPaymentRefundStarted`
+  or `MakerPaymentRefundFinished` milestones loads without a missing-`data`
+  failure. The historical payload-bearing refund-start form preserves its
+  `wait_until` deadline.
 - Native live swap/order/stats persistence is exercised only after migration
   completion and succeeds against the state-15 schema.
 - Completion-fiat snapshots are stored in `stats_swaps`; `my_swaps` does not

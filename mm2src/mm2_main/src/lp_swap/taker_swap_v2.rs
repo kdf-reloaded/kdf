@@ -1375,8 +1375,20 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
 
         // Build and broadcast taker negotiation response.
         let unique_data = sm.unique_data();
-        let maker_coin_htlc_pub = sm.maker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
-        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let maker_coin_htlc_pub = match sm.maker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive maker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
+        let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
 
         let taker_negotiation_msg = SwapMessage {
             inner: Some(swap_message::Inner::TakerNegotiation(TakerNegotiation {
@@ -1457,7 +1469,13 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for N
     async fn on_changed(self: Box<Self>, sm: &mut Self::StateMachine) -> StateResult<Self::StateMachine> {
         let unique_data = sm.unique_data();
         let taker_secret_hash = sm.taker_secret_hash();
-        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
         let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
             mm2_net_config::net_config_or_panic(sm.ctx.netid()),
             &sm.taker_coin,
@@ -1728,10 +1746,25 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
         }
 
         // Derive taker's own taker-coin pubkey.
-        let taker_taker_coin_pub = match sm
-            .taker_coin
-            .parse_pubkey(&sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data))
-        {
+        let taker_taker_coin_pub_bytes = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason =
+                    AbortReason::InternalError(format!("Failed to derive own taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    TakerFundingRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.taker_funding.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_taker_coin_pub = match sm.taker_coin.parse_pubkey(&taker_taker_coin_pub_bytes) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse own taker-coin pubkey: {:?}", e));
@@ -1948,10 +1981,25 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for M
                 .await;
             },
         };
-        let taker_taker_coin_pub = match sm
-            .taker_coin
-            .parse_pubkey(&sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data))
-        {
+        let taker_taker_coin_pub_bytes = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason =
+                    AbortReason::InternalError(format!("Failed to derive own taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    TakerFundingRefundRequired::new(
+                        self.maker_coin_start_block,
+                        self.taker_coin_start_block,
+                        self.negotiation_data.clone(),
+                        self.taker_funding.clone(),
+                        reason,
+                    ),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_taker_coin_pub = match sm.taker_coin.parse_pubkey(&taker_taker_coin_pub_bytes) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse own taker-coin pubkey: {:?}", e));
@@ -2104,10 +2152,19 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 .await;
             },
         };
-        let taker_taker_coin_pub = match sm
-            .taker_coin
-            .parse_pubkey(&sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data))
-        {
+        let taker_taker_coin_pub_bytes = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason =
+                    AbortReason::InternalError(format!("Failed to derive own taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    TakerPaymentRefundRequired::new(self.taker_payment.clone(), self.negotiation_data.clone(), reason),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_taker_coin_pub = match sm.taker_coin.parse_pubkey(&taker_taker_coin_pub_bytes) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse own taker-coin pubkey: {:?}", e));
@@ -2118,8 +2175,29 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 .await;
             },
         };
-        let maker_address = sm.taker_coin.my_addr().await;
-        let taker_taker_coin_pub_bytes = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let maker_address = match sm.taker_coin.try_my_addr().await {
+            Ok(address) => address,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
+                return Self::change_state(
+                    TakerPaymentRefundRequired::new(self.taker_payment.clone(), self.negotiation_data.clone(), reason),
+                    sm,
+                )
+                .await;
+            },
+        };
+        let taker_taker_coin_pub_bytes = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason =
+                    AbortReason::InternalError(format!("Failed to derive own taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(
+                    TakerPaymentRefundRequired::new(self.taker_payment.clone(), self.negotiation_data.clone(), reason),
+                    sm,
+                )
+                .await;
+            },
+        };
         let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
             mm2_net_config::net_config_or_panic(sm.ctx.netid()),
             &sm.taker_coin,
@@ -2426,7 +2504,13 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 return Self::change_state(Aborted::new(reason), sm).await;
             },
         };
-        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
         let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
             mm2_net_config::net_config_or_panic(sm.ctx.netid()),
             &sm.taker_coin,
@@ -2503,7 +2587,13 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             }
         }
 
-        let taker_coin_htlc_pub = sm.taker_coin.derive_htlc_pubkey_v2_bytes(&unique_data);
+        let taker_coin_htlc_pub = match sm.taker_coin.try_derive_htlc_pubkey_v2_bytes(&unique_data) {
+            Ok(pubkey) => pubkey,
+            Err(e) => {
+                let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
         let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
             mm2_net_config::net_config_or_panic(sm.ctx.netid()),
             &sm.taker_coin,

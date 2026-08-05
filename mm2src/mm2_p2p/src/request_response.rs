@@ -6,11 +6,13 @@ use futures::io::{AsyncRead, AsyncWrite};
 use futures::task::{Context, Poll};
 use futures::StreamExt;
 use libp2p::core::upgrade::{read_length_prefixed, write_length_prefixed};
-use libp2p::request_response::{InboundFailure, OutboundFailure, ProtocolName, ProtocolSupport, RequestId,
-                               RequestResponse, RequestResponseCodec, RequestResponseConfig, RequestResponseEvent,
-                               RequestResponseMessage, ResponseChannel};
-use libp2p::swarm::{NetworkBehaviour, NetworkBehaviourAction, NetworkBehaviourEventProcess, PollParameters};
-use libp2p::NetworkBehaviour;
+use libp2p::core::{Endpoint, Multiaddr};
+use libp2p::request_response::{Behaviour as RequestResponse, Codec as RequestResponseCodec,
+                               Config as RequestResponseConfig, Event as RequestResponseEvent, InboundFailure,
+                               Message as RequestResponseMessage, OutboundFailure, ProtocolSupport, RequestId,
+                               ResponseChannel};
+use libp2p::swarm::{ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, PollParameters, THandler,
+                    THandlerInEvent, THandlerOutEvent, ToSwarm};
 use libp2p::PeerId;
 use log::{debug, error, warn};
 use serde::de::DeserializeOwned;
@@ -29,7 +31,7 @@ pub type RequestResponseSender = mpsc::UnboundedSender<(PeerId, PeerRequest, one
 pub fn build_request_response_behaviour() -> RequestResponseBehaviour {
     let config = RequestResponseConfig::default();
     let protocol = iter::once((Protocol::Version2, ProtocolSupport::Full));
-    let inner = RequestResponse::new(Codec::default(), protocol, config);
+    let inner = RequestResponse::new(protocol, config);
 
     let (tx, rx) = mpsc::unbounded();
     let pending_requests = HashMap::new();
@@ -48,6 +50,7 @@ pub fn build_request_response_behaviour() -> RequestResponseBehaviour {
     }
 }
 
+#[derive(Debug)]
 pub enum RequestResponseBehaviourEvent {
     InboundRequest {
         peer_id: PeerId,
@@ -61,26 +64,17 @@ struct PendingRequest {
     initiated_at: Instant,
 }
 
-#[derive(NetworkBehaviour)]
-#[behaviour(out_event = "RequestResponseBehaviourEvent", event_process = true)]
-#[behaviour(poll_method = "poll_event")]
 pub struct RequestResponseBehaviour {
     /// The inner RequestResponse network behaviour.
     inner: RequestResponse<Codec<Protocol, PeerRequest, PeerResponse>>,
-    #[behaviour(ignore)]
     rx: RequestResponseReceiver,
-    #[behaviour(ignore)]
     tx: RequestResponseSender,
-    #[behaviour(ignore)]
     pending_requests: HashMap<RequestId, PendingRequest>,
     /// Events that need to be yielded to the outside when polling.
-    #[behaviour(ignore)]
     events: VecDeque<RequestResponseBehaviourEvent>,
     /// Timeout for pending requests
-    #[behaviour(ignore)]
     timeout: Duration,
     /// Interval for request timeout check
-    #[behaviour(ignore)]
     timeout_interval: Interval,
 }
 
@@ -106,43 +100,6 @@ impl RequestResponseBehaviour {
         request_id
     }
 
-    fn poll_event(
-        &mut self,
-        cx: &mut Context,
-        _params: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<RequestResponseBehaviourEvent, <Self as NetworkBehaviour>::ConnectionHandler>>
-    {
-        // poll the `rx`
-        match self.rx.poll_next_unpin(cx) {
-            // received a request, forward it through the network and put to the `pending_requests`
-            Poll::Ready(Some((peer_id, request, response_tx))) => {
-                let _request_id = self.send_request(&peer_id, request, response_tx);
-            },
-            // the channel was closed
-            Poll::Ready(None) => panic!("request-response channel has been closed"),
-            Poll::Pending => (),
-        }
-
-        if let Some(event) = self.events.pop_front() {
-            // forward a pending event to the top
-            return Poll::Ready(NetworkBehaviourAction::GenerateEvent(event));
-        }
-
-        while let Poll::Ready(Some(())) = self.timeout_interval.poll_next_unpin(cx) {
-            let now = Instant::now();
-            let timeout = self.timeout;
-            self.pending_requests.retain(|request_id, pending_request| {
-                let retain = now.duration_since(pending_request.initiated_at) < timeout;
-                if !retain {
-                    warn!("Request {} timed out", request_id);
-                }
-                retain
-            });
-        }
-
-        Poll::Pending
-    }
-
     fn process_request(
         &mut self,
         peer_id: PeerId,
@@ -163,13 +120,11 @@ impl RequestResponseBehaviour {
                     error!("{:?}. Request {:?} is not processed", e, request_id);
                 }
             },
-            _ => error!("Received unknown request {:?}", request_id),
+            _ => debug!("Ignoring response for no-longer-pending request {:?}", request_id),
         }
     }
-}
 
-impl NetworkBehaviourEventProcess<RequestResponseEvent<PeerRequest, PeerResponse>> for RequestResponseBehaviour {
-    fn inject_event(&mut self, event: RequestResponseEvent<PeerRequest, PeerResponse>) {
+    fn process_event(&mut self, event: RequestResponseEvent<PeerRequest, PeerResponse>) {
         let (peer_id, message) = match event {
             RequestResponseEvent::Message { peer, message } => (peer, message),
             RequestResponseEvent::InboundFailure { error, .. } => {
@@ -186,6 +141,15 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeerRequest, PeerResponse
                 request_id,
                 error,
             } => {
+                // The local timeout can expire before libp2p emits the terminal failure.
+                // The caller has already been notified by the dropped oneshot sender in that case.
+                if !self.pending_requests.contains_key(&request_id) {
+                    debug!(
+                        "Ignoring late outbound failure {:?} for no-longer-pending request {:?} to peer {:?}",
+                        error, request_id, peer
+                    );
+                    return;
+                }
                 match &error {
                     OutboundFailure::UnsupportedProtocols => debug!(
                         "Peer {:?} does not support request-response protocol for request {:?}",
@@ -215,6 +179,108 @@ impl NetworkBehaviourEventProcess<RequestResponseEvent<PeerRequest, PeerResponse
                 self.process_response(request_id, response)
             },
         }
+    }
+}
+
+impl NetworkBehaviour for RequestResponseBehaviour {
+    type ConnectionHandler = THandler<RequestResponse<Codec<Protocol, PeerRequest, PeerResponse>>>;
+    type ToSwarm = RequestResponseBehaviourEvent;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.inner
+            .handle_established_inbound_connection(connection_id, peer, local_addr, remote_addr)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        peer: PeerId,
+        addr: &Multiaddr,
+        role_override: Endpoint,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        self.inner
+            .handle_established_outbound_connection(connection_id, peer, addr, role_override)
+    }
+
+    fn handle_pending_inbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        local_addr: &Multiaddr,
+        remote_addr: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        self.inner
+            .handle_pending_inbound_connection(connection_id, local_addr, remote_addr)
+    }
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        maybe_peer: Option<PeerId>,
+        addresses: &[Multiaddr],
+        effective_role: Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        self.inner
+            .handle_pending_outbound_connection(connection_id, maybe_peer, addresses, effective_role)
+    }
+
+    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) { self.inner.on_swarm_event(event) }
+
+    fn on_connection_handler_event(
+        &mut self,
+        peer_id: PeerId,
+        connection_id: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        self.inner.on_connection_handler_event(peer_id, connection_id, event)
+    }
+
+    fn poll(
+        &mut self,
+        cx: &mut Context,
+        params: &mut impl PollParameters,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        // Poll the `rx` for locally-initiated requests to forward through the network.
+        match self.rx.poll_next_unpin(cx) {
+            Poll::Ready(Some((peer_id, request, response_tx))) => {
+                let _request_id = self.send_request(&peer_id, request, response_tx);
+            },
+            Poll::Ready(None) => panic!("request-response channel has been closed"),
+            Poll::Pending => (),
+        }
+
+        // Drive the inner request-response behaviour, processing its generated events locally
+        // and forwarding all other swarm actions unchanged.
+        loop {
+            match self.inner.poll(cx, params) {
+                Poll::Ready(ToSwarm::GenerateEvent(event)) => self.process_event(event),
+                Poll::Ready(other) => return Poll::Ready(other.map_out(|_| unreachable!())),
+                Poll::Pending => break,
+            }
+        }
+
+        if let Some(event) = self.events.pop_front() {
+            return Poll::Ready(ToSwarm::GenerateEvent(event));
+        }
+
+        while let Poll::Ready(Some(())) = self.timeout_interval.poll_next_unpin(cx) {
+            let now = Instant::now();
+            let timeout = self.timeout;
+            self.pending_requests.retain(|request_id, pending_request| {
+                let retain = now.duration_since(pending_request.initiated_at) < timeout;
+                if !retain {
+                    warn!("Request {} timed out", request_id);
+                }
+                retain
+            });
+        }
+
+        Poll::Pending
     }
 }
 
@@ -257,27 +323,17 @@ macro_rules! try_io {
     };
 }
 
-impl ProtocolName for Protocol {
-    fn protocol_name(&self) -> &[u8] {
+impl AsRef<str> for Protocol {
+    fn as_ref(&self) -> &str {
         match self {
-            Protocol::Version2 => b"/request-response/2",
+            Protocol::Version2 => "/request-response/2",
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Protocol, ProtocolName};
-
-    #[test]
-    fn protocol_name_is_version2() {
-        assert_eq!(Protocol::Version2.protocol_name(), b"/request-response/2");
     }
 }
 
 #[async_trait]
 impl<
-        Proto: Clone + ProtocolName + Send + Sync,
+        Proto: Clone + AsRef<str> + Send + Sync,
         Req: DeserializeOwned + Serialize + Send + Sync,
         Res: DeserializeOwned + Serialize + Send + Sync,
     > RequestResponseCodec for Codec<Proto, Req, Res>
@@ -339,4 +395,14 @@ where
         ));
     }
     write_length_prefixed(io, data).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Protocol;
+
+    #[test]
+    fn protocol_name_is_version2() {
+        assert_eq!(Protocol::Version2.as_ref(), "/request-response/2");
+    }
 }

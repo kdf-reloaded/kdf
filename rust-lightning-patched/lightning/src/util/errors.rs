@@ -18,85 +18,85 @@ use core::fmt;
 /// too-high values)
 #[derive(Clone, PartialEq)]
 pub enum APIError {
-	/// Indicates the API was wholly misused (see err for more). Cases where these can be returned
-	/// are documented, but generally indicates some precondition of a function was violated.
-	APIMisuseError {
-		/// A human-readable error message
-		err: String
-	},
-	/// Due to a high feerate, we were unable to complete the request.
-	/// For example, this may be returned if the feerate implies we cannot open a channel at the
-	/// requested value, but opening a larger channel would succeed.
-	FeeRateTooHigh {
-		/// A human-readable error message
-		err: String,
-		/// The feerate which was too high.
-		feerate: u32
-	},
-	/// A malformed Route was provided (eg overflowed value, node id mismatch, overly-looped route,
-	/// too-many-hops, etc).
-	RouteError {
-		/// A human-readable error message
-		err: &'static str
-	},
-	/// We were unable to complete the request as the Channel required to do so is unable to
-	/// complete the request (or was not found). This can take many forms, including disconnected
-	/// peer, channel at capacity, channel shutting down, etc.
-	ChannelUnavailable {
-		/// A human-readable error message
-		err: String
-	},
-	/// An attempt to call watch/update_channel returned an Err (ie you did this!), causing the
-	/// attempted action to fail.
-	MonitorUpdateFailed,
-	/// [`KeysInterface::get_shutdown_scriptpubkey`] returned a shutdown scriptpubkey incompatible
-	/// with the channel counterparty as negotiated in [`InitFeatures`].
-	///
-	/// Using a SegWit v0 script should resolve this issue. If you cannot, you won't be able to open
-	/// a channel or cooperatively close one with this peer (and will have to force-close instead).
-	///
-	/// [`KeysInterface::get_shutdown_scriptpubkey`]: crate::chain::keysinterface::KeysInterface::get_shutdown_scriptpubkey
-	/// [`InitFeatures`]: crate::ln::features::InitFeatures
-	IncompatibleShutdownScript {
-		/// The incompatible shutdown script.
-		script: ShutdownScript,
-	},
+    /// Indicates the API was wholly misused (see err for more). Cases where these can be returned
+    /// are documented, but generally indicates some precondition of a function was violated.
+    APIMisuseError {
+        /// A human-readable error message
+        err: String,
+    },
+    /// Due to a high feerate, we were unable to complete the request.
+    /// For example, this may be returned if the feerate implies we cannot open a channel at the
+    /// requested value, but opening a larger channel would succeed.
+    FeeRateTooHigh {
+        /// A human-readable error message
+        err: String,
+        /// The feerate which was too high.
+        feerate: u32,
+    },
+    /// A malformed Route was provided (eg overflowed value, node id mismatch, overly-looped route,
+    /// too-many-hops, etc).
+    RouteError {
+        /// A human-readable error message
+        err: &'static str,
+    },
+    /// We were unable to complete the request as the Channel required to do so is unable to
+    /// complete the request (or was not found). This can take many forms, including disconnected
+    /// peer, channel at capacity, channel shutting down, etc.
+    ChannelUnavailable {
+        /// A human-readable error message
+        err: String,
+    },
+    /// An attempt to call watch/update_channel returned an Err (ie you did this!), causing the
+    /// attempted action to fail.
+    MonitorUpdateFailed,
+    /// [`KeysInterface::get_shutdown_scriptpubkey`] returned a shutdown scriptpubkey incompatible
+    /// with the channel counterparty as negotiated in [`InitFeatures`].
+    ///
+    /// Using a SegWit v0 script should resolve this issue. If you cannot, you won't be able to open
+    /// a channel or cooperatively close one with this peer (and will have to force-close instead).
+    ///
+    /// [`KeysInterface::get_shutdown_scriptpubkey`]: crate::chain::keysinterface::KeysInterface::get_shutdown_scriptpubkey
+    /// [`InitFeatures`]: crate::ln::features::InitFeatures
+    IncompatibleShutdownScript {
+        /// The incompatible shutdown script.
+        script: ShutdownScript,
+    },
 }
 
 impl fmt::Debug for APIError {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		match *self {
-			APIError::APIMisuseError {ref err} => write!(f, "Misuse error: {}", err),
-			APIError::FeeRateTooHigh {ref err, ref feerate} => write!(f, "{} feerate: {}", err, feerate),
-			APIError::RouteError {ref err} => write!(f, "Route error: {}", err),
-			APIError::ChannelUnavailable {ref err} => write!(f, "Channel unavailable: {}", err),
-			APIError::MonitorUpdateFailed => f.write_str("Client indicated a channel monitor update failed"),
-			APIError::IncompatibleShutdownScript { ref script } => {
-				write!(f, "Provided a scriptpubkey format not accepted by peer: {}", script)
-			},
-		}
-	}
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            APIError::APIMisuseError { ref err } => write!(f, "Misuse error: {}", err),
+            APIError::FeeRateTooHigh { ref err, ref feerate } => write!(f, "{} feerate: {}", err, feerate),
+            APIError::RouteError { ref err } => write!(f, "Route error: {}", err),
+            APIError::ChannelUnavailable { ref err } => write!(f, "Channel unavailable: {}", err),
+            APIError::MonitorUpdateFailed => f.write_str("Client indicated a channel monitor update failed"),
+            APIError::IncompatibleShutdownScript { ref script } => {
+                write!(f, "Provided a scriptpubkey format not accepted by peer: {}", script)
+            },
+        }
+    }
 }
 
 #[inline]
 pub(crate) fn get_onion_debug_field(error_code: u16) -> (&'static str, usize) {
-	match error_code & 0xff {
-		4|5|6 => ("sha256_of_onion", 32),
-		11|12 => ("htlc_msat", 8),
-		13|18 => ("cltv_expiry", 4),
-		19 => ("incoming_htlc_msat", 8),
-		20 => ("flags", 2),
-		_ => ("", 0),
-	}
+    match error_code & 0xff {
+        4 | 5 | 6 => ("sha256_of_onion", 32),
+        11 | 12 => ("htlc_msat", 8),
+        13 | 18 => ("cltv_expiry", 4),
+        19 => ("incoming_htlc_msat", 8),
+        20 => ("flags", 2),
+        _ => ("", 0),
+    }
 }
 
 #[inline]
 pub(crate) fn get_onion_error_description(error_code: u16) -> (&'static str, &'static str) {
-	const BADONION: u16 = 0x8000;
-	const PERM: u16 = 0x4000;
-	const NODE: u16 = 0x2000;
-	const UPDATE: u16 = 0x1000;
-	match error_code {
+    const BADONION: u16 = 0x8000;
+    const PERM: u16 = 0x4000;
+    const NODE: u16 = 0x2000;
+    const UPDATE: u16 = 0x1000;
+    match error_code {
 		_c if _c == PERM|1 => ("The realm byte was not understood by the processing node", "invalid_realm"),
 		_c if _c == NODE|2 => ("Node indicated temporary node failure", "temporary_node_failure"),
 		_c if _c == PERM|NODE|2 => ("Node indicated permanent node failure", "permanent_node_failure"),

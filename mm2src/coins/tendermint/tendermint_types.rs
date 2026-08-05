@@ -113,6 +113,24 @@ pub struct TendermintProtocolInfo {
     pub account_prefix: String,
     pub chain_id: ChainId,
     pub(super) gas_price: Option<f64>,
+    /// Configured destination bech32 account-prefix (HRP) -> integer ICS-20
+    /// channel number map (R36.3.1). Seeds `ibc_channel_for_prefix`; defaults to
+    /// empty when the coin config omits it.
+    #[serde(default)]
+    pub(super) ibc_channels: HashMap<String, u64>,
+}
+
+impl TendermintProtocolInfo {
+    /// Resolve the configured outbound ICS-20 channel id (`channel-N`) toward a
+    /// destination chain identified by its bech32 account-prefix (HRP), if one is
+    /// configured in `ibc_channels` (R36.3.1 / ch.18 §18.4). Returns `None` when
+    /// no channel is configured for the prefix.
+    #[allow(dead_code)]
+    pub(crate) fn ibc_channel_for_prefix(&self, dest_prefix: &str) -> Option<String> {
+        self.ibc_channels
+            .get(dest_prefix)
+            .map(|channel| format!("channel-{channel}"))
+    }
 }
 
 #[derive(Clone)]

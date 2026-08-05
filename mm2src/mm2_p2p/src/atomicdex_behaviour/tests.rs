@@ -425,7 +425,7 @@ async fn test_subscribe_propagates_to_remote_peer() {
 
     let topic = "tp3-smoke-subscribe".to_owned();
 
-    let relay_subs: Arc<Mutex<Vec<crate::gossipsub::TopicHash>>> = Arc::new(Mutex::new(Vec::new()));
+    let relay_subs: Arc<Mutex<Vec<libp2p::gossipsub::TopicHash>>> = Arc::new(Mutex::new(Vec::new()));
     let relay_subs_cpy = relay_subs.clone();
 
     let relay_port = next_port();

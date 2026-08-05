@@ -134,6 +134,10 @@ pub(crate) use abi::{AbiError, Contract, Function, Token};
 
 #[cfg(test)] mod abi_golden_tests;
 #[cfg(test)] mod eth_tests;
+// Local `geth --dev` integration tests for the v1 ETH/ERC20 HTLC payment +
+// refund path. Native only; they skip themselves when `geth` is not on PATH.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod eth_swap_dev_tests;
 // Emulator-gated EVM Trezor signing integration tests (CRD §50.8). Native,
 // non-iOS, and only when the `trezor-emulator-tests` feature is on; they drive a
 // real `task::withdraw` against a running Trezor emulator.

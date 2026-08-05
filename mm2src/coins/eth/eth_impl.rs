@@ -1144,10 +1144,10 @@ impl EthCoin {
     /// (web3 instances, key pair, address and swap contracts) but carries the token's
     /// own ticker, contract address, decimals and confirmation requirement.
     ///
-    /// Per CRD §35.2.2 the token decimals are taken from the coin configuration; the
-    /// contract is not introspected. Returns an error if the configuration does not
-    /// declare a valid `decimals` value.
-    pub fn erc20_token_from_conf(
+    /// The token decimals are taken from the coin configuration when present.
+    /// If the configuration omits them, fall back to the ERC-20 `decimals()`
+    /// contract method like the legacy standalone ERC-20 activator does.
+    pub async fn erc20_token_from_conf_or_contract(
         &self,
         ticker: String,
         token_addr: Address,
@@ -1157,13 +1157,19 @@ impl EthCoin {
         let conf = crate::coin_conf(&ctx, &ticker);
         let decimals = match conf["decimals"].as_u64() {
             Some(d) if d > 0 && d <= 19 => d as u8,
-            _ => {
-                return Err(format!(
-                    "Token {} decimals must be declared in its coin configuration",
-                    ticker
-                ))
-            },
+            None | Some(0) => get_token_decimals(&self.web3, token_addr).await?,
+            Some(d) => return Err(format!("Token {} decimals {} is not supported", ticker, d)),
         };
+        Ok(self.erc20_token_from_decimals(ticker, token_addr, required_confirmations, decimals))
+    }
+
+    fn erc20_token_from_decimals(
+        &self,
+        ticker: String,
+        token_addr: Address,
+        required_confirmations: u64,
+        decimals: u8,
+    ) -> EthCoin {
         let token_impl = EthCoinImpl {
             signer: self.signer.clone(),
             my_address: self.my_address,
@@ -1194,7 +1200,7 @@ impl EthCoin {
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
             erc20_tokens_infos: Default::default(),
         };
-        Ok(EthCoin(Arc::new(token_impl)))
+        EthCoin(Arc::new(token_impl))
     }
 
     /// Downloads and saves ETH transaction history of my_address, relies on Parity trace_filter API
@@ -2897,7 +2903,10 @@ impl EthCoin {
                         .first()
                         .map(|val| increase_by_percent_one_gwei(*val, BASE_BLOCK_FEE_DIFF_PCT)),
                     Err(e) => {
-                        error!("Error {} on eth_feeHistory request", e);
+                        common::log::debug!(
+                            "Optional eth_feeHistory gas-price source is unavailable: {}; using remaining sources",
+                            e
+                        );
                         None
                     },
                 }

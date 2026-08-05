@@ -69,3 +69,58 @@ impl EventStreamer for SwapStatusStreamer {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mm2_event_stream::StreamingManager;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Registers the swap-status streamer, pushes `event` through it, and
+    /// returns the single [`Event`] delivered to a subscribed client.
+    async fn deliver(event: SwapStatusEvent) -> Arc<Event> {
+        let manager = StreamingManager::default();
+        let mut client = manager.new_client(1);
+        manager.add(1, SwapStatusStreamer).await.unwrap();
+        manager.send_fn(&StreamerId::SwapStatus, || event).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), client.rx.recv())
+            .await
+            .expect("timed out waiting for swap-status event")
+            .expect("streamer channel closed")
+    }
+
+    #[tokio::test]
+    async fn maker_v1_event_is_broadcast_with_stable_envelope() {
+        let uuid = Uuid::default();
+        let event = deliver(SwapStatusEvent::MakerV1 {
+            uuid,
+            event: MakerLegacyEvent::Finished,
+        })
+        .await;
+
+        assert_eq!(event.origin(), "SWAP_STATUS");
+        assert!(!event.is_error());
+        let (_, data) = event.get();
+        assert_eq!(data["swap_type"], "MakerV1");
+        assert_eq!(data["swap_data"]["uuid"], uuid.to_string());
+        assert_eq!(data["swap_data"]["event"]["type"], "Finished");
+    }
+
+    #[tokio::test]
+    async fn taker_v1_event_is_broadcast_with_stable_envelope() {
+        let uuid = Uuid::default();
+        let event = deliver(SwapStatusEvent::TakerV1 {
+            uuid,
+            event: TakerLegacyEvent::Finished,
+        })
+        .await;
+
+        assert_eq!(event.origin(), "SWAP_STATUS");
+        assert!(!event.is_error());
+        let (_, data) = event.get();
+        assert_eq!(data["swap_type"], "TakerV1");
+        assert_eq!(data["swap_data"]["uuid"], uuid.to_string());
+        assert_eq!(data["swap_data"]["event"]["type"], "Finished");
+    }
+}

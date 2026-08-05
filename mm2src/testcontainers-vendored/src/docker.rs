@@ -7,7 +7,7 @@ pub trait Docker
 where
     Self: Sized,
 {
-    fn run<I: Image>(&self, image: I) -> Container<Self, I>;
+    fn run<I: Image>(&self, image: I) -> Container<'_, Self, I>;
     fn logs(&self, id: &str) -> Logs;
     fn ports(&self, id: &str) -> Ports;
     fn rm(&self, id: &str);

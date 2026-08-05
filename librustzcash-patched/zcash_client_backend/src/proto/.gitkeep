@@ -1,5 +1,0 @@
-# Placeholder so the gitignored build-output directory `src/proto/` exists on a
-# fresh checkout. The crate's build.rs runs `protobuf_codegen_pure` with
-# `out_dir("src/proto")`, which does not create the directory itself; without
-# this placeholder a clean clone fails to build with ENOENT. Generated `*.rs`
-# files in this directory remain gitignored.

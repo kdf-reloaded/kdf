@@ -28,7 +28,8 @@ impl TokenOf for SplToken {
     type PlatformCoin = SolanaCoin;
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl TokenInitializer for SplTokenInitializer {
     type Token = SplToken;
     type TokenActivationRequest = SplActivationRequest;

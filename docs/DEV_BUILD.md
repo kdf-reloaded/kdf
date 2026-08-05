@@ -171,13 +171,18 @@ Below are significant `mm2_main` build features (from `mm2src/mm2_main/Cargo.tom
 
 ### 4.1 `unsafe-rpc-wire-dump` (latest)
 
-Enables debugging-only RPC request/response wire dump code paths.
+Enables debugging-only RPC request/response wire dump code paths. This feature is intended
+for development and debugging; the compiled code is dormant until activated at runtime.
 
-- Runtime gate required: `MM2_RPC_WIRE_DUMP=1`
-- Secret redaction is default.
-- Full unredacted dump requires: `MM2_RPC_WIRE_DUMP_SECRETS=1`
+- **Compile-time guard:** Feature flag gates the code paths
+- **Runtime gate:** `MM2_RPC_WIRE_DUMP=1` environment variable activates dumping
+- **Secret redaction:** Default behavior redacts sensitive data (mnemonics, keys, etc.)
+- **Full dump:** Set `MM2_RPC_WIRE_DUMP_SECRETS=1` to dump unredacted (use with caution)
 
-Example:
+**Release profile note:** See section 4.2 (`unsafe-rpc-wire-dump-release-override`) for using
+this feature in release builds.
+
+Example (dev profile):
 
 ```bash
 cd mm2src
@@ -188,13 +193,23 @@ MM2_RPC_WIRE_DUMP=1 cargo build -p mm2_main --features unsafe-rpc-wire-dump
 
 Explicit override that permits release-profile builds when `unsafe-rpc-wire-dump` is enabled.
 
-Without this override, release build is intentionally blocked.
+The `mm2_main` build script (in `build.rs`) enforces that this override flag must be set
+whenever `unsafe-rpc-wire-dump` is used with a release profile, to prevent accidental
+production builds containing debugging code. When building in dev profile, the override
+is not required.
 
-Example:
+Example (release with override):
 
 ```bash
 cd mm2src
 cargo build -p mm2_main --release --features unsafe-rpc-wire-dump,unsafe-rpc-wire-dump-release-override
+```
+
+Example (dev profile, override not required):
+
+```bash
+cd mm2src
+cargo build -p mm2_main --features unsafe-rpc-wire-dump
 ```
 
 ### 4.3 `regtest-netid`
@@ -287,11 +302,14 @@ via GitHub Actions.
 ### 7.1) Per-platform build workflows
 
 Each target has a dedicated workflow under `.github/workflows/` that accepts a
-`profile` input (`release` / `dev`) and can be run on its own or reused by an
-umbrella workflow:
+`profile` input (`release` / `dev`) and an optional `features` input (comma-separated
+Cargo feature flags) that can be run on its own or reused by an umbrella workflow:
 
 - `build-linux.yml`, `build-macos.yml`, `build-windows.yml`, `build-ios.yml`,
   `build-android.yml`, `build-wasm.yml`.
+
+The `features` parameter is particularly useful for enabling debugging features like
+`unsafe-rpc-wire-dump` across all platforms via a single workflow invocation.
 
 **Linux is built inside a pinned Debian 11 container (glibc 2.31).** This gives
 the shipped binary a deliberately low glibc floor so it runs on any host with
@@ -306,6 +324,25 @@ Unsigned, all-platform snapshot builds, **manual only** (`workflow_dispatch`).
 Use the "Run workflow" button to snapshot any ref on demand. Artifacts are
 uploaded as GitHub Actions run artifacts; they are **not** checksummed, signed,
 or published as a GitHub Release.
+
+### 7.2a) Dev snapshots with RPC dump — `dev-build-rpc.yml`
+
+Variant of `dev-build.yml` that builds all platforms with the `unsafe-rpc-wire-dump`
+and `unsafe-rpc-wire-dump-release-override` features enabled. This produces debug
+binaries capable of capturing and dumping RPC request/response wire traffic.
+
+**Requires both features together:** The `build.rs` build script in `mm2_main` enforces
+that `unsafe-rpc-wire-dump-release-override` must be enabled when building in release
+profile with the `unsafe-rpc-wire-dump` feature, to prevent accidental production builds
+with debugging code. The CI workflow automatically includes both features.
+
+**Runtime activation:** The wire dump code is compiled in but inactive by default.
+Enable it with environment variables:
+
+```bash
+MM2_RPC_WIRE_DUMP=1 ./kdf          # Dump RPC wire traffic (secrets redacted)
+MM2_RPC_WIRE_DUMP_SECRETS=1 ./kdf  # Full unredacted dump (caution: sensitive data)
+```
 
 ### 7.3) Staging snapshots — `staging-build.yml`
 

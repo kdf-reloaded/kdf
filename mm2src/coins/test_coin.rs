@@ -293,4 +293,10 @@ impl MmCoin for TestCoin {
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
     fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { true }
+
+    fn burn_pubkey(&self) -> Vec<u8> { Vec::new() }
+
+    fn should_burn_directly(&self) -> bool { false }
+
+    fn should_burn_dex_fee(&self) -> bool { false }
 }

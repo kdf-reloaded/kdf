@@ -1,0 +1,51 @@
+name: Security Audit
+
+on:
+  push:
+    branches: [ reloaded-gplv2-base, dev ]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/audit.yml'
+  pull_request:
+    branches: [ reloaded-gplv2-base, dev ]
+    paths:
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - 'deny.toml'
+      - '.github/workflows/audit.yml'
+  # Weekly run so a freshly published advisory against an already-pinned
+  # dependency is surfaced even without a dependency change.
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  advisories:
+    # Fails only on vulnerability / unsound advisories that are NOT in
+    # deny.toml's accepted `ignore` list. The accepted advisories (libp2p 0.52
+    # fork TLS/net stack, Solana SDK, WalletConnect, vendored zcash), the
+    # scheduled reloaded-owned migrations (rusqlite, metrics) and the accepted
+    # transitive unsound advisories are documented with per-advisory rationale
+    # in deny.toml; see docs/reloaded-rewrite/28-libp2p-modernization.md (OQ2)
+    # for the libp2p residue. A newly disclosed advisory outside that list
+    # turns this job red.
+    #
+    # deny.toml uses cargo-deny schema v2, so cargo-deny is pinned to a known
+    # version rather than floating (a floating minor could change the config
+    # schema and break the parse, as the pre-0.16 -> v2 migration did).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - name: cargo-deny (advisories)
+        run: cargo deny check advisories

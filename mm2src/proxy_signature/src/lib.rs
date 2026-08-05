@@ -40,9 +40,9 @@ impl RawMessage {
         uri: &Uri,
         body_size: usize,
         expires_in_seconds: i64,
-    ) -> Result<ProxySign, libp2p::identity::error::SigningError> {
+    ) -> Result<ProxySign, libp2p::identity::SigningError> {
         let pubkey = keypair.public();
-        let encoded_pk = pubkey.to_protobuf_encoding();
+        let encoded_pk = pubkey.encode_protobuf();
         let peer_id = PeerId::from_public_key(&pubkey);
 
         let expires_at = Utc::now().timestamp() + expires_in_seconds;
@@ -115,7 +115,7 @@ impl ProxySign {
         }
 
         // Decode the public key from the protobuf blob.
-        let pubkey = match PublicKey::from_protobuf_encoding(&self.raw_message.public_key_encoded) {
+        let pubkey = match PublicKey::try_decode_protobuf(&self.raw_message.public_key_encoded) {
             Ok(k) => k,
             Err(_) => return false,
         };
@@ -143,10 +143,10 @@ mod tests {
 
     fn test_keypair() -> Keypair {
         // Deterministic Ed25519 keypair for reproducible tests.
-        let seed: [u8; 32] = [42; 32];
-        let secret = libp2p::identity::ed25519::SecretKey::from_bytes(seed).unwrap();
+        let mut seed: [u8; 32] = [42; 32];
+        let secret = libp2p::identity::ed25519::SecretKey::try_from_bytes(&mut seed).unwrap();
         let ed_kp = libp2p::identity::ed25519::Keypair::from(secret);
-        Keypair::Ed25519(ed_kp)
+        Keypair::from(ed_kp)
     }
 
     fn test_uri() -> Uri { "https://proxy.example.com/rpc".parse().unwrap() }

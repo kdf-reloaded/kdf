@@ -154,7 +154,7 @@ impl<'a> SqlCreateTable<'a> {
     }
 
     pub fn create(self) -> SqlResult<()> {
-        self.conn.execute(&self.sql()?, rusqlite::NO_PARAMS)?;
+        self.conn.execute(&self.sql()?, [])?;
         Ok(())
     }
 

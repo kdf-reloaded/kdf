@@ -43,7 +43,7 @@ fn test_ip(ctx: &MmArc, ip: IpAddr) -> Result<(), String> {
         }
         attempts_left -= 1;
         // TODO: Avoid `mypubport`.
-        let port = rng.gen_range(1111, 65535);
+        let port = rng.gen_range(1111..65535);
         log::info!("Trying to bind on {}:{}", ip, port);
         match std::net::TcpListener::bind((ip, port)) {
             Ok(_) => break Ok(()),

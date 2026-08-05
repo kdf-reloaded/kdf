@@ -374,7 +374,7 @@ mod wasm_tests {
             let uuid = new_uuid();
             let my_coin = *coins.choose(&mut rng).unwrap();
             let other_coin = *coins.choose(&mut rng).unwrap();
-            let started_at = rng.gen_range(timestamp_range.start, timestamp_range.end);
+            let started_at = rng.gen_range(timestamp_range.start..timestamp_range.end);
 
             if is_applied(&filters, my_coin, other_coin, started_at) {
                 expected_uuids.insert(OrderedUuid {

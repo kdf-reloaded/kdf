@@ -33,7 +33,7 @@ fn solana_prerequisites() {
             "shoot island position soft burden budget tooth cruel issue economy destroy above".to_string(),
         );
         let public_address = fin.pubkey().to_string();
-        let priv_key = &fin.secret().to_bytes()[..].to_base58();
+        let priv_key = &fin.secret_bytes()[..].to_base58();
         assert_eq!(public_address.len(), 44);
         assert_eq!(public_address, "2bUBiBNZyD29gP1oV6de7nxowMLoDBtopMMTGgMvjG5m");
         assert_eq!(priv_key, "F6czu7fdefbsCDH52JesQrBSJS5Sz25AkPLWFf8zUWhm");

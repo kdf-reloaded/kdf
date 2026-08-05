@@ -1,18 +1,14 @@
 use super::*;
 use common::executor::{spawn, Timer};
+use common::log::{LogArc, Tag};
 use gstuff::Constructible;
 use hdrhistogram::Histogram;
 use itertools::Itertools;
-use metrics_core::{Builder, Drain, Key, Label, Observe, Observer, ScopedString};
-use metrics_runtime::{observers::PrometheusBuilder, Receiver};
-use metrics_util::{parse_quantiles, Quantile};
 use serde_json as json;
 use std::collections::HashMap;
-use std::fmt::Write as WriteFmt;
-use std::slice::Iter;
-
-use common::log::{LogArc, Tag};
-pub use metrics_runtime::Sink;
+use std::fmt::Write;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Increment counter if an MmArc is not dropped yet and metrics system is initialized already.
 #[macro_export]
@@ -64,8 +60,293 @@ macro_rules! mm_timing {
     }};
 }
 
-/// Default quantiles are "min" and "max"
+/// Default quantiles are "min" and "max".
 const QUANTILES: &[f64] = &[0.0, 1.0];
+
+/// Significant figures used for the timing histograms (see `Histogram::new`).
+const HIST_SIGFIG: u8 = 3;
+
+/// A single metric label (key/value pair) attached to a metric sample.
+///
+/// Replaces the former `metrics_core::Label`; kept as a first-class public type
+/// because the `mm_counter!`/`mm_gauge!`/`mm_timing!` macros construct it directly.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MetricLabel {
+    key: String,
+    value: String,
+}
+
+impl MetricLabel {
+    pub fn new<K: Into<String>, V: Into<String>>(key: K, value: V) -> MetricLabel {
+        MetricLabel {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn key(&self) -> &str { &self.key }
+
+    pub fn value(&self) -> &str { &self.value }
+}
+
+/// Identifies a metric by its name and the (ordered) set of labels attached to it.
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct MetricKey {
+    name: String,
+    labels: Vec<MetricLabel>,
+}
+
+impl MetricKey {
+    fn labels_map(&self) -> HashMap<String, String> {
+        self.labels
+            .iter()
+            .map(|label| (label.key.clone(), label.value.clone()))
+            .collect()
+    }
+
+    fn tags(&self) -> Vec<Tag> {
+        self.labels
+            .iter()
+            .map(|label| Tag {
+                key: label.key.clone(),
+                val: Some(label.value.clone()),
+            })
+            .collect()
+    }
+}
+
+/// In-memory metric storage for a single `Metrics` instance.
+#[derive(Default)]
+struct RegistryInner {
+    counters: HashMap<MetricKey, u64>,
+    gauges: HashMap<MetricKey, i64>,
+    histograms: HashMap<MetricKey, Histogram<u64>>,
+}
+
+/// A per-instance metrics registry. Cheap to share via `Arc`; the monotonic
+/// `start` instant provides the clock used by `Sink::now`.
+struct Registry {
+    inner: Mutex<RegistryInner>,
+    start: Instant,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Registry {
+            inner: Mutex::new(RegistryInner::default()),
+            start: Instant::now(),
+        }
+    }
+}
+
+impl Registry {
+    fn collect_json(&self) -> MetricsJson {
+        let inner = self.inner.lock().expect("metrics registry poisoned");
+        let mut metrics = Vec::new();
+
+        for (key, value) in inner.counters.iter() {
+            metrics.push(MetricType::Counter {
+                key: key.name.clone(),
+                labels: key.labels_map(),
+                value: *value,
+            });
+        }
+
+        for (key, value) in inner.gauges.iter() {
+            metrics.push(MetricType::Gauge {
+                key: key.name.clone(),
+                labels: key.labels_map(),
+                value: *value,
+            });
+        }
+
+        for (key, hist) in inner.histograms.iter() {
+            let mut quantiles = hist_at_quantiles(hist, QUANTILES);
+            quantiles.insert("count".into(), hist.len());
+            metrics.push(MetricType::Histogram {
+                key: key.name.clone(),
+                labels: key.labels_map(),
+                quantiles,
+            });
+        }
+
+        MetricsJson { metrics }
+    }
+
+    /// Render the collected metrics in Prometheus text exposition format.
+    fn collect_prometheus(&self) -> String {
+        let inner = self.inner.lock().expect("metrics registry poisoned");
+        let mut out = String::new();
+
+        // Group by sanitized metric name so each `# TYPE` line is emitted once.
+        let mut counters: HashMap<String, Vec<(&MetricKey, u64)>> = HashMap::new();
+        for (key, value) in inner.counters.iter() {
+            counters.entry(sanitize(&key.name)).or_default().push((key, *value));
+        }
+        for name in counters.keys().sorted() {
+            let _ = writeln!(out, "# TYPE {} counter", name);
+            for (key, value) in counters[name].iter().sorted_by(|a, b| a.0.labels.cmp(&b.0.labels)) {
+                let _ = writeln!(out, "{}{} {}", name, render_labels(&key.labels, &[]), value);
+            }
+        }
+
+        let mut gauges: HashMap<String, Vec<(&MetricKey, i64)>> = HashMap::new();
+        for (key, value) in inner.gauges.iter() {
+            gauges.entry(sanitize(&key.name)).or_default().push((key, *value));
+        }
+        for name in gauges.keys().sorted() {
+            let _ = writeln!(out, "# TYPE {} gauge", name);
+            for (key, value) in gauges[name].iter().sorted_by(|a, b| a.0.labels.cmp(&b.0.labels)) {
+                let _ = writeln!(out, "{}{} {}", name, render_labels(&key.labels, &[]), value);
+            }
+        }
+
+        let mut histograms: HashMap<String, Vec<(&MetricKey, &Histogram<u64>)>> = HashMap::new();
+        for (key, hist) in inner.histograms.iter() {
+            histograms.entry(sanitize(&key.name)).or_default().push((key, hist));
+        }
+        for name in histograms.keys().sorted() {
+            let _ = writeln!(out, "# TYPE {} summary", name);
+            for (key, hist) in histograms[name].iter().sorted_by(|a, b| a.0.labels.cmp(&b.0.labels)) {
+                for &q in QUANTILES {
+                    let quantile = format!("{}", q);
+                    let value = hist.value_at_quantile(q);
+                    let labels = render_labels(&key.labels, &[("quantile", &quantile)]);
+                    let _ = writeln!(out, "{}{} {}", name, labels, value);
+                }
+                let base = render_labels(&key.labels, &[]);
+                let _ = writeln!(out, "{}_count{} {}", name, base, hist.len());
+            }
+        }
+
+        out
+    }
+}
+
+/// Sanitizes a metric name into a Prometheus-valid identifier (`[a-zA-Z0-9_:]`).
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == ':' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Renders a Prometheus label set `{k="v",...}`, optionally with extra labels
+/// appended (used to add the `quantile` label to histogram samples). Returns an
+/// empty string when there are no labels at all.
+fn render_labels(labels: &[MetricLabel], extra: &[(&str, &str)]) -> String {
+    if labels.is_empty() && extra.is_empty() {
+        return String::new();
+    }
+    let mut parts = Vec::with_capacity(labels.len() + extra.len());
+    for label in labels {
+        parts.push(format!(
+            "{}=\"{}\"",
+            sanitize(&label.key),
+            escape_label_value(&label.value)
+        ));
+    }
+    for (k, v) in extra {
+        parts.push(format!("{}=\"{}\"", sanitize(k), escape_label_value(v)));
+    }
+    format!("{{{}}}", parts.join(","))
+}
+
+fn escape_label_value(value: &str) -> String { value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n") }
+
+/// Values of a histogram at the requested quantiles, keyed by a human label
+/// (`min` for 0.0, `max` for 1.0, `p<NN>` otherwise).
+fn hist_at_quantiles(hist: &Histogram<u64>, quantiles: &[f64]) -> HashMap<String, u64> {
+    quantiles
+        .iter()
+        .map(|q| (quantile_label(*q), hist.value_at_quantile(*q)))
+        .collect()
+}
+
+fn quantile_label(q: f64) -> String {
+    if q == 0.0 {
+        "min".to_string()
+    } else if q == 1.0 {
+        "max".to_string()
+    } else {
+        format!("p{}", (q * 100.0) as u64)
+    }
+}
+
+/// Handle for sending metric samples into a `Registry`.
+///
+/// Cloneable and cheap; mirrors the sink API the `mm_*` macros expect.
+#[derive(Clone)]
+pub struct Sink {
+    registry: Arc<Registry>,
+}
+
+impl Sink {
+    /// Monotonically increasing timestamp in nanoseconds since registry creation,
+    /// used to bracket timing measurements passed to `record_timing`.
+    pub fn now(&self) -> u64 { self.registry.start.elapsed().as_nanos() as u64 }
+
+    pub fn increment_counter(&mut self, name: &str, value: u64) {
+        self.increment_counter_with_labels(name, value, Vec::new())
+    }
+
+    pub fn increment_counter_with_labels(&mut self, name: &str, value: u64, labels: Vec<MetricLabel>) {
+        let key = MetricKey {
+            name: name.to_string(),
+            labels,
+        };
+        let mut inner = self.registry.inner.lock().expect("metrics registry poisoned");
+        *inner.counters.entry(key).or_insert(0) += value;
+    }
+
+    pub fn update_gauge(&mut self, name: &str, value: i64) { self.update_gauge_with_labels(name, value, Vec::new()) }
+
+    pub fn update_gauge_with_labels(&mut self, name: &str, value: i64, labels: Vec<MetricLabel>) {
+        let key = MetricKey {
+            name: name.to_string(),
+            labels,
+        };
+        let mut inner = self.registry.inner.lock().expect("metrics registry poisoned");
+        inner.gauges.insert(key, value);
+    }
+
+    pub fn record_timing(&mut self, name: &str, start: u64, end: u64) {
+        self.record_timing_with_labels(name, start, end, Vec::new())
+    }
+
+    pub fn record_timing_with_labels(&mut self, name: &str, start: u64, end: u64, labels: Vec<MetricLabel>) {
+        let value = end.saturating_sub(start);
+        let key = MetricKey {
+            name: name.to_string(),
+            labels,
+        };
+        let mut inner = self.registry.inner.lock().expect("metrics registry poisoned");
+        let hist = inner
+            .histograms
+            .entry(key)
+            .or_insert_with(|| Histogram::new(HIST_SIGFIG).expect("HIST_SIGFIG is a valid significant-figures value"));
+        if let Err(err) = hist.record(value) {
+            log!("failed to record timing value: "(err));
+        }
+    }
+}
+
+pub struct Clock {
+    sink: Sink,
+}
+
+impl From<Sink> for Clock {
+    fn from(sink: Sink) -> Self { Clock { sink } }
+}
+
+impl ClockOps for Clock {
+    fn now(&self) -> u64 { self.sink.now() }
+}
 
 pub trait TrySink {
     fn try_sink(&self) -> Option<Sink>;
@@ -82,33 +363,19 @@ impl TrySink for MetricsWeak {
     }
 }
 
-pub struct Clock {
-    sink: Sink,
-}
-
-impl From<Sink> for Clock {
-    fn from(sink: Sink) -> Self { Clock { sink } }
-}
-
-impl ClockOps for Clock {
-    fn now(&self) -> u64 { self.sink.now() }
-}
-
 #[derive(Default)]
 pub struct Metrics {
-    /// `Receiver` receives and collect all the metrics sent through the `sink`.
-    /// The `receiver` can be initialized only once time.
-    receiver: Constructible<Receiver>,
+    /// The metric registry. Can be initialized only once.
+    registry: Constructible<Arc<Registry>>,
 }
 
 impl MetricsOps for Metrics {
     fn init(&self) -> Result<(), String> {
-        if self.receiver.is_some() {
+        if self.registry.is_some() {
             return ERR!("metrics system is initialized already");
         }
 
-        let receiver = try_s!(Receiver::builder().build());
-        let _ = try_s!(self.receiver.pin(receiver));
+        let _ = try_s!(self.registry.pin(Arc::new(Registry::default())));
 
         Ok(())
     }
@@ -116,278 +383,60 @@ impl MetricsOps for Metrics {
     fn init_with_dashboard(&self, log_state: LogWeak, record_interval: f64) -> Result<(), String> {
         self.init()?;
 
-        let controller = self.receiver.as_option().unwrap().controller();
-
-        let observer = TagObserver::new(QUANTILES);
-        let exporter = TagExporter {
-            log_state,
-            controller,
-            observer,
-        };
+        let registry = self.registry.as_option().unwrap().clone();
+        let exporter = TagExporter { log_state, registry };
 
         spawn(exporter.run(record_interval));
 
         Ok(())
     }
 
-    fn clock(&self) -> Result<Clock, String> { self.sink().map_err(|e| ERRL!("{}", e)).map(Clock::from) }
+    fn clock(&self) -> Result<Clock, String> { self.sink().map(Clock::from) }
 
     fn collect_json(&self) -> Result<Json, String> {
-        let receiver = try_s!(self.try_receiver());
-        let controller = receiver.controller();
-
-        let mut observer = JsonObserver::new(QUANTILES);
-
-        controller.observe(&mut observer);
-
-        observer.into_json()
+        let registry = try_s!(self.try_registry());
+        json::to_value(registry.collect_json()).map_err(|err| ERRL!("{}", err))
     }
 }
 
 impl Metrics {
-    /// Try get receiver.
-    fn try_receiver(&self) -> Result<&Receiver, String> {
-        self.receiver.ok_or("metrics system is not initialized yet".into())
+    fn try_registry(&self) -> Result<&Arc<Registry>, String> {
+        self.registry
+            .as_option()
+            .ok_or("metrics system is not initialized yet".into())
     }
 
-    fn sink(&self) -> Result<Sink, String> { Ok(try_s!(self.try_receiver()).sink()) }
+    fn sink(&self) -> Result<Sink, String> {
+        let registry = self.try_registry()?.clone();
+        Ok(Sink { registry })
+    }
 
     /// Collect the metrics in Prometheus format.
     pub fn collect_prometheus_format(&self) -> Result<String, String> {
-        let receiver = try_s!(self.try_receiver());
-        let controller = receiver.controller();
-
-        let mut observer = PrometheusBuilder::new().set_quantiles(QUANTILES).build();
-        controller.observe(&mut observer);
-
-        Ok(observer.drain())
+        let registry = try_s!(self.try_registry());
+        Ok(registry.collect_prometheus())
     }
 }
 
-type MetricName = ScopedString;
-
-type MetricLabels = Vec<Label>;
-
-type MetricNameValueMap = HashMap<MetricName, Integer>;
-
-#[derive(Clone, Eq, PartialEq, PartialOrd, Ord)]
-enum Integer {
-    Signed(i64),
-    Unsigned(u64),
-}
-
-impl std::fmt::Display for Integer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Integer::Signed(x) => write!(f, "{}", x),
-            Integer::Unsigned(x) => write!(f, "{}", x),
-        }
-    }
-}
-
-struct PreparedMetric {
-    tags: Vec<Tag>,
-    message: String,
-}
-
-/// Observes metrics and histograms in Tag format.
-struct TagObserver {
-    /// Supported quantiles like Min, 0.5, 0.8, Max
-    quantiles: Vec<Quantile>,
-    /// Metric:Value pair matching an unique set of labels.
-    metrics: HashMap<MetricLabels, MetricNameValueMap>,
-    /// Histograms present set of time measurements and analysis over the measurements
-    histograms: HashMap<Key, Histogram<u64>>,
-}
-
-impl TagObserver {
-    fn new(quantiles: &[f64]) -> Self {
-        TagObserver {
-            quantiles: parse_quantiles(quantiles),
-            metrics: Default::default(),
-            histograms: Default::default(),
-        }
-    }
-
-    fn prepare_metrics(&self) -> Vec<PreparedMetric> {
-        self.metrics
-            .iter()
-            .map(|(labels, name_value_map)| {
-                let tags = labels_to_tags(labels.iter());
-                let message = name_value_map_to_message(name_value_map);
-
-                PreparedMetric { tags, message }
-            })
-            .collect()
-    }
-
-    fn prepare_histograms(&self) -> Vec<PreparedMetric> {
-        self.histograms
-            .iter()
-            .map(|(key, hist)| {
-                let tags = labels_to_tags(key.labels());
-                let message = format!("{}: {}", key.name(), hist_to_message(hist, &self.quantiles));
-
-                PreparedMetric { tags, message }
-            })
-            .collect()
-    }
-
-    fn insert_metric(&mut self, key: Key, value: Integer) {
-        let (name, labels) = key.into_parts();
-        self.metrics
-            .entry(labels)
-            .and_modify(|name_value_map| {
-                name_value_map.insert(name.clone(), value.clone());
-            })
-            .or_insert({
-                let mut name_value_map = HashMap::new();
-                name_value_map.insert(name, value);
-                name_value_map
-            });
-    }
-
-    /// Clear metrics or histograms if it's necessary
-    /// after an exporter has turned the observer's metrics and histograms.
-    fn on_turned(&mut self) {
-        // clear histograms because they can be duplicated
-        self.histograms.clear();
-        // don't clear metrics because the keys don't changes often
-    }
-}
-
-impl Observer for TagObserver {
-    fn observe_counter(&mut self, key: Key, value: u64) { self.insert_metric(key, Integer::Unsigned(value)) }
-
-    fn observe_gauge(&mut self, key: Key, value: i64) { self.insert_metric(key, Integer::Signed(value)) }
-
-    fn observe_histogram(&mut self, key: Key, values: &[u64]) {
-        let entry = self.histograms.entry(key).or_insert({
-            // Use default significant figures value.
-            // For more info on `sigfig` see the Historgam::new_with_bounds().
-            let sigfig = 3;
-            match Histogram::new(sigfig) {
-                Ok(x) => x,
-                Err(err) => {
-                    log!("failed to create histogram: "(err));
-                    // do nothing on error
-                    return;
-                },
-            }
-        });
-
-        for value in values {
-            if let Err(err) = entry.record(*value) {
-                log!("failed to observe histogram value: "(err));
-            }
-        }
-    }
-}
-
-/// Observes metrics and histograms in Tag format.
-struct JsonObserver {
-    /// Supported quantiles like Min, 0.5, 0.8, Max.
-    quantiles: Vec<Quantile>,
-    /// Collected metrics and histograms as serializable and deserializable structure.
-    metrics: MetricsJson,
-}
-
-impl Observer for JsonObserver {
-    fn observe_counter(&mut self, key: Key, value: u64) {
-        let (key, labels) = key.into_parts();
-
-        let metric = MetricType::Counter {
-            key: key.to_string(),
-            labels: labels_into_parts(labels.iter()),
-            value,
-        };
-
-        self.metrics.metrics.push(metric);
-    }
-
-    fn observe_gauge(&mut self, key: Key, value: i64) {
-        let (key, labels) = key.into_parts();
-
-        let metric = MetricType::Gauge {
-            key: key.to_string(),
-            labels: labels_into_parts(labels.iter()),
-            value,
-        };
-
-        self.metrics.metrics.push(metric);
-    }
-
-    fn observe_histogram(&mut self, key: Key, values: &[u64]) {
-        let (key, labels) = key.into_parts();
-
-        // Use default significant figures value.
-        // For more info on `sigfig` see the Historgam::new_with_bounds().
-        let sigfig = 3;
-        let mut histogram = match Histogram::new(sigfig) {
-            Ok(x) => x,
-            Err(err) => {
-                log!("failed to create histogram: "(err));
-                // do nothing on error
-                return;
-            },
-        };
-
-        for value in values {
-            if let Err(err) = histogram.record(*value) {
-                log!("failed to observe histogram value: "(err));
-            }
-        }
-
-        let count = histogram.len() as u64;
-        let mut quantiles = hist_at_quantiles(histogram, &self.quantiles);
-        // add total quantiles number
-        quantiles.insert("count".into(), count);
-
-        let metric = MetricType::Histogram {
-            key: key.to_string(),
-            labels: labels_into_parts(labels.iter()),
-            quantiles,
-        };
-
-        self.metrics.metrics.push(metric);
-    }
-}
-
-impl JsonObserver {
-    fn new(quantiles: &[f64]) -> Self {
-        JsonObserver {
-            quantiles: parse_quantiles(quantiles),
-            metrics: Default::default(),
-        }
-    }
-
-    fn into_json(self) -> Result<Json, String> { json::to_value(self.metrics).map_err(|err| ERRL!("{}", err)) }
-}
-
-/// Exports metrics by converting them to a Tag format and log them using log::Status.
-struct TagExporter<C> {
+/// Exports metrics to the log using `log::Status` in Tag format, on an interval.
+struct TagExporter {
     /// Using a weak reference by default in order to avoid circular references and leaks.
     log_state: LogWeak,
-    /// Handle for acquiring metric snapshots.
-    controller: C,
-    /// Handle for converting snapshots into log.
-    observer: TagObserver,
+    /// The registry to snapshot on each turn.
+    registry: Arc<Registry>,
 }
 
-impl<C> TagExporter<C>
-where
-    C: Observe,
-{
-    /// Run endless async loop
-    async fn run(mut self, interval: f64) {
+impl TagExporter {
+    /// Run endless async loop.
+    async fn run(self, interval: f64) {
         loop {
             Timer::sleep(interval).await;
             self.turn();
         }
     }
 
-    /// Observe metrics and histograms and record it into the log in Tag format
-    fn turn(&mut self) {
+    /// Observe metrics and histograms and record them into the log in Tag format.
+    fn turn(&self) {
         let log_state = match LogArc::from_weak(&self.log_state) {
             Some(x) => x,
             // MmCtx is dropped already
@@ -396,77 +445,61 @@ where
 
         log!(">>>>>>>>>> DEX metrics <<<<<<<<<");
 
-        // Observe means fill the observer's metrics and histograms with actual values
-        self.controller.observe(&mut self.observer);
+        let inner = self.registry.inner.lock().expect("metrics registry poisoned");
 
-        for PreparedMetric { tags, message } in self.observer.prepare_metrics() {
+        // Group counters and gauges that share the same label set into a single
+        // `name=value ...` message tagged with those labels.
+        let mut grouped: HashMap<Vec<MetricLabel>, Vec<(String, String)>> = HashMap::new();
+        for (key, value) in inner.counters.iter() {
+            grouped
+                .entry(key.labels.clone())
+                .or_default()
+                .push((key.name.clone(), value.to_string()));
+        }
+        for (key, value) in inner.gauges.iter() {
+            grouped
+                .entry(key.labels.clone())
+                .or_default()
+                .push((key.name.clone(), value.to_string()));
+        }
+
+        for (labels, name_values) in grouped.iter() {
+            let tags = labels_to_tags(labels);
+            let message = name_values
+                .iter()
+                .sorted()
+                .map(|(name, value)| format!("{}={}", name, value))
+                .join(" ");
             log_state.log_deref_tags("", tags, &message);
         }
 
-        for PreparedMetric { tags, message } in self.observer.prepare_histograms() {
+        for (key, hist) in inner.histograms.iter() {
+            let tags = key.tags();
+            let message = format!("{}: {}", key.name, hist_to_message(hist, QUANTILES));
             log_state.log_deref_tags("", tags, &message);
         }
-
-        self.observer.on_turned();
     }
 }
 
-fn labels_to_tags(labels: Iter<Label>) -> Vec<Tag> {
+fn labels_to_tags(labels: &[MetricLabel]) -> Vec<Tag> {
     labels
-        .map(|label| Tag {
-            key: label.key().to_string(),
-            val: Some(label.value().to_string()),
-        })
-        .collect()
-}
-
-fn labels_into_parts(labels: Iter<Label>) -> HashMap<String, String> {
-    labels
-        .map(|label| (label.key().to_string(), label.value().to_string()))
-        .collect()
-}
-
-fn name_value_map_to_message(name_value_map: &MetricNameValueMap) -> String {
-    let mut message = String::with_capacity(256);
-    match wite!(message, for (key, value) in name_value_map.iter().sorted() { (key) "=" (value.to_string()) } separated {' '})
-    {
-        Ok(_) => message,
-        Err(err) => {
-            log!("Error " (err) " on format hist to message");
-            String::new()
-        },
-    }
-}
-
-fn hist_at_quantiles(hist: Histogram<u64>, quantiles: &[Quantile]) -> HashMap<String, u64> {
-    quantiles
         .iter()
-        .map(|quantile| {
-            let key = quantile.label().to_string();
-            let val = hist.value_at_quantile(quantile.value());
-            (key, val)
+        .map(|label| Tag {
+            key: label.key.clone(),
+            val: Some(label.value.clone()),
         })
         .collect()
 }
 
-fn hist_to_message(hist: &Histogram<u64>, quantiles: &[Quantile]) -> String {
-    let mut message = String::with_capacity(256);
-    let fmt_quantiles = quantiles.iter().map(|quantile| {
-        let key = quantile.label().to_string();
-        let val = hist.value_at_quantile(quantile.value());
-        format!("{}={}", key, val)
-    });
-
-    match wite!(message,
-                "count=" (hist.len())
-                if quantiles.is_empty() { "" } else { " " }
-                for q in fmt_quantiles { (q) } separated {' '}
-    ) {
-        Ok(_) => message,
-        Err(err) => {
-            log!("Error " (err) " on format hist to message");
-            String::new()
-        },
+fn hist_to_message(hist: &Histogram<u64>, quantiles: &[f64]) -> String {
+    let fmt_quantiles = quantiles
+        .iter()
+        .map(|q| format!("{}={}", quantile_label(*q), hist.value_at_quantile(*q)))
+        .join(" ");
+    if fmt_quantiles.is_empty() {
+        format!("count={}", hist.len())
+    } else {
+        format!("count={} {}", hist.len(), fmt_quantiles)
     }
 }
 
@@ -590,7 +623,6 @@ pub mod prometheus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::block_on;
     use common::log::LogState;
 
     #[test]
@@ -625,7 +657,7 @@ mod tests {
 
         mm_gauge!(metrics, "rpc.connection.count", 3, "coin" => "KMD");
 
-        // counter, gauge and timing may be collected also by sink API
+        // gauge takes the latest value for a given label set
         mm_gauge!(metrics, "rpc.connection.count", 5, "coin" => "KMD");
 
         let expected = json::json!({

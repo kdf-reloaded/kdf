@@ -4,7 +4,7 @@ use super::{StoredSession, WcStorageOps, WC_SESSION_TABLE};
 use crate::error::WalletConnectError;
 use async_trait::async_trait;
 use db_common::async_sql_conn::{AsyncConnError, AsyncConnection};
-use db_common::sqlite::rusqlite::{params, NO_PARAMS};
+use db_common::sqlite::rusqlite::params;
 
 impl From<AsyncConnError> for WalletConnectError {
     fn from(e: AsyncConnError) -> Self { WalletConnectError::Storage(e.to_string()) }
@@ -32,7 +32,7 @@ impl WcStorageOps for SqliteSessionStorage {
         );
         self.conn
             .call(move |conn| {
-                conn.execute(&sql, NO_PARAMS)?;
+                conn.execute(&sql, [])?;
                 Ok(())
             })
             .await?;
@@ -79,7 +79,7 @@ impl WcStorageOps for SqliteSessionStorage {
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
-                let mapped = stmt.query_map(NO_PARAMS, |row| {
+                let mapped = stmt.query_map([], |row| {
                     Ok(StoredSession {
                         topic: row.get(0)?,
                         data: row.get(1)?,

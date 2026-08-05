@@ -3,7 +3,7 @@
 //! Fee parameters match the original KomoDeFi codebase:
 //! - Base rate:  1/777  (~0.129%)
 //! - KMD rate:   9/7770 (~0.116%, 10% discount)
-//! - No burn mechanism
+//! - KMD burn:   25% of the DEX fee via OP_RETURN
 
 use lazy_static::lazy_static;
 use num_rational::BigRational;
@@ -44,21 +44,20 @@ impl NetConfig for Netid8762 {
     fn dex_fee_pubkey_ed25519(&self) -> &'static str { DEX_FEE_PUBKEY_ED25519 }
 
     fn dex_fee_rate(&self) -> BigRational {
-        // 1/777 ≈ 0.00129%
+        // 1/777 ≈ 0.129%
         BigRational::new(1.into(), 777.into())
     }
 
     fn fee_discount_tickers(&self) -> &'static [&'static str] { &["KMD"] }
 
     fn dex_fee_rate_discounted(&self) -> BigRational {
-        // 9/7770 ≈ 0.00116% (1/777 minus 10%)
+        // 9/7770 ≈ 0.116% (1/777 minus 10%)
         BigRational::new(9.into(), 7770.into())
     }
 
-    fn dex_fee_min_threshold(&self) -> BigRational {
-        // 0.0001
-        BigRational::new(1.into(), 10000.into())
-    }
+    fn burn_enabled(&self) -> bool { true }
+
+    fn dex_fee_share(&self) -> BigRational { BigRational::new(3.into(), 4.into()) }
 
     fn seed_nodes(&self) -> &'static [&'static str] { SEED_NODES }
 }

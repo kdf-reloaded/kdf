@@ -185,19 +185,6 @@ pub enum StartSimpleMakerBotError {
     InternalError(String),
 }
 
-#[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
-#[serde(tag = "error_type", content = "error_data")]
-pub enum SwapUpdateNotificationError {
-    #[display(fmt = "{}", _0)]
-    MyRecentSwapsError(MyRecentSwapsErr),
-    #[display(fmt = "Swap info not available")]
-    SwapInfoNotAvailable,
-}
-
-impl From<MyRecentSwapsErr> for SwapUpdateNotificationError {
-    fn from(e: MyRecentSwapsErr) -> Self { SwapUpdateNotificationError::MyRecentSwapsError(e) }
-}
-
 #[derive(Debug)]
 pub enum PriceServiceRequestError {
     HttpProcessError(String),

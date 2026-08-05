@@ -3,6 +3,8 @@ use crate::platform_coin_with_tokens::{EnablePlatformCoinWithTokensError, InitTo
 use crate::prelude::{CoinAddressInfo, CoinConfWithProtocolError, DerivationMethod};
 use crate::standalone_coin::InitStandaloneCoinError;
 use crate::token::EnableTokenError;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::z_coin_activation::ZcoinInitError;
 use coins::utxo::rpc_clients::UtxoRpcError;
 use coins::{BalanceError, CoinProtocol, UnexpectedDerivationMethod};
 use common::{HttpStatusCode, StatusCode};
@@ -620,6 +622,24 @@ fn test_standalone_error_from_rpc_task_error() {
 
     let e: InitStandaloneCoinError = RpcTaskError::Internal("rpc boom".into()).into();
     assert!(matches!(e, InitStandaloneCoinError::Internal(ref s) if s.contains("rpc boom")));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_zcoin_error_to_standalone_error_does_not_panic() {
+    let e: InitStandaloneCoinError = ZcoinInitError::CoinCreationError {
+        ticker: "ARRR".into(),
+        error: "lightwalletd unavailable".into(),
+    }
+    .into();
+    assert!(matches!(
+        e,
+        InitStandaloneCoinError::CoinCreationError { ref ticker, ref error }
+            if ticker == "ARRR" && error.contains("lightwalletd unavailable")
+    ));
+
+    let e: InitStandaloneCoinError = ZcoinInitError::HardwareWalletsAreNotSupportedYet.into();
+    assert!(matches!(e, InitStandaloneCoinError::PrivKeyNotAllowed(ref reason) if reason.contains("Hardware wallets")));
 }
 
 // ---------------------------------------------------------------------------

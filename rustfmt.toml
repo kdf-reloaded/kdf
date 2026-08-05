@@ -2,17 +2,15 @@
 # https://github.com/rust-lang/rustfmt/blob/master/Configurations.md#unstable_features
 unstable_features = true
 
-# Do not reformat vendored upstream crates. These `*-patched` trees are
-# third-party forks carried verbatim (plus minimal functional patches); running
-# our house style over them would create large, meaningless diffs against
-# upstream and obscure the real patches. `cargo fmt --all` includes them because
-# they are workspace members, so they are excluded here instead.
+# Do not reformat vendored upstream crates. These trees are third-party sources
+# carried verbatim (plus minimal functional patches); running our house style
+# over them would create large, meaningless diffs against upstream and obscure
+# the real patches.
 # Note: Unstable (requires `unstable_features = true`, nightly rustfmt).
 # https://github.com/rust-lang/rustfmt/blob/master/Configurations.md#ignore
 ignore = [
-    "librustzcash-patched",
     "rust-lightning-patched",
-    "sia-rust-patched",
+    "vendor-patches",
 ]
 
 # Put single-expression functions on a single line

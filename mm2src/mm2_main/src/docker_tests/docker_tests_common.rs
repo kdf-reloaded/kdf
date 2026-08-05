@@ -303,7 +303,11 @@ pub fn fill_qrc20_address(coin: &Qrc20Coin, amount: BigDecimal, timeout: u64) {
     // prevent concurrent fill since daemon RPC returns errors if send_to_address
     // is called concurrently (insufficient funds) and it also may return other errors
     // if previous transaction is not confirmed yet
-    let _lock = COINS_LOCK.lock().unwrap();
+    //
+    // Recover from a poisoned lock: a previous fill panicking (e.g. a flaky daemon
+    // RPC) must not cascade PoisonError into every subsequent test under
+    // `--test-threads=1`; the lock only guards ordering, not invariants.
+    let _lock = COINS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let timeout = now_ms() / 1000 + timeout;
     let client = match coin.as_ref().rpc_client {
         UtxoRpcClientEnum::Native(ref client) => client,
@@ -428,7 +432,11 @@ where
     // prevent concurrent fill since daemon RPC returns errors if send_to_address
     // is called concurrently (insufficient funds) and it also may return other errors
     // if previous transaction is not confirmed yet
-    let _lock = COINS_LOCK.lock().unwrap();
+    //
+    // Recover from a poisoned lock: a previous fill panicking (e.g. a flaky daemon
+    // RPC) must not cascade PoisonError into every subsequent test under
+    // `--test-threads=1`; the lock only guards ordering, not invariants.
+    let _lock = COINS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let timeout = now_ms() / 1000 + timeout;
 
     if let UtxoRpcClientEnum::Native(client) = &coin.as_ref().rpc_client {

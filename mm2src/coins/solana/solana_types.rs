@@ -125,13 +125,11 @@ impl From<ed25519_dalek::SignatureError> for KeyPairCreationError {
 }
 
 fn generate_keypair_from_slice(priv_key: &[u8]) -> Result<Keypair, MmError<KeyPairCreationError>> {
-    let secret_key = ed25519_dalek::SecretKey::from_bytes(priv_key)?;
-    let public_key = ed25519_dalek::PublicKey::from(&secret_key);
-    let key_pair = ed25519_dalek::Keypair {
-        secret: secret_key,
-        public: public_key,
-    };
-    solana_keypair::keypair_from_seed(key_pair.to_bytes().as_ref())
+    let secret: [u8; 32] = priv_key
+        .try_into()
+        .map_to_mm(|_| KeyPairCreationError::KeyPairFromSeed("invalid ed25519 secret key length".to_string()))?;
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+    solana_keypair::keypair_from_seed(signing_key.to_keypair_bytes().as_ref())
         .map_to_mm(|e| KeyPairCreationError::KeyPairFromSeed(e.to_string()))
 }
 

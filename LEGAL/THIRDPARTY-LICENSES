@@ -24,6 +24,21 @@ Maintainer policy:
 - Release preparation must verify that third-party notices align with
 	the actual distributed tree (`RELEASE_CHECKLIST.md`, Security section).
 
+Patched published crates
+------------------------
+
+The following directories contain published crates.io sources with narrow KDF
+Reloaded patches:
+
+* `vendor-patches/zcash_client_backend-0.23.0/`
+* `vendor-patches/zcash_primitives-0.28.0/`
+* `vendor-patches/zcash_transparent-0.8.0/`
+
+Each package is offered upstream under `MIT OR Apache-2.0`. KDF Reloaded relies
+on the MIT option when combining these components with the GPL-2.0-only work.
+Both upstream license texts are retained in each directory, and each local
+delta is described by its `KDF-PATCH.md` and the provenance ledger.
+
 Adapted sources
 ---------------
 

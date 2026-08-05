@@ -297,6 +297,24 @@ impl<Address, HDWallet> DerivationMethod<Address, HDWallet> {
     pub fn unwrap_iguana(&self) -> &Address { self.iguana_or_err().unwrap() }
 }
 #[allow(clippy::upper_case_acronyms)]
+/// Deserialize a Tendermint `decimals` value, rejecting any value above 18 as
+/// invalid protocol data (R36.3.1). The Cosmos base-denom-to-whole-coin scale is
+/// bounded at 18 places; a higher value would make every balance/amount
+/// conversion undefined, so it fails `protocol_data` parsing rather than
+/// silently activating a mis-scaled coin.
+fn deserialize_tendermint_decimals<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let decimals = u8::deserialize(deserializer)?;
+    if decimals > 18 {
+        return Err(serde::de::Error::custom(format!(
+            "Tendermint `decimals` must be 18 or lower, got {decimals}"
+        )));
+    }
+    Ok(decimals)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "protocol_data")]
 pub enum CoinProtocol {
@@ -341,12 +359,41 @@ pub enum CoinProtocol {
         token_contract_address: String,
         decimals: u8,
     },
+    /// ZHTLC (Zcash-HTLC) shielded coin, e.g. ARRR/PIRATE and the ZOMBIE test
+    /// coin. The variant carries a **required** `protocol_data` payload
+    /// (R39.1.2): the Zcash `consensus_params`, an optional `check_point_block`
+    /// sync anchor and an optional `z_derivation_path`. The shielded-coin
+    /// builder sources all of its network parameters from this payload
+    /// (R39.6.4). Because `consensus_params` is required, a bare
+    /// `{"type":"ZHTLC"}` with no `protocol_data` is non-conformant and fails
+    /// deserialization by design.
     #[cfg(not(target_arch = "wasm32"))]
-    ZHTLC,
+    ZHTLC(ZcoinProtocolInfo),
     SIA,
     TENDERMINT {
+        /// The platform chain's native base denomination (the smallest-unit bank
+        /// denom, e.g. `uatom`, `uiris`, `uosmo`). It is the denom the platform
+        /// coin queries for its own balance, denominates fees in, and signs
+        /// bank/HTLC/IBC messages against (R36.3.1). Required.
+        denom: String,
+        /// The number of decimal places between the base denom and one whole
+        /// coin, used to scale base-unit balances/amounts (R36.3.1). Required and
+        /// bounded at 18; a value above 18 fails protocol-data parsing.
+        #[serde(deserialize_with = "deserialize_tendermint_decimals")]
+        decimals: u8,
+        /// The bech32 human-readable prefix (HRP) of the chain's account
+        /// addresses (e.g. `cosmos`, `iaa`, `osmo`). Required.
         account_prefix: String,
+        /// The Cosmos/Tendermint chain identifier (e.g. `cosmoshub-4`). Required.
         chain_id: String,
+        /// Map whose keys are a target chain's bech32 account-prefix (HRP) and
+        /// whose values are the integer ICS-20 channel number `N` on this chain's
+        /// transfer port toward that target (the integer `N` denoting the channel
+        /// identifier `channel-N`). Seeds the configured destination-prefix ->
+        /// channel resolution used by the IBC/HTLC layer (R36.3.1). Optional;
+        /// defaults to an empty map when absent.
+        #[serde(default)]
+        ibc_channels: HashMap<String, u64>,
     },
     TENDERMINTTOKEN {
         platform: String,
@@ -367,7 +414,43 @@ pub enum CoinProtocol {
         platform: String,
         contract_address: String,
     },
+    /// NFT entry in the coins config (e.g. `NFT_ETH`). NFT support is
+    /// activated through the dedicated `enable_nft` RPC method, not
+    /// through `electrum`/`enable`. This variant exists so that startup
+    /// config parsing does not fail with a confusing serde error when an
+    /// NFT entry is present; `lp_coininit` rejects it with a helpful
+    /// message directing callers to `enable_nft`.
+    NFT {
+        /// The parent EVM platform coin ticker (e.g. `"ETH"`).
+        platform: String,
+    },
 }
+
+impl CoinProtocol {
+    /// Deserialize a coin's `protocol` config value, tolerating the standard
+    /// `{"type": "ETH"}` form that omits `protocol_data`.
+    ///
+    /// `CoinProtocol` uses adjacent tagging (`content = "protocol_data"`), and the
+    /// `ETH` variant is a struct variant (`chain_id`), so serde otherwise rejects a
+    /// bare `{"type": "ETH"}` with `missing field protocol_data` even though its only
+    /// field is optional. Backfill an empty `protocol_data` for exactly that case and
+    /// defer to the derived deserialization (all other variants are untouched), so
+    /// both `{"type": "ETH"}` and `{"type": "ETH", "protocol_data": {"chain_id": N}}`
+    /// parse. This is the canonical way to parse a coin `protocol` from config.
+    pub fn from_conf_json(mut protocol: serde_json::Value) -> serde_json::Result<CoinProtocol> {
+        let is_eth = protocol.get("type").and_then(serde_json::Value::as_str) == Some("ETH");
+        if is_eth && protocol.get("protocol_data").is_none() {
+            if let Some(obj) = protocol.as_object_mut() {
+                obj.insert(
+                    "protocol_data".to_owned(),
+                    serde_json::Value::Object(serde_json::Map::new()),
+                );
+            }
+        }
+        serde_json::from_value(protocol)
+    }
+}
+
 pub enum RpcClientType {
     Native,
     Electrum,
@@ -430,6 +513,209 @@ impl BalanceTradeFeeUpdatedHandler for CoinsContext {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
         for sub in self.balance_update_handlers.lock().await.iter() {
             sub.balance_updated(coin, new_balance).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod coin_protocol_tests {
+    use super::CoinProtocol;
+    use serde_json::json;
+
+    #[test]
+    fn eth_protocol_accepts_bare_and_explicit_protocol_data() {
+        // The standard `{"type":"ETH"}` form (no protocol_data) must parse.
+        match CoinProtocol::from_conf_json(json!({"type": "ETH"})).unwrap() {
+            CoinProtocol::ETH { chain_id } => assert_eq!(chain_id, None),
+            other => panic!("expected ETH, got {:?}", other),
+        }
+        // Explicit empty protocol_data.
+        match CoinProtocol::from_conf_json(json!({"type": "ETH", "protocol_data": {}})).unwrap() {
+            CoinProtocol::ETH { chain_id } => assert_eq!(chain_id, None),
+            other => panic!("expected ETH, got {:?}", other),
+        }
+        // protocol_data carrying chain_id is preserved.
+        match CoinProtocol::from_conf_json(json!({"type": "ETH", "protocol_data": {"chain_id": 137}})).unwrap() {
+            CoinProtocol::ETH { chain_id } => assert_eq!(chain_id, Some(137)),
+            other => panic!("expected ETH, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn other_variants_are_unaffected() {
+        // A struct variant with required fields still needs its protocol_data.
+        assert!(CoinProtocol::from_conf_json(json!({"type": "ERC20"})).is_err());
+        CoinProtocol::from_conf_json(json!({
+            "type": "ERC20",
+            "protocol_data": {"platform": "ETH", "contract_address": "0x0"}
+        }))
+        .unwrap();
+        // A unit variant still parses.
+        assert!(matches!(
+            CoinProtocol::from_conf_json(json!({"type": "UTXO"})).unwrap(),
+            CoinProtocol::UTXO
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn zhtlc_requires_full_protocol_data() {
+        // Bare ZHTLC (no protocol_data) is non-conformant now that the arm carries
+        // a required payload whose required member is `consensus_params` (R39.1.2).
+        assert!(CoinProtocol::from_conf_json(json!({"type": "ZHTLC"})).is_err());
+        // A ZHTLC whose protocol_data omits the required consensus_params also fails.
+        assert!(CoinProtocol::from_conf_json(json!({"type": "ZHTLC", "protocol_data": {}})).is_err());
+        // Production ZHTLC (ARRR/PIRATE) ships consensus params, a checkpoint block
+        // and the z-derivation path under protocol_data; all of it must be accepted.
+        let arrr = json!({
+            "type": "ZHTLC",
+            "protocol_data": {
+                "consensus_params": {
+                    "overwinter_activation_height": 152855,
+                    "sapling_activation_height": 152855,
+                    "blossom_activation_height": null,
+                    "heartwood_activation_height": null,
+                    "canopy_activation_height": null,
+                    "coin_type": 133,
+                    "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+                    "hrp_sapling_extended_full_viewing_key": "zxviews",
+                    "hrp_sapling_payment_address": "zs",
+                    "b58_pubkey_address_prefix": [28, 184],
+                    "b58_script_address_prefix": [28, 189]
+                },
+                "check_point_block": {
+                    "height": 1900000,
+                    "time": 1652512363,
+                    "hash": "44797f3bb78323a7717007f1e289a3689e0b5b3433385dbd8e6f6a1700000000",
+                    "sapling_tree": "01e40c26f4"
+                },
+                "z_derivation_path": "m/32'/141'"
+            }
+        });
+        match CoinProtocol::from_conf_json(arrr).unwrap() {
+            CoinProtocol::ZHTLC(info) => {
+                use zcash_protocol::consensus::NetworkConstants;
+                assert!(info.check_point_block.is_some());
+                assert!(info.z_derivation_path.is_some());
+                assert_eq!(info.consensus_params.hrp_sapling_payment_address(), "zs");
+                assert_eq!(info.consensus_params.coin_type(), 133);
+            },
+            other => panic!("expected ZHTLC, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tendermint_protocol_data_parses_full_config() {
+        // A full TENDERMINT protocol_data with denom/decimals/account_prefix/
+        // chain_id and a configured ibc_channels map parses, and surplus benign
+        // keys (gas_price, chain_registry_name, and forward-compat tuning hints)
+        // are accepted and ignored -- no deny_unknown_fields (R36.3.1/R36.3.3).
+        let conf = json!({
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "uatom",
+                "decimals": 6,
+                "account_prefix": "cosmos",
+                "chain_id": "cosmoshub-4",
+                "gas_price": 0.025,
+                "chain_registry_name": "cosmoshub",
+                "ibc_channels": {"osmo": 141, "iaa": 0},
+                "min_balance_for_ibc_routing": 1000
+            }
+        });
+        match CoinProtocol::from_conf_json(conf).unwrap() {
+            CoinProtocol::TENDERMINT {
+                denom,
+                decimals,
+                account_prefix,
+                chain_id,
+                ibc_channels,
+            } => {
+                assert_eq!(denom, "uatom");
+                assert_eq!(decimals, 6);
+                assert_eq!(account_prefix, "cosmos");
+                assert_eq!(chain_id, "cosmoshub-4");
+                assert_eq!(ibc_channels.get("osmo"), Some(&141));
+                assert_eq!(ibc_channels.get("iaa"), Some(&0));
+            },
+            other => panic!("expected TENDERMINT, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tendermint_protocol_data_defaults_ibc_channels_empty() {
+        // ibc_channels is optional and defaults to an empty map (R36.3.1).
+        match CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "uiris",
+                "decimals": 6,
+                "account_prefix": "iaa",
+                "chain_id": "irishub-1"
+            }
+        }))
+        .unwrap()
+        {
+            CoinProtocol::TENDERMINT { ibc_channels, .. } => assert!(ibc_channels.is_empty()),
+            other => panic!("expected TENDERMINT, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tendermint_protocol_data_requires_denom_and_decimals() {
+        // denom and decimals are required members of TENDERMINT protocol_data.
+        assert!(CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {"decimals": 6, "account_prefix": "cosmos", "chain_id": "cosmoshub-4"}
+        }))
+        .is_err());
+        assert!(CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {"denom": "uatom", "account_prefix": "cosmos", "chain_id": "cosmoshub-4"}
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn tendermint_protocol_data_rejects_decimals_above_18() {
+        // decimals must be 18 or lower; a higher value fails protocol-data parsing
+        // as a bounded-input check (R36.3.1).
+        assert!(CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "uatom",
+                "decimals": 19,
+                "account_prefix": "cosmos",
+                "chain_id": "cosmoshub-4"
+            }
+        }))
+        .is_err());
+        // The boundary value 18 is accepted.
+        assert!(CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "aevmos",
+                "decimals": 18,
+                "account_prefix": "evmos",
+                "chain_id": "evmos_9001-2"
+            }
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn nft_protocol_parses_and_carries_platform() {
+        // A GLEEC-style NFT config entry {"type":"NFT","protocol_data":{"platform":"ETH"}}
+        // must deserialize without error so that startup config loading and
+        // from_conf_json callers don't see a confusing serde error (ch.19 §19.11).
+        match CoinProtocol::from_conf_json(json!({
+            "type": "NFT",
+            "protocol_data": {"platform": "ETH"}
+        }))
+        .unwrap()
+        {
+            CoinProtocol::NFT { platform } => assert_eq!(platform, "ETH"),
+            other => panic!("expected NFT, got {:?}", other),
         }
     }
 }

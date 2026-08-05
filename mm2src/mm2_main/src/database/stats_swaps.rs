@@ -1,6 +1,6 @@
 use crate::mm2::lp_swap::{MakerSavedSwap, MakerSwapEvent, SavedSwap, SavedSwapIo, TakerSavedSwap, TakerSwapEvent};
 use common::log::{debug, error};
-use db_common::sqlite::rusqlite::{Connection, OptionalExtension};
+use db_common::sqlite::rusqlite::{params_from_iter, Connection, OptionalExtension};
 use mm2_core::mm_ctx::MmArc;
 use std::collections::HashSet;
 
@@ -321,7 +321,9 @@ fn insert_stats_taker_swap_sql_init(swap: &TakerSavedSwap) -> Option<(&'static s
 
 pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap, fiat_snapshot: Option<&FiatPriceSnapshot>) {
     let params = vec![swap.uuid().to_string()];
-    let query_row = conn.query_row(SELECT_ID_BY_UUID, &params, |row| row.get::<_, i64>(0));
+    let query_row = conn.query_row(SELECT_ID_BY_UUID, params_from_iter(params.iter()), |row| {
+        row.get::<_, i64>(0)
+    });
     match query_row.optional() {
         // swap is not indexed yet, go ahead
         Ok(None) => (),
@@ -344,7 +346,7 @@ pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap, fiat_snapshot: Opt
     };
 
     debug!("Executing query {} with params {:?}", sql, params);
-    if let Err(e) = conn.execute(sql, &params) {
+    if let Err(e) = conn.execute(sql, params_from_iter(params.iter())) {
         error!("Error {} on query {} with params {:?}", e, sql, params);
     };
 }

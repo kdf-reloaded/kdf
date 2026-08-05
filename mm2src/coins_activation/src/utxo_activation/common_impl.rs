@@ -57,7 +57,11 @@ where
         .update_in_progress_status(UtxoStandardInProgressStatus::RequestingWalletBalance)
         .mm_err(Into::into)?;
     let wallet_balance = coin
-        .enable_coin_balance(xpub_extractor, activation_params.scan_policy)
+        .enable_coin_balance(
+            xpub_extractor,
+            activation_params.scan_policy,
+            activation_params.min_addresses_number.unwrap_or_default(),
+        )
         .await
         .mm_err(|error| InitUtxoStandardError::CoinCreationError {
             ticker: coin.ticker().to_owned(),

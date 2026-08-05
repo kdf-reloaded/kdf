@@ -326,6 +326,10 @@ pub trait ParseCoinAssocTypes {
     /// Returns this coin's current HTLC address.
     async fn my_addr(&self) -> Self::Address;
 
+    /// Fallible form of [`ParseCoinAssocTypes::my_addr`] for V2 paths that can
+    /// report address-selection errors before constructing P2P messages.
+    async fn try_my_addr(&self) -> Result<Self::Address, String> { Ok(self.my_addr().await) }
+
     fn parse_address(&self, address: &str) -> Result<Self::Address, Self::AddressParseError>;
     fn parse_pubkey(&self, pubkey: &[u8]) -> Result<Self::Pubkey, Self::PubkeyParseError>;
     fn parse_tx(&self, tx: &[u8]) -> Result<Self::Tx, Self::TxParseError>;
@@ -338,8 +342,20 @@ pub trait CommonSwapOpsV2: ParseCoinAssocTypes + Send + Sync + 'static {
     /// Derive the HTLC pubkey for this swap (may differ from the main wallet pubkey).
     fn derive_htlc_pubkey_v2(&self, swap_unique_data: &[u8]) -> Self::Pubkey;
 
+    /// Fallible form of [`CommonSwapOpsV2::derive_htlc_pubkey_v2`] used by
+    /// state-machine call sites that must reject unsupported key policies
+    /// before P2P negotiation or transaction construction.
+    fn try_derive_htlc_pubkey_v2(&self, swap_unique_data: &[u8]) -> Result<Self::Pubkey, String> {
+        Ok(self.derive_htlc_pubkey_v2(swap_unique_data))
+    }
+
     /// Same as [`derive_htlc_pubkey_v2`] but returns raw bytes for P2P transmission.
     fn derive_htlc_pubkey_v2_bytes(&self, swap_unique_data: &[u8]) -> Vec<u8>;
+
+    /// Fallible form of [`CommonSwapOpsV2::derive_htlc_pubkey_v2_bytes`].
+    fn try_derive_htlc_pubkey_v2_bytes(&self, swap_unique_data: &[u8]) -> Result<Vec<u8>, String> {
+        Ok(self.derive_htlc_pubkey_v2_bytes(swap_unique_data))
+    }
 }
 /// V2 swap operations for the **maker coin** (the coin the maker locks first).
 #[async_trait]

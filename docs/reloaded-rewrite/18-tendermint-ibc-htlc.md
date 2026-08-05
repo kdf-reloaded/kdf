@@ -132,10 +132,27 @@ The per-coin configuration record carries:
 - `account_prefix` — bech32 HRP (e.g. `"cosmos"`, `"iaa"`,
   `"nuc"`).
 - `chain_id` — string id used in tx signing (`SignDoc.chain_id`).
-- `gas_price` — base gas price (e.g. `0.025uatom`).
+- `gas_price` — base gas price (e.g. `0.025uatom`); optional, with a
+  built-in default when omitted.
 - `denom` — platform-coin base denom.
 - `decimals` — display decimals (typically 6 or 18).
+- `ibc_channels` — optional map from a **target chain's bech32
+  account-prefix** to the **integer IBC channel number** on this
+  chain's transfer port toward that target (integer `N` denoting the
+  ICS-20 channel id `channel-N`); seeds the destination-prefix →
+  channel resolution used by the IBC transfer path (§18.4). Optional,
+  defaults to empty.
+- `chain_registry_name` — optional Cosmos-chain-registry name;
+  carried for external tooling and not consumed by any swap/IBC path.
 - `rpc_urls` — list of CometBFT RPC nodes for tx broadcast + query.
+
+> **Config source of truth (informative).** These per-coin and
+> per-token fields are carried in the coin-protocol `protocol_data`
+> object under the `TENDERMINT` / `TENDERMINTTOKEN` protocol tags and
+> are fully pinned — with required/optional status, wire types, and
+> the `ibc_channels` map shape — in
+> [Chapter 36 §36.3](36-tendermint-v2-activation-rpcs.md). Activation
+> reads them from `protocol_data`, not from the top-level coin conf.
 
 The per-token configuration record adds:
 

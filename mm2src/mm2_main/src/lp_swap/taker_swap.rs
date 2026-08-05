@@ -397,6 +397,16 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
                         )
                     }
                     status.status(&[&"swap", &("uuid", uuid.as_str())], &event.status_str());
+                    // Notify the swap-status streamer of the new V1 taker event
+                    // (mirrors the V2 emission in taker_swap_v2.rs).
+                    ctx.event_stream_manager
+                        .send_fn(&mm2_event_stream::StreamerId::SwapStatus, || {
+                            super::swap_events::SwapStatusEvent::TakerV1 {
+                                uuid: running_swap.uuid,
+                                event: event.clone(),
+                            }
+                        })
+                        .ok();
                     running_swap.apply_event(event);
                 }
                 match res.0 {
@@ -665,11 +675,25 @@ impl<'de> Deserialize<'de> for TakerSwapEvent {
             // Historical files have been observed with and without payloads on these milestone events.
             Some("WatcherMessageSent") => return Ok(TakerSwapEvent::WatcherMessageSent),
             Some("MakerPaymentSpendConfirmed") => return Ok(TakerSwapEvent::MakerPaymentSpendConfirmed),
+            Some("TakerPaymentInstructionsReceived") if value.get("data").is_none() => {
+                return Ok(TakerSwapEvent::TakerPaymentInstructionsReceived(None));
+            },
             _ => (),
         }
         json::from_value::<TakerSwapEventDeser>(value)
             .map(TakerSwapEvent::from)
             .map_err(D::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod taker_event_deser_tests {
+    use super::*;
+
+    #[test]
+    fn payment_instructions_received_accepts_missing_data() {
+        let event: TakerSwapEvent = json::from_str(r#"{"type":"TakerPaymentInstructionsReceived"}"#).unwrap();
+        assert_eq!(event, TakerSwapEvent::TakerPaymentInstructionsReceived(None));
     }
 }
 
@@ -2804,7 +2828,7 @@ mod taker_swap_tests {
 
         assert_eq!(unsafe { SWAP_CONTRACT_ADDRESS_CALLED }, 1);
         let expected_addr = addr_from_str("0xa09ad3cd7e96586ebd05a2607ee56b56fb2db8fd").unwrap();
-        let expected = BytesJson::from(expected_addr.0.as_ref());
+        let expected = BytesJson::from(&expected_addr.0[..]);
         assert_eq!(taker_swap.r().data.maker_coin_swap_contract_address, Some(expected));
         assert_eq!(
             taker_swap.r().data.taker_coin_swap_contract_address,

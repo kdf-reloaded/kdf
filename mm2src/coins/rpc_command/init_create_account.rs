@@ -191,7 +191,7 @@ pub(crate) mod common_impl {
             Vec::new()
         };
 
-        let total_balance = crate::coin_balance::sum_hd_address_balances(&addresses);
+        let total_balance = crate::coin_balance::sum_hd_address_balances(coin.ticker(), &addresses);
 
         Ok(HDAccountBalance {
             account_index,

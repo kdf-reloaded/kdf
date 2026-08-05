@@ -35,11 +35,12 @@ UTXO version-two implementation.
 
 Bound rules R1–R4 cover the trait surface and associated types;
 R5–R10 cover the three Bitcoin scripts; R11–R20 cover the maker
-trait methods; R21–R35 cover the taker trait methods; R36–R44
+trait methods; R21–R35 cover the taker trait methods; R36–R48
 cover the common-trait derivations, the shared spend-construction
 helper, the helper-inventory boundary, the numeric constants, the
 state-machine wiring, the optional confirmation-gate policy, and
-the hierarchical-deterministic trade-preview sender derivation.
+the hierarchical-deterministic and hardware-wallet address,
+public-key, and signing contracts.
 
 ## 15.2 Subsystem Shape
 
@@ -469,15 +470,36 @@ common-swap-operations trait:
 
 | Method                             | Bound role                                                                                                                                                  |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `derive_htlc_pubkey_v2(swap_unique_data)` | Returns the chapter-bound UTXO public-key type. Delegates to a *new* version-two keypair accessor added alongside (not replacing) the version-one keypair accessor. |
+| `derive_htlc_pubkey_v2(swap_unique_data)` | Returns the chapter-bound UTXO public-key type. Delegates to a *new* version-two signing-key/public-key accessor added alongside (not replacing) the version-one keypair accessor. |
 | `derive_htlc_pubkey_v2_bytes(swap_unique_data)` | Returns the compressed 33-byte form for peer-to-peer transmission in the version-two negotiation messages.                                                  |
 
-The new version-two keypair accessor MUST be fallible
-and MUST dispatch on the chapter-05 key-pair policy: the
-single-keypair mode returns the
-single keypair; the hierarchical-deterministic variant returns
-the activated key; the hardware-wallet variant returns the
-deferred-variant error of D2.
+The new version-two accessor MUST dispatch on the chapter-05
+key-pair policy:
+
+- single-keypair mode uses the activated single keypair and
+  returns its compressed public key;
+- hierarchical-deterministic mode uses the currently enabled HD
+  address recorded by the active HD wallet state and returns that
+  address's compressed public key;
+- Trezor/hardware-wallet mode uses the currently enabled
+  hardware-wallet HD address recorded by the active HD wallet
+  state and returns that address's compressed public key.
+
+For HD and hardware-wallet modes, `swap_unique_data` MUST NOT
+select a different local key. The per-swap data is retained for
+protocol compatibility, but key isolation is not bound in this
+chapter (D2).
+
+The accessor MUST NOT synthesize a software key for a
+hardware-wallet coin, MUST NOT derive from a host mnemonic, and
+MUST NOT fall back to the single-address activation key. If an
+enabled HD address with a cached public key is unavailable, every
+fallible call path that needs the local HTLC public key MUST fail
+before P2P negotiation, transaction construction, or broadcast
+with a structured address-selection or hardware-wallet-readiness
+error. Public trait methods that are infallible MUST only be
+called after the activation or swap-start path has established
+this invariant.
 
 A distinct version-two accessor is required
 because version one's accessor has a different signature and a
@@ -598,15 +620,116 @@ payment, taker-payment spend, and maker-payment spend. It MUST
 NOT change the normal non-optional payment confirmation waits
 that enforce the order's configured confirmation policy.
 
-**R44.** UTXO trade-preimage and taker-volume estimation MUST
-derive the sender address from the active derivation method. Under
-Iguana derivation it MUST use the Iguana address. Under
-hierarchical-deterministic derivation it MUST derive the address
-from the active public key and the HD wallet address format. These
-paths MUST NOT reject HD activation solely because an Iguana
-private key or Iguana address is unavailable.
+**R44.** UTXO trade-preimage and taker-volume estimation, and
+every version-two swap path that needs the local UTXO address
+through the public version-two parse/coin interface, MUST derive
+the sender address from the active derivation method. Under
+single-address derivation it MUST use the activated single
+address. Under hierarchical-deterministic derivation it MUST use
+the currently enabled HD address recorded by the active HD wallet
+state. It MUST NOT reconstruct an arbitrary root-public-key
+address when a different HD address is enabled, and it MUST NOT
+reject HD activation solely because a single-address private key
+or single-address value is unavailable.
 
-## 15.13 Tests
+The interface contract is: callers receive the same address type
+as the UTXO coin normally uses; the HD case is selected by the
+coin's active derivation method; failure to read an enabled HD
+address MUST be reported as a structured derivation/address
+selection error by call sites that already have an error channel.
+In public version-two interfaces that are currently infallible,
+the implementation MUST ensure the enabled-address invariant
+before invoking the infallible accessor.
+
+For Trezor/hardware-wallet activation, the active address is the
+address selected by the UTXO activation parameters for the
+hardware-backed HD wallet. The selected address record MUST carry:
+the displayable address, the compressed public key, and the full
+BIP-32 derivation path from the hardware wallet's master node to
+that address. That same path is the signing path for every
+version-two HTLC signature made by the local side.
+
+## 15.13 Bound Trezor/Hardware-Wallet Support
+
+**R45.** Trezor/hardware-wallet UTXO version-two swaps MUST use
+the active enabled hardware-wallet HD address as the local HTLC
+identity. The local HTLC public key sent in version-two
+negotiation messages and embedded in the maker-payment,
+taker-funding, and taker-payment scripts MUST be the compressed
+public key stored with that enabled address. The implementation
+MUST NOT request or expose private key material, MUST NOT use a
+host-side substitute key, and MUST NOT derive a different public
+key from the root public key when the user has enabled a specific
+address path.
+
+The enabled address path MUST be selected before the first
+version-two negotiation message that carries the local HTLC
+public key. If the enabled hardware-wallet address cannot be
+read, if it has no compressed public key, if the derivation path
+is missing, if the configured coin has no hardware-wallet coin
+mapping, or if the initialized hardware wallet is not the
+expected device, the swap start MUST fail before negotiation with
+a structured hardware-wallet or address-selection error.
+
+**R46.** Every wallet-funded transaction in a Trezor/hardware-
+wallet UTXO version-two swap MUST be signed by the hardware
+wallet. This includes maker-payment creation and taker-funding
+creation. Each wallet-controlled input supplied to the device
+MUST carry the derivation path and public key for the address
+that controls that input. Outputs that pay to the version-two
+pay-to-script-hash HTLC addresses are ordinary external outputs
+from the device's point of view. Change outputs, when present,
+MUST be identified as change by derivation path; otherwise they
+MUST be presented as external outputs. The host MUST reject the
+operation if it cannot provide complete derivation-path metadata
+for every wallet-controlled input.
+
+**R47.** Every version-two HTLC spend that requires the local
+party's signature MUST be authorized by the hardware wallet using
+the enabled address path bound by R44 and R45. This applies to:
+maker timelock refund, maker secret refund, taker spending the
+maker payment, taker funding timelock refund, taker funding
+secret refund, taker funding-spend preimage generation, taker
+funding-spend finalization, taker-payment timelock refund,
+taker-payment-spend preimage generation, and maker finalization
+of the taker-payment spend.
+
+The host is responsible for constructing the version-two redeem
+script and final script-sig or witness stack exactly as specified
+by R8, R9, R10, R13–R15, R18, R19, R21, R23, R24, R26, and R28.
+The hardware wallet is responsible only for authorizing the
+transaction digest for the enabled address path and returning a
+signature. The signature-hash flag MUST match the branch contract:
+all-outputs for fully fixed transactions and single-output for
+the chapter-08 `Standard` taker-payment-spend preimage. The final
+transaction MUST be rejected before broadcast if the returned
+signature count is wrong, the returned signature does not verify
+against the enabled address public key and expected digest, or
+the completed script does not spend the expected HTLC output.
+
+**R48.** Hardware-wallet user actions and errors MUST surface
+through the same observable task/swap status channel used by
+other hardware-wallet operations. During version-two swap
+activation and signing, callers MUST be able to distinguish at
+least: waiting for device connection, PIN entry required,
+passphrase entry required, on-device confirmation required, user
+cancellation or rejection, device disconnected, unexpected
+device, unsupported coin mapping, unsupported script/signing
+mode, transport failure, and invalid device response. These
+conditions MUST fail the current swap step without panicking and
+MUST leave already published transactions recoverable through the
+chapter-14 kickstart flow.
+
+If the connected firmware or coin mapping cannot sign the P2SH
+HTLC input form required by this chapter, the implementation MUST
+fail at the first HTLC-signing step with a structured unsupported
+script/signing-mode error. It MUST NOT broadcast a partially
+signed HTLC spend, MUST NOT ask the user to export a private key,
+and MUST NOT fall back to software signing. Wallet-funded sends
+MAY still be supported for the same coin, but that is not
+sufficient to advertise end-to-end version-two swap support.
+
+## 15.14 Tests
 
 **T1.** *Script-layout invariants.* Three unit tests build each
 of the three scripts (R8, R9, R10) with known inputs and assert
@@ -653,46 +776,111 @@ remains zero, one remains one, and values greater than one are
 capped to one.
 
 **T10.** *HD trade-preview sender derivation.* A unit test
-constructs an HD UTXO coin field set and asserts that
-trade-preimage sender derivation returns the address built from
-the active public key and the HD address format instead of
-requiring Iguana derivation.
+constructs an HD UTXO coin field set with a known enabled HD
+address and asserts that trade-preimage sender derivation returns
+that enabled address. The test MUST use an enabled address that is
+distinguishable from the address that would be obtained by
+blindly applying the default UTXO address format to the root
+activated public key. The test asserts that HD estimation does not
+require a single-address private key or single-address value.
 
-## 15.14 Deferred Work
+**T11.** *HD version-two local address contract.* A unit test
+constructs a version-two-capable UTXO coin under HD derivation
+with a known enabled HD address and asserts that the public
+version-two local-address accessor returns that same enabled
+address. A companion error-path test exercises an HD wallet state
+with no readable enabled address and asserts a structured
+address-selection failure at the nearest fallible call boundary,
+with no swap negotiation message emitted and no transaction
+constructed.
+
+**T12.** *Hardware-wallet HTLC public-key derivation.* A unit test
+activates a UTXO coin under a Trezor/hardware-wallet key policy
+with a known enabled hardware-wallet HD address. The test asserts
+that `derive_htlc_pubkey_v2_bytes` returns the compressed public
+key stored with that enabled address, that a different enabled
+address path produces a different local HTLC public key when the
+device account data differs, and that no software fallback key is
+used.
+
+**T13.** *Hardware-wallet active-path selection.* A task-level
+test activates a hardware-backed UTXO coin with a non-default
+account/change/address-index path and starts version-two
+negotiation. The emitted local HTLC public key and local sender
+address MUST correspond to the selected enabled path, not to the
+coin root, account root, first external address, or any
+single-address activation value. The error-path variant activates
+without a readable enabled address and asserts that no
+negotiation message or transaction is emitted.
+
+**T14.** *Trezor-emulator wallet-funded sends.* An emulator-backed
+acceptance test runs maker-payment creation and taker-funding
+creation for a Standard UTXO version-two swap. The test MUST
+assert that every wallet-controlled input sent to the emulator has
+the correct derivation path, every HTLC output matches the R8 or
+R10 pay-to-script-hash address built from the enabled hardware
+public key, user-action statuses are observable while the device
+is waiting, and the resulting transaction is accepted by the
+regtest or container node.
+
+**T15.** *Trezor-emulator HTLC signing.* An emulator-backed
+acceptance test covers every local HTLC signature required by the
+happy-path Standard UTXO version-two swap: taker funding-spend
+preimage, taker funding-spend finalization, maker taker-payment
+finalization, and taker maker-payment spend. The test MUST verify
+the returned signatures against the enabled address public key and
+the expected signature-hash mode, inspect the final script-sig
+branch selectors, broadcast the completed transactions, and
+complete the swap.
+
+**T16.** *Trezor-emulator refund and abort paths.* Emulator-backed
+acceptance tests cover maker timelock refund, maker secret refund,
+taker funding timelock refund, taker funding secret refund, and
+taker-payment timelock refund. Each test MUST assert that the
+device is asked to sign with the enabled address path, that the
+branch selectors and revealed secret pushes match R13, R14, R18,
+R19, and R24, and that restart recovery can continue from the
+last published transaction.
+
+**T17.** *Hardware-wallet negative paths.* Task-level tests
+exercise: no initialized device, unexpected device, user
+cancellation, disconnected device during signing, unsupported
+coin mapping, unsupported P2SH HTLC signing mode, missing
+derivation path metadata for a wallet input, invalid signature
+count, and a signature that fails verification against the enabled
+address public key. Each condition MUST surface as a structured
+hardware-wallet or signing error, MUST NOT panic, and MUST NOT
+broadcast a transaction.
+
+## 15.15 Deferred Work
 
 **D1.** Chapter 16's `WithBurn` and `NoFee` arms of R26, R27,
 R28. The substrate emits explicit deferred-variant rejection
 errors in those arms; chapter 16 binds the replacement.
 
-**D2.** Hardware-wallet support in R36. The
-chapter-bound version-two swap-fee keypair accessor returns the
-deferred-variant error under the hardware-wallet keypair-policy
-arm. The hash-time-locked-contract public-key derivation path
-for the hardware-wallet keypair-policy arm is deferred.
-
-**D3.** Per-swap hierarchical-deterministic key isolation. The
+**D2.** Per-swap hierarchical-deterministic key isolation. The
 substrate currently does not thread the swap-unique data into
 derivation; the same coin yields the same
 hash-time-locked-contract keypair for every swap under a given
 key-pair policy. Per-swap key isolation is deferred.
 
-**D4.** Watcher-reward consumption on UTXO version two (R12
+**D3.** Watcher-reward consumption on UTXO version two (R12
 passes the absent marker). Watcher-reward integration is
 deferred.
 
-**D5.** Native-mode address-import parity. R17 performs the
+**D4.** Native-mode address-import parity. R17 performs the
 chapter-bound address-import call on validation; R12 does not.
 A future revision MUST decide whether both paths should import
 or neither.
 
-**D6.** Threading the swap-unique data into the funding-spend
+**D5.** Threading the swap-unique data into the funding-spend
 argument types
 (`GenTakerFundingSpendArgs` /
 `ValidateTakerFundingSpendPreimageArgs`). The helpers currently
 pass an empty slice to the keypair helper; this is harmless
-under the current single-keypair derivation but blocks D3.
+under the current single-keypair derivation but blocks D2.
 
-## 15.14 Baseline Verifications
+## 15.16 Baseline Verifications
 
 **V1.** The baseline tree MUST be confirmed to contain none of
 the four trait implementations of R1 on the coin type. The
@@ -712,7 +900,7 @@ effect on chapter 14 and chapter 17 is exactly the kickstart-
 handler match-arm extension of R42 and the EVM-side
 non-participation noted in chapter 16 R23.
 
-## 15.15 External References
+## 15.17 External References
 
 - Bitcoin opcode semantics —
   <https://en.bitcoin.it/wiki/Script>.
@@ -723,7 +911,7 @@ non-participation noted in chapter 16 R23.
 - BIP-16, *pay-to-script-hash* —
   <https://github.com/bitcoin/bips/blob/master/bip-0016.mediawiki>.
 
-## 15.16 Provenance Footer
+## 15.18 Provenance Footer
 
 - *Inputs:* the baseline workspace at the pinned baseline-revision
   commit; chapter 01 (clean-room rules); chapter 05 (the
@@ -741,7 +929,10 @@ non-participation noted in chapter 16 R23.
   module; public Bitcoin-script and signature-hash documentation.
 - *Permitted-input classes used:* baseline source; bound substrate
   identifiers introduced with in-chapter justification; public
-  protocol documentation.
+  protocol documentation; restricted behavior-analysis corpus
+  consulted only for functional/interface behavior.
 - *Sibling-allowlist consultations:* none beyond the cross-chapter
   references listed in *Inputs*.
-- *Forbidden corpus:* not consulted.
+- *Restricted corpus output policy:* no source text, private
+  helper decomposition, private identifiers, or implementation
+  bodies are carried into this chapter.
