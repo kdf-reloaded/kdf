@@ -90,6 +90,14 @@ jobs:
             cmd: cargo test -p kdf_spv_validation
           - name: rpc-response
             cmd: cargo test -p coins --lib rpc_response_tests
+          # The shielded (ARRR/ZHTLC) store, scan and tree-state tests. Previously
+          # unreachable from any matrix cell: the two `coins` cells above filter
+          # to `eth::eth_tests::*` and `rpc_response_tests`, so nothing ran the
+          # `z_coin` module and its regressions defended nothing in CI. See
+          # docs/plans/librustzcash-upgrade.md and
+          # docs/plans/arrr-ironwood-compatibility.md.
+          - name: shielded
+            cmd: cargo test -p coins --lib z_coin::
 
     steps:
       - uses: actions/checkout@v7
