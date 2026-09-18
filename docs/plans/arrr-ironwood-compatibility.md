@@ -688,3 +688,24 @@ Open items depending on Pirate's answers:
   `BranchId::for_height` still returns `Sapling` at any height even with an Ironwood height
   configured, because the shielded builder derives the transaction version it signs from
   that lookup.
+- **2026‑09‑18 — A4, the swap freeze, landed (R39.6.4b), and the chosen margin was
+  corrected upward.** The accepted decision was a flat cut-off at `T − 156 000 s`. Writing
+  the cross-crate guard test exposed that 156 000 s covers only the *lock* — the swap
+  machines then wait `lock + 3700` (`wait_refund_until`) before refunding, and the refund
+  still has to be mined. The margin is now **160 300 s** (156 000 lock + 3 700 grace + 600
+  ≈ 10 blocks), so a payment made in the last tradeable second is refundable *and confirmed*
+  before activation. Cost of the correction: 72 minutes of extra freeze. **ARRR trading now
+  pauses 1 Oct 2026 22:28 UTC.**
+  Implemented as two overrides because neither alone suffices — `MmCoin::wallet_only`
+  (`buy`/`sell`/`setprice`) and `is_coin_protocol_supported` (the incoming peer-match paths,
+  which never consult `wallet_only`). The margin has to be a constant in `coins` because the
+  locktime rules live in `mm2_main`, which depends on `coins` and not the reverse;
+  `payment_locktime_covers_ironwood_freeze_margin` in `mm2_main` fails if they drift.
+  Verified live on mainnet across three configured states: **no** activation time → trades
+  (reaches the balance check at `ordermatch_trading:1802`); the **real** time 1791054000,
+  13 days early → still trades, so shipping the value now breaks nothing; an activation
+  inside the window → refused at `:1780` with "Base coin ARRR is wallet only", while
+  `my_balance`, `z_coin_tx_history` (`sync_status: Finished`, 2 transactions) and activation
+  itself all keep working. `mm2_main`'s 97 pre-existing test failures are missing-passphrase
+  environment gates, unchanged from baseline (356→357 passing, the one addition being this
+  guard).
