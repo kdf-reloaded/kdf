@@ -154,6 +154,23 @@ pub struct ZcoinConsensusParams {
     heartwood_activation_height: Option<u32>,
     /// Canopy activation height, or `null`.
     canopy_activation_height: Option<u32>,
+    /// Wall-clock timestamp (Unix seconds) from which the coin's Ironwood
+    /// network upgrade activates, or `null` when the coin has no such upgrade.
+    ///
+    /// Pirate does not fix an Ironwood activation *height* in advance: each node
+    /// derives it at runtime from the first block whose time exceeds this value
+    /// (plus a settling margin), so the height is not knowable until shortly
+    /// before it takes effect. This field carries the only part of the rule that
+    /// can be published ahead of time. Optional and additive; absent for every
+    /// coin that has no Ironwood upgrade, and ignored by builds that predate it.
+    #[serde(default)]
+    ironwood_activation_time: Option<u32>,
+    /// Ironwood activation height, once the network has derived and published it.
+    ///
+    /// Optional: the height is unknown until the upgrade is imminent, and a
+    /// wallet shipping an older coin configuration will not carry it at all.
+    #[serde(default)]
+    ironwood_activation_height: Option<u32>,
     /// SLIP-44 coin type used in shielded HD derivation.
     coin_type: u32,
     /// Bech32 human-readable prefix for extended spending keys.
@@ -190,6 +207,14 @@ impl ZcoinConsensusParams {
     }
 
     fn coin_type(&self) -> u32 { self.coin_type }
+
+    /// Wall-clock timestamp from which Ironwood activates, when the coin declares one.
+    #[allow(dead_code)] // Consumed by the Ironwood build guard and swap freeze.
+    pub(crate) fn ironwood_activation_time(&self) -> Option<u32> { self.ironwood_activation_time }
+
+    /// Ironwood activation height, when the network has derived and published one.
+    #[allow(dead_code)] // Consumed by the Ironwood build guard and swap freeze.
+    pub(crate) fn ironwood_activation_height(&self) -> Option<u32> { self.ironwood_activation_height }
 
     fn hrp_sapling_extended_spending_key(&self) -> &str { &self.hrp_sapling_extended_spending_key }
 
@@ -476,6 +501,89 @@ mod native_sapling_cache_tests {
         assert!(cache_path.exists());
 
         let _ = std::fs::remove_dir_all(db_dir);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ironwood_consensus_param_tests {
+    use super::*;
+
+    /// The ARRR mainnet `consensus_params` as published in `GLEECBTC/coins`, which
+    /// carries no Ironwood keys. It must keep parsing, with both fields absent.
+    fn arrr_params_without_ironwood() -> Json {
+        json!({
+            "overwinter_activation_height": 152855,
+            "sapling_activation_height": 152855,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        })
+    }
+
+    /// An older binary must not choke on a newer coin file, and a newer binary must
+    /// not require one: both fields are optional and defaulted.
+    #[test]
+    fn ironwood_params_are_optional_in_both_directions() {
+        let without: ZcoinConsensusParams = serde_json::from_value(arrr_params_without_ironwood()).unwrap();
+        assert_eq!(without.ironwood_activation_time(), None);
+        assert_eq!(without.ironwood_activation_height(), None);
+
+        let mut with_time = arrr_params_without_ironwood();
+        with_time["ironwood_activation_time"] = json!(1_791_054_000u32);
+        let parsed: ZcoinConsensusParams = serde_json::from_value(with_time).unwrap();
+        assert_eq!(parsed.ironwood_activation_time(), Some(1_791_054_000));
+        assert_eq!(parsed.ironwood_activation_height(), None);
+
+        let mut with_both = arrr_params_without_ironwood();
+        with_both["ironwood_activation_time"] = json!(1_791_054_000u32);
+        with_both["ironwood_activation_height"] = json!(4_141_710u32);
+        let parsed: ZcoinConsensusParams = serde_json::from_value(with_both).unwrap();
+        assert_eq!(parsed.ironwood_activation_time(), Some(1_791_054_000));
+        assert_eq!(parsed.ironwood_activation_height(), Some(4_141_710));
+
+        // Explicit nulls are equivalent to absence.
+        let mut nulls = arrr_params_without_ironwood();
+        nulls["ironwood_activation_time"] = Json::Null;
+        nulls["ironwood_activation_height"] = Json::Null;
+        let parsed: ZcoinConsensusParams = serde_json::from_value(nulls).unwrap();
+        assert_eq!(parsed.ironwood_activation_time(), None);
+        assert_eq!(parsed.ironwood_activation_height(), None);
+    }
+
+    /// A2 only carries the data. Until Step 3 maps it, no post-Sapling upgrade may
+    /// report an activation height, because the transaction builder derives the
+    /// consensus branch ID from exactly these lookups: a premature mapping would
+    /// change the transactions this build signs.
+    #[test]
+    fn carrying_the_ironwood_height_does_not_yet_move_the_branch_id() {
+        let mut with_height = arrr_params_without_ironwood();
+        with_height["ironwood_activation_time"] = json!(1_791_054_000u32);
+        with_height["ironwood_activation_height"] = json!(4_141_710u32);
+        let params: ZcoinConsensusParams = serde_json::from_value(with_height).unwrap();
+
+        for nu in [
+            NetworkUpgrade::Nu5,
+            NetworkUpgrade::Nu6,
+            NetworkUpgrade::Nu6_1,
+            NetworkUpgrade::Nu6_2,
+        ] {
+            assert_eq!(params.activation_height(nu), None, "{:?} must stay unmapped", nu);
+        }
+        assert_eq!(
+            params.activation_height(NetworkUpgrade::Sapling),
+            Some(BlockHeight::from_u32(152_855))
+        );
+        // Far above the declared Ironwood height, the branch in force is still Sapling.
+        assert_eq!(
+            BranchId::for_height(&params, BlockHeight::from_u32(4_200_000)),
+            BranchId::Sapling
+        );
     }
 }
 

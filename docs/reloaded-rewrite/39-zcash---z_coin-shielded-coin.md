@@ -321,6 +321,33 @@ invalid proofs.
 > read/hash-mismatch errors.
 
 ### 39.6.4 Consume `protocol_data` consensus parameters
+
+R39.6.4a `consensus_params` may additionally carry two optional Ironwood
+network-upgrade members, both defaulting to absent:
+
+- `ironwood_activation_time` -- the wall-clock timestamp (Unix seconds) from
+  which the coin's Ironwood upgrade activates;
+- `ironwood_activation_height` -- the activation height, once the network has
+  derived and published it.
+
+Both are optional in both directions: a configuration omitting them shall parse
+on a build that understands them, and a configuration carrying them shall parse
+on a build that does not (this payload is deliberately not
+`deny_unknown_fields`, per R36.3.1/R36.3.3).
+
+They are two members rather than one because the dictated chain does not fix an
+Ironwood activation height in advance: each node derives it at runtime from the
+first block whose time exceeds the timestamp, plus a settling margin, so only
+the timestamp can be published ahead of the upgrade and only the height is
+usable as a consensus-parameter lookup.
+
+Carrying these members shall not by itself change any network-upgrade
+activation lookup. Until the Ironwood upgrade is bound to
+`NetworkUpgrade::Nu6_3`, every post-Sapling upgrade shall continue to report no
+activation height, because the shielded transaction builder derives the
+consensus branch ID -- and therefore the transaction version it signs -- from
+exactly those lookups.
+
 R39.6.4 The shielded-coin builder shall source **all** of its Zcash
 network parameters, its shielded HD derivation path, and its sync checkpoint
 from the coin config's `protocol.protocol_data` (R39.1.2–R39.1.4), rather than
