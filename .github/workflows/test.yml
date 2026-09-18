@@ -97,7 +97,7 @@ jobs:
           # docs/plans/librustzcash-upgrade.md and
           # docs/plans/arrr-ironwood-compatibility.md.
           - name: shielded
-            cmd: cargo test -p coins --lib z_coin::
+            cmd: "cargo test -p coins --lib z_coin::"
 
     steps:
       - uses: actions/checkout@v7
