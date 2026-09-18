@@ -1359,6 +1359,7 @@ impl MmCoin for ZCoin {
                 let my_balance_change = data.spent_by_me - data.received_by_me;
 
                 Ok(TransactionDetails {
+                    tx_json: None,
                     tx_hex: tx_bytes.into(),
                     tx_hash: tx_hash.to_tx_hash(),
                     from: vec![coin.z_fields.my_z_addr_encoded.clone()],

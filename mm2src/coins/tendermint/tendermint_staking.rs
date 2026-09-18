@@ -418,6 +418,7 @@ impl TendermintCoin {
             .into();
 
         let tx_details = TransactionDetails {
+            tx_json: None,
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![self.account_id.to_string()],
@@ -525,6 +526,7 @@ impl TendermintCoin {
             .into();
 
         let tx_details = TransactionDetails {
+            tx_json: None,
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![self.account_id.to_string()],
@@ -620,6 +622,7 @@ impl TendermintCoin {
             .into();
 
         let tx_details = TransactionDetails {
+            tx_json: None,
             tx_hex: tx_hex.clone(),
             tx_hash: tx_id,
             from: vec![validator_address.to_string()],

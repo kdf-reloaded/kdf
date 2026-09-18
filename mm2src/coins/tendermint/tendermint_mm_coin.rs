@@ -307,6 +307,7 @@ impl MmCoin for TendermintCoin {
             let internal_id = tx_hash_to_internal_id(&tx_hash);
 
             let tx_details = TransactionDetails {
+                tx_json: None,
                 tx_hex: tx_bytes.into(),
                 tx_hash,
                 from: vec![account_id.to_string()],

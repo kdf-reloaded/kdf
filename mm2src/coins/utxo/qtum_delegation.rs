@@ -330,6 +330,7 @@ impl QtumCoin {
         let my_balance_change = &received_by_me - &spent_by_me;
 
         Ok(TransactionDetails {
+            tx_json: None,
             tx_hex: serialize(&generated_tx.signed).into(),
             tx_hash: generated_tx.signed.hash().reversed().to_vec().to_tx_hash(),
             from: vec![my_address_string],

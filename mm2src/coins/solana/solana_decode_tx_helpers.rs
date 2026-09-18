@@ -58,6 +58,7 @@ impl SolanaConfirmedTransaction {
                 };
                 let fee = BigDecimal::try_from(lamports_to_sol(self.meta.fee))?;
                 let tx = TransactionDetails {
+                    tx_json: None,
                     tx_hex: Default::default(),
                     tx_hash: self.transaction.signatures[0].to_string(),
                     from: vec![instruction.parsed.info.source.clone()],

@@ -19,6 +19,7 @@ async fn withdraw_base_coin_impl(coin: SolanaCoin, req: WithdrawRequest) -> With
     };
     let spent_by_me = &total_amount + &res.sol_required;
     Ok(TransactionDetails {
+        tx_json: None,
         tx_hex: serialized_tx.into(),
         tx_hash: tx.signatures[0].to_string(),
         from: vec![coin.my_address.clone()],

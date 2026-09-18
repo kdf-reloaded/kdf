@@ -771,6 +771,7 @@ pub(crate) fn build_evm_withdraw_details(
         spent_by_me += &fee_details.total_fee;
     }
     Ok(TransactionDetails {
+        tx_json: None,
         to: vec![checksum_address(&format!("{:#02x}", plan.to_addr))],
         from: vec![from_checksum],
         total_amount: amount_decimal,
@@ -1545,6 +1546,7 @@ impl EthCoin {
                 };
 
                 let details = TransactionDetails {
+                    tx_json: None,
                     my_balance_change: &received_by_me - &spent_by_me,
                     spent_by_me,
                     received_by_me,
@@ -1934,6 +1936,7 @@ impl EthCoin {
                 };
 
                 let details = TransactionDetails {
+                    tx_json: None,
                     my_balance_change: &received_by_me - &spent_by_me,
                     spent_by_me,
                     received_by_me,

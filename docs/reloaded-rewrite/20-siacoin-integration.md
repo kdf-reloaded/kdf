@@ -41,7 +41,9 @@ The bound surface covers:
 - the atomic-swap HTLC realised as a native Sia spend policy,
   and the V1 swap-protocol obligations the module must meet;
 - the walletd HTTP endpoints the module consumes;
-- the value-transfer (withdraw) behaviour; and
+- the value-transfer (withdraw) behaviour, including the
+  transaction carrier the withdraw response and the legacy
+  broadcast method exchange; and
 - the explicitly deferred pieces (multi-account HD, history
   persistence, swap-spend search, message signing, V2 swap
   protocol, watcher eligibility).
@@ -448,7 +450,209 @@ does not define coin-specific task-withdraw behaviour of its own;
 the request/response wire contract for both paths is bound by
 [Chapter 49](49-withdrawal-task-path.md), not by this chapter. This
 chapter binds only the Sia-specific fee/signing behaviour of
-R-W1--R-W4.
+R-W1--R-W4, the Sia-specific transaction-carrier and
+record-identity fields of R-W6--R-W11, and the SC-specific part of
+the legacy broadcast method's request contract (R-W8).
+
+### 20.9.1 Transaction carrier in the withdraw response (dictated interop)
+
+**R-W6 (`tx_hex` -- mandatory, authoritative).** The completed
+transaction-details object a Sia withdrawal returns MUST carry
+`tx_hex`, non-empty, on exactly the mandatory terms
+[Chapter 49](49-withdrawal-task-path.md) R49.25 states for every
+coin family. Sia is the case where a coin's *native* serialisation
+of a signed transaction is **JSON text** rather than a binary
+encoding, so for this coin `tx_hex` is the lowercase hex encoding
+of the **UTF-8 bytes of that Sia-native transaction JSON** -- hex
+of JSON text, not hex of a binary wire form. Hex-decoding `tx_hex`
+MUST yield exactly the byte sequence the bound Sia library
+(§20.2) produces when it serialises the signed V2 transaction, so
+that the decoded bytes parse directly as that library's V2
+transaction type. A withdrawal that cannot produce that
+serialisation MUST fail with a structured withdrawal error;
+returning an empty, default, or otherwise placeholder `tx_hex`
+while reporting success is a defect, because R49.25 makes the
+field mandatory for a completed withdrawal and every downstream
+broadcast path reads it.
+
+**R-W7 (`tx_json` -- additional carrier).** In addition to R-W6,
+the Sia transaction-details object MUST carry a field named
+exactly `tx_json`, placed at the **top level** of that object (a
+sibling of `tx_hex`, `tx_hash`, `from`, `to`, `fee_details`, ...,
+not nested inside any of them). Its value is the Sia-native
+signed-transaction **JSON object itself** -- the identical
+serialisation R-W6 hex-encodes, emitted unencoded. For one
+completed withdrawal, hex-decoding `tx_hex` and parsing the result
+as JSON MUST produce the same JSON value as `tx_json`: the two
+fields are two encodings of one transaction and never two
+different transactions. `tx_json` is coin-specific. It is absent
+from the transaction-details object of a coin family that has no
+native JSON transaction form, and a consumer MUST read its absence
+as "this coin has no JSON carrier", never as an error.
+
+> **Deliberate superset (informative).** The two external contracts
+> this project tracks for SC disagree about the carrier. The
+> platform's published public API reference documents `tx_hex` as
+> the sole transaction carrier for a withdrawal and defines no
+> `tx_json` field for any coin. The deployed interoperability
+> reference for SC does the opposite: for this one coin it carries
+> the signed transaction only as a top-level `tx_json` object and
+> emits no `tx_hex` at all. This project resolves the disagreement
+> by emitting **both** -- `tx_hex` stays authoritative and
+> mandatory (R-W6), `tx_json` is added alongside it (R-W7) -- which
+> is a strict superset of both shapes, so an integration written
+> against either one keeps working unchanged. The addition is
+> purely additive: it removes no field and changes no existing
+> field's name, type, or meaning. A client that has only ever read
+> `tx_hex` is unaffected; a client written against the SC-only
+> shape finds `tx_json` where it expects it.
+
+**R-W8 (broadcast contract -- `send_raw_transaction`).** The legacy
+`send_raw_transaction` JSON-RPC method MUST accept a Sia
+transaction in **either** carrier, so that a caller can feed back
+whichever half of the R-W6/R-W7 pair it kept:
+
+| Request field | JSON type | Interpretation for SC |
+| --- | --- | --- |
+| `tx_hex` | string | hex; the decoded bytes are the Sia-native transaction JSON text |
+| `tx_json` | object | the Sia-native signed-transaction JSON object, taken as-is |
+
+The contract is:
+
+- **Precedence.** When both fields are present, `tx_hex` wins and
+  `tx_json` is ignored. One deterministic precedence rule applies
+  to every coin, so a caller that echoes back a whole
+  transaction-details object -- which for SC carries both -- always
+  broadcasts the same transaction regardless of which coin it
+  holds.
+- **Neither present.** The call MUST fail with a request-validation
+  error that names both accepted fields, and MUST NOT broadcast.
+- **Selected carrier unparseable.** When the selected carrier is
+  present but cannot be decoded -- `tx_hex` is not valid hex, or
+  `tx_json` is not a JSON object, or the resulting bytes do not
+  parse as a signed Sia V2 transaction -- the call MUST fail with a
+  structured error and MUST NOT silently fall through to the other
+  carrier. A malformed `tx_hex` is an error, not a reason to try
+  `tx_json`. Nothing is broadcast on any failure path.
+- **Success.** On success the response carries the broadcast
+  transaction's id under `tx_hash`, unchanged from the shape every
+  other coin family returns from this method.
+
+No chapter of this document set presently binds
+`send_raw_transaction`'s request or response shape; the method is
+recorded only as a supported legacy method in the document set's
+RPC-method census
+([`rpc-method-census.md`](rpc-method-census.md)), and
+[Chapter 47](47-metamask-integration.md) refers to it for the EVM
+MetaMask follow-up case only. R-W8 is therefore the binding
+statement of the SC-specific part of that method's request
+contract; the coin-generic part of the method is unchanged by this
+chapter.
+
+### 20.9.2 Record-identity fields in the withdraw response
+
+**R-W9 (`transaction_type`).** A completed SC withdrawal's
+transaction-details object MUST set `transaction_type` to the
+v2-transaction wire value [Chapter 53](53-sia-transaction-history.md)
+R53.5.10 reserves for Sia (`SiaV2Transaction`). It MUST NOT be
+left at the shared enumeration's default standard-transfer member.
+The reconciliation with ch. 53 is that the wire value denotes
+*what the record is* -- a Sia v2 transaction -- and not *which
+subsystem produced it*: a record the withdraw path returns and a
+record the history path later projects from the same transaction's
+walletd event (ch. 53 §53.5) describe one transaction and MUST
+agree on this field. The deployed interoperability reference also
+reports the Sia v2-transaction value on its withdraw path, so this
+is compatibility restoration, not a divergence. Emitting the
+default standard-transfer member for an SC withdrawal is a defect
+against both ch. 53 R53.5.10 and the reference behaviour.
+
+**R-W10 (`internal_id`).** A completed SC withdrawal's
+transaction-details object MUST set `internal_id` to the **raw
+bytes of the signed transaction's id** -- the same 32-byte value
+whose lowercase hex form the same object reports as `tx_hash`.
+This is the identity rule ch. 53 R53.5.2 already binds for a Sia
+*history* record, applied to the withdraw path so that the two
+paths agree: the record a caller receives from a withdrawal and
+the record that later appears in that address's history for the
+same transaction carry the same primary key, and a caller can join
+them without re-deriving one from the other.
+
+> **Upstream divergence (informative).** This is not
+> compatibility restoration. The deployed interoperability
+> reference leaves `internal_id` **empty** on its SC withdraw
+> response, exactly as this project's current withdraw path does;
+> only its history path populates the field. R-W10 is therefore a
+> deliberate, documented improvement over the reference behaviour,
+> not parity with it. It is safe as an additive change -- the
+> field is mandatory in the R49.25 field set either way, and the
+> reference merely returns an empty value for it, so populating it
+> supplies information where a caller previously had none rather
+> than changing the meaning of a value a caller could already rely
+> on. A consumer that ignored `internal_id` on SC withdrawals
+> because it was always empty is unaffected.
+
+### 20.9.3 What a client can do with `tx_json` outside this project
+
+**R-W11 (basis caveat).** The Sia-native V2-transaction JSON that
+R-W6 hex-encodes and R-W7 emits does **not** include the
+chain-index "basis" the walletd broadcast endpoint
+(`POST /api/txpool/broadcast`, §20.8) requires alongside the
+transaction: the basis is a broadcast-time parameter of the
+endpoint, not a field of the Sia transaction structure, and it is
+deliberately excluded from the transaction's serialised form. A
+consumer that takes `tx_json` (or the decoded `tx_hex`) and
+broadcasts it to walletd through its own client MUST therefore
+supply a basis itself -- normally the current chain tip. This
+chapter's own broadcast path (R-W8) and the bound Sia library
+resolve the missing basis to the current tip, so a caller that
+round-trips the transaction back through `send_raw_transaction`
+never has to think about it; a caller that leaves this project's
+RPC surface does. The transaction remains valid for broadcast only
+while the inputs it spends remain unspent, so a `tx_json` held for
+later is subject to the same staleness as any other pre-signed
+transaction.
+
+### 20.9.4 Verification
+
+**T-W1.** Complete an SC withdrawal and inspect the returned
+transaction-details object. It carries a non-empty `tx_hex` and a
+top-level `tx_json` object. Hex-decode `tx_hex`, parse the result
+as JSON, and compare with `tx_json`: the two are the same JSON
+value (R-W6, R-W7).
+
+**T-W2.** Take the same completed withdrawal and broadcast it
+three ways through `send_raw_transaction`: with `tx_hex` alone,
+with `tx_json` alone, and with both present. All three select the
+same transaction and report the same `tx_hash`. Repeat with a
+`tx_hex` that is not valid hex while a well-formed `tx_json` is
+also present: the call fails and does not fall through to
+`tx_json` (R-W8).
+
+**T-W3.** Call `send_raw_transaction` for SC with neither `tx_hex`
+nor `tx_json` present: the call fails with a request-validation
+error and broadcasts nothing (R-W8).
+
+**T-W4.** Compare a completed SC withdrawal's transaction-details
+object with the history record that the history path later
+produces for the same transaction (ch. 53 §53.5). Both report the
+same `transaction_type` v2-transaction wire value, the same
+`tx_hash`, and the same `internal_id` bytes (R-W9, R-W10; ch. 53
+R53.5.2, R53.5.10).
+
+> **Code-quality finding (informative).** In this project's current
+> Sia withdraw path, the failure branch of serialising the signed
+> transaction into `tx_hex` substitutes an empty default value
+> instead of propagating an error, so a serialisation failure would
+> return a *successful* withdrawal response carrying an empty
+> `tx_hex`. That contradicts R-W6 and ch. 49 R49.25 (which make a
+> non-empty `tx_hex` mandatory for a completed withdrawal) and the
+> repository's own rule against substituting a placeholder value in
+> a funds-moving path. Proposed fix: propagate a structured
+> withdrawal error on that branch, so the withdrawal fails rather
+> than reporting success with an unusable carrier. The same
+> serialisation feeds `tx_json` under R-W7, so the fix covers both
+> fields at once.
 
 ## 20.10 Deferred Work
 
@@ -604,13 +808,15 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   public SLIP-44 registry (Sia coin type `1991`) and SLIP-10
   ed25519 derivation; the public Sia Rust library API the module
   binds (the key/address/transaction/spend-policy and API-client
-  types); and cross-chapter contracts (Chapters 06, 08, 13, 51).
+  types); the platform's published public API reference for the
+  withdrawal response's transaction carrier (§20.9.1); and
+  cross-chapter contracts (Chapters 06, 08, 13, 47, 49, 51, 53).
 - *Permitted-input classes used:* baseline source (epoch
   classification and absence verification only); external public
   specifications (the Sia protocol and consensus/transaction
   formats, the walletd HTTP API, SLIP-44/SLIP-10, the public Sia
   Rust library API); cross-chapter contracts (Chapters 06, 08,
-  13, 51); Interop / wire-and-API-bound reuse (R29/R31/R33) for the
+  13, 47, 49, 51, 53); Interop / wire-and-API-bound reuse (R29/R31/R33) for the
   dictated fragments embedded in §20.4 (the `enable_sia` /
   `task::enable_sia::*` public method strings), §20.4.1 (the
   SLIP-44 coin type and SLIP-10 scheme), §20.5 (the ed25519
@@ -619,7 +825,12 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   its success/refund satisfaction forms), §20.8 (the walletd
   endpoint paths), and -- added in this revision -- §20.9 (the
   `fee_details.total_amount` withdraw/tx-history response field
-  name) -- whose authoritative source is the bytes and
+  name) and -- added in this revision -- §20.9.1 (the `tx_hex` /
+  `tx_json` withdraw-response carrier fields, their top-level
+  placement, and the `tx_hex` / `tx_json` request fields and
+  precedence of the legacy broadcast method) and §20.9.2 (the Sia
+  v2-transaction `transaction_type` wire value, already bound by
+  chapter 53 R53.5.10) -- whose authoritative source is the bytes and
   calls any conforming Sia node, walletd instance, or library
   consumer must exchange for interoperability, not the historical
   lineage's discretionary expression.
@@ -632,14 +843,26 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   coin-layer key operations, and the ed25519 padding convention
   that R-S9 applies, and -- added in this revision -- the
   coin-pair secret-hash-algorithm-selection contract of R71
-  through R73 that R-S10 applies).
+  through R73 that R-S10 applies); Chapter 49 (the mandatory
+  completed-withdrawal field set of R49.25 that §20.9.1 R-W6
+  extends for this coin); Chapter 53 (the record-identity and
+  transaction-type rules R53.5.2 / R53.5.10 that §20.9.2
+  R-W9 / R-W10 reconcile the withdraw path with).
 - *Forbidden corpus:* consulted **only** to recover the
   externally-dictated public method strings of §20.4, the
   dictated derivation/coin-type and protocol/units facts of
   §20.4.1 and §20.5, the dictated spend-policy HTLC contract of
   §20.6, the dictated walletd endpoint paths of §20.8, and --
   added in this revision -- the `fee_details.total_amount` wire
-  field name of §20.9 R-W4, checked at both the `v2.6.0-beta`
+  field name of §20.9 R-W4, the withdraw-response transaction-carrier
+  facts of §20.9.1 (that the reference shape for this coin carries
+  the signed transaction as a top-level `tx_json` object and emits
+  no `tx_hex`, that its legacy broadcast method accepts either
+  `tx_hex` or `tx_json` with `tx_hex` taking precedence, and that
+  neither-present is a request-validation failure) and the
+  record-identity facts of §20.9.2 (that the reference withdraw
+  response reports the Sia v2-transaction `transaction_type` value
+  and leaves `internal_id` empty), checked at both the `v2.6.0-beta`
   stable-legacy reference and the current `dev`/v3 reference per
   AGENTS.md §3, with no disagreement between the two -- embedded
   as Interop/wire-compatibility reuse. While checking §20.9's

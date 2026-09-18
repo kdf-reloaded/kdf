@@ -169,8 +169,11 @@ pub(crate) fn tx_details_from_event(
 
     Ok(Some(TransactionDetails {
         // A walletd event is not a rebroadcastable serialised transaction
-        // (R53.5.11, D53.4).
+        // (R53.5.11, D53.4), so neither carrier is populated here: the JSON
+        // carrier ch.20 R-W7 binds is the withdraw path's, not the history
+        // path's.
         tx_hex: BytesJson(Vec::new()),
+        tx_json: None,
         tx_hash: event.id.to_string(),
         from: address_list(consumed.into_iter().map(|(address, _)| address)),
         to: address_list(created.into_iter().map(|(address, _)| address)),

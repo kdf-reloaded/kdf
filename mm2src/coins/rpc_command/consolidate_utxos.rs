@@ -109,6 +109,7 @@ pub async fn consolidate_utxos_rpc(
             let spent_by_me = big_decimal_from_sat_unsigned(spent_by_me, coin.as_ref().decimals);
 
             let tx = TransactionDetails {
+                tx_json: None,
                 from: vec![format!("{}", from_address)],
                 to: vec![format!("{}", from_address)],
                 received_by_me: received_by_me.clone(),

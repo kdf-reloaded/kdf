@@ -132,6 +132,7 @@ async fn withdraw_native_trx(
     let spent_by_me = amount_dec.clone();
 
     Ok(TransactionDetails {
+        tx_json: None,
         tx_hex: BytesJson::from(tx_bytes),
         tx_hash: format!("{:x}", hash),
         from: vec![my_address_str],
@@ -219,6 +220,7 @@ async fn withdraw_trc20_token(
     let spent_by_me = amount_dec.clone();
 
     Ok(TransactionDetails {
+        tx_json: None,
         tx_hex: BytesJson::from(tx_bytes),
         tx_hash: format!("{:x}", hash),
         from: vec![my_address_str],
