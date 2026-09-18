@@ -322,6 +322,34 @@ invalid proofs.
 
 ### 39.6.4 Consume `protocol_data` consensus parameters
 
+R39.6.4b A shielded coin that declares `ironwood_activation_time` and is built
+without the ability to construct Ironwood-era transactions shall refuse to enter
+**new** swaps from a cut-off preceding that activation, and shall report itself
+as wallet-only for the purposes of order placement.
+
+The cut-off shall precede activation by at least the longest time a swap payment
+can remain unspendable-and-unrefunded: the longest maker payment lock this
+framework produces, plus the refund grace the swap machines add before acting,
+plus an allowance for the refund to be mined. A payment funded at the last
+tradeable instant must therefore still be refundable, and confirmed, before
+activation.
+
+The refusal shall be applied at **both** of:
+
+- the locally initiated order paths, via the coin's wallet-only report, which
+  `buy`, `sell` and `setprice` already gate on; and
+- the incoming peer-match predicate, which the wallet-only report does not
+  reach — a remote taker can otherwise match an order already posted and pull
+  the coin into a new swap regardless.
+
+The refusal shall not affect balance, address derivation, withdrawal, history,
+or any swap already in progress: nothing re-checks these once a swap has begun,
+and a swap already under way must be allowed to finish or refund normally.
+
+A coin that declares no Ironwood activation time shall never be frozen, and the
+freeze shall lift entirely once the build can construct Ironwood-era
+transactions.
+
 R39.6.4a `consensus_params` may additionally carry two optional Ironwood
 network-upgrade members, both defaulting to absent:
 
