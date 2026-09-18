@@ -1145,7 +1145,7 @@ impl ZCoinShieldedHistory {
                 let spent: i64 = row.get(5)?;
                 Ok(ZCoinStoredHistoryRow {
                     internal_id: row.get(0)?,
-                    tx_hash: hex::encode(txid),
+                    tx_hash: encode_display_txid(txid),
                     block_height: row.get::<_, u32>(2)? as u64,
                     timestamp: row.get::<_, u32>(3)? as u64,
                     received_by_me: non_negative_amount(received, 4)?,
@@ -1231,6 +1231,20 @@ fn decode_32_byte_hex(name: &str, value: &str) -> Result<[u8; 32], String> {
     bytes
         .try_into()
         .map_err(|bytes: Vec<u8>| format!("Invalid {} length: expected 32 bytes, got {}", name, bytes.len()))
+}
+
+/// Renders a transaction ID in the big-endian *display* order every block
+/// explorer, every other KDF coin's history, and this coin's own `withdraw`
+/// response use.
+///
+/// `zcash_client_sqlite` stores `transactions.txid` in the internal
+/// little-endian byte order, so the raw column must be reversed before it is
+/// shown. Skipping the reversal produced an `z_coin_tx_history` `tx_hash` that
+/// no explorer could resolve and that disagreed with the value
+/// `send_raw_transaction` returned for the very same transaction (R39.8.7).
+fn encode_display_txid(mut txid: Vec<u8>) -> String {
+    txid.reverse();
+    hex::encode(txid)
 }
 
 /// Converts the display-order block ID returned by `z_gettreestate` (and thus
@@ -2263,6 +2277,44 @@ mod tests {
         hash
     }
 
+    /// Two real ARRR mainnet transaction IDs, in the internal little-endian byte
+    /// order `zcash_client_sqlite` stores in `transactions.txid`, paired with the
+    /// big-endian display order block explorers resolve. Captured from the
+    /// 2026-09-18 live verification run (see
+    /// `docs/plans/arrr-ironwood-compatibility.md`): a 0.1 ARRR receive mined at
+    /// height 4138653 and the sweep that spent it, mined at 4138661.
+    ///
+    /// These are deliberately **not** byte-order-symmetric. The previous fixture
+    /// used `[1u8; 32]` / `[2u8; 32]`, which read identically forwards and
+    /// backwards and so could never have detected a missing reversal.
+    const FIXTURE_RECEIVE_TXID_INTERNAL: [u8; 32] =
+        hex_literal_32("a4d43b3b60f54559abed8c6ba71354214c7f20b6a4e5e74ac318ba0a53409733");
+    const FIXTURE_RECEIVE_TXID_DISPLAY: &str = "339740530aba18c34ae7e5a4b6207f4c215413a76b8cedab5945f5603b3bd4a4";
+    const FIXTURE_SPEND_TXID_INTERNAL: [u8; 32] =
+        hex_literal_32("0e3774441248e313b0c0bc1bf49a23e2d523c61c30fc4c897c6fc1e3da6cbb23");
+    const FIXTURE_SPEND_TXID_DISPLAY: &str = "23bb6cdae3c16f7c894cfc301cc623d5e2239af41bbcc0b013e348124474370e";
+
+    /// `const`-evaluable hex decoder, so the fixture IDs above can be written as
+    /// the hex strings they are quoted as everywhere else.
+    const fn hex_literal_32(hex: &str) -> [u8; 32] {
+        const fn nibble(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => panic!("fixture txid hex must be lowercase [0-9a-f]"),
+            }
+        }
+        let bytes = hex.as_bytes();
+        assert!(bytes.len() == 64, "fixture txid hex must be 32 bytes");
+        let mut out = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            out[i] = (nibble(bytes[2 * i]) << 4) | nibble(bytes[2 * i + 1]);
+            i += 1;
+        }
+        out
+    }
+
     fn insert_history_fixture(history: &ZCoinShieldedHistory) {
         let mut wallet_db = open_wallet_db(history.wallet_db_path(), test_params()).unwrap();
         if wallet_db.get_account_ids().unwrap().is_empty() {
@@ -2307,14 +2359,14 @@ mod tests {
             "INSERT INTO transactions (
                 id_tx, txid, block, mined_height, tx_index, min_observed_height
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![1i64, vec![1u8; 32], 10u32, 10u32, 0u32, 10u32],
+            params![1i64, FIXTURE_RECEIVE_TXID_INTERNAL.to_vec(), 10u32, 10u32, 0u32, 10u32],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO transactions (
                 id_tx, txid, block, mined_height, tx_index, min_observed_height
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![2i64, vec![2u8; 32], 11u32, 11u32, 0u32, 11u32],
+            params![2i64, FIXTURE_SPEND_TXID_INTERNAL.to_vec(), 11u32, 11u32, 0u32, 11u32],
         )
         .unwrap();
         conn.execute(
@@ -2616,6 +2668,54 @@ mod tests {
         assert_eq!(user_version, 8);
     }
 
+    /// A shielded transaction ID must be reported in the same byte order as every
+    /// block explorer, every other KDF coin's history, and this coin's own
+    /// `withdraw` response -- big-endian display order.
+    ///
+    /// Regression: `load_page` hex-encoded the raw `transactions.txid` column,
+    /// which `zcash_client_sqlite` stores in internal little-endian order. The
+    /// resulting `z_coin_tx_history` `tx_hash` resolved on no explorer and
+    /// disagreed with the ID `send_raw_transaction` returned for the very same
+    /// transaction. Reproduced live on ARRR mainnet 2026-09-18 with exactly the
+    /// two transactions used as fixtures here.
+    #[test]
+    fn tx_history_reports_txids_in_explorer_display_order() {
+        // The stored bytes and the displayed string are byte reversals of each
+        // other -- pin that, so neither constant can drift alone.
+        let mut reversed = FIXTURE_RECEIVE_TXID_INTERNAL;
+        reversed.reverse();
+        assert_eq!(hex::encode(reversed), FIXTURE_RECEIVE_TXID_DISPLAY);
+        let mut reversed = FIXTURE_SPEND_TXID_INTERNAL;
+        reversed.reverse();
+        assert_eq!(hex::encode(reversed), FIXTURE_SPEND_TXID_DISPLAY);
+
+        assert_eq!(
+            encode_display_txid(FIXTURE_RECEIVE_TXID_INTERNAL.to_vec()),
+            FIXTURE_RECEIVE_TXID_DISPLAY
+        );
+
+        let history = open_test_history();
+        insert_history_fixture(&history);
+        let page = history
+            .load_page(
+                "ARRR",
+                "zs-wallet",
+                8,
+                12,
+                &PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
+                10,
+            )
+            .unwrap();
+
+        let rendered: Vec<&str> = page.transactions.iter().map(|t| t.tx_hash.as_str()).collect();
+        assert_eq!(rendered, vec![FIXTURE_SPEND_TXID_DISPLAY, FIXTURE_RECEIVE_TXID_DISPLAY]);
+        // Guard the specific failure: the raw internal order must never surface.
+        for tx in &page.transactions {
+            assert_ne!(tx.tx_hash, hex::encode(FIXTURE_RECEIVE_TXID_INTERNAL));
+            assert_ne!(tx.tx_hash, hex::encode(FIXTURE_SPEND_TXID_INTERNAL));
+        }
+    }
+
     #[test]
     fn load_page_returns_newest_first_wallet_scan_history() {
         let history = open_test_history();
@@ -2634,6 +2734,11 @@ mod tests {
 
         assert_eq!(page.total, 2);
         assert_eq!(page.transactions[0].internal_id, 2);
+        // Newest first, so index 0 is the spend and index 1 the receive. Both
+        // must be rendered in explorer display order, not the internal
+        // little-endian order the wallet database stores (R39.8.7).
+        assert_eq!(page.transactions[0].tx_hash, FIXTURE_SPEND_TXID_DISPLAY);
+        assert_eq!(page.transactions[1].tx_hash, FIXTURE_RECEIVE_TXID_DISPLAY);
         assert_eq!(
             page.transactions[0].spent_by_me,
             BigDecimal::from(25) / BigDecimal::from(100)

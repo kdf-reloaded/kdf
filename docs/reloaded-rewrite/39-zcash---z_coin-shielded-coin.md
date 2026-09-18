@@ -1202,7 +1202,7 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 
 | Field | JSON type | Description |
 |-------|-----------|-------------|
-| `tx_hash` | string | Transaction hash, hexadecimal. |
+| `tx_hash` | string | Transaction hash, hexadecimal, in **big-endian display order** (R39.8.7a). |
 | `from` | array of strings | Source address set the coins were sent from. |
 | `to` | array of strings | Destination address set the coins were sent to. |
 | `spent_by_me` | decimal (string/number) | Amount spent from the wallet's own address. |
@@ -1214,6 +1214,24 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `transaction_fee` | decimal | Fee paid by the transaction. |
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
+
+R39.8.7a `tx_hash` shall be rendered in the **big-endian display byte order** used
+by block explorers, by the transparent-coin history of `my_tx_history`, and by
+this coin's own `withdraw` and `send_raw_transaction` responses -- **not** in the
+internal little-endian order the shielded wallet database stores.
+
+The shielded wallet database (`zcash_client_sqlite`) persists
+`transactions.txid` little-endian, so the stored column shall be byte-reversed
+before it is serialized. The two orders are byte reversals of one another and
+are therefore indistinguishable by length or charset: a wrong order is not a
+malformed value, it is a valid-looking hash that resolves to nothing. A
+regression fixture shall use transaction IDs that are **not** byte-order
+symmetric, because a symmetric fixture (for example a repeated single byte)
+cannot distinguish the two orders at all.
+
+`internal_id` is unrelated to `tx_hash` and is not a transaction hash: it is the
+wallet database's own row identifier, used only for `FromId` paging (R39.8.2).
+
 
 ### 39.8.4 Error conditions
 
