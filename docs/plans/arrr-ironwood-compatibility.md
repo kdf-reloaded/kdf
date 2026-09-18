@@ -673,3 +673,18 @@ Open items depending on Pirate's answers:
   passed review — the same display-vs-little-endian confusion the previous migration hit
   with `TreeState` block IDs. Fix is one call site plus the CRD line; folded into round 1
   because it lives in the same file as A1.
+- **2026‑09‑18 — Plan A round 1 landed on `feat/arrr-ironwood`.** Four commits:
+  (1) a `shielded` cell in the `unit-tests` matrix — the `z_coin::` module ran in **no**
+  CI job before, so its tests defended nothing; (2) the txid display-order fix with the two
+  real mainnet IDs as fixtures; (3) tree-state checkpoint validation (R39.8.0ak) plus the
+  `saplingFrontier`/`ironwoodTree` proto fields; (4) the optional Ironwood consensus
+  parameters (R39.6.4a). 54 shielded tests (was 46), 69 `coins_activation`, native build,
+  wasm32 `coins`/`mm2_db`/`mm2_main`, and the `docker_tests` binary all pass.
+  Every new rejection test was **verified to fail without its fix** before being kept.
+  Re-verified live against mainnet on the patched build: activation `Ok`, `sync_status`
+  `Finished`, no shielded WARN/ERROR, and both history transaction IDs now **resolve on
+  `explorer.pirate.black`** — `339740530aba…` matching exactly the ID the sending wallet
+  reported. A2 deliberately changes no activation lookup: a test pins that
+  `BranchId::for_height` still returns `Sapling` at any height even with an Ironwood height
+  configured, because the shielded builder derives the transaction version it signs from
+  that lookup.
