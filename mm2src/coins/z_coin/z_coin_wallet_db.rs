@@ -34,6 +34,10 @@ const LIGHTWALLETD_BLOCK_BATCH_SIZE: u64 = 500;
 const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTWALLETD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const LIGHTWALLETD_GRPC_SERVICE: &str = "pirate.wallet.sdk.rpc.CompactTxStreamer";
+/// Length of a Sapling commitment root, which a lightwalletd `TreeState` must never
+/// carry in place of a serialized commitment tree. See
+/// [`parse_checkpoint_commitment_tree`].
+const SAPLING_COMMITMENT_ROOT_LEN: usize = 32;
 
 type LightwalletdClient = z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient<Channel>;
 type ReloadedWalletDb = WalletDb<Connection, ZcoinConsensusParams, SystemClock, OsRng>;
@@ -650,8 +654,23 @@ impl ZCoinShieldedHistory {
                 tree_state.height
             )
         })?);
+        // The frontier field, when the server sends one, must carry the same bytes
+        // as the tree field. A divergence is a server-side defect we want visible;
+        // field 5 stays authoritative because every supported server populates it.
+        if !tree_state.sapling_frontier.is_empty() && tree_state.sapling_frontier != tree_state.tree {
+            log::warn!(
+                "lightwalletd tree-state at height {} disagrees with itself: sapling tree is {} hex chars, \
+                 sapling frontier is {} hex chars; using the tree field",
+                checkpoint_height,
+                tree_state.tree.len(),
+                tree_state.sapling_frontier.len()
+            );
+        }
+        let sapling_activation = consensus_params
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap_or(BlockHeight::from_u32(0));
         let commitment_tree: sapling::CommitmentTree =
-            read_commitment_tree(sapling_tree.as_slice()).map_err(|e| e.to_string())?;
+            parse_checkpoint_commitment_tree(&sapling_tree, checkpoint_height, sapling_activation)?;
         let chain_state = ChainState::new(checkpoint_height, BlockHash(hash), commitment_tree.to_frontier());
         let mut wallet_db = open_wallet_db(&self.wallet_db_path, consensus_params)?;
         if wallet_db.get_account_ids().map_err(|e| e.to_string())?.is_empty() {
@@ -1231,6 +1250,67 @@ fn decode_32_byte_hex(name: &str, value: &str) -> Result<[u8; 32], String> {
     bytes
         .try_into()
         .map_err(|bytes: Vec<u8>| format!("Invalid {} length: expected 32 bytes, got {}", name, bytes.len()))
+}
+
+/// Parses the Sapling commitment tree a lightwalletd `TreeState` carries, refusing
+/// the shapes that would otherwise be accepted as a silently wrong anchor.
+///
+/// Pirate's lightwalletd fills this field through `preferredTreeState(finalState,
+/// finalRoot)`, which substitutes the **32-byte commitment root** whenever the node
+/// cannot supply a frontier — in `GetTreeState` and `GetBridgeTreeState` alike, so
+/// there is no alternative RPC to ask instead. Three rejections are needed, because
+/// `read_commitment_tree` alone catches none of them reliably:
+///
+/// 1. A bare 32-byte root. It is not a serialized tree at all.
+/// 2. Trailing bytes. `read_commitment_tree` reads `left`, `right` and `parents` and
+///    returns without checking that the buffer is exhausted, so a root beginning
+///    `00 00 00` parses **successfully** as an *empty* tree while 29 bytes are
+///    silently discarded — anchoring the wallet on a tree of size 0.
+/// 3. An empty field above Sapling activation. Upstream treats the empty string as
+///    the empty tree, which is only legitimate at or below the activation height;
+///    the fetch plan floors every request at that height.
+fn parse_checkpoint_commitment_tree(
+    sapling_tree: &[u8],
+    checkpoint_height: BlockHeight,
+    sapling_activation: BlockHeight,
+) -> Result<sapling::CommitmentTree, String> {
+    if sapling_tree.is_empty() {
+        if checkpoint_height <= sapling_activation {
+            return Ok(sapling::CommitmentTree::empty());
+        }
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} is empty, but Sapling activated at {}",
+            checkpoint_height, sapling_activation
+        ));
+    }
+
+    if sapling_tree.len() == SAPLING_COMMITMENT_ROOT_LEN {
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} is a bare {}-byte commitment root, not a \
+             serialized commitment tree; the server substituted finalRoot for finalState and the wallet \
+             must not anchor on it",
+            checkpoint_height, SAPLING_COMMITMENT_ROOT_LEN
+        ));
+    }
+
+    let mut cursor = std::io::Cursor::new(sapling_tree);
+    let tree: sapling::CommitmentTree = read_commitment_tree(&mut cursor).map_err(|e| {
+        format!(
+            "lightwalletd tree-state sapling tree at height {} is not a serialized commitment tree: {}",
+            checkpoint_height, e
+        )
+    })?;
+    let consumed = cursor.position();
+    if consumed != sapling_tree.len() as u64 {
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} has {} trailing byte(s) after a {}-byte \
+             commitment tree; refusing a partially parsed anchor",
+            checkpoint_height,
+            sapling_tree.len() as u64 - consumed,
+            consumed
+        ));
+    }
+    Ok(tree)
 }
 
 /// Renders a transaction ID in the big-endian *display* order every block
@@ -2800,6 +2880,116 @@ mod tests {
         assert_eq!(scanned, 10);
     }
 
+    /// Builds a `TreeState` for the checkpoint-validation tests. Height 10 is above
+    /// `test_params()`'s Sapling activation of 2, so the empty-tree shortcut does
+    /// not apply and every payload is validated on its merits.
+    fn tree_state_with_tree(tree_hex: &str) -> z_coin_grpc::TreeState {
+        z_coin_grpc::TreeState {
+            network: "main".to_owned(),
+            height: 10,
+            hash: hex::encode((0u8..32).collect::<Vec<_>>()),
+            time: 10,
+            tree: tree_hex.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A bare 32-byte commitment root is not a commitment tree. Pirate's
+    /// lightwalletd substitutes one whenever the node cannot supply a frontier, so
+    /// the wallet must refuse it rather than anchor on it.
+    #[test]
+    fn tree_state_bare_commitment_root_is_rejected() {
+        let history = open_test_history();
+        let root = hex::encode([0x7au8; 32]);
+        assert_eq!(root.len(), 64);
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&root))
+            .unwrap_err();
+        assert!(error.contains("bare 32-byte commitment root"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// The dangerous variant: a root whose leading bytes happen to be zero parses
+    /// *successfully* as an empty tree, because `read_commitment_tree` never checks
+    /// that it consumed the whole buffer. Before the length guard this was accepted
+    /// and anchored the wallet on a tree of size 0.
+    #[test]
+    fn tree_state_bare_root_of_leading_zeros_is_rejected_not_silently_empty() {
+        let mut root = [0xabu8; 32];
+        root[0] = 0;
+        root[1] = 0;
+        root[2] = 0;
+        // Demonstrate the trap directly: the raw parse succeeds and yields an empty
+        // tree, discarding 29 bytes.
+        let parsed: sapling::CommitmentTree = read_commitment_tree(&root[..]).unwrap();
+        assert_eq!(parsed.size(), 0, "fixture no longer reproduces the silent-empty parse");
+
+        let history = open_test_history();
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&hex::encode(root)))
+            .unwrap_err();
+        assert!(error.contains("bare 32-byte commitment root"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// Anything appended after a well-formed tree means the payload is not what the
+    /// server claimed; a partially consumed buffer must not become an anchor.
+    #[test]
+    fn tree_state_with_trailing_bytes_is_rejected() {
+        let history = open_test_history();
+        let mut bytes = empty_sapling_tree_bytes();
+        let tree_len = bytes.len();
+        bytes.extend_from_slice(&[0xffu8; 8]);
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&hex::encode(bytes)))
+            .unwrap_err();
+        assert!(error.contains("trailing byte"), "{}", error);
+        assert!(
+            error.contains(&format!("{}-byte commitment tree", tree_len)),
+            "{}",
+            error
+        );
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// An empty tree field is only legitimate at or below Sapling activation. The
+    /// fetch plan floors every request at that height, so above it an empty field
+    /// means the server had nothing to give us.
+    #[test]
+    fn tree_state_empty_tree_is_rejected_above_sapling_activation_and_allowed_at_it() {
+        let history = open_test_history();
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(""))
+            .unwrap_err();
+        assert!(error.contains("is empty"), "{}", error);
+        assert!(error.contains("Sapling activated at 2"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+
+        // At activation itself the empty tree is the correct answer.
+        let mut at_activation = tree_state_with_tree("");
+        at_activation.height = 2;
+        history
+            .init_wallet_checkpoint_from_tree_state(test_params(), at_activation)
+            .unwrap();
+        assert!(history.initial_chain_state.lock().is_some());
+    }
+
+    /// A server that sends both fields must agree with itself; when it does, the
+    /// checkpoint is accepted exactly as before.
+    #[test]
+    fn tree_state_sapling_frontier_matching_tree_is_accepted() {
+        let history = open_test_history();
+        let tree_hex = hex::encode(empty_sapling_tree_bytes());
+        let mut state = tree_state_with_tree(&tree_hex);
+        state.height = 2;
+        state.sapling_frontier = tree_hex;
+        state.ironwood_tree = hex::encode([0x11u8; 32]);
+        history
+            .init_wallet_checkpoint_from_tree_state(test_params(), state)
+            .unwrap();
+        assert!(history.initial_chain_state.lock().is_some());
+    }
+
     #[test]
     fn tree_state_display_hash_is_the_compact_chain_little_endian_anchor() {
         let history = open_test_history();
@@ -2813,6 +3003,7 @@ mod tests {
                 hash: hex::encode(display_hash),
                 time: 10,
                 tree: hex::encode(empty_sapling_tree_bytes()),
+                ..Default::default()
             })
             .unwrap();
 
@@ -2963,6 +3154,7 @@ mod tests {
             hash: hex::encode(display_hash),
             time: 8011,
             tree: hex::encode(final_tree_bytes),
+            ..Default::default()
         };
         let db_dir = history.wallet_db_path().parent().unwrap().to_owned();
         drop(history);

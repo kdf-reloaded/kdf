@@ -1215,6 +1215,35 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
 
+R39.8.0ak The Sapling commitment tree carried by a lightwalletd `TreeState`
+shall be validated before it is accepted as the wallet's sync anchor. The
+wallet shall reject, without mutating any persisted or in-memory chain state:
+
+- a payload whose length equals a Sapling commitment root (32 bytes), which is
+  not a serialized commitment tree;
+- a payload with bytes remaining after a complete commitment tree has been
+  read;
+- an empty payload at a height above Sapling activation.
+
+An empty payload at or below Sapling activation denotes the empty tree and
+shall be accepted.
+
+The first two rejections are load-bearing rather than defensive. The dictated
+server fills this field through `preferredTreeState(finalState, finalRoot)`,
+which substitutes the commitment **root** whenever the node cannot supply a
+frontier, and it does so identically in `GetTreeState` and
+`GetBridgeTreeState` — so no alternative RPC avoids it. A root is
+indistinguishable from a tree by inspection, and the reference tree reader
+returns as soon as it has read its three members without requiring the buffer
+to be exhausted: a root whose leading bytes are zero therefore parses
+*successfully* as the **empty** tree while the remainder is discarded,
+anchoring the wallet on a tree of size zero. Length and full-consumption checks
+are the only things that separate the two cases.
+
+Where the server also populates a Sapling frontier field, a value differing
+from the tree field shall be recorded as a warning and the tree field shall
+remain authoritative.
+
 R39.8.7a `tx_hash` shall be rendered in the **big-endian display byte order** used
 by block explorers, by the transparent-coin history of `my_tx_history`, and by
 this coin's own `withdraw` and `send_raw_transaction` responses -- **not** in the
