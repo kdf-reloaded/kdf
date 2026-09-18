@@ -34,6 +34,10 @@ const LIGHTWALLETD_BLOCK_BATCH_SIZE: u64 = 500;
 const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LIGHTWALLETD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const LIGHTWALLETD_GRPC_SERVICE: &str = "pirate.wallet.sdk.rpc.CompactTxStreamer";
+/// Length of a Sapling commitment root, which a lightwalletd `TreeState` must never
+/// carry in place of a serialized commitment tree. See
+/// [`parse_checkpoint_commitment_tree`].
+const SAPLING_COMMITMENT_ROOT_LEN: usize = 32;
 
 type LightwalletdClient = z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient<Channel>;
 type ReloadedWalletDb = WalletDb<Connection, ZcoinConsensusParams, SystemClock, OsRng>;
@@ -650,8 +654,23 @@ impl ZCoinShieldedHistory {
                 tree_state.height
             )
         })?);
+        // The frontier field, when the server sends one, must carry the same bytes
+        // as the tree field. A divergence is a server-side defect we want visible;
+        // field 5 stays authoritative because every supported server populates it.
+        if !tree_state.sapling_frontier.is_empty() && tree_state.sapling_frontier != tree_state.tree {
+            log::warn!(
+                "lightwalletd tree-state at height {} disagrees with itself: sapling tree is {} hex chars, \
+                 sapling frontier is {} hex chars; using the tree field",
+                checkpoint_height,
+                tree_state.tree.len(),
+                tree_state.sapling_frontier.len()
+            );
+        }
+        let sapling_activation = consensus_params
+            .activation_height(NetworkUpgrade::Sapling)
+            .unwrap_or(BlockHeight::from_u32(0));
         let commitment_tree: sapling::CommitmentTree =
-            read_commitment_tree(sapling_tree.as_slice()).map_err(|e| e.to_string())?;
+            parse_checkpoint_commitment_tree(&sapling_tree, checkpoint_height, sapling_activation)?;
         let chain_state = ChainState::new(checkpoint_height, BlockHash(hash), commitment_tree.to_frontier());
         let mut wallet_db = open_wallet_db(&self.wallet_db_path, consensus_params)?;
         if wallet_db.get_account_ids().map_err(|e| e.to_string())?.is_empty() {
@@ -1145,7 +1164,7 @@ impl ZCoinShieldedHistory {
                 let spent: i64 = row.get(5)?;
                 Ok(ZCoinStoredHistoryRow {
                     internal_id: row.get(0)?,
-                    tx_hash: hex::encode(txid),
+                    tx_hash: encode_display_txid(txid),
                     block_height: row.get::<_, u32>(2)? as u64,
                     timestamp: row.get::<_, u32>(3)? as u64,
                     received_by_me: non_negative_amount(received, 4)?,
@@ -1231,6 +1250,81 @@ fn decode_32_byte_hex(name: &str, value: &str) -> Result<[u8; 32], String> {
     bytes
         .try_into()
         .map_err(|bytes: Vec<u8>| format!("Invalid {} length: expected 32 bytes, got {}", name, bytes.len()))
+}
+
+/// Parses the Sapling commitment tree a lightwalletd `TreeState` carries, refusing
+/// the shapes that would otherwise be accepted as a silently wrong anchor.
+///
+/// Pirate's lightwalletd fills this field through `preferredTreeState(finalState,
+/// finalRoot)`, which substitutes the **32-byte commitment root** whenever the node
+/// cannot supply a frontier — in `GetTreeState` and `GetBridgeTreeState` alike, so
+/// there is no alternative RPC to ask instead. Three rejections are needed, because
+/// `read_commitment_tree` alone catches none of them reliably:
+///
+/// 1. A bare 32-byte root. It is not a serialized tree at all.
+/// 2. Trailing bytes. `read_commitment_tree` reads `left`, `right` and `parents` and
+///    returns without checking that the buffer is exhausted, so a root beginning
+///    `00 00 00` parses **successfully** as an *empty* tree while 29 bytes are
+///    silently discarded — anchoring the wallet on a tree of size 0.
+/// 3. An empty field above Sapling activation. Upstream treats the empty string as
+///    the empty tree, which is only legitimate at or below the activation height;
+///    the fetch plan floors every request at that height.
+fn parse_checkpoint_commitment_tree(
+    sapling_tree: &[u8],
+    checkpoint_height: BlockHeight,
+    sapling_activation: BlockHeight,
+) -> Result<sapling::CommitmentTree, String> {
+    if sapling_tree.is_empty() {
+        if checkpoint_height <= sapling_activation {
+            return Ok(sapling::CommitmentTree::empty());
+        }
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} is empty, but Sapling activated at {}",
+            checkpoint_height, sapling_activation
+        ));
+    }
+
+    if sapling_tree.len() == SAPLING_COMMITMENT_ROOT_LEN {
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} is a bare {}-byte commitment root, not a \
+             serialized commitment tree; the server substituted finalRoot for finalState and the wallet \
+             must not anchor on it",
+            checkpoint_height, SAPLING_COMMITMENT_ROOT_LEN
+        ));
+    }
+
+    let mut cursor = std::io::Cursor::new(sapling_tree);
+    let tree: sapling::CommitmentTree = read_commitment_tree(&mut cursor).map_err(|e| {
+        format!(
+            "lightwalletd tree-state sapling tree at height {} is not a serialized commitment tree: {}",
+            checkpoint_height, e
+        )
+    })?;
+    let consumed = cursor.position();
+    if consumed != sapling_tree.len() as u64 {
+        return Err(format!(
+            "lightwalletd tree-state sapling tree at height {} has {} trailing byte(s) after a {}-byte \
+             commitment tree; refusing a partially parsed anchor",
+            checkpoint_height,
+            sapling_tree.len() as u64 - consumed,
+            consumed
+        ));
+    }
+    Ok(tree)
+}
+
+/// Renders a transaction ID in the big-endian *display* order every block
+/// explorer, every other KDF coin's history, and this coin's own `withdraw`
+/// response use.
+///
+/// `zcash_client_sqlite` stores `transactions.txid` in the internal
+/// little-endian byte order, so the raw column must be reversed before it is
+/// shown. Skipping the reversal produced an `z_coin_tx_history` `tx_hash` that
+/// no explorer could resolve and that disagreed with the value
+/// `send_raw_transaction` returned for the very same transaction (R39.8.7).
+fn encode_display_txid(mut txid: Vec<u8>) -> String {
+    txid.reverse();
+    hex::encode(txid)
 }
 
 /// Converts the display-order block ID returned by `z_gettreestate` (and thus
@@ -2263,6 +2357,44 @@ mod tests {
         hash
     }
 
+    /// Two real ARRR mainnet transaction IDs, in the internal little-endian byte
+    /// order `zcash_client_sqlite` stores in `transactions.txid`, paired with the
+    /// big-endian display order block explorers resolve. Captured from the
+    /// 2026-09-18 live verification run (see
+    /// `docs/plans/arrr-ironwood-compatibility.md`): a 0.1 ARRR receive mined at
+    /// height 4138653 and the sweep that spent it, mined at 4138661.
+    ///
+    /// These are deliberately **not** byte-order-symmetric. The previous fixture
+    /// used `[1u8; 32]` / `[2u8; 32]`, which read identically forwards and
+    /// backwards and so could never have detected a missing reversal.
+    const FIXTURE_RECEIVE_TXID_INTERNAL: [u8; 32] =
+        hex_literal_32("a4d43b3b60f54559abed8c6ba71354214c7f20b6a4e5e74ac318ba0a53409733");
+    const FIXTURE_RECEIVE_TXID_DISPLAY: &str = "339740530aba18c34ae7e5a4b6207f4c215413a76b8cedab5945f5603b3bd4a4";
+    const FIXTURE_SPEND_TXID_INTERNAL: [u8; 32] =
+        hex_literal_32("0e3774441248e313b0c0bc1bf49a23e2d523c61c30fc4c897c6fc1e3da6cbb23");
+    const FIXTURE_SPEND_TXID_DISPLAY: &str = "23bb6cdae3c16f7c894cfc301cc623d5e2239af41bbcc0b013e348124474370e";
+
+    /// `const`-evaluable hex decoder, so the fixture IDs above can be written as
+    /// the hex strings they are quoted as everywhere else.
+    const fn hex_literal_32(hex: &str) -> [u8; 32] {
+        const fn nibble(b: u8) -> u8 {
+            match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                _ => panic!("fixture txid hex must be lowercase [0-9a-f]"),
+            }
+        }
+        let bytes = hex.as_bytes();
+        assert!(bytes.len() == 64, "fixture txid hex must be 32 bytes");
+        let mut out = [0u8; 32];
+        let mut i = 0;
+        while i < 32 {
+            out[i] = (nibble(bytes[2 * i]) << 4) | nibble(bytes[2 * i + 1]);
+            i += 1;
+        }
+        out
+    }
+
     fn insert_history_fixture(history: &ZCoinShieldedHistory) {
         let mut wallet_db = open_wallet_db(history.wallet_db_path(), test_params()).unwrap();
         if wallet_db.get_account_ids().unwrap().is_empty() {
@@ -2307,14 +2439,14 @@ mod tests {
             "INSERT INTO transactions (
                 id_tx, txid, block, mined_height, tx_index, min_observed_height
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![1i64, vec![1u8; 32], 10u32, 10u32, 0u32, 10u32],
+            params![1i64, FIXTURE_RECEIVE_TXID_INTERNAL.to_vec(), 10u32, 10u32, 0u32, 10u32],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO transactions (
                 id_tx, txid, block, mined_height, tx_index, min_observed_height
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![2i64, vec![2u8; 32], 11u32, 11u32, 0u32, 11u32],
+            params![2i64, FIXTURE_SPEND_TXID_INTERNAL.to_vec(), 11u32, 11u32, 0u32, 11u32],
         )
         .unwrap();
         conn.execute(
@@ -2616,6 +2748,54 @@ mod tests {
         assert_eq!(user_version, 8);
     }
 
+    /// A shielded transaction ID must be reported in the same byte order as every
+    /// block explorer, every other KDF coin's history, and this coin's own
+    /// `withdraw` response -- big-endian display order.
+    ///
+    /// Regression: `load_page` hex-encoded the raw `transactions.txid` column,
+    /// which `zcash_client_sqlite` stores in internal little-endian order. The
+    /// resulting `z_coin_tx_history` `tx_hash` resolved on no explorer and
+    /// disagreed with the ID `send_raw_transaction` returned for the very same
+    /// transaction. Reproduced live on ARRR mainnet 2026-09-18 with exactly the
+    /// two transactions used as fixtures here.
+    #[test]
+    fn tx_history_reports_txids_in_explorer_display_order() {
+        // The stored bytes and the displayed string are byte reversals of each
+        // other -- pin that, so neither constant can drift alone.
+        let mut reversed = FIXTURE_RECEIVE_TXID_INTERNAL;
+        reversed.reverse();
+        assert_eq!(hex::encode(reversed), FIXTURE_RECEIVE_TXID_DISPLAY);
+        let mut reversed = FIXTURE_SPEND_TXID_INTERNAL;
+        reversed.reverse();
+        assert_eq!(hex::encode(reversed), FIXTURE_SPEND_TXID_DISPLAY);
+
+        assert_eq!(
+            encode_display_txid(FIXTURE_RECEIVE_TXID_INTERNAL.to_vec()),
+            FIXTURE_RECEIVE_TXID_DISPLAY
+        );
+
+        let history = open_test_history();
+        insert_history_fixture(&history);
+        let page = history
+            .load_page(
+                "ARRR",
+                "zs-wallet",
+                8,
+                12,
+                &PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
+                10,
+            )
+            .unwrap();
+
+        let rendered: Vec<&str> = page.transactions.iter().map(|t| t.tx_hash.as_str()).collect();
+        assert_eq!(rendered, vec![FIXTURE_SPEND_TXID_DISPLAY, FIXTURE_RECEIVE_TXID_DISPLAY]);
+        // Guard the specific failure: the raw internal order must never surface.
+        for tx in &page.transactions {
+            assert_ne!(tx.tx_hash, hex::encode(FIXTURE_RECEIVE_TXID_INTERNAL));
+            assert_ne!(tx.tx_hash, hex::encode(FIXTURE_SPEND_TXID_INTERNAL));
+        }
+    }
+
     #[test]
     fn load_page_returns_newest_first_wallet_scan_history() {
         let history = open_test_history();
@@ -2634,6 +2814,11 @@ mod tests {
 
         assert_eq!(page.total, 2);
         assert_eq!(page.transactions[0].internal_id, 2);
+        // Newest first, so index 0 is the spend and index 1 the receive. Both
+        // must be rendered in explorer display order, not the internal
+        // little-endian order the wallet database stores (R39.8.7).
+        assert_eq!(page.transactions[0].tx_hash, FIXTURE_SPEND_TXID_DISPLAY);
+        assert_eq!(page.transactions[1].tx_hash, FIXTURE_RECEIVE_TXID_DISPLAY);
         assert_eq!(
             page.transactions[0].spent_by_me,
             BigDecimal::from(25) / BigDecimal::from(100)
@@ -2695,6 +2880,116 @@ mod tests {
         assert_eq!(scanned, 10);
     }
 
+    /// Builds a `TreeState` for the checkpoint-validation tests. Height 10 is above
+    /// `test_params()`'s Sapling activation of 2, so the empty-tree shortcut does
+    /// not apply and every payload is validated on its merits.
+    fn tree_state_with_tree(tree_hex: &str) -> z_coin_grpc::TreeState {
+        z_coin_grpc::TreeState {
+            network: "main".to_owned(),
+            height: 10,
+            hash: hex::encode((0u8..32).collect::<Vec<_>>()),
+            time: 10,
+            tree: tree_hex.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A bare 32-byte commitment root is not a commitment tree. Pirate's
+    /// lightwalletd substitutes one whenever the node cannot supply a frontier, so
+    /// the wallet must refuse it rather than anchor on it.
+    #[test]
+    fn tree_state_bare_commitment_root_is_rejected() {
+        let history = open_test_history();
+        let root = hex::encode([0x7au8; 32]);
+        assert_eq!(root.len(), 64);
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&root))
+            .unwrap_err();
+        assert!(error.contains("bare 32-byte commitment root"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// The dangerous variant: a root whose leading bytes happen to be zero parses
+    /// *successfully* as an empty tree, because `read_commitment_tree` never checks
+    /// that it consumed the whole buffer. Before the length guard this was accepted
+    /// and anchored the wallet on a tree of size 0.
+    #[test]
+    fn tree_state_bare_root_of_leading_zeros_is_rejected_not_silently_empty() {
+        let mut root = [0xabu8; 32];
+        root[0] = 0;
+        root[1] = 0;
+        root[2] = 0;
+        // Demonstrate the trap directly: the raw parse succeeds and yields an empty
+        // tree, discarding 29 bytes.
+        let parsed: sapling::CommitmentTree = read_commitment_tree(&root[..]).unwrap();
+        assert_eq!(parsed.size(), 0, "fixture no longer reproduces the silent-empty parse");
+
+        let history = open_test_history();
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&hex::encode(root)))
+            .unwrap_err();
+        assert!(error.contains("bare 32-byte commitment root"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// Anything appended after a well-formed tree means the payload is not what the
+    /// server claimed; a partially consumed buffer must not become an anchor.
+    #[test]
+    fn tree_state_with_trailing_bytes_is_rejected() {
+        let history = open_test_history();
+        let mut bytes = empty_sapling_tree_bytes();
+        let tree_len = bytes.len();
+        bytes.extend_from_slice(&[0xffu8; 8]);
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(&hex::encode(bytes)))
+            .unwrap_err();
+        assert!(error.contains("trailing byte"), "{}", error);
+        assert!(
+            error.contains(&format!("{}-byte commitment tree", tree_len)),
+            "{}",
+            error
+        );
+        assert!(history.initial_chain_state.lock().is_none());
+    }
+
+    /// An empty tree field is only legitimate at or below Sapling activation. The
+    /// fetch plan floors every request at that height, so above it an empty field
+    /// means the server had nothing to give us.
+    #[test]
+    fn tree_state_empty_tree_is_rejected_above_sapling_activation_and_allowed_at_it() {
+        let history = open_test_history();
+        let error = history
+            .init_wallet_checkpoint_from_tree_state(test_params(), tree_state_with_tree(""))
+            .unwrap_err();
+        assert!(error.contains("is empty"), "{}", error);
+        assert!(error.contains("Sapling activated at 2"), "{}", error);
+        assert!(history.initial_chain_state.lock().is_none());
+
+        // At activation itself the empty tree is the correct answer.
+        let mut at_activation = tree_state_with_tree("");
+        at_activation.height = 2;
+        history
+            .init_wallet_checkpoint_from_tree_state(test_params(), at_activation)
+            .unwrap();
+        assert!(history.initial_chain_state.lock().is_some());
+    }
+
+    /// A server that sends both fields must agree with itself; when it does, the
+    /// checkpoint is accepted exactly as before.
+    #[test]
+    fn tree_state_sapling_frontier_matching_tree_is_accepted() {
+        let history = open_test_history();
+        let tree_hex = hex::encode(empty_sapling_tree_bytes());
+        let mut state = tree_state_with_tree(&tree_hex);
+        state.height = 2;
+        state.sapling_frontier = tree_hex;
+        state.ironwood_tree = hex::encode([0x11u8; 32]);
+        history
+            .init_wallet_checkpoint_from_tree_state(test_params(), state)
+            .unwrap();
+        assert!(history.initial_chain_state.lock().is_some());
+    }
+
     #[test]
     fn tree_state_display_hash_is_the_compact_chain_little_endian_anchor() {
         let history = open_test_history();
@@ -2708,6 +3003,7 @@ mod tests {
                 hash: hex::encode(display_hash),
                 time: 10,
                 tree: hex::encode(empty_sapling_tree_bytes()),
+                ..Default::default()
             })
             .unwrap();
 
@@ -2858,6 +3154,7 @@ mod tests {
             hash: hex::encode(display_hash),
             time: 8011,
             tree: hex::encode(final_tree_bytes),
+            ..Default::default()
         };
         let db_dir = history.wallet_db_path().parent().unwrap().to_owned();
         drop(history);

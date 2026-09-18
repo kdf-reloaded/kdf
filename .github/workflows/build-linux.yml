@@ -46,8 +46,45 @@ jobs:
 
     steps:
       # The debian:11 image is minimal: install everything the build needs.
+      #
+      # Sources are pinned to snapshot.debian.org. Debian 11 reached end of
+      # standard support on 2026-08-31, and its bullseye-security pool has since
+      # been emptied while the suite's index still advertises the removed
+      # versions -- so a plain `apt-get install` fails on a 404 for every
+      # security-suite package it resolves (14 of 26 on 2026-09-18, reproduced
+      # from two CDN nodes, from security.debian.org directly, and off-runner).
+      # That mismatch cannot self-heal: nothing is publishing bullseye-security
+      # any more. archive.debian.org does not carry bullseye yet, so the only
+      # source still serving a self-consistent bullseye + bullseye-security pair
+      # is a snapshot taken while the pool was intact.
+      #
+      # This keeps the glibc 2.31 floor that this whole workflow exists to
+      # preserve (see the header comment); bumping the base image instead would
+      # raise it and stop released binaries starting on Ubuntu 20.04, Debian 11
+      # and Rocky 9. Revisit when bullseye lands on archive.debian.org, which is
+      # the durable home for an EOL suite.
       - name: Install build dependencies
         run: |
+          set -eu
+          # Last snapshot taken while the bullseye-security pool was still
+          # intact: 2026-09-01 has every package this step installs; 2026-09-05
+          # already has none of them. Verified by running this exact step in a
+          # debian:11 container.
+          #
+          # The live index advertises a glibc 2.31-13+deb11u14 that no usable
+          # snapshot carries, so this pin resolves 2.31-13+deb11u13 instead. The
+          # ABI floor is unchanged -- still glibc 2.31 -- and the patch level of
+          # the build container's glibc does not reach the artifact, which links
+          # against whatever glibc the user runs.
+          SNAPSHOT=20260901T000000Z
+          {
+            echo "deb http://snapshot.debian.org/archive/debian/${SNAPSHOT}/ bullseye main"
+            echo "deb http://snapshot.debian.org/archive/debian/${SNAPSHOT}/ bullseye-updates main"
+            echo "deb http://snapshot.debian.org/archive/debian-security/${SNAPSHOT}/ bullseye-security main"
+          } > /etc/apt/sources.list
+          # A snapshot serves the Release file as it stood on that date, so its
+          # Valid-Until is necessarily in the past.
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10-no-check-valid-until
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev cmake \

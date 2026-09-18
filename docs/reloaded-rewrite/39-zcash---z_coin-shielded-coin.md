@@ -321,6 +321,61 @@ invalid proofs.
 > read/hash-mismatch errors.
 
 ### 39.6.4 Consume `protocol_data` consensus parameters
+
+R39.6.4b A shielded coin that declares `ironwood_activation_time` and is built
+without the ability to construct Ironwood-era transactions shall refuse to enter
+**new** swaps from a cut-off preceding that activation, and shall report itself
+as wallet-only for the purposes of order placement.
+
+The cut-off shall precede activation by at least the longest time a swap payment
+can remain unspendable-and-unrefunded: the longest maker payment lock this
+framework produces, plus the refund grace the swap machines add before acting,
+plus an allowance for the refund to be mined. A payment funded at the last
+tradeable instant must therefore still be refundable, and confirmed, before
+activation.
+
+The refusal shall be applied at **both** of:
+
+- the locally initiated order paths, via the coin's wallet-only report, which
+  `buy`, `sell` and `setprice` already gate on; and
+- the incoming peer-match predicate, which the wallet-only report does not
+  reach — a remote taker can otherwise match an order already posted and pull
+  the coin into a new swap regardless.
+
+The refusal shall not affect balance, address derivation, withdrawal, history,
+or any swap already in progress: nothing re-checks these once a swap has begun,
+and a swap already under way must be allowed to finish or refund normally.
+
+A coin that declares no Ironwood activation time shall never be frozen, and the
+freeze shall lift entirely once the build can construct Ironwood-era
+transactions.
+
+R39.6.4a `consensus_params` may additionally carry two optional Ironwood
+network-upgrade members, both defaulting to absent:
+
+- `ironwood_activation_time` -- the wall-clock timestamp (Unix seconds) from
+  which the coin's Ironwood upgrade activates;
+- `ironwood_activation_height` -- the activation height, once the network has
+  derived and published it.
+
+Both are optional in both directions: a configuration omitting them shall parse
+on a build that understands them, and a configuration carrying them shall parse
+on a build that does not (this payload is deliberately not
+`deny_unknown_fields`, per R36.3.1/R36.3.3).
+
+They are two members rather than one because the dictated chain does not fix an
+Ironwood activation height in advance: each node derives it at runtime from the
+first block whose time exceeds the timestamp, plus a settling margin, so only
+the timestamp can be published ahead of the upgrade and only the height is
+usable as a consensus-parameter lookup.
+
+Carrying these members shall not by itself change any network-upgrade
+activation lookup. Until the Ironwood upgrade is bound to
+`NetworkUpgrade::Nu6_3`, every post-Sapling upgrade shall continue to report no
+activation height, because the shielded transaction builder derives the
+consensus branch ID -- and therefore the transaction version it signs -- from
+exactly those lookups.
+
 R39.6.4 The shielded-coin builder shall source **all** of its Zcash
 network parameters, its shielded HD derivation path, and its sync checkpoint
 from the coin config's `protocol.protocol_data` (R39.1.2–R39.1.4), rather than
@@ -1202,7 +1257,7 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 
 | Field | JSON type | Description |
 |-------|-----------|-------------|
-| `tx_hash` | string | Transaction hash, hexadecimal. |
+| `tx_hash` | string | Transaction hash, hexadecimal, in **big-endian display order** (R39.8.7a). |
 | `from` | array of strings | Source address set the coins were sent from. |
 | `to` | array of strings | Destination address set the coins were sent to. |
 | `spent_by_me` | decimal (string/number) | Amount spent from the wallet's own address. |
@@ -1214,6 +1269,53 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `transaction_fee` | decimal | Fee paid by the transaction. |
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
+
+R39.8.0ak The Sapling commitment tree carried by a lightwalletd `TreeState`
+shall be validated before it is accepted as the wallet's sync anchor. The
+wallet shall reject, without mutating any persisted or in-memory chain state:
+
+- a payload whose length equals a Sapling commitment root (32 bytes), which is
+  not a serialized commitment tree;
+- a payload with bytes remaining after a complete commitment tree has been
+  read;
+- an empty payload at a height above Sapling activation.
+
+An empty payload at or below Sapling activation denotes the empty tree and
+shall be accepted.
+
+The first two rejections are load-bearing rather than defensive. The dictated
+server fills this field through `preferredTreeState(finalState, finalRoot)`,
+which substitutes the commitment **root** whenever the node cannot supply a
+frontier, and it does so identically in `GetTreeState` and
+`GetBridgeTreeState` — so no alternative RPC avoids it. A root is
+indistinguishable from a tree by inspection, and the reference tree reader
+returns as soon as it has read its three members without requiring the buffer
+to be exhausted: a root whose leading bytes are zero therefore parses
+*successfully* as the **empty** tree while the remainder is discarded,
+anchoring the wallet on a tree of size zero. Length and full-consumption checks
+are the only things that separate the two cases.
+
+Where the server also populates a Sapling frontier field, a value differing
+from the tree field shall be recorded as a warning and the tree field shall
+remain authoritative.
+
+R39.8.7a `tx_hash` shall be rendered in the **big-endian display byte order** used
+by block explorers, by the transparent-coin history of `my_tx_history`, and by
+this coin's own `withdraw` and `send_raw_transaction` responses -- **not** in the
+internal little-endian order the shielded wallet database stores.
+
+The shielded wallet database (`zcash_client_sqlite`) persists
+`transactions.txid` little-endian, so the stored column shall be byte-reversed
+before it is serialized. The two orders are byte reversals of one another and
+are therefore indistinguishable by length or charset: a wrong order is not a
+malformed value, it is a valid-looking hash that resolves to nothing. A
+regression fixture shall use transaction IDs that are **not** byte-order
+symmetric, because a symmetric fixture (for example a repeated single byte)
+cannot distinguish the two orders at all.
+
+`internal_id` is unrelated to `tx_hash` and is not a transaction hash: it is the
+wallet database's own row identifier, used only for `FromId` paging (R39.8.2).
+
 
 ### 39.8.4 Error conditions
 

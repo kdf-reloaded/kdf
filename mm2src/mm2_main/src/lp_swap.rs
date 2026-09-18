@@ -1006,6 +1006,45 @@ pub struct TransactionIdentifier {
 }
 
 #[cfg(test)]
+mod ironwood_freeze_margin_tests {
+    use super::*;
+
+    /// A shielded coin that cannot yet build Ironwood-era transactions stops
+    /// entering new swaps `coins::z_coin::IRONWOOD_SWAP_FREEZE_MARGIN_SECS` before
+    /// its upgrade, so that a payment made in the last tradeable second is still
+    /// spendable or refundable before activation.
+    ///
+    /// That margin has to be a constant in `coins`, because the locktime rules live
+    /// here and this crate depends on `coins` rather than the other way round. This
+    /// test is what stops the two drifting: if the locktime or its multipliers
+    /// change, the margin must be raised to match.
+    #[test]
+    fn payment_locktime_covers_ironwood_freeze_margin() {
+        // The longest lock the framework produces: the maker leg (`* 2`) under the
+        // legacy slow-coin rule (`* 10`, `lp_atomic_locktime_v1`), which a peer
+        // negotiating without confirmation settings can still reach.
+        let longest_maker_payment_lock = get_payment_locktime() * 10 * 2;
+        assert!(
+            coins::z_coin::IRONWOOD_SWAP_FREEZE_MARGIN_SECS >= longest_maker_payment_lock,
+            "Ironwood freeze margin {}s no longer covers the longest maker payment lock {}s \
+             (payment locktime {}s); raise IRONWOOD_SWAP_FREEZE_MARGIN_SECS in coins::z_coin",
+            coins::z_coin::IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            longest_maker_payment_lock,
+            get_payment_locktime()
+        );
+
+        // And the refund grace the swap machines add on top of the lock.
+        let longest_wait_refund_until = longest_maker_payment_lock + 3700;
+        assert!(
+            coins::z_coin::IRONWOOD_SWAP_FREEZE_MARGIN_SECS >= longest_wait_refund_until,
+            "Ironwood freeze margin {}s does not cover the refund deadline {}s",
+            coins::z_coin::IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            longest_wait_refund_until
+        );
+    }
+}
+
+#[cfg(test)]
 mod wire_field_tests {
     use super::*;
 
