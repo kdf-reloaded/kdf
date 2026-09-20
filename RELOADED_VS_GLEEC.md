@@ -169,6 +169,20 @@ Chain's Ironwood upgrade (3 Oct 2026 19:00 UTC), so omitting the field on a coin
 that *does* upgrade accepts that risk knowingly. No other operator configuration
 is required to match GLEEC KDF behaviour.
 
+Note that omission is the situation **as shipped**: both members are an extension
+this project introduced, no published coin configuration declares either of them
+(verified against `GLEECBTC/coins` master, where ARRR is the only coin carrying
+`consensus_params` at all, and no coin mentions Ironwood), and upstream KDF's
+`ZcoinConsensusParams` has no equivalent field. So on a default installation both
+gates are dormant and ARRR behaves exactly as under GLEEC KDF — including across
+the Ironwood activation, where it will build version-4 transactions that the
+post-upgrade mempool rejects. The values are deliberately left to configuration
+rather than compiled in: Pirate derives the activation height at runtime and the
+timestamp could still move, and a compiled-in date that fired early would refuse
+every ARRR transaction until a new binary shipped, which is a worse failure than
+the one the gates prevent. Supplying the member in any coin configuration the
+build loads is sufficient to arm both gates; no code change is needed.
+
 ## Detail sections
 
 Detail subsections will be added as features land. Each entry above expands here with: rationale, code locations, test coverage, migration notes, and links to relevant pull requests.
