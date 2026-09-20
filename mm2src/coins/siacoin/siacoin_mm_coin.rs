@@ -378,8 +378,24 @@ impl MmCoin for SiaCoin {
                     .or_mm_err(|| RawTransactionError::HashNotExist(req.tx_hash.clone()))?,
             };
 
+            // Both carriers, on the same terms the withdraw path uses (ch.20 R-W12,
+            // R-W6/R-W7): `tx_hex` is the hex of Sia's native transaction JSON and
+            // `tx_json` that same JSON unencoded, derived from the very bytes
+            // `tx_hex` encodes so the two can never describe different
+            // transactions. Serialising here rather than through
+            // `Transaction::tx_hex()` is deliberate: that trait method has no error
+            // channel and substitutes an empty vector on failure, which would hand
+            // the caller a successful response carrying no transaction at all.
+            let tx_bytes = serde_json::ser::to_vec(&SiaTransaction(tx)).map_to_mm(|e| {
+                RawTransactionError::InternalError(format!("Failed to serialize the transaction: {e}"))
+            })?;
+            let tx_json = serde_json::from_slice(&tx_bytes).map_to_mm(|e| {
+                RawTransactionError::InternalError(format!("Failed to reparse the serialized transaction: {e}"))
+            })?;
+
             Ok(RawTransactionRes {
-                tx_hex: BytesJson(SiaTransaction(tx).tx_hex()),
+                tx_hex: BytesJson(tx_bytes),
+                tx_json: Some(tx_json),
             })
         };
         Box::new(fut.boxed().compat())

@@ -427,6 +427,7 @@ pub async fn get_raw_transaction_impl(coin: EthCoin, req: RawTransactionRequest)
     let alloy_tx = alloy_tx.or_mm_err(|| RawTransactionError::HashNotExist(req.tx_hash))?;
     let raw = signed_tx_from_alloy_tx(alloy_tx).map_to_mm(RawTransactionError::InternalError)?;
     Ok(RawTransactionRes {
+        tx_json: None,
         tx_hex: BytesJson(rlp::encode(&raw)),
     })
 }
@@ -981,6 +982,7 @@ pub async fn sign_raw_eth_tx_impl(coin: EthCoin, args: SignRawTransactionRequest
     let bytes = rlp::encode(&signed);
 
     Ok(RawTransactionRes {
+        tx_json: None,
         tx_hex: BytesJson::from(bytes.to_vec()),
     })
 }

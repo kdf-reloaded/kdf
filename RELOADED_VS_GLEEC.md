@@ -40,6 +40,16 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 - Split CI: format → matrix unit-tests → docker-tests, with cancel-in-progress concurrency.
 - Specific mismatch-kind reporting in UTXO maker-payment validation (better operator diagnostics).
 - Read-only fallback for legacy `<db_root>/wallets/*.wallet` wallet files written by an earlier reloaded build (two-field envelope). New wallets are always written as the canonical `<db_root>/<name>.json` record; the legacy form is read (for login, listing and deletion) but never written. This fallback has no analogue in GLEEC KDF, which never produced the `.wallet` form. The on-disk format does not by itself select HD vs single-address signing (that is governed by `enable_hd` and per-coin activation); see CRD chapter 07 §7.5/§7.7 R9A.
+- **Siacoin `get_raw_transaction` carries both encodings.** GLEEC KDF returns
+  only `tx_hex` from this method for SC, hex-encoding the same Sia-native JSON.
+  Reloaded returns `tx_json` alongside it (CRD ch.20 R-W12), on the same terms
+  as the withdraw path, so one coin does not offer the JSON carrier from one
+  method and withhold it from another. No compat switch is provided for the same
+  reason as the withdraw carrier below: the change is strictly additive — it
+  removes no field and alters no existing field's name, type or meaning — so an
+  integration written against either shape keeps working unchanged. Code:
+  `coins/lp_coins_types.rs`, `coins/siacoin/siacoin_mm_coin.rs`.
+
 - **Siacoin withdraw carries the signed transaction in both encodings, and
   `send_raw_transaction` accepts either.** Sia is the coin family whose native
   serialisation of a signed transaction is JSON text rather than a binary

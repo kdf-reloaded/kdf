@@ -613,7 +613,42 @@ while the inputs it spends remain unspent, so a `tx_json` held for
 later is subject to the same staleness as any other pre-signed
 transaction.
 
-### 20.9.4 Verification
+### 20.9.4 The same carrier pair on `get_raw_transaction`
+
+This subsection sits with the other carrier rules rather than
+with §20.10 D8's raw-transaction-fetch entry, because what it
+binds is the carrier convention itself and a reader checking how
+Sia carries a transaction should find every rule in one place.
+
+**R-W12 (`get_raw_transaction`).** A successful
+`get_raw_transaction` response for SC MUST carry the fetched
+transaction in both carriers, on exactly the terms R-W6 and R-W7
+bind for the withdraw path: `tx_hex` holds the lowercase hex of
+the UTF-8 bytes of Sia's native transaction JSON, and a top-level
+`tx_json` field holds that same JSON unencoded. Hex-decoding
+`tx_hex` and parsing the result MUST yield the same JSON value as
+`tx_json`. As in R-W7, `tx_json` is coin-specific: it is absent
+from the response of a coin family with no native JSON
+transaction form, and a consumer MUST read its absence as "this
+coin has no JSON carrier", never as an error.
+
+A failure to serialise the fetched transaction MUST be reported
+as a structured error. Returning a success response carrying an
+empty or otherwise placeholder `tx_hex` is a defect for the same
+reason R-W6 gives for the withdraw path: every consumer of this
+method reads that field, and an empty one is not a transaction.
+
+> **Upstream divergence (informative).** The deployed
+> interoperability reference returns only `tx_hex` from this
+> method for SC, hex-encoding the same native JSON. Adding
+> `tx_json` alongside it is additive on the same reasoning R-W7
+> records for the withdraw path -- no field is removed and no
+> existing field changes name, type or meaning -- and it removes
+> an inconsistency this project would otherwise carry, where one
+> method offers the JSON carrier and another does not for the
+> same coin and the same transaction.
+
+### 20.9.5 Verification
 
 **T-W1.** Complete an SC withdrawal and inspect the returned
 transaction-details object. It carries a non-empty `tx_hex` and a
@@ -640,19 +675,31 @@ same `transaction_type` v2-transaction wire value, the same
 `tx_hash`, and the same `internal_id` bytes (R-W9, R-W10; ch. 53
 R53.5.2, R53.5.10).
 
-> **Code-quality finding (informative).** In this project's current
-> Sia withdraw path, the failure branch of serialising the signed
-> transaction into `tx_hex` substitutes an empty default value
-> instead of propagating an error, so a serialisation failure would
-> return a *successful* withdrawal response carrying an empty
-> `tx_hex`. That contradicts R-W6 and ch. 49 R49.25 (which make a
-> non-empty `tx_hex` mandatory for a completed withdrawal) and the
-> repository's own rule against substituting a placeholder value in
-> a funds-moving path. Proposed fix: propagate a structured
-> withdrawal error on that branch, so the withdrawal fails rather
-> than reporting success with an unusable carrier. The same
-> serialisation feeds `tx_json` under R-W7, so the fix covers both
-> fields at once.
+**T-W5.** Fetch the same transaction through `get_raw_transaction`
+and inspect the response. It carries a non-empty `tx_hex` and a
+top-level `tx_json`; hex-decoding `tx_hex` and parsing the result
+yields the same JSON value as `tx_json`, and that value equals the
+`tx_json` the withdraw response reported for the same transaction
+(R-W12).
+
+> **Code-quality finding (informative) -- resolved.** The failure
+> branch of serialising the signed transaction into `tx_hex` used
+> to substitute an empty default instead of propagating an error,
+> so a serialisation failure would have returned a *successful*
+> withdrawal response carrying an empty `tx_hex` -- contradicting
+> R-W6 and ch. 49 R49.25, and substituting a placeholder value in
+> a funds-moving path. Both the withdraw path and the
+> `get_raw_transaction` path (R-W12) now propagate a structured
+> error instead, and the same serialisation feeds `tx_json` in
+> each, so one fix covers both fields in both methods.
+>
+> One instance of the pattern deliberately remains, recorded as
+> §20.10 D9: the coin-generic transaction trait's own
+> hex-serialisation method returns a byte vector with no error
+> channel, so its Sia implementation still substitutes an empty
+> vector on failure. Closing it requires changing a trait shared
+> by every coin family, which is out of proportion to a
+> serialisation that cannot fail for this type in practice.
 
 ## 20.10 Deferred Work
 
@@ -767,8 +814,25 @@ rather than defects. None is a correctness claim.
   `get_event(txid)` filtered to `EventDataWrapper::V2Transaction`, the
   same txid-scoped lookup D7's `watcher_validate_taker_fee` already
   uses), falling back to `get_unconfirmed_transaction` for a
-  mempool-only transaction. Commit `02341d5d4`.
+  mempool-only transaction. Commit `02341d5d4`. The response's transaction carriers are bound
+  by §20.9.4 R-W12, which this method satisfies on the same terms
+  the withdraw path does.
 
+
+- **D9 -- Placeholder byte vector in the coin-generic transaction
+  trait.** The workspace's shared transaction trait exposes a
+  hex-serialisation method returning a byte vector with no error
+  channel, so Sia's implementation substitutes an empty vector if
+  serialisation fails. This is the one surviving instance of the
+  pattern §20.9.5's resolved code-quality note describes; the
+  withdraw path and `get_raw_transaction` both propagate a
+  structured error instead and no longer route through it.
+  Serialising this type cannot fail in practice -- it is a plain
+  struct with string-keyed maps and no non-finite numbers -- so the
+  residual risk is theoretical. Closing it properly means giving
+  that trait method a fallible signature, which touches every coin
+  family and is therefore out of scope for a Sia change. Left open
+  deliberately rather than worked around locally.
 
 ## 20.11 Baseline Verifications
 
