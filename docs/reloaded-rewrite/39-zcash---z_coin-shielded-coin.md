@@ -1270,6 +1270,31 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
 
+R39.8.0al A wallet whose scanned chain no longer agrees with the network shall
+rewind past the divergence and re-anchor, not fail.
+
+A light wallet that syncs to the chain tip records the tip block. An ordinary
+one-block reorg then leaves it holding a block the network has dropped, and the
+tree state the backend reports for that height no longer matches what the wallet
+stored. Treating that as an error is unrecoverable by construction: the stored
+state is never repaired, so every later activation repeats the same comparison
+and the wallet can never sync again.
+
+On a mismatch between the stored block hash and the one the backend reports at
+the anchor height, the wallet shall therefore:
+
+- rewind the wallet database by a bounded depth and re-anchor at the lower
+  height, repeating a bounded number of times;
+- rebuild and rescan from scratch if the divergence persists, if the requested
+  rewind is refused, or if the rewind cannot move below the divergence. No
+  shielded value is lost either way, because every note is recoverable from the
+  chain with the wallet's own viewing key;
+- resume fetching from the height actually anchored at, never from the height
+  originally planned, so the rewound range is rescanned rather than skipped.
+
+The divergence shall be reported with both the stored and the reported block
+hash, in display byte order, so the two can be distinguished and looked up.
+
 R39.8.0ak The Sapling commitment tree carried by a lightwalletd `TreeState`
 shall be validated before it is accepted as the wallet's sync anchor. The
 wallet shall reject, without mutating any persisted or in-memory chain state:

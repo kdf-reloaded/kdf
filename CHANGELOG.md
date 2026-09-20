@@ -4,6 +4,10 @@ All notable changes to KDF Reloaded are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0 releases use the `0.MAJOR.MINOR-PRERELEASE.N` convention; expect breaking changes between alpha and beta.
 
+### Fixed
+
+- **A shielded (ARRR/ZHTLC) wallet that met an ordinary chain reorg could never sync again — CRD ch.39 R39.8.0al.** A light wallet that syncs to the chain tip records the tip block; a routine one-block reorg then leaves it holding a block the network has dropped. On the next activation the tree state the servers report for that height no longer matched what the wallet stored, and the wallet refused to continue — with no rewind and no rebuild, so every retry repeated the identical comparison and the wallet stayed stuck permanently. It surfaced as `All lightwalletd servers failed: … tree-state hash at height N does not match the shielded wallet DB`, with every reachable server named, which reads like a server outage but is the opposite: the servers agreed with each other and the wallet was the stale party. Confirmed against mainnet — a wallet's stored tip hash was found on the chain as a real block at that height with `isMainChain: false`. The wallet now rewinds past the divergence and re-anchors, rebuilding and rescanning only if that fails or the backend refuses the rewind (which it does for heights it holds no commitment-tree checkpoint for); fetching resumes from the height actually anchored at, so the rewound range is rescanned rather than skipped. No shielded value is at risk in any path — every note is recoverable from the chain with the wallet's viewing key. The divergence is now logged with both block hashes in explorer display order, where before it named neither. Code: `mm2src/coins/z_coin/z_coin_wallet_db.rs`.
+
 ## [Unreleased]
 
 ### Added
