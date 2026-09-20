@@ -186,11 +186,23 @@ impl MarketCoinOps for SiaCoin {
             let check_every = 10f64;
 
             loop {
-                let found_in_mempool = client
-                    .dispatcher(TxpoolTransactionsRequest)
-                    .await
-                    .unwrap_or_default()
-                    .v2transactions
+                // A transport failure here means "we do not know yet", not "not
+                // spent", so the loop keeps polling either way -- aborting the
+                // wait on one blip would fail a swap that is perfectly fine. But
+                // it is logged rather than discarded: a node that is persistently
+                // unreachable otherwise presents exactly like an unspent HTLC, and
+                // the swap runs silently to its timeout with nothing to explain
+                // why. The chain-side lookup below already reports its errors this
+                // way; this one used to swallow them.
+                let mempool_transactions = match client.dispatcher(TxpoolTransactionsRequest).await {
+                    Ok(response) => response.v2transactions,
+                    Err(e) => {
+                        debug!("SiaCoin::wait_for_tx_spend: mempool query failed: {}", e);
+                        Vec::new()
+                    },
+                };
+
+                let found_in_mempool = mempool_transactions
                     .into_iter()
                     .find(|tx| tx.siacoin_inputs.iter().any(|input| input.parent.id == output_id));
 
