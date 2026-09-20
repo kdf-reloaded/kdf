@@ -19,6 +19,7 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 |------|---------|------------------------|------------------------|------------------|
 | Network selection | `netid` | `8762` or `6133` — GLEEC's default netid `0` is **not supported** | No | [see below](#netid) |
 | WalletConnect session storage | `wc_session_persistence` | `open` *(also the default)* | No | [CRD ch.22 §22.5](reloaded-rewrite/22-walletconnect-v2.md) |
+| Shielded network upgrade | `ironwood_activation_time` *(coin config, `protocol.protocol_data.consensus_params`)* | **omitted** — GLEEC KDF has no equivalent and applies no upgrade gating. When present, new swaps for that coin stop 160 300 s before the time it names and transaction building stops at it. | No | [CRD ch.39 R39.6.4a–c](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Key export | `allow_insecure_key_export` | `true` — enables GLEEC-parity offline / no-activation / HD-range / shielded key export. Default `false`. | Yes | [CRD ch.07 §7.3A](reloaded-rewrite/07-wallet-lifecycle-and-key-export.md) |
 
 ### `netid`

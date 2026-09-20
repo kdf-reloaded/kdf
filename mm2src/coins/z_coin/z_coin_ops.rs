@@ -163,6 +163,20 @@ impl ZCoin {
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
+        // Before the lock and before the sapling-sync wait: every ARRR transaction
+        // is built here, including withdrawals, which never pass the swap gates.
+        // Placed ahead of the wait deliberately -- refusing after it would make the
+        // caller block first and be refused second (R39.6.4c).
+        if self.ironwood_build_refused() {
+            return MmError::err(GenTxError::IronwoodUpgradeUnsupported {
+                coin: self.ticker().to_owned(),
+                activation_time: self
+                    .z_fields
+                    .consensus_params
+                    .ironwood_activation_time()
+                    .unwrap_or_default(),
+            });
+        }
         let _lock = self.z_fields.z_unspent_mutex.lock().await;
         while !self.is_sapling_state_synced() {
             Timer::sleep(0.5).await

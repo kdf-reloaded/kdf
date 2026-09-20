@@ -709,3 +709,34 @@ Open items depending on Pirate's answers:
   itself all keep working. `mm2_main`'s 97 pre-existing test failures are missing-passphrase
   environment gates, unchanged from baseline (356→357 passing, the one addition being this
   guard).
+- **2026‑09‑20 — the ARRR light wallet works again; Plan A round 1 + A4 merged to `dev`.**
+  Testing against real wallets exposed three further defects, all found by running the
+  wallet rather than reading code, and all fixed and verified live on mainnet. A wallet
+  that had scanned an orphaned tip could **never sync again**: there was no rewind path, so
+  every retry repeated the same comparison. It surfaced as "all lightwalletd servers
+  failed", which reads like an outage but was the opposite — the servers agreed and the
+  wallet was stale. **Incoming payments from current Pirate wallets were invisible**:
+  Pirate accepts both note plaintext versions at every height, but librustzcash derives
+  ZIP‑212 enforcement solely from Canopy, which Pirate does not have, so enforcement
+  resolved to `Off`, only `0x01` was accepted, and every `0x02` note was discarded without
+  an error. And a **caller-requested rescan was silently discarded** by the next
+  activation, which matters most when restoring a seed whose funds predate the recent scan
+  window. The ZIP‑212 defect is very likely the original GleecDEX report, though that
+  remains inference — we never saw that wallet. Proven end to end: a 0.001 ARRR payment
+  from Treasure Chest, previously invisible, was received. Merged to `dev` (fast-forward,
+  CI green before and after) and built on all six platforms.
+- **2026‑09‑20 — A3 landed (R39.6.4c), completing the 3 Oct safety net.** The swap freeze
+  alone left a hole: `withdraw` passes none of the swap gates, so after activation it would
+  still have built a v4 transaction and failed at broadcast as an opaque network rejection.
+  Every ARRR transaction is now refused from activation onwards, at the single point they
+  are all built, before that path's blocking wait. The two cut-offs are deliberately
+  staggered and must not be merged — between them a swap begun before the freeze must still
+  spend or refund, so a build refusal starting at the freeze would strand exactly the swaps
+  the freeze protects; a test pins that ordering.
+  Compatibility recorded per `docs/COMPAT_SWITCHES.md`: the opt-out is omitting
+  `ironwood_activation_time` from the coin's `consensus_params`, which restores
+  GLEEC-equivalent behaviour exactly. Documented at the setting (CRD §39.6.4a and the field
+  itself) and as a row in `docs/GLEEC_COMPATIBILITY.md`; `RELOADED_VS_GLEEC.md` carries the
+  ZIP‑212 divergence, which has no switch by design.
+  **Still open for Plan A:** A5, the dead `cryptoforge` endpoints upstream in
+  `GLEECBTC/coins`.

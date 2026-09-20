@@ -186,6 +186,27 @@ fn ironwood_swap_freeze_active_at(
     now_sec >= u64::from(activation_time).saturating_sub(freeze_margin_secs)
 }
 
+/// Whether a coin declaring Ironwood activation at `activation_time` must refuse
+/// to build any transaction as of `now_sec`.
+///
+/// From activation the network accepts only the new transaction format, so a
+/// build without that support can produce nothing spendable. Refusing locally
+/// says why; the alternative is a transaction the network drops, surfaced as an
+/// opaque broadcast failure after the user has already been charged the wait.
+///
+/// Distinct from [`ironwood_swap_freeze_active_at`], which starts *earlier* and
+/// only blocks entering new swaps: a swap begun before activation must still be
+/// able to spend or refund, so the two gates cannot share a cut-off.
+fn ironwood_build_refused_at(activation_time: Option<u32>, v6_supported: bool, now_sec: u64) -> bool {
+    if v6_supported {
+        return false;
+    }
+    let Some(activation_time) = activation_time else {
+        return false;
+    };
+    now_sec >= u64::from(activation_time)
+}
+
 /// Zcash consensus/network parameters for a shielded coin, sourced from the
 /// coin config's `protocol.protocol_data.consensus_params` (R39.1.3, R39.6.4).
 ///
@@ -218,6 +239,11 @@ pub struct ZcoinConsensusParams {
     /// before it takes effect. This field carries the only part of the rule that
     /// can be published ahead of time. Optional and additive; absent for every
     /// coin that has no Ironwood upgrade, and ignored by builds that predate it.
+    ///
+    /// **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade
+    /// gating. Omit this field to retain GLEEC-equivalent behaviour for a coin;
+    /// when present it drives both the swap freeze and the build refusal. See
+    /// `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_activation_time: Option<u32>,
     /// Ironwood activation height, once the network has derived and published it.
@@ -830,6 +856,60 @@ mod ironwood_swap_freeze_tests {
         assert!((ARRR_FREEZE_START - 1) + longest_lock + 3_700 < ARRR_IRONWOOD_ACTIVATION as u64);
     }
 
+    /// From activation the network accepts only the new transaction format, so a
+    /// build without it must refuse rather than emit something unspendable.
+    #[test]
+    fn building_is_refused_from_activation_onwards() {
+        let refused = |now| ironwood_build_refused_at(Some(ARRR_IRONWOOD_ACTIVATION), IRONWOOD_V6_SUPPORTED, now);
+        assert!(
+            !refused(ARRR_IRONWOOD_ACTIVATION as u64 - 1),
+            "a second before activation must still build"
+        );
+        assert!(
+            refused(ARRR_IRONWOOD_ACTIVATION as u64),
+            "activation itself must refuse"
+        );
+        assert!(refused(ARRR_IRONWOOD_ACTIVATION as u64 + 365 * 86_400));
+    }
+
+    /// A coin with no Ironwood upgrade, and a build that can produce the new
+    /// format, must both be unaffected -- otherwise flipping the capability flag
+    /// would leave the coin permanently unable to transact.
+    #[test]
+    fn building_is_never_refused_without_an_upgrade_or_with_v6_support() {
+        for now in [0, ARRR_IRONWOOD_ACTIVATION as u64, u64::MAX] {
+            assert!(!ironwood_build_refused_at(None, IRONWOOD_V6_SUPPORTED, now));
+            assert!(!ironwood_build_refused_at(Some(ARRR_IRONWOOD_ACTIVATION), true, now));
+        }
+    }
+
+    /// The two gates are deliberately staggered, and the order matters: trading
+    /// stops first so that no swap is still in flight when building stops. If the
+    /// build gate ever moved earlier than the freeze, a swap begun just before the
+    /// freeze could be unable to spend or refund itself.
+    #[test]
+    fn the_swap_freeze_starts_before_building_is_refused() {
+        let freeze_start = ARRR_IRONWOOD_ACTIVATION as u64 - IRONWOOD_SWAP_FREEZE_MARGIN_SECS;
+        let build_stop = ARRR_IRONWOOD_ACTIVATION as u64;
+        assert!(freeze_start < build_stop, "trading must stop before building does");
+
+        // In the window between them: no new swaps, but spends and refunds of
+        // existing ones still build -- which is the entire purpose of the window.
+        let midpoint = freeze_start + (build_stop - freeze_start) / 2;
+        assert!(ironwood_swap_freeze_active_at(
+            Some(ARRR_IRONWOOD_ACTIVATION),
+            IRONWOOD_V6_SUPPORTED,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            midpoint
+        ));
+        assert!(
+            !ironwood_build_refused_at(Some(ARRR_IRONWOOD_ACTIVATION), IRONWOOD_V6_SUPPORTED, midpoint),
+            "an in-flight swap must still be able to spend or refund during the freeze window"
+        );
+        // And the window is wide enough for the longest payment lock to expire.
+        assert!(build_stop - freeze_start >= IRONWOOD_SWAP_FREEZE_MARGIN_SECS);
+    }
+
     /// An activation time closer to the epoch than the margin must clamp rather
     /// than wrap. Such a time is already in the past, so the coin being frozen
     /// throughout is the correct answer -- the point is that the subtraction must
@@ -1324,6 +1404,17 @@ impl ZCoin {
     ///
     /// Not wasm-gated: the two trait methods that consult it are compiled on every
     /// target.
+    /// Whether this coin must refuse to build a transaction right now, because its
+    /// Ironwood upgrade has activated and this build cannot produce the format the
+    /// network now requires.
+    pub(crate) fn ironwood_build_refused(&self) -> bool {
+        ironwood_build_refused_at(
+            self.z_fields.consensus_params.ironwood_activation_time(),
+            IRONWOOD_V6_SUPPORTED,
+            now_ms() / 1000,
+        )
+    }
+
     fn ironwood_swap_freeze_active(&self) -> bool {
         ironwood_swap_freeze_active_at(
             self.z_fields.consensus_params.ironwood_activation_time(),

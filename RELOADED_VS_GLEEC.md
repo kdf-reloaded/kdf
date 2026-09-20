@@ -70,6 +70,16 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   must not answer one balance question two ways. Code:
   `mm2_main/src/lp_swap.rs`, `mm2_main/src/lp_swap/maker_swap_v2.rs`,
   `mm2_main/src/lp_swap/taker_swap_v2.rs`.
+- **Shielded note decryption accepts both note plaintext versions.** Pirate
+  accepts both the pre- and post-ZIP-212 note plaintext at every height, but has
+  no Canopy upgrade, and librustzcash derives ZIP-212 enforcement solely from
+  Canopy — so an unmodified stack silently discards every note sent by a current
+  Pirate wallet, and the payment never appears. Reloaded derives its decryption
+  parameters separately so that both versions are read (CRD ch.39 R39.8.0am).
+  GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
+  No compat switch: the alternative is invisible incoming payments. Code:
+  `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+
 - **Siacoin transaction history on the mmrpc-2.0 `my_tx_history`.** GLEEC KDF
   serves SC history through the legacy tier-1 `my_tx_history` only, and rejects
   an SC request on the mmrpc-2.0 method with the not-supported error. Reloaded
@@ -104,7 +114,18 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
 
 ### Settings to set for GLEEC-compatible operation
 
-See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). To match GLEEC KDF's full key-export behaviour, set `allow_insecure_key_export` to `true` (default `false`); no other operator configuration is required to match GLEEC KDF behaviour.
+See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). To match GLEEC KDF's full key-export behaviour, set `allow_insecure_key_export` to `true` (default `false`).
+
+To match GLEEC KDF's behaviour around a shielded coin's network upgrade, omit
+`ironwood_activation_time` from that coin's `protocol.protocol_data.consensus_params`.
+When it is present, Reloaded stops entering new swaps for that coin 160 300 s
+before the time it names and refuses to build any of its transactions from that
+time onwards (CRD ch.39 R39.6.4b/R39.6.4c); when it is absent, neither gate
+exists and behaviour matches GLEEC KDF exactly. The gates protect a counterparty
+whose HTLC would otherwise be left unspendable and unrefundable across Pirate
+Chain's Ironwood upgrade (3 Oct 2026 19:00 UTC), so omitting the field on a coin
+that *does* upgrade accepts that risk knowingly. No other operator configuration
+is required to match GLEEC KDF behaviour.
 
 ## Detail sections
 

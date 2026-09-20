@@ -322,6 +322,29 @@ invalid proofs.
 
 ### 39.6.4 Consume `protocol_data` consensus parameters
 
+R39.6.4c A shielded coin that declares `ironwood_activation_time` and is built
+without the ability to construct Ironwood-era transactions shall refuse to build
+**any** transaction from that activation time onwards, with an error naming the
+coin, the activation time, and the need to upgrade.
+
+The refusal shall be applied at the single point every shielded transaction is
+constructed, so that it covers withdrawals as well as swap payments: a
+withdrawal passes none of the swap gates of R39.6.4b, so without this it would
+still build a transaction the network no longer accepts and fail only at
+broadcast, as an opaque rejection.
+
+It shall be evaluated before any blocking wait in that path, so that a caller is
+refused promptly rather than made to wait first and refused second.
+
+This cut-off is **later** than the swap freeze of R39.6.4b and the two shall not
+be merged. The freeze starts earlier and stops only the entering of new swaps;
+between the two, a swap begun before the freeze must still be able to spend or
+refund itself, which requires building transactions. A build refusal starting at
+the freeze would strand exactly the swaps the freeze exists to protect.
+
+Receiving, balance, address derivation and history shall remain unaffected in
+both windows.
+
 R39.6.4b A shielded coin that declares `ironwood_activation_time` and is built
 without the ability to construct Ironwood-era transactions shall refuse to enter
 **new** swaps from a cut-off preceding that activation, and shall report itself
@@ -362,6 +385,13 @@ Both are optional in both directions: a configuration omitting them shall parse
 on a build that understands them, and a configuration carrying them shall parse
 on a build that does not (this payload is deliberately not
 `deny_unknown_fields`, per R36.3.1/R36.3.3).
+
+> **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade gating.
+> Omit `ironwood_activation_time` to retain GLEEC-equivalent behaviour for a
+> coin; when it is present, the swap freeze of R39.6.4b and the build refusal of
+> R39.6.4c both apply to that coin. Omitting it on a coin that does upgrade
+> accepts the risk those gates exist to prevent -- a counterparty's HTLC left
+> neither spendable nor refundable across the upgrade.
 
 They are two members rather than one because the dictated chain does not fix an
 Ironwood activation height in advance: each node derives it at runtime from the

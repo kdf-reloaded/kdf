@@ -38,6 +38,19 @@ pub enum GenTxError {
         hex: BytesJson,
         err: std::io::Error,
     },
+    /// The coin's Ironwood network upgrade has activated and this build cannot
+    /// construct the transaction format the network now requires.
+    #[display(
+        fmt = "{} network upgrade (Ironwood) activated at {}; this build cannot create {} transactions -- \
+               please upgrade",
+        coin,
+        activation_time,
+        coin
+    )]
+    IronwoodUpgradeUnsupported {
+        coin: String,
+        activation_time: u32,
+    },
 }
 
 impl From<GetUnspentWitnessErr> for GenTxError {
@@ -77,6 +90,9 @@ impl From<GenTxError> for WithdrawError {
             | GenTxError::NumConversion(_)
             | GenTxError::ShieldedWalletDb(_)
             | GenTxError::TxReadError { .. } => WithdrawError::InternalError(gen_tx.to_string()),
+            // Actionable by the user (upgrade), so it keeps its own message rather
+            // than being flattened into an internal error.
+            GenTxError::IronwoodUpgradeUnsupported { .. } => WithdrawError::InternalError(gen_tx.to_string()),
             #[cfg(not(target_arch = "wasm32"))]
             GenTxError::TxBuilderError(_) => WithdrawError::InternalError(gen_tx.to_string()),
         }
