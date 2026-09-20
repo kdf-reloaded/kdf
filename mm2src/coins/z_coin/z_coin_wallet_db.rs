@@ -92,6 +92,13 @@ pub(crate) struct ZCoinShieldedHistory {
     consensus_params: ZcoinConsensusParams,
     extfvk: ExtendedFullViewingKey,
     initial_chain_state: Arc<Mutex<Option<ChainState>>>,
+    /// The anchor this wallet is *born* at: the coin configuration's checkpoint
+    /// height, or Sapling activation when the coin declares no checkpoint.
+    ///
+    /// Distinguishes a wallet that has never been anchored anywhere else from one
+    /// deliberately re-anchored by a caller-supplied sync start. The two are
+    /// otherwise indistinguishable until a scan finds its first transaction.
+    birth_anchor_height: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -256,12 +263,22 @@ impl ZCoinShieldedHistory {
         }
         drop(wallet_db);
 
+        let birth_anchor_height = check_point_block
+            .map(|check_point| u64::from(check_point.height))
+            .unwrap_or_else(|| {
+                consensus_params
+                    .activation_height(NetworkUpgrade::Sapling)
+                    .map(|height| u64::from(u32::from(height)))
+                    .unwrap_or(0)
+            });
+
         Ok(ZCoinShieldedHistory {
             compact_blocks_path: paths.compact_blocks_path,
             wallet_db_path: paths.wallet_db_path,
             consensus_params,
             extfvk: extfvk.clone(),
             initial_chain_state: Arc::new(Mutex::new(initial_chain_state)),
+            birth_anchor_height,
         })
     }
 
@@ -397,8 +414,19 @@ impl ZCoinShieldedHistory {
             // If the wallet is still empty and its seed checkpoint predates the
             // default recent window, jump forward to that window instead of
             // replaying long-dead history.
+            //
+            // Only for a wallet still sitting at the anchor it was born with. One
+            // deliberately re-anchored -- a caller-supplied sync start, which is how
+            // a restored seed reaches its older funds -- looks *identical* to a
+            // fresh wallet right up until the rescan reaches its first transaction,
+            // so without this check the very next activation that carries no
+            // `sync_params` silently discards the rescan and skips forward past the
+            // funds it was asked to find (R39.8.0an).
+            let anchored_at_birth = self
+                .wallet_sync_start_height()?
+                .is_some_and(|start| start <= self.birth_anchor_height.saturating_add(1));
             let should_reseed_empty_checkpoint =
-                resumed_start < default_recent_start && self.wallet_scan_state_is_empty()?;
+                anchored_at_birth && resumed_start < default_recent_start && self.wallet_scan_state_is_empty()?;
             return Ok(Some(LightwalletdFetchPlan {
                 start_height: if should_reseed_empty_checkpoint {
                     default_recent_start
@@ -2548,6 +2576,19 @@ mod tests {
         out
     }
 
+    /// Anchors a freshly rebuilt wallet at `start_height`, the way the fetch path
+    /// does when it adopts a caller-supplied sync start.
+    fn seed_wallet_anchor(history: &ZCoinShieldedHistory, start_height: u64) {
+        let mut wallet_db = open_wallet_db(history.wallet_db_path(), test_params()).unwrap();
+        let ufvk = sapling_ufvk(&history.extfvk).unwrap();
+        import_wallet_account(
+            &mut wallet_db,
+            &ufvk,
+            ChainState::empty(BlockHeight::from_u32(start_height as u32 - 1), BlockHash([7u8; 32])),
+        )
+        .unwrap();
+    }
+
     fn insert_history_fixture(history: &ZCoinShieldedHistory) {
         let mut wallet_db = open_wallet_db(history.wallet_db_path(), test_params()).unwrap();
         if wallet_db.get_account_ids().unwrap().is_empty() {
@@ -2844,6 +2885,58 @@ mod tests {
                 reset_stale_empty_checkpoint: true,
                 reset_scan_state: false,
             })
+        );
+    }
+
+    /// A caller-supplied sync start must survive activations that do not repeat it.
+    ///
+    /// Regression: a wallet part-way through a deep rescan is indistinguishable
+    /// from a fresh one -- empty, anchored far behind the recent window -- until
+    /// the rescan reaches its first transaction. The reseed therefore fired on the
+    /// next activation carrying no `sync_params` and jumped the wallet forward to
+    /// the recent window, silently discarding the rescan. Observed in the wild: a
+    /// rescan requested at 02:02:11 was wiped 53 seconds later. The damaging case
+    /// is restoring a seed whose funds predate the recent window -- the rescan that
+    /// would have found them is thrown away and the balance stays at zero
+    /// (R39.8.0an).
+    #[test]
+    fn a_requested_sync_start_is_not_discarded_by_the_reseed() {
+        // Born at the coin configuration's checkpoint: the reseed is correct here,
+        // because this wallet has never been anchored anywhere deliberately.
+        let fresh = open_checkpointed_test_history(42);
+        let plan = fresh
+            .lightwalletd_fetch_plan(&test_params(), 10_000, None, false)
+            .unwrap();
+        assert_eq!(
+            plan.unwrap().reset_stale_empty_checkpoint,
+            true,
+            "a wallet still at its birth anchor should skip long-dead history"
+        );
+
+        // Now re-anchor it deliberately, as a caller-supplied sync start does.
+        let requested_start = 5_000;
+        let rescan = fresh
+            .lightwalletd_fetch_plan(&test_params(), 10_000, Some(requested_start), false)
+            .unwrap()
+            .expect("an explicit start must produce a plan");
+        assert_eq!(rescan.start_height, requested_start);
+        assert!(rescan.reset_scan_state, "a changed anchor rebuilds the wallet");
+        fresh.reset_wallet_scan_state().unwrap();
+        seed_wallet_anchor(&fresh, requested_start);
+
+        // The next activation carries no sync_params -- exactly what a GUI sends on
+        // restart. The rescan must survive it.
+        let plan = fresh
+            .lightwalletd_fetch_plan(&test_params(), 10_000, None, false)
+            .unwrap()
+            .expect("a plan is still required");
+        assert!(
+            !plan.reset_stale_empty_checkpoint,
+            "a deliberately re-anchored wallet must not be reseeded forward"
+        );
+        assert_eq!(
+            plan.start_height, requested_start,
+            "the rescan must resume from the requested start, not jump to the recent window"
         );
     }
 

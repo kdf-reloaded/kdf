@@ -1270,6 +1270,23 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
 
+R39.8.0an A caller-supplied shielded sync start shall survive subsequent
+activations that do not repeat it.
+
+Activation may skip forward to the recent scan window rather than replay long
+-dead history, but only for a wallet still anchored where it was born -- at the
+coin configuration's checkpoint, or Sapling activation when none is declared. A
+wallet deliberately re-anchored by a caller-supplied sync start shall keep that
+anchor.
+
+The two states are otherwise indistinguishable: a wallet part-way through a deep
+rescan is empty and anchored far behind the recent window, exactly like a fresh
+one, until the rescan reaches its first transaction. Skipping forward on that
+basis discards the rescan silently, and the case it damages is the one that
+needs it most -- restoring a seed whose funds predate the recent window, where
+the discarded rescan is the only thing that would have found them and the
+balance simply stays at zero.
+
 R39.8.0am Shielded note decryption shall accept both the pre- and post-ZIP-212
 note plaintext versions at every height, for every shielded coin whose network
 accepts both.
