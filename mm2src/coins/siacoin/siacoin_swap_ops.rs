@@ -517,43 +517,69 @@ impl SiaCoin {
         let sia_args = SiaValidatePaymentInputArgs::try_from_validate_payment_input(input, payment_owner)?;
 
         let my_keypair = self.my_keypair()?;
-        let success_public_key = my_keypair.public();
-        let refund_public_key = sia_args.other_pub;
 
-        let htlc_address = SpendPolicy::atomic_swap(
-            &success_public_key,
-            &refund_public_key,
+        // Validating a payment *this* node can claim: our key takes the
+        // success branch, the counterparty's the refund branch (§20.6).
+        check_htlc_payment_output(
+            &sia_args.payment_tx,
+            &my_keypair.public(),
+            &sia_args.other_pub,
             sia_args.time_lock,
             &sia_args.secret_hash,
+            sia_args.amount,
         )
-        .address();
-
-        let expected_htlc_output = SiacoinOutput {
-            value: sia_args.amount,
-            address: htlc_address,
-        };
-
-        let htlc_output = match sia_args.payment_tx.0.siacoin_outputs.get(HTLC_VOUT_INDEX as usize) {
-            Some(output) => output,
-            None => {
-                return Err(SiaValidateHtlcPaymentError::InvalidOutputLength {
-                    expected: HTLC_VOUT_INDEX + 1,
-                    actual: sia_args.payment_tx.0.siacoin_outputs.len() as u32,
-                    txid: sia_args.payment_tx.0.txid(),
-                })
-            },
-        };
-
-        if *htlc_output != expected_htlc_output {
-            return Err(SiaValidateHtlcPaymentError::InvalidOutput {
-                expected: expected_htlc_output,
-                actual: htlc_output.clone(),
-                txid: sia_args.payment_tx.0.txid(),
-            });
-        }
-
-        Ok(())
     }
+}
+
+/// Pure core of `validate_htlc_payment`: does `payment_tx`'s HTLC output
+/// (R-H1, index `HTLC_VOUT_INDEX`) fund exactly the address an atomic-swap
+/// spend policy with these parameters produces, for exactly `amount`?
+///
+/// Factored out of the trait method -- which only adds keypair lookup and
+/// argument parsing around this -- so it is unit-testable without a walletd
+/// client, in the same style as `classify_htlc_spend` below and
+/// `check_taker_payment_output` (`siacoin_mm_coin.rs`).
+///
+/// The argument order is load-bearing and not interchangeable:
+/// `success_pub` is the key that claims the payment by revealing the
+/// preimage, `refund_pub` the key that reclaims it after `time_lock`.
+/// Swapping them yields a different address, so a payment only the
+/// counterparty could claim does not validate.
+fn check_htlc_payment_output(
+    payment_tx: &SiaTransaction,
+    success_pub: &PublicKey,
+    refund_pub: &PublicKey,
+    time_lock: u64,
+    secret_hash: &Hash256,
+    amount: Currency,
+) -> Result<(), SiaValidateHtlcPaymentError> {
+    let htlc_address = SpendPolicy::atomic_swap(success_pub, refund_pub, time_lock, secret_hash).address();
+
+    let expected_htlc_output = SiacoinOutput {
+        value: amount,
+        address: htlc_address,
+    };
+
+    let htlc_output = match payment_tx.0.siacoin_outputs.get(HTLC_VOUT_INDEX as usize) {
+        Some(output) => output,
+        None => {
+            return Err(SiaValidateHtlcPaymentError::InvalidOutputLength {
+                expected: HTLC_VOUT_INDEX + 1,
+                actual: payment_tx.0.siacoin_outputs.len() as u32,
+                txid: payment_tx.0.txid(),
+            })
+        },
+    };
+
+    if *htlc_output != expected_htlc_output {
+        return Err(SiaValidateHtlcPaymentError::InvalidOutput {
+            expected: expected_htlc_output,
+            actual: htlc_output.clone(),
+            txid: payment_tx.0.txid(),
+        });
+    }
+
+    Ok(())
 }
 
 // ── Swap-spend event-walk classification (CRD ch.20 §20.10 D3) ───────
@@ -1141,5 +1167,194 @@ mod swap_spend_search_tests {
     fn no_matching_event_is_not_found() {
         let secret_hash = Hash256(sha256(&[7u8; 32]).take());
         assert_eq!(classify_htlc_spend(&[], &htlc_output_id(), &secret_hash), None);
+    }
+}
+
+#[cfg(test)]
+mod validate_htlc_payment_tests {
+    //! Regression surface for the counterparty-payment validation a swap
+    //! accepts or rejects on (`validate_maker_payment` /
+    //! `validate_taker_payment`, R-H1). Exercises the extracted pure helper
+    //! directly, no walletd client needed -- the same style as
+    //! `swap_spend_search_tests` below and `watcher_ops_tests`
+    //! (`siacoin_mm_coin.rs`).
+    //!
+    //! Every case here is a *rejection* property except the first: the
+    //! security-relevant behaviour is refusing a payment this node could not
+    //! actually claim on the terms it negotiated. A validation that accepted
+    //! any of these would let a swap proceed against a contract that pays
+    //! someone else, pays the wrong amount, or unlocks at the wrong time.
+
+    use super::*;
+
+    const TIME_LOCK: u64 = 1_800_000_000;
+    const AMOUNT: Currency = Currency(500);
+
+    fn keypair(seed: u8) -> SiaKeypair {
+        SiaKeypair::from_private_bytes(&[seed; 32]).expect("32 bytes is a valid ed25519 secret key")
+    }
+
+    fn secret_hash_of(secret: &[u8; 32]) -> Hash256 { Hash256(sha256(secret).take()) }
+
+    /// A payment funding the atomic-swap address these parameters produce,
+    /// with `amount` in the HTLC output.
+    fn payment_paying(
+        success_pub: &PublicKey,
+        refund_pub: &PublicKey,
+        time_lock: u64,
+        secret_hash: &Hash256,
+        amount: Currency,
+    ) -> SiaTransaction {
+        let htlc_address = SpendPolicy::atomic_swap(success_pub, refund_pub, time_lock, secret_hash).address();
+        SiaTransaction(V2Transaction {
+            siacoin_outputs: vec![SiacoinOutput {
+                value: amount,
+                address: htlc_address,
+            }],
+            ..Default::default()
+        })
+    }
+
+    /// The parameters both sides agreed on: this node claims with `mine`,
+    /// the counterparty refunds with `theirs`.
+    fn agreed() -> (SiaKeypair, SiaKeypair, Hash256) { (keypair(1), keypair(2), secret_hash_of(&[7u8; 32])) }
+
+    /// Pins the protocol property every role-order case below depends on:
+    /// the success and refund keys are not interchangeable, so the two
+    /// orders fund different addresses.
+    ///
+    /// Worth asserting separately because the fixtures here build their
+    /// expected address with the same `SpendPolicy::atomic_swap` call the
+    /// production helper makes. That is fine as long as the two use the
+    /// same argument order deliberately -- but it means a mutation applied
+    /// to *both* at once cancels itself out and the role-order cases still
+    /// pass. This test does not compare against a fixture at all, so it
+    /// cannot be fooled that way.
+    #[test]
+    fn the_success_and_refund_roles_are_not_interchangeable() {
+        let (mine, theirs, secret_hash) = agreed();
+
+        let ours_claims = SpendPolicy::atomic_swap(&mine.public(), &theirs.public(), TIME_LOCK, &secret_hash).address();
+        let theirs_claims =
+            SpendPolicy::atomic_swap(&theirs.public(), &mine.public(), TIME_LOCK, &secret_hash).address();
+
+        assert_ne!(ours_claims, theirs_claims);
+    }
+
+    #[test]
+    fn a_payment_on_the_agreed_terms_validates() {
+        let (mine, theirs, secret_hash) = agreed();
+        let tx = payment_paying(&mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT);
+
+        assert!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT).is_ok()
+        );
+    }
+
+    /// The case that matters most: a payment whose policy gives *them* the
+    /// success branch and *us* the refund branch funds a different address.
+    /// Accepting it would mean proceeding with a swap whose payment we can
+    /// only ever reclaim after the timelock, never claim with the secret.
+    #[test]
+    fn a_payment_with_the_roles_swapped_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let tx = payment_paying(&theirs.public(), &mine.public(), TIME_LOCK, &secret_hash, AMOUNT);
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
+    }
+
+    #[test]
+    fn a_payment_for_the_wrong_amount_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let tx = payment_paying(&mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, Currency(499));
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
+    }
+
+    /// Bound to the negotiated secret hash: a contract locked to a different
+    /// preimage cannot be claimed with the secret this swap will reveal.
+    #[test]
+    fn a_payment_locked_to_a_different_secret_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let other_hash = secret_hash_of(&[8u8; 32]);
+        let tx = payment_paying(&mine.public(), &theirs.public(), TIME_LOCK, &other_hash, AMOUNT);
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
+    }
+
+    /// Bound to the negotiated counterparty key, so a payment refundable by
+    /// some third key is not accepted as theirs.
+    #[test]
+    fn a_payment_refundable_by_a_different_key_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let stranger = keypair(3);
+        let tx = payment_paying(&mine.public(), &stranger.public(), TIME_LOCK, &secret_hash, AMOUNT);
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
+    }
+
+    /// Bound to the negotiated timelock: a shorter one would let the
+    /// counterparty reclaim the payment before this node's own leg is safe.
+    #[test]
+    fn a_payment_with_a_different_timelock_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let tx = payment_paying(&mine.public(), &theirs.public(), TIME_LOCK - 3600, &secret_hash, AMOUNT);
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
+    }
+
+    /// A transaction with no outputs at all reports the length problem
+    /// rather than panicking on the missing index.
+    #[test]
+    fn a_payment_with_no_outputs_is_rejected_as_too_short() {
+        let (mine, theirs, secret_hash) = agreed();
+        let tx = SiaTransaction(V2Transaction::default());
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutputLength { actual: 0, .. })
+        ));
+    }
+
+    /// The HTLC must be at `HTLC_VOUT_INDEX`. A transaction that funds the
+    /// right address at some *other* index is rejected, so a payment cannot
+    /// be smuggled past validation by burying the real output behind a
+    /// decoy -- the spend path only ever consumes `HTLC_VOUT_INDEX`.
+    #[test]
+    fn a_payment_funding_the_htlc_at_the_wrong_index_is_rejected() {
+        let (mine, theirs, secret_hash) = agreed();
+        let correct = payment_paying(&mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT);
+        let htlc_output = correct.0.siacoin_outputs[HTLC_VOUT_INDEX as usize].clone();
+
+        let decoy = SiacoinOutput {
+            value: AMOUNT,
+            address: SpendPolicy::PublicKey(keypair(9).public()).address(),
+        };
+        let mut outputs = vec![decoy];
+        outputs.insert(HTLC_VOUT_INDEX as usize + 1, htlc_output);
+        let tx = SiaTransaction(V2Transaction {
+            siacoin_outputs: outputs,
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
+            Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
+        ));
     }
 }
