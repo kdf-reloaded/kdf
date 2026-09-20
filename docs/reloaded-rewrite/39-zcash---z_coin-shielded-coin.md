@@ -392,6 +392,22 @@ on a build that does not (this payload is deliberately not
 > R39.6.4c both apply to that coin. Omitting it on a coin that does upgrade
 > accepts the risk those gates exist to prevent -- a counterparty's HTLC left
 > neither spendable nor refundable across the upgrade.
+>
+> **As shipped, that risk is accepted.** Both members are an extension
+> introduced by this project: upstream KDF's `ZcoinConsensusParams` declares no
+> equivalent, and no published coin configuration carries either member -- in
+> `GLEECBTC/coins` no coin mentions Ironwood, and ARRR is the only coin carrying
+> `consensus_params` at all. A default installation therefore arms neither gate,
+> and ARRR is expected to stop transacting when Ironwood activates. Supplying
+> `ironwood_activation_time` in any configuration the build loads arms both
+> gates without a code change.
+
+The values shall remain configuration and shall not be compiled in as a
+per-ticker default. The dictated chain derives the activation height at runtime
+and the published timestamp may still move; a compiled-in timestamp that fired
+early would refuse every transaction of that coin, and freeze its market, until
+a new binary shipped -- a failure both broader and slower to repair than the one
+R39.6.4b/R39.6.4c prevent. Configuration keeps a moved date a data change.
 
 They are two members rather than one because the dictated chain does not fix an
 Ironwood activation height in advance: each node derives it at runtime from the

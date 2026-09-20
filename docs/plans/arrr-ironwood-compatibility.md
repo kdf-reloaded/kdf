@@ -594,6 +594,26 @@ Decisions taken with the maintainer:
 - **Step 0 timing (2026‑09‑18):** run it first, funded, before any code change.
 - **Round 1 contents (2026‑09‑18):** A1 (tree‑state validation) + A2 (config fields) + a
   `shielded` CI matrix cell.
+- **A5 dropped (2026‑09‑21):** updating ARRR's entry in `GLEECBTC/coins` is the Pirate
+  team's call, not ours; we do not edit another project's coin definition.
+- **The beta ships with both gates dormant (2026‑09‑21).** `ironwood_activation_time` and
+  `ironwood_activation_height` were confirmed to be **our own invention**: upstream KDF's
+  `ZcoinConsensusParams` declares no equivalent (checked live against
+  `KomodoPlatform/komodo-defi-framework` master and an Apr‑2026 reference copy), and no coin
+  in `GLEECBTC/coins` mentions Ironwood — ARRR is the only coin there carrying
+  `consensus_params` at all. Since both A3 and A4 read `ironwood_activation_time` and both
+  return `false` when it is absent, neither gate fires on a default installation. Accepted
+  knowingly, for three reasons: the project is in alpha/beta under a standing warning and can
+  afford ARRR being unusable for a period; asking GLEEC to carry a schema extension only this
+  fork reads would be presumptuous while we cannot yet transact v6 at all; and — decisively —
+  a compiled‑in activation timestamp is *worse than none* if Pirate slips the date, because
+  it would refuse every ARRR transaction and freeze the market until a new binary shipped,
+  whereas configuration keeps a moved date a data change. The mechanism is built, tested and
+  arms itself the moment any configuration supplies the timestamp. Residual exposure is
+  narrow: withdrawals merely fail with a less clear error, but a swap funded shortly before
+  activation could be left unable to spend *or* refund its HTLC. Recorded in `CHANGELOG.md`,
+  `RELOADED_VS_GLEEC.md` and CRD R39.6.4a, which now also forbids a per‑ticker compiled‑in
+  default.
 
 **Open (to be decided with the wider team):**
 
