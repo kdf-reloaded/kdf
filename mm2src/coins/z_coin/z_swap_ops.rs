@@ -246,8 +246,11 @@ impl SwapOps for ZCoin {
                 if let Some((note, address, memo)) = try_sapling_output_recovery(
                     &DEX_FEE_OVK,
                     shielded_out,
+                    // Decryption-only parameters: the dex-fee output is built by
+                    // the counterparty, which may be a modern Pirate wallet using
+                    // the post-ZIP-212 note plaintext (R39.8.0am).
                     zcash_primitives::transaction::components::sapling::zip212_enforcement(
-                        &coin.z_fields.consensus_params,
+                        &crate::z_coin::ZcoinDecryptionParams::new(coin.z_fields.consensus_params.clone()),
                         block_height,
                     ),
                 ) {

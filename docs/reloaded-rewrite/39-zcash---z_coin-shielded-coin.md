@@ -1270,6 +1270,33 @@ object whose shape differs from the generic v2 history entry. Its fields are:
 | `coin` | string | Ticker the transaction belongs to. |
 | `internal_id` | integer (signed 64-bit) | Stable internal identifier used for `FromId` paging (R39.8.4). |
 
+R39.8.0am Shielded note decryption shall accept both the pre- and post-ZIP-212
+note plaintext versions at every height, for every shielded coin whose network
+accepts both.
+
+The dictated chain states this rule explicitly in its own plaintext-version
+check: both lead bytes are valid at all heights. It has no Canopy upgrade, and
+the reference library derives ZIP-212 enforcement solely from Canopy activation
+-- so with Canopy absent the reference library reports enforcement *off*, which
+accepts only the pre-ZIP-212 lead byte. A note carrying the post-ZIP-212 byte
+then fails to trial-decrypt, and because a failed trial decryption is
+indistinguishable from a note that simply is not ours, the payment does not
+error: it never appears at all. Every payment from a current wallet on that
+network is invisible.
+
+The wallet shall therefore derive its decryption parameters separately from the
+coin's consensus parameters, reporting the enforcement state that accepts both
+versions, and shall apply them at every trial-decryption site: the compact-block
+scanner, mempool pre-confirmation detection, full-transaction decryption, and
+outgoing-output recovery.
+
+Those decryption parameters shall **never** reach transaction construction. The
+consensus branch ID is resolved as the branch of the last *active* upgrade, so
+parameters that report Canopy active would move every constructed transaction
+off the Sapling branch and invalidate it. A test shall pin both halves: that the
+coin's real parameters still resolve to the Sapling branch, and that the
+decryption parameters do not.
+
 R39.8.0al A wallet whose scanned chain no longer agrees with the network shall
 rewind past the divergence and re-anchor, not fail.
 

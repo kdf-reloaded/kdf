@@ -297,6 +297,61 @@ impl consensus::Parameters for ZcoinConsensusParams {
     }
 }
 
+/// Network parameters for **trial-decrypting notes only**.
+///
+/// Pirate accepts both the pre- and post-ZIP-212 note plaintext versions at every
+/// height -- its own `plaintext_version_is_valid` says so in as many words, and it
+/// has no Canopy upgrade at all. Upstream librustzcash derives ZIP-212 enforcement
+/// solely from Canopy, so with Canopy absent it reports
+/// [`Zip212Enforcement::Off`], which accepts **only** the `0x01` lead byte and
+/// silently discards every note a modern Pirate wallet sends. The note does not
+/// fail to decrypt loudly; it simply never appears, so the payment is invisible.
+///
+/// Reporting Canopy as active with a far-future activation height puts upstream
+/// permanently inside its grace period, which accepts `0x01` and `0x02` alike --
+/// exactly Pirate's rule.
+///
+/// # This type must never reach transaction construction
+///
+/// [`BranchId::for_height`] returns the branch of the *last active* upgrade, so a
+/// Canopy that reports active would silently move our transactions off the Sapling
+/// consensus branch and make every one of them invalid. Decryption never consults
+/// the branch id, which is why the lie is safe here and nowhere else. Construct it
+/// only at a decryption call site.
+#[derive(Clone, Debug)]
+pub(crate) struct ZcoinDecryptionParams(ZcoinConsensusParams);
+
+/// Kept far enough above any real chain height that
+/// `activation_height(Canopy) + ZIP212_GRACE_PERIOD` cannot be reached, so
+/// enforcement stays in the grace period for the life of the chain, and low enough
+/// that the addition cannot overflow.
+const ZCOIN_DECRYPTION_CANOPY_HEIGHT: u32 = 0xF000_0000;
+
+impl ZcoinDecryptionParams {
+    pub(crate) fn new(params: ZcoinConsensusParams) -> Self { Self(params) }
+}
+
+impl consensus::Parameters for ZcoinDecryptionParams {
+    fn network_type(&self) -> NetworkType { self.0.network_type() }
+
+    fn activation_height(&self, nu: NetworkUpgrade) -> Option<BlockHeight> {
+        match nu {
+            // Reported as a height no chain reaches, so `is_nu_active` below is the
+            // only thing that makes Canopy "active" and the grace-period window
+            // never closes.
+            NetworkUpgrade::Canopy => Some(BlockHeight::from_u32(ZCOIN_DECRYPTION_CANOPY_HEIGHT)),
+            other => self.0.activation_height(other),
+        }
+    }
+
+    fn is_nu_active(&self, nu: NetworkUpgrade, height: BlockHeight) -> bool {
+        match nu {
+            NetworkUpgrade::Canopy => true,
+            other => self.0.activation_height(other).is_some_and(|h| h <= height),
+        }
+    }
+}
+
 /// Sync-anchor block descriptor from `protocol.protocol_data.check_point_block`
 /// (R39.1.4). When present it is the sync-start anchor: in native mode the
 /// wallet-DB commitment-tree cache is anchored at `height` (seeded from
@@ -556,6 +611,127 @@ mod native_sapling_cache_tests {
         assert!(cache_path.exists());
 
         let _ = std::fs::remove_dir_all(db_dir);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod zip212_decryption_tests {
+    use super::*;
+    use rand::rngs::OsRng;
+    use sapling::keys::PreparedIncomingViewingKey;
+    use sapling::note_encryption::{sapling_note_encryption, try_sapling_compact_note_decryption,
+                                   CompactOutputDescription, Zip212Enforcement};
+    use sapling::util::generate_random_rseed;
+    use sapling::value::NoteValue;
+    use sapling::{Note, Rseed};
+    use zcash_note_encryption::{Domain, COMPACT_NOTE_SIZE};
+    use zcash_primitives::transaction::components::sapling::zip212_enforcement;
+
+    /// ARRR's real mainnet parameters: Pirate has no Blossom, Heartwood or Canopy
+    /// upgrade at all, so all three are `null` in the coin configuration.
+    fn arrr_params() -> ZcoinConsensusParams {
+        serde_json::from_value(json!({
+            "overwinter_activation_height": 152855,
+            "sapling_activation_height": 152855,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        }))
+        .unwrap()
+    }
+
+    /// Builds a compact output for `rseed`, as a sending wallet would, and reports
+    /// whether it trial-decrypts under `enforcement`.
+    /// The rseed a sending wallet produces under `sender_enforcement`:
+    /// pre-ZIP-212 when it is `Off`, post-ZIP-212 otherwise.
+    fn rseed_from_sender(sender_enforcement: Zip212Enforcement) -> Rseed {
+        generate_random_rseed(sender_enforcement, &mut OsRng)
+    }
+
+    fn note_decrypts(rseed: Rseed, enforcement: Zip212Enforcement) -> bool {
+        let extsk = sapling::zip32::ExtendedSpendingKey::master(&[7u8; 32]);
+        #[allow(deprecated)]
+        let extfvk = extsk.to_extended_full_viewing_key();
+        let (_, address) = extfvk.default_address();
+        let note = Note::from_parts(address, NoteValue::from_raw(100_000), rseed);
+        let encryptor = sapling_note_encryption(None, note.clone(), [0u8; 512], &mut OsRng);
+        let enc = encryptor.encrypt_note_plaintext();
+        let compact = CompactOutputDescription {
+            ephemeral_key: sapling::note_encryption::SaplingDomain::epk_bytes(encryptor.epk()),
+            cmu: note.cmu(),
+            enc_ciphertext: enc[..COMPACT_NOTE_SIZE].try_into().unwrap(),
+        };
+        let ivk = PreparedIncomingViewingKey::new(&extfvk.fvk.vk.ivk());
+        try_sapling_compact_note_decryption(&ivk, &compact, enforcement).is_some()
+    }
+
+    /// The defect: ARRR has no Canopy, upstream derives ZIP-212 enforcement solely
+    /// from Canopy, and so the coin's own parameters yield `Off` -- which accepts
+    /// only the pre-ZIP-212 lead byte. Every note a modern Pirate wallet sends
+    /// carries the post-ZIP-212 byte and is discarded without an error, so the
+    /// payment never appears. This pins the cause, so the fix below cannot be
+    /// mistaken for a no-op.
+    #[test]
+    fn the_coins_own_parameters_reject_post_zip212_notes() {
+        let height = BlockHeight::from_u32(4_138_653);
+        assert_eq!(zip212_enforcement(&arrr_params(), height), Zip212Enforcement::Off);
+        assert!(
+            note_decrypts(rseed_from_sender(Zip212Enforcement::Off), Zip212Enforcement::Off),
+            "a pre-ZIP-212 note must still decrypt"
+        );
+        assert!(
+            !note_decrypts(rseed_from_sender(Zip212Enforcement::On), Zip212Enforcement::Off),
+            "this is the bug being fixed: a post-ZIP-212 note is silently dropped"
+        );
+    }
+
+    /// Pirate accepts both plaintext versions at every height. The decryption
+    /// parameters must reproduce that, which upstream expresses as the grace
+    /// period (R39.8.0am).
+    #[test]
+    fn decryption_parameters_accept_both_note_plaintext_versions() {
+        let params = ZcoinDecryptionParams::new(arrr_params());
+        for height in [152_855u32, 4_138_653, 0xEFFF_FFFF] {
+            assert_eq!(
+                zip212_enforcement(&params, BlockHeight::from_u32(height)),
+                Zip212Enforcement::GracePeriod,
+                "enforcement must stay in the grace period at height {}",
+                height
+            );
+        }
+        assert!(note_decrypts(
+            rseed_from_sender(Zip212Enforcement::Off),
+            Zip212Enforcement::GracePeriod
+        ));
+        assert!(note_decrypts(
+            rseed_from_sender(Zip212Enforcement::On),
+            Zip212Enforcement::GracePeriod
+        ));
+    }
+
+    /// The hazard that rules out simply lying to the shared parameters:
+    /// `BranchId::for_height` returns the branch of the last *active* upgrade, so a
+    /// Canopy reporting active would move every transaction we sign off the Sapling
+    /// branch and make it invalid. The decryption parameters are allowed to report
+    /// Canopy active precisely because nothing that builds a transaction ever sees
+    /// them -- and the coin's real parameters must keep resolving to Sapling.
+    #[test]
+    fn the_real_parameters_still_resolve_to_the_sapling_branch() {
+        let height = BlockHeight::from_u32(4_138_653);
+        assert_eq!(BranchId::for_height(&arrr_params(), height), BranchId::Sapling);
+        // And the decryption wrapper would not be safe to build with, which is why
+        // it is confined to decryption call sites.
+        assert_ne!(
+            BranchId::for_height(&ZcoinDecryptionParams::new(arrr_params()), height),
+            BranchId::Sapling,
+            "if this ever becomes Sapling the confinement rule can be relaxed -- until then it must not be"
+        );
     }
 }
 

@@ -234,8 +234,11 @@ impl ZCoin {
                 BranchId::for_height(&self.z_fields.consensus_params, mined_height),
             )
             .map_to_mm(|err| GenTxError::TxReadError { err, hex: prev_tx.hex })?;
+            // Decryption-only parameters, so a counterparty's post-ZIP-212 note is
+            // not silently discarded (R39.8.0am).
+            let decryption_params = ZcoinDecryptionParams::new(self.z_fields.consensus_params.clone());
             let decrypted = decrypt_transaction(
-                &self.z_fields.consensus_params,
+                &decryption_params,
                 Some(mined_height),
                 Some(BlockHeight::from_u32(current_block)),
                 &z_cash_tx,

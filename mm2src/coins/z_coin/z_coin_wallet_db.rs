@@ -1,5 +1,5 @@
 use super::z_rpc::z_coin_grpc;
-use super::{CheckPointBlockInfo, ZCoinBuildError, ZcoinConsensusParams};
+use super::{CheckPointBlockInfo, ZCoinBuildError, ZcoinConsensusParams, ZcoinDecryptionParams};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
@@ -1151,8 +1151,12 @@ impl ZCoinShieldedHistory {
                 first_height: from_height,
                 sapling_tree_size_before,
             };
+            // Decryption-only parameters: Pirate accepts both note plaintext
+            // versions at every height, which upstream can only express inside the
+            // ZIP-212 grace period (R39.8.0am). Never used to build a transaction.
+            let decryption_params = ZcoinDecryptionParams::new(consensus_params.clone());
             let summary = match scan_cached_blocks(
-                &consensus_params,
+                &decryption_params,
                 &block_source,
                 &mut wallet_db,
                 from_height,
@@ -4115,7 +4119,13 @@ impl ZCoinShieldedHistory {
         let ivk = PreparedIncomingViewingKey::new(&self.extfvk.fvk.vk.ivk());
         // Mempool transactions will be mined at the next height at the
         // earliest, so enforcement is evaluated against the tip.
-        let enforcement = zip212_enforcement(&self.consensus_params, BlockHeight::from_u32(tip as u32));
+        // Same reason as the scanner: a mempool note from a modern Pirate wallet
+        // carries the post-ZIP-212 lead byte, which the coin's own parameters would
+        // reject outright (R39.8.0am).
+        let enforcement = zip212_enforcement(
+            &ZcoinDecryptionParams::new(self.consensus_params.clone()),
+            BlockHeight::from_u32(tip as u32),
+        );
 
         for server in servers {
             let mut client = match Self::connect_lightwalletd(server).await {
