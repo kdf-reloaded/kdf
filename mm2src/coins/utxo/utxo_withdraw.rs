@@ -227,6 +227,7 @@ where
             _ => serialize(&signed).into(),
         };
         Ok(TransactionDetails {
+            tx_json: None,
             from: vec![self.sender_address_string()],
             to: vec![req.to.clone()],
             total_amount: big_decimal_from_sat(data.spent_by_me as i64, decimals),

@@ -348,10 +348,36 @@ shall treat `tx_hex` and `tx_hash` as mandatory for a completed withdrawal
 transaction and shall use the remaining metadata for history, balance, and
 confirmation display.
 
+R49.26. The field set of R49.25 is a **minimum**, not a closed set. A coin
+family may bind *additional* top-level fields on the same transaction-details
+object, and a consumer shall ignore a field it does not recognise rather than
+treat it as a protocol error. Such an addition is conformant only while it is
+strictly additive: it shall not remove a R49.25 field, shall not change an
+existing field's name, JSON type, or meaning, and shall not make `tx_hex` or
+`tx_hash` optional for the coin that adds it.
+
+The one coin family that presently uses R49.26 is Siacoin, whose native
+transaction serialisation is JSON text rather than a binary encoding. It
+carries the signed transaction twice: in the mandatory `tx_hex` of R49.25, as
+hex of that JSON text, and additionally in a top-level `tx_json` object holding
+the same JSON unencoded. That carrier pair, its precedence when the transaction
+is fed back to the legacy broadcast method, and the Sia-specific
+`transaction_type` and `internal_id` values are bound by
+[Chapter 20](20-siacoin-integration.md) §20.9.1-§20.9.2 (R-W6 through R-W11),
+not by this chapter. `tx_json` is absent for every other coin family, and its
+absence is not an error.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
 Both shall expose the same transaction-details field contract.
+
+T49.26. For a coin family that binds an additional field under R49.26, complete
+a withdrawal through both the direct `withdraw` method and the task path and
+confirm that the R49.25 minimum field set is present and unchanged in both, that
+`tx_hex` and `tx_hash` are non-empty, and that the additional field appears in
+both payloads. Repeat for a coin family that binds no additional field and
+confirm the extra field is simply absent and no error is raised.
 
 ## 49.7 Provenance Footer
 
@@ -364,11 +390,19 @@ Both shall expose the same transaction-details field contract.
   R35.1.4/R35.3.2 (the Trezor hardware policy this chapter's sender
   selection and `user_action` surface accommodate); [Chapter 50](50-evm-trezor-signing.md)
   R50.1-R50.4 (the EVM Trezor withdrawal path built directly on this
-  chapter's wire).
+  chapter's wire); [Chapter 20](20-siacoin-integration.md) §20.9.1-§20.9.2
+  (the Siacoin transaction-carrier and record-identity fields this chapter's
+  R49.26 admits as the one present use of an additional coin-family field).
 - *Permitted-input classes used:* baseline/as-built source (the shipped
   withdraw wire and shared task-status envelope pattern); cross-chapter
-  contracts (Chapters 35, 50); Interop / wire-and-API-bound reuse (R29/R31)
+  contracts (Chapters 20, 35, 50); Interop / wire-and-API-bound reuse (R29/R31)
   for the dictated request/response field names and task-status vocabulary.
-- *Sibling-allowlist consultations:* [Chapter 35](35-evm-v2-activation-rpcs.md),
+- *Sibling-allowlist consultations:* [Chapter 20](20-siacoin-integration.md),
+  [Chapter 35](35-evm-v2-activation-rpcs.md),
   [Chapter 50](50-evm-trezor-signing.md).
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* consulted **only** for the fact that one coin family's
+  deployed reference response carries an additional top-level transaction
+  carrier alongside the R49.25 minimum field set -- the fact R49.26 generalises.
+  The carrier's own wire detail is recorded in
+  [Chapter 20](20-siacoin-integration.md) §20.9.1, not here. No discretionary
+  expression crosses into this chapter.

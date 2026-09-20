@@ -546,6 +546,11 @@ pub enum TransactionType {
 #[serde(deny_unknown_fields)]
 pub struct TransactionDetails {
     pub tx_hex: String,
+    /// Present only for a coin whose native transaction serialisation is JSON
+    /// text (CRD ch.20 R-W7); `deny_unknown_fields` above would otherwise
+    /// reject such a response outright.
+    #[serde(default)]
+    pub tx_json: Option<Json>,
     pub tx_hash: String,
     pub from: Vec<String>,
     pub to: Vec<String>,

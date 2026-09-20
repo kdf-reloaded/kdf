@@ -32,8 +32,8 @@ use common::now_ms;
 
 use crate::siacoin::{hastings_to_siacoin, siacoin_to_hastings, Address, ApiClientHelpers, Currency, SiaApiClient,
                      SiaCoin, SiaFeeDetails, SiaFeePolicy, SiaKeypair as Keypair, SiacoinElement, SiacoinOutput,
-                     SpendPolicy, TxpoolFeeRequest, V2TransactionBuilder};
-use crate::{MarketCoinOps, PrivKeyPolicy, TransactionDetails, TransactionType, WithdrawError, WithdrawRequest,
+                     SpendPolicy, TxpoolFeeRequest, V2Transaction, V2TransactionBuilder};
+use crate::{Json, MarketCoinOps, PrivKeyPolicy, TransactionDetails, TransactionType, WithdrawError, WithdrawRequest,
             WithdrawResult};
 
 /// Serialized size, in bytes, of a transaction shaped like the one
@@ -268,11 +268,13 @@ impl<'a> SiaWithdrawBuilder<'a> {
         let fee_sc = hastings_to_siacoin(plan.fee);
         let received_back = hastings_to_siacoin(plan.change_amount);
 
-        let tx_hex = serde_json::ser::to_vec(&signed).unwrap_or_default();
-        let tx_hash = signed.txid().to_string();
+        let (tx_bytes, tx_json) = transaction_carriers(&signed)?;
+        let txid = signed.txid();
+        let tx_hash = txid.to_string();
 
         Ok(TransactionDetails {
-            tx_hex: BytesJson(tx_hex),
+            tx_hex: BytesJson(tx_bytes),
+            tx_json: Some(tx_json),
             tx_hash,
             from: vec![self.from_address.to_string()],
             to: vec![self.req.to.clone()],
@@ -290,12 +292,43 @@ impl<'a> SiaWithdrawBuilder<'a> {
             ),
             block_height: 0,
             coin: self.coin.ticker().to_string(),
-            internal_id: vec![].into(),
+            // The raw id bytes whose hex form is this record's own `tx_hash`
+            // (ch.20 R-W10). The history path keys its records the same way
+            // (ch.53 R53.5.2), so a withdrawal and the history record that
+            // later appears for the same transaction share one primary key.
+            internal_id: BytesJson(txid.0.to_vec()),
             timestamp: now_ms() / 1000,
             kmd_rewards: None,
-            transaction_type: TransactionType::StandardTransfer,
+            // What the record *is* -- a Sia v2 transaction -- not which
+            // subsystem produced it (ch.20 R-W9, ch.53 R53.5.10). The history
+            // path reports the same value for the same transaction.
+            transaction_type: TransactionType::SiaV2Transaction,
         })
     }
+}
+
+/// Derive the two transaction carriers ch.20 R-W6/R-W7 bind, from one signed
+/// transaction.
+///
+/// Sia is the coin family whose native serialisation of a signed transaction is
+/// JSON text rather than a binary encoding, so the carriers are two encodings of
+/// one byte sequence: `tx_hex` is its lowercase hex (R-W6) and `tx_json` the same
+/// JSON emitted unencoded (R-W7). Returning `tx_json` by parsing the very bytes
+/// `tx_hex` will encode -- rather than serialising `signed` a second time -- is
+/// what makes R-W7's "never two different transactions" hold by construction.
+///
+/// # Errors
+///
+/// A serialisation failure aborts the withdrawal, per R-W6: a completed
+/// withdrawal's `tx_hex` is mandatory and every broadcast path reads it, so
+/// reporting success with an empty or placeholder carrier would hand the caller
+/// a withdrawal it cannot broadcast.
+fn transaction_carriers(signed: &V2Transaction) -> Result<(Vec<u8>, Json), MmError<WithdrawError>> {
+    let tx_bytes = serde_json::ser::to_vec(signed)
+        .map_err(|e| WithdrawError::InternalError(format!("Failed to serialize the signed transaction: {e}")))?;
+    let tx_json = serde_json::from_slice(&tx_bytes)
+        .map_err(|e| WithdrawError::InternalError(format!("Failed to reparse the serialized transaction: {e}")))?;
+    Ok((tx_bytes, tx_json))
 }
 
 #[cfg(test)]
@@ -407,5 +440,42 @@ mod tests {
     #[test]
     fn fee_for_weight_saturates_on_overflow() {
         assert_eq!(fee_for_weight(Currency(u128::MAX), u64::MAX), Currency(u128::MAX));
+    }
+
+    /// T-W1: the two carriers a withdrawal returns are two encodings of one
+    /// transaction. Hex-decoding `tx_hex` and parsing the result as JSON yields
+    /// the same JSON value as `tx_json` -- never two different transactions.
+    #[test]
+    fn both_carriers_encode_the_same_transaction() {
+        let signed = V2TransactionBuilder::new().build();
+        let (tx_bytes, tx_json) = transaction_carriers(&signed).expect("a built transaction serializes");
+
+        let from_hex: Json = serde_json::from_slice(&hex::decode(hex::encode(&tx_bytes)).expect("valid hex"))
+            .expect("the decoded bytes are the transaction's own JSON");
+        assert_eq!(from_hex, tx_json);
+    }
+
+    /// R-W6: the bytes `tx_hex` encodes are the bound library's own
+    /// serialisation, so they parse straight back into an equivalent
+    /// transaction -- which is exactly what the broadcast path does with them.
+    #[test]
+    fn the_hex_carrier_decodes_back_into_the_same_transaction() {
+        let signed = V2TransactionBuilder::new().build();
+        let (tx_bytes, _) = transaction_carriers(&signed).expect("a built transaction serializes");
+
+        let recovered: V2Transaction = serde_json::from_slice(&tx_bytes).expect("round-trips through its own form");
+        assert_eq!(recovered.txid().to_string(), signed.txid().to_string());
+    }
+
+    /// R-W10: `internal_id` carries the raw id bytes whose lowercase hex form
+    /// the same record reports as `tx_hash`, so a withdrawal record and the
+    /// history record for the same transaction share one primary key
+    /// (ch.53 R53.5.2). Guards the relationship between the two fields, which
+    /// is the part a caller joins on.
+    #[test]
+    fn the_record_id_is_the_raw_form_of_the_reported_hash() {
+        let txid = V2TransactionBuilder::new().build().txid();
+
+        assert_eq!(hex::encode(txid.0), txid.to_string());
     }
 }

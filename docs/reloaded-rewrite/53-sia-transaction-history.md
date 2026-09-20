@@ -297,7 +297,10 @@ nor counted in `total`, and skipping one is not an error (D53.3).
 lowercase hex encoding. For the two transaction event kinds this identifier
 is the Sia transaction id; for the two payout kinds it is the identifier of
 the created output. One event yields exactly one record, and the identifier
-is the record's primary key in the store (§53.6.4).
+is the record's primary key in the store (§53.6.4). The Sia withdraw path
+applies the same identity rule to the record it returns for a transaction it
+has just signed (ch. 20 §20.9.2 R-W10), so a withdrawal result and the history
+record that later covers the same transaction share one primary key.
 
 **R53.5.3** All monetary fields shall be denominated in **whole SC** using
 the dictated `1 SC = 10^24 hastings` ratio of ch. 20 §20.5 (R-U1). No field
@@ -364,11 +367,24 @@ shall not change the wire form, default, or meaning of any existing member,
 and the default for a record that does not set the field remains the
 standard-transfer member.
 
+These wire values describe *what a record is*, not which subsystem produced
+it. The Sia withdraw path therefore reports the same v2-transaction value on
+the transaction-details object it returns for a freshly signed transfer
+(ch. 20 §20.9.2 R-W9); the withdraw and history paths shall not disagree about
+this field for one transaction.
+
 **R53.5.11** The shared record's raw-transaction field carries **no data**
 for a Sia record (an empty byte string). A walletd event is not a
 rebroadcastable serialised transaction, and a caller shall not treat that
 field as one for Sia. Carrying a typed Sia payload there is deferred
 (D53.4).
+
+This is the one field where a history record and a Sia *withdraw* record
+differ by design. A withdraw response holds the signed transaction itself, so
+it carries both a non-empty `tx_hex` and a top-level `tx_json` object
+(ch. 20 §20.9.1 R-W6 / R-W7). A history record is projected from a walletd
+event, which is not that transaction, so it carries neither: a caller shall
+not expect `tx_json` on a Sia history record while D53.4 remains open.
 
 **R53.5.12** Mapping is a pure function of the event and the wallet address:
 no walletd call, no chain-tip read, and no clock read participates in it, so
@@ -499,7 +515,11 @@ D2; the residue is narrower.
   activity in wallet history is deferred.
 - **D53.4 -- Typed transaction payload.** The shared record's
   raw-transaction field is empty for Sia (R53.5.11); exposing the event's
-  typed payload to callers is deferred.
+  typed payload to callers is deferred. The withdraw path already binds the
+  carrier shape such a payload would use if this were closed -- a top-level
+  `tx_json` object alongside `tx_hex` (ch. 20 §20.9.1 R-W7) -- so closing
+  D53.4 means populating those two fields from the event's transaction, not
+  inventing a second carrier shape.
 - **D53.5 -- Multi-address history.** Only the activated single address is
   queried (R53.4.2), matching Sia activation's account-0-only scope
   (ch. 20 §20.4.1; ch. 46 R46.1.3). Ch. 20 §20.10 D1 (multi-account HD) is
@@ -620,7 +640,9 @@ V4. The walletd address-events endpoint, the event object's identifier /
   historical lineage's discretionary expression.
 - *Sibling-allowlist consultations:* [Chapter 20](20-siacoin-integration.md)
   (§20.4/§20.4.1 the activated single address, §20.5 the units contract,
-  §20.8 the walletd endpoint set, §20.10 D1/D2 the deferred boundary this
+  §20.8 the walletd endpoint set, §20.9.1-§20.9.2 the withdraw path's
+  transaction carrier and its reuse of this chapter's record-identity and
+  transaction-type rules, §20.10 D1/D2 the deferred boundary this
   chapter narrows); [Chapter 44](44-database-persistence-and-migrations.md)
   (to establish that the swap/order/statistics database is *not* this
   chapter's substrate); [Chapter 46](46-sia-v2-activation-rpcs.md) (§46.1.2
