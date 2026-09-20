@@ -42,6 +42,13 @@ pub struct RawTransactionRequest {
 pub struct RawTransactionRes {
     /// Raw bytes of signed transaction in hexadecimal string, this should be return hexadecimal encoded signed transaction for get_raw_transaction
     pub tx_hex: BytesJson,
+    /// The transaction in a coin's native JSON form, for a coin whose native
+    /// serialisation of a transaction is JSON text rather than a binary encoding --
+    /// currently Sia only (CRD ch.20 R-W12). It is the same serialisation `tx_hex`
+    /// hex-encodes, emitted unencoded, and is omitted entirely for every other coin
+    /// family, exactly as the equivalent field on `TransactionDetails` (R-W7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_json: Option<Json>,
 }
 /// Previous utxo transaction data for signing
 #[derive(Clone, Debug, Deserialize)]
@@ -689,6 +696,13 @@ impl Default for TransactionType {
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction
     pub tx_hex: BytesJson,
+    /// The signed transaction in a coin's native JSON form, for a coin whose native
+    /// serialisation of a transaction is JSON text rather than a binary encoding --
+    /// currently Sia only (CRD ch.20 R-W7). It is the same serialisation `tx_hex`
+    /// hex-encodes, emitted unencoded, and is omitted entirely for every other coin
+    /// family; its absence means "this coin has no JSON carrier", never an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_json: Option<Json>,
     /// Transaction hash in hexadecimal format
     pub(crate) tx_hash: String,
     /// Coins are sent from these addresses

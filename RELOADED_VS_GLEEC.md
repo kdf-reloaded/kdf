@@ -40,6 +40,33 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
 - Split CI: format → matrix unit-tests → docker-tests, with cancel-in-progress concurrency.
 - Specific mismatch-kind reporting in UTXO maker-payment validation (better operator diagnostics).
 - Read-only fallback for legacy `<db_root>/wallets/*.wallet` wallet files written by an earlier reloaded build (two-field envelope). New wallets are always written as the canonical `<db_root>/<name>.json` record; the legacy form is read (for login, listing and deletion) but never written. This fallback has no analogue in GLEEC KDF, which never produced the `.wallet` form. The on-disk format does not by itself select HD vs single-address signing (that is governed by `enable_hd` and per-coin activation); see CRD chapter 07 §7.5/§7.7 R9A.
+- **Siacoin `get_raw_transaction` carries both encodings.** GLEEC KDF returns
+  only `tx_hex` from this method for SC, hex-encoding the same Sia-native JSON.
+  Reloaded returns `tx_json` alongside it (CRD ch.20 R-W12), on the same terms
+  as the withdraw path, so one coin does not offer the JSON carrier from one
+  method and withhold it from another. No compat switch is provided for the same
+  reason as the withdraw carrier below: the change is strictly additive — it
+  removes no field and alters no existing field's name, type or meaning — so an
+  integration written against either shape keeps working unchanged. Code:
+  `coins/lp_coins_types.rs`, `coins/siacoin/siacoin_mm_coin.rs`.
+
+- **Siacoin withdraw carries the signed transaction in both encodings, and
+  `send_raw_transaction` accepts either.** Sia is the coin family whose native
+  serialisation of a signed transaction is JSON text rather than a binary
+  encoding, and the two external contracts for SC disagree about how to carry
+  it: the Komodo Platform published API reference documents `tx_hex` as the sole
+  carrier for every coin and defines no `tx_json` field at all, while GLEEC KDF
+  for this one coin emits only a top-level `tx_json` object and no `tx_hex`.
+  Reloaded emits **both** — `tx_hex` stays mandatory and authoritative (CRD
+  ch.20 R-W6, ch.49 R49.25), `tx_json` is added alongside it (R-W7) — and
+  accepts either on `send_raw_transaction`, `tx_hex` winning when both are
+  present (R-W8). No compat switch is provided because the result is a strict
+  superset of both shapes: an integration written against either one keeps
+  working unchanged, no field is removed, and no existing field's name, type or
+  meaning changes. `tx_json` is absent for every other coin family and its
+  absence is not an error. Code: `coins/lp_coins_types.rs`,
+  `coins/lp_coins_ops.rs`, `coins/siacoin/sia_withdraw.rs`.
+
 - Reloaded-specific Z-coin shielded database names isolate the upgraded stable
   `librustzcash` schema from GLEEC KDF's legacy schema. See
   [Shielded database isolation](#shielded-database-isolation) below.
@@ -79,6 +106,21 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   GLEEC KDF, on the legacy stack, is affected by the same underlying divergence.
   No compat switch: the alternative is invisible incoming payments. Code:
   `coins/z_coin.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
+- **Siacoin withdraw populates `internal_id`.** GLEEC KDF leaves `internal_id`
+  empty on its SC withdraw response — only its history path fills the field in.
+  Reloaded sets it to the raw bytes of the signed transaction's id, the same
+  value whose lowercase hex the record already reports as `tx_hash` (CRD ch.20
+  R-W10), so a withdrawal record and the history record that later appears for
+  the same transaction share one primary key and a caller can join them without
+  re-deriving one from the other. This is a deliberate improvement, not parity.
+  No compat switch is provided: the field is mandatory in the ch.49 R49.25 field
+  set either way and GLEEC KDF merely returns an empty value for it, so
+  populating it supplies information where a caller previously had none rather
+  than changing the meaning of a value anyone could already rely on — a consumer
+  that ignored `internal_id` on SC withdrawals because it was always empty is
+  unaffected. Not listed in `docs/GLEEC_COMPATIBILITY.md`, which catalogues
+  configuration values an operator sets; this divergence has no setting.
+  Code: `coins/siacoin/sia_withdraw.rs`.
 
 - **Siacoin transaction history on the mmrpc-2.0 `my_tx_history`.** GLEEC KDF
   serves SC history through the legacy tier-1 `my_tx_history` only, and rejects

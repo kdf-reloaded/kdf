@@ -558,6 +558,7 @@ impl MmCoin for TendermintToken {
             let tx_hash = hex::encode_upper(sha256(&tx_bytes).as_slice());
 
             let tx_details = TransactionDetails {
+                tx_json: None,
                 tx_hex: tx_bytes.into(),
                 tx_hash: tx_hash.clone(),
                 from: vec![account_id.to_string()],

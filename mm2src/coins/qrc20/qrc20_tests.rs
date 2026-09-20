@@ -516,6 +516,7 @@ fn test_transfer_details_by_hash() {
     // qKVvtDqpnFGDxsDzck5jmLwdnD2jRH6aM8 is UTXO representation of 1549128bbfb33b997949b4105b6a6371c998e212 contract address
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
         from: vec!["qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG".into()],
@@ -540,6 +541,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
         from: vec!["qKVvtDqpnFGDxsDzck5jmLwdnD2jRH6aM8".into()],
@@ -564,6 +566,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
         from: vec!["qXxsj5RtciAby9T7m98AgAATL4zTi4UwDG".into()],
@@ -588,6 +591,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
         from: vec!["qKVvtDqpnFGDxsDzck5jmLwdnD2jRH6aM8".into()],
@@ -612,6 +616,7 @@ fn test_transfer_details_by_hash() {
 
     let (_id, actual) = it.next().unwrap();
     let expected = TransactionDetails {
+        tx_json: None,
         tx_hex: tx_hex.clone(),
         tx_hash: tx_hash_bytes.to_tx_hash(),
         from: vec!["qKVvtDqpnFGDxsDzck5jmLwdnD2jRH6aM8".into()],

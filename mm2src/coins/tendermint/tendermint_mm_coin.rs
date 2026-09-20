@@ -307,6 +307,7 @@ impl MmCoin for TendermintCoin {
             let internal_id = tx_hash_to_internal_id(&tx_hash);
 
             let tx_details = TransactionDetails {
+                tx_json: None,
                 tx_hex: tx_bytes.into(),
                 tx_hash,
                 from: vec![account_id.to_string()],
@@ -340,6 +341,7 @@ impl MmCoin for TendermintCoin {
             req.tx_hash.make_ascii_uppercase();
             let tx_from_rpc = coin.request_tx(req.tx_hash).await.map_mm_err()?;
             Ok(RawTransactionRes {
+                tx_json: None,
                 tx_hex: tx_from_rpc.encode_to_vec().into(),
             })
         };

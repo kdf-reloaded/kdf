@@ -542,6 +542,7 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     };
 
     Ok(TransactionDetails {
+        tx_json: None,
         from: from_addresses,
         to: to_addresses,
         received_by_me: big_decimal_from_sat_unsigned(received_by_me, coin.as_ref().decimals),

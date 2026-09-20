@@ -1327,6 +1327,7 @@ async fn sign_raw_utxo_tx<T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps>(
 
     let tx_signed_bytes = serialize_with_flags(&tx_signed, SERIALIZE_TRANSACTION_WITNESS);
     Ok(RawTransactionRes {
+        tx_json: None,
         tx_hex: tx_signed_bytes.into(),
     })
 }
