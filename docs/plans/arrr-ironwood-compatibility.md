@@ -4,7 +4,7 @@
 > Pirate Chain team (§7) and one internal design decision (§5A).
 > Written to be readable without knowledge of KDF Reloaded internals: the **Overview** is for
 > everyone; §1 lists verified facts with sources; §2–§5 are implementation detail for our
-> engineers; §6 is the timeline; §7 the questions for the Pirate team; §9 the decisions log.
+> engineers; §6 is the timeline; §7 the open items for the Pirate team; §9 the decisions log.
 
 ## Overview
 
@@ -108,23 +108,30 @@ builds on the bump because only the new crates know the v6 format.
 
 ### What we would like the Pirate team to confirm
 
-Short form — full list with context in §7:
+Short form — full list with context in §7. Most of the original questions were **answered
+from published code** on 2026‑09‑21 (Treasure Chest, `piratenetwork/librustzcash`, Stashi,
+Pirate `lightwalletd`) and are recorded in §9 rather than asked again. In particular we no
+longer need to ask about wire/txid/sighash identity, the v6 Sapling digest personalizations,
+the `ac_private` P2SH exemption, the activation‑height derivation rule, or whether Sapling
+survives v6 — the code settles all five. What is left:
 
-1. Version‑4 Sapling transactions are intentionally **non‑standard** after Ironwood; would a
-   grace period (v4 standard until a later height) be considered?
-2. For a transaction with only transparent + Sapling parts (empty Orchard slot, empty
-   Ironwood bundle), Pirate's v6 wire format, txid and sighash are **byte‑identical to Zcash
-   NU6.3**, so unmodified upstream `librustzcash 0.30` output is valid on Pirate.
-3. The mainnet activation height will be **published** once derived, and ideally exposed by
+1. Would a **standardness grace period** be considered? The code has none — v4 becomes
+   non‑standard at the activation block with no taper.
+2. The mainnet activation height will be **published** once derived, and ideally exposed by
    `lightwalletd` (a `LightdInfo` field).
-4. A public **Ironwood‑activated testnet** (`lightwalletd` + Electrum) or a regtest recipe
-   *with standardness enforced* is available for third‑party wallet testing.
-5. `lightwalletd`'s `GetTreeState`/`GetBridgeTreeState` should not put a bare 32‑byte
+3. `lightwalletd`'s `GetTreeState`/`GetBridgeTreeState` should not put a bare 32‑byte
    `finalRoot` in the `saplingTree` field when `finalState` is missing.
-6. Which `lightwalletd` endpoints are canonical (5 of 8 in the shared coin list are down);
-   will the cipig ElectrumX servers index, deserialize and relay v6 transactions.
-7. Sapling‑only v6 transactions (with our P2SH HTLC output and OP_RETURN redeem‑script
-   reveal) stay standard indefinitely — no Sapling→Ironwood turnstile or sunset planned.
+4. Which `lightwalletd` endpoints are canonical (5 of 8 in the shared coin list are down),
+   and can `LightdInfo.piratedBuild` be populated?
+5. A public **Ironwood‑activated testnet** (`lightwalletd` + Electrum), or a regtest recipe
+   *with standardness enforced*, for third‑party wallet testing.
+6. Will the cipig ElectrumX servers deserialize, index and relay **v6** transactions? If not
+   we move tip/broadcast/spend‑detection to `lightwalletd`.
+7. A **compact‑format divergence inside Pirate's own stack**: `lightwalletd` carries Ironwood
+   actions in `actions = 6`, while the `librustzcash` Treasure Chest links expects a separate
+   `ironwoodActions = 9`. Harmless for Sapling‑only clients; which is canonical?
+8. **Confirmation of intent** that Sapling‑only v6 stays standard indefinitely. The code says
+   yes; we are asking about the roadmap, not the current rule.
 
 ---
 
@@ -223,7 +230,7 @@ stopped.*
 3. **Server hygiene.** Remove the five dead lightwalletd endpoints and the one dead Electrum
    endpoint upstream in **`GLEECBTC/coins`** (`light_wallet_d/ARRR`, `electrums/ARRR`;
    `ARRR_WSS` inherits the dead `electrum3`), order by measured latency, and ask Pirate for
-   the canonical list (§7 q6).
+   the canonical list (§7 item 4).
 4. **Ironwood guard and swap freeze** (maintainer decision: wall‑clock, with freeze). This
    is B's safety net but needs nothing from the crate bump, so it ships here:
    - add `ironwood_activation_time: Option<u32>` and `ironwood_activation_height: Option<u32>`
@@ -361,6 +368,15 @@ activation is a version‑6 transaction committing to branch ID `0x37a5165b`; be
 it stays exactly what we build today; and every swap step that reads ARRR transaction bytes
 understands v6 and its ZIP‑244 txid.*
 
+**Scope, settled 2026‑09‑21 (§9).** This step needs the v6 **wire format**, the ZIP‑244 v6
+digests and the `Nu6_3` branch ID — and nothing else. Sapling is a first‑class field of
+Pirate's v6 transaction, so we keep building Sapling bundles with the key, note, witness and
+commitment‑tree machinery we already have. The Ironwood **pool** is out of scope: no halo2
+proving, no Orchard circuit, no `pirate1…` addresses, no ZIP‑32 Ironwood derivation, no
+second commitment tree, no second sync pool. Every piece we do need is already implemented in
+upstream `librustzcash`, and is compiled out of our build today only because Ironwood sits
+behind the `orchard` feature we do not enable.
+
 1. **Consensus parameters.** Map `NetworkUpgrade::Nu6_3` to `ironwood_activation_height` in
    `ZcoinConsensusParams::activation_height`. With that single arm the upstream builder
    selects `TxVersion::V6`, the Ironwood branch ID, ZIP‑244 txids and ZIP‑229 Sapling digests
@@ -388,13 +404,13 @@ understands v6 and its ZIP‑244 txid.*
    chosen, `z_p2sh_spend` must stop re‑parsing its own output as `UtxoTx` before broadcast
    (`z_htlc.rs:207`) and the ZHTLC swap paths must return `TransactionEnum::ZTransaction`.
 6. **Coin configuration.** `ironwood_activation_time` published in step 1;
-   `ironwood_activation_height` as soon as the network derives it (§7 q3); `txversion` stays 4.
+   `ironwood_activation_height` as soon as the network derives it (§7 item 1); `txversion` stays 4.
 7. **Testing.** ZOMBIE runs Komodo `komodod` and will **not** get Ironwood. Build a docker
    harness with `pirated -regtest` (Ironwood fixed at height 200) + Pirate `lightwalletd`:
    mine past 200, activate the KDF light wallet, receive, then send/refund an HTLC and a
    withdrawal. **Regtest has `fRequireStandard = false`, so it proves consensus validity
    only** — the "v4 rejected, v6 accepted" case needs Pirate testnet (Ironwood at 280 500) or
-   a regtest with standardness switched on (§7 q4). Then Step 0 on mainnet after 3 Oct.
+   a regtest with standardness switched on (§7 item 5). Then Step 0 on mainnet after 3 Oct.
 
 ### 5A. Open decision — which parser reads v6 ARRR transactions in the swap layer
 
@@ -416,7 +432,7 @@ fails on v6:
 | our own spend/refund pre‑broadcast | `z_htlc.rs:203‑212` | `deserialize` the builder's bytes into `UtxoTx` |
 
 Common to both options: the ARRR ElectrumX servers must themselves parse v6 and return
-ZIP‑244 txids (§7 q6) — otherwise spend detection is impossible on Electrum regardless of our
+ZIP‑244 txids (§7 item 6) — otherwise spend detection is impossible on Electrum regardless of our
 parser, and tip/broadcast/history must move to `lightwalletd`. And the HTLC *script* helpers
 (`payment_script`, script hashing, OP_RETURN layout) do not parse transactions and are reused
 unchanged.
@@ -433,7 +449,7 @@ side‑by‑side test over recorded v4 swap transactions.
 untouched. Native only (`ZTransaction` is `cfg(not(wasm32))`).
 *Effort:* ~300–500 lines + tests; 2–4 days.
 *Pros:* contained blast radius; uses the one implementation of v6 and ZIP‑244 that already
-exists and matches Pirate by construction (§7 q2); no consensus‑critical hashing written by
+exists and matches Pirate by construction — confirmed 2026‑09‑21, see §9; no consensus‑critical hashing written by
 us; easiest to review.
 *Cons:* duplicates ~6 HTLC checks that exist in `utxo_common` (two places to maintain); a
 subtle semantic drift between the copies would only show in mixed‑version swaps; benefits no
@@ -491,57 +507,73 @@ fast:
   `zcash_protocol 0.9.0` would give us the branch ID but the old `zcash_primitives` would
   still emit v4 (or, if `Nu6_2` were reused, a v5 header Pirate does not accept), which is
   non‑standard after activation — unless Pirate relaxes `IRONWOOD_MIN_CURRENT_VERSION` to 4
-  (§7 q1). If they do, a ~40‑line vendored patch becomes a viable interim for B.
+  (§7 item 2). If they do, a ~40‑line vendored patch becomes a viable interim for B.
 - Any KDF build (ours or Komodo's) that is not upgraded will be unable to send or swap ARRR
   after activation.
 
 ---
 
-## 7. Questions for the Pirate Chain team
+## 7. Open items for the Pirate Chain team
 
-1. **Standardness.** `IsStandardTx` requires transaction version 6 after Ironwood
-   (`IRONWOOD_MIN_CURRENT_VERSION = 6`). Zcash kept v4 standard through NU5/NU6. Is the
-   intent to force every wallet to v6 on day one? Would a grace period (v4 standard until a
-   later height) be considered? It would decouple light‑wallet upgrades from the fork date.
-2. **Wire compatibility.** For a v6 transaction containing only transparent inputs/outputs
-   and a Sapling bundle (empty Orchard slot, empty Ironwood bundle), are the serialization,
-   txid (ZIP 244) and signature hash byte‑identical to Zcash NU6.3 — i.e. is a transaction
-   produced by unmodified upstream `zcash_primitives 0.30` with `BranchId::Nu6_3` valid on
-   Pirate? Are the Sapling v6 digest personalizations (`ZTxIdSSpendNH_v6`,
-   `ZTxAuthSapliH_v6`) unchanged? Does the `ac_private` exemption (Sapling → P2SH output with
-   the redeem script revealed in OP_RETURN, `main.cpp:1740‑1752`) apply unchanged to v6, and
-   are there any v6‑specific fee or OP_RETURN standardness rules?
-3. **Activation height.** Please confirm the rule (first block with `nTime > 1791054000`;
-   activation = that height + 60; trusted once 30 blocks deep) and publish the derived
-   mainnet height as soon as it is known. Could `lightwalletd` expose it (e.g.
-   `LightdInfo.ironwoodActivationHeight`) so light clients need not re‑derive it? We note
-   `LightdInfo.consensusBranchId` reports the chain‑tip branch, not the next block's.
-4. **Test network.** Is there a public Ironwood‑activated testnet with `lightwalletd` (and
-   ideally an Electrum server) that third‑party wallets can use? Regtest has
-   `fRequireStandard = false`, so it cannot show the v4‑rejected / v6‑accepted behaviour — is
-   there a flag to enforce standardness on regtest, or a recommended docker recipe?
-5. **`GetTreeState` fallback.** `preferredTreeState()` returns `finalRoot` (a 32‑byte hash)
-   in the `saplingTree` field of both `GetTreeState` and `GetBridgeTreeState` when
-   `finalState` is unavailable. Legacy clients parse that field as a serialized commitment
-   tree and fail — or worse, a root beginning `00 00 00` parses silently as an empty tree.
-   Could the field be left empty (or the RPC return an error) in that case?
-6. **Endpoints and Electrum.** `piratelightd1‑4.cryptoforge.cc` no longer resolve and
-   `electrum3.cipig.net:9447` refuses connections — which `lightwalletd` endpoints are
-   canonical for the shared coin list? `LightdInfo.piratedBuild` is empty on all servers —
-   can it be populated? The `arrr.electrumN.cipig.net` ElectrumX 2.0.0 servers are our
-   source of the chain tip, our broadcast path, and our spend‑detection path (scripthash
-   history + raw tx by txid): will they deserialize v6 transactions, index them under their
-   ZIP‑244 txids, and relay them after activation? If not, we will move those functions to
-   `lightwalletd` (`GetLatestBlock`, `SendTransaction`, `GetTaddressTxids`) — please confirm
-   those are considered stable.
-7. **Sapling longevity.** Will Sapling‑only v6 transactions stay standard indefinitely, or is
-   a Sapling→Ironwood turnstile / Sapling deprecation date planned? Our swap protocol is
-   Sapling‑only.
-8. **Compact format.** Pirate's `lightwalletd` reuses `CompactTx.actions` (field 6) for
-   Ironwood actions, while the upstream lightwallet protocol defines a separate
-   `ironwood_actions` field. Harmless for Sapling‑only clients, but worth aligning before
-   third‑party Orchard‑aware scanners appear.
-9. **Sanity.** The 19 Sep `requiredSigs` change has no effect on light clients — correct?
+**Most of the original list has been answered from published code** — Treasure Chest
+(`PirateNetwork/pirate`), `piratenetwork/librustzcash`, `piratenetwork/sapling-crypto`,
+Stashi Wallet and Pirate's `lightwalletd` — on 2026‑09‑21. Those answers are recorded in §9
+with their sources and are **not** restated as questions here. What remains is what code
+cannot answer: operational facts, third‑party readiness, and forward‑looking intent.
+
+### 7.1 Requests (things only the Pirate team can do)
+
+1. **Publish the derived mainnet activation height** as soon as the network has settled it.
+   We can derive it ourselves (§5 step 3.2) but a published value removes a whole class of
+   disagreement. Could `lightwalletd` expose it, e.g. `LightdInfo.ironwoodActivationHeight`?
+   `LightdInfo.consensusBranchId` reports the chain‑tip branch, not the next block's, so it
+   cannot serve this purpose.
+2. **Would a standardness grace period be considered?** The code has none: `IsStandardTx`
+   switches hard to `IRONWOOD_MIN_CURRENT_VERSION = 6` the moment `ironwoodActive` is true
+   (`src/main.cpp:941‑947`), so v4 becomes non‑standard at the activation block with no
+   taper. A grace period would decouple third‑party wallet upgrades from the fork date. We
+   are asking whether one is wanted, not whether one exists.
+3. **`GetTreeState` fallback.** `preferredTreeState()` returns `finalRoot` — a bare 32‑byte
+   hash — in the `saplingTree` field of both `GetTreeState` and `GetBridgeTreeState` when
+   `finalState` is unavailable. A client parsing that field as a serialized commitment tree
+   fails, or worse: a root beginning `00 00 00` parses *silently* as the empty tree. Could
+   the field be left empty, or the RPC return an error, in that case? (We validate against
+   this ourselves — R39.8.0ak — but every other light client is exposed.)
+4. **Canonical endpoints.** `piratelightd1‑4.cryptoforge.cc` no longer resolve and
+   `electrum3.cipig.net:9447` refuses connections. Which `lightwalletd` endpoints should the
+   shared coin list carry? `LightdInfo.piratedBuild` is empty on every server we reach — can
+   it be populated? It is the cheapest upgrade signal a light client has.
+5. **A public Ironwood testnet with `lightwalletd`**, ideally reachable by third‑party
+   wallets. Regtest sets `fRequireStandard = false`, so it can prove consensus validity but
+   never the "v4 rejected / v6 accepted" mempool behaviour that actually breaks wallets on
+   3 Oct. Is there a flag to enforce standardness on regtest, or a recommended recipe?
+
+### 7.2 Facts we cannot determine from your repositories
+
+6. **Electrum readiness.** `arrr.electrum1/2.cipig.net:20008` (ElectrumX 2.0.0) are our chain
+   tip, our broadcast path and our spend‑detection path (scripthash history, raw tx by txid).
+   Will they deserialize v6, index it under its ZIP‑244 txid, and relay it after activation?
+   They are third‑party infrastructure, so you may not own the answer — but you likely know
+   it sooner than we do. If the answer is no, we move those three functions to `lightwalletd`
+   (`GetLatestBlock`, `SendTransaction`, `GetTaddressTxids`); please confirm those are stable.
+7. **A compact‑format divergence inside your own stack.** Pirate's `lightwalletd` declares
+   `repeated CompactOrchardAction actions = 6;` commented "*legacy v5 transactions and
+   Ironwood in v6 transactions*", i.e. field 6 carries Ironwood actions. The
+   `piratenetwork/librustzcash` that Treasure Chest itself links declares a *separate*
+   `repeated CompactOrchardAction ironwoodActions = 9;` alongside `actions = 6`. An
+   Ironwood‑aware Rust scanner built on your own fork would therefore look in field 9 and
+   find nothing. Harmless for Sapling‑only clients such as ours, which read `spends`/
+   `outputs` and never `actions` — but worth settling before Ironwood‑aware third‑party
+   scanners appear. Which is canonical?
+8. **Sapling longevity — confirmation of intent.** The evidence says Sapling is permanent:
+   it is a first‑class field of the v6 wire format, your coincontrol RPC defaults
+   `"type"` to `"sapling"` "for backward compatibility" (release notes 6.0.4), and the
+   Ironwood turnstile is Orchard→Ironwood, a pool Pirate never activated. We read that as
+   "Sapling‑only v6 stays standard indefinitely". Is that the intent, or is a
+   Sapling→Ironwood migration or deprecation date foreseen? Our swap protocol is
+   Sapling‑only, so a deprecation would be a redesign rather than an upgrade.
+9. **Sanity.** The 19 Sep `requiredSigs` dPoW change has no effect on light clients —
+   correct?
 
 ---
 
@@ -614,6 +646,64 @@ Decisions taken with the maintainer:
   activation could be left unable to spend *or* refund its HTLC. Recorded in `CHANGELOG.md`,
   `RELOADED_VS_GLEEC.md` and CRD R39.6.4a, which now also forbids a per‑ticker compiled‑in
   default.
+
+- **Stashi Wallet assessed; its crates are not adoptable, and are not needed (2026‑09‑21).**
+  Investigated `PirateNetwork/Stashi-Wallet` at the Pirate team's suggestion. Three findings,
+  all from published code:
+  - *Stashi's own crates are the wrong layer.* It is a 16‑crate, ~120 k‑line application
+    workspace (MIT) with its **own** storage and sync engines — `pirate-storage-sqlite`
+    (27 897 lines) replaces `zcash_client_sqlite`, which Stashi does not depend on at all,
+    and `pirate-sync-lightd` (35 661 lines) replaces the whole lightwalletd sync path.
+    Adopting it means deleting `z_coin` and rewriting against a foreign storage model with no
+    swap/HTLC layer in it — not a wrapper crate, a different product.
+  - *Ironwood is an upstream Zcash upgrade (NU6.3), not a Pirate invention.* Upstream
+    `zcash/librustzcash` implements it in full: `BranchId::Nu6_3 => 0x37a5_165b` (Pirate's
+    branch ID verbatim), `BranchId::Nu6_3 => TxVersion::V6`, and the Ironwood pool across 116
+    files. **`piratenetwork/librustzcash` is 2 commits ahead of upstream** (3 files, +16
+    lines), one of which is only a Cargo patch table. The entire Pirate‑specific delta in the
+    whole stack is `sapling-crypto` (3 commits / 2 files / +18) and `orchard` (1 commit /
+    1 file / +33).
+  - *The one substantive Pirate patch is the ZIP‑212 lead‑byte rule, which we already solved.*
+    Their `plaintext_version_is_valid` ignores enforcement and accepts `0x01 || 0x02`
+    unconditionally — the same semantics as our `ZcoinDecryptionParams` (R39.8.0am), reached
+    independently from mainnet evidence. Ours is the safer of the two: theirs is global, so
+    their *builder* also accepts both, whereas ours is confined to decryption with a test
+    pinning that real params still resolve to Sapling. Note that Stashi's own
+    `PirateNetwork::activation_height` returns `None` for Canopy exactly as ours does — they
+    needed the library patch for precisely the reason we needed the parameter split.
+  Conclusion: **the target is upstream `librustzcash`, not Pirate's fork and not Stashi.**
+  No wrapper crate. `[patch.crates-io]` cannot bridge a version gap anyway (patching
+  `=0.23.0` with `0.24.0-rc.1` is refused), so step 2 must bump the pins regardless.
+- **Sapling survives inside v6; the Ironwood pool is out of scope (2026‑09‑21).** This was
+  §7's largest open question and it is answered by Pirate's own serializer
+  (`src/primitives/transaction.h:722‑760`): a v6 transaction is `branchId, lockTime,
+  expiryHeight, vin, vout, saplingBundle, <empty Orchard slot>, ironwoodBundle`. Sapling is a
+  first‑class field, no turnstile touches it, and no consensus rule requires an Ironwood
+  bundle. Corroborated four ways: `TxVersion::V6.has_sapling() == true` upstream; release
+  notes 6.0.4 default coincontrol `"type"` to `"sapling"` "for backward compatibility";
+  Stashi's builder dispatches purely on address prefix (`pirate1…` → Ironwood, else Sapling);
+  and the public record has the turnstile as Orchard→Ironwood, a pool Pirate never activated
+  (ZIP 2005 is quantum *recoverability*, opt‑in). **Step 3 therefore needs only the v6 wire
+  format, ZIP‑244 v6 digests and the `Nu6_3` branch ID — all already upstream — while we keep
+  building Sapling bundles.** Dropped entirely: halo2 proving, the Orchard circuit,
+  `pirate1…` addresses, ZIP‑32 Ironwood derivation, a second commitment tree, a second sync
+  pool, and the `PirateNetwork/halo2` and `PirateNetwork/orchard` forks.
+- **Wire and digest identity confirmed by construction (2026‑09‑21).** Treasure Chest computes
+  its own txids and sighashes with the *same* `piratenetwork/librustzcash` rev `cc3c11cf`
+  that we would build against, and neither of that fork's two commits touches txid or
+  sighash. So the v6 serialization, ZIP‑244 txid and Sapling v6 digest personalizations
+  (`ZTxIdSSpendNH_v6`, `ZTxAuthSapliH_v6`) are identical because they are *the same code*.
+  The empty‑slot encoding is likewise settled: `write_bundle(None, …)` emits
+  `CompactSize::write(0)` — a single `0x00` — for each of the Orchard and Ironwood slots,
+  exactly what Pirate's `READWRITE(COMPACTSIZE(nOrchardSlotActions))` expects. And the
+  `ac_private` exemption our swap layer depends on (Sapling → P2SH with the redeem script
+  revealed, `src/main.cpp:1740‑1752`) lives in `CheckTransaction` with **no version gating**,
+  so it applies to v6 unchanged.
+- **The newer backend does not drag Ironwood into our build (2026‑09‑21).** In
+  `zcash_client_backend`, every Ironwood scanning path — keys, nullifiers, domains — is behind
+  `#[cfg(feature = "orchard")]`, and the `sync` module that probes Ironwood subtree roots is
+  behind `sync`/`sync-decryptor`. We build with `default-features = false` and neither
+  feature, so Ironwood is compiled out entirely.
 
 **Open (to be decided with the wider team):**
 
