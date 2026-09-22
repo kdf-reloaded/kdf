@@ -143,7 +143,22 @@ the fork buys, and OQ2 does not currently mention it.
 `.github/workflows/audit.yml` gains a `dependabot-alerts` job that fails on any
 open, non-dismissed Dependabot alert against the **root** `Cargo.lock`. That is
 the lockfile the shipped binaries resolve from; vendor-patch and orphan lockfiles
-are noise, not build inputs. It needs `security-events: read`.
+are noise, not build inputs.
+
+> **One-time setup required — the job is inert until it is done.** The default
+> `GITHUB_TOKEN` **cannot** read the Dependabot alerts API: it returns
+> `403 Resource not accessible by integration`, and there is no `permissions:`
+> key that grants it (`security-events: read` does not). Reading alerts needs a
+> PAT, or a GitHub App token, carrying `dependabot_alerts` / `security_events`
+> read. Add it as a repo secret named **`DEPENDABOT_ALERTS_TOKEN`** and the job
+> arms itself — it already prefers that secret and falls back to `GITHUB_TOKEN`.
+>
+> Until the secret exists the job prints a warning naming this setup step and
+> **passes**, deliberately: a gate that is permanently red because it is
+> misconfigured teaches everyone to ignore it, which is worse than not having it.
+> So a green `dependabot-alerts` means either "no open root-lock alerts" or "not
+> armed yet" — check the job log for the warning to tell them apart. Any other
+> API failure (bad credentials, outage) still fails the job.
 
 The accept mechanism for that job is *dismissing* the alert with a reason and a
 justification, exactly as `deny.toml`'s `ignore` list is the accept mechanism for

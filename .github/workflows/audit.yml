@@ -68,11 +68,18 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      security-events: read
     steps:
       - name: Open Dependabot alerts against the root lockfile
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The default GITHUB_TOKEN CANNOT read the Dependabot alerts API -- it
+          # returns 403 "Resource not accessible by integration" and there is no
+          # `permissions:` key that grants it. Reading alerts needs a PAT (or a
+          # GitHub App token) with `security_events` / `dependabot_alerts: read`.
+          #
+          # ONE-TIME SETUP: add a repo secret named DEPENDABOT_ALERTS_TOKEN. Until
+          # that exists this job warns and passes rather than failing, so the gate
+          # is inert but nothing is broken -- see the 403 branch below.
+          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN || secrets.GITHUB_TOKEN }}
           # Dependabot alert state is a property of the repository, derived from
           # the DEFAULT branch -- there is no per-ref view. A PR that fixes an
           # alert therefore cannot close it until it merges, so failing this job
@@ -80,17 +87,27 @@ jobs:
           # fixing. Report there, enforce on the default branch.
           ENFORCE: ${{ github.event_name != 'pull_request' }}
         run: |
-          set -euo pipefail
-          gh api --paginate \
-            "/repos/${{ github.repository }}/dependabot/alerts?state=open&per_page=100" \
-            --jq '.[] | select(.dependency.manifest_path == "Cargo.lock")
-                      | "\(.security_advisory.severity)\t\(.dependency.package.name)\t\(.security_advisory.ghsa_id)\t\(.security_advisory.summary)"' \
-            > open-alerts.tsv
-          if [ ! -s open-alerts.tsv ]; then
+          set -uo pipefail
+          if ! alerts=$(gh api --paginate \
+                "/repos/${{ github.repository }}/dependabot/alerts?state=open&per_page=100" \
+                --jq '.[] | select(.dependency.manifest_path == "Cargo.lock")
+                          | "\(.security_advisory.severity)\t\(.dependency.package.name)\t\(.security_advisory.ghsa_id)\t\(.security_advisory.summary)"' \
+                2>&1); then
+            printf '%s\n' "$alerts"
+            if printf '%s' "$alerts" | grep -qiE 'not accessible by integration|HTTP 403'; then
+              echo "::warning::dependabot-alerts is INERT: this token cannot read the Dependabot alerts API. Add a DEPENDABOT_ALERTS_TOKEN repo secret (a PAT with dependabot_alerts/security_events read) to arm it. See docs/plans/dependabot-triage-2026-09.md."
+              exit 0
+            fi
+            echo "::error::Could not query the Dependabot alerts API."
+            exit 1
+          fi
+
+          if [ -z "$alerts" ]; then
             echo "No open Dependabot alerts against the root Cargo.lock."
             exit 0
           fi
-          cat open-alerts.tsv
+
+          printf '%s\n' "$alerts"
           echo
           echo "Fix the dependency, or dismiss the alert on the Security tab with a"
           echo "reason and a written justification, and record that rationale in deny.toml."
