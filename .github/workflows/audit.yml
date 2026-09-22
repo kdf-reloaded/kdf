@@ -49,3 +49,43 @@ jobs:
           tool: cargo-deny@0.19.9
       - name: cargo-deny (advisories)
         run: cargo deny check advisories
+
+  # cargo-deny reads the RustSec advisory database. The GitHub Advisory Database is
+  # a superset of it, and the gap is not theoretical: on 2026-09-23 five open alerts
+  # against the root lockfile -- including two remotely reachable gossipsub panics
+  # (GHSA-gc42-3jg7-rxr2, GHSA-xqmp-fxgv-xvq5) and a yamux one -- had no RUSTSEC id
+  # at all, so `cargo deny check advisories` printed `advisories ok` while a remote
+  # crash sat in the tree.
+  #
+  # This job closes that gap by reading Dependabot's own findings. It only considers
+  # the root `Cargo.lock`, which is the lockfile the shipped binaries resolve from;
+  # vendor-patch and orphan lockfiles are Dependabot noise, not build inputs. The
+  # accept mechanism here is *dismissing* the alert on the Security tab (with a
+  # reason and a justification), the same way deny.toml's `ignore` list is the accept
+  # mechanism for the cargo-deny job -- a dismissed alert is no longer "open".
+  dependabot-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Open Dependabot alerts against the root lockfile
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api --paginate \
+            "/repos/${{ github.repository }}/dependabot/alerts?state=open&per_page=100" \
+            --jq '.[] | select(.dependency.manifest_path == "Cargo.lock")
+                      | "\(.security_advisory.severity)\t\(.dependency.package.name)\t\(.security_advisory.ghsa_id)\t\(.security_advisory.summary)"' \
+            > open-alerts.tsv
+          if [ -s open-alerts.tsv ]; then
+            echo "::error::Open Dependabot alerts against the root Cargo.lock:"
+            cat open-alerts.tsv
+            echo
+            echo "Fix the dependency, or dismiss the alert on the Security tab with a"
+            echo "reason and a written justification, and record that rationale in deny.toml."
+            exit 1
+          fi
+          echo "No open Dependabot alerts against the root Cargo.lock."

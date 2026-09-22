@@ -17,7 +17,6 @@ byteorder = "1.3.2"
 common = { workspace = true }
 cuckoofilter = "0.3.2"
 derive_more = { workspace = true }
-env_logger = "0.7.1"
 fnv = "1.0.6"
 futures = { workspace = true }
 futures_codec = "0.4.0"
@@ -56,3 +55,9 @@ wasm-bindgen-futures = "0.4.21"
 
 [build-dependencies]
 prost-build = "0.12"
+
+[dev-dependencies]
+# Test-only (`env_logger::try_init()` in src/atomicdex_behaviour/tests.rs), so it
+# lives in dev-dependencies. 0.7 pulled `atty` 0.2.14, which is unmaintained and
+# carries RUSTSEC-2021-0145 (unaligned read); 0.11 dropped that dependency.
+env_logger = "0.11"

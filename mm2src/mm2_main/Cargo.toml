@@ -136,7 +136,11 @@ web-sys = { version = "0.3.55", features = ["console"] }
 instant = {version = "0.1.12", features = ["wasm-bindgen"]}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dirs = { version = "1" }
+# 1.0.5 (2018) pulls redox_users 0.3 -> rust-argon2 0.7 -> crossbeam-utils 0.7.2
+# (RUSTSEC-2022-0041). Only `dirs::home_dir()` is used, which is unchanged across
+# the major versions. Note dirs >= 4 resolves the Windows home via
+# SHGetKnownFolderPath rather than %HOME%/%USERPROFILE%.
+dirs = { version = "6" }
 hyper = { version = "0.14.11", features = ["client", "http2", "server", "tcp"] }
 tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net", "signal"] }
 futures-rustls = { version = "0.21.1" }
