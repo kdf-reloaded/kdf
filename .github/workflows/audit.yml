@@ -73,6 +73,12 @@ jobs:
       - name: Open Dependabot alerts against the root lockfile
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Dependabot alert state is a property of the repository, derived from
+          # the DEFAULT branch -- there is no per-ref view. A PR that fixes an
+          # alert therefore cannot close it until it merges, so failing this job
+          # on `pull_request` would mark every such PR red for the thing it is
+          # fixing. Report there, enforce on the default branch.
+          ENFORCE: ${{ github.event_name != 'pull_request' }}
         run: |
           set -euo pipefail
           gh api --paginate \
@@ -80,12 +86,17 @@ jobs:
             --jq '.[] | select(.dependency.manifest_path == "Cargo.lock")
                       | "\(.security_advisory.severity)\t\(.dependency.package.name)\t\(.security_advisory.ghsa_id)\t\(.security_advisory.summary)"' \
             > open-alerts.tsv
-          if [ -s open-alerts.tsv ]; then
-            echo "::error::Open Dependabot alerts against the root Cargo.lock:"
-            cat open-alerts.tsv
-            echo
-            echo "Fix the dependency, or dismiss the alert on the Security tab with a"
-            echo "reason and a written justification, and record that rationale in deny.toml."
+          if [ ! -s open-alerts.tsv ]; then
+            echo "No open Dependabot alerts against the root Cargo.lock."
+            exit 0
+          fi
+          cat open-alerts.tsv
+          echo
+          echo "Fix the dependency, or dismiss the alert on the Security tab with a"
+          echo "reason and a written justification, and record that rationale in deny.toml."
+          if [ "$ENFORCE" = "true" ]; then
+            echo "::error::Open Dependabot alerts against the root Cargo.lock (see above)."
             exit 1
           fi
-          echo "No open Dependabot alerts against the root Cargo.lock."
+          # Workflow commands must be a single line.
+          echo "::warning::Open Dependabot alerts against the root Cargo.lock (see the job log). Not failing the PR: alert state follows the default branch, so a fix on this branch cannot close them until it merges."

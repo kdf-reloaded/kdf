@@ -144,6 +144,13 @@ justification, exactly as `deny.toml`'s `ignore` list is the accept mechanism fo
 the cargo-deny job. Keep the two in sync: when you dismiss an alert, record why in
 `deny.toml`.
 
+One wrinkle worth knowing about: Dependabot alert state is a property of the
+repository, derived from the **default branch** — there is no per-ref view. A PR
+that fixes an alert cannot close it until it merges, so the job reports on
+`pull_request` and only fails on pushes to the default branch and on the weekly
+schedule. Expect the PR carrying this change to warn about the five root-lock
+alerts it fixes, and to go quiet once merged.
+
 ## Still open, deliberately
 
 - **rust-lightning 0.0.106 → 0.0.12x**, and with it `bitcoin 0.27`,
