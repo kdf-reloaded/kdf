@@ -11,6 +11,30 @@ large frames) from the WalletConnect relay client's native transport, without
 changing the WalletConnect pairing/relay wire protocol or breaking the WASM
 transport path — *if and when* this is judged worth doing (see below).
 
+## Second advisory in the same fork (added 2026-09-23)
+
+`relay_rpc` also pulls **`jsonwebtoken` 8.3.0**, which carries
+GHSA-h395-gr6q-cpjc (type confusion in claim validation — a standard claim
+supplied with the wrong JSON type is treated as absent, so a `validate_nbf` /
+`validate_exp` check silently does not run unless the claim is also in
+`required_spec_claims`). It has no RustSec id, so `cargo deny check advisories`
+cannot see it at all; it was found through Dependabot on 2026-09-23.
+
+It is **dismissed as `not_used`**, and correctly so today: `relay_rpc` signs by
+hand with `ed25519_dalek` (`relay_rpc/src/jwt.rs:106-121`) and links
+`jsonwebtoken` only through `VerifyableClaims::decode` (`jwt.rs:260`), whose
+sole callers are upstream's own unit tests. KDF uses the websocket client and
+never verifies a relay-supplied JWT. That stops being true the moment anything
+here uses `relay_client::http` (the `watchRegister`/`watchUnregister` path) or
+starts verifying a token.
+
+This does not change the priority assessment below on its own — it is a second
+*dormant* advisory, not a second live one. But it does mean the fork bump now
+clears two advisories rather than one, and both live in the same two files, so
+do `jsonwebtoken` 8 -> 10.3+ in the same upstream pass as the tungstenite bump
+rather than as separate work. Tracked alongside it in
+`docs/plans/v0.2.0-dependency-hygiene.md` section F2.
+
 ## Confirmed root cause and ownership (corrected 2026-08-06)
 
 **Correction:** an earlier version of this doc claimed the fork chain here
@@ -146,6 +170,9 @@ repositories at two hops:
 - Manual smoke test: pair with a real WalletConnect-compatible wallet and
   round-trip at least one signing request over the native relay transport
 - `cargo deny check advisories` green with the ignore line removed
+- `cargo tree -i jsonwebtoken` shows >= 10.3.0 if the second advisory above was
+  taken in the same pass; reopen and re-close Dependabot alert #26 rather than
+  leaving it dismissed as `not_used`, since it is then actually fixed
 
 ## Release posture
 

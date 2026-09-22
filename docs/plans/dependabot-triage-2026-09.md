@@ -132,6 +132,12 @@ TUI path in `common`/`gstuff`/`mm2_test_helpers`), and `remove_dir_all 0.5.3` fr
 the fork, so OQ2's residue list is two entries shorter than it claims. `deny.toml`
 now says so; ch28 has not been edited.
 
+Two things ch28 should pick up when it is next revised, both recorded only in the
+plans for now: that correction, and the fact that the fork's `libp2p-yamux` 0.44
+is what keeps the vulnerable `yamux 0.12.1` in the tree (section F1 of the
+hygiene plan) — dropping the `yamux012` dependency is part of what modernizing
+the fork buys, and OQ2 does not currently mention it.
+
 ## CI gate
 
 `.github/workflows/audit.yml` gains a `dependabot-alerts` job that fails on any
@@ -162,3 +168,9 @@ alerts it fixes, and to go quiet once merged.
   vendor patch.
 - **`wasm-timer` 0.2.4** — unmaintained since 2020, sole reason `parking_lot 0.9`
   and `lock_api 0.3.4` are in the tree. Replacing it would clear 5 alerts.
+- **The two `not_used` dismissals — `yamux` and `jsonwebtoken`.** Both are
+  judgements about our call sites, not about the advisories: the vulnerable code
+  is compiled in and simply never reached, so each dismissal is only as true as
+  one specific fact about our source, and nothing in CI checks that fact. Tracked
+  with the invalidating conditions spelled out in
+  [`v0.2.0-dependency-hygiene.md`](v0.2.0-dependency-hygiene.md) section F.
