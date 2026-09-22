@@ -181,6 +181,9 @@ lightning-persister = { path = "lightning_persister" }
 lightning-net-tokio = { path = "../../rust-lightning-patched/lightning-net-tokio" }
 rust-ini = { version = "0.13" }
 rustls = { version = "0.20", features = ["dangerous_configuration"] }
+# Already in the tree via the Zcash stack; declared directly because
+# `SentTransaction::new` takes a `time::OffsetDateTime`.
+time = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "1.7" }
 tokio-rustls = { version = "0.23" }
 tonic = { version = "0.11", features = ["tls", "tls-webpki-roots", "channel"] }

@@ -107,6 +107,26 @@ pub enum SendOutputsErr {
     Rpc(UtxoRpcError),
     TxNotMined(String),
     PrivKeyNotAllowed(PrivKeyNotAllowed),
+    #[display(
+        fmt = "Timed out after {}s waiting for an in-flight shielded spend to be scanned",
+        _0
+    )]
+    InFlightSpendWaitTimeout(u64),
+}
+
+/// Failure to record a broadcast shielded transaction in the wallet database
+/// (CRD ch.39 R39.8.0ap/as). Never fails the send: the transaction is already on
+/// the network by the time recording runs.
+#[derive(Debug, Display)]
+pub enum RecordSentTxErr {
+    #[display(fmt = "Shielded wallet DB is unavailable: {}", _0)]
+    ShieldedWalletDb(String),
+    #[display(fmt = "Shielded wallet DB has no account")]
+    NoAccount,
+    #[display(fmt = "Shielded wallet DB has not been scanned")]
+    ScanRequired,
+    #[display(fmt = "Invalid fee amount {}", _0)]
+    InvalidFeeAmount(u64),
 }
 
 impl From<PrivKeyNotAllowed> for SendOutputsErr {

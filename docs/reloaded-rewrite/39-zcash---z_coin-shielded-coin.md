@@ -721,7 +721,10 @@ same wallet note is not selected concurrently by multiple sends or swaps. After
 broadcast, the scanner shall keep following the transaction until it is either
 scanned into the wallet database or no longer available from the backend. Change
 outputs and outgoing spends shall become reflected in balance and
-`z_coin_tx_history` only through the wallet database scan state.
+`z_coin_tx_history` only through the wallet database scan state. The observable
+contract for that coordination -- its ordering relative to broadcast, its release
+conditions, its durability and its serialization scope -- is bound by §39.8.0.7
+(R39.8.0ao--R39.8.0at); this rule states only that the coordination exists.
 
 R39.8.0q Unconfirmed shielded outputs are not spendable merely because the local
 process created or observed them. Spendable balance, transaction history, and
@@ -1237,6 +1240,235 @@ transaction disappears without bespoke invalidation. The total surfaces only in
 the non-spendable balance field. Backend failure degrades the pending view to
 zero rather than failing the balance.
 
+### 39.8.0.7 In-flight note exclusion for shielded sends
+
+> **Dirty-side derivation record (sanitized).** This subsection was authored by
+> the KDF Spec Reader, which was explicitly asked (per `AGENTS.md` §2) to assess
+> the upstream approach in this area for correctness rather than only to restate
+> it, because R39.8.0p already described the behaviour and the defect persisted.
+> It carries only the observable send-path contract -- ordering relative to
+> broadcast, release conditions, durability, and serialization scope -- plus two
+> behavioural code-quality findings. It carries no private implementation
+> expression. The public-crate facts about the selected dependency generation's
+> spendable-note exclusion (R39.8.0aq) come from the published package sources
+> named in R39.8.0y, not from the corpus. A clean-side implementation shall not
+> consume this subsection until the KDF Dirty Gate has passed it.
+
+R39.8.0ao **The contract.** A shielded note spent by a transaction this wallet has
+broadcast shall not be offered to note selection for any later shielded
+transaction until either the effect of that broadcast is durably recorded in the
+shielded wallet database, or the broadcast transaction can no longer be mined. A
+second transaction that reuses such a note re-presents the same nullifier and is
+rejected by the network, so this exclusion is a correctness condition of the send
+path rather than an optimisation.
+
+The exclusion shall cover every path that constructs a shielded transaction --
+withdrawal, swap payment, DEX fee or burn output, and refund alike -- because all
+of them draw from the same wallet note set. It applies to Light mode
+specifically: in Native mode the full node accounts for its own mempool spends
+when it reports unspent shielded value, so a wallet-side exclusion is not
+required there and shall not be assumed to exist.
+
+Unconfirmed change created by such a transaction remains governed by R39.8.0q and
+§39.8.0.6: it is never spendable before it is scanned, and it is surfaced only as
+a non-spendable amount.
+
+R39.8.0ap **Ordering: the exclusion is established after a successful broadcast,
+not before it.** The in-flight record shall be written only once the backend has
+accepted the transaction. Selecting, building and signing shall establish nothing
+durable: a build that fails, or a broadcast the backend refuses for any reason,
+shall leave the wallet in exactly the state it held before the attempt, with every
+selected note immediately available to the next send and the reported balance
+unchanged.
+
+This ordering is the deployed contract and it is also the only ordering that is
+safe under R39.8.0aq. Recording the exclusion before broadcast obliges the
+failure path to release it; in the selected dependency generation of R39.8.0y
+there is no supported explicit release, so every rejected or failed send would
+instead strand its inputs until their expiry height. Recording after broadcast
+converts that failure mode into an ordinary retryable error.
+
+The window this ordering opens -- between choosing notes and recording the
+broadcast, during which nothing marks them -- is closed by the serialization
+requirement of R39.8.0at, not by moving the record earlier.
+
+R39.8.0aq **Release.** The release in the normal case is the block scan: once the
+block containing the transaction is scanned into the shielded wallet database, the
+notes it spends are recorded as spent there and the separate in-flight exclusion
+for that transaction shall no longer be applied. There shall be no explicit
+unlock operation on the send path, and none shall be assumed to exist.
+
+In the selected current generation (R39.8.0y) the wallet database's own
+spendable-note exclusion is derived from a spending transaction's mined height,
+its expiry height, and the height at which the wallet first observed it.
+Re-describing such a transaction as unrecognised or as not being on the main chain
+does not release its inputs in that generation. Consequently exactly two releases
+exist and both are automatic: the containing block is scanned, or the wallet's
+scanned tip passes the transaction's expiry height.
+
+R39.8.0ar **A bounded release is mandatory.** Whatever mechanism records the
+in-flight spend, the note shall become selectable again within a bounded height
+window even if the transaction is never mined. A record that can only be cleared
+by scanning the very transaction that created it is non-conformant: a transaction
+that is broadcast and then dropped, evicted, or replaced never arrives, and its
+inputs would then be excluded for the remaining life of the wallet with no
+operator-visible way to recover them. Expiry-height-bounded exclusion satisfies
+this requirement with no additional sweep; any other mechanism shall carry an
+equivalent bound of its own.
+
+> **Code-quality finding (informative).** The deployed upstream approach does not
+> satisfy R39.8.0ar. It maintains its own durable record of the notes a broadcast
+> transaction spends, separate from the shielded wallet database, and that record
+> is removed at exactly one place: when a scanned block yields a wallet
+> transaction with the same identifier. No expiry, no startup reconciliation, and
+> no mempool-disappearance path removes it -- and the scanner's own handling of a
+> transaction that vanishes from the backend clears only its internal follow-up
+> state, not the spend record. A transaction that is accepted by the backend and
+> then never mined therefore removes its inputs from the wallet permanently and
+> across restarts. The user-visible failure is a later send that waits, and then
+> fails, while the balance reports value that can never be spent; nothing short of
+> discarding wallet state restores it. Deriving the exclusion from the
+> transaction's expiry height instead -- as the selected dependency generation
+> already does -- removes this failure mode entirely, because the exclusion then
+> lapses exactly when the transaction itself becomes unmineable.
+
+R39.8.0as **Durability.** The in-flight exclusion shall be durable across a
+restart of the daemon, not merely held for the process lifetime, and shall be
+scoped to the wallet/account whose notes it describes. Because every release is
+height-driven rather than event-driven (R39.8.0aq), an in-memory-only record lost
+on restart would silently re-offer a note whose spend is still in flight, and the
+resulting second transaction would be rejected with no indication of why. On
+native targets this means on-disk storage; on the WASM target it means the
+browser-persistent store used for the wallet's other shielded state (R39.8.0j).
+
+R39.8.0at **Serialization.** Note selection, transaction construction, broadcast,
+and the recording of the in-flight spend shall together be one critical section
+per shielded wallet. A note selected for one send shall not be selectable by
+another send until the first has either recorded its broadcast or failed.
+
+Serializing only construction-through-record is insufficient and shall not be
+treated as satisfying this rule: two sends that both complete selection before
+either broadcasts will choose the same notes, and the second broadcast is then
+rejected by the network as a duplicate nullifier. The observable symptom is a
+swap payment or withdrawal that fails at broadcast for no reason visible in the
+request.
+
+The section shall not be held across a wait for an in-flight spend to clear. That
+wait depends on the scanner advancing, and the scanner cannot advance while the
+section is held, so holding it would deadlock. A send that finds insufficient
+unexcluded value shall therefore wait outside the section and re-select inside it
+on each attempt. The wait shall be bounded and shall terminate in a typed
+failure rather than blocking indefinitely, and a request that cannot be funded
+even with every note unexcluded shall fail immediately with an
+insufficient-balance error rather than consuming the wait budget.
+
+> **Code-quality finding (informative).** The deployed upstream implementation
+> does not satisfy R39.8.0at either: its exclusive section covers construction,
+> broadcast and recording, but the notes are chosen just before that section is
+> entered, deliberately so that the scanner can keep running while a send waits
+> for an earlier spend to clear. Two sends that reach selection before either
+> broadcasts therefore select the same notes, and the second is rejected at
+> broadcast. In practice the exposure is narrowed by a second, coarser property
+> of the same design -- after a broadcast the scanner refuses to hand control to
+> the next transaction-generation request until that transaction has been scanned
+> or has disappeared from the backend, so only one shielded send is genuinely in
+> flight at a time -- but that gate is armed by the broadcast, which is precisely
+> after the racing window has closed. Re-selecting inside the section, rather than
+> before it, closes the window without reintroducing the deadlock the split was
+> made to avoid.
+
+> **Upstream divergence (informative).** Upstream keeps the in-flight record in a
+> store of its own, outside the shielded wallet database, and reduces the reported
+> spendable balance by consulting it. This project instead records the broadcast
+> transaction in the shielded wallet database itself and lets that database's own
+> spendable-note exclusion do the work (R39.8.0aq). The two are behaviourally
+> equivalent for R39.8.0ao, R39.8.0ap and R39.8.0as, and the divergence is
+> deliberate: it is what supplies the bounded release R39.8.0ar requires and
+> upstream lacks. Its cost is that the exclusion cannot be revoked explicitly,
+> which R39.8.0ap's ordering already accommodates.
+
+> **Status update (reloaded).** As of this writing the Light-mode send path
+> records the broadcast transaction in the shielded wallet database immediately
+> after a successful broadcast, best-effort, so a failure to record degrades to
+> the prior behaviour rather than turning a sent transaction into a caller-visible
+> error. R39.8.0ap, R39.8.0aq, R39.8.0ar and R39.8.0as are satisfied by that
+> arrangement; the best-effort degradation is a narrow, logged residual gap
+> against R39.8.0ao, bounded by the fact that the transaction is already on the
+> network and the scan corrects the wallet once its block lands.
+>
+> R39.8.0at is satisfied on the send path: note selection, construction,
+> broadcast and recording are performed under one per-wallet exclusive section,
+> the sapling-state gate and the confirmation wait are both taken outside it, and
+> a shortfall that this process's in-flight spends could still cover releases the
+> section, waits, and re-selects on the next attempt under a bounded budget that
+> ends in a typed failure. A shortfall that no in-flight spend could cover fails
+> immediately rather than consuming that budget.
+>
+> One path remains uncovered and is tracked as D39.8.0e: a withdrawal is built
+> but not broadcast by this daemon, so nothing on the send path observes its
+> broadcast and no in-flight record is written for it.
+
+#### Tests
+
+T39.8.0h In-flight exclusion tests shall prove, for a Light-mode shielded coin:
+that after a successful broadcast the notes it spends are not offered to a second
+send, and the second send reports an insufficient-balance or bounded-wait failure
+rather than producing a transaction that reuses them; that a broadcast which the
+backend rejects leaves every selected note immediately reusable and the reported
+balance unchanged, so an immediate retry succeeds; that restarting the daemon
+between the broadcast and the containing block's scan does not re-offer the
+excluded notes; that scanning the containing block makes the change spendable and
+the spent notes permanently absent, with no double counting across that
+transition (jointly with T39.8.0g); and that a transaction which is broadcast and
+never mined stops excluding its inputs once the wallet's scanned tip passes its
+expiry height, with the recovered value spendable afterwards. A concurrency
+fixture shall start two shielded sends whose funding requirements overlap and
+prove that exactly one selects each note -- the other either waits and re-selects
+different notes or fails with a typed error -- and that neither is rejected at
+broadcast for reusing a nullifier.
+
+> **Coverage status (2026-09-22).** T39.8.0h is **not** yet satisfied. One
+> deterministic case is covered: a recorded but unmined transaction is not
+> reported as scanned, which is the predicate the in-flight exclusion and the
+> pending-receipt accounting both depend on. Every other case the rule names --
+> the second send declining the excluded notes, a rejected broadcast leaving them
+> reusable, survival across a restart, the mined-and-scanned transition, expiry
+> lapse, and the two-send concurrency fixture -- remains unwritten, because each
+> needs a harness able to drive a shielded wallet database through
+> broadcast/scan/expiry transitions, which this tree does not yet have. Tracked
+> as D39.8.0f.
+
+#### Deferred Work
+
+D39.8.0d Serializing note selection with construction, broadcast and recording
+(R39.8.0at) — **resolved.** The send path now selects inside the same exclusive
+section that covers construction, broadcast and recording, and keeps both the
+sapling-state gate and the wait for an in-flight spend outside it, so the scanner
+can still advance while a send waits and each attempt re-selects.
+
+D39.8.0e The exclusion does not yet cover a withdrawal broadcast outside this
+daemon. A withdrawal is built and returned as a signed transaction for the caller
+to submit, so the send path never observes its broadcast and writes no in-flight
+record for it; a shielded send issued between that external submission and the
+scan of the containing block can therefore still select the withdrawal's inputs
+and be rejected as a duplicate nullifier. Closing this requires the coin to
+observe the broadcast of a transaction it did not send itself, which the generic
+raw-transaction submission path does not currently expose to the shielded layer.
+Swap payments and DEX fees are unaffected: those are broadcast by the send path
+and are recorded (R39.8.0ap).
+
+D39.8.0f T39.8.0h is only partially covered; see the coverage status under that
+rule for what exists and what does not. The missing cases share one prerequisite:
+a test harness that can put a shielded wallet database into a chosen state --
+notes received, a transaction recorded but unmined, a block scanned, a scanned
+tip advanced past an expiry height -- and re-run note selection against it. The
+existing fixtures build such a database only for history and scan-state
+assertions and cannot express a broadcast, a restart, or two concurrent sends.
+Until this is closed the in-flight exclusion rests on the single predicate test
+plus the type checker, which is weaker coverage than a funds-moving path in this
+project is expected to carry; the shortfall is in test coverage only and does not
+describe a known defect in the implemented behaviour.
+
 ### 39.8.1 Envelope, method string & platform gate
 
 R39.8.1 The project shall expose a dedicated shielded-coin transaction-history
@@ -1576,6 +1808,14 @@ storage error that reflects the store failure.
   spendable or tradable amounts, is not double-counted when the transaction
   is mined and scanned, and disappears if the transaction is dropped or
   expires.
+- In-flight note exclusion (§39.8.0.7): after a Light-mode shielded send is
+  accepted by the backend, the notes it spends are no longer selectable and stay
+  unselectable across a daemon restart, until either the containing block is
+  scanned or the wallet's scanned tip passes the transaction's expiry height; a
+  rejected broadcast leaves every selected note immediately reusable and the
+  balance unchanged; two concurrent sends never select the same note
+  (R39.8.0at -- implemented, D39.8.0d resolved 2026-09-22). A withdrawal
+  submitted outside this daemon remains uncovered (D39.8.0e).
 - Generic history separation: for an activated ZCoin, generic `my_tx_history`
   v2 rejects the coin as unsupported for that method; Desktop uses
   `z_coin_tx_history` for shielded history (§39.8.0c).

@@ -970,7 +970,13 @@ failure mode V5 records.
 
 The removal points are correct: at each of them the reserved funds have
 just been committed to an on-chain output and are no longer spendable
-balance. Note the consequence that the reservation window opens *after*
+balance. That last clause is an assumption about the coin layer, not
+something this rule can enforce: the coin MUST stop offering the inputs
+of a broadcast-but-unconfirmed payment as spendable, or removing the
+reservation at broadcast hands the same funds back to the next trade. For
+a Zcash-Sapling shielded coin in light mode that guarantee is bound by
+[chapter 39](39-zcash---z_coin-shielded-coin.md) §39.8.0.7. Note the
+consequence that the reservation window opens *after*
 the swap's own start balance check has already passed, unlike the legacy
 contract where the registry entry precedes the first stage
 (chapter 51 R51).

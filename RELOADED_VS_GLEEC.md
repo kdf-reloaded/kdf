@@ -97,6 +97,25 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   must not answer one balance question two ways. Code:
   `mm2_main/src/lp_swap.rs`, `mm2_main/src/lp_swap/maker_swap_v2.rs`,
   `mm2_main/src/lp_swap/taker_swap_v2.rs`.
+- **Shielded in-flight note exclusion lapses at the transaction's expiry
+  height.** In Light mode, a shielded note spent by a broadcast-but-unmined
+  transaction must stop being offered to the next send, or the second
+  transaction re-presents the same nullifier and the network rejects it. GLEEC
+  KDF keeps that exclusion in a store of its own and clears it in exactly one
+  place: when a scanned block yields the matching transaction. Nothing else
+  removes it — no expiry, no startup reconciliation, no handling of a
+  transaction that disappears from the backend. A transaction that is accepted
+  and then dropped, evicted, or replaced therefore never arrives, and its inputs
+  are excluded for the remaining life of the wallet, across restarts, with no
+  operator-visible way to recover them. Reloaded instead records the broadcast in
+  the shielded wallet database and lets that database's own spendable-note
+  exclusion do the work, which lapses automatically once the scanned tip passes
+  the transaction's expiry height (40 blocks, ~40 minutes on ARRR). The visible
+  effect is that funds stranded by a never-mined shielded send come back by
+  themselves instead of being lost. No compat switch is provided: the
+  alternative behaviour is permanently unspendable balance, and a node must not
+  answer one spendability question two ways (CRD ch.39 R39.8.0ao--R39.8.0at).
+  Code: `coins/z_coin/z_coin_ops.rs`, `coins/z_coin/z_coin_wallet_db.rs`.
 - **Shielded note decryption accepts both note plaintext versions.** Pirate
   accepts both the pre- and post-ZIP-212 note plaintext at every height, but has
   no Canopy upgrade, and librustzcash derives ZIP-212 enforcement solely from

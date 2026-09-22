@@ -1,5 +1,17 @@
 use super::*;
 
+/// How long a send waits for an in-flight shielded spend to be scanned before it
+/// gives up (R39.8.0at requires the wait to be bounded and to end in a typed
+/// failure). One pass costs at most a block plus a shielded-sync poll period, so
+/// this allows several attempts without outliving the swap timeouts above it.
+#[cfg(not(target_arch = "wasm32"))]
+const IN_FLIGHT_SPEND_WAIT_SECS: u64 = 300;
+
+/// Gap between re-selection attempts while waiting. Matches the polling cadence
+/// used elsewhere on this path.
+#[cfg(not(target_arch = "wasm32"))]
+const IN_FLIGHT_SPEND_RETRY_SECS: f64 = 10.;
+
 impl ZCoin {
     #[inline(always)]
     #[cfg(not(target_arch = "wasm32"))]
@@ -163,10 +175,20 @@ impl ZCoin {
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
-        // Before the lock and before the sapling-sync wait: every ARRR transaction
-        // is built here, including withdrawals, which never pass the swap gates.
-        // Placed ahead of the wait deliberately -- refusing after it would make the
-        // caller block first and be refused second (R39.6.4c).
+        self.prepare_shielded_build().await?;
+        let _lock = self.z_fields.z_unspent_mutex.lock().await;
+        self.gen_tx_locked(t_outputs, z_outputs).await
+    }
+
+    /// The gates that must clear before the critical section is entered.
+    ///
+    /// Every ARRR transaction is built through here, including withdrawals, which
+    /// never pass the swap gates. The Ironwood refusal comes first deliberately:
+    /// refusing after the wait would make the caller block first and be refused
+    /// second (R39.6.4c). The sapling-state wait stays outside the section because
+    /// the section must not be held across a wait (R39.8.0at).
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn prepare_shielded_build(&self) -> Result<(), MmError<GenTxError>> {
         if self.ironwood_build_refused() {
             return MmError::err(GenTxError::IronwoodUpgradeUnsupported {
                 coin: self.ticker().to_owned(),
@@ -177,10 +199,21 @@ impl ZCoin {
                     .unwrap_or_default(),
             });
         }
-        let _lock = self.z_fields.z_unspent_mutex.lock().await;
         while !self.is_sapling_state_synced() {
             Timer::sleep(0.5).await
         }
+        Ok(())
+    }
+
+    /// Selects notes and builds the transaction. The caller must already hold
+    /// `z_unspent_mutex` and must keep holding it through broadcast and recording
+    /// (R39.8.0at).
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn gen_tx_locked(
+        &self,
+        t_outputs: Vec<TxOut>,
+        z_outputs: Vec<ZOutput>,
+    ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         let tx_fee = self.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
         if matches!(self.rpc_client(), UtxoRpcClientEnum::Electrum(_)) {
             return self.gen_tx_from_shielded_wallet_db(t_outputs, z_outputs, tx_fee);
@@ -519,15 +552,54 @@ impl ZCoin {
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
     ) -> Result<ZTransaction, MmError<SendOutputsErr>> {
-        let (tx, _) = self.gen_tx(t_outputs, z_outputs).await.mm_err(Into::into)?;
-        let mut tx_bytes = Vec::with_capacity(1024);
-        tx.write(&mut tx_bytes).expect("Write should not fail");
+        self.prepare_shielded_build().await.mm_err(SendOutputsErr::from)?;
 
-        self.rpc_client()
-            .send_raw_transaction(tx_bytes.into())
-            .compat()
-            .await
-            .mm_err(Into::into)?;
+        let deadline = now_ms() / 1000 + IN_FLIGHT_SPEND_WAIT_SECS;
+        let tx = loop {
+            // Selection, construction, broadcast and recording are one critical
+            // section. Selecting outside it would let a second send choose the same
+            // notes before this one records its broadcast, and the loser is rejected
+            // by the network as a duplicate nullifier (R39.8.0at).
+            let broadcast = {
+                let _lock = self.z_fields.z_unspent_mutex.lock().await;
+                self.forget_scanned_in_flight_spends();
+
+                match self.gen_tx_locked(t_outputs.clone(), z_outputs.clone()).await {
+                    Ok((tx, additional_data)) => {
+                        let mut tx_bytes = Vec::with_capacity(1024);
+                        tx.write(&mut tx_bytes).expect("Write should not fail");
+
+                        self.rpc_client()
+                            .send_raw_transaction(tx_bytes.into())
+                            .compat()
+                            .await
+                            .mm_err(SendOutputsErr::from)?;
+
+                        // Only after the backend accepted it: a refused broadcast must
+                        // leave every selected note immediately reusable (R39.8.0ap).
+                        self.record_sent_shielded_tx(&tx, &additional_data);
+                        Some(tx)
+                    },
+                    // A shortfall that no in-flight spend can cover will not improve by
+                    // waiting, so it fails now instead of consuming the budget.
+                    Err(e) if !self.shortfall_can_clear(e.get_inner()) => return Err(e).mm_err(SendOutputsErr::from),
+                    Err(_) => None,
+                }
+            };
+
+            match broadcast {
+                Some(tx) => break tx,
+                None => {
+                    if now_ms() / 1000 >= deadline {
+                        return MmError::err(SendOutputsErr::InFlightSpendWaitTimeout(IN_FLIGHT_SPEND_WAIT_SECS));
+                    }
+                    // Deliberately outside the section: the shortfall clears only when
+                    // the scanner advances, and it cannot advance while we hold the
+                    // section (R39.8.0at).
+                    Timer::sleep(IN_FLIGHT_SPEND_RETRY_SECS).await;
+                },
+            }
+        };
 
         self.rpc_client()
             .wait_for_confirmations(
@@ -535,13 +607,130 @@ impl ZCoin {
                 tx.expiry_height().into(),
                 1,
                 false,
-                now_ms() + 4000,
+                // Seconds, as `wait_for_confirmations` compares it against `now_ms() / 1000`.
+                now_ms() / 1000 + 4000,
                 10,
             )
             .compat()
             .await
             .map_to_mm(SendOutputsErr::TxNotMined)?;
         Ok(tx)
+    }
+
+    /// Records a just-broadcast transaction in the shielded wallet database so the notes it
+    /// spends stop being selected before the block containing it is scanned.
+    ///
+    /// Light mode only. The native path selects through `z_list_unspent`, where the daemon
+    /// already accounts for its own mempool spends.
+    ///
+    /// Best-effort by construction: the transaction is on the network by the time this runs,
+    /// so a failure here must not turn a sent transaction into a caller-visible error. It
+    /// degrades to the previous behaviour, which the scan corrects once the block lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn record_sent_shielded_tx(&self, tx: &ZTransaction, additional_data: &AdditionalTxData) {
+        if !matches!(self.rpc_client(), UtxoRpcClientEnum::Electrum(_)) {
+            return;
+        }
+
+        match self.try_record_sent_shielded_tx(tx, additional_data.fee_amount) {
+            Ok(()) => {
+                if let Ok(mut in_flight) = self.z_fields.in_flight_spends.lock() {
+                    in_flight.insert(*tx.txid().as_ref(), additional_data.spent_by_me);
+                }
+            },
+            Err(e) => log::warn!(
+                "ZCoin {}: could not record sent transaction {:?} in the shielded wallet DB: {}. \
+                 Its notes stay selectable until the containing block is scanned.",
+                self.ticker(),
+                tx.txid(),
+                e
+            ),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_record_sent_shielded_tx(&self, tx: &ZTransaction, fee_sat: u64) -> Result<(), MmError<RecordSentTxErr>> {
+        let mut wallet_db = WalletDb::for_path(
+            self.z_fields.shielded_history.wallet_db_path(),
+            self.z_fields.consensus_params.clone(),
+            zcash_client_sqlite::util::SystemClock,
+            rand::rngs::OsRng,
+        )
+        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?;
+        let account_id = wallet_db
+            .get_account_ids()
+            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
+            .into_iter()
+            .next()
+            .or_mm_err(|| RecordSentTxErr::NoAccount)?;
+        let (target_height, _) = wallet_db
+            .get_target_and_anchor_heights(NonZeroU32::MIN)
+            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
+            .or_mm_err(|| RecordSentTxErr::ScanRequired)?;
+        let fee_amount = Amount::from_u64(fee_sat).map_to_mm(|_| RecordSentTxErr::InvalidFeeAmount(fee_sat))?;
+
+        // No outputs are declared. The only wallet-internal output we create is change, which
+        // cannot be spent until mined regardless, is already surfaced as a pending mempool
+        // receipt, and is recorded for real when the block is scanned. Declaring none keeps
+        // this write to the part that is load-bearing: marking the spent nullifiers, which
+        // `select_spendable_notes` then excludes on its own.
+        wallet_db
+            .store_transactions_to_be_sent(&[SentTransaction::new(
+                tx,
+                time::OffsetDateTime::now_utc(),
+                target_height,
+                account_id,
+                &[],
+                fee_amount,
+                &[],
+            )])
+            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))
+    }
+
+    /// Drops in-flight entries whose transaction the wallet database has since
+    /// scanned. From that point the database's own spend record is the exclusion
+    /// (R39.8.0aq), so keeping the entry would only delay a later send.
+    ///
+    /// An entry whose transaction is never mined is not dropped here; it lapses
+    /// with the wallet-database record at the transaction's expiry height
+    /// (R39.8.0ar), and until then it costs at most one wait budget.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn forget_scanned_in_flight_spends(&self) {
+        let mut in_flight = match self.z_fields.in_flight_spends.lock() {
+            Ok(in_flight) => in_flight,
+            Err(_) => return,
+        };
+        in_flight.retain(|txid, _| !matches!(self.z_fields.shielded_history.transaction_is_scanned(txid), Ok(true)));
+    }
+
+    /// Total value currently committed to this process's in-flight spends.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_flight_spend_total(&self) -> u64 {
+        self.z_fields
+            .in_flight_spends
+            .lock()
+            .map(|in_flight| {
+                in_flight
+                    .values()
+                    .copied()
+                    .fold(0u64, |acc, value| acc.saturating_add(value))
+            })
+            .unwrap_or(0)
+    }
+
+    /// Whether a shortfall could still be covered once this process's in-flight
+    /// spends have been scanned. A request that cannot be funded even with every
+    /// note unexcluded fails immediately rather than waiting (R39.8.0at).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn shortfall_can_clear(&self, err: &GenTxError) -> bool {
+        let (available, required) = match err {
+            GenTxError::InsufficientBalance {
+                available, required, ..
+            } => (available, required),
+            _ => return false,
+        };
+        let in_flight = big_decimal_from_sat_unsigned(self.in_flight_spend_total(), self.decimals());
+        in_flight > BigDecimal::from(0u8) && available + in_flight >= *required
     }
 
     pub async fn get_unspent_witness(

@@ -50,8 +50,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, Weak};
 #[cfg(not(target_arch = "wasm32"))]
-use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, InputSource, TargetValue, WalletCommitmentTrees,
-                                     WalletRead};
+use zcash_client_backend::data_api::{wallet::ConfirmationsPolicy, InputSource, SentTransaction, TargetValue,
+                                     WalletCommitmentTrees, WalletRead, WalletWrite};
 use zcash_client_backend::decrypt_transaction;
 use zcash_keys::encoding::{decode_payment_address, encode_extended_spending_key, encode_payment_address};
 #[cfg(not(target_arch = "wasm32"))]
@@ -514,8 +514,19 @@ pub struct ZCoinFields {
     /// Native only — WASM cannot build shielded transactions (no param files).
     #[cfg(not(target_arch = "wasm32"))]
     z_tx_prover: LocalTxProver,
-    /// Mutex preventing concurrent transaction generation/same input usage
+    /// Serializes note selection, construction, broadcast and in-flight recording
+    /// into one critical section per shielded wallet (CRD ch.39 R39.8.0at).
     z_unspent_mutex: AsyncMutex<()>,
+    /// Value in zatoshi of the notes each transaction this process broadcast
+    /// committed, keyed by txid, retained until the transaction is observed as
+    /// scanned. The authoritative exclusion is the wallet database record written
+    /// by R39.8.0ap; this map exists only to tell a shortfall that an in-flight
+    /// spend will clear from one that no amount of waiting can fix, so a request
+    /// that is unfundable even with every note unexcluded fails at once instead of
+    /// consuming the wait budget (R39.8.0at). Being process-local costs nothing
+    /// after a restart: the map is empty, so a shortfall simply fails fast.
+    #[cfg(not(target_arch = "wasm32"))]
+    in_flight_spends: Mutex<HashMap<[u8; 32], u64>>,
     sapling_state_synced: AtomicBool,
     /// Platform-agnostic sapling state cache (SQLite on native, IndexedDB on WASM).
     sapling_cache: Arc<dyn SaplingStateCacheOps + Send + Sync>,
@@ -599,6 +610,7 @@ pub struct ZCoin {
     z_fields: Arc<ZCoinFields>,
 }
 
+#[derive(Clone)]
 pub struct ZOutput {
     pub to_addr: PaymentAddress,
     pub amount: Amount,
@@ -1601,6 +1613,8 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             z_tx_prover,
             z_unspent_mutex: AsyncMutex::new(()),
+            #[cfg(not(target_arch = "wasm32"))]
+            in_flight_spends: Mutex::new(HashMap::new()),
             sapling_state_synced: AtomicBool::new(false),
             sapling_cache,
             #[cfg(not(target_arch = "wasm32"))]

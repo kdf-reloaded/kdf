@@ -2698,6 +2698,38 @@ mod tests {
         .unwrap();
     }
 
+    /// Recording a broadcast this wallet made inserts a `transactions` row while
+    /// the transaction is still unmined (CRD ch.39 R39.8.0ap). That row carries no
+    /// received note, so counting it as scanned would drop the in-flight exclusion
+    /// early and hide the transaction's unconfirmed change from the pending-receipt
+    /// balance (R39.8.0ah). Only a mined height means the block was scanned.
+    #[test]
+    fn unmined_transaction_row_is_not_reported_as_scanned() {
+        const UNMINED_TXID: [u8; 32] = [0xab; 32];
+
+        let history = open_test_history();
+        insert_history_fixture(&history);
+
+        let conn = Connection::open(history.wallet_db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO transactions (
+                id_tx, txid, block, mined_height, tx_index, min_observed_height
+             ) VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+            params![99i64, UNMINED_TXID.to_vec(), 11u32],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            !history.transaction_is_scanned(&UNMINED_TXID).unwrap(),
+            "a recorded but unmined transaction must not count as scanned"
+        );
+        assert!(
+            history.transaction_is_scanned(&FIXTURE_RECEIVE_TXID_INTERNAL).unwrap(),
+            "a mined transaction must count as scanned"
+        );
+    }
+
     #[test]
     fn empty_wallet_uses_recent_lightwalletd_start_when_no_start_requested() {
         let history = open_test_history();
@@ -4297,9 +4329,13 @@ impl ZCoinShieldedHistory {
     pub(crate) fn transaction_is_scanned(&self, txid: &[u8; 32]) -> Result<bool, String> {
         let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| e.to_string())?;
+        // A row alone does not mean scanned: recording a broadcast we made inserts
+        // one while the transaction is still unmined (R39.8.0ap), and such a row
+        // carries no received note. Only a mined height means the block was scanned
+        // and the wallet holds the real notes.
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM transactions WHERE txid = ?1;",
+                "SELECT COUNT(*) FROM transactions WHERE txid = ?1 AND mined_height IS NOT NULL;",
                 params![&txid[..]],
                 |row| row.get(0),
             )

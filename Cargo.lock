@@ -1956,6 +1956,7 @@ dependencies = [
  "spl-token",
  "tendermint-rpc",
  "thiserror 1.0.69",
+ "time",
  "tiny-bip39",
  "tokio",
  "tokio-rustls 0.23.2",
