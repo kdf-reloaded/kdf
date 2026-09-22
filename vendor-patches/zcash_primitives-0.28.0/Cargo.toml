@@ -254,3 +254,14 @@ check-cfg = [
     'cfg(zcash_unstable, values("zfuture", "nu7"))',
     "cfg(live_network_tests)",
 ]
+
+# Standalone-test support. The root workspace redirects zcash_transparent to the
+# sibling vendor patch via its own `[patch.crates-io]`, but when this crate is
+# built on its own (`cargo test --manifest-path ...`, which is the reason it sits
+# in the root `exclude` list) that redirect does not apply and `transparent`
+# resolves to the unpatched crates.io 0.8.0 -- which lacks the reloaded additions
+# `TransparentBuilder::add_output_raw`, `TransparentInputInfo::from_kdf_p2sh_parts`
+# and `SpendInfo::KdfP2sh`, so the build fails. Patch it here too so the focused
+# tests actually compile.
+[patch.crates-io]
+zcash_transparent = { path = "../zcash_transparent-0.8.0" }
