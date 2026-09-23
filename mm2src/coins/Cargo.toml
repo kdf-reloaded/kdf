@@ -124,7 +124,15 @@ uuid = { workspace = true }
 # vendored locally in `eth/wire_types.rs`.
 alloy = { workspace = true }
 tower = { workspace = true }
-winapi = "0.3"
+# winapi features must be declared HERE, not inherited. Every one of these
+# call sites used to compile only because some other crate in the graph
+# happened to enable the feature and Cargo unified it. That broke on
+# 2026-09-23: bumping `dirs` 1 -> 6 moved dirs-sys from winapi to
+# windows-sys, the `shlobj` feature stopped being enabled by anyone, and the
+# Windows build failed with "unresolved import winapi::um::shlobj". Nothing
+# in CI catches this on push -- no Windows job runs outside workflow_dispatch.
+# shlobj: SHGetSpecialFolderPathA + CSIDL_APPDATA, minwindef: MAX_PATH (utxo.rs:155-161).
+winapi = { version = "0.3", features = ["shlobj", "minwindef"] }
 zbase32 = "0.1.2"
 incrementalmerkletree = { version = "=0.8.2", features = ["legacy-api", "std"] }
 zcash_note_encryption = "=0.4.2"

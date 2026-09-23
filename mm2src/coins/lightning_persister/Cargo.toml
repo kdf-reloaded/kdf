@@ -25,7 +25,9 @@ serde = "1.0"
 serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winbase"] }
+# See the note in ../Cargo.toml: declare every feature this crate uses rather
+# than inheriting it. winbase: ReplaceFileW/MoveFileExW, ntdef: WCHAR (util.rs).
+winapi = { version = "0.3", features = ["winbase", "ntdef"] }
 
 [dev-dependencies]
 lightning = { path = "../../../rust-lightning-patched/lightning", features = ["_test_utils"] }

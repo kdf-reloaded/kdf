@@ -58,7 +58,16 @@ ser_error_derive = { path = "../derives/ser_error_derive" }
 shared_ref_counter = { path = "shared_ref_counter" }
 uuid = { version = "0.7", features = ["serde", "v4"] }
 wasm-timer = "0.2.4"
-winapi = "0.3"
+# winapi features must be declared HERE, not inherited. Every one of these
+# call sites used to compile only because some other crate in the graph
+# happened to enable the feature and Cargo unified it. That broke on
+# 2026-09-23: bumping `dirs` 1 -> 6 moved dirs-sys from winapi to
+# windows-sys, the `shlobj` feature stopped being enabled by anyone, and the
+# Windows build failed with "unresolved import winapi::um::shlobj". Nothing
+# in CI catches this on push -- no Windows job runs outside workflow_dispatch.
+# minwinbase: EXCEPTION_ACCESS_VIOLATION / EXCEPTION_ILLEGAL_INSTRUCTION
+# (crash_reports.rs).
+winapi = { version = "0.3", features = ["minwinbase"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 chrono = { version = "0.4", features = ["wasmbind"] }
