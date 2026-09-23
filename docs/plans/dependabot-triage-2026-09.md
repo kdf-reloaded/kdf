@@ -148,17 +148,34 @@ are noise, not build inputs.
 > **One-time setup required — the job is inert until it is done.** The default
 > `GITHUB_TOKEN` **cannot** read the Dependabot alerts API: it returns
 > `403 Resource not accessible by integration`, and there is no `permissions:`
-> key that grants it (`security-events: read` does not). Reading alerts needs a
-> PAT, or a GitHub App token, carrying `dependabot_alerts` / `security_events`
-> read. Add it as a repo secret named **`DEPENDABOT_ALERTS_TOKEN`** and the job
-> arms itself — it already prefers that secret and falls back to `GITHUB_TOKEN`.
+> key that grants it (`security-events: read` is not the relevant scope).
 >
-> Until the secret exists the job prints a warning naming this setup step and
+> **Preferred: a GitHub App.** Owned by `kdf-reloaded`, installed on this repo,
+> with the single repository permission `Dependabot alerts: Read-only` and no
+> webhook. Put its App ID and private key in the repo secrets `AUDIT_APP_ID` and
+> `AUDIT_APP_PRIVATE_KEY`; the job mints a short-lived token per run via
+> `actions/create-github-app-token`. Chosen over a PAT because it does not
+> expire, has nothing to rotate, is not tied to a person's account — notably not
+> to the release-signing identity — and makes the audit log attribute
+> security-alert reads to the App rather than to a human.
+>
+> **Fallback: a PAT** in `DEPENDABOT_ALERTS_TOKEN`. Fine-grained, scoped to this
+> repo with `Dependabot alerts: Read-only`, or classic with `public_repo` (this
+> repo is public) or `security_events`. Note that fine-grained PATs against an
+> org-owned repo require the org to have opted into them
+> (Org Settings → Personal access tokens), and that they expire.
+>
+> Until one of those exists the job prints a warning naming this setup step and
 > **passes**, deliberately: a gate that is permanently red because it is
 > misconfigured teaches everyone to ignore it, which is worse than not having it.
 > So a green `dependabot-alerts` means either "no open root-lock alerts" or "not
 > armed yet" — check the job log for the warning to tell them apart. Any other
 > API failure (bad credentials, outage) still fails the job.
+>
+> One asymmetry to be aware of if you use a PAT: an **expired** token returns 401
+> and fails the job loudly, but a token that has **lost the permission** returns
+> 403 and is indistinguishable from "never configured", so it goes quietly inert.
+> The App has no expiry, which is the main reason it is preferred.
 
 The accept mechanism for that job is *dismissing* the alert with a reason and a
 justification, exactly as `deny.toml`'s `ignore` list is the accept mechanism for
