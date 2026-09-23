@@ -68,18 +68,41 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+    env:
+      # Read at job level so the `env` context can be tested in a step `if:`,
+      # which is what lets the token step be skipped cleanly when the App is not
+      # configured (and on fork PRs, where no secret is exposed at all).
+      AUDIT_APP_ID: ${{ secrets.AUDIT_APP_ID }}
     steps:
+      # The default GITHUB_TOKEN CANNOT read the Dependabot alerts API -- it
+      # returns 403 "Resource not accessible by integration", and there is no
+      # `permissions:` key that grants it (`security-events: read` is not the
+      # relevant scope). Reading alerts needs a GitHub App token or a PAT with
+      # `dependabot_alerts` / `security_events` read.
+      #
+      # ONE-TIME SETUP, preferred: a GitHub App owned by this org, installed on
+      # this repo with `Dependabot alerts: Read-only`, its App ID and private key
+      # in the AUDIT_APP_ID / AUDIT_APP_PRIVATE_KEY secrets. No expiry, no
+      # rotation, and alert reads are attributed to the App rather than to a
+      # person. A DEPENDABOT_ALERTS_TOKEN PAT still works as a fallback.
+      #
+      # Until one of those exists the job warns and passes rather than failing --
+      # a gate that is permanently red because it is misconfigured teaches
+      # everyone to ignore it. See the 403 branch below and
+      # docs/plans/dependabot-triage-2026-09.md.
+      - name: Mint a GitHub App token
+        id: app-token
+        if: env.AUDIT_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AUDIT_APP_ID }}
+          private-key: ${{ secrets.AUDIT_APP_PRIVATE_KEY }}
+
       - name: Open Dependabot alerts against the root lockfile
         env:
-          # The default GITHUB_TOKEN CANNOT read the Dependabot alerts API -- it
-          # returns 403 "Resource not accessible by integration" and there is no
-          # `permissions:` key that grants it. Reading alerts needs a PAT (or a
-          # GitHub App token) with `security_events` / `dependabot_alerts: read`.
-          #
-          # ONE-TIME SETUP: add a repo secret named DEPENDABOT_ALERTS_TOKEN. Until
-          # that exists this job warns and passes rather than failing, so the gate
-          # is inert but nothing is broken -- see the 403 branch below.
-          GH_TOKEN: ${{ secrets.DEPENDABOT_ALERTS_TOKEN || secrets.GITHUB_TOKEN }}
+          # App token if the App is configured, else a PAT, else the default
+          # token -- which 403s into the inert-with-a-warning branch below.
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.DEPENDABOT_ALERTS_TOKEN || secrets.GITHUB_TOKEN }}
           # Dependabot alert state is a property of the repository, derived from
           # the DEFAULT branch -- there is no per-ref view. A PR that fixes an
           # alert therefore cannot close it until it merges, so failing this job
