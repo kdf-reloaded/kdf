@@ -44,6 +44,14 @@ iguana/exchanges/manychains
 # Subcrate artefacts
 /mm2src/common/c_headers
 /mm2src/*/target
+vendor-patches/*/target
+# The vendored libp2p-gossipsub patch deliberately does NOT commit its Cargo.lock.
+# It is only used by `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/...`;
+# the shipped build resolves this crate through the root lockfile. Committing it
+# would add a fourth Dependabot-scanned manifest whose alerts describe nothing
+# that ships -- exactly the noise the 2026-09-23 triage cleared out. See
+# docs/plans/dependabot-triage-2026-09.md.
+vendor-patches/libp2p-gossipsub-0.45.0/Cargo.lock
 
 # Private IDE configuration
 /mm2src/peers/.vscode/tasks.json

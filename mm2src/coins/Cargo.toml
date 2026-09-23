@@ -153,7 +153,11 @@ sapling = { package = "sapling-crypto", version = "=0.7.0", default-features = f
 zcash_primitives = { version = "=0.28.0", default-features = false, features = ["non-standard-fees", "std", "transparent-inputs"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dirs = { version = "1" }
+# 1.0.5 (2018) pulls redox_users 0.3 -> rust-argon2 0.7 -> crossbeam-utils 0.7.2
+# (RUSTSEC-2022-0041). Only `dirs::home_dir()` is used, which is unchanged across
+# the major versions. Note dirs >= 4 resolves the Windows home via
+# SHGetKnownFolderPath rather than %HOME%/%USERPROFILE%.
+dirs = { version = "6" }
 hyper = { version = "0.14", features = ["client", "http2", "http1"] }
 hyper-rustls = { version = "0.23", default-features = false, features = ["http1", "http2", "webpki-roots", "webpki-tokio"] }
 # The `lightning` module (mm2src/coins/lightning/) is itself

@@ -31,9 +31,25 @@ targets = [
 db-path = "~/.cargo/advisory-db"
 # The url(s) of the advisory databases to use
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# cargo-deny schema v2 (>= 0.16): vulnerabilities and unsound/notice advisories
-# are hard errors unless listed in `ignore` below. Only `unmaintained` and
-# `yanked` remain tunable.
+# cargo-deny schema v2 (>= 0.16): `vulnerability` advisories are hard errors
+# unless listed in `ignore` below. Only `unmaintained` and `yanked` remain
+# tunable.
+#
+# CORRECTION (2026-09-23): this block used to claim that `unsound` advisories are
+# hard errors too. Measured with the CI-pinned cargo-deny 0.19.9, that is not the
+# behaviour we get. The tree contains lock_api 0.3.4 (RUSTSEC-2020-0070),
+# lru 0.7.5 (RUSTSEC-2026-0002) and rand 0.7.3 (RUSTSEC-2026-0097) -- all three
+# `informational = "unsound"` and all three below their patched versions -- and
+# `cargo deny check advisories` still reports `advisories ok`. Adding those IDs to
+# `ignore` produces `advisory-not-detected: no crate matched advisory criteria`,
+# i.e. cargo-deny never matched them against the graph in the first place, so they
+# are documented in a comment below rather than listed as ignores. Do not assume
+# this gate covers unsound advisories.
+#
+# Note also what this gate CANNOT see: cargo-deny reads RustSec, and the GitHub
+# Advisory Database is a superset. The `dependabot-alerts` job in
+# .github/workflows/audit.yml covers the GHSA-only advisories -- see its comment
+# for why that gap mattered in practice.
 #
 # We do NOT fail on unmaintained-crate advisories: this gate targets actual
 # vulnerabilities, and the tree carries ~30 transitively-unmaintained crates
@@ -62,9 +78,16 @@ ignore = [
     "RUSTSEC-2026-0104", # rustls-webpki
     "RUSTSEC-2023-0052", # webpki
     "RUSTSEC-2025-0009", # ring
-    "RUSTSEC-2024-0019", # mio
-    "RUSTSEC-2024-0421", # idna
-    "RUSTSEC-2023-0018", # remove_dir_all
+    "RUSTSEC-2024-0421", # idna (fork libp2p-dns -> trust-dns-proto 0.22)
+
+    # --- Misattributed to the libp2p fork; kept, but for a different reason ---
+    # CORRECTION (2026-09-23): `cargo tree -i` shows neither of these comes from
+    # libp2p. mio 0.7.13 is pulled by crossterm and signal-hook-mio (the TUI path
+    # in common/gstuff/mm2_test_helpers); remove_dir_all 0.5.3 by tempfile 3.3.0
+    # (prost-build, rusty-fork). Both are therefore clearable independently of the
+    # fork -- ch28's OQ2 residue list is two entries shorter than it claims.
+    "RUSTSEC-2024-0019", # mio (crossterm / signal-hook-mio)
+    "RUSTSEC-2023-0018", # remove_dir_all (tempfile 3.3.0)
 
     # --- Solana SDK (via solana-keypair) ---
     # Old ed25519/curve25519 persist through the Solana SDK, independent of
@@ -76,9 +99,10 @@ ignore = [
     "RUSTSEC-2023-0065", # tungstenite DoS on large frames
 
     # --- Unsound advisories (transitive) ---
-    # cargo-deny schema v2 treats `unsound` advisories as hard errors; under the
-    # prior tooling these were non-blocking warnings. Accepted here to preserve
-    # that policy.
+    # Listed as accepted risk. (These were added believing schema v2 made
+    # `unsound` a hard error; it does not -- see the CORRECTION at the top of this
+    # section. They stay because the rationale below is still the reason we live
+    # with them.)
     # - rmp-serde (RUSTSEC-2022-0092): a *direct* dependency, but the patched 1.x
     #   line changes the MessagePack enum encoding (integer variant index ->
     #   variant name), which would break P2P wire compatibility with GLEEC and
@@ -97,6 +121,29 @@ ignore = [
     # not a `cargo update -p h2`. Scheduled, not upstream-blocked: tracked as
     # its own migration rather than folded into this ignore silently.
     "RUSTSEC-2026-0258", # h2 0.3.27 unbounded empty DATA frames
+
+    # --- Residual `unsound` advisories: accepted, NOT listed as ignores ---
+    # cargo-deny does not match these against the graph (see the CORRECTION at the
+    # top of this section), so an `ignore` entry would only emit
+    # `advisory-not-detected` noise. They are dismissed on the GitHub Security tab;
+    # the rationale lives here so it is in one place. Each is an old version pinned
+    # transitively -- none is independently bumpable without moving its pinner.
+    #
+    # - RUSTSEC-2020-0070 / GHSA-hj9h-wrgg-hgmx et al: lock_api 0.3.4
+    #   <- parking_lot 0.9.0 <- wasm-timer 0.2.4, unmaintained since 2020 and used
+    #   by common, mm2_main and mm2_p2p. Clearing it means replacing wasm-timer.
+    # - RUSTSEC-2026-0002 / GHSA-rhfx-m35p-ff5j: lru 0.7.5 <- parity-util-mem 0.11
+    #   <- the sp-* (Substrate 6.0) stack; lru 0.10.1 <- the fork's libp2p-identify.
+    # - RUSTSEC-2026-0097 / GHSA-cq8v-f236-94qc: rand 0.7.3 <- the fork's
+    #   cuckoofilter, the Solana SDK's ed25519-dalek 1.x, and tiny-bip39 0.8.2 --
+    #   the same upstream roots already accepted above.
+    #
+    # Cleared in the same pass, recorded so they are not re-introduced:
+    # - RUSTSEC-2021-0145 (atty): env_logger 0.7 -> 0.11 in mm2_p2p, moved to
+    #   dev-dependencies since it is only used from tests. atty left the graph.
+    # - RUSTSEC-2022-0041 (crossbeam-utils 0.7.2): dirs 1 -> 6 in coins/mm2_main
+    #   dropped redox_users 0.3 -> rust-argon2 0.7, and hdrhistogram 7.1 -> 7.6
+    #   dropped crossbeam-channel 0.4. Both pullers are gone.
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories

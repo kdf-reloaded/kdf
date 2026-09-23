@@ -57,6 +57,7 @@ exclude = [
     "vendor-patches/zcash_client_backend-0.23.0",
     "vendor-patches/zcash_primitives-0.28.0",
     "vendor-patches/zcash_transparent-0.8.0",
+    "vendor-patches/libp2p-gossipsub-0.45.0",
 ]
 
 # https://doc.rust-lang.org/beta/cargo/reference/features.html#feature-resolver-version-2
@@ -176,6 +177,19 @@ debug = false
 inherits = "release"
 debug = true
 strip = false
+
+# libp2p-gossipsub 0.45.0 as shipped in the pinned fork carries a remotely
+# reachable panic: a peer-supplied PRUNE backoff flows unchecked into `Instant`
+# arithmetic, so any mesh peer can crash the swarm state machine without
+# authentication (GHSA-gc42-3jg7-rxr2, GHSA-xqmp-fxgv-xvq5). Upstream fixed it in
+# gossipsub 0.49.3/0.49.4, which belongs to libp2p 0.56; `k-0.52.12` is the newest
+# tag the KomodoPlatform fork has, so there is nothing to bump to. The vendored
+# copy is the fork's own source with the checked-arithmetic fix applied and the
+# relay-mesh extension (`i_am_relay`/`IAmRelay`) left intact. Drop this patch when
+# a fork tag carrying the fix appears. See vendor-patches/libp2p-gossipsub-0.45.0
+# /PATCH-NOTES.md.
+[patch."https://github.com/KomodoPlatform/rust-libp2p.git"]
+libp2p-gossipsub = { path = "vendor-patches/libp2p-gossipsub-0.45.0" }
 
 # bitcoin 0.27 / bitcoin_hashes 0.10 both declare an optional `core2 = "^0.3"`
 # dep used only under `no-std`. Every 0.3.x release is yanked upstream, which
