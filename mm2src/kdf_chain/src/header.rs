@@ -11,9 +11,10 @@ use primitives::bytes::Bytes;
 use primitives::compact::Compact;
 use primitives::hash::H256;
 use primitives::U256;
-use serialization::{deserialize, serialize, Deserializable, Reader, Serializable, Stream};
+use serialization::{deserialize, serialize, CoinVariant, Deserializable, Reader, Serializable, Stream};
 use std::io;
 
+use crate::raw_header::MIN_RAW_HEADER_SIZE;
 use crate::transaction::{deserialize_tx, OutPoint, Transaction, TxType};
 
 // Multi-coin block-version magic numbers. Each value is a published consensus
@@ -156,6 +157,100 @@ impl BlockHeader {
             BlockHeaderBits::U32(nb) => Ok(U256::from(nb)),
         }
     }
+
+    /// Parses one header from exactly the bytes a chain backend served for it.
+    ///
+    /// The layout is chosen as the [`Deserializable`] impl chooses it, and the
+    /// parse must consume `bytes` exactly. Outside the Qtum variant most
+    /// layouts are inferred from the version value alone, and one version value
+    /// can belong to more than one family: a chain whose blocks signal only
+    /// BIP9 bit 28 produces the KAWPOW version value on standard headers. So
+    /// when that inferred parse does not fit and exactly 80 bytes were served,
+    /// the header is read with the standard 80-byte layout (CRD ch.37 R37.5.6).
+    ///
+    /// # Errors
+    ///
+    /// Returns the codec error of the inferred parse when neither reading
+    /// consumes `bytes` exactly.
+    pub fn from_served_bytes(bytes: &[u8], coin_variant: CoinVariant) -> Result<Self, serialization::Error> {
+        let layout_inferred = !coin_variant.is_qtum();
+        match read_all(bytes, coin_variant, |reader| reader.read()) {
+            Err(_) if layout_inferred && bytes.len() == MIN_RAW_HEADER_SIZE => {
+                read_all(bytes, CoinVariant::Standard, BlockHeader::read_standard)
+            },
+            parsed => parsed,
+        }
+    }
+
+    /// Parses `count` consecutive headers from the concatenated bytes a chain
+    /// backend served for them (for example the `hex` of an Electrum
+    /// `blockchain.block.headers` response).
+    ///
+    /// The list must end exactly at the end of `bytes`; a list that runs out
+    /// early or leaves trailing bytes is rejected whole, never truncated. The
+    /// standard-layout fallback of [`BlockHeader::from_served_bytes`] applies
+    /// to the whole list when `bytes` is exactly `count` standard headers long.
+    ///
+    /// # Errors
+    ///
+    /// Returns the codec error of the inferred parse when neither reading
+    /// yields exactly `count` headers ending at the end of `bytes`.
+    pub fn list_from_served_bytes(
+        bytes: &[u8],
+        count: usize,
+        coin_variant: CoinVariant,
+    ) -> Result<Vec<Self>, serialization::Error> {
+        let layout_inferred = !coin_variant.is_qtum();
+        match read_all(bytes, coin_variant, |reader| {
+            (0..count).map(|_| reader.read()).collect()
+        }) {
+            Err(_) if layout_inferred && count.checked_mul(MIN_RAW_HEADER_SIZE) == Some(bytes.len()) => {
+                read_all(bytes, CoinVariant::Standard, |reader| {
+                    (0..count).map(|_| BlockHeader::read_standard(reader)).collect()
+                })
+            },
+            parsed => parsed,
+        }
+    }
+
+    /// Reads the standard 80-byte layout, whatever the version value says.
+    fn read_standard<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
+        Ok(BlockHeader {
+            version: reader.read()?,
+            previous_header_hash: reader.read()?,
+            merkle_root_hash: reader.read()?,
+            hash_final_sapling_root: None,
+            time: reader.read()?,
+            bits: BlockHeaderBits::Compact(reader.read()?),
+            nonce: BlockHeaderNonce::U32(reader.read()?),
+            solution: None,
+            aux_pow: None,
+            prog_pow: None,
+            mtp_pow: None,
+            is_verus: false,
+            hash_state_root: None,
+            hash_utxo_root: None,
+            prevout_stake: None,
+            vch_block_sig_dlgt: None,
+            n_height: None,
+            n_nonce_u64: None,
+            mix_hash: None,
+        })
+    }
+}
+
+/// Runs `read` over `bytes` and requires that it consumed every byte.
+fn read_all<'a, R, F>(bytes: &'a [u8], coin_variant: CoinVariant, read: F) -> Result<R, serialization::Error>
+where
+    F: FnOnce(&mut Reader<&'a [u8]>) -> Result<R, serialization::Error>,
+{
+    let mut reader = Reader::new_with_coin_variant(bytes, coin_variant);
+    let value = read(&mut reader)?;
+    if reader.is_finished() {
+        Ok(value)
+    } else {
+        Err(serialization::Error::UnreadData)
+    }
 }
 
 impl From<&'static str> for BlockHeader {
@@ -180,8 +275,11 @@ impl Serializable for BlockHeader {
         }
         s.append(&self.time);
         s.append(&self.bits);
-        // KAWPOW and ProgPoW emit the nonce in their dedicated trailers.
-        if !self.is_prog_pow() && self.version != KAWPOW_VERSION {
+        // KAWPOW and ProgPoW emit the nonce in their dedicated trailers. Decide
+        // on the trailer actually carried, not on the version value: a
+        // standard header whose version equals one of those families' values
+        // still has its 4-byte nonce, including a nonce of zero.
+        if self.n_height.is_none() && self.prog_pow.is_none() {
             s.append(&self.nonce);
         }
         if let Some(sol) = &self.solution {
@@ -324,5 +422,154 @@ impl Deserializable for BlockHeader {
             n_nonce_u64,
             mix_hash,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Version value of a BIP9 block signalling only bit 28 (top bits `001`
+    /// plus `1 << 28`), as mined on Bitcoin Core regtest while its test
+    /// deployment is started or locked in. Equal to `KAWPOW_VERSION`.
+    const BIT28_VERSION: u32 = 0x3000_0000;
+
+    fn standard_header(version: u32, prev: H256, time: u32, nonce: u32) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(MIN_RAW_HEADER_SIZE);
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&prev[..]);
+        bytes.extend_from_slice(&[0x5a; 32]);
+        bytes.extend_from_slice(&time.to_le_bytes());
+        bytes.extend_from_slice(&0x207f_ffffu32.to_le_bytes());
+        bytes.extend_from_slice(&nonce.to_le_bytes());
+        bytes
+    }
+
+    fn kawpow_header(prev: H256, time: u32, height: u32, nonce_64: u64) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(120);
+        bytes.extend_from_slice(&KAWPOW_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&prev[..]);
+        bytes.extend_from_slice(&[0x5a; 32]);
+        bytes.extend_from_slice(&time.to_le_bytes());
+        bytes.extend_from_slice(&0x1b00_ffffu32.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&nonce_64.to_le_bytes());
+        bytes.extend_from_slice(&[0xc3; 32]);
+        bytes
+    }
+
+    /// Builds a linked chain of standard headers with the given versions;
+    /// every other nonce is zero, as regtest mining commonly yields.
+    fn standard_chain(versions: &[u32]) -> Vec<Vec<u8>> {
+        let mut prev = H256::default();
+        versions
+            .iter()
+            .enumerate()
+            .map(|(i, version)| {
+                let nonce = if i % 2 == 0 { 0 } else { i as u32 };
+                let header = standard_header(*version, prev, 1_700_000_000 + i as u32, nonce);
+                prev = dhash256(&header);
+                header
+            })
+            .collect()
+    }
+
+    fn assert_standard_list(served: &[Vec<u8>], parsed: &[BlockHeader]) {
+        assert_eq!(parsed.len(), served.len());
+        for (i, (bytes, header)) in served.iter().zip(parsed).enumerate() {
+            assert!(header.n_height.is_none() && header.n_nonce_u64.is_none() && header.mix_hash.is_none());
+            assert_eq!(header.time, 1_700_000_000 + i as u32);
+            let nonce = if i % 2 == 0 { 0 } else { i as u32 };
+            assert_eq!(header.nonce, BlockHeaderNonce::U32(nonce));
+            assert_eq!(&header.raw()[..], &bytes[..]);
+            assert_eq!(header.hash(), dhash256(bytes));
+            if i > 0 {
+                assert_eq!(header.previous_header_hash, parsed[i - 1].hash());
+            }
+        }
+    }
+
+    #[test]
+    fn bit28_standard_header_list_reads_as_80_byte_headers() {
+        // The coin is not configured as a KAWPOW chain, and the server serves
+        // eleven standard headers (a median-time-past window) whose version
+        // equals the KAWPOW value.
+        let served = standard_chain(&[BIT28_VERSION; 11]);
+        let hex = served.concat();
+
+        let parsed = BlockHeader::list_from_served_bytes(&hex, served.len(), CoinVariant::Standard).unwrap();
+
+        assert_standard_list(&served, &parsed);
+        assert!(parsed.iter().all(|header| header.version == BIT28_VERSION));
+    }
+
+    #[test]
+    fn standard_header_list_across_bit28_activation_reads_as_80_byte_headers() {
+        // Signalling starts mid-window, then the deployment activates.
+        let mut versions = vec![0x2000_0000; 3];
+        versions.extend([BIT28_VERSION; 5]);
+        versions.extend([0x2000_0000; 3]);
+        let served = standard_chain(&versions);
+
+        let parsed =
+            BlockHeader::list_from_served_bytes(&served.concat(), served.len(), CoinVariant::Standard).unwrap();
+
+        assert_standard_list(&served, &parsed);
+    }
+
+    #[test]
+    fn bit28_standard_header_with_zero_nonce_round_trips() {
+        let served = standard_header(BIT28_VERSION, H256::default(), 1_700_000_000, 0);
+
+        let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+
+        assert_eq!(header.nonce, BlockHeaderNonce::U32(0));
+        assert!(header.n_height.is_none());
+        assert_eq!(&header.raw()[..], &served[..]);
+        assert_eq!(header.hash(), dhash256(&served));
+        // A stored copy (the re-encoded bytes) reads back to the same header.
+        assert_eq!(
+            BlockHeader::from_served_bytes(&header.raw(), CoinVariant::Standard).unwrap(),
+            header
+        );
+    }
+
+    #[test]
+    fn kawpow_header_list_keeps_kawpow_layout() {
+        // KAWPOW headers are still recognised by their version value; until
+        // the header family can be configured per coin (CRD ch.37 §37.9 D1)
+        // that is how a KAWPOW coin's 120-byte headers are read.
+        let first = kawpow_header(H256::default(), 1_700_000_000, 2_000_000, 0x0123_4567_89ab_cdef);
+        let second = kawpow_header(dhash256(&first), 1_700_000_060, 2_000_001, 0);
+        let served = [first, second];
+
+        let parsed = BlockHeader::list_from_served_bytes(&served.concat(), 2, CoinVariant::Standard).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].n_height, Some(2_000_000));
+        assert_eq!(parsed[0].n_nonce_u64, Some(0x0123_4567_89ab_cdef));
+        assert_eq!(parsed[0].mix_hash, Some(H256::from([0xc3; 32])));
+        assert_eq!(parsed[1].n_height, Some(2_000_001));
+        assert_eq!(parsed[1].n_nonce_u64, Some(0));
+        assert_eq!(parsed[1].time, 1_700_000_060);
+        for (bytes, header) in served.iter().zip(&parsed) {
+            assert_eq!(header.version, KAWPOW_VERSION);
+            assert_eq!(&header.raw()[..], &bytes[..]);
+        }
+        let single = BlockHeader::from_served_bytes(&served[1], CoinVariant::Standard).unwrap();
+        assert_eq!(single, parsed[1]);
+    }
+
+    #[test]
+    fn header_list_with_trailing_bytes_is_rejected() {
+        let served = standard_chain(&[0x2000_0000; 2]);
+        let mut hex = served.concat();
+        hex.push(0);
+
+        assert_eq!(
+            BlockHeader::list_from_served_bytes(&hex, 2, CoinVariant::Standard),
+            Err(serialization::Error::UnreadData)
+        );
+        assert!(BlockHeader::list_from_served_bytes(&hex[..hex.len() - 2], 2, CoinVariant::Standard).is_err());
     }
 }

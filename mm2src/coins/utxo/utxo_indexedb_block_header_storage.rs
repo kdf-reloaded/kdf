@@ -9,7 +9,7 @@ use mm2_db::indexed_db::{DbIdentifier, DbInstance, DbLocked, DbTransactionError,
                          WeakDb};
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use serialization::deserialize;
+use serialization::CoinVariant;
 use std::collections::HashMap;
 
 const DB_NAME: &str = "block_headers_storage";
@@ -333,7 +333,7 @@ fn decode_header(for_coin: &str, hex: &str) -> Result<BlockHeader, MmError<Block
         ticker: for_coin.to_owned(),
         reason: e.to_string(),
     })?;
-    deserialize(bytes.as_slice()).map_to_mm(|e| BlockHeaderStorageError::DecodeError {
+    BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).map_to_mm(|e| BlockHeaderStorageError::DecodeError {
         ticker: for_coin.to_owned(),
         reason: e.to_string(),
     })
