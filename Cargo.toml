@@ -58,6 +58,8 @@ exclude = [
     "vendor-patches/zcash_primitives-0.28.0",
     "vendor-patches/zcash_transparent-0.8.0",
     "vendor-patches/libp2p-gossipsub-0.45.0",
+    "vendor-patches/libp2p-yamux-0.44.0",
+    "vendor-patches/relay_rpc-0.1.0",
 ]
 
 # https://doc.rust-lang.org/beta/cargo/reference/features.html#feature-resolver-version-2
@@ -188,14 +190,32 @@ strip = false
 # relay-mesh extension (`i_am_relay`/`IAmRelay`) left intact. Drop this patch when
 # a fork tag carrying the fix appears. See vendor-patches/libp2p-gossipsub-0.45.0
 # /PATCH-NOTES.md.
+#
+# libp2p-yamux 0.44.0 depends on BOTH yamux 0.12 and 0.13 and falls back to the
+# 0.12 line whenever `Config` is configured at all -- upstream asserted that as
+# intended behaviour in its own test. yamux 0.12 carries GHSA-vxx9-2994-q338, a
+# remotely reachable panic on a crafted SYN Data frame with an oversized body,
+# and has no fixed release (0.13.10 is the fix). We only ever call
+# `Config::default()`, so we were on the safe line by accident; the vendored copy
+# removes the 0.12 path outright so it cannot be reached by a future config call.
 [patch."https://github.com/KomodoPlatform/rust-libp2p.git"]
 libp2p-gossipsub = { path = "vendor-patches/libp2p-gossipsub-0.45.0" }
+libp2p-yamux = { path = "vendor-patches/libp2p-yamux-0.44.0" }
 
 # bitcoin 0.27 / bitcoin_hashes 0.10 both declare an optional `core2 = "^0.3"`
 # dep used only under `no-std`. Every 0.3.x release is yanked upstream, which
 # blocks fresh resolution against vendored lightning/zcash crates. The shim at
 # `core2-shim/` re-exports core2 0.4 under version 0.3.4 so the optional dep
 # resolves without affecting any std build (no-std is never enabled here).
+# relay_rpc used `jsonwebtoken` for exactly one thing -- verifying the Ed25519
+# signature on a relay JWT -- while doing its own claim validation by hand. That
+# dragged in jsonwebtoken 8.3.0 (GHSA-h395-gr6q-cpjc) and ring 0.16.20 for a
+# three-line call. The vendored copy verifies with `ed25519_dalek`, which the
+# same file already uses to sign, so both dependencies leave the graph. Drop this
+# patch if the fork bumps jsonwebtoken (see docs/plans/walletconnect-fork-upgrade.md).
+[patch."https://github.com/komodoplatform/walletconnectrust"]
+relay_rpc = { path = "vendor-patches/relay_rpc-0.1.0" }
+
 [patch.crates-io]
 core2 = { path = "core2-shim" }
 zcash_client_backend = { path = "vendor-patches/zcash_client_backend-0.23.0" }
