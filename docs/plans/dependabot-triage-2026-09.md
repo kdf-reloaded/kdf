@@ -240,9 +240,14 @@ alerts it fixes, and to go quiet once merged.
   vendor patch.
 - **`wasm-timer` 0.2.4** — unmaintained since 2020, sole reason `parking_lot 0.9`
   and `lock_api 0.3.4` are in the tree. Replacing it would clear 5 alerts.
-- **The two `not_used` dismissals — `yamux` and `jsonwebtoken`.** Both are
-  judgements about our call sites, not about the advisories: the vulnerable code
-  is compiled in and simply never reached, so each dismissal is only as true as
-  one specific fact about our source, and nothing in CI checks that fact. Tracked
-  with the invalidating conditions spelled out in
-  [`v0.2.0-dependency-hygiene.md`](v0.2.0-dependency-hygiene.md) section F.
+- ~~**The two `not_used` dismissals — `yamux` and `jsonwebtoken`.**~~ **Done
+  2026-09-23.** Both are now fixed rather than dismissed: `libp2p-yamux` is
+  vendored with the `yamux012` dependency removed, and `relay_rpc` is vendored
+  with its single `jsonwebtoken` call site replaced by `ed25519_dalek`
+  verification. Neither vulnerable crate is in the graph any more. See section F
+  of [`v0.2.0-dependency-hygiene.md`](v0.2.0-dependency-hygiene.md) for the
+  record of why they were dismissed first, and the two `PATCH-NOTES.md` files
+  for what changed. Worth keeping in mind for the next one of these: the
+  `yamux` write-up named only the *deprecated* setters as the trap, and missed
+  that `set_max_num_streams` — not deprecated — switched to the vulnerable line
+  too. "Unreachable today" arguments are easy to get narrowly wrong.

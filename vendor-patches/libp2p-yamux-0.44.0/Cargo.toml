@@ -1,0 +1,37 @@
+# VENDOR PATCH of libp2p-yamux 0.44.0, taken verbatim from
+# KomodoPlatform/rust-libp2p tag k-0.52.12 (commit 8bcc1fda) and patched to drop
+# the yamux 0.12 code path entirely -- GHSA-vxx9-2994-q338. See PATCH-NOTES.md.
+#
+# The fork declares these deps via `[workspace.dependencies]`; vendored here as
+# explicit git deps on the SAME fork tag so Cargo unifies them with the copies
+# the root `libp2p = { git = ..., tag = "k-0.52.12" }` pin already resolves.
+[package]
+name = "libp2p-yamux"
+edition = "2021"
+rust-version = "1.65.0"
+description = "Yamux multiplexing protocol for libp2p"
+version = "0.44.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+license = "MIT"
+repository = "https://github.com/libp2p/rust-libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+futures = "0.3.28"
+libp2p-core = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+thiserror = "1.0"
+yamux013 = { version = "0.13.1", package = "yamux" }
+tracing = "0.1.37"
+
+[dev-dependencies]
+async-std = { version = "1.7.0", features = ["attributes"] }
+libp2p-muxer-test-harness = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+
+# Passing arguments to the docsrs builder in order to properly document cfg's.
+# More information: https://docs.rs/about/builds#cross-compiling
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+rustc-args = ["--cfg", "docsrs"]
+
