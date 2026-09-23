@@ -62,7 +62,7 @@ manifest, mirroring how the three zcash crates are already handled. Details,
 including the verification that the vendored copy's 6 failing behaviour tests fail
 identically on pristine fork source, are in that directory's `PATCH-NOTES.md`.
 
-## Fixed (42 alerts)
+## Fixed (43 alerts)
 
 | # | Change | Alerts |
 |---|---|---:|
@@ -71,7 +71,7 @@ identically on pristine fork source, are in that directory's `PATCH-NOTES.md`.
 | 3 | Vendored + patched `libp2p-gossipsub` 0.45.0 (above). | 2 |
 | 4 | `serde_with` 3.12.0 → 3.22.0. Needed `ref-cast` 1.0.3 → 1.0.27 first: `sp-storage 6.0.0` had it pinned and blocked the resolve. | 1 |
 | 5 | `env_logger` 0.7 → 0.11 in `mm2_p2p`, moved to `[dev-dependencies]` (only used from `tests.rs`). `atty` left the graph. | 1 |
-| 6 | `dirs` 1 → 6 in `coins` and `mm2_main`, `hdrhistogram` 7.1 → 7.6 in `mm2_metrics`. Dropped `redox_users 0.3` → `rust-argon2 0.7` and `crossbeam-channel 0.4`, the two things pulling `crossbeam-utils 0.7.2`. | 1 |
+| 6 | `dirs` 1 → 6 in `coins` and `mm2_main`, `hdrhistogram` 7.1 → 7.6 in `mm2_metrics`. Dropped `redox_users 0.3` → `rust-argon2 0.7` and `crossbeam-channel 0.4`. | 0 — see correction below |
 
 Only `dirs::home_dir()` is used, and it is unchanged across those majors — note
 that `dirs >= 4` resolves the Windows home via `SHGetKnownFolderPath` rather than
@@ -89,7 +89,47 @@ unpatched crates.io copy and did not compile. All three suites now pass
 `async_std::sync::channel`, which `mm2_main/src/lp_swap.rs:360` still uses, and
 the bump cleared no alert on its own.
 
-## Accepted (34 alerts, dismissed on the Security tab)
+
+### Correction (2026-09-23, after merge)
+
+That last row originally claimed **1** alert — `crossbeam-utils 0.7.2`,
+RUSTSEC-2022-0041 / GHSA-qc84-gqf4-9926, alert #7 — and it did not clear it.
+
+`crossbeam-utils 0.7.2` had **three** pullers, not two. The `dirs` and
+`hdrhistogram` bumps removed `rust-argon2 0.7` (via `redox_users 0.3`) and
+`crossbeam-channel 0.4`, but **`async-std 1.6.2`** is a third and is sufficient
+on its own. The clearance was checked while `async-std` was briefly at 1.13.2
+during the residual-bump attempts, and not re-checked after that bump was
+reverted for breaking the build — `async_std::sync::channel`, removed in
+async-std 1.9, is still used at `mm2_main/src/lp_swap.rs:360`. The
+`dirs`/`hdrhistogram` bumps were still worth keeping: they are what removed
+`atty` and two of the three pullers. They just did not close #7.
+
+#7 is therefore **dismissed rather than fixed** — `tolerable_risk`, on the
+grounds that the advisory is `informational = unsound` and affects only
+`AtomicCell<{i,u}64>` `fetch_*` on 32-bit targets that have `Atomic{I,U}64`
+(64-bit targets are unaffected outright). The real fix is the `async-std` bump,
+which is a swap-shutdown code change — `Receiver::recv` returns `Option` today
+and `Result` on the `async-channel` replacement, in the `select!` arms of both
+`maker_swap.rs` and `taker_swap.rs` — and is tracked as its own item in
+[`v0.2.0-dependency-hygiene.md`](v0.2.0-dependency-hygiene.md).
+
+The final split, confirmed against the Security tab after the merge rescan, is
+**43 fixed, 33 dismissed, 0 open** — not the 42/34 predicted before merge. Two
+movements account for the difference: #7 went from "fixed" to "dismissed" (this
+correction), and the two `rsa` Marvin alerts (#112, #113) went the other way,
+from "dismissed" to **fixed**. They had been dismissed `no_bandwidth` on the
+grounds that no fixed release existed; the `cargo update` in
+`vendor-patches/zcash_client_backend-0.23.0` moved `rsa` to 0.9.10, which
+GitHub now scores as outside the affected range. A better outcome than the
+dismissal reason claimed, so it stands uncorrected in the alert itself.
+
+Worth noting what caught this: the `dependabot-alerts` gate, on its first armed
+run. It is the only check that would have — `cargo deny check advisories` is
+green on this exact tree, because RUSTSEC-2022-0041 is `unsound` and cargo-deny
+does not match those at all.
+
+## Accepted (33 alerts, dismissed on the Security tab)
 
 Dismissal reason and a short justification are attached to each alert; the full
 rationale lives in `deny.toml`. Summary:
@@ -102,7 +142,7 @@ rationale lives in `deny.toml`. Summary:
 | `lock_api` ×5, `lru`, `rand` — RustSec `unsound`, transitively pinned | 7 | `tolerable_risk` |
 | `yamux` — vulnerable 0.12.1 compiled in but never constructed | 1 | `not_used` |
 | `jsonwebtoken` — verify path is dead code | 1 | `not_used` |
-| `rsa` Marvin ×2 — no fixed release, test-only lockfile | 2 | `no_bandwidth` |
+| `crossbeam-utils` 0.7.2 — unsound, 32-bit only, pinned by `async-std 1.6.2` | 1 | `tolerable_risk` |
 
 The two `not_used` ones are worth spelling out, because both look alarming on the
 dashboard and neither is reachable:
@@ -148,17 +188,34 @@ are noise, not build inputs.
 > **One-time setup required — the job is inert until it is done.** The default
 > `GITHUB_TOKEN` **cannot** read the Dependabot alerts API: it returns
 > `403 Resource not accessible by integration`, and there is no `permissions:`
-> key that grants it (`security-events: read` does not). Reading alerts needs a
-> PAT, or a GitHub App token, carrying `dependabot_alerts` / `security_events`
-> read. Add it as a repo secret named **`DEPENDABOT_ALERTS_TOKEN`** and the job
-> arms itself — it already prefers that secret and falls back to `GITHUB_TOKEN`.
+> key that grants it (`security-events: read` is not the relevant scope).
 >
-> Until the secret exists the job prints a warning naming this setup step and
+> **Preferred: a GitHub App.** Owned by `kdf-reloaded`, installed on this repo,
+> with the single repository permission `Dependabot alerts: Read-only` and no
+> webhook. Put its App ID and private key in the repo secrets `AUDIT_APP_ID` and
+> `AUDIT_APP_PRIVATE_KEY`; the job mints a short-lived token per run via
+> `actions/create-github-app-token`. Chosen over a PAT because it does not
+> expire, has nothing to rotate, is not tied to a person's account — notably not
+> to the release-signing identity — and makes the audit log attribute
+> security-alert reads to the App rather than to a human.
+>
+> **Fallback: a PAT** in `DEPENDABOT_ALERTS_TOKEN`. Fine-grained, scoped to this
+> repo with `Dependabot alerts: Read-only`, or classic with `public_repo` (this
+> repo is public) or `security_events`. Note that fine-grained PATs against an
+> org-owned repo require the org to have opted into them
+> (Org Settings → Personal access tokens), and that they expire.
+>
+> Until one of those exists the job prints a warning naming this setup step and
 > **passes**, deliberately: a gate that is permanently red because it is
 > misconfigured teaches everyone to ignore it, which is worse than not having it.
 > So a green `dependabot-alerts` means either "no open root-lock alerts" or "not
 > armed yet" — check the job log for the warning to tell them apart. Any other
 > API failure (bad credentials, outage) still fails the job.
+>
+> One asymmetry to be aware of if you use a PAT: an **expired** token returns 401
+> and fails the job loudly, but a token that has **lost the permission** returns
+> 403 and is indistinguishable from "never configured", so it goes quietly inert.
+> The App has no expiry, which is the main reason it is preferred.
 
 The accept mechanism for that job is *dismissing* the alert with a reason and a
 justification, exactly as `deny.toml`'s `ignore` list is the accept mechanism for

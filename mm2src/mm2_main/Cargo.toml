@@ -149,7 +149,15 @@ futures-rustls = { version = "0.21.1" }
 crypto = { path = "../crypto", features = ["test-helpers"] }
 mocktopus = "0.8.0"
 testcontainers = { path = "../testcontainers-vendored" }
-winapi = "0.3"
+# winapi features must be declared HERE, not inherited. Every one of these
+# call sites used to compile only because some other crate in the graph
+# happened to enable the feature and Cargo unified it. That broke on
+# 2026-09-23: bumping `dirs` 1 -> 6 moved dirs-sys from winapi to
+# windows-sys, the `shlobj` feature stopped being enabled by anyone, and the
+# Windows build failed with "unresolved import winapi::um::shlobj". Nothing
+# in CI catches this on push -- no Windows job runs outside workflow_dispatch.
+# processenv: SetCurrentDirectoryA (mm2_tests.rs).
+winapi = { version = "0.3", features = ["processenv"] }
 
 [build-dependencies]
 chrono = "0.4"

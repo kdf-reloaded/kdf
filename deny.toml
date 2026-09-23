@@ -138,12 +138,27 @@ ignore = [
     #   cuckoofilter, the Solana SDK's ed25519-dalek 1.x, and tiny-bip39 0.8.2 --
     #   the same upstream roots already accepted above.
     #
-    # Cleared in the same pass, recorded so they are not re-introduced:
+    # - RUSTSEC-2022-0041 / GHSA-qc84-gqf4-9926: crossbeam-utils 0.7.2
+    #   <- async-std 1.6.2, a direct dependency of common, coins and mm2_main.
+    #   Affects only `AtomicCell<{i,u}64>` fetch_* on 32-bit targets that have
+    #   Atomic{I,U}64; 64-bit targets are unaffected outright. async-std cannot
+    #   move without code changes: 1.9 removed `async_std::sync::channel`, which
+    #   the swap shutdown path still uses (mm2_main/src/lp_swap.rs:360, plus
+    #   `Receiver::clone`/`recv` in maker_swap.rs and taker_swap.rs, where recv
+    #   returns Option today and Result on the async-channel replacement).
+    #   Tracked as its own item -- see docs/plans/v0.2.0-dependency-hygiene.md.
+    #
+    #   CORRECTION (2026-09-23): the first version of this block claimed this
+    #   advisory was cleared by the dirs 1 -> 6 and hdrhistogram 7.1 -> 7.6 bumps.
+    #   Those did remove two of the three pullers (rust-argon2 0.7 via
+    #   redox_users, and crossbeam-channel 0.4), but async-std 1.6.2 is a third
+    #   and is sufficient on its own. The clearance was verified while async-std
+    #   was briefly at 1.13.2 and not re-verified after that bump was reverted
+    #   for breaking the build.
+
+    # Cleared in the same pass, recorded so it is not re-introduced:
     # - RUSTSEC-2021-0145 (atty): env_logger 0.7 -> 0.11 in mm2_p2p, moved to
     #   dev-dependencies since it is only used from tests. atty left the graph.
-    # - RUSTSEC-2022-0041 (crossbeam-utils 0.7.2): dirs 1 -> 6 in coins/mm2_main
-    #   dropped redox_users 0.3 -> rust-argon2 0.7, and hdrhistogram 7.1 -> 7.6
-    #   dropped crossbeam-channel 0.4. Both pullers are gone.
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
