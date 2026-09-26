@@ -307,6 +307,7 @@ fn help() {
             "The first command-line argument is special and designates the mode.\n"
             "\n"
             "  help                       ..  Display this message.\n"
+            "  version, --version         ..  Display the version and exit.\n"
             "  btc2kmd {WIF or BTC}       ..  Convert a BTC WIF into a KMD WIF.\n"
             "  events                     ..  Listen to a feed coming from a separate MM daemon and print it to stdout.\n"
             "  vanity {substring}         ..  Tries to find an address with the given substring.\n"
@@ -424,6 +425,11 @@ pub fn mm2_main() {
     }
     if cfg!(windows) && first_arg == Some("/?") {
         help();
+        return;
+    }
+    // The version banner has already been logged above; exit successfully
+    // instead of parsing the flag as a JSON configuration.
+    if first_arg == Some("--version") || first_arg == Some("version") {
         return;
     }
 

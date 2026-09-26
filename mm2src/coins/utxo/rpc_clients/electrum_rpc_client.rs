@@ -662,11 +662,10 @@ impl ElectrumClient {
                         if headers.count == 0 {
                             return MmError::err(UtxoRpcError::Internal("No headers available".to_string()));
                         }
-                        let len = CompactInteger::from(headers.count);
-                        let mut serialized = serialize(&len).take();
-                        serialized.extend(headers.hex.0.into_iter());
-                        let mut reader = Reader::new_with_coin_variant(serialized.as_slice(), CoinVariant::Standard);
-                        let maybe_block_headers = reader.read_list::<BlockHeader>();
+                        let count = usize::try_from(headers.count)
+                            .map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+                        let maybe_block_headers =
+                            BlockHeader::list_from_served_bytes(&headers.hex.0, count, CoinVariant::Standard);
                         let block_headers = match maybe_block_headers {
                             Ok(headers) => headers,
                             Err(e) => return MmError::err(UtxoRpcError::InvalidResponse(format!("{:?}", e))),
@@ -923,11 +922,9 @@ impl UtxoRpcClientOps for ElectrumClient {
                     if res.count == 0 {
                         return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
                     }
-                    let len = CompactInteger::from(res.count);
-                    let mut serialized = serialize(&len).take();
-                    serialized.extend(res.hex.0.into_iter());
-                    let mut reader = Reader::new_with_coin_variant(serialized.as_slice(), coin_variant);
-                    let headers = reader.read_list::<BlockHeader>()?;
+                    let count =
+                        usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+                    let headers = BlockHeader::list_from_served_bytes(&res.hex.0, count, coin_variant)?;
                     let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
                     // can unwrap because count is non zero
                     Ok(median(timestamps.as_mut_slice()).unwrap())
@@ -937,8 +934,8 @@ impl UtxoRpcClientOps for ElectrumClient {
 
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {
         let header_bytes = self.blockchain_block_header(height).compat().await?;
-        let header: BlockHeader =
-            deserialize(header_bytes.0.as_slice()).map_to_mm(|e| UtxoRpcError::InvalidResponse(format!("{:?}", e)))?;
+        let header = BlockHeader::from_served_bytes(&header_bytes.0, CoinVariant::Standard)
+            .map_to_mm(|e| UtxoRpcError::InvalidResponse(format!("{:?}", e)))?;
         Ok(header.time as u64)
     }
 }

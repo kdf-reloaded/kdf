@@ -145,7 +145,7 @@ where
     {
         None => {
             let bytes = client.blockchain_block_header(height).compat().await?;
-            let header: BlockHeader = deserialize(bytes.0.as_slice())?;
+            let header = BlockHeader::from_served_bytes(&bytes.0, CoinVariant::Standard)?;
             let conf = &storage.conf;
             let blocks_limit = NonZeroU64::new(crate::utxo::DIFFICULTY_RETARGET_INTERVAL)
                 .expect("difficulty-retarget interval is non-zero");
@@ -341,7 +341,7 @@ async fn verify_anchor_header(client: &ElectrumClient, anchor: &crate::utxo::SPV
         .compat()
         .await
         .map_err(|e| e.to_string())?;
-    let header: BlockHeader = deserialize(bytes.0.as_slice()).map_err(|e| format!("{:?}", e))?;
+    let header = BlockHeader::from_served_bytes(&bytes.0, CoinVariant::Standard).map_err(|e| format!("{:?}", e))?;
     // The configured hash is in the displayed (big-endian) hex form; reverse it for comparison.
     let configured_hash = anchor
         .hash

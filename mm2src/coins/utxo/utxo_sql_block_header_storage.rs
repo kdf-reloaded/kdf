@@ -10,7 +10,7 @@ use db_common::{sqlite::rusqlite::Error as SqlError,
                 sqlite::CHECK_TABLE_EXISTS_SQL};
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use serialization::deserialize;
+use serialization::CoinVariant;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -223,7 +223,7 @@ impl SqliteBlockHeadersStorage {
                         reason: e.to_string(),
                     })
                 })?;
-                let header: BlockHeader = deserialize(bytes.as_slice()).map_err(|e| {
+                let header = BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).map_err(|e| {
                     MmError::new(BlockHeaderStorageError::DecodeError {
                         ticker: ticker.clone(),
                         reason: e.to_string(),
@@ -306,11 +306,12 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
                 ticker: for_coin.to_string(),
                 reason: e.to_string(),
             })?;
-            let header: BlockHeader =
-                deserialize(header_bytes.as_slice()).map_err(|e| BlockHeaderStorageError::DecodeError {
+            let header = BlockHeader::from_served_bytes(&header_bytes, CoinVariant::Standard).map_err(|e| {
+                BlockHeaderStorageError::DecodeError {
                     ticker: for_coin.to_string(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
             return Ok(Some(header));
         }
         Ok(None)
@@ -442,6 +443,7 @@ mod sql_block_headers_storage_tests {
     use crate::utxo::rpc_clients::ElectrumBlockHeaderV14;
     use common::block_on;
     use primitives::hash::H256;
+    use serialization::deserialize;
 
     #[test]
     fn test_init_collection() {
