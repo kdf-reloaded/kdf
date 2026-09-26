@@ -49,6 +49,9 @@ pub trait TryFromCoinProtocol {
         Self: Sized;
 }
 
+// Cold error path: created at most once per failed activation request and
+// converted immediately, so the variant's size is irrelevant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum CoinConfWithProtocolError {
     ConfigIsNotFound(String),
