@@ -656,7 +656,7 @@ mod tests {
     }
 
     fn withdraw_req(from: Option<WithdrawFrom>) -> WithdrawRequest {
-        WithdrawRequest::new("RICK".to_owned(), from, "receiver".to_owned(), 1.into(), false, None)
+        WithdrawRequest::new("DOC".to_owned(), from, "receiver".to_owned(), 1.into(), false, None)
     }
 
     #[test]

@@ -561,7 +561,7 @@ mod tests {
                 secret_hash_algo, p2p_privkey, lock_duration, maker_coin_confs, maker_coin_nota,
                 taker_coin_confs, taker_coin_nota, other_p2p_pub, swap_version{price_columns}
             ) VALUES (
-                1, 'RICK', 'MORTY', 'legacy-swap', 1000, 2, 0, '[{{\"type\":\"Started\"}}]',
+                1, 'DOC', 'MARTY', 'legacy-swap', 1000, 2, 0, '[{{\"type\":\"Started\"}}]',
                 '1.23', '4.56', '0.1', '0.02', '0.01', X'01', X'02',
                 3, X'03', 7800, 2, 1, 3, 0, X'04', 0{my_swap_prices}
             );
@@ -570,8 +570,8 @@ mod tests {
                 taker_amount, is_success, maker_coin_ticker, maker_coin_platform,
                 taker_coin_ticker, taker_coin_platform{price_columns}
             ) VALUES (
-                1, 'RICK', 'MORTY', 'legacy-swap', 1000, 2000, 1.23,
-                4.56, 1, 'RICK', '', 'MORTY', ''{stats_prices}
+                1, 'DOC', 'MARTY', 'legacy-swap', 1000, 2000, 1.23,
+                4.56, 1, 'DOC', '', 'MARTY', ''{stats_prices}
             );",
         ))
         .unwrap();

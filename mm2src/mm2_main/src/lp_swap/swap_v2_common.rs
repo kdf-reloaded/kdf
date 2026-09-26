@@ -1790,7 +1790,7 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let repr = MakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("10.5"),
             maker_secret: H256Json::from([0xABu8; 32]),
             maker_secret_hash: BytesJson::from(vec![
@@ -1799,7 +1799,7 @@ mod tests {
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
             started_at: 1700000000,
             lock_duration: 7200,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("20.5"),
             taker_premium: MmNumber::from("0.1"),
             dex_fee_amount: MmNumber::from("0.01"),
@@ -1829,8 +1829,8 @@ mod tests {
 
         let json = serde_json::to_string(&repr).unwrap();
         let back: MakerSwapDbRepr = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.maker_coin, "RICK");
-        assert_eq!(back.taker_coin, "MORTY");
+        assert_eq!(back.maker_coin, "DOC");
+        assert_eq!(back.taker_coin, "MARTY");
         assert_eq!(back.uuid, repr.uuid);
         assert_eq!(back.events.len(), 2);
         assert_eq!(back.swap_version, 2);
@@ -1845,7 +1845,7 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let repr = TakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("10.5"),
             taker_secret: H256Json::from([0xCDu8; 32]),
             taker_secret_hash: BytesJson::from(vec![
@@ -1854,7 +1854,7 @@ mod tests {
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::SHA256,
             started_at: 1700000000,
             lock_duration: 7200,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("20.5"),
             taker_premium: MmNumber::from("0.1"),
             dex_fee_amount: MmNumber::from("0.01"),
@@ -1884,8 +1884,8 @@ mod tests {
 
         let json = serde_json::to_string(&repr).unwrap();
         let back: TakerSwapDbRepr = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.maker_coin, "RICK");
-        assert_eq!(back.taker_coin, "MORTY");
+        assert_eq!(back.maker_coin, "DOC");
+        assert_eq!(back.taker_coin, "MARTY");
         assert_eq!(back.uuid, repr.uuid);
         assert_eq!(back.events.len(), 2);
         assert_eq!(back.swap_version, 2);
@@ -1903,13 +1903,13 @@ mod tests {
         let uuid = Uuid::new_v4();
         let info = ActiveSwapV2Info {
             uuid,
-            maker_coin: "RICK".into(),
-            taker_coin: "MORTY".into(),
+            maker_coin: "DOC".into(),
+            taker_coin: "MARTY".into(),
             swap_type: SwapV2Type::MakerV2,
         };
         assert_eq!(info.uuid, uuid);
-        assert_eq!(info.maker_coin, "RICK");
-        assert_eq!(info.taker_coin, "MORTY");
+        assert_eq!(info.maker_coin, "DOC");
+        assert_eq!(info.taker_coin, "MARTY");
         assert_eq!(info.swap_type, SwapV2Type::MakerV2);
     }
 
@@ -1922,14 +1922,14 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let mut repr = MakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("1"),
             maker_secret: H256Json::from([0u8; 32]),
             maker_secret_hash: BytesJson::from(vec![0u8; 20]),
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
             started_at: 0,
             lock_duration: 3600,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("1"),
             taker_premium: MmNumber::from("0"),
             dex_fee_amount: MmNumber::from("0"),
@@ -1992,14 +1992,14 @@ mod tests {
 
         fn sample_maker_repr(uuid: Uuid) -> MakerSwapDbRepr {
             MakerSwapDbRepr {
-                maker_coin: "RICK".into(),
+                maker_coin: "DOC".into(),
                 maker_volume: MmNumber::from("10"),
                 maker_secret: H256Json::from([0xABu8; 32]),
                 maker_secret_hash: BytesJson::from(vec![1u8; 20]),
                 secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
                 started_at: 1700000000,
                 lock_duration: 7200,
-                taker_coin: "MORTY".into(),
+                taker_coin: "MARTY".into(),
                 taker_volume: MmNumber::from("20"),
                 taker_premium: MmNumber::from("0.1"),
                 dex_fee_amount: MmNumber::from("0.01"),
@@ -2020,14 +2020,14 @@ mod tests {
 
         fn sample_taker_repr(uuid: Uuid) -> TakerSwapDbRepr {
             TakerSwapDbRepr {
-                maker_coin: "RICK".into(),
+                maker_coin: "DOC".into(),
                 maker_volume: MmNumber::from("10"),
                 taker_secret: H256Json::from([0xCDu8; 32]),
                 taker_secret_hash: BytesJson::from(vec![2u8; 20]),
                 secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::SHA256,
                 started_at: 1700000000,
                 lock_duration: 7200,
-                taker_coin: "MORTY".into(),
+                taker_coin: "MARTY".into(),
                 taker_volume: MmNumber::from("20"),
                 taker_premium: MmNumber::from("0.1"),
                 dex_fee_amount: MmNumber::from("0.01"),
@@ -2065,8 +2065,8 @@ mod tests {
 
             // get_repr roundtrip — verify core fields
             let loaded: MakerSwapDbRepr = block_on(storage.get_repr(uuid)).unwrap();
-            assert_eq!(loaded.maker_coin, "RICK");
-            assert_eq!(loaded.taker_coin, "MORTY");
+            assert_eq!(loaded.maker_coin, "DOC");
+            assert_eq!(loaded.taker_coin, "MARTY");
             assert_eq!(loaded.started_at, 1700000000);
             assert_eq!(loaded.lock_duration, 7200);
             assert_eq!(loaded.swap_version, 2);
@@ -2135,8 +2135,8 @@ mod tests {
             assert!(block_on(storage.has_record_for(&uuid)).unwrap());
 
             let loaded: TakerSwapDbRepr = block_on(storage.get_repr(uuid)).unwrap();
-            assert_eq!(loaded.maker_coin, "RICK");
-            assert_eq!(loaded.taker_coin, "MORTY");
+            assert_eq!(loaded.maker_coin, "DOC");
+            assert_eq!(loaded.taker_coin, "MARTY");
             assert_eq!(loaded.started_at, 1700000000);
             assert_eq!(loaded.swap_version, 2);
 

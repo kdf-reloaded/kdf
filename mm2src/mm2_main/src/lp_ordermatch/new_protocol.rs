@@ -407,8 +407,8 @@ mod new_protocol_tests {
 
         let old_msg = MakerOrderCreatedV1 {
             uuid: Uuid::new_v4().into(),
-            base: "RICK".to_string(),
-            rel: "MORTY".to_string(),
+            base: "DOC".to_string(),
+            rel: "MARTY".to_string(),
             price: BigRational::from_integer(1.into()),
             max_volume: BigRational::from_integer(2.into()),
             min_volume: BigRational::from_integer(1.into()),

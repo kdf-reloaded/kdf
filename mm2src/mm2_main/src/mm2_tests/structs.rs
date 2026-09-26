@@ -481,6 +481,9 @@ pub struct MakerPreimage {
     pub total_fees: Vec<TotalTradeFeeForTest>,
 }
 
+// Test-only response fixture: its size does not matter, and boxing a variant
+// would only complicate the expected values the tests construct.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(untagged)]

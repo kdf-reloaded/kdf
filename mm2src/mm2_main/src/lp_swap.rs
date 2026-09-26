@@ -1239,7 +1239,7 @@ mod v2_spend_headroom_tests {
     /// the reason the answer cannot be "reserve the fee" or "reserve nothing".
     fn utxo_style_fee() -> TradeFee {
         TradeFee {
-            coin: "MORTY".into(),
+            coin: "MARTY".into(),
             amount: MmNumber::from("0.00001"),
             paid_from_trading_vol: true,
         }

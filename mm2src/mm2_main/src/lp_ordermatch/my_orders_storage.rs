@@ -886,8 +886,8 @@ mod tests {
 
         let maker1 = maker_order_for_test();
         let mut maker2 = MakerOrder {
-            base: "RICK".to_owned(),
-            rel: "MORTY".to_owned(),
+            base: "DOC".to_owned(),
+            rel: "MARTY".to_owned(),
             ..maker_order_for_test()
         };
         let taker1 = taker_order_for_test();
@@ -933,8 +933,8 @@ mod tests {
 
         let maker1 = maker_order_for_test();
         let mut maker2 = MakerOrder {
-            base: "RICK".to_owned(),
-            rel: "MORTY".to_owned(),
+            base: "DOC".to_owned(),
+            rel: "MARTY".to_owned(),
             ..maker_order_for_test()
         };
         let taker1 = taker_order_for_test();

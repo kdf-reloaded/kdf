@@ -591,7 +591,7 @@ mod z_coin_tx_history_tests {
             block_height,
             timestamp: 0,
             fee_details: None,
-            coin: "RICK".to_owned(),
+            coin: "DOC".to_owned(),
             internal_id: vec![id].into(),
             kmd_rewards: None,
             transaction_type: TransactionType::StandardTransfer,
@@ -601,7 +601,7 @@ mod z_coin_tx_history_tests {
     #[test]
     fn from_id_not_found_returns_empty_page_with_total_preserved() {
         let request = MyTxHistoryRequestV2 {
-            coin: "RICK".to_owned(),
+            coin: "DOC".to_owned(),
             limit: 2,
             paging_options: PagingOptionsEnum::FromId(vec![99u8].into()),
         };
@@ -619,7 +619,7 @@ mod z_coin_tx_history_tests {
     #[test]
     fn from_id_found_returns_following_records() {
         let request = MyTxHistoryRequestV2 {
-            coin: "RICK".to_owned(),
+            coin: "DOC".to_owned(),
             limit: 2,
             paging_options: PagingOptionsEnum::FromId(vec![2u8].into()),
         };
@@ -642,7 +642,7 @@ mod z_coin_tx_history_tests {
     #[test]
     fn page_number_paging_uses_expected_offset() {
         let request = MyTxHistoryRequestV2 {
-            coin: "RICK".to_owned(),
+            coin: "DOC".to_owned(),
             limit: 2,
             paging_options: PagingOptionsEnum::PageNumber(NonZeroUsize::new(2).unwrap()),
         };
@@ -706,7 +706,7 @@ mod z_coin_tx_history_tests {
         );
         assert_eq!(not_active.status_code(), StatusCode::NOT_FOUND);
 
-        let not_supported = MyTxHistoryErrorV2::NotSupportedFor("RICK".into());
+        let not_supported = MyTxHistoryErrorV2::NotSupportedFor("DOC".into());
         assert_eq!(
             serde_json::to_value(&not_supported).unwrap()["error_type"],
             serde_json::json!("NotSupportedFor")

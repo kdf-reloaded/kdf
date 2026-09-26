@@ -100,16 +100,16 @@ fn test_enable_token_error_http_status_codes() {
 
 #[test]
 fn test_enable_token_error_from_coin_conf_error() {
-    let e: EnableTokenError = CoinConfWithProtocolError::ConfigIsNotFound("RICK".into()).into();
-    assert!(matches!(e, EnableTokenError::TokenConfigIsNotFound(ref t) if t == "RICK"));
+    let e: EnableTokenError = CoinConfWithProtocolError::ConfigIsNotFound("DOC".into()).into();
+    assert!(matches!(e, EnableTokenError::TokenConfigIsNotFound(ref t) if t == "DOC"));
 
     let json_err = serde_json::from_str::<serde_json::Value>("bad_json").unwrap_err();
     let e: EnableTokenError = CoinConfWithProtocolError::CoinProtocolParseError {
-        ticker: "MORTY".into(),
+        ticker: "MARTY".into(),
         err: json_err,
     }
     .into();
-    assert!(matches!(e, EnableTokenError::TokenProtocolParseError { ref ticker, .. } if ticker == "MORTY"));
+    assert!(matches!(e, EnableTokenError::TokenProtocolParseError { ref ticker, .. } if ticker == "MARTY"));
 
     let e: EnableTokenError = CoinConfWithProtocolError::UnexpectedProtocol {
         ticker: "BTC".into(),

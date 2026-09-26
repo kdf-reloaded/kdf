@@ -5,6 +5,13 @@
 #![allow(clippy::diverging_sub_expression)]
 #![allow(clippy::explicit_auto_deref)]
 #![recursion_limit = "512"]
+// Test builds expand `#[mockable]` (mocktopus) on the mocked items; the
+// generated injection code trips these lints, which cannot be fixed at the
+// source, so they are allowed for test builds only.
+#![cfg_attr(
+    test,
+    allow(clippy::swap_ptr_to_ref, clippy::forget_non_drop, clippy::let_unit_value)
+)]
 #![cfg_attr(target_arch = "wasm32", allow(unused_imports))]
 
 #[macro_use] extern crate common;

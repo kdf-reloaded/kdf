@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn test_requests_superset() {
         // Reduced (always-available) form requests no superset capability.
-        assert!(!reduced_req(vec!["RICK".into()]).requests_superset());
+        assert!(!reduced_req(vec!["DOC".into()]).requests_superset());
 
         // Each opt-in capability independently flags the request as superset.
         let hd = GetPrivateKeysRequest {
@@ -776,7 +776,7 @@ mod tests {
         let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
         let req = GetPrivateKeysRequest {
             offline: true,
-            ..reduced_req(vec!["RICK".into()])
+            ..reduced_req(vec!["DOC".into()])
         };
         match block_on(get_private_keys(ctx, req)) {
             Ok(_) => panic!("expected InsecureExportDisabled"),
