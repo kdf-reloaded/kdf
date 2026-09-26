@@ -54,6 +54,11 @@ const RICK_ELECTRUM_ADDRS: &[&'static str] = &[
     "electrum2.cipig.net:10017",
     "electrum3.cipig.net:10017",
 ];
+const DOC_ELECTRUM_ADDRS: &[&str] = &[
+    "doc.electrum1.cipig.net:10020",
+    "doc.electrum2.cipig.net:10020",
+    "doc.electrum3.cipig.net:10020",
+];
 const TEST_COIN_DECIMALS: u8 = 8;
 
 pub fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
@@ -1247,15 +1252,19 @@ fn test_utxo_lock() {
 
 #[test]
 fn test_spv_proof() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    // RICK, the chain this test used before, is retired. DOC is its successor
+    // test chain in the same family (Komodo asset chain, Equihash headers,
+    // overwintered v4 transactions), so the proof exercises the same path.
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
         false,
     );
 
-    // https://rick.explorer.dexstats.info/tx/78ea7839f6d1b0dafda2ba7e34c1d8218676a58bd1b33f03a5f76391f61b72b0
-    let tx_str = "0400008085202f8902bf17bf7d1daace52e08f732a6b8771743ca4b1cb765a187e72fd091a0aabfd52000000006a47304402203eaaa3c4da101240f80f9c5e9de716a22b1ec6d66080de6a0cca32011cd77223022040d9082b6242d6acf9a1a8e658779e1c655d708379862f235e8ba7b8ca4e69c6012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffff023ca13c0e9e085dd13f481f193e8a3e8fd609020936e98b5587342d994f4d020000006b483045022100c0ba56adb8de923975052312467347d83238bd8d480ce66e8b709a7997373994022048507bcac921fdb2302fa5224ce86e41b7efc1a2e20ae63aa738dfa99b7be826012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0300e1f5050000000017a9141ee6d4c38a3c078eab87ad1a5e4b00f21259b10d870000000000000000166a1400000000000000000000000000000000000000001b94d736000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac2d08e35e000000000000000000000000000000";
+    // DOC height 1357312, position 5 in its block (a three-level Merkle branch):
+    // txid 193831c822b3e879e872f766236bc1a20fc2bbb1ce9b6dab9e571069147afc9d
+    let tx_str = "0400008085202f8902c55b1d7ebd78ed1f533a9e12f86981abb2a0022ca06cc36cfa4884bdd4cb1db3000000006a47304402207e3fbd998bac475f4bc7ebc762afbf7a73920115467b1cef88bdcd90a2846ace02205daa4bc6efdf95e124f5d387ea5058744d0d5dd4be1e188c0eda72d9f269f415012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffc55b1d7ebd78ed1f533a9e12f86981abb2a0022ca06cc36cfa4884bdd4cb1db3010000006a47304402207cde81386bee3f1e16c82f56073889b5afe4d00dd5a7d074beac3932fb365769022060d3acd30b61cbabf0dd1d0dd17da8952933bc8b2beb8525717238720ace7109012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0240420f00000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac11825300000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acd177ab69000000000000000000000000000000";
     let tx: UtxoTx = tx_str.into();
 
     let res = block_on(utxo_common::validate_spv_proof(coin.clone(), tx, now_ms() / 1000 + 30));
