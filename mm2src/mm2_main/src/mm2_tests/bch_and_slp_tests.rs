@@ -310,7 +310,7 @@ fn test_common_cashaddresses() {
     log!({ "log path: {}", mm.log_path.display() });
 
     // Enable BCH electrum client with tx_history loop.
-    // Enable RICK electrum client with tx_history loop.
+    // Enable DOC electrum client with tx_history loop.
     let electrum = block_on(mm.rpc(&json! ({
         "userpass": mm.userpass,
         "method": "electrum",

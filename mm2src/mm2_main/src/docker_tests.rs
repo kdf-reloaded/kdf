@@ -2687,7 +2687,7 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
 
-        log!("Get RICK/MORTY orderbook on Bob side");
+        log!("Get DOC/MARTY orderbook on Bob side");
         let rc = block_on(mm_bob_dup.rpc(&json! ({
             "userpass": mm_bob_dup.userpass,
             "method": "orderbook",
@@ -2761,7 +2761,7 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
 
-        log!("Get RICK/MORTY orderbook on Bob side");
+        log!("Get DOC/MARTY orderbook on Bob side");
         let rc = block_on(mm_bob_dup.rpc(&json! ({
             "userpass": mm_bob_dup.userpass,
             "method": "orderbook",
@@ -3352,7 +3352,7 @@ mod docker_tests {
         })))
         .unwrap();
 
-        assert!(withdraw.0.is_client_error(), "RICK withdraw: {}", withdraw.1);
+        assert!(withdraw.0.is_client_error(), "DOC withdraw: {}", withdraw.1);
         log!("error: "[withdraw.1]);
         let error: RpcErrorResponse<withdraw_error::NotSufficientBalance> =
             json::from_str(&withdraw.1).expect("Expected 'RpcErrorResponse<NotSufficientBalance>'");
@@ -3385,7 +3385,7 @@ mod docker_tests {
         })))
         .unwrap();
 
-        assert!(withdraw.0.is_client_error(), "RICK withdraw: {}", withdraw.1);
+        assert!(withdraw.0.is_client_error(), "DOC withdraw: {}", withdraw.1);
         log!("error: "[withdraw.1]);
         let error: RpcErrorResponse<withdraw_error::NotSufficientBalance> =
             json::from_str(&withdraw.1).expect("Expected 'RpcErrorResponse<NotSufficientBalance>'");

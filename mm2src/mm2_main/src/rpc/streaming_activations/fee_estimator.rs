@@ -263,8 +263,8 @@ mod tests {
 
     #[test]
     fn require_evm_coin_rejects_activated_non_evm_coin() {
-        let err = require_evm_coin("RICK", MmCoinEnum::Test(TestCoin::new("RICK"))).unwrap_err();
-        assert!(matches!(err, FeeEstimatorStreamingError::NotSupportedFor(ticker) if ticker == "RICK"));
+        let err = require_evm_coin("DOC", MmCoinEnum::Test(TestCoin::new("DOC"))).unwrap_err();
+        assert!(matches!(err, FeeEstimatorStreamingError::NotSupportedFor(ticker) if ticker == "DOC"));
     }
 
     #[tokio::test]
@@ -302,7 +302,7 @@ mod tests {
         let ctx = MmCtxBuilder::default().into_mm_arc();
         let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
         coins_ctx
-            .add_coin(MmCoinEnum::Test(TestCoin::new("RICK")))
+            .add_coin(MmCoinEnum::Test(TestCoin::new("DOC")))
             .await
             .unwrap();
         let _handle = ctx.event_stream_manager.new_client(7);
@@ -310,7 +310,7 @@ mod tests {
         let err = match enable_fee_estimator(ctx.clone(), EnableStreamingRequest {
             client_id: 7,
             inner: EnableFeeEstimatorRequest {
-                coin: "RICK".to_owned(),
+                coin: "DOC".to_owned(),
                 config: FeeEstimatorConfig {
                     estimate_every: 15.0,
                     estimator_type: FeeEstimatorType::Simple,
@@ -325,9 +325,9 @@ mod tests {
 
         assert!(matches!(
             err.into_inner(),
-            FeeEstimatorStreamingError::NotSupportedFor(ticker) if ticker == "RICK"
+            FeeEstimatorStreamingError::NotSupportedFor(ticker) if ticker == "DOC"
         ));
-        let streamer_id = StreamerId::FeeEstimation("RICK".to_owned());
+        let streamer_id = StreamerId::FeeEstimation("DOC".to_owned());
         assert!(!ctx.event_stream_manager.is_active(&streamer_id));
         assert!(!ctx.event_stream_manager.client_subscribed_to(7, &streamer_id));
     }

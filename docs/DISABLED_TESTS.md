@@ -76,7 +76,7 @@ Re-enable path: fresh electrum URLs + a network-gated CI job. Flaky by nature.
 - `test_one_unavailable_electrum_proto_version` (`coins/utxo/utxo_tests.rs`) —
   only exercised deprecated electrum protocol v1.2 negotiation. **Delete
   candidate** (no coverage value).
-- `test_spam_rick` (`coins/utxo/utxo_tests.rs`) — manual repro, not an assertion.
+- `test_spam_doc` (`coins/utxo/utxo_tests.rs`) — manual repro, not an assertion.
   **Delete candidate.**
 
 > Note: `coins/eth/abi_golden_tests.rs` mentions `#[ignore]` only in a doc

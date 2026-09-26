@@ -166,12 +166,12 @@ mod tests {
         mock_min_tx_amount();
 
         let net_cfg = net_config_or_panic(6133);
-        let taker_coin = MmCoinEnum::Test(TestCoin::new("MORTY"));
+        let taker_coin = MmCoinEnum::Test(TestCoin::new("MARTY"));
         let trade_amount = MmNumber::from("1");
         let burn_pubkey = net_cfg.burn_addr_raw_pubkey();
 
-        let aware_fee = compute_dex_fee_with_taker_pubkey(net_cfg, &taker_coin, "RICK", &trade_amount, burn_pubkey);
-        let blind_fee = compute_dex_fee(net_cfg, &taker_coin, "RICK", &trade_amount);
+        let aware_fee = compute_dex_fee_with_taker_pubkey(net_cfg, &taker_coin, "DOC", &trade_amount, burn_pubkey);
+        let blind_fee = compute_dex_fee(net_cfg, &taker_coin, "DOC", &trade_amount);
 
         assert_eq!(aware_fee, DexFee::Standard(MmNumber::from((2, 100))));
         assert_eq!(aware_fee, blind_fee);

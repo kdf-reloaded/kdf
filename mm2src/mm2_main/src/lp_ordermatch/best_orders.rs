@@ -435,7 +435,7 @@ mod best_orders_test {
             orders: HashMap<String, Vec<BestOrderWithProofV1>>,
         }
 
-        let orders = make_random_orders("".into(), &[1; 32], "RICK".into(), "MORTY".into(), 10);
+        let orders = make_random_orders("".into(), &[1; 32], "DOC".into(), "MARTY".into(), 10);
         let v1_orders: Vec<_> = orders
             .clone()
             .into_iter()
@@ -447,7 +447,7 @@ mod best_orders_test {
             .collect();
 
         let v1 = BestOrdersResV1 {
-            orders: HashMap::from_iter(std::iter::once(("RICK".into(), v1_orders))),
+            orders: HashMap::from_iter(std::iter::once(("DOC".into(), v1_orders))),
         };
 
         let v1_serialized = rmp_serde::to_vec_named(&v1).unwrap();
@@ -481,7 +481,7 @@ mod best_orders_test {
             .collect();
 
         let v2 = BestOrdersResV2 {
-            orders: HashMap::from_iter(std::iter::once(("RICK".into(), v2_orders))),
+            orders: HashMap::from_iter(std::iter::once(("DOC".into(), v2_orders))),
             protocol_infos: HashMap::from_iter(std::iter::once((Uuid::new_v4(), BaseRelProtocolInfo {
                 base: vec![1],
                 rel: vec![2],

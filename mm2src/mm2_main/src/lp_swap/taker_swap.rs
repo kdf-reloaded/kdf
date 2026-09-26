@@ -2908,7 +2908,7 @@ mod taker_swap_tests {
     #[test]
     fn test_recheck_only_one_swap_contract_address() {
         // swap file contains only maker_coin_swap_contract_address
-        let taker_saved_json = r#"{"type":"Taker","uuid":"49c79ea4-e1eb-4fb2-a0ef-265bded0b77f","events":[{"timestamp":1608542326909,"event":{"type":"Started","data":{"taker_coin":"RICK","maker_coin":"ETH","maker":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","my_persistent_pub":"02031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","lock_duration":7800,"maker_amount":"0.1","taker_amount":"0.1","maker_payment_confirmations":1,"maker_payment_requires_nota":false,"taker_payment_confirmations":0,"taker_payment_requires_nota":false,"taker_payment_lock":1608550126,"uuid":"49c79ea4-e1eb-4fb2-a0ef-265bded0b77f","started_at":1608542326,"maker_payment_wait":1608545446,"maker_coin_start_block":14360,"taker_coin_start_block":723123,"maker_coin_swap_contract_address":"a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd"}}},{"timestamp":1608542327416,"event":{"type":"Negotiated","data":{"maker_payment_locktime":1608557926,"maker_pubkey":"03c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","secret_hash":"8b0221f3b977c1c65dddf17c1c28e2bbced9e7b4"}}},{"timestamp":1608542332604,"event":{"type":"TakerFeeSent","data":{"tx_hex":"0400008085202f89011ca964f77200b73d64b481f47de84098041d3470d6256e44f2741f080e2b11cf020000006b4830450221008a064f5e51ef8281d43eb7bcd016fed7e560ea1eb7b0713ec977602c96d8f79b02205bfaa6655b849b9922c03276b938273f2edb8fb9ffcaa2a9212d7220560f6060012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0246320000000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac62752e27000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac7768e05f000000000000000000000000000000","tx_hash":"3793df28ed2aac6188d2c48ec65eff12eea301089d60da655fc96f598326d708"}}},{"timestamp":1608542334018,"event":{"type":"MakerPaymentReceived","data":{"tx_hex":"f8ef82021c80830249f094a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd88016345785d8a0000b884152cf3af50aebafeaf827c62c2eed09e265fa5aa9e013c0f27f0a88259f1aaa1279f0c32000000000000000000000000bab36286672fbdc7b250804bf6d14be0df69fa298b0221f3b977c1c65dddf17c1c28e2bbced9e7b4000000000000000000000000000000000000000000000000000000000000000000000000000000005fe0a5661ba0f18a0c5c349462b51dacd1a0761e4997d4572a01e48480c4e310d69a40308ad3a04510513f01a79c59f22c9cb79952547c8dfc4c74785b630f512d64369323e0c1","tx_hash":"6782323490584a2bc768cd5199506bfa1ed91e7515b35bb72fa269604b7dc0aa"}}},{"timestamp":1608542334019,"event":{"type":"MakerPaymentWaitConfirmStarted"}},{"timestamp":1608542334825,"event":{"type":"MakerPaymentValidatedAndConfirmed"}},{"timestamp":1608542337671,"event":{"type":"TakerPaymentSent","data":{"tx_hex":"0400008085202f890108d72683596fc95f65da609d0801a3ee12ff5ec68ec4d28861ac2aed28df9337010000006b48304502210086a03db599438b243bee2b02af56e23447f85d09854416b51305536b9ca5890e02204b288acdea4cdc7ab1ffbd9766a7bdf95f5bd02d2917dfb7089dbf29032591b0012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff03809698000000000017a914888e9e1816214c3960eac7b55e35521ca4426b0c870000000000000000166a148b0221f3b977c1c65dddf17c1c28e2bbced9e7b4fada9526000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac7f68e05f000000000000000000000000000000","tx_hash":"44fa493757df5fdca823bbac05a8b8feb5862d799d4947fd544abcd129feceea"}}},{"timestamp":1608542348271,"event":{"type":"TakerPaymentSpent","data":{"transaction":{"tx_hex":"0400008085202f8901eacefe29d1bc4a54fd47499d792d86b5feb8a805acbb23a8dc5fdf573749fa4400000000d74730440220508c853cc4f1fcb9e6aa00e704eef99adaee9a4ea63a1fd6393bb7ff18da02c802200396bb5d52157bd77ff26ac521ed75aca388d3ec1e5e3ebb7b3aed73c3d33ec50120df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e004c6b6304ee86e05fb1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a9148b0221f3b977c1c65dddf17c1c28e2bbced9e7b4882103c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3edac68ffffffff0198929800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac725ae05f000000000000000000000000000000","tx_hash":"9376dde62249802a0aba8259f51def9bb2e509af85a5ec7df04b479a9da28a29"},"secret":"df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e"}}},{"timestamp":1608542349372,"event":{"type":"MakerPaymentSpent","data":{"tx_hex":"f90107821fb980830249f094a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd80b8a402ed292b50aebafeaf827c62c2eed09e265fa5aa9e013c0f27f0a88259f1aaa1279f0c32000000000000000000000000000000000000000000000000016345785d8a0000df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000004b2d0d6c2c785217457b69b922a2a9cea98f71e91ca0ed6a4942a78c7ae6eb3c9dec496459a9ef68b34cb389acd939d13d3ecaf7e4aca021bb77e80fc60acf25a7a01cc1272b1b76594a521fb1abe1322d650e58a672c2","tx_hash":"c2d206e665aee159a5ab9aff60f76444e97bdad8f9152eccb6ca07d9204974ca"}}},{"timestamp":1608542349373,"event":{"type":"Finished"}}],"maker_amount":"0.1","maker_coin":"ETH","taker_amount":"0.1","taker_coin":"RICK","gui":"nogui","mm_version":"1a6082121","success_events":["Started","Negotiated","TakerFeeSent","MakerPaymentReceived","MakerPaymentWaitConfirmStarted","MakerPaymentValidatedAndConfirmed","TakerPaymentSent","TakerPaymentSpent","MakerPaymentSpent","Finished"],"error_events":["StartFailed","NegotiateFailed","TakerFeeSendFailed","MakerPaymentValidateFailed","MakerPaymentWaitConfirmFailed","TakerPaymentTransactionFailed","TakerPaymentWaitConfirmFailed","TakerPaymentDataSendFailed","TakerPaymentWaitForSpendFailed","MakerPaymentSpendFailed","TakerPaymentWaitRefundStarted","TakerPaymentRefunded","TakerPaymentRefundFailed"]}"#;
+        let taker_saved_json = r#"{"type":"Taker","uuid":"49c79ea4-e1eb-4fb2-a0ef-265bded0b77f","events":[{"timestamp":1608542326909,"event":{"type":"Started","data":{"taker_coin":"DOC","maker_coin":"ETH","maker":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","my_persistent_pub":"02031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","lock_duration":7800,"maker_amount":"0.1","taker_amount":"0.1","maker_payment_confirmations":1,"maker_payment_requires_nota":false,"taker_payment_confirmations":0,"taker_payment_requires_nota":false,"taker_payment_lock":1608550126,"uuid":"49c79ea4-e1eb-4fb2-a0ef-265bded0b77f","started_at":1608542326,"maker_payment_wait":1608545446,"maker_coin_start_block":14360,"taker_coin_start_block":723123,"maker_coin_swap_contract_address":"a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd"}}},{"timestamp":1608542327416,"event":{"type":"Negotiated","data":{"maker_payment_locktime":1608557926,"maker_pubkey":"03c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","secret_hash":"8b0221f3b977c1c65dddf17c1c28e2bbced9e7b4"}}},{"timestamp":1608542332604,"event":{"type":"TakerFeeSent","data":{"tx_hex":"0400008085202f89011ca964f77200b73d64b481f47de84098041d3470d6256e44f2741f080e2b11cf020000006b4830450221008a064f5e51ef8281d43eb7bcd016fed7e560ea1eb7b0713ec977602c96d8f79b02205bfaa6655b849b9922c03276b938273f2edb8fb9ffcaa2a9212d7220560f6060012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0246320000000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac62752e27000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac7768e05f000000000000000000000000000000","tx_hash":"3793df28ed2aac6188d2c48ec65eff12eea301089d60da655fc96f598326d708"}}},{"timestamp":1608542334018,"event":{"type":"MakerPaymentReceived","data":{"tx_hex":"f8ef82021c80830249f094a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd88016345785d8a0000b884152cf3af50aebafeaf827c62c2eed09e265fa5aa9e013c0f27f0a88259f1aaa1279f0c32000000000000000000000000bab36286672fbdc7b250804bf6d14be0df69fa298b0221f3b977c1c65dddf17c1c28e2bbced9e7b4000000000000000000000000000000000000000000000000000000000000000000000000000000005fe0a5661ba0f18a0c5c349462b51dacd1a0761e4997d4572a01e48480c4e310d69a40308ad3a04510513f01a79c59f22c9cb79952547c8dfc4c74785b630f512d64369323e0c1","tx_hash":"6782323490584a2bc768cd5199506bfa1ed91e7515b35bb72fa269604b7dc0aa"}}},{"timestamp":1608542334019,"event":{"type":"MakerPaymentWaitConfirmStarted"}},{"timestamp":1608542334825,"event":{"type":"MakerPaymentValidatedAndConfirmed"}},{"timestamp":1608542337671,"event":{"type":"TakerPaymentSent","data":{"tx_hex":"0400008085202f890108d72683596fc95f65da609d0801a3ee12ff5ec68ec4d28861ac2aed28df9337010000006b48304502210086a03db599438b243bee2b02af56e23447f85d09854416b51305536b9ca5890e02204b288acdea4cdc7ab1ffbd9766a7bdf95f5bd02d2917dfb7089dbf29032591b0012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff03809698000000000017a914888e9e1816214c3960eac7b55e35521ca4426b0c870000000000000000166a148b0221f3b977c1c65dddf17c1c28e2bbced9e7b4fada9526000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac7f68e05f000000000000000000000000000000","tx_hash":"44fa493757df5fdca823bbac05a8b8feb5862d799d4947fd544abcd129feceea"}}},{"timestamp":1608542348271,"event":{"type":"TakerPaymentSpent","data":{"transaction":{"tx_hex":"0400008085202f8901eacefe29d1bc4a54fd47499d792d86b5feb8a805acbb23a8dc5fdf573749fa4400000000d74730440220508c853cc4f1fcb9e6aa00e704eef99adaee9a4ea63a1fd6393bb7ff18da02c802200396bb5d52157bd77ff26ac521ed75aca388d3ec1e5e3ebb7b3aed73c3d33ec50120df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e004c6b6304ee86e05fb1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a9148b0221f3b977c1c65dddf17c1c28e2bbced9e7b4882103c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3edac68ffffffff0198929800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac725ae05f000000000000000000000000000000","tx_hash":"9376dde62249802a0aba8259f51def9bb2e509af85a5ec7df04b479a9da28a29"},"secret":"df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e"}}},{"timestamp":1608542349372,"event":{"type":"MakerPaymentSpent","data":{"tx_hex":"f90107821fb980830249f094a09ad3cd7e96586ebd05a2607ee56b56fb2db8fd80b8a402ed292b50aebafeaf827c62c2eed09e265fa5aa9e013c0f27f0a88259f1aaa1279f0c32000000000000000000000000000000000000000000000000016345785d8a0000df871242dcbcc4fe9ed4d3413e21b2f8ce606a3ee7128c9b2d2e31fcedc1848e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000004b2d0d6c2c785217457b69b922a2a9cea98f71e91ca0ed6a4942a78c7ae6eb3c9dec496459a9ef68b34cb389acd939d13d3ecaf7e4aca021bb77e80fc60acf25a7a01cc1272b1b76594a521fb1abe1322d650e58a672c2","tx_hash":"c2d206e665aee159a5ab9aff60f76444e97bdad8f9152eccb6ca07d9204974ca"}}},{"timestamp":1608542349373,"event":{"type":"Finished"}}],"maker_amount":"0.1","maker_coin":"ETH","taker_amount":"0.1","taker_coin":"DOC","gui":"nogui","mm_version":"1a6082121","success_events":["Started","Negotiated","TakerFeeSent","MakerPaymentReceived","MakerPaymentWaitConfirmStarted","MakerPaymentValidatedAndConfirmed","TakerPaymentSent","TakerPaymentSpent","MakerPaymentSpent","Finished"],"error_events":["StartFailed","NegotiateFailed","TakerFeeSendFailed","MakerPaymentValidateFailed","MakerPaymentWaitConfirmFailed","TakerPaymentTransactionFailed","TakerPaymentWaitConfirmFailed","TakerPaymentDataSendFailed","TakerPaymentWaitForSpendFailed","MakerPaymentSpendFailed","TakerPaymentWaitRefundStarted","TakerPaymentRefunded","TakerPaymentRefundFailed"]}"#;
         let taker_saved_swap: TakerSavedSwap = json::from_str(taker_saved_json).unwrap();
         let key_pair =
             key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
@@ -2997,12 +2997,12 @@ mod taker_swap_tests {
         for (available, is_kmd) in source {
             let available = MmNumber::from(available);
             // no matter base or rel is KMD
-            let base = if is_kmd { "RICK" } else { "MORTY" };
+            let base = if is_kmd { "DOC" } else { "MARTY" };
             let max_taker_vol =
-                max_taker_vol_from_available(net_cfg, available.clone(), "RICK", "MORTY", &min_tx_amount)
+                max_taker_vol_from_available(net_cfg, available.clone(), "DOC", "MARTY", &min_tx_amount)
                     .expect("!max_taker_vol_from_available");
 
-            let dex_fee = dex_fee_amount(net_cfg, base, "MORTY", &max_taker_vol, &dex_fee_threshold);
+            let dex_fee = dex_fee_amount(net_cfg, base, "MARTY", &max_taker_vol, &dex_fee_threshold);
             assert!(dex_fee_threshold < dex_fee);
             assert!(min_tx_amount <= max_taker_vol);
             assert_eq!(max_taker_vol + dex_fee, available);
@@ -3022,10 +3022,10 @@ mod taker_swap_tests {
         for (available, is_kmd) in source {
             let available = MmNumber::from(available);
             // no matter base or rel is KMD
-            let base = if is_kmd { "KMD" } else { "RICK" };
-            let max_taker_vol = max_taker_vol_from_available(net_cfg, available.clone(), base, "MORTY", &min_tx_amount)
+            let base = if is_kmd { "KMD" } else { "DOC" };
+            let max_taker_vol = max_taker_vol_from_available(net_cfg, available.clone(), base, "MARTY", &min_tx_amount)
                 .expect("!max_taker_vol_from_available");
-            let dex_fee = dex_fee_amount(net_cfg, base, "MORTY", &max_taker_vol, &dex_fee_threshold);
+            let dex_fee = dex_fee_amount(net_cfg, base, "MARTY", &max_taker_vol, &dex_fee_threshold);
             log!("available "[available.to_decimal()]" max_taker_vol "[max_taker_vol.to_decimal()]", dex_fee "[dex_fee.to_decimal()]);
             assert_eq!(dex_fee_threshold, dex_fee);
             assert!(min_tx_amount <= max_taker_vol);
@@ -3045,7 +3045,7 @@ mod taker_swap_tests {
         ];
         for available in availables {
             let available = MmNumber::from(available);
-            max_taker_vol_from_available(net_cfg, available.clone(), "KMD", "MORTY", &dex_fee_threshold)
+            max_taker_vol_from_available(net_cfg, available.clone(), "KMD", "MARTY", &dex_fee_threshold)
                 .expect_err("!max_taker_vol_from_available success but should be error");
         }
     }
@@ -3064,8 +3064,8 @@ mod taker_swap_tests {
                     "event": {
                         "type": "Started",
                         "data": {
-                            "taker_coin": "MORTY",
-                            "maker_coin": "RICK",
+                            "taker_coin": "MARTY",
+                            "maker_coin": "DOC",
                             "maker": "15d9c51c657ab1be4ae9d3ab6e76a619d3bccfe830d5363fa168424c0d044732",
                             "my_persistent_pub": "03ad6f89abc2e5beaa8a3ac28e22170659b3209fe2ddf439681b4b8f31508c36fa",
                             "lock_duration": 7800,
@@ -3082,17 +3082,17 @@ mod taker_swap_tests {
                             "maker_coin_start_block": 865240,
                             "taker_coin_start_block": 869167,
                             "fee_to_send_taker_fee": {
-                                "coin": "MORTY",
+                                "coin": "MARTY",
                                 "amount": "0.00001",
                                 "paid_from_trading_vol": false
                             },
                             "taker_payment_trade_fee": {
-                                "coin": "MORTY",
+                                "coin": "MARTY",
                                 "amount": "0.00001",
                                 "paid_from_trading_vol": false
                             },
                             "maker_payment_spend_trade_fee": {
-                                "coin": "RICK",
+                                "coin": "DOC",
                                 "amount": "0.00001",
                                 "paid_from_trading_vol": true
                             }
@@ -3101,9 +3101,9 @@ mod taker_swap_tests {
                 }
             ],
             "maker_amount": "0.1",
-            "maker_coin": "RICK",
+            "maker_coin": "DOC",
             "taker_amount": "0.11",
-            "taker_coin": "MORTY",
+            "taker_coin": "MARTY",
             "gui": null,
             "mm_version": "21867da64",
             "success_events": [],
@@ -3115,8 +3115,8 @@ mod taker_swap_tests {
                 .unwrap();
         let ctx = test_ctx_with_netid(key_pair);
 
-        let maker_coin = MmCoinEnum::Test(TestCoin::new("RICK"));
-        let taker_coin = MmCoinEnum::Test(TestCoin::new("MORTY"));
+        let maker_coin = MmCoinEnum::Test(TestCoin::new("DOC"));
+        let taker_coin = MmCoinEnum::Test(TestCoin::new("MARTY"));
 
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
         TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
@@ -3127,10 +3127,10 @@ mod taker_swap_tests {
         let weak_ref = Arc::downgrade(&arc);
         swaps_ctx.running_swaps.lock().unwrap().push(weak_ref);
 
-        let actual = get_locked_amount(&ctx, "RICK");
+        let actual = get_locked_amount(&ctx, "DOC");
         assert_eq!(actual, MmNumber::from(0));
 
-        let actual = get_locked_amount_by_other_swaps(&ctx, &new_uuid(), "RICK");
+        let actual = get_locked_amount_by_other_swaps(&ctx, &new_uuid(), "DOC");
         assert_eq!(actual, MmNumber::from(0));
     }
 
@@ -3159,8 +3159,8 @@ mod taker_swap_tests {
                         "event": {{
                             "type": "Started",
                             "data": {{
-                                "taker_coin": "MORTY",
-                                "maker_coin": "RICK",
+                                "taker_coin": "MARTY",
+                                "maker_coin": "DOC",
                                 "maker": "15d9c51c657ab1be4ae9d3ab6e76a619d3bccfe830d5363fa168424c0d044732",
                                 "my_persistent_pub": "03ad6f89abc2e5beaa8a3ac28e22170659b3209fe2ddf439681b4b8f31508c36fa",
                                 "lock_duration": 7800,
@@ -3177,17 +3177,17 @@ mod taker_swap_tests {
                                 "maker_coin_start_block": 865240,
                                 "taker_coin_start_block": 869167,
                                 "fee_to_send_taker_fee": {{
-                                    "coin": "MORTY",
+                                    "coin": "MARTY",
                                     "amount": "0.00001",
                                     "paid_from_trading_vol": false
                                 }},
                                 "taker_payment_trade_fee": {{
-                                    "coin": "MORTY",
+                                    "coin": "MARTY",
                                     "amount": "0.00001",
                                     "paid_from_trading_vol": false
                                 }},
                                 "maker_payment_spend_trade_fee": {{
-                                    "coin": "RICK",
+                                    "coin": "DOC",
                                     "amount": "0.00001",
                                     "paid_from_trading_vol": true
                                 }}
@@ -3196,9 +3196,9 @@ mod taker_swap_tests {
                     }}{events_tail}
                 ],
                 "maker_amount": "0.1",
-                "maker_coin": "RICK",
+                "maker_coin": "DOC",
                 "taker_amount": "0.11",
-                "taker_coin": "MORTY",
+                "taker_coin": "MARTY",
                 "gui": null,
                 "mm_version": "21867da64",
                 "success_events": [],
@@ -3211,8 +3211,8 @@ mod taker_swap_tests {
                     .unwrap();
             let ctx = test_ctx_with_netid(key_pair);
 
-            let maker_coin = MmCoinEnum::Test(TestCoin::new("RICK"));
-            let taker_coin = MmCoinEnum::Test(TestCoin::new("MORTY"));
+            let maker_coin = MmCoinEnum::Test(TestCoin::new("DOC"));
+            let taker_coin = MmCoinEnum::Test(TestCoin::new("MARTY"));
 
             TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
             TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
@@ -3223,7 +3223,7 @@ mod taker_swap_tests {
             let weak_ref = Arc::downgrade(&arc);
             swaps_ctx.running_swaps.lock().unwrap().push(weak_ref);
 
-            get_locked_amount(&ctx, "MORTY")
+            get_locked_amount(&ctx, "MARTY")
         }
 
         // Still running: the volume it has not yet paid is genuinely reserved.

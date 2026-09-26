@@ -9,8 +9,8 @@ fn test_best_orders() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":52592,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -104,10 +104,10 @@ fn test_best_orders() {
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MARTY").unwrap();
-    assert_eq!(1, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap();
+    assert_eq!(1, best_marty_orders.len());
     let expected_price: BigDecimal = "0.8".parse().unwrap();
-    assert_eq!(expected_price, best_morty_orders[0].price);
+    assert_eq!(expected_price, best_marty_orders[0].price);
 
     let rc = block_on(mm_alice.rpc(&json! ({
         "userpass": mm_alice.userpass,
@@ -119,15 +119,15 @@ fn test_best_orders() {
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    // MORTY
-    let best_morty_orders = response.result.get("MARTY").unwrap();
+    // MARTY
+    let best_marty_orders = response.result.get("MARTY").unwrap();
     let expected_price: BigDecimal = "0.7".parse().unwrap();
-    let bob_morty_addr = addr_from_enable(&bob_coins, "MARTY");
-    assert_eq!(expected_price, best_morty_orders[0].price);
-    assert_eq!(bob_morty_addr, best_morty_orders[0].address);
+    let bob_marty_addr = addr_from_enable(&bob_coins, "MARTY");
+    assert_eq!(expected_price, best_marty_orders[0].price);
+    assert_eq!(bob_marty_addr, best_marty_orders[0].address);
     let expected_price: BigDecimal = "0.8".parse().unwrap();
-    assert_eq!(expected_price, best_morty_orders[1].price);
-    assert_eq!(bob_morty_addr, best_morty_orders[1].address);
+    assert_eq!(expected_price, best_marty_orders[1].price);
+    assert_eq!(bob_marty_addr, best_marty_orders[1].address);
     // ETH
     let expected_price: BigDecimal = "0.8".parse().unwrap();
     let best_eth_orders = response.result.get("ETH").unwrap();
@@ -146,9 +146,9 @@ fn test_best_orders() {
 
     let expected_price: BigDecimal = "1.25".parse().unwrap();
 
-    let best_morty_orders = response.result.get("MARTY").unwrap();
-    assert_eq!(expected_price, best_morty_orders[0].price);
-    assert_eq!(1, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap();
+    assert_eq!(expected_price, best_marty_orders[0].price);
+    assert_eq!(1, best_marty_orders.len());
 
     let best_eth_orders = response.result.get("ETH").unwrap();
     assert_eq!(expected_price, best_eth_orders[0].price);
@@ -166,10 +166,10 @@ fn test_best_orders() {
 
     let expected_price: BigDecimal = "1.25".parse().unwrap();
 
-    let best_morty_orders = response.result.get("MARTY").unwrap();
-    assert_eq!(expected_price, best_morty_orders[0].price);
-    assert_eq!("MARTY", best_morty_orders[0].coin);
-    assert_eq!(1, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap();
+    assert_eq!(expected_price, best_marty_orders[0].price);
+    assert_eq!("MARTY", best_marty_orders[0].coin);
+    assert_eq!(1, best_marty_orders.len());
 
     block_on(mm_bob.stop()).unwrap();
     block_on(mm_alice.stop()).unwrap();
@@ -181,8 +181,8 @@ fn test_best_orders_duplicates_after_update() {
     let eve_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let coins = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":52592,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}}
     ]);
 
     // start bob as a seednode
@@ -275,10 +275,10 @@ fn test_best_orders_duplicates_after_update() {
     .unwrap();
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MARTY").unwrap();
-    assert_eq!(1, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap();
+    assert_eq!(1, best_marty_orders.len());
     let expected_price: BigDecimal = "1".parse().unwrap();
-    assert_eq!(expected_price, best_morty_orders[0].price);
+    assert_eq!(expected_price, best_marty_orders[0].price);
 
     for _ in 0..5 {
         let rc = block_on(mm_eve.rpc(&json!({
@@ -315,10 +315,10 @@ fn test_best_orders_duplicates_after_update() {
 
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
-    let best_morty_orders = response.result.get("MARTY").unwrap();
-    assert_eq!(1, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap();
+    assert_eq!(1, best_marty_orders.len());
     let expected_price: BigDecimal = "1.2".parse().unwrap();
-    assert_eq!(expected_price, best_morty_orders[0].price);
+    assert_eq!(expected_price, best_marty_orders[0].price);
 
     block_on(mm_bob.stop()).unwrap();
     block_on(mm_alice.stop()).unwrap();
@@ -331,16 +331,16 @@ fn test_best_orders_filter_response() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":52592,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
 
-    // alice defined MORTY as "wallet_only" in config
+    // alice defined MARTY as "wallet_only" in config
     let alice_coins_config = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
-        {"coin":"MARTY","asset":"MARTY","rpcport":11608,"wallet_only": true,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","rpcport":52592,"wallet_only": true,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"ETH","name":"ethereum","protocol":{"type":"ETH"},"rpcport":80},
         {"coin":"JST","name":"jst","protocol":{"type":"ERC20", "protocol_data":{"platform":"ETH","contract_address":"0x2b294F029Fde858b2c62184e8390591755521d8E"}}}
     ]);
@@ -435,8 +435,8 @@ fn test_best_orders_filter_response() {
     assert!(rc.0.is_success(), "!best_orders: {}", rc.1);
     let response: BestOrdersResponse = json::from_str(&rc.1).unwrap();
     let empty_vec = Vec::new();
-    let best_morty_orders = response.result.get("MARTY").unwrap_or(&empty_vec);
-    assert_eq!(0, best_morty_orders.len());
+    let best_marty_orders = response.result.get("MARTY").unwrap_or(&empty_vec);
+    assert_eq!(0, best_marty_orders.len());
     let best_eth_orders = response.result.get("ETH").unwrap();
     assert_eq!(1, best_eth_orders.len());
 
@@ -450,12 +450,12 @@ fn test_best_orders_address_and_confirmations() {
     let bob_passphrase = get_passphrase(&".env.seed", "BOB_PASSPHRASE").unwrap();
 
     let bob_coins_config = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"required_confirmations":10,"requires_notarization":true,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":5,"requires_notarization":false,"protocol":{"type":"UTXO"},"address_format":{"format":"segwit"}}
     ]);
 
     let alice_coins_config = json!([
-        {"coin":"DOC","asset":"DOC","rpcport":8923,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
+        {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"overwintered":1,"protocol":{"type":"UTXO"}},
         {"coin":"tBTC","name":"tbitcoin","fname":"tBitcoin","rpcport":18332,"pubtype":111,"p2shtype":196,"wiftype":239,"segwit":true,"bech32_hrp":"tb","txfee":0,"estimate_fee_mode":"ECONOMICAL","mm2":1,"required_confirmations":0,"protocol":{"type":"UTXO"}}
     ]);
 
@@ -502,7 +502,7 @@ fn test_best_orders_address_and_confirmations() {
         "userpass": "pass",
         "method": "electrum",
         "coin": "DOC",
-        "servers": [{"url":"electrum1.cipig.net:10017"},{"url":"electrum2.cipig.net:10017"},{"url":"electrum3.cipig.net:10017"}],
+        "servers": [{"url":"doc.electrum1.cipig.net:10020"},{"url":"doc.electrum2.cipig.net:10020"},{"url":"doc.electrum3.cipig.net:10020"}],
         "mm2": 1,
     }))).unwrap();
     assert_eq!(
@@ -512,9 +512,9 @@ fn test_best_orders_address_and_confirmations() {
         electrum.0,
         electrum.1
     );
-    log!({ "enable RICK: {:?}", electrum });
-    let enable_rick_res: EnableElectrumResponse = json::from_str(&electrum.1).unwrap();
-    let rick_address = enable_rick_res.address;
+    log!({ "enable DOC: {:?}", electrum });
+    let enable_doc_res: EnableElectrumResponse = json::from_str(&electrum.1).unwrap();
+    let doc_address = enable_doc_res.address;
 
     // issue sell request on Bob side by setting base/rel price
     log!("Issue bob sell requests");
@@ -577,7 +577,7 @@ fn test_best_orders_address_and_confirmations() {
     let best_orders = response.result.get("DOC").unwrap();
     assert_eq!(1, best_orders.len());
     assert_eq!(best_orders[0].coin, "DOC");
-    assert_eq!(best_orders[0].address, rick_address);
+    assert_eq!(best_orders[0].address, doc_address);
     assert_eq!(best_orders[0].base_confs, 5);
     assert!(!best_orders[0].base_nota);
     assert_eq!(best_orders[0].rel_confs, 10);
@@ -635,7 +635,7 @@ fn test_best_orders_address_and_confirmations() {
     let best_orders = response.result.get("DOC").unwrap();
     assert_eq!(1, best_orders.len());
     assert_eq!(best_orders[0].coin, "DOC");
-    assert_eq!(best_orders[0].address, rick_address);
+    assert_eq!(best_orders[0].address, doc_address);
     assert_eq!(best_orders[0].base_confs, 5);
     assert!(!best_orders[0].base_nota);
     assert_eq!(best_orders[0].rel_confs, 10);
@@ -736,10 +736,10 @@ fn zhtlc_best_orders() {
 
     let best_orders = block_on(best_orders_v2(&mm_alice, "ZOMBIE", "buy", "1"));
     let best_orders: RpcV2Response<BestOrdersV2Response> = json::from_value(best_orders).unwrap();
-    let rick_best_orders = best_orders.result.orders.get("DOC").unwrap();
+    let doc_best_orders = best_orders.result.orders.get("DOC").unwrap();
 
-    assert_eq!(1, rick_best_orders.len());
-    rick_best_orders
+    assert_eq!(1, doc_best_orders.len());
+    doc_best_orders
         .iter()
         .find(|order| order.uuid == bob_set_price_res.result.uuid)
         .unwrap();

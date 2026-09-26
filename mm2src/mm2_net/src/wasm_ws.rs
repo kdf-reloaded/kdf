@@ -695,7 +695,7 @@ mod tests {
         let conn_idx = CONN_IDX.fetch_add(1, Ordering::Relaxed);
 
         let (mut outgoing_tx, mut incoming_rx) =
-            spawn_ws_transport(conn_idx, "wss://electrum1.cipig.net:30017").expect("!spawn_ws_transport");
+            spawn_ws_transport(conn_idx, "wss://doc.electrum1.cipig.net:30020").expect("!spawn_ws_transport");
 
         match incoming_rx.next().timeout_secs(5.).await.unwrap_w() {
             Some((_conn_idx, WebSocketEvent::Establish)) => (),
@@ -754,7 +754,7 @@ mod tests {
 
         // TODO check if outgoing messages are ignored non-open states
         let (_outgoing_tx, mut incoming_rx) =
-            spawn_ws_transport(conn_idx, "ws://electrum1.cipig.net:10017").expect("!spawn_ws_transport");
+            spawn_ws_transport(conn_idx, "ws://doc.electrum1.cipig.net:10020").expect("!spawn_ws_transport");
 
         match incoming_rx.next().timeout_secs(5.).await.unwrap_w() {
             Some((

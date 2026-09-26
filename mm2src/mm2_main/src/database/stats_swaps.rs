@@ -429,18 +429,18 @@ fn test_split_coin() {
     let actual = split_coin(input);
     assert_eq!(expected, actual);
 
-    let input = "RICK";
-    let expected = ("RICK".into(), "".into());
+    let input = "DOC";
+    let expected = ("DOC".into(), "".into());
     let actual = split_coin(input);
     assert_eq!(expected, actual);
 
-    let input = "RICK-BEP20";
-    let expected = ("RICK".into(), "BEP20".into());
+    let input = "DOC-BEP20";
+    let expected = ("DOC".into(), "BEP20".into());
     let actual = split_coin(input);
     assert_eq!(expected, actual);
 
-    let input = "RICK-";
-    let expected = ("RICK".into(), "".into());
+    let input = "DOC-";
+    let expected = ("DOC".into(), "".into());
     let actual = split_coin(input);
     assert_eq!(expected, actual);
 }
