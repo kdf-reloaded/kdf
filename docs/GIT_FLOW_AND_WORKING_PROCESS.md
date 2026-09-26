@@ -9,13 +9,17 @@ feature branches.
 |---|---|---|
 | `main` | Tagged releases only | Always shippable |
 | `staging` | Pre-release integration | Green CI, QA-tested |
-| `reloaded-gplv2-base` | Active development (dev) | Green CI, may have unreleased features |
+| `dev` | Active development | Green CI, may have unreleased features |
 
-Hierarchy: `main` ← `staging` ← `reloaded-gplv2-base` ← feature branches.
+Hierarchy: `main` ← `staging` ← `dev` ← feature branches.
+
+`reloaded-gplv2-base` is a historical branch. It stopped receiving work in
+June 2026 and is far behind `dev`, so do not branch from it or compare
+against it.
 
 Promotion is one-way and explicit:
-1. Feature branch → `reloaded-gplv2-base` after PR review + green CI.
-2. `reloaded-gplv2-base` → `staging` when a release candidate is ready.
+1. Feature branch → `dev` after PR review + green CI.
+2. `dev` → `staging` when a release candidate is ready.
 3. `staging` → `main` after QA sign-off, then tag `vX.Y.Z` (annotated, GPG-signed).
 
 Release tags use the `v*` convention and drive the signed release pipeline
@@ -34,7 +38,7 @@ to `staging`).
 When comparing against an ancestor, use:
 
 ```bash
-git merge-base HEAD origin/reloaded-gplv2-base
+git merge-base HEAD origin/dev
 ```
 
 If `origin/staging` and `origin/main` already exist in your clone, you may
@@ -45,20 +49,23 @@ The deprecated upstream `mm2.1` branch is not used in Reloaded.
 ## Feature branches
 
 - Lifetime ≤ 1–2 weeks. Decompose larger work into multiple feature branches.
-- Branch from `reloaded-gplv2-base`. Never branch from `main` or `staging`.
+- Branch from `origin/dev`. Never branch from `main`, `staging`, or
+  `reloaded-gplv2-base`.
 - Hotfixes for `main` are exceptional and must be back-merged into
-  `staging` and `reloaded-gplv2-base` immediately after.
+  `staging` and `dev` immediately after.
 
 ## Commits
 
 - Small, self-contained commits. Each commit must leave the tree compiling
   and tests passing.
-- Run `cargo fmt` before committing. CI fails on unformatted code.
-- Run `cargo clippy -p <crate> --all-targets -- -D warnings` on touched
-  crates. For WASM-only code add `--target wasm32-unknown-unknown`.
-- For larger refactors, follow the phased plan files at the repo root
-  (`RELOADED-PLAN.md`, `RELOADED-REFACTOR.md`, `RELOADED-UNIT-TESTS.md`).
-  Mark items `[x]` with the commit SHA as you ship them.
+- Format touched packages with the pinned toolchain
+  (`cargo +nightly-2026-05-08 fmt -p <package>`) before committing. CI fails
+  on unformatted code. Never run a bare workspace-wide `cargo fmt`.
+- Run `cargo clippy -p <package> --all-targets --no-deps -- -D warnings` on
+  touched packages. For WASM-only code add `--target wasm32-unknown-unknown`.
+  `AGENTS.md` §6 has the full verification list.
+- For larger work, write or follow a plan under [`docs/plans/`](./plans/)
+  and record progress there as items ship.
 
 ## PRs
 
