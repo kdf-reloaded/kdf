@@ -1,5 +1,5 @@
 #![feature(custom_test_frameworks)]
-#![feature(test)]
+#![cfg_attr(test, feature(test))]
 #![test_runner(docker_tests_runner)]
 #![recursion_limit = "512"]
 // This is a separate crate root from `mm2_lib.rs`/`mm2_bin.rs` (its own [[bin]]
@@ -13,6 +13,13 @@
 #![allow(clippy::result_large_err)]
 #![allow(clippy::diverging_sub_expression)]
 #![allow(clippy::explicit_auto_deref)]
+// Test builds expand `#[mockable]` (mocktopus) on the mocked items; the
+// generated injection code trips these lints, which cannot be fixed at the
+// source, so they are allowed for test builds only.
+#![cfg_attr(
+    test,
+    allow(clippy::swap_ptr_to_ref, clippy::forget_non_drop, clippy::let_unit_value)
+)]
 
 #[cfg(test)] use docker_tests::docker_tests_runner;
 
