@@ -192,11 +192,10 @@ impl ZCoin {
         if self.ironwood_build_refused() {
             return MmError::err(GenTxError::IronwoodUpgradeUnsupported {
                 coin: self.ticker().to_owned(),
-                activation_time: self
-                    .z_fields
-                    .consensus_params
-                    .ironwood_activation_time()
-                    .unwrap_or_default(),
+                // The effective time, not the configured one: the guard fires on a
+                // built-in activation time too (R39.6.4d), and reporting the
+                // configured value would name `0` in exactly that case.
+                activation_time: self.effective_ironwood_activation_time().unwrap_or_default(),
             });
         }
         while !self.is_sapling_state_synced() {

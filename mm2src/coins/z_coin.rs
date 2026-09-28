@@ -141,6 +141,60 @@ mod z_coin_tests;
 /// unaffected, and swaps already under way are never interrupted.
 const IRONWOOD_V6_SUPPORTED: bool = false;
 
+/// Pirate Chain mainnet Ironwood activation: Sat 3 Oct 2026 19:00:00 UTC.
+///
+/// Read from Pirate's own `KOMODO_IRONWOOD_ACTIVATION` (`src/komodo_defs.h`) and
+/// confirmed by the Pirate maintainer on 2026-09-28, who also confirmed that no
+/// activation *height* will be published ahead of the upgrade and that there will
+/// be no standardness grace period.
+const ARRR_IRONWOOD_ACTIVATION_TIME: u32 = 1_791_054_000;
+
+/// The Ironwood activation time this build knows for a coin, used when the coin
+/// configuration does not supply one.
+///
+/// Every published ARRR coin configuration omits `ironwood_activation_time` — the
+/// field is an extension introduced by this project, and upstream KDF has no
+/// equivalent — so without a built-in value the two gates below would never engage
+/// on any deployment but our own. The upgrade is a fact about the network rather
+/// than an operator preference, so the value is carried here and a configuration
+/// entry overrides it (R39.6.4d).
+///
+/// Keyed on ticker rather than on the consensus parameters because the parameters
+/// of an Ironwood chain are indistinguishable from those of a chain that will
+/// never upgrade.
+fn builtin_ironwood_activation_time(ticker: &str) -> Option<u32> {
+    match ticker {
+        "ARRR" => Some(ARRR_IRONWOOD_ACTIVATION_TIME),
+        _ => None,
+    }
+}
+
+/// The Ironwood activation time in force for a coin: the configured value, else the
+/// built-in one, unless the configuration opts out.
+///
+/// Precedence is configuration over built-in so that a moved activation time stays a
+/// data change — the Pirate maintainer restated 3 Oct 2026 19:00 UTC as fixed, but a
+/// compiled-in date that could not be overridden would refuse every transaction of
+/// the coin, and freeze its market, until a new binary shipped.
+///
+/// The built-in value is withheld from test and regtest parameters: those networks
+/// activate Ironwood at a *height* with no timestamp at all (Pirate testnet at
+/// height 297), so applying a mainnet timestamp there would gate a chain whose
+/// activation it does not describe.
+fn effective_ironwood_activation_time(params: &ZcoinConsensusParams, ticker: &str) -> Option<u32> {
+    if params.ironwood_gate_disabled() {
+        return None;
+    }
+
+    params.ironwood_activation_time().or_else(|| {
+        if matches!(params.network_type_hint(), NetworkType::Main) {
+            builtin_ironwood_activation_time(ticker)
+        } else {
+            None
+        }
+    })
+}
+
 /// How far ahead of Ironwood activation a coin that cannot build v6 transactions
 /// stops entering new swaps, in seconds.
 ///
@@ -240,12 +294,29 @@ pub struct ZcoinConsensusParams {
     /// can be published ahead of time. Optional and additive; absent for every
     /// coin that has no Ironwood upgrade, and ignored by builds that predate it.
     ///
+    /// When present this value is used; when absent, a built-in value for the
+    /// coin's ticker applies on mainnet (R39.6.4d) — for ARRR, 3 Oct 2026
+    /// 19:00 UTC. Configuration therefore *overrides* rather than *enables*, so a
+    /// moved activation time remains a data change.
+    ///
     /// **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade
-    /// gating. Omit this field to retain GLEEC-equivalent behaviour for a coin;
-    /// when present it drives both the swap freeze and the build refusal. See
-    /// `docs/GLEEC_COMPATIBILITY.md`.
+    /// gating. Because a built-in value applies when this field is absent, omitting
+    /// it is *not* sufficient to match GLEEC KDF — set `ironwood_gate_disabled` to
+    /// `true` for that. See `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_activation_time: Option<u32>,
+    /// Suppresses the Ironwood swap freeze and build refusal for this coin
+    /// entirely, including the built-in activation time (R39.6.4d).
+    ///
+    /// The escape hatch for an operator who would rather meet the network's own
+    /// rejection than this build's refusal — and the switch that restores
+    /// GLEEC-equivalent behaviour, since simply omitting
+    /// `ironwood_activation_time` no longer does so.
+    ///
+    /// **Compatibility:** set to `true` to match GLEEC KDF exactly. Defaults to
+    /// `false`. See `docs/GLEEC_COMPATIBILITY.md`.
+    #[serde(default)]
+    ironwood_gate_disabled: bool,
     /// Ironwood activation height, once the network has derived and published it.
     ///
     /// Optional: the height is unknown until the upgrade is imminent, and a
@@ -296,6 +367,9 @@ impl ZcoinConsensusParams {
     /// Ironwood activation height, when the network has derived and published one.
     #[allow(dead_code)] // Consumed by the Ironwood build guard and swap freeze.
     pub(crate) fn ironwood_activation_height(&self) -> Option<u32> { self.ironwood_activation_height }
+
+    /// Whether this coin opts out of Ironwood gating altogether.
+    pub(crate) fn ironwood_gate_disabled(&self) -> bool { self.ironwood_gate_disabled }
 
     fn hrp_sapling_extended_spending_key(&self) -> &str { &self.hrp_sapling_extended_spending_key }
 
@@ -778,7 +852,9 @@ mod ironwood_swap_freeze_tests {
     use super::*;
 
     /// Pirate mainnet Ironwood activation: Sat 3 Oct 2026 19:00:00 UTC.
-    const ARRR_IRONWOOD_ACTIVATION: u32 = 1_791_054_000;
+    ///
+    /// Aliases the production constant so the two cannot drift.
+    const ARRR_IRONWOOD_ACTIVATION: u32 = ARRR_IRONWOOD_ACTIVATION_TIME;
     /// The moment the freeze engages for that activation: 1 Oct 2026 23:40:00 UTC.
     const ARRR_FREEZE_START: u64 = ARRR_IRONWOOD_ACTIVATION as u64 - IRONWOOD_SWAP_FREEZE_MARGIN_SECS;
 
@@ -989,6 +1065,137 @@ mod ironwood_consensus_param_tests {
         let parsed: ZcoinConsensusParams = serde_json::from_value(nulls).unwrap();
         assert_eq!(parsed.ironwood_activation_time(), None);
         assert_eq!(parsed.ironwood_activation_height(), None);
+    }
+
+    /// Every published ARRR coin configuration omits `ironwood_activation_time`, so
+    /// without a built-in value neither gate would ever engage in production. The
+    /// built-in one must arm them from the coin file as it actually ships.
+    #[test]
+    fn builtin_activation_time_arms_the_gates_when_the_coin_file_omits_it() {
+        let params: ZcoinConsensusParams = serde_json::from_value(arrr_params_without_ironwood()).unwrap();
+        // The field really is absent — the point of the test.
+        assert_eq!(params.ironwood_activation_time(), None);
+
+        let effective = effective_ironwood_activation_time(&params, "ARRR");
+        assert_eq!(effective, Some(ARRR_IRONWOOD_ACTIVATION_TIME));
+
+        // And the gates fire off it, on the same schedule as a configured value.
+        let freeze_start = ARRR_IRONWOOD_ACTIVATION_TIME as u64 - IRONWOOD_SWAP_FREEZE_MARGIN_SECS;
+        assert!(!ironwood_swap_freeze_active_at(
+            effective,
+            IRONWOOD_V6_SUPPORTED,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            freeze_start - 1,
+        ));
+        assert!(ironwood_swap_freeze_active_at(
+            effective,
+            IRONWOOD_V6_SUPPORTED,
+            IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
+            freeze_start,
+        ));
+        assert!(!ironwood_build_refused_at(
+            effective,
+            IRONWOOD_V6_SUPPORTED,
+            ARRR_IRONWOOD_ACTIVATION_TIME as u64 - 1
+        ));
+        assert!(ironwood_build_refused_at(
+            effective,
+            IRONWOOD_V6_SUPPORTED,
+            ARRR_IRONWOOD_ACTIVATION_TIME as u64
+        ));
+    }
+
+    /// Configuration overrides the built-in, so a moved activation time stays a data
+    /// change rather than a release.
+    #[test]
+    fn configured_activation_time_overrides_the_builtin() {
+        let moved = ARRR_IRONWOOD_ACTIVATION_TIME + 86_400;
+        let mut cfg = arrr_params_without_ironwood();
+        cfg["ironwood_activation_time"] = json!(moved);
+        let params: ZcoinConsensusParams = serde_json::from_value(cfg).unwrap();
+
+        assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), Some(moved));
+        // The built-in must not win, or a delayed upgrade could not be followed.
+        assert_ne!(
+            effective_ironwood_activation_time(&params, "ARRR"),
+            Some(ARRR_IRONWOOD_ACTIVATION_TIME)
+        );
+    }
+
+    /// The opt-out that restores GLEEC-equivalent behaviour. It must beat both the
+    /// built-in value and an explicitly configured one, otherwise an operator who
+    /// asked for no gating would still be gated.
+    #[test]
+    fn ironwood_gate_disabled_suppresses_both_the_builtin_and_a_configured_time() {
+        let mut off = arrr_params_without_ironwood();
+        off["ironwood_gate_disabled"] = json!(true);
+        let params: ZcoinConsensusParams = serde_json::from_value(off).unwrap();
+        assert!(params.ironwood_gate_disabled());
+        assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), None);
+
+        let mut off_with_time = arrr_params_without_ironwood();
+        off_with_time["ironwood_gate_disabled"] = json!(true);
+        off_with_time["ironwood_activation_time"] = json!(ARRR_IRONWOOD_ACTIVATION_TIME);
+        let params: ZcoinConsensusParams = serde_json::from_value(off_with_time).unwrap();
+        assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), None);
+
+        // Defaulting matters as much as the switch: an existing coin file that says
+        // nothing must not be read as opting out.
+        let silent: ZcoinConsensusParams = serde_json::from_value(arrr_params_without_ironwood()).unwrap();
+        assert!(!silent.ironwood_gate_disabled());
+    }
+
+    /// The built-in value is keyed on ticker, so a shielded coin with no Ironwood
+    /// upgrade must not inherit Pirate's activation time from ARRR-shaped parameters.
+    #[test]
+    fn builtin_applies_only_to_known_tickers() {
+        let params: ZcoinConsensusParams = serde_json::from_value(arrr_params_without_ironwood()).unwrap();
+        for ticker in ["ZOMBIE", "ARRR-segwit", "arrr", "", "KMD"] {
+            assert_eq!(
+                effective_ironwood_activation_time(&params, ticker),
+                None,
+                "{ticker} must not inherit Pirate's activation time"
+            );
+        }
+    }
+
+    /// Pirate's test and regtest networks activate Ironwood at a *height* with no
+    /// timestamp (testnet at 297), so the mainnet timestamp describes neither. A
+    /// build-time default must not gate them off a value that does not apply.
+    #[test]
+    fn builtin_is_withheld_from_test_and_regtest_parameters() {
+        use zcash_protocol::constants::{regtest, testnet};
+
+        for (hrp_addr, hrp_key) in [
+            (
+                testnet::HRP_SAPLING_PAYMENT_ADDRESS,
+                testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            ),
+            (
+                regtest::HRP_SAPLING_PAYMENT_ADDRESS,
+                regtest::HRP_SAPLING_EXTENDED_SPENDING_KEY,
+            ),
+        ] {
+            let mut cfg = arrr_params_without_ironwood();
+            cfg["hrp_sapling_payment_address"] = json!(hrp_addr);
+            cfg["hrp_sapling_extended_spending_key"] = json!(hrp_key);
+            let params: ZcoinConsensusParams = serde_json::from_value(cfg).unwrap();
+            assert!(!matches!(params.network_type_hint(), NetworkType::Main));
+            assert_eq!(
+                effective_ironwood_activation_time(&params, "ARRR"),
+                None,
+                "{hrp_addr} parameters must not take the mainnet built-in"
+            );
+        }
+
+        // An explicit configured value still applies on those networks — the
+        // withholding is of the *default*, not of the feature.
+        let mut cfg = arrr_params_without_ironwood();
+        cfg["hrp_sapling_payment_address"] = json!(testnet::HRP_SAPLING_PAYMENT_ADDRESS);
+        cfg["hrp_sapling_extended_spending_key"] = json!(testnet::HRP_SAPLING_EXTENDED_SPENDING_KEY);
+        cfg["ironwood_activation_time"] = json!(1_700_000_000u32);
+        let params: ZcoinConsensusParams = serde_json::from_value(cfg).unwrap();
+        assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), Some(1_700_000_000));
     }
 
     /// A2 only carries the data. Until Step 3 maps it, no post-Sapling upgrade may
@@ -1421,7 +1628,7 @@ impl ZCoin {
     /// network now requires.
     pub(crate) fn ironwood_build_refused(&self) -> bool {
         ironwood_build_refused_at(
-            self.z_fields.consensus_params.ironwood_activation_time(),
+            self.effective_ironwood_activation_time(),
             IRONWOOD_V6_SUPPORTED,
             now_ms() / 1000,
         )
@@ -1429,11 +1636,17 @@ impl ZCoin {
 
     fn ironwood_swap_freeze_active(&self) -> bool {
         ironwood_swap_freeze_active_at(
-            self.z_fields.consensus_params.ironwood_activation_time(),
+            self.effective_ironwood_activation_time(),
             IRONWOOD_V6_SUPPORTED,
             IRONWOOD_SWAP_FREEZE_MARGIN_SECS,
             now_ms() / 1000,
         )
+    }
+
+    /// The Ironwood activation time in force for this coin — configured value,
+    /// else the built-in one for its ticker, unless gating is switched off.
+    pub(crate) fn effective_ironwood_activation_time(&self) -> Option<u32> {
+        effective_ironwood_activation_time(&self.z_fields.consensus_params, &self.utxo_arc.conf.ticker)
     }
 }
 
