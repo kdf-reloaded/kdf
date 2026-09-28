@@ -327,6 +327,8 @@ without the ability to construct Ironwood-era transactions shall refuse to build
 **any** transaction from that activation time onwards, with an error naming the
 coin, the activation time, and the need to upgrade.
 
+The refusal shall reach callers as an *unsupported operation*, not as an internal error: nothing has failed inside the process, and the remedy is the user's. `WithdrawError::UnsupportedAfterNetworkUpgrade` carries it and maps to HTTP 400, following R47.6.7/R50.20 for the MetaMask and Trezor policies.
+
 The refusal shall be applied at the single point every shielded transaction is
 constructed, so that it covers withdrawals as well as swap payments: a
 withdrawal passes none of the swap gates of R39.6.4b, so without this it would

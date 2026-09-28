@@ -1216,6 +1216,38 @@ mod ironwood_consensus_param_tests {
         assert_eq!(effective_ironwood_activation_time(&params, "ARRR"), Some(1_700_000_000));
     }
 
+    /// The refusal is a condition the user resolves by upgrading, not a server
+    /// fault, so it must not reach a caller as an internal error / HTTP 500 --
+    /// which is how it first shipped. After 3 Oct every ARRR withdrawal takes this
+    /// path, and a GUI showing "Internal error" would read as a broken wallet
+    /// rather than an actionable prompt.
+    #[test]
+    fn the_ironwood_refusal_is_reported_as_unsupported_not_as_an_internal_error() {
+        use crate::lp_coins_errors::WithdrawError;
+        use common::HttpStatusCode;
+
+        let refusal = GenTxError::IronwoodUpgradeUnsupported {
+            coin: "ARRR".to_owned(),
+            activation_time: ARRR_IRONWOOD_ACTIVATION_TIME,
+        };
+        let message = refusal.to_string();
+        let withdraw: WithdrawError = refusal.into();
+
+        assert!(
+            matches!(withdraw, WithdrawError::UnsupportedAfterNetworkUpgrade(_)),
+            "expected UnsupportedAfterNetworkUpgrade, got {withdraw:?}"
+        );
+        assert_eq!(withdraw.status_code(), common::StatusCode::BAD_REQUEST);
+        // The reason must survive the conversion: it names the coin and the time.
+        let reported = withdraw.to_string();
+        assert!(reported.contains("ARRR"), "{reported}");
+        assert!(
+            reported.contains(&ARRR_IRONWOOD_ACTIVATION_TIME.to_string()),
+            "{reported}"
+        );
+        assert!(reported.contains(&message), "{reported}");
+    }
+
     /// A2 only carries the data. Until Step 3 maps it, no post-Sapling upgrade may
     /// report an activation height, because the transaction builder derives the
     /// consensus branch ID from exactly these lookups: a premature mapping would

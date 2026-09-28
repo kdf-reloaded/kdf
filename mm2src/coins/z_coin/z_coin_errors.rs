@@ -92,7 +92,9 @@ impl From<GenTxError> for WithdrawError {
             | GenTxError::TxReadError { .. } => WithdrawError::InternalError(gen_tx.to_string()),
             // Actionable by the user (upgrade), so it keeps its own message rather
             // than being flattened into an internal error.
-            GenTxError::IronwoodUpgradeUnsupported { .. } => WithdrawError::InternalError(gen_tx.to_string()),
+            GenTxError::IronwoodUpgradeUnsupported { .. } => {
+                WithdrawError::UnsupportedAfterNetworkUpgrade(gen_tx.to_string())
+            },
             #[cfg(not(target_arch = "wasm32"))]
             GenTxError::TxBuilderError(_) => WithdrawError::InternalError(gen_tx.to_string()),
         }
