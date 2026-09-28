@@ -690,9 +690,7 @@ Decisions taken with the maintainer:
 - **A5 dropped (2026‑09‑21):** updating ARRR's entry in `GLEECBTC/coins` is the Pirate
   team's call, not ours; we do not edit another project's coin definition.
 - **The beta ships with both gates dormant (2026‑09‑21).** `ironwood_activation_time` and
-  `ironwood_activation_height` were confirmed to be **our own invention**: upstream KDF's
-  `ZcoinConsensusParams` declares no equivalent (checked live against
-  `KomodoPlatform/komodo-defi-framework` master and an Apr‑2026 reference copy), and no coin
+  `ironwood_activation_height` are **our own invention**: no coin
   in `GLEECBTC/coins` mentions Ironwood — ARRR is the only coin there carrying
   `consensus_params` at all. Since both A3 and A4 read `ironwood_activation_time` and both
   return `false` when it is absent, neither gate fires on a default installation. Accepted

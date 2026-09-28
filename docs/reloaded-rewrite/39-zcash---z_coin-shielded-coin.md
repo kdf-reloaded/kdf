@@ -388,8 +388,9 @@ on a build that understands them, and a configuration carrying them shall parse
 on a build that does not (this payload is deliberately not
 `deny_unknown_fields`, per R36.3.1/R36.3.3).
 
-> **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade gating.
-> Set `ironwood_gate_disabled` to `true` to retain GLEEC-equivalent behaviour for
+> **Compatibility:** no published coin configuration declares
+> `ironwood_activation_time` or `ironwood_activation_height`, and GLEEC KDF applies
+> no upgrade gating. Set `ironwood_gate_disabled` to `true` to retain GLEEC-equivalent behaviour for
 > a coin; with the default `false`, the swap freeze of R39.6.4b and the build
 > refusal of R39.6.4c apply to any coin with a known Ironwood activation.
 > Disabling them on a coin that does upgrade accepts the risk those gates exist
@@ -412,11 +413,10 @@ coin configuration supplies none. For ARRR that value is **1 791 054 000**
 **This reverses an earlier requirement of this chapter**, which forbade a
 per-ticker default on the grounds that a compiled-in date could not follow a
 moved activation. Two facts overrode it. First, both members are an extension
-introduced by this project -- upstream KDF's `ZcoinConsensusParams` declares no
-equivalent, and no published coin configuration carries either member (in
-`GLEECBTC/coins` no coin mentions Ironwood, and ARRR is the only coin carrying
-`consensus_params` at all) -- so gating driven purely by configuration armed on
-no deployment whatsoever, making the safety net decorative. Second, the dictated
+introduced by this project, and no published coin configuration carries either
+member (in `GLEECBTC/coins` no coin mentions Ironwood, and ARRR is the only coin
+carrying `consensus_params` at all) -- so gating driven purely by configuration
+armed on no deployment whatsoever, making the safety net decorative. Second, the dictated
 chain's maintainer confirmed on 2026-09-28 that there will be no standardness
 grace period and recommended that ARRR swaps stop from 2 Oct, so the gates could
 not wait on a third party's configuration change. An activation time is a fact

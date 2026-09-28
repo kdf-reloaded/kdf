@@ -192,9 +192,8 @@ behaviour.
 **ARRR carries a built-in activation time, so omitting `ironwood_activation_time` is
 not an opt-out.** This reverses what an earlier release documented, and the reason is
 worth stating. Both `ironwood_activation_time` and `ironwood_activation_height` are an
-extension this project introduced: upstream KDF's `ZcoinConsensusParams` has no
-equivalent, and no published coin configuration declares either of them — verified
-against `GLEECBTC/coins` master, where ARRR is the only coin carrying
+extension this project introduced: no published coin configuration declares either of
+them — verified against `GLEECBTC/coins` master, where ARRR is the only coin carrying
 `consensus_params` at all and no coin mentions Ironwood. Gating driven purely by
 configuration therefore engaged on no deployment at all, which made the safety net
 decorative. Pirate Chain's maintainer confirmed on 2026-09-28 that there will be **no
