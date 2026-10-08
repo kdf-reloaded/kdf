@@ -177,30 +177,38 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
 
 See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md). To match GLEEC KDF's full key-export behaviour, set `allow_insecure_key_export` to `true` (default `false`).
 
-To match GLEEC KDF's behaviour around a shielded coin's network upgrade, omit
-`ironwood_activation_time` from that coin's `protocol.protocol_data.consensus_params`.
-When it is present, Reloaded stops entering new swaps for that coin 160 300 s
-before the time it names and refuses to build any of its transactions from that
-time onwards (CRD ch.39 R39.6.4b/R39.6.4c); when it is absent, neither gate
-exists and behaviour matches GLEEC KDF exactly. The gates protect a counterparty
-whose HTLC would otherwise be left unspendable and unrefundable across Pirate
-Chain's Ironwood upgrade (3 Oct 2026 19:00 UTC), so omitting the field on a coin
-that *does* upgrade accepts that risk knowingly. No other operator configuration
-is required to match GLEEC KDF behaviour.
+To match GLEEC KDF's behaviour around a shielded coin's network upgrade, set
+`ironwood_gate_disabled` to `true` in that coin's
+`protocol.protocol_data.consensus_params`. With the default `false`, Reloaded stops
+entering new swaps for a coin with a known Ironwood activation 160 300 s before it
+and refuses to build any of that coin's transactions from it onwards (CRD ch.39
+R39.6.4b/R39.6.4c); with the switch on, neither gate exists and behaviour matches
+GLEEC KDF exactly. The gates protect a counterparty whose HTLC would otherwise be
+left unspendable and unrefundable across Pirate Chain's Ironwood upgrade
+(3 Oct 2026 19:00 UTC), so turning them off on a coin that *does* upgrade accepts
+that risk knowingly. No other operator configuration is required to match GLEEC KDF
+behaviour.
 
-Note that omission is the situation **as shipped**: both members are an extension
-this project introduced, no published coin configuration declares either of them
-(verified against `GLEECBTC/coins` master, where ARRR is the only coin carrying
-`consensus_params` at all, and no coin mentions Ironwood), and upstream KDF's
-`ZcoinConsensusParams` has no equivalent field. So on a default installation both
-gates are dormant and ARRR behaves exactly as under GLEEC KDF — including across
-the Ironwood activation, where it will build version-4 transactions that the
-post-upgrade mempool rejects. The values are deliberately left to configuration
-rather than compiled in: Pirate derives the activation height at runtime and the
-timestamp could still move, and a compiled-in date that fired early would refuse
-every ARRR transaction until a new binary shipped, which is a worse failure than
-the one the gates prevent. Supplying the member in any coin configuration the
-build loads is sufficient to arm both gates; no code change is needed.
+**ARRR carries a built-in activation time, so omitting `ironwood_activation_time` is
+not an opt-out.** This reverses what an earlier release documented, and the reason is
+worth stating. Both `ironwood_activation_time` and `ironwood_activation_height` are an
+extension this project introduced: upstream KDF's `ZcoinConsensusParams` has no
+equivalent, and no published coin configuration declares either of them — verified
+against `GLEECBTC/coins` master, where ARRR is the only coin carrying
+`consensus_params` at all and no coin mentions Ironwood. Gating driven purely by
+configuration therefore engaged on no deployment at all, which made the safety net
+decorative. Pirate Chain's maintainer confirmed on 2026-09-28 that there will be **no
+standardness grace period** and recommended disabling ARRR swaps from 2 Oct, so the
+gates had to work without waiting on a third party's configuration change. The
+activation time is a fact about the network rather than an operator preference, so
+this build carries it for ARRR (CRD ch.39 R39.6.4d).
+
+Configuration still wins where it is present: `ironwood_activation_time` overrides the
+built-in value, so a moved activation time stays a data change rather than a release —
+a compiled-in date that could not be overridden would refuse every ARRR transaction,
+and freeze its market, until a new binary shipped. The built-in value is also withheld
+from test and regtest parameters, which activate Ironwood at a height with no timestamp
+at all. A coin whose ticker this build does not know is unaffected either way.
 
 ## Detail sections
 
