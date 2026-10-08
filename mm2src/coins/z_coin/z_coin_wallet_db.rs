@@ -3424,6 +3424,153 @@ mod tests {
         );
     }
 
+    /// Pirate testnet block 389 -- captured from `testlightwalletd1.cryptoforge.cc`
+    /// on 2026-09-28, when that chain was at tip 53 202 with
+    /// `branchId=37a5165b`, i.e. **Ironwood already active** (it activates at
+    /// height 297 there).
+    ///
+    /// Its single transaction is the case this wallet has to survive after 3 Oct
+    /// and could not otherwise be shown: a **version-6 transaction that touches
+    /// both shielded pools at once** -- one Sapling spend, two Sapling outputs,
+    /// and two Ironwood actions carried in `CompactTx` field 6. Pirate's
+    /// `lightwalletd` puts Ironwood actions in field 6 (confirmed by the Pirate
+    /// maintainer and, here, from the wire), a field this project's
+    /// `compact_formats.proto` does not declare at all, so prost skips it as an
+    /// unknown field and `convert_compact_tx` drops the actions deliberately.
+    ///
+    /// The release notes claim receiving, balance and history keep working across
+    /// the upgrade. That claim rested on reading the code; this test rests on the
+    /// chain. The assertion is deliberately not "scanning returned Ok": it is
+    /// that the Sapling commitment tree we build from the block is byte-identical
+    /// to the one `lightwalletd` itself reports for that height, which a scan
+    /// that silently lost an output would fail.
+    ///
+    /// The fixture is inlined rather than fetched because the maintainer would
+    /// not guarantee the test chain stays up; the block, and both bracketing tree
+    /// states, are recorded here so the regression outlives the network.
+    #[test]
+    fn a_post_ironwood_v6_block_scans_to_the_same_sapling_tree_lightwalletd_reports() {
+        use prost::Message;
+
+        /// Raw `CompactBlock` protobuf for testnet height 389.
+        const BLOCK_389_HEX: &str = concat!(
+            "1085031a200f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c58030422",
+            "2051ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406288f9da0d3",
+            "063afe040801122008ced81faa87809f83cd6a4df74b2a956fa3785292116683552e2fba134d",
+            "e9ec22220a20050899d5d9c1fa66ca3e1bce6f0bc9187c08e229a7df1f6b7b0c4fc3d01559c0",
+            "2a7a0a209161e18aad6a412a3c57fd040ac15f532d5296603a7c608d4d9020c7eead82641220",
+            "aadf17949507e6bcbb0e0c4316b56eb59fec0cb1814592dab833db55e401b6e31a34913f9664",
+            "d14935fae8fd1bc6b6b3d7a49fa499d24269aa87099f7adacc4f190879b5d25a8b9e88177b99",
+            "a12e9019be2784bbaafe2a7a0a205e32f4d009420beec8469345c1ae3809735bb5e820b42993",
+            "b3e076562426e62b1220db59b0eb8e21888d871ca951d93cbfcff3709e99a357b7c3e9ea2427",
+            "8df7a72a1a34da12a43877c3a4ce873e52999d011826a46958ed713efbc2bc1b20d2f4410b9b",
+            "2c77882378cf22a381bf7c8d2efdbe4d2f21674b329c010a202caefca055a245598c3d888ecb",
+            "4a978232c79e9cfa1b89000d3f22963a2fb21512209ee073ca70f29bcbfa59bb04f325567cb8",
+            "8a14679cf0f016374c01b72f7d2f141a20d1ef7b44c85f83d17ffc67376eca3c1f7558996e42",
+            "f6de7b2e9e4614467f589f22340180351dac92aca0cdeee51fa7480d77309da90931fa42944f",
+            "374f37821d712294769a0700b6602cf5981503d02b11629ca56f26329c010a2061acce9276ba",
+            "361d4deb56e56fb8aa0e0c3c768c394a902ee4d5a60bcca0080c1220c25fcc41b88ade59fc8b",
+            "d80dd17d6a8104064ad444d5fe6a02b15f640c526b321a20ff503325721da4b314a2622fa428",
+            "1ee1234a7c9df0ab0656bca6add1b206e7182234c63633711fba0bea09b39aa264ebea4e59da",
+            "ab6a410b65f86590a4dc7408b8481f55446b57d0bc5fa4037d120e89b35639990364",
+        );
+        /// `GetTreeState` at 388 -- the anchor the wallet starts from.
+        const TREE_388_HEX: &str = concat!(
+            "01fce57d8fee40b8268479aa4839759f951bd7cca5f94237b0193a03e5e9884613001f000000",
+            "00000000000000000000000000000000000000000000000000000000",
+        );
+        /// `GetTreeState` at 389 -- what the server says the tree must become.
+        const TREE_389_HEX: &str = concat!(
+            "015e32f4d009420beec8469345c1ae3809735bb5e820b42993b3e076562426e62b001f012f2e",
+            "c5ee7925881d1e8c5b5a1c695ae156b88c8437641db3a60094e5b83a2b630000000000000000",
+            "00000000000000000000000000000000000000000000",
+        );
+        /// Internal (little-endian) block hashes, as `check_point_block` stores them.
+        const HASH_388_INTERNAL: &str = "51ac3c0a025f331fcfdb288f278a45fb424b765086b350cf1c57746dce466406";
+        const HASH_389_INTERNAL: &str = "0f74f26e7742237702f44b6548952aee87649d4264e43d8db82b4c314c580304";
+
+        // Pirate's test chain activates Sapling at 61, not at the mainnet height.
+        let params: ZcoinConsensusParams = serde_json::from_value(serde_json::json!({
+            "overwinter_activation_height": 61,
+            "sapling_activation_height": 61,
+            "blossom_activation_height": null,
+            "heartwood_activation_height": null,
+            "canopy_activation_height": null,
+            "coin_type": 133,
+            "hrp_sapling_extended_spending_key": "secret-extended-key-main",
+            "hrp_sapling_extended_full_viewing_key": "zxviews",
+            "hrp_sapling_payment_address": "zs",
+            "b58_pubkey_address_prefix": [0x1c, 0xb8],
+            "b58_script_address_prefix": [0x1c, 0xbd]
+        }))
+        .unwrap();
+
+        let mut hash_388 = [0u8; 32];
+        hash_388.copy_from_slice(&hex::decode(HASH_388_INTERNAL).unwrap());
+        let checkpoint = CheckPointBlockInfo {
+            height: 388,
+            hash: rpc::v1::types::H256(hash_388),
+            time: 1785204289,
+            sapling_tree: hex::decode(TREE_388_HEX).unwrap().into(),
+        };
+
+        // The viewing key is a stranger's: none of these notes are ours, and the
+        // commitment tree is built from every output regardless of ownership --
+        // which is exactly what makes the tree the right thing to assert on.
+        let db_dir = test_db_dir("post-ironwood-v6-block");
+        let history =
+            ZCoinShieldedHistory::open_or_create("ARRR", db_dir, params.clone(), &test_extfvk(31), Some(&checkpoint))
+                .unwrap();
+
+        let block = z_coin_grpc::CompactBlock::decode(hex::decode(BLOCK_389_HEX).unwrap().as_slice()).unwrap();
+
+        // Pin the fixture's shape, so a future edit cannot quietly turn this into
+        // a test about an ordinary Sapling block.
+        assert_eq!(block.height, 389);
+        assert_eq!(block.vtx.len(), 1, "fixture should carry exactly one transaction");
+        assert_eq!(block.vtx[0].spends.len(), 1, "one Sapling spend");
+        assert_eq!(block.vtx[0].outputs.len(), 2, "two Sapling outputs");
+        assert_eq!(
+            hex::encode(&block.prev_hash),
+            HASH_388_INTERNAL,
+            "the fixture must chain to the checkpoint it is scanned from"
+        );
+
+        history
+            .insert_compact_block(convert_compact_block(block).unwrap())
+            .unwrap();
+        assert_eq!(
+            history
+                .scan_cached_blocks_to_height(params.clone(), 389, 1_000, 0, |_, _| {})
+                .unwrap(),
+            389,
+            "scanning a version-6 block must reach its height"
+        );
+
+        // The decisive comparison, made with the same code production uses to
+        // detect a diverged wallet.
+        assert_eq!(
+            history
+                .init_wallet_checkpoint_from_tree_state(params, z_coin_grpc::TreeState {
+                    network: "test".to_owned(),
+                    height: 389,
+                    hash: hex::encode(
+                        hex::decode(HASH_389_INTERNAL)
+                            .unwrap()
+                            .into_iter()
+                            .rev()
+                            .collect::<Vec<_>>()
+                    ),
+                    time: 1785204367,
+                    tree: TREE_389_HEX.to_owned(),
+                    ..Default::default()
+                })
+                .unwrap(),
+            CheckpointOutcome::Accepted,
+            "our Sapling tree after the v6 block must equal lightwalletd's own"
+        );
+    }
+
     #[test]
     fn pirate_compact_block_without_chain_metadata_scans_received_note() {
         let db_dir = test_db_dir("pirate-compact-metadata-adapter");

@@ -327,6 +327,8 @@ without the ability to construct Ironwood-era transactions shall refuse to build
 **any** transaction from that activation time onwards, with an error naming the
 coin, the activation time, and the need to upgrade.
 
+The refusal shall reach callers as an *unsupported operation*, not as an internal error: nothing has failed inside the process, and the remedy is the user's. `WithdrawError::UnsupportedAfterNetworkUpgrade` carries it and maps to HTTP 400, following R47.6.7/R50.20 for the MetaMask and Trezor policies.
+
 The refusal shall be applied at the single point every shielded transaction is
 constructed, so that it covers withdrawals as well as swap payments: a
 withdrawal passes none of the swap gates of R39.6.4b, so without this it would
@@ -386,28 +388,51 @@ on a build that understands them, and a configuration carrying them shall parse
 on a build that does not (this payload is deliberately not
 `deny_unknown_fields`, per R36.3.1/R36.3.3).
 
-> **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade gating.
-> Omit `ironwood_activation_time` to retain GLEEC-equivalent behaviour for a
-> coin; when it is present, the swap freeze of R39.6.4b and the build refusal of
-> R39.6.4c both apply to that coin. Omitting it on a coin that does upgrade
-> accepts the risk those gates exist to prevent -- a counterparty's HTLC left
-> neither spendable nor refundable across the upgrade.
+> **Compatibility:** no published coin configuration declares
+> `ironwood_activation_time` or `ironwood_activation_height`, and GLEEC KDF applies
+> no upgrade gating. Set `ironwood_gate_disabled` to `true` to retain GLEEC-equivalent behaviour for
+> a coin; with the default `false`, the swap freeze of R39.6.4b and the build
+> refusal of R39.6.4c apply to any coin with a known Ironwood activation.
+> Disabling them on a coin that does upgrade accepts the risk those gates exist
+> to prevent -- a counterparty's HTLC left neither spendable nor refundable
+> across the upgrade.
 >
-> **As shipped, that risk is accepted.** Both members are an extension
-> introduced by this project: upstream KDF's `ZcoinConsensusParams` declares no
-> equivalent, and no published coin configuration carries either member -- in
-> `GLEECBTC/coins` no coin mentions Ironwood, and ARRR is the only coin carrying
-> `consensus_params` at all. A default installation therefore arms neither gate,
-> and ARRR is expected to stop transacting when Ironwood activates. Supplying
-> `ironwood_activation_time` in any configuration the build loads arms both
-> gates without a code change.
+> **Omitting `ironwood_activation_time` is not an opt-out**, because a built-in
+> activation time applies where the configuration supplies none (R39.6.4d).
 
-The values shall remain configuration and shall not be compiled in as a
-per-ticker default. The dictated chain derives the activation height at runtime
-and the published timestamp may still move; a compiled-in timestamp that fired
-early would refuse every transaction of that coin, and freeze its market, until
-a new binary shipped -- a failure both broader and slower to repair than the one
-R39.6.4b/R39.6.4c prevent. Configuration keeps a moved date a data change.
+R39.6.4d `consensus_params` shall additionally accept an optional
+`ironwood_gate_disabled` boolean, defaulting to `false`, which suppresses both
+R39.6.4b and R39.6.4c for that coin including any built-in activation time.
+
+A build shall carry a built-in Ironwood activation time for each coin whose
+upgrade is known to it, keyed on the coin's ticker, and shall apply it when the
+coin configuration supplies none. For ARRR that value is **1 791 054 000**
+(3 Oct 2026 19:00:00 UTC), read from the dictated chain's own
+`KOMODO_IRONWOOD_ACTIVATION`.
+
+**This reverses an earlier requirement of this chapter**, which forbade a
+per-ticker default on the grounds that a compiled-in date could not follow a
+moved activation. Two facts overrode it. First, both members are an extension
+introduced by this project, and no published coin configuration carries either
+member (in `GLEECBTC/coins` no coin mentions Ironwood, and ARRR is the only coin
+carrying `consensus_params` at all) -- so gating driven purely by configuration
+armed on no deployment whatsoever, making the safety net decorative. Second, the dictated
+chain's maintainer confirmed on 2026-09-28 that there will be no standardness
+grace period and recommended that ARRR swaps stop from 2 Oct, so the gates could
+not wait on a third party's configuration change. An activation time is a fact
+about the network, not an operator preference.
+
+The original concern is answered by precedence rather than by abstention:
+
+- A configured `ironwood_activation_time` shall override the built-in value, so a
+  moved activation remains a data change and never requires a release.
+- The built-in value shall be withheld from test and regtest parameters, which
+  activate Ironwood at a height with no timestamp at all, so a mainnet timestamp
+  describes neither.
+- A coin whose ticker the build does not know shall be unaffected.
+
+A build that gains v6 transaction support (R39.6.4c) makes both gates inert
+regardless of any of the above.
 
 They are two members rather than one because the dictated chain does not fix an
 Ironwood activation height in advance: each node derives it at runtime from the
