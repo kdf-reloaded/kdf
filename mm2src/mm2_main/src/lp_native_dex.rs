@@ -438,6 +438,11 @@ fn migration_1(_ctx: &MmArc) {}
 pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        info!(
+            "Database root: {}; identity database directory: {}",
+            crate::mm2::absolute_path_for_log(&ctx.db_root()),
+            crate::mm2::absolute_path_for_log(&ctx.dbdir())
+        );
         fix_directories(&ctx)?;
         ctx.init_sqlite_connection()
             .map_to_mm(MmInitError::ErrorSqliteInitializing)?;
@@ -811,6 +816,12 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
             field: "wss_certs".to_owned(),
             error: e.to_string(),
         })?;
+
+    info!(
+        "WSS private key file: {}; WSS certificate file: {}",
+        crate::mm2::absolute_path_for_log(&certs.server_priv_key),
+        crate::mm2::absolute_path_for_log(&certs.certificate)
+    );
 
     // First, try to extract the all PKCS8 private keys
     let mut server_priv_keys = extract_cert_from_file(

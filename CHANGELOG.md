@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Startup now logs which files it used.** At INFO level, right after the logger is
+  initialized, KDF reports the absolute path of the configuration file (or that the
+  configuration came from the command line or from the host application), of the coins file
+  (or that coins are inline in the configuration, noting an ignored `MM_COINS_PATH`), of the
+  `MM_LOG` log file, of the database root and per-identity database directory, and of the
+  optional `wss_certs` key/certificate files and the named-wallet record read. Only paths and
+  source kinds are logged, never file contents or configuration values. Chapter 45 R45.6.6.
+
 ### Fixed
 
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and

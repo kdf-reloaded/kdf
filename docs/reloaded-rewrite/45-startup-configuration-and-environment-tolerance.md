@@ -249,6 +249,30 @@ to the default log level and shall never refuse or panic the launch.
 R45.6.5 No environment variable bound in this chapter is *required* for a
 successful launch; each has a bound default or a bound degraded mode.
 
+R45.6.6 *Startup path report (KDF Reloaded original addition; operator
+diagnostics).* After the logger is initialized, startup shall report at INFO
+level, as absolute paths (relative paths resolved against the working directory
+without symlink resolution; the path as given if resolution fails):
+
+- the source of the runtime configuration: the command-line argument, or the
+  configuration file with whether it was selected via `MM_CONF_PATH` or by the
+  default name; a host-supplied configuration (library entry point) is reported
+  as such;
+- the source of the coins list: inline in the configuration (noting an
+  `MM_COINS_PATH` that is set but therefore ignored), or the coins file with
+  whether it was selected via `MM_COINS_PATH` or by the default name;
+- the log file named by a usable `MM_LOG` value (R45.6.3);
+- the database root and the per-identity database directory;
+- the optional files the configuration references, when configured: the
+  `wss_certs` private-key and certificate files, and the named-wallet record
+  file actually read (canonical or legacy).
+
+The report names paths and source kinds only; it shall never include the
+contents of any file, the command-line configuration text, or any configuration
+value. Producing the report shall never fail or panic the launch (R45.7.1). The
+log text is operator-facing and non-normative: it carries no wire or
+compatibility obligation.
+
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
 R45.7.1 No combination of unset, empty, or unexpected-type configuration fields
@@ -295,6 +319,13 @@ T45.7 *Field defaults.* Omitting each of `netid`, `i_am_seed`, `gui`, `rpcip`,
 T45.8 *Bad logging env vars.* An `MM_LOG` value not ending in `.log`, and an
 unparsable `RUST_LOG` value, MUST each allow the daemon to start (file logging
 disabled / default level), not refuse or panic (R45.6.3, R45.6.4).
+
+T45.9 *Startup path report.* With the configuration taken from the command line,
+from the default-named file, and from an `MM_CONF_PATH` file, and with coins
+inline versus from the default-named file versus from an `MM_COINS_PATH` file,
+the report MUST state the actual source of each, MUST show relative paths as
+absolute, MUST note an ignored `MM_COINS_PATH` when coins are inline, and MUST
+NOT contain any file content or configuration value (R45.6.6).
 
 ## 45.9 Deferred Work
 
@@ -367,3 +398,7 @@ operator-experience enhancement.
   daemon, in what mode, and which refuse). No private identifiers, function
   bodies, control flow, or error/log string literals were carried across; all
   behaviour is restated as functional requirements.
+- *Addition R45.6.6 / T45.9 (startup path report):* a KDF Reloaded original
+  operator-diagnostics requirement, authored independently from this
+  repository's code and public documentation, without consulting the forbidden
+  corpus.
