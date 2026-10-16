@@ -41,7 +41,7 @@ impl RepositoryOperations for GithubClient {
         branch: &str,
         dir: &str,
     ) -> Result<Vec<FileMetadata>, MmError<GitControllerError>> {
-        let uri = format!(
+        let uri  = format!(
             "{}/repos/{}/{}/contents/{}?ref={}",
             self.api_address, owner, repository_name, dir, branch
         );
