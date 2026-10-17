@@ -55,6 +55,16 @@ policy. §22.9B is the driving spec for that remaining call-site
 port and records, operation by operation, how far the reference
 release carries it.
 
+**Operator availability switches.** Separately from what is
+*reachable*, §22.9C specifies the operator-facing switches that
+decide whether a reachable WalletConnect operation is *offered*: a
+global enable/disable switch for the whole subsystem, enforced at
+activation and at session establishment and failing closed, and
+per-family switches for the withdrawal and swap operations that can
+actually occur. They are a security control rather than a
+GLEEC-compatibility control (§22.9C.2), they default to today's
+behaviour, and none of them is implemented yet (D12).
+
 ## 22.1 Subsystem Shape
 
 The subsystem is a standalone library compilation unit. It
@@ -1044,6 +1054,36 @@ D11. The UTXO withdrawal refusal recorded in RP9 is a reference gap,
     this item exists to say that the refusal must not be ported.
     The requirement is the one stated in this item.
 
+D12. **[REQUIRED — §22.9C, not implemented]** The operator
+    availability switches of §22.9C: the global WalletConnect
+    enable/disable switch (RS1–RS4.2), the four per-family
+    per-operation switches RS6 specifies, the single signer-selection
+    chokepoint of RS7, the nested configuration block of RS8–RS10,
+    and the per-switch tests ACS4 requires. Nothing of this exists
+    in the tree today. The implementation plan is
+    [`docs/plans/walletconnect-switches-and-presigned-refund.md`](../plans/walletconnect-switches-and-presigned-refund.md),
+    phase 1. Each per-family switch is sequenced behind the change
+    that makes its operation reachable (RS5.1), so this item
+    partially follows D10 and D11.
+
+D13. Two controls §22.9C deliberately leaves unspecified rather than
+    specify dormant: a **per-family activation** switch (the global
+    switch's activation refusal, RS2(1), is the only activation-level
+    control specified), and a **runtime or RPC-level** disable (RS4.2
+    makes the switch restart-scoped; an RPC that can disable a
+    security control needs its own authorization story first). Both
+    fall under RS5.2 if they are added.
+
+D14. **[REQUIRED — §22.9C, not implemented]** RS6.1's gate: a
+    Tendermint coin activated under a WalletConnect key source must
+    be refused entry to the **legacy (v1) HTLC paths** at the
+    earliest lifecycle point. Neither RP11.1 nor
+    [Chapter 47](47-metamask-integration.md) R47.5.13a names that
+    path, and the per-swap key accessor returns no error there — it
+    returns "no key of my own", on which the swap machine substitutes
+    the node's persistent public key. This is a gate rather than a
+    switch and is why §22.9C.5 specifies no `cosmos` swap switch.
+
 ## 22.9A Required Port — Coin Integration and Public RPC Surface (driving-spec)
 
 **STATUS.** *Implemented.* The capabilities in this section were
@@ -1429,6 +1469,464 @@ automated coverage of the swap path.
 >    transaction to the wallet, independently of whether swaps are
 >    enabled.
 
+## 22.9C Operator Availability Switches (driving-spec)
+
+**STATUS.** *Required — not implemented.* None of this section
+exists in the tree: there is no `walletconnect` configuration block,
+no signer-selection chokepoint, and no enforcement point. The
+section is the driving spec for that work and is tracked as D12. It
+is **clean-room-original design** — it restates no external
+behaviour and derives from no forbidden-class input (§22.12).
+
+### 22.9C.1 Why the subsystem needs an off switch
+
+WalletConnect is the only subsystem in this tree holding a
+**persistent, relay-mediated, externally-pairable session with key
+material at rest**. Three properties combine here that combine
+nowhere else:
+
+- the session outlives the process (§22.5), so the exposure is not
+  bounded by how long a node happens to run;
+- the counterparty is reached through a third-party relay and the
+  pairing is initiated from outside the node's trust boundary
+  (§22.4); and
+- the session symmetric key is written to disk **unencrypted** under
+  the default `open` value of `wc_session_persistence` (§22.5.1) —
+  the gap R5 states and D3 tracks, and which is **unmet** at the
+  time of writing.
+
+The bounded exposure §22.5.1 records — theft of a persisted session
+key permits soliciting a signing prompt from the paired wallet, not
+direct theft of funds — is why the `open` default is tolerable. It
+is not a reason the subsystem needs no off switch. An operator who
+learns of a relay compromise, a weakness in the pairing flow, or a
+vulnerability in a wallet their users pair with has today no way to
+remove the exposure short of waiting for a release. This section is
+that way.
+
+> **Containment versus the actual hole (engineering judgement).** A
+> switch is *containment*: it protects whoever knows to flip it, from
+> the moment they know. Closing R5 / D3 — zeroize-on-drop for session
+> key material, and in time the encrypted at-rest format of D8 —
+> protects *everyone*, including every operator who never reads this
+> chapter. Both are wanted and neither substitutes for the other,
+> but where sequencing must be chosen, **the zeroize gap comes
+> first**. Nothing in this section addresses R5 / D3, and this
+> section must not be read as having reduced their priority.
+
+### 22.9C.2 Not compatibility switches, and why our variant is the default
+
+**These are not `RELOADED_VS_GLEEC` switches.** The compatibility
+convention of `COMPAT_SWITCHES.md` exists for one purpose: when
+reloaded behaviour *diverges from GLEEC*, an operator must be able
+to recover the GLEEC-compatible behaviour, and the divergence must
+be recorded in `GLEEC_COMPATIBILITY.md`. The switches of this
+section do the opposite job. They let an operator **reduce their own
+attack surface**; they describe no divergence, there is no
+GLEEC-compatible value to recover, and their lifecycle is the
+lifecycle of the threat rather than of a compatibility window. They
+are therefore deliberately a **separate mechanism**: they shall not
+be added to `COMPAT_SWITCHES.md`, shall not be given a row in
+`GLEEC_COMPATIBILITY.md`, and shall not be framed as
+`RELOADED_VS_GLEEC` entries. Where operator-facing security controls
+accumulate enough to need a central home of their own, that home is
+a document distinct from the compatibility chapters; the decision of
+whether to create one belongs to the implementation plan
+(`docs/plans/walletconnect-switches-and-presigned-refund.md`) and is
+deliberately not taken here.
+
+**The default-side rule resolves cleanly in our favour.** The
+project's standing rule on which side of a difference is the default
+has three arms: where a difference touches wire compatibility or
+breaks other users or nodes, GLEEC parity is the default; where it
+touches no wire format, affects no other node, and only improves
+user experience or security, our variant is the default; anything
+between the two is a team decision. These switches touch **no wire
+format** (no WC2 envelope, no CAIP identifier, no request payload of
+§22.8.1, no on-disk record of §22.5.3 changes), affect **no other
+node** (a disabled subsystem makes a node offer fewer of its own
+capabilities; it changes nothing another node observes or relies
+on), and are **security only**. The second arm therefore applies
+without argument and our variant is the default. This reasoning is
+recorded here so that a later reader does not reconstruct it, and so
+that the absence of a `GLEEC_COMPATIBILITY.md` row is not later
+mistaken for an oversight.
+
+### 22.9C.3 The global switch
+
+**RS1 — A global availability switch exists.** A single
+node-configuration switch shall govern whether the WalletConnect
+subsystem is available at all. Its default value is **available**,
+so an operator who configures nothing sees exactly the behaviour
+they see today.
+
+**RS2 — Two enforcement points, both mandatory.** The global switch
+shall be enforced at exactly these two points, and a conforming
+implementation shall enforce it at both:
+
+1. *Activation.* Activation of any coin whose key-source policy
+   names a WalletConnect session (RP8, any of the three request
+   shapes) shall be refused with a structured error, never a panic,
+   when the switch is off. This is the point that keeps a disabled
+   subsystem from acquiring new dependents.
+2. *Session establishment and restore.* When the switch is off, the
+   subsystem shall not create a new pairing, shall not settle a
+   proposed session, shall not restore a persisted session into
+   memory, and shall not establish the relay connection. The five
+   public RPC handlers of §22.9A.2 shall refuse with a structured
+   error rather than returning an empty result, so that "disabled"
+   is distinguishable from "no sessions".
+
+**RS3 — The switch fails closed.** Where the effective value of the
+switch cannot be determined — an unreadable or unparsable
+configuration block, a value of the wrong type, an enforcement point
+that cannot reach the resolved value — the subsystem shall be
+treated as **disabled**. No code path may proceed past either
+enforcement point on an undetermined value.
+
+This is not in tension with the *available* default of RS1, and the
+distinction is load-bearing: **absence of configuration is a
+determinate answer** (the operator expressed no policy, so the
+status-quo default applies), whereas **a configuration error is not
+an answer at all** (the operator expressed a policy that could not
+be read, and the safe reading of an unreadable security policy is
+the restrictive one). An implementation that conflates the two
+cases fails this requirement whichever way it conflates them.
+
+**RS4 — The global switch short-circuits every per-family switch.**
+When the global switch is off, the per-family map of §22.9C.5 shall
+not be consulted and no per-family value can re-enable anything. A
+per-family switch set to *available* under a disabled subsystem is
+not an error and is not a conflict; it is simply unreachable.
+
+**RS4.1 — Disabling is not destructive, and does not weaken R8.**
+Disabling the subsystem shall not delete, rewrite, or expire any
+persisted session record, so that re-enabling restores the prior
+session set rather than requiring every user to re-pair. There is
+no conflict with the unconditional-load rule R8 / §22.5.2: R8 binds
+what the loader does *about `wc_session_persistence`* when the
+loader runs — it must read every record irrespective of that
+setting and auto-detect its format — and RS2(2) decides whether the
+subsystem connects to the relay and therefore whether the loader
+runs at all. A disabled subsystem reads nothing because it starts
+nothing; it does not read selectively. R8 is unweakened and
+unamended.
+
+**RS4.2 — Restart scope.** The switch is resolved from the node
+configuration at startup and is **not** hot-reloadable: shutting the
+subsystem off requires a node restart, not a release. A
+runtime-reconfiguration or RPC-level kill switch would need its own
+authorization story — an RPC that can disable a security control can
+also be the thing an attacker calls — and is deliberately not
+specified here (D13).
+
+### 22.9C.4 No dormant security switches
+
+**RS5 — No dormant security switches (binding).** A switch that does
+not gate anything tells an operator they are protected when they are
+not, which is worse than having no switch at all: the operator stops
+looking. Therefore:
+
+- every switch specified in this section **MUST** gate at an
+  enforcement point in the shipped artifact; and
+- every switch specified in this section **MUST** have a test that
+  proves it gates — a test that performs the operation with the
+  switch off and asserts the structured refusal, and performs it
+  with the switch on and asserts it proceeds.
+
+A switch for which the second bullet cannot be written is evidence
+that the first bullet is false, and the switch shall not ship.
+
+*Acceptance criterion.* ACS4 of §22.9C.8 is the discharge of this
+requirement, and it is per switch, not per section: the per-switch
+test matrix is complete when every switch §22.9C.5 specifies has
+both halves of its own test. A conforming implementation that adds
+a switch without its test does not satisfy this chapter.
+
+**RS5.1 — Sequencing consequence.** Because signing is not reachable
+by a user at all today (D10, §22.9B), a per-family switch shipped
+before the operation it gates is reachable would be dormant by
+construction and would breach RS5. Each per-family switch shall
+therefore ship **in or after** the change that makes its operation
+reachable, and never before it. The global switch of §22.9C.3 is
+not subject to this constraint: its session-establishment
+enforcement point (RS2(2)) gates operations that are reachable
+today — pairing, settlement, restore, and the five RPCs of §22.9A.2
+— so it is non-dormant from the moment it ships, and its
+activation enforcement point (RS2(1)) becomes live with D10 without
+ever having been dormant in the sense RS5 forbids.
+
+**RS5.2 — The forward half of the rule.** If a family/operation
+combination that §22.9C.5 refuses a switch for later becomes
+reachable, the change that makes it reachable **shall** add that
+switch, its enforcement at the chokepoint, and its RS5 test in the
+**same** change. Making an operation reachable without that is a
+silent security decision taken by omission, which is exactly what
+§22.9C.5's refusals are chosen to avoid.
+
+### 22.9C.5 Which family/operation switches exist, and which do not
+
+**RS6 — Switches exist only where the operation is reachable.** A
+per-family, per-operation switch shall be specified for a
+combination if and only if that operation can actually occur for
+that family under a WalletConnect key source. Reachability is
+determined by RP9's per-operation record together with the binding
+rules RP10, RP11, RP11.1, D11 and
+[Chapter 47](47-metamask-integration.md) R47.5.13 / R47.5.13a.
+(RP9 is an **informative** record of the reference release, §22.9B;
+it is used here as evidence of what is reachable, and the binding
+rules just named are what govern.) The determination is:
+
+| Family (CAIP-2) | Operation | Switch | Basis |
+|---|---|---|---|
+| `bip122` (UTXO) | withdrawal | **yes** | Reachable in reloaded by requirement. RP9 records the reference refusing it, but **D11 binds reloaded to make it reachable** through the same delegated PSBT signing operation the legacy swap path already uses, and §22.9B.4 finding 1 calls it the one RP9 `no` reloaded should turn into a `yes`. The switch ships with that wiring (RS5.1), not before it. |
+| `bip122` (UTXO) | legacy (v1) swap HTLC | **yes** | Reachable. RP9 marks UTXO the one family the reference announces as swap-capable, and RP11 gives the structural reason: the UTXO HTLC public key *is* the activated address's public key, no per-swap key is derived, and every HTLC signature is obtained by a no-broadcast PSBT request with the framework retaining broadcast control. Chapter 47 R47.5.13a carves exactly this case out of its swap ban. |
+| `bip122` (UTXO) | swap-protocol-v2 HTLC | **no** | Unreachable, and already bindingly gated. RP11.1 requires a key-less coin to be refused at the earliest lifecycle point because the per-swap key accessor has no implementation for it; in this tree that accessor (`get_htlc_key_pair_v2` in `mm2src/coins/utxo/utxo_common/utxo_common_swap.rs`, surfaced through `try_derive_htlc_pubkey_v2` in `mm2src/coins/utxo/utxo_standard_swap_v2.rs`) errors for every policy that is not a local key pair. A switch would gate nothing. |
+| `eip155` (EVM) | withdrawal | **yes** | Reachable. RP9 records `yes` on both the legacy and the task withdrawal route. |
+| `eip155` (EVM) | swap (either protocol) | **no** | Structurally unreachable, and bindingly gated for a different reason than operator policy. Chapter 47 R47.5.13 records that the EVM-family HTLC paths require a per-swap HTLC key pair derived from a **local** secret, which no key-less policy can produce, and R47.5.13a extends its early structured rejection to *every* non-keypair signing policy for the EVM-family HTLC paths — carving out only a family that needs no per-swap key and can delegate every HTLC signature, which RP11 establishes is the UTXO case and not this one. RP9 agrees: swap-protocol-v2 `no`, and for legacy v1 only "transaction-send path is wired; not announced as supported". §22.9B.4 finding 3 adds that an unresolved account-nonce serialization hazard would have to be closed before EVM swaps could run over this policy at all. A switch here would be a permanent no-op reporting protection that R47.5.13a provides for an unrelated reason, and it would silently decide the security question if the combination ever became reachable — RS5.2 is how that question gets decided instead. |
+| `cosmos` (Tendermint) | withdrawal | **yes** | Reachable. RP9 records `yes`. |
+| `cosmos` (Tendermint) | swap (either protocol) | **no** | Unreachable. The legacy Tendermint HTLC path takes its signing key from the activated local secret — `get_htlc_key_pair` in `mm2src/coins/tendermint/tendermint_swap_ops.rs`, which resolves `activated_key_or_err` on the activation policy — and a key-less policy cannot satisfy it; swap-protocol-v2 is refused by RP11.1 as it is for every family. RP9 records only "generic send path is wired; not announced as supported" for the v1 row, which is not reachability. See RS6.1: this is the one refusal the existing record does not already gate explicitly, and it is closed with a gate rather than with a switch. |
+| all three | activation; learning the address and public key from the wallet | global only | Reachable for all three families (RP9 row 1) and governed by the global switch's activation enforcement point, RS2(1). A **per-family** activation switch would also be reachable and is deliberately left unspecified (D13) rather than specified and left dormant; RS5.2 governs if it is added. |
+| all three | watcher participation | **no** | RP10 already requires a coin whose signing policy holds no local secret to report itself unsupported by the watcher subsystem, unconditionally and for reasons unrelated to operator policy. A switch would gate nothing. |
+| all three | stand-alone message-signing RPC | **no** | RP9 / RP9.1: wallet message signing is reachable only as the activation-time public-key-recovery step of RP8.3; it is wired to no user-facing message-signing RPC for any family. Nothing to gate. |
+| all three | private-key export / display | **no** | RP9 records it refused for all three families (the framework cannot export a key it does not hold; Chapter 47 R47.5.14 is the same rule for the MetaMask policy). Nothing to gate, and nothing an operator could usefully tighten. |
+| all three | any other delegated operation | global only | RP9's "ordinary transaction build → wallet signature → broadcast" row is `yes` for all three families but does **not** enumerate the family-specific operation classes it covers (Tendermint staking and IBC transfer, EVM contract calls, and so on). Those reach the chokepoint in the `Other` operation class of RS7.1 and are governed by the global switch alone, until RS5.2 is applied to one of them. |
+
+Four switches are therefore specified: `bip122` withdrawal,
+`bip122` legacy swap, `eip155` withdrawal, `cosmos` withdrawal.
+
+**RS6.1 — Gate the Tendermint legacy HTLC paths too (gap closure).**
+The early structured rejection RP11.1 requires covers the
+swap-protocol-v2 HTLC paths and the watcher-message paths, and
+Chapter 47 R47.5.13a names the EVM-family HTLC paths, the
+swap-protocol-v2 HTLC paths and the watcher-message paths. Neither
+names the **Tendermint legacy (v1) HTLC paths**, and RP11's
+carve-out is explicitly about the UTXO family only. That leaves one
+path for which the record states no gate while the implementation
+cannot serve it: `get_htlc_key_pair` returns `None` for a policy
+with no activated key, and a `None` there does not fail — it means
+"this coin has no key of its own", on which the swap machine
+substitutes the node's own persistent public key
+(`derive_htlc_pubkeys` in `mm2src/mm2_main/src/lp_swap.rs` maps the
+absent key onto the node key before calling `derive_htlc_pubkey`,
+whose 33-byte width is bound by
+[Chapter 51](51-legacy-v1-swap-state-machine.md) R63). For a
+key-less Tendermint coin that fallback announces a key the paired
+wallet cannot sign with, which is a silent wrong answer rather than
+a refusal. A Tendermint coin activated under a WalletConnect key
+source shall therefore be refused entry to the legacy HTLC paths at
+the **earliest** lifecycle point with a structured
+unsupported-operation error, on the same terms and at the same
+lifecycle point as RP11.1 and R47.5.13a require for the paths they
+name; the work is tracked as D14. This is a gate, not a switch: it
+is unconditional and not operator-configurable, which is precisely
+why `cosmos` gets no swap switch.
+
+### 22.9C.6 One enforcement chokepoint
+
+**RS7 — Signer selection is a single chokepoint.** Enforcement of
+the switches shall happen at exactly two places: the activation-time
+refusal of RS2(1), and **one** chokepoint through which a
+WalletConnect signer is selected for a coin operation. Every
+delegated-signing route — withdrawal, legacy swap HTLC, ordinary
+send, and any route added later — shall reach a `WcCoinSigner`
+implementation (§22.3) only through that chokepoint. Scattered
+per-call-site checks are **forbidden**, including as a transitional
+state.
+
+The reason is not tidiness. Scattered checks produce *partial*
+enforcement, and partial enforcement is the worst outcome available
+here — worse than uniform absence, because it is
+**indistinguishable from protection**. An operator who sets a
+switch and observes one route refuse has no way to learn that a
+second route does not consult it; absence of the feature at least
+tells the truth. A single chokepoint makes the enforcement property
+auditable by reading one function instead of by enumerating call
+sites, and makes a newly added call site inherit enforcement rather
+than need to remember it.
+
+**RS7.1 — The chokepoint knows the operation.** The per-family,
+per-operation decision cannot be made from the coin and the session
+alone, so the chokepoint shall take the **operation class** as an
+explicit argument supplied by the caller, never inferred from
+context. Its variants shall be exactly the switched classes of
+§22.9C.5 plus the catch-all class, that is: withdrawal, swap, the
+activation-time wallet interaction, and `Other`. Adding a new
+operation class is the trigger for RS5.2.
+
+**RS7.2 — The chokepoint is the only route.** The property RS7
+asserts shall be enforced structurally rather than by convention:
+the trait's signing and sign-and-send methods shall not be callable
+from outside the chokepoint's module. Rust visibility is the
+intended instrument; where the module layout makes that impractical
+for a particular family, an equivalent mechanical check that fails
+the build or a test is acceptable, and a code-review convention is
+not.
+
+### 22.9C.7 Configuration shape
+
+**RS8 — One nested block, not a flat list of booleans.** The
+switches shall be expressed as nested keys of the **existing**
+`walletconnect` object in the node configuration (`MM2.json`) —
+the object that already carries `project_id` and `relay_address` —
+and the per-family map shall be keyed by the **CAIP-2 namespace**
+identifiers §22.8 already binds as this subsystem's family taxonomy,
+so that a family added later needs no new top-level key and no new
+spelling convention:
+
+```json
+{
+  "walletconnect": {
+    "project_id": "<unchanged>",
+    "relay_address": "<unchanged>",
+    "enabled": true,
+    "unnamed_family_policy": "deny",
+    "families": {
+      "bip122": { "withdraw": true, "swap": true },
+      "eip155": { "withdraw": true },
+      "cosmos": { "withdraw": true }
+    }
+  }
+}
+```
+
+The two existing keys keep their present meaning and their present
+lenient handling; this section adds keys to the object and amends
+nothing already in it. Note in particular that `project_id` is
+**required** today, so a node that configures none already fails to
+bring the subsystem up. That is not an off switch and must not be
+treated as one: it is a misconfiguration that surfaces as an error
+at first use, it does not refuse activation, and an operator cannot
+tell it apart from a mistake. Making the off state explicit,
+early, and distinguishable from a broken configuration is part of
+what RS1–RS3 are for.
+
+A flat list of independent booleans is explicitly rejected as the
+shape. Flattened over the three families and the two operations plus
+a global flag, it would be **seven booleans — 128 nominal states**,
+of which a handful will ever be tested, and nothing in the shape
+would say which handful. The nested shape collapses that
+deliberately: `enabled: false` short-circuits the whole map (RS4),
+so the states that need testing are the global off state, each
+individual per-family switch off, and the unnamed-family case. The
+test matrix is small by construction rather than by hope, and the
+four switches §22.9C.5 actually specifies are fewer than the six the
+flat shape would have invited — the two it does not specify are
+exactly the ones RS5 forbids.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `walletconnect` | object | The existing block. Absent, or present without any key this section introduces, means "no policy expressed"; see RS9. |
+| `walletconnect.enabled` | bool | The global switch of RS1. Default `true`. |
+| `walletconnect.families` | object | Map from CAIP-2 namespace to that family's per-operation switches. |
+| `walletconnect.families.<ns>.withdraw` | bool | Withdrawal switch for that family, where §22.9C.5 specifies one. Default `true`. |
+| `walletconnect.families.<ns>.swap` | bool | Swap switch for that family, where §22.9C.5 specifies one. Default `true`. |
+| `walletconnect.unnamed_family_policy` | `"deny"` / `"allow"` | What applies to a family the `families` map does not name, when the map is present. Default `"deny"`. |
+
+**RS9 — Missing keys.** Absence is a determinate answer and shall
+be resolved as follows:
+
+| Case | Resolution |
+|---|---|
+| `walletconnect` absent, or present with none of this section's keys | The subsystem is available and every switch §22.9C.5 specifies is available. This is exactly today's behaviour, and is why the feature breaks no existing deployment. |
+| `walletconnect` present, `families` absent | As above for the per-family switches; `enabled` is read as given. The operator expressed a global policy and no per-family policy. |
+| `families` present, a family **named**, an operation key absent | That operation takes its default, available. |
+| `families` present, a family **not named** | `unnamed_family_policy` governs, default `deny`. Writing a `families` map at all is therefore an **allowlist**, which is what keeps a family added to the code in a later release from becoming available by omission in an existing operator's configuration. |
+| `enabled` absent | `true`. |
+| `unnamed_family_policy` absent | `"deny"`. |
+
+The asymmetry between the first case and the last is deliberate and
+is stated so it is not later read as an inconsistency: an operator
+who has written **no** WalletConnect policy gets the status quo,
+including for a family added later, because that is what "default
+available" means and anything else would silently change behaviour
+on upgrade; an operator who has written a policy gets allowlist
+semantics within it, because having written one they are entitled to
+have it mean what it says. An operator who wants the strict reading
+globally sets `enabled: false`, or writes a `families` map and
+leaves `unnamed_family_policy` at its default.
+
+**RS10 — Unknown keys and unswitchable combinations are startup
+errors.** The configuration block shall be parsed strictly. Each of
+the following shall stop startup with an explanatory error naming the
+offending key — the same treatment R7 / D8 already give the
+unimplemented `encrypted` value of `wc_session_persistence`. The
+strictness applies to the keys this section introduces and to
+everything nested under them; `project_id` and `relay_address` keep
+their existing handling and are not made strict here.
+
+1. an unknown key nested under `families`, or under a family entry,
+   or an unrecognised sibling of `enabled` /
+   `unnamed_family_policy` / `families` that is not one of the two
+   pre-existing keys;
+2. a family key that is not a CAIP-2 namespace this build supports;
+3. an operation key that is not one of the operation names above;
+4. a value of the wrong type;
+5. an operation key naming a family/operation combination for which
+   §22.9C.5 specifies **no** switch — for example `eip155` with a
+   `swap` key.
+
+Case 5 is the configuration-level expression of RS5: silently
+accepting `{"eip155": {"swap": false}}` would hand the operator a
+dormant switch through the configuration file rather than through
+the code, and would report protection that does not exist. Cases 1
+and 3 matter for the same reason in the dangerous direction: a
+misspelled operation key that is silently ignored turns an intended
+*deny* into an *allow*. When a refused combination becomes
+reachable, RS5.2 requires the switch, its enforcement, its test
+**and** its acceptance in this parser to land in one change.
+
+The cost of strictness is that a configuration file shared across
+node versions can fail on the older binary. That is accepted
+deliberately: a security switch an operator believes they set is
+worth more than a configuration file that loads everywhere, and the
+failure mode chosen is the loud one.
+
+### 22.9C.8 Acceptance criteria
+
+- ACS1. With `enabled: false`, activation of a coin naming a
+  WalletConnect session fails with a structured error for each of
+  the three request shapes of RP8, and no `WcCoinSigner` is
+  constructed.
+- ACS2. With `enabled: false`, no relay connection is established,
+  no pairing is created, no persisted session is restored, and the
+  five RPCs of §22.9A.2 refuse with a structured error rather than
+  returning an empty result. The persisted records are still
+  present afterwards, and a subsequent run with `enabled: true`
+  restores them (RS4.1).
+- ACS3. A `walletconnect` block that cannot be parsed into the
+  resolved configuration results in the subsystem being disabled or
+  startup being refused — never in the subsystem running with an
+  assumed value (RS3). A unit test asserts that the resolver yields
+  *disabled* on an error input, and a separate test asserts that
+  the **absent** block yields *available* (RS9).
+- ACS4. **Per switch**, for each of the four switches of §22.9C.5:
+  the operation fails with a structured error when that switch is
+  off, and proceeds when it is on, with no other switch changed.
+  Four pairs of assertions, one pair per switch. This criterion is
+  the discharge of RS5 and is not satisfied by a sample of the
+  switches.
+- ACS5. With `families` present and not naming `cosmos`, a
+  Tendermint withdrawal under a WalletConnect key source is refused
+  (`unnamed_family_policy` default `deny`); with
+  `unnamed_family_policy: "allow"` and the same map, it proceeds.
+- ACS6. Each of the five cases of RS10 stops startup with an error
+  naming the offending key; in particular `{"eip155": {"swap":
+  false}}` is rejected rather than accepted as a dormant switch.
+- ACS7. The chokepoint is the only route: a mechanical check — the
+  trait's signing methods being private outside the chokepoint
+  module, or an equivalent build- or test-time check — fails if a
+  second call site reaches a `WcCoinSigner` signing method directly
+  (RS7.2).
+- ACS8. With no `walletconnect` block in the configuration, every
+  operation §22.9C.5 names behaves exactly as it does without this
+  feature. No existing deployment changes behaviour on upgrade.
+- ACS9. A Tendermint coin activated under a WalletConnect key
+  source is refused entry to the legacy HTLC paths at order
+  placement / swap start with a structured unsupported-operation
+  error, and never reaches the node-public-key fallback of
+  `derive_htlc_pubkey` (RS6.1).
+
 ## 22.10 External References
 
 - The WalletConnect v2 protocol specification (transport,
@@ -1495,7 +1993,19 @@ V3. The third-party Cargo dependencies that provide the relay
   field spellings, and the dictated wallet-metadata signals; and,
   for §22.9B, the signing-reachability acceptance sets, the
   activation key-source JSON shapes, and the public release
-  designations (see *Forbidden corpus* below).
+  designations (see *Forbidden corpus* below). For §22.9C
+  additionally, and for that section exclusively: this repository's
+  own post-baseline source tree, read for the reachability facts the
+  section's switch determination rests on (the per-swap key
+  accessors of the UTXO and Tendermint families, the legacy swap
+  machine's absent-key substitution, the activation-policy types,
+  and the WalletConnect handle's own request surface); this document
+  set's own chapters 09, 47, 49, 51 and 55 and the earlier sections
+  of this chapter; and the project's own in-tree conventions
+  `COMPAT_SWITCHES.md`, `GLEEC_COMPATIBILITY.md` and
+  `CODING_STANDARDS.md`, consulted in order to state that §22.9C is
+  *not* governed by them. §22.9C took no input of any other kind
+  (see *Clean-room-original material* below).
 - *Permitted-input classes used:* baseline source; external public
   specifications (WalletConnect v2; CAIP-2; CAIP-10; Ethereum
   JSON-RPC; EIP-191/EIP-1559; Cosmos SDK signing schemes / ADR-036;
@@ -1510,7 +2020,10 @@ V3. The third-party Cargo dependencies that provide the relay
   signals, and for the §22.9B signing-reachability acceptance sets,
   activation key-source JSON shapes, and public release
   designations, with the relicensed historical record cited as the
-  R31 source (see *Forbidden corpus* below).
+  R31 source (see *Forbidden corpus* below). §22.9C rests on
+  **R7 (independent work)** together with R1 and this project's own
+  post-baseline clean-room output and cross-chapter contracts, and
+  on no other class.
 - *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* not consulted for clean-room derivation of
   protected expression. There are four narrow exceptions, each
@@ -1547,6 +2060,37 @@ V3. The third-party Cargo dependencies that provide the relay
   comments, or diagnostics — was taken from the corpus; the
   surrounding prose is authored fresh per the R31 sanitization
   discipline.
+
+  The four exceptions above describe §22.5.3, §22.7.1/R11, §22.8.1
+  and §22.9B. None of them reaches §22.9C, and this record is not
+  widened to cover it — the next item states §22.9C's position
+  instead, and states a different thing.
+- *Clean-room-original material:* this item scopes §22.9C in full
+  (RS1 through RS10 and ACS1–ACS9), the §22.0 paragraph headed
+  *Operator availability switches*, deferrals D12, D13 and D14, and
+  the two §22.12 additions that describe them — and nothing else.
+  (It is therefore disjoint from the *Dirty Gate clearance* item
+  below, which scopes the §22.0 paragraph headed *What is not yet
+  reachable* and the §22.9B material.) This material derives from
+  **no forbidden-class input** of any of the classes R8–R10. It is
+  not a port, a restatement, or a reconstruction of any external
+  behaviour: it is this project's own design for its own
+  operator-facing security controls, and it makes no claim, positive
+  or negative, about whether any other implementation offers
+  anything like it — no such question was asked, and answering one
+  would have changed this record. Its inputs are the ones the
+  *Inputs* item scopes to §22.9C — this repository's own
+  post-baseline tree, this document set's own chapters, and the
+  project's own conventions — which is R7 independent work. It therefore required
+  **no** §1.4A two-team pass: no Spec Reader authored it, no Dirty
+  Gate cleared it, and R38's mandatory route does not apply because
+  no forbidden-class input was taken to establish any of its
+  content. No clearance is pending for it, and the absence of a
+  clearance record is the correct state rather than an omission. The
+  one judgement in §22.9C that reads an external record at all —
+  RS6's use of RP9 as evidence of reachability — reads it from
+  §22.9B of this chapter as already-cleared chapter text, not from
+  any forbidden-class source.
 - *Dirty Gate clearance (chapter 01 T1):* the fourth exception
   above — §22.9B in full (RP8 through RP13 and §22.9B.4), the
   paragraph it added to §22.0, deferrals D10 and D11, and the
