@@ -648,15 +648,27 @@ chapter.
    the one that closes the plaintext-on-disk exposure; R5 / D3 closes in-memory
    disclosure. Which of the two comes first is a maintainer choice between two
    threats, not something this plan decides.
-1. **Phase 1 S1, S1a, S2, S3, S6.** The resolved config type, the startup
-   resolution point, the global switch at the session enforcement point, the
-   chokepoint, and the independent Tendermint gate. S1a is a prerequisite of
-   S2, not a refinement of it: the switch must be resolved before the handle is
-   built, because when it is off no handle is built at all. S6's Tendermint
-   half is independently shippable and independently useful; its UTXO half
-   (RS6.2 / D15) is not, and goes with the policy arm.
-2. **Phase 1 S4–S5**, each piece with the ch.22 D10 / D11 wiring that makes its
-   operation reachable. Not before.
+1. **Phase 1 S1, S1a, S2, S3, S4's EVM arm, S6's Tendermint half.** The
+   resolved config type, the startup resolution point, the global switch at the
+   session enforcement point, the chokepoint, the EVM activation refusal, and
+   the Tendermint HTLC gate. Three ordering facts that are not obvious:
+   - **S1a is a prerequisite of S2**, not a refinement of it. The switch must
+     be resolved before the handle is built, because when it is off no handle
+     is built at all — so there is nowhere later to put the resolution
+     (ch.22 RS11(3)).
+   - **S4's EVM arm belongs here, not in step 2.** The EVM activation request
+     type already carries the WalletConnect variant, so the refusal arm is
+     writable today and ch.22 RS2.1 requires it with the global switch. Only
+     its *proceeds-when-on* half waits for D10.
+   - **S6 splits.** Its Tendermint half (RS6.1 / D14) is independently
+     shippable and independently useful; its UTXO half (RS6.2 / D15) has
+     nothing to gate until the policy arm exists, so it moves to step 2.
+2. **Phase 1 S4's Tendermint and UTXO arms, S5, S6's UTXO half**, each piece
+   with the ch.22 D10 / D11 wiring that makes its operation reachable. Not
+   before. Each row of S5's table also extends the RS10 parser in the same
+   change, because ch.22 RS10 case 5 keys the accepted key set off the switches
+   the build *enforces* — so "the switch" and "the config key that names it"
+   are one unit of work, not two.
 3. **Phase 1 S7** documentation, with the phase it documents.
 4. **Phase 2 chapter** written and reviewed before Phase 2 code.
 5. **Phase 2 UTXO** (P0–P4). SegWit first; non-SegWit adds P4's
