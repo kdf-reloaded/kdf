@@ -5728,7 +5728,7 @@ mod tests {
         );
     }
     // -----------------------------------------------------------------------------------------
-    // A withdrawal is built here and broadcast by the caller (CRD ch.39 R39.8.0av / T39.8.0h)
+    // A withdrawal is built here and broadcast by the caller (CRD ch.39 R39.8.0ap, D39.8.0e / T39.8.0h)
     // -----------------------------------------------------------------------------------------
 
     /// One scanned 1.25 ARRR note, one spending key, and the pieces `build_from_wallet_db` needs.
@@ -5829,6 +5829,44 @@ mod tests {
         }
 
         fn fee(&self) -> BigDecimal { big_decimal_from_sat_unsigned(Self::FEE_SAT, 8) }
+
+        /// A withdrawal as `withdraw` builds it: selected from the wallet database, signed, returned.
+        /// Nothing is recorded.
+        fn build(
+            &self,
+        ) -> Result<zcash_primitives::transaction::Transaction, crate::z_coin::z_coin_errors::GenTxError> {
+            crate::z_coin::z_coin_ops::build_from_wallet_db(&self.inputs(), vec![], vec![self.output()], self.fee(), 12)
+                .map(|(tx, _)| tx)
+                .map_err(|e| e.into_inner())
+        }
+
+        /// The second step of the withdraw contract: the caller submits the serialized transaction
+        /// and the backend accepts it. Returns what was recorded.
+        fn broadcast(
+            &self,
+            tx: &zcash_primitives::transaction::Transaction,
+        ) -> Option<zcash_primitives::transaction::Transaction> {
+            let mut bytes = Vec::new();
+            tx.write(&mut bytes).unwrap();
+            crate::z_coin::z_coin_ops::record_broadcast_in_wallet_db(
+                self.history.wallet_db_path(),
+                &self.params,
+                &bytes,
+            )
+            .unwrap()
+        }
+
+        /// The fee column the wallet database holds for `tx`.
+        fn recorded_fee(&self, tx: &zcash_primitives::transaction::Transaction) -> Option<u64> {
+            let conn = Connection::open(self.history.wallet_db_path()).unwrap();
+            conn.query_row(
+                "SELECT fee FROM transactions WHERE txid = ?1",
+                params![&tx.txid().as_ref()[..]],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+            .map(|fee| fee as u64)
+        }
     }
 
     fn sapling_nullifiers(tx: &zcash_primitives::transaction::Transaction) -> Vec<[u8; 32]> {
@@ -5844,79 +5882,85 @@ mod tests {
     }
 
     /// The defect, as it reaches the wallet database: two withdrawals built one after the other,
-    /// with nothing broadcast and no scan in between, are handed the same note, so the second is
-    /// rejected by the network as a duplicate nullifier. Building without locking is what the
-    /// withdraw path did before R39.8.0av.
+    /// with nothing broadcast and no scan between them, are handed the same note. This is the
+    /// intended behaviour when the first is abandoned (see below), and the failure when it is not.
     #[test]
-    fn unlocked_withdraw_builds_select_the_same_note() {
-        use crate::z_coin::z_coin_ops::build_from_wallet_db;
+    fn unrecorded_withdraw_builds_select_the_same_note() {
         let Some(fixture) = WithdrawFixture::new() else { return };
-
-        let build = || {
-            build_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
-                .map_err(|e| e.to_string())
-                .unwrap()
-                .0
-        };
-        let (first, second) = (build(), build());
+        let (first, second) = (fixture.build().unwrap(), fixture.build().unwrap());
         assert_eq!(sapling_nullifiers(&first).len(), 1);
-        assert_eq!(
-            sapling_nullifiers(&first),
-            sapling_nullifiers(&second),
-            "both builds spend the same note: the second would be rejected as a duplicate nullifier"
-        );
+        assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&second));
     }
 
-    /// T39.8.0h, withdrawal side: the build locks the notes it commits to, so a second build before
-    /// anything is broadcast or scanned cannot be handed the same note, and is told it is short
-    /// rather than producing a transaction that reuses it.
+    /// T39.8.0h, withdrawal side (R39.8.0ap, D39.8.0e): withdraw builds and returns, and the caller
+    /// submits through `send_raw_transaction`. Once the backend has accepted those bytes, a second
+    /// build before any scan is not handed the same note and is told it is short.
     #[test]
-    fn locked_withdraw_builds_do_not_select_the_same_note() {
+    fn a_broadcast_withdrawal_holds_its_note_against_the_next_build() {
         use crate::z_coin::z_coin_errors::GenTxError;
-        use crate::z_coin::z_coin_ops::build_and_lock_from_wallet_db;
         let Some(fixture) = WithdrawFixture::new() else { return };
 
-        let (first, _) =
-            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
-                .map_err(|e| e.to_string())
-                .unwrap();
-        assert_eq!(sapling_nullifiers(&first).len(), 1);
+        let first = fixture.build().unwrap();
+        let recorded = fixture.broadcast(&first);
+        assert_eq!(recorded.as_ref().map(|tx| tx.txid()), Some(first.txid()));
+        assert_eq!(
+            fixture
+                .history
+                .spent_value_of_transaction(first.txid().as_ref())
+                .unwrap(),
+            WithdrawFixture::NOTE_VALUE
+        );
+        assert_eq!(
+            fixture.recorded_fee(&first),
+            Some(WithdrawFixture::FEE_SAT),
+            "the fee recorded from the raw bytes is the fee the build paid"
+        );
 
-        let second =
-            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12);
-        match second.map_err(|e| e.into_inner()) {
-            Err(GenTxError::InsufficientBalance { available, .. }) => {
-                assert_eq!(
-                    available,
-                    BigDecimal::from(0),
-                    "the locked note must not be offered at all"
-                )
-            },
+        match fixture.build() {
+            Err(GenTxError::InsufficientBalance { available, .. }) => assert_eq!(available, BigDecimal::from(0)),
             Err(other) => panic!("expected an insufficient-balance failure, got {other}"),
-            Ok(_) => panic!("a second build before broadcast or scan must not produce a transaction"),
+            Ok(_) => panic!("a second build after the first was broadcast must not reuse its note"),
         }
     }
 
-    /// The release the lock depends on, since the caller may never broadcast: a built transaction
-    /// stops holding its notes once the chain passes its expiry height, and not a block earlier.
-    /// The wallet database counts the transaction as unexpired while `expiry_height >= target`,
+    /// What the redesign buys, and the most likely thing to regress: a build the caller never
+    /// submits (the user cancelled the confirmation) records nothing, so the next build reuses the
+    /// note freely and nothing is stranded until expiry.
+    #[test]
+    fn an_abandoned_withdrawal_strands_no_notes() {
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let abandoned = fixture.build().unwrap();
+        assert_eq!(
+            fixture
+                .history
+                .spent_value_of_transaction(abandoned.txid().as_ref())
+                .unwrap(),
+            0,
+            "building alone records nothing"
+        );
+        let retry = fixture
+            .build()
+            .expect("the note is free: the first build was never broadcast");
+        assert_eq!(sapling_nullifiers(&abandoned), sapling_nullifiers(&retry));
+    }
+
+    /// The release the record depends on when a broadcast transaction is never mined: it stops
+    /// holding its notes once the chain passes its expiry height, and not a block earlier. The
+    /// wallet database counts the transaction as unexpired while `expiry_height >= target`,
     /// where target is the chain tip plus one.
     #[test]
-    fn locked_withdraw_notes_are_released_once_the_expiry_height_passes() {
+    fn a_broadcast_withdrawal_releases_its_note_once_the_expiry_height_passes() {
         use crate::z_coin::z_coin_errors::GenTxError;
-        use crate::z_coin::z_coin_ops::build_and_lock_from_wallet_db;
         let Some(fixture) = WithdrawFixture::new() else { return };
-        let build = || {
-            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
-                .map_err(|e| e.into_inner())
-        };
 
-        let (first, _) = build().unwrap();
+        let first = fixture.build().unwrap();
+        fixture.broadcast(&first);
         let expiry: u32 = first.expiry_height().into();
         assert_eq!(
             expiry,
             12 + 40,
-            "the builder's default expiry delta is what bounds the lock"
+            "the builder's default expiry delta is what bounds the hold"
         );
 
         // Advance the wallet's scanned tip block by block, as the sync loop does; a bare
@@ -5937,19 +5981,19 @@ mod tests {
                 .scan_cached_blocks_to_height(fixture.params.clone(), u64::from(tip), 1_000, 0, |_, _| {})
                 .unwrap();
         };
-        let shortfall = |result: Result<_, GenTxError>| match result {
-            Err(GenTxError::InsufficientBalance { available, .. }) => available == BigDecimal::from(0),
-            _ => false,
-        };
 
         // Tip = expiry - 1, so target = expiry: the transaction can still be mined in that block.
         advance_to(expiry - 1);
-        assert!(shortfall(build()), "still held while the transaction can yet be mined");
+        assert!(
+            matches!(fixture.build(), Err(GenTxError::InsufficientBalance { available, .. }) if available == BigDecimal::from(0)),
+            "still held while the transaction can yet be mined"
+        );
         // Tip = expiry, so target = expiry + 1: it can no longer be mined.
         advance_to(expiry);
-        let (retry, _) = build()
+        let retry = fixture
+            .build()
             .map_err(|e| e.to_string())
-            .expect("the notes are free once the transaction has expired");
+            .expect("the note is free once the transaction has expired");
         assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
     }
 }
@@ -6084,6 +6128,25 @@ impl ZCoinShieldedHistory {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// Total value of the wallet's notes that the transaction `txid` spends, as recorded in
+    /// the wallet database. Zero when the transaction is unknown or spends none of them.
+    pub(crate) fn spent_value_of_transaction(&self, txid: &[u8; 32]) -> Result<u64, String> {
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(rn.value), 0)
+                 FROM sapling_received_note_spends s
+                 JOIN sapling_received_notes rn ON rn.id = s.sapling_received_note_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                 WHERE t.txid = ?1;",
+                params![&txid[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        u64::try_from(total).map_err(|e| e.to_string())
     }
 }
 

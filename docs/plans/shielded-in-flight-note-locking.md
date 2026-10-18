@@ -1,36 +1,30 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-**Status:** parked (swap and `withdraw` paths shipped; the rest of T39.8.0h and Native-mode withdraw are open) — **Last reviewed:** 2026-10-18
+**Status:** in progress (swap and `withdraw` paths shipped; remaining T39.8.0h cases and two-process detection open) — **Last reviewed:** 2026-10-19
 
-> **Withdraw path closed (Light mode), 2026-10-18.** A user sent 0.01 ARRR to themselves,
-> never saw it in the history, and the next send failed with
-> `bad-txns-duplicate-nullifier-requirements-not-met`: `withdraw` built through the old
-> `gen_tx`, recorded nothing, and returned the transaction for the client to broadcast, so the
-> next withdrawal re-selected the same note. The fix is `ZCoin::gen_tx_for_withdraw`
-> (`mm2src/coins/z_coin/z_coin_ops.rs`), specified as CRD ch.39 R39.8.0av. Under the
-> withdraw contract (build and return; the client broadcasts, so a GUI can offer a confirmation
-> and a cancel) the only moment the daemon is involved is build time, so that is when the
-> transaction is recorded -- in the same critical section as the selection, before it is
-> returned. Neither the request nor the response changes, and `withdraw` still does not
-> broadcast. **Unlock semantics:** because the client may never broadcast, the notes are held
-> until the block is scanned (the normal release) or the wallet's scanned tip passes the
-> transaction's expiry height, which is the builder's default delta of 40 blocks (about forty
-> minutes on ARRR's 60-second blocks) -- verified against the wallet database's own predicate
-> (`expiry_height >= target height`, target = tip + 1) by a test that advances the scanned tip
-> across the boundary. A cancelled withdrawal therefore holds its notes for up to that window;
-> this is accepted, and is why the exception to R39.8.0ap's "record after broadcast" is confined
-> to the one path whose broadcast cannot be observed. A withdrawal never waits for an in-flight
-> spend; when this process's own in-flight spends explain a shortfall it fails at once with
-> `NotSufficientBalanceInFlightSpend`, which names the value held and the release rule. The
-> in-memory map behind that message now also drops entries once their expiry has passed, so an
-> abandoned withdrawal does not make later swap sends wait for a spend that can no longer clear;
-> the map is lost on restart, after which the exclusion still holds and the refusal is the bare
-> insufficient-balance one. **Not covered:** Native mode (the daemon builds the withdrawal and
-> cannot know of it until submitted); two daemons on one seed with *separate* wallet databases,
-> which cannot see each other's in-flight spends -- this fix does not make that arrangement
-> safe (a possible detection, not implemented: noticing a nullifier on chain that this wallet did
-> not create); and the T39.8.0h cases for a rejected broadcast, a restart and two concurrent
-> sends.
+> **Withdraw path closed, 2026-10-19.** A user sent 0.01 ARRR to themselves, never saw it in the
+> history, and the next send failed with `bad-txns-duplicate-nullifier-requirements-not-met`:
+> `withdraw` built a transaction and recorded nothing, and the client's `send_raw_transaction`
+> went through generic UTXO code that knows nothing of shielded notes, so the next withdrawal
+> re-selected the same note. The fix is in `ZCoin::send_raw_tx_bytes` (`mm2src/coins/z_coin.rs`,
+> with `record_broadcast_in_wallet_db` in `z_coin_ops.rs`): after the backend accepts the bytes,
+> the transaction is read back from them and recorded exactly as the swap send path records
+> its own (CRD ch.39 R39.8.0ap, D39.8.0e). The hook is on `ZCoin` rather than in `utxo_common`
+> because that code is shared by every UTXO coin. `withdraw` still builds and returns and does
+> not broadcast; its request and response are unchanged, so the GLEEC two-step contract holds.
+> A build that is never submitted records nothing, so a cancelled send strands no notes. The fee
+> recorded is derived from the bytes (value leaving the Sapling pool less the transparent outputs;
+> a transaction with transparent inputs or a non-Sapling bundle is not recorded). `withdraw` with
+> `max` no longer computes a negative amount when the spendable balance does not cover the fee.
+> The in-memory `in_flight_spends` map now also drops entries whose expiry has passed. ARRR is
+> lightwalletd-only, so there is no Native-mode path to cover.
+>
+> **Still to do for `done`:** the T39.8.0h cases for a rejected broadcast, a restart, the
+> mined-and-scanned transition and two concurrent sends (CRD ch.39 D39.8.0f); detection of two
+> daemons on one seed with separate wallet databases (this fix does not make that safe; a
+> possible cheap detection is noticing a nullifier on chain that this wallet did not create);
+> F3 (post-broadcast sync trigger, latency only). Deferred, not planned: showing built-but-unsent
+> transactions to the user (D39.8.0g).
 >
 > **Re-checked against the tree 2026-10-18.** Selection, construction, broadcast and recording
 > run as one critical section in `ZCoin::send_outputs`

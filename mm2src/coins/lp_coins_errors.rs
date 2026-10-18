@@ -477,25 +477,6 @@ pub enum WithdrawError {
         available: BigDecimal,
         required: BigDecimal,
     },
-    /// CRD ch.39 R39.8.0av: a shielded withdrawal is short only because the notes that would fund it
-    /// are held by an earlier transaction of this daemon that is not yet mined. Distinct from
-    /// `NotSufficientBalance` so the cause reaches the user: with the balance showing, a bare
-    /// "not enough funds" cannot be connected to the send that just happened.
-    #[display(
-        fmt = "Not enough spendable {} right now: available {}, required at least {}. {} is committed to a \
-               transaction you built or sent that has not been mined yet; it becomes spendable again once \
-               that transaction is mined (its change) or it expires unmined, about 40 blocks after it was built",
-        coin,
-        available,
-        required,
-        in_flight
-    )]
-    NotSufficientBalanceInFlightSpend {
-        coin: String,
-        available: BigDecimal,
-        required: BigDecimal,
-        in_flight: BigDecimal,
-    },
     #[display(fmt = "Balance is zero")]
     ZeroBalanceToWithdrawMax,
     #[display(fmt = "The amount {} is too small, required at least {}", amount, threshold)]
@@ -555,7 +536,6 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::CoinDoesntSupportInitWithdraw { .. }
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
-            | WithdrawError::NotSufficientBalanceInFlightSpend { .. }
             | WithdrawError::ZeroBalanceToWithdrawMax
             | WithdrawError::AmountTooLow { .. }
             | WithdrawError::InvalidAddress(_)

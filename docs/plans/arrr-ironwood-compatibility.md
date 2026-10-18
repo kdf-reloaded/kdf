@@ -1174,14 +1174,13 @@ that reads differently from before) are worth capturing even when the shielded l
 
 ### 11.6 Known gaps that could surface mid‑test
 
-- **A withdrawal records its notes when it is built (Light mode).** In‑flight shielded note
+- **A withdrawal is recorded when its transaction is submitted.** In‑flight shielded note
   locking covers the swap sends (selection, construction, broadcast and recording are one
-  critical section in `ZCoin::send_outputs`) and, since the fix for D39.8.0e, the **withdraw**
-  path too: it cannot broadcast (the caller does), so `ZCoin::gen_tx_for_withdraw` records the
-  built transaction in the shielded wallet database (CRD ch.39 R39.8.0av). A `withdraw`
-  immediately followed by another send no longer picks the same note. The cost: a withdrawal the
-  caller never submits holds its notes until its expiry height, 40 blocks after it was built.
-  Two daemons on one seed with separate wallet databases are still not protected. See
+  critical section in `ZCoin::send_outputs`) and the **withdraw** path: `withdraw` builds and
+  returns, and when the client submits the result through `send_raw_transaction`,
+  `ZCoin::send_raw_tx_bytes` records it once the backend accepts it (CRD ch.39 R39.8.0ap,
+  D39.8.0e). A built withdrawal that is never submitted holds nothing. Two daemons on one seed
+  with separate wallet databases are still not protected. See
   [`shielded-in-flight-note-locking.md`](shielded-in-flight-note-locking.md).
 - **The P2SH / HTLC spend path is deliberately refused**, not silently wrong: the R‑address
   workaround for Pirate's transparent‑index defect is still unproved on a funded HTLC, so

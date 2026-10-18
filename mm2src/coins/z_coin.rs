@@ -703,7 +703,7 @@ pub struct ZCoinFields {
     /// into one critical section per shielded wallet (CRD ch.39 R39.8.0at).
     z_unspent_mutex: AsyncMutex<()>,
     /// The notes each transaction this process broadcast, or built for a caller to
-    /// broadcast (a withdrawal, R39.8.0av), committed, keyed by txid, retained until
+    /// broadcast (including a withdrawal the caller submits, D39.8.0e), committed, keyed by txid, retained until
     /// the transaction is observed as scanned or its expiry height has passed. The
     /// authoritative exclusion is the wallet database record written by R39.8.0ap;
     /// this map exists only to tell a shortfall that an in-flight spend will clear
@@ -1377,33 +1377,6 @@ mod ironwood_consensus_param_tests {
             "{reported}"
         );
         assert!(reported.contains(&message), "{reported}");
-    }
-
-    /// A withdrawal refused because an earlier spend holds the notes must say so. With 2.5 ARRR
-    /// showing, a bare "not enough funds" cannot be connected to the send that just happened. It
-    /// keeps its own error type rather than reusing `NotSufficientBalance`, and is the user's to
-    /// resolve (400), not a server fault.
-    #[test]
-    fn a_shortfall_caused_by_an_in_flight_spend_names_it() {
-        use crate::lp_coins_errors::WithdrawError;
-        use common::HttpStatusCode;
-
-        let shortfall = GenTxError::InsufficientBalanceInFlightSpend {
-            coin: "ARRR".to_owned(),
-            available: "0.5".parse().unwrap(),
-            required: "1.0101".parse().unwrap(),
-            in_flight: "2".parse().unwrap(),
-        };
-        let withdraw: WithdrawError = shortfall.into();
-        assert!(
-            matches!(withdraw, WithdrawError::NotSufficientBalanceInFlightSpend { .. }),
-            "{withdraw:?}"
-        );
-        assert_eq!(withdraw.status_code(), common::StatusCode::BAD_REQUEST);
-        let reported = withdraw.to_string();
-        assert!(reported.contains("has not been mined yet"), "{reported}");
-        assert!(reported.contains("expires unmined"), "{reported}");
-        assert!(reported.contains('2'), "{reported}");
     }
 
     /// Step E binds `Nu6_3` to the Ironwood height, and only that upgrade: the unused Zcash
@@ -2519,14 +2492,36 @@ impl MarketCoinOps for ZCoin {
 
     fn platform_ticker(&self) -> &str { self.ticker() }
 
-    #[inline(always)]
     fn send_raw_tx(&self, tx: &str) -> Box<dyn Future<Item = String, Error = String> + Send> {
-        utxo_common::send_raw_tx(self.as_ref(), tx)
+        let bytes = try_fus!(hex::decode(tx));
+        self.send_raw_tx_bytes(&bytes)
     }
 
-    #[inline(always)]
+    /// Broadcasts through the shared UTXO path, then records what the backend accepted.
+    ///
+    /// This is where a withdrawal's second step lands (`send_raw_transaction`), so it is the one
+    /// place this daemon observes that broadcast. The hook lives on `ZCoin` rather than in
+    /// `utxo_common`, which is shared by every UTXO coin and knows nothing of shielded notes
+    /// (R39.8.0ap, D39.8.0e). Recording happens only after the backend accepted the transaction,
+    /// and a failure to record never fails the broadcast.
     fn send_raw_tx_bytes(&self, tx: &[u8]) -> Box<dyn Future<Item = String, Error = String> + Send> {
-        utxo_common::send_raw_tx_bytes(self.as_ref(), tx)
+        let fut = utxo_common::send_raw_tx_bytes(self.as_ref(), tx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let coin = self.clone();
+            let bytes = tx.to_vec();
+            Box::new(
+                async move {
+                    let hash = fut.compat().await?;
+                    coin.record_broadcast_shielded_tx(&bytes);
+                    Ok(hash)
+                }
+                .boxed()
+                .compat(),
+            )
+        }
+        #[cfg(target_arch = "wasm32")]
+        fut
     }
 
     fn wait_for_confirmations(
@@ -2673,6 +2668,18 @@ impl MmCoin for ZCoin {
                 let amount = if req.max {
                     let fee = coin.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
                     let balance = coin.my_balance().compat().await.mm_err(Into::into)?;
+                    // Nothing to send when the spendable balance does not cover the fee; subtracting
+                    // anyway yields a negative amount that only fails later, as an internal error.
+                    if balance.spendable <= BigDecimal::from(0u8) {
+                        return MmError::err(WithdrawError::ZeroBalanceToWithdrawMax);
+                    }
+                    if balance.spendable <= fee {
+                        return MmError::err(WithdrawError::NotSufficientBalance {
+                            coin: coin.ticker().to_owned(),
+                            available: balance.spendable,
+                            required: fee,
+                        });
+                    }
                     balance.spendable - fee
                 } else {
                     req.amount
@@ -2688,7 +2695,7 @@ impl MmCoin for ZCoin {
                     memo: None,
                 };
 
-                let (tx, data) = coin.gen_tx_for_withdraw(vec![z_output]).await.mm_err(Into::into)?;
+                let (tx, data) = coin.gen_tx(vec![], vec![z_output]).await.mm_err(Into::into)?;
                 let mut tx_bytes = Vec::with_capacity(1024);
                 tx.write(&mut tx_bytes)
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;

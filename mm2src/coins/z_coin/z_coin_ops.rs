@@ -362,55 +362,16 @@ impl ZCoin {
         }
     }
 
-    /// Generates a transaction this process will not broadcast itself -- a withdrawal, which the
-    /// caller submits (R39.8.0av) -- and, in Light mode, locks the notes it spends.
-    ///
-    /// The locking happens here because build time is the only moment the daemon is involved: the
-    /// withdrawal contract is "build and return, the client broadcasts", so a later send cannot be
-    /// told apart from "the user cancelled" except by the transaction's expiry. The notes are
-    /// therefore held until the transaction is scanned as mined or the chain passes its expiry
-    /// height, whichever comes first.
-    ///
-    /// A shortfall that the notes held by this process's own in-flight spends explain is reported
-    /// as such ([`GenTxError::InsufficientBalanceInFlightSpend`]) instead of as a bare insufficient
-    /// balance, and is refused at once: a withdrawal does not block waiting for a spend to clear.
+    /// Generates a tx sending outputs from our address
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn gen_tx_for_withdraw(
+    pub(crate) async fn gen_tx(
         &self,
+        t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         self.prepare_shielded_build().await?;
         let _lock = self.z_fields.z_unspent_mutex.lock().await;
-        self.forget_released_in_flight_spends();
-
-        let (tx, additional_data) = match self.gen_tx_locked(vec![], z_outputs, true).await {
-            Ok(built) => built,
-            Err(e) => {
-                let named = match e.get_inner() {
-                    GenTxError::InsufficientBalance {
-                        coin,
-                        available,
-                        required,
-                    } if self.shortfall_can_clear(e.get_inner()) => {
-                        Some(GenTxError::InsufficientBalanceInFlightSpend {
-                            coin: coin.clone(),
-                            available: available.clone(),
-                            required: required.clone(),
-                            in_flight: big_decimal_from_sat_unsigned(self.in_flight_spend_total(), self.decimals()),
-                        })
-                    },
-                    _ => None,
-                };
-                return match named {
-                    Some(named) => MmError::err(named),
-                    None => Err(e),
-                };
-            },
-        };
-        if self.is_light() {
-            self.note_in_flight_spend(&tx, &additional_data);
-        }
-        Ok((tx, additional_data))
+        self.gen_tx_locked(t_outputs, z_outputs).await
     }
 
     /// The gates that must clear before the critical section is entered.
@@ -440,23 +401,18 @@ impl ZCoin {
     /// Selects notes and builds the transaction. The caller must already hold
     /// `z_unspent_mutex` and must keep holding it through broadcast and recording
     /// (R39.8.0at).
-    ///
-    /// `lock_notes` records the built transaction in the shielded wallet database before it is
-    /// returned (Light mode only; R39.8.0av). A caller that broadcasts the transaction itself
-    /// passes `false` and records after the broadcast instead (R39.8.0ap).
     #[cfg(not(target_arch = "wasm32"))]
     async fn gen_tx_locked(
         &self,
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
-        lock_notes: bool,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         let tx_fee = self.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
         // One height authority for every construction path (R39.11.11); the read fails the build
         // rather than falling back to another source.
         let builder_height = self.builder_target_height().await.mm_err(GenTxError::from)?;
         if self.is_light() {
-            return self.gen_tx_from_shielded_wallet_db(t_outputs, z_outputs, tx_fee, builder_height, lock_notes);
+            return self.gen_tx_from_shielded_wallet_db(t_outputs, z_outputs, tx_fee, builder_height);
         }
 
         let t_output_sat: u64 = t_outputs.iter().fold(0, |cur, out| cur + u64::from(out.value()));
@@ -629,7 +585,6 @@ impl ZCoin {
         z_outputs: Vec<ZOutput>,
         tx_fee: BigDecimal,
         builder_height: u32,
-        lock_notes: bool,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         if !self.shielded_wallet_db_scan_complete() {
             return MmError::err(GenTxError::ShieldedWalletDb(
@@ -646,11 +601,7 @@ impl ZCoin {
             my_addr: &self.z_fields.my_z_addr,
             prover: &self.z_fields.z_tx_prover,
         };
-        if lock_notes {
-            build_and_lock_from_wallet_db(&inputs, t_outputs, z_outputs, tx_fee, builder_height)
-        } else {
-            build_from_wallet_db(&inputs, t_outputs, z_outputs, tx_fee, builder_height)
-        }
+        build_from_wallet_db(&inputs, t_outputs, z_outputs, tx_fee, builder_height)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -671,7 +622,7 @@ impl ZCoin {
                 let _lock = self.z_fields.z_unspent_mutex.lock().await;
                 self.forget_released_in_flight_spends();
 
-                match self.gen_tx_locked(t_outputs.clone(), z_outputs.clone(), false).await {
+                match self.gen_tx_locked(t_outputs.clone(), z_outputs.clone()).await {
                     Ok((tx, additional_data)) => {
                         let mut tx_bytes = Vec::with_capacity(1024);
                         tx.write(&mut tx_bytes).expect("Write should not fail");
@@ -684,7 +635,7 @@ impl ZCoin {
 
                         // Only after the backend accepted it: a refused broadcast must
                         // leave every selected note immediately reusable (R39.8.0ap).
-                        self.record_sent_shielded_tx(&tx, &additional_data);
+                        self.record_sent_shielded_tx(&tx, additional_data.fee_amount);
                         Some(tx)
                     },
                     // A shortfall that no in-flight spend can cover will not improve by
@@ -734,7 +685,7 @@ impl ZCoin {
     /// so a failure here must not turn a sent transaction into a caller-visible error. It
     /// degrades to the previous behaviour, which the scan corrects once the block lands.
     #[cfg(not(target_arch = "wasm32"))]
-    fn record_sent_shielded_tx(&self, tx: &ZTransaction, additional_data: &AdditionalTxData) {
+    fn record_sent_shielded_tx(&self, tx: &ZTransaction, fee_sat: u64) {
         if !self.is_light() {
             return;
         }
@@ -743,9 +694,9 @@ impl ZCoin {
             self.z_fields.shielded_history.wallet_db_path(),
             &self.z_fields.consensus_params,
             tx,
-            additional_data.fee_amount,
+            fee_sat,
         ) {
-            Ok(()) => self.note_in_flight_spend(tx, additional_data),
+            Ok(()) => self.note_in_flight_spend(tx),
             Err(e) => log::warn!(
                 "ZCoin {}: could not record sent transaction {:?} in the shielded wallet DB: {}. \
                  Its notes stay selectable until the containing block is scanned.",
@@ -756,13 +707,60 @@ impl ZCoin {
         }
     }
 
-    /// Remembers that `tx` commits the notes it spends, so a shortfall can be told apart from one
-    /// no waiting will fix, and so a refused withdrawal can name the cause.
+    /// Records a transaction the backend has just accepted through `send_raw_transaction`, which
+    /// is how a withdrawal reaches the network: it is built and returned, and the caller submits
+    /// it (R39.8.0ap, D39.8.0e). Only the raw bytes are available here, so everything is derived
+    /// from them.
+    ///
+    /// A transaction with no Sapling spend, or one that spends none of this wallet's notes, is
+    /// left alone: the wallet database matches spends to its own notes by nullifier and ignores
+    /// the rest. A build that is never submitted never reaches this point and records nothing, so
+    /// an abandoned withdrawal strands no notes.
     #[cfg(not(target_arch = "wasm32"))]
-    fn note_in_flight_spend(&self, tx: &ZTransaction, additional_data: &AdditionalTxData) {
+    pub(crate) fn record_broadcast_shielded_tx(&self, tx_bytes: &[u8]) {
+        if !self.is_light() {
+            return;
+        }
+        match record_broadcast_in_wallet_db(
+            self.z_fields.shielded_history.wallet_db_path(),
+            &self.z_fields.consensus_params,
+            tx_bytes,
+        ) {
+            Ok(Some(tx)) => self.note_in_flight_spend(&tx),
+            Ok(None) => {},
+            Err(e) => log::warn!(
+                "ZCoin {}: could not record a broadcast transaction in the shielded wallet DB: {}. \
+                 Its notes stay selectable until the containing block is scanned.",
+                self.ticker(),
+                e
+            ),
+        }
+    }
+
+    /// Remembers that `tx` commits the notes it spends, so a shortfall can be told apart from one
+    /// no waiting will fix. The value is read back from the wallet database record just written.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn note_in_flight_spend(&self, tx: &ZTransaction) {
+        let txid: [u8; 32] = *tx.txid().as_ref();
+        let value = match self.z_fields.shielded_history.spent_value_of_transaction(&txid) {
+            Ok(value) => value,
+            Err(e) => {
+                log::warn!(
+                    "ZCoin {}: could not read the value spent by {:?}: {}",
+                    self.ticker(),
+                    tx.txid(),
+                    e
+                );
+                return;
+            },
+        };
+        // None of this wallet's notes: nothing is committed, so there is nothing to track.
+        if value == 0 {
+            return;
+        }
         if let Ok(mut in_flight) = self.z_fields.in_flight_spends.lock() {
-            in_flight.insert(*tx.txid().as_ref(), InFlightSpend {
-                value: additional_data.spent_by_me,
+            in_flight.insert(txid, InFlightSpend {
+                value,
                 expiry_height: tx.expiry_height().into(),
             });
         }
@@ -789,7 +787,7 @@ impl ZCoin {
     ///
     /// The expiry test uses the same height the wallet database uses to decide that the
     /// transaction's notes are free again, so this map and the database release together. Without
-    /// the second rule an abandoned withdrawal, which is never scanned, would stay here for the
+    /// the second rule a broadcast transaction that is never mined, and so never scanned, would stay here for the
     /// life of the process.
     #[cfg(not(target_arch = "wasm32"))]
     fn forget_released_in_flight_spends(&self) {
@@ -1076,28 +1074,6 @@ pub(crate) fn build_from_wallet_db(
     Ok((tx, additional_data))
 }
 
-/// [`build_from_wallet_db`], then records the built transaction in the wallet database so the
-/// notes it spends are not offered to the next selection (R39.8.0av).
-///
-/// For a transaction this process builds but does not broadcast (a withdrawal): the caller of
-/// the withdrawal broadcasts it, if at all, so build time is the only moment this process is
-/// involved. A failure to record fails the build: handing out a signed transaction whose notes
-/// stay selectable is the defect itself, and nothing has been sent yet, so refusing costs the
-/// user a retry rather than a stuck send.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn build_and_lock_from_wallet_db(
-    inputs: &WalletDbBuild<'_>,
-    t_outputs: Vec<TxOut>,
-    z_outputs: Vec<ZOutput>,
-    tx_fee: BigDecimal,
-    builder_height: u32,
-) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
-    let (tx, additional_data) = build_from_wallet_db(inputs, t_outputs, z_outputs, tx_fee, builder_height)?;
-    record_sent_in_wallet_db(inputs.wallet_db_path, inputs.params, &tx, additional_data.fee_amount)
-        .mm_err(|e| GenTxError::ShieldedWalletDb(format!("could not lock the notes of the built transaction: {e}")))?;
-    Ok((tx, additional_data))
-}
-
 /// Writes a transaction this wallet built into the shielded wallet database as sent and
 /// unmined, which marks the notes it spends so `select_spendable_notes` stops offering them.
 /// The wallet database releases them by itself once the transaction is mined (the scan
@@ -1193,4 +1169,57 @@ mod in_flight_tests {
         };
         assert!(!in_flight_spend_expired(&never, Some(u32::MAX)));
     }
+}
+
+/// Records raw transaction bytes the backend has accepted, deriving everything from the bytes.
+///
+/// `Ok(None)` when the bytes are not a transaction that spends Sapling notes (nothing to record).
+/// A transaction that spends none of this wallet's notes is recorded harmlessly: the wallet
+/// database matches spends to its own notes by nullifier and ignores the rest.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn record_broadcast_in_wallet_db(
+    wallet_db_path: &Path,
+    params: &ZcoinConsensusParams,
+    tx_bytes: &[u8],
+) -> Result<Option<ZTransaction>, String> {
+    // The backend accepted bytes we cannot read: not a shielded transaction of ours.
+    let Ok(tx) = z_tx_read::read_tx(tx_bytes) else {
+        return Ok(None);
+    };
+    if !tx
+        .sapling_bundle()
+        .is_some_and(|bundle| !bundle.shielded_spends().is_empty())
+    {
+        return Ok(None);
+    }
+    let fee_sat = broadcast_fee_sat(&tx).ok_or_else(|| {
+        format!(
+            "transaction {:?} spends shielded notes but its fee cannot be derived from its bytes",
+            tx.txid()
+        )
+    })?;
+    record_sent_in_wallet_db(wallet_db_path, params, &tx, fee_sat).map_err(|e| e.to_string())?;
+    Ok(Some(tx))
+}
+
+/// The fee of a transaction whose only shielded pool is Sapling and which has no transparent
+/// inputs, from its bytes alone: the value leaving the Sapling pool less the transparent outputs
+/// it pays. `None` when the transaction is any other shape, where the fee would need data the
+/// bytes do not carry (transparent input values).
+#[cfg(not(target_arch = "wasm32"))]
+fn broadcast_fee_sat(tx: &ZTransaction) -> Option<u64> {
+    if tx.orchard_bundle().is_some() || tx.ironwood_bundle().is_some() {
+        return None;
+    }
+    let leaving_sapling = i64::from(tx.sapling_bundle()?.value_balance());
+    let transparent_out = match tx.transparent_bundle() {
+        Some(bundle) if !bundle.vin.is_empty() => return None,
+        Some(bundle) => bundle.vout.iter().try_fold(0i64, |sum, out| {
+            i64::try_from(u64::from(out.value()))
+                .ok()
+                .and_then(|value| sum.checked_add(value))
+        })?,
+        None => 0,
+    };
+    u64::try_from(leaving_sapling.checked_sub(transparent_out)?).ok()
 }
