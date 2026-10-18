@@ -192,11 +192,14 @@ independently shippable — there is nothing to gate until the policy arm exists
   These are not compatibility switches: they describe no divergence from GLEEC,
   there is no GLEEC-compatible value to recover, and their lifecycle is the
   threat's, not a compatibility window's (ch.22 §22.9C.2).
-- The default-side rule resolves in our favour and the reasoning is worth
-  writing down once: these switches touch no wire format and affect no other
-  node, and are security-only, so our variant is the default without a team
-  decision. ch.22 §22.9C.2 states it; the operator-facing docs should not
-  re-derive it.
+- The default-side rule does **not** apply, and the per-setting documentation
+  should not claim it does. `docs/COMPAT_SWITCHES.md` records the rule under
+  *"The default-side rule"* and, under *"What this convention is not"*, states
+  that it does not reach operator-facing security controls: such a control's
+  default is a security decision for the feature that owns it. ch.22 §22.9C.2
+  owns this one and settles it as *available* because an operator who
+  configures nothing must see no change. The operator-facing docs should cite
+  §22.9C.2 and not re-derive anything.
 - **Open: whether operator security controls get a document of their own.** My
   recommendation is **not yet**. One control does not need a central chapter,
   and creating `docs/OPERATOR_SECURITY_CONTROLS.md` speculatively would invite
@@ -541,6 +544,11 @@ chapter.
   `derive_htlc_pubkey` contract the Tendermint gate (S6) interacts with.
 - [`COMPAT_SWITCHES.md`](../COMPAT_SWITCHES.md) and
   [`GLEEC_COMPATIBILITY.md`](../GLEEC_COMPATIBILITY.md) — the convention the
-  Phase 1 switches are deliberately **not** part of.
+  Phase 1 switches are deliberately **not** part of. Its
+  [default-side rule](../COMPAT_SWITCHES.md#the-default-side-rule) and its
+  *"What this convention is not"* carve-out for operator-facing security
+  controls are what ch.22 §22.9C.2 cites. **Both land with PR #45**, which is
+  open and unmerged at the time of writing; the citation resolves when it
+  merges.
 - [`walletconnect-fork-upgrade.md`](walletconnect-fork-upgrade.md) — the
   subsystem's dependency work; unrelated to either phase but the same code.

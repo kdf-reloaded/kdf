@@ -1545,7 +1545,7 @@ that way.
 > either gap, and this section must not be read as having reduced
 > the priority of either.
 
-### 22.9C.2 Not compatibility switches, and why our variant is the default
+### 22.9C.2 Not compatibility switches, and why the default is *available*
 
 **These are not `RELOADED_VS_GLEEC` switches.** The compatibility
 convention of `COMPAT_SWITCHES.md` exists for one purpose: when
@@ -1566,22 +1566,38 @@ whether to create one belongs to the implementation plan
 (`docs/plans/walletconnect-switches-and-presigned-refund.md`) and is
 deliberately not taken here.
 
-**The default-side rule resolves cleanly in our favour.** The
-project's standing rule on which side of a difference is the default
-has three arms: where a difference touches wire compatibility or
-breaks other users or nodes, GLEEC parity is the default; where it
-touches no wire format, affects no other node, and only improves
-user experience or security, our variant is the default; anything
-between the two is a team decision. These switches touch **no wire
-format** (no WC2 envelope, no CAIP identifier, no request payload of
-§22.8.1, no on-disk record of §22.5.3 changes), affect **no other
-node** (a disabled subsystem makes a node offer fewer of its own
-capabilities; it changes nothing another node observes or relies
-on), and are **security only**. The second arm therefore applies
-without argument and our variant is the default. This reasoning is
-recorded here so that a later reader does not reconstruct it, and so
-that the absence of a `GLEEC_COMPATIBILITY.md` row is not later
-mistaken for an oversight.
+**The default-side rule does not reach these switches, and that is
+the point.** The project's standing policy on which side of a
+compatibility divergence the default falls is recorded in
+[`docs/COMPAT_SWITCHES.md`](../COMPAT_SWITCHES.md), *"The
+default-side rule"* (anchor `#the-default-side-rule`); it is not
+restated here. What matters for this section is the carve-out that
+accompanies it: the same document's *"What this convention is not"*
+states that the rule is **not** a rule about operator-facing
+security controls, that a security control's default is a security
+decision for the feature that owns it rather than a parity question,
+and that the rule does not reach it. The switches of this section
+are exactly that kind of control. They touch **no wire format** (no
+WC2 envelope, no CAIP identifier, no request payload of §22.8.1, no
+on-disk record of §22.5.3 changes) and affect **no other node** (a
+disabled subsystem makes a node offer fewer of its own capabilities;
+it changes nothing another node observes or relies on), so enabling
+or disabling them diverges from nothing — which is the condition
+under which `COMPAT_SWITCHES.md` says such a control enters that
+convention at all. It therefore does not enter it, and the
+default-side rule has nothing to decide.
+
+**This section owns the default, and it is *available*.** The reason
+is not parity and not a rule appealed to from elsewhere: it is that
+the status quo must not change under an operator who configures
+nothing. Any other default would turn an upgrade into a silent
+withdrawal of a capability their users already have, and RS1 and
+RS9's first case are where that is bound. The restrictive reading is
+available to an operator who asks for it, in one key. This
+reasoning is recorded here so that a later reader does not
+reconstruct it, and so that the absence of a
+`GLEEC_COMPATIBILITY.md` row is not later mistaken for an
+oversight.
 
 ### 22.9C.3 The global switch
 
