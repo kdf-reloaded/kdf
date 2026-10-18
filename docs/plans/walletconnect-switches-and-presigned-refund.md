@@ -86,9 +86,17 @@ context (see S1a).
 - `families: Option<BTreeMap<CaipNamespace, FamilySwitches>>` — `None` means "no
   per-family policy expressed" (RS9), which is **not** the same as an empty map.
 - `unnamed_family_policy: Allow | Deny`, default `Deny` (RS9).
+- `unnamed_operation_policy: Allow | Deny`, default `Deny` (RS9). The
+  allowlist is an allowlist at **both** levels: an operation key absent from a
+  family entry the map *does* name follows this key, so that a switch added by
+  a later RS5.2 change is not granted by omission to an operator who locked
+  that family down two releases ago.
 - `FamilySwitches` carries only the operations ch.22 §22.9C.5 specifies **for
-  that namespace**; an operation key for a combination with no switch is a parse
-  error (RS10 case 5). A per-namespace deserializer, not one shared struct with
+  that namespace** *and whose enforcement this build has wired*; any other
+  operation key is a parse error (RS10 case 5). The UTXO swap key is spelled
+  `legacy_swap`, not `swap`, because §22.9C.5 switches the legacy v1 HTLC and
+  refuses a switch for swap-protocol-v2 — a key called `swap` would claim the
+  wider scope. A per-namespace deserializer, not one shared struct with
   optional fields, is what makes that fall out of the types rather than out of a
   hand-written check.
 - Resolution must distinguish "absent" from "unparsable": absent yields the
@@ -167,7 +175,8 @@ funnel on the wire side, but the switch decision needs the *coin* and the
 *operation*, which that function does not have. So:
 
 - add one chokepoint that takes the coin's CAIP-2 namespace, the session topic,
-  and an explicit `WcOperation { Withdraw, Swap, Activation, Unclassified }`
+  and an explicit `WcOperation { Withdraw, LegacySwapHtlc, Activation,
+  Unclassified }`
   (RS7.1) — supplied by the caller, never inferred. `Unclassified` is the
   residual variant and the chokepoint **refuses** it unconditionally (RS7.3):
   it is not a catch-all that passes on the global switch. `experimental::
@@ -231,7 +240,7 @@ reachable, never before:
 | --- | --- |
 | `eip155.withdraw` | ch.22 D10's EVM withdrawal wiring |
 | `cosmos.withdraw` | ch.22 D10's Tendermint withdrawal wiring |
-| `bip122.swap` | ch.22 D10's UTXO legacy-swap wiring |
+| `bip122.legacy_swap` | ch.22 D10's UTXO legacy-swap wiring |
 | `bip122.withdraw` | ch.22 D11's UTXO withdrawal wiring (coordinate with CRD ch.49) |
 
 A switch whose operation slips out of a release slips with it. Shipping the
@@ -313,28 +322,46 @@ weight:
 - **ACS6 and ACS13** — one startup-error test per RS10 case, driven through
   **startup** and not through the resolver alone, because the defect being
   guarded against is a misconfigured node running until somebody calls a
-  WalletConnect RPC. In particular `{"eip155": {"swap": false}}` is
+  WalletConnect RPC. In particular `{"eip155": {"legacy_swap": false}}` is
   **rejected** rather than silently accepted. ACS13 adds the mechanical
   one-parser check.
 - **ACS7** — the mechanical check that no second call site reaches a
   `WcCoinSigner` signing method.
-- **ACS8** — with no new keys configured, nothing changes. This one is cheap and
-  is the regression gate for the whole phase.
+- **ACS8 / ACS8a** — the regression gate, and it has to be written against the
+  right configuration: a `walletconnect` block **present** with a valid
+  `project_id` and none of the new keys. Written against an absent block it
+  passes trivially and proves nothing, because without `project_id` the handle
+  is never built either way. ACS8a is the matching positive test for the one
+  configuration this feature knowingly breaks — a present block with an
+  unrecognised sibling, including a misspelling of `relay_address`.
 
 The `WcSessionPersistence` unit tests in `mm2src/kdf_walletconnect/src/lib.rs`
 are the model for the parser tests; follow their shape.
 
 ### Migration and compatibility (Phase 1)
 
-**There is nothing to break.** The default is "available", absent configuration
-resolves to today's behaviour for every family and operation, and the new keys
-nest into an existing object without changing either key already in it. No
-on-disk format changes, no wire format changes, no RPC shape changes, no
-persisted session is rewritten or deleted. An operator who upgrades and
-configures nothing cannot tell the feature landed — ACS8 asserts exactly that.
+**One configuration breaks, deliberately, and it is not the empty one.** The
+default is "available", a `walletconnect` block carrying only `project_id` and
+`relay_address` resolves to today's behaviour for every family and operation,
+and the new keys nest into an existing object without changing either key
+already in it. No on-disk format changes, no wire format changes, no RPC shape
+changes, no persisted session is rewritten or deleted. An operator who upgrades
+and configures nothing new cannot tell the feature landed — ACS8 asserts that,
+against a block **present** with a valid `project_id`, which is the actual
+status quo. (A test against an *absent* block asserts nothing: with no block
+there is no `project_id`, the handle is never built, and the comparison is
+between two identical failures.)
 
-Two deliberate asymmetries worth repeating to whoever implements it, because
-both look like bugs:
+What *does* break is a `walletconnect` object carrying an unrecognised sibling,
+which RS10 case 1 turns into a startup error and which boots today because the
+object's two keys are read by direct indexing with everything else ignored. The
+realistic instance is a **misspelling** — `relay_url` for `relay_address` — on
+a node that has been quietly running on the default relay. The Risks table
+accepts that trade; this section used to assert the opposite of it, which is
+how an implementer ends up fielding the bug report. ACS8a tests it.
+
+Three deliberate asymmetries worth repeating to whoever implements it, because
+all three look like bugs:
 
 1. The default is *available* but the failure mode is *closed* (RS1 vs RS3).
    Absence of configuration is a determinate answer; a configuration error is
@@ -343,6 +370,18 @@ both look like bugs:
    family means that family is **denied** (RS9). Writing a map at all is an
    allowlist, which is what stops a family added in a later release from
    becoming available by omission in an existing operator's config.
+3. The allowlist is an allowlist at the **operation** level too: an operation
+   key absent from a named family entry follows `unnamed_operation_policy`,
+   default deny (RS9). So `{"bip122": {"withdraw": false}}` denies
+   `bip122.legacy_swap` as well, and an operator who wants only withdrawal off
+   writes both keys. The reason is the same one as (2), one level down: a
+   switch added by a later RS5.2 change must not be granted by omission.
+4. Disabling is reversible without user impact only for a disable **shorter
+   than the sessions' remaining lifetime** (RS4.1). Nothing extends a session's
+   expiry while the subsystem is off, and the unconditional loader deletes
+   expired rows on the re-enabled start, so a long disable ends in the
+   every-user-re-pairs state RS4.1 is written to avoid. Do not promise
+   otherwise; ACS2's second case tests the bound.
 
 ---
 
@@ -627,7 +666,8 @@ chapter.
 | Enforcement leaks to a second call site over time | RS7.2 / ACS7 — a capability witness the compiler enforces, over the funnel as well as the trait, not a review convention |
 | A check passes on `WcCoinSigner` while `send_session_request` stays open to every holder of the handle | RS7.2's funnel clause and ACS7's three compile-fail cases; a trait-only check certifies a property that does not protect the channel |
 | A fund-moving route reaches the wallet through the chokepoint's residual operation class while a per-family switch reports it blocked | RS7.3 — the residual class is refused unconditionally, and ACS11(b)'s mechanical call-site enumeration is reviewable against the fund-moving RPC routes |
-| Strict config parsing breaks a config shared across node versions | Accepted deliberately and documented: a security switch the operator believes they set is worth more than a config that loads everywhere |
+| Strict config parsing breaks a config shared across node versions | Accepted deliberately and documented: a security switch the operator believes they set is worth more than a config that loads everywhere. Two instances, both asserted rather than assumed: an unrecognised sibling in an existing `walletconnect` object (ACS8a — the realistic case is a misspelled `relay_address` on a node quietly using the default relay), and a key whose switch a later release enforces but this one does not (RS10 case 5, ACS6) |
+| A switch added by a later RS5.2 change is granted by omission to an operator who locked a family down two releases ago | RS9's `unnamed_operation_policy`, default deny, plus RS5.2's requirement that the change state what existing configurations resolve to |
 | Phase 2 pre-signs something not consensus-enforced | P0's corollary as a binding CRD requirement with a named consensus rule per pre-sign site |
 | Phase 2 broadcast gets stuck in the mempool | P2.1's pre-flight feerate gate as a **precondition** of broadcast. This **narrows** the window and does not close it — feerates rise after broadcast — so it is not a retired risk |
 | A stuck pre-signed refund is unreplaceable even after the wallet returns | P2.2 — an RBF-signalling nSequence (`0xffff_fffd`) chosen deliberately instead of inheriting `SEQUENCE_FINAL - 1`, which is **not** BIP-125 opt-in. Open decision 9 (P2.3's fee ladder) would remove the need to wait for the wallet at all |
@@ -675,10 +715,12 @@ chapter.
    session-key accessor live in `kdf_walletconnect`, and the witness type has
    to be visible to them, so putting the chokepoint there keeps the whole
    restricted surface in one crate. **Recommendation: `kdf_walletconnect`.**
-3. **Phase 1 `unnamed_family_policy` spelling and placement:** a sibling key, as
-   specified, versus a reserved `default` entry inside `families`. Specified as
-   a sibling because a CAIP-2 namespace could in principle be spelled
-   `default`; revisit only if an operator-facing reason appears.
+3. **Phase 1 `unnamed_*_policy` spelling and placement:** sibling keys, as
+   specified, versus a reserved `default` entry inside `families` and inside
+   each family entry. Specified as siblings because a CAIP-2 namespace could in
+   principle be spelled `default`, and because two sibling keys read more
+   plainly than two reserved entries at different nesting depths; revisit only
+   if an operator-facing reason appears.
 4. **Phase 2 storage:** does the artifact live in the swap's own storage or in a
    separate store? Encryption at rest (P1) may decide it.
 5. **Phase 2 same-chain two-leg EVM swaps** (P5): handled, or refused with a

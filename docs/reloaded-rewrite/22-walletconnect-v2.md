@@ -1717,7 +1717,20 @@ not an error and is not a conflict; it is simply unreachable.
 **RS4.1 — Disabling is not destructive, and does not weaken R8.**
 Disabling the subsystem shall not delete, rewrite, or expire any
 persisted session record, so that re-enabling restores the prior
-session set rather than requiring every user to re-pair. There is
+session set rather than requiring every user to re-pair — **for a
+disable shorter than the records' remaining lifetime**. Beyond that
+the purpose does not hold and the mechanism is not at fault: a WC2
+session's expiry is set by the wallet at settle and is extended only
+by live traffic, of which a disabled subsystem generates none, so on
+the first re-enabled start the unconditional loader deletes every
+row that has since expired, exactly as it would have for a node that
+was merely offline. A node disabled for longer than the remaining
+session lifetime therefore re-enables into the every-user-re-pairs
+state this requirement is written to avoid, and the records are then
+genuinely gone. This is a limitation of the switch, not a defect in
+it, and it is stated so that nobody promises an operator that
+disabling is reversible without user impact for an arbitrary
+duration. There is
 no conflict with the unconditional-load rule R8 / §22.5.2: R8 binds
 what the loader does *about `wc_session_persistence`* when the
 loader runs — it must read every record irrespective of that
@@ -1823,10 +1836,17 @@ to infer it from.
 **RS5.2 — The forward half of the rule.** If a family/operation
 combination that §22.9C.5 refuses a switch for later becomes
 reachable, the change that makes it reachable **shall** add that
-switch, its enforcement at the chokepoint, and its RS5 test in the
-**same** change. Making an operation reachable without that is a
-silent security decision taken by omission, which is exactly what
-§22.9C.5's refusals are chosen to avoid.
+switch, its enforcement at the chokepoint, its RS5 test, its
+acceptance in the RS10 parser, and a statement of **what existing
+configurations resolve to under the new switch**, in the **same**
+change. Making an operation reachable without that is a silent
+security decision taken by omission, which is exactly what
+§22.9C.5's refusals are chosen to avoid. The last of the five is
+there because RS9's `unnamed_operation_policy` already answers the
+question for a named family and the answer should be restated rather
+than assumed: a reader of the change should not have to re-derive
+what happens to an operator who locked a family down two releases
+ago.
 
 ### 22.9C.5 Which family/operation switches exist, and which do not
 
@@ -1857,7 +1877,8 @@ rules just named are what govern.) The determination is:
 | all three | any other delegated operation | **none, and the operation is refused** | RP9's "ordinary transaction build → wallet signature → broadcast" row is `yes` for all three families but does **not** enumerate the family-specific operation classes it covers (Tendermint staking and IBC transfer, EVM contract calls, and so on). Several are live RPC routes in this tree already — `experimental::staking::delegate`, `undelegate` and `claim_rewards` reach `TendermintCoin::delegate` through `add_delegation` — and every one of them **moves funds**. They are therefore *not* governed by the global switch alone and *not* governed by a per-family `withdraw` switch either: they reach the chokepoint in the residual class of RS7.1 and RS7.3 **refuses** them. Making one of them available to a WalletConnect wallet means enumerating its operation class and adding its switch under RS5.2, in the change that makes it reachable. |
 
 Four switches are therefore specified: `bip122` withdrawal,
-`bip122` legacy swap, `eip155` withdrawal, `cosmos` withdrawal.
+`bip122` legacy swap (configuration key `legacy_swap`, RS8),
+`eip155` withdrawal, `cosmos` withdrawal.
 
 **Reading the *Basis* column.** The column distinguishes two things
 a reader must not conflate, because §22.9C.5 is where a reader comes
@@ -1961,8 +1982,22 @@ explicit argument supplied by the caller, never inferred from
 context. Its variants shall be exactly the switched classes of
 §22.9C.5, plus the activation-time wallet interaction, plus **one
 residual variant** whose meaning is "this call site has not declared
-an enumerated class". Adding a new operation class is the trigger
-for RS5.2.
+an enumerated class". Concretely, for the four switches §22.9C.5
+specifies: withdrawal, **legacy (v1) swap HTLC**, the activation-time
+wallet interaction, and the residual variant. Adding a new operation
+class is the trigger for RS5.2.
+
+The swap class is *legacy-swap-only*, and is named so. An
+undifferentiated `Swap` variant could not tell §22.9C.5's switched
+combination (`bip122` legacy v1) from the one it refuses a switch for
+(`bip122` swap-protocol-v2), so the switch would silently govern both
+protocol versions — doing more than §22.9C.5 says it does — and an
+operator setting the key would be told they had permitted something
+that has no switch, which is RS10 case 5 pointing the other way. A
+swap-protocol-v2 request therefore carries no enumerated class and is
+refused by RS7.3, which also gives RP11.1's "earliest lifecycle
+point" rejection a concrete second home for anything that reaches
+the chokepoint regardless.
 
 The residual variant is **not** a catch-all that passes on the
 global switch. It is the subject of RS7.3, and the distinction is
@@ -2076,7 +2111,7 @@ spelling convention:
     "enabled": true,
     "unnamed_family_policy": "deny",
     "families": {
-      "bip122": { "withdraw": true, "swap": true },
+      "bip122": { "withdraw": true, "legacy_swap": true },
       "eip155": { "withdraw": true },
       "cosmos": { "withdraw": true }
     }
@@ -2085,8 +2120,16 @@ spelling convention:
 ```
 
 The two existing keys keep their present meaning and their present
-lenient handling; this section adds keys to the object and amends
-nothing already in it. Note in particular that `project_id` is
+lenient handling, and this section adds keys to the object rather
+than changing either of those two. It does not follow that the
+object's handling is unchanged: RS10 makes an **unrecognised
+sibling** of this section's keys a startup error, and the object is
+read today by direct indexing of exactly two keys with everything
+else ignored, so a node carrying a third key — including a
+*misspelling* of `relay_address` — boots today and will not after
+this section lands. That is a deliberate breakage, it is the only
+one, and ACS8a tests it. A reader should not take "amends nothing"
+further than the two keys' own spellings and semantics. Note in particular that `project_id` is
 **required** today, so a node that configures none already fails to
 bring the subsystem up. That is not an off switch and must not be
 treated as one: it is a misconfiguration that surfaces as an error
@@ -2123,7 +2166,8 @@ of which a handful will ever be tested, and nothing in the shape
 would say which handful. The nested shape collapses that
 deliberately: `enabled: false` short-circuits the whole map (RS4),
 so the states that need testing are the global off state, each
-individual per-family switch off, and the unnamed-family case. The
+individual per-family switch off, the unnamed-family case, and the
+unnamed-operation case (RS9). The
 test matrix is small by construction rather than by hope, and the
 four switches §22.9C.5 actually specifies are fewer than the six the
 flat shape would have invited — the two it does not specify are
@@ -2135,31 +2179,62 @@ exactly the ones RS5 forbids.
 | `walletconnect.enabled` | bool | The global switch of RS1. Default `true`. |
 | `walletconnect.families` | object | Map from CAIP-2 namespace to that family's per-operation switches. |
 | `walletconnect.families.<ns>.withdraw` | bool | Withdrawal switch for that family, where §22.9C.5 specifies one. Default `true`. |
-| `walletconnect.families.<ns>.swap` | bool | Swap switch for that family, where §22.9C.5 specifies one. Default `true`. |
+| `walletconnect.families.<ns>.legacy_swap` | bool | Legacy (v1) swap-HTLC switch for that family, where §22.9C.5 specifies one. Spelled `legacy_swap` and not `swap` deliberately: §22.9C.5 switches the legacy (v1) swap HTLC for `bip122` and specifies **no** switch for swap-protocol-v2, so a key called `swap` would tell an operator they had permitted something that has no switch. Default `true`. |
 | `walletconnect.unnamed_family_policy` | `"deny"` / `"allow"` | What applies to a family the `families` map does not name, when the map is present. Default `"deny"`. |
+| `walletconnect.unnamed_operation_policy` | `"deny"` / `"allow"` | What applies to an operation key absent from a family entry the `families` map *does* name. Default `"deny"`. |
 
 **RS9 — Missing keys.** Absence is a determinate answer and shall
 be resolved as follows:
 
 | Case | Resolution |
 |---|---|
-| `walletconnect` absent, or present with none of this section's keys | The subsystem is available and every switch §22.9C.5 specifies is available. This is exactly today's behaviour, and is why the feature breaks no existing deployment. |
+| `walletconnect` **absent** | No policy is expressed, so this section's resolution is *available*. Note that the subsystem cannot come up in this state for an unrelated, pre-existing reason: `project_id` is required, so the handle is never built and no operation this section names can occur, before the feature or after it. "Available" here therefore means "this section denies nothing", not "the subsystem works". |
+| `walletconnect` **present** with a valid `project_id` and none of this section's keys | The subsystem is available and every switch §22.9C.5 specifies is available. **This is the configuration that is actually today's behaviour**, and is the one a regression test must use (ACS8). |
 | `walletconnect` present, `families` absent | As above for the per-family switches; `enabled` is read as given. The operator expressed a global policy and no per-family policy. |
-| `families` present, a family **named**, an operation key absent | That operation takes its default, available. |
+| `families` present, a family **named**, an operation key absent | `unnamed_operation_policy` governs, default `deny`. A `families` map is an allowlist at **both** levels; see the paragraph below. |
 | `families` present, a family **not named** | `unnamed_family_policy` governs, default `deny`. Writing a `families` map at all is therefore an **allowlist**, which is what keeps a family added to the code in a later release from becoming available by omission in an existing operator's configuration. |
 | `enabled` absent | `true`. |
 | `unnamed_family_policy` absent | `"deny"`. |
+| `unnamed_operation_policy` absent | `"deny"`. |
 
-The asymmetry between the first case and the last is deliberate and
-is stated so it is not later read as an inconsistency: an operator
-who has written **no** WalletConnect policy gets the status quo,
-including for a family added later, because that is what "default
-available" means and anything else would silently change behaviour
-on upgrade; an operator who has written a policy gets allowlist
-semantics within it, because having written one they are entitled to
-have it mean what it says. An operator who wants the strict reading
-globally sets `enabled: false`, or writes a `families` map and
-leaves `unnamed_family_policy` at its default.
+The asymmetry between the no-policy case and the written-policy
+cases is deliberate and is stated so it is not later read as an
+inconsistency: an operator who has written **no** WalletConnect
+policy gets the status quo, including for a family or an operation
+added later, because that is what "default available" means and
+anything else would silently change behaviour on upgrade; an
+operator who has written a policy gets allowlist semantics within
+it, because having written one they are entitled to have it mean
+what it says. An operator who wants the strict reading globally sets
+`enabled: false`, or writes a `families` map and leaves both
+`unnamed_*_policy` keys at their defaults.
+
+**The allowlist is an allowlist at both levels, and that is why
+there are two policy keys.** Family-level denial exists so that a
+family added to the code in a later release does not become
+available by omission in an existing operator's configuration. That
+reasoning applies verbatim one level down: when RS5.2 fires and a
+new switch is added for a family the operator has already named —
+say a `bip122` message-signing switch once RP9.1's gap is closed —
+an existing `{"bip122": {"withdraw": false, "legacy_swap": false}}`
+would, under an operation-level default of *available*, silently
+grant the new capability on upgrade. That is the same failure the
+family level is written to prevent, and it is worse at the operation
+level because it recurs with every RS5.2 change. It also contradicts
+the entitlement argument above: an operator reads that map as
+"bip122: these two operations, off", not as "bip122: everything,
+minus these two, forever, including operations that do not exist
+yet".
+
+The cost is one more key and one more case in the test matrix (RS8's
+small-by-construction matrix becomes: global off, each per-family
+switch off, the unnamed-family case, and the unnamed-operation
+case). The alternative — re-arguing the question at every RS5.2
+change — is how a default becomes a decision taken by whoever is in
+a hurry. RS5.2 additionally requires the change that adds a switch
+to state what existing configurations resolve to under it, which is
+cheap and keeps the question visible even where these defaults
+already answer it.
 
 **RS10 — Unknown keys and unswitchable combinations are startup
 errors.** The configuration block shall be parsed strictly. Each of
@@ -2174,7 +2249,14 @@ look like. §22.9C.9 item 1 records that as a pre-existing matter and
 this section does not rely on it.) The strictness applies to the
 keys this section introduces and to everything nested under them;
 `project_id` and `relay_address` keep their existing handling and
-are not made strict here.
+are not made strict here. "Those two keys" means those two
+spellings: a key that is *nearly* `relay_address` is an unrecognised
+sibling and case 1 applies to it, which is how the strictness
+reaches a pre-existing key indirectly. That is intended — a
+silently-ignored misspelling of a relay address is how a node ends
+up on a relay its operator did not choose — but it is the reason
+this section breaks one existing configuration (ACS8a) rather than
+none.
 
 1. an unknown key nested under `families`, or under a family entry,
    or an unrecognised sibling of `enabled` /
@@ -2186,7 +2268,7 @@ are not made strict here.
 5. an operation key naming a family/operation combination for which
    **this build enforces no switch**. Two things make a key
    acceptable, not one: §22.9C.5 must specify the switch, *and* its
-   enforcement must have landed. `eip155` with a `swap` key fails
+   enforcement must have landed. `eip155` with a `legacy_swap` key fails
    the first test and is rejected in every release; `bip122` with a
    `withdraw` key fails the second until D11's wiring lands, and is
    rejected until then.
@@ -2207,7 +2289,7 @@ operator a dormant switch through the configuration file rather than
 through the code — they set `{"bip122": {"withdraw": false}}`, the
 node loads, nothing refuses anything, and RS5's whole argument
 applies: the operator stops looking. Silently accepting
-`{"eip155": {"swap": false}}` is the same defect in its permanent
+`{"eip155": {"legacy_swap": false}}` is the same defect in its permanent
 form. Cases 1 and 3 matter for the same reason in the dangerous
 direction: a misspelled operation key that is silently ignored turns
 an intended *deny* into an *allow*. When a refused combination
@@ -2291,7 +2373,12 @@ RS8 claims.
   three RPCs of §22.9A.2 that RS4.3 does not exempt refuse with a
   structured error rather than returning an empty result. The
   persisted records are still present afterwards, and a subsequent
-  run with `enabled: true` restores them (RS4.1).
+  run with `enabled: true` restores them (RS4.1). A second case
+  advances time past a record's expiry across the disabled interval
+  and asserts the bound RS4.1 states rather than the promise: the
+  expired record is deleted on the re-enabled start and the session
+  is not restored. Without that case a single-run round-trip test
+  passes and the bound is discovered by an operator instead.
 - ACS3. A `walletconnect` block that cannot be parsed into the
   resolved configuration results in the subsystem being disabled or
   startup being refused — never in the subsystem running with an
@@ -2320,7 +2407,7 @@ RS8 claims.
   in isolation does not discharge this criterion, because the defect
   it exists to catch is a misconfigured node running happily until
   somebody calls a WalletConnect RPC. In particular
-  `{"eip155": {"swap": false}}` is rejected rather than accepted as
+  `{"eip155": {"legacy_swap": false}}` is rejected rather than accepted as
   a dormant switch. Case 5 is tested in **both** directions: a
   combination §22.9C.5 specifies no switch for is rejected, and a
   combination it does specify but whose enforcement has not yet
@@ -2338,9 +2425,24 @@ RS8 claims.
   defeat. The criterion is not satisfied by a test that asserts the
   chokepoint refuses when a switch is off — that is ACS4 — nor by
   one that asserts the trait alone is unreachable.
-- ACS8. With no `walletconnect` block in the configuration, every
-  operation §22.9C.5 names behaves exactly as it does without this
-  feature. No existing deployment changes behaviour on upgrade.
+- ACS8. The regression gate, stated against the configuration that
+  is actually the status quo: with a `walletconnect` block present,
+  carrying a valid `project_id` and **none** of the keys this
+  section introduces, every operation §22.9C.5 names behaves exactly
+  as it does without this feature. A test written against an
+  *absent* block does not discharge this criterion — with no block
+  there is no `project_id`, the handle is never built, and the
+  criterion compares two identical failures.
+- ACS8a. The deliberate breakage is tested as such: a
+  `walletconnect` block carrying a valid `project_id` **and an
+  unrecognised sibling** stops startup under RS10 case 1, including
+  when that sibling is a misspelling of `relay_address`. This node
+  boots today — the existing reader indexes two keys directly and
+  ignores everything else in the object — so it is the one
+  configuration this feature knowingly breaks, and it is asserted
+  rather than assumed. RS10's note that `project_id` and
+  `relay_address` keep their existing handling is about those two
+  spellings and does not extend to a misspelling of either.
 - ACS9. A Tendermint coin activated under a WalletConnect key
   source is refused entry to the legacy HTLC paths at order
   placement / swap start with a structured unsupported-operation
@@ -2597,7 +2699,8 @@ V3. The third-party Cargo dependencies that provide the relay
   widened to cover it — the next item states §22.9C's position
   instead, and states a different thing.
 - *Clean-room-original material:* this item scopes §22.9C in full
-  (RS1 through RS11 with their sub-numbered parts, and ACS1–ACS13),
+  (RS1 through RS11 with their sub-numbered parts, and ACS1–ACS13
+  including ACS8a),
   the §22.0 paragraph headed
   *Operator availability switches*, deferrals D12 through D15, and
   the two §22.12 additions that describe them — and nothing else.
