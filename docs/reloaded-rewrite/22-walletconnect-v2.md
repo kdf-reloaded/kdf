@@ -1639,7 +1639,17 @@ they see today.
 
 **RS2 — Two enforcement points, both mandatory.** The global switch
 shall be enforced at exactly these two points, and a conforming
-implementation shall enforce it at both:
+implementation shall enforce it at both. The two become live at
+different times, and because "shall enforce at both" would otherwise
+read as a bar on shipping anything, the staging is stated here
+rather than left to be inferred from RS5.1: point (2) is live from
+the first commit, since the operations it gates are reachable today;
+point (1) is live per request shape as the activation port of D10
+lands, and ACS1 is discharged per shape in step with it. For the
+**EVM** shape the refusal arm can be written now and shall be,
+because that shape's activation request type already carries a
+WalletConnect key-source variant and already has an
+unusable-on-this-build refusal arm to sit beside — see RS2.1.
 
 1. *Activation.* Activation of any coin whose key-source policy
    names a WalletConnect session (RP8, any of the three request
@@ -1655,6 +1665,32 @@ implementation shall enforce it at both:
    distinguishable from "no sessions" — with the two exceptions
    RS4.3 specifies, which read and delete local records only and
    establish nothing.
+
+**RS2.1 — The EVM activation arm is written first, and takes
+precedence.** The EVM activation request type already parses a
+WalletConnect key source from the wire and already refuses it with a
+structured error on the ground that this build cannot sign with one.
+Two consequences, both binding.
+
+- The RS2(1) refusal arm for that shape shall be written with the
+  global switch and not deferred with the rest of the activation
+  port. The alternative — deferring the only shape that can be
+  written — is what leaves RS2's "shall enforce at both" unsatisfied
+  for no reason.
+- Where both refusals apply, **the switch's refusal takes
+  precedence** and names the switch. An operator who turned
+  WalletConnect off and then sees "not supported by this build" has
+  been told something true and useless; the error must say which
+  decision refused them.
+
+Note honestly what this arm can and cannot be tested against while
+D10 is outstanding: its *refuses when off* half is testable
+immediately, and its *proceeds when on* half is not, because the
+build-unsupported refusal fires either way until the activation port
+lands. That is not a dormant switch in RS5's sense — the switch
+gates reachable operations at point (2) from its first commit — but
+it does mean ACS1's EVM row is half-discharged until D10, and
+§22.9C.8 says so rather than leaving a reader to find the gap.
 
 **RS3 — The switch fails closed.** Where the effective value of the
 switch cannot be determined — an unreadable or unparsable
@@ -1776,10 +1812,13 @@ therefore ship **in or after** the change that makes its operation
 reachable, and never before it. The global switch of §22.9C.3 is
 not subject to this constraint: its session-establishment
 enforcement point (RS2(2)) gates operations that are reachable
-today — pairing, settlement, restore, and the five RPCs of §22.9A.2
-— so it is non-dormant from the moment it ships, and its
-activation enforcement point (RS2(1)) becomes live with D10 without
-ever having been dormant in the sense RS5 forbids.
+today — pairing, settlement, restore, and the RPCs of §22.9A.2 that
+RS4.3 does not exempt — so it is non-dormant from the moment it
+ships, and its activation enforcement point (RS2(1)) becomes live
+per request shape as D10's arms land, without ever having been
+dormant in the sense RS5 forbids. RS2.1 and ACS1 state that staging
+explicitly; this requirement is not the place a reader should have
+to infer it from.
 
 **RS5.2 — The forward half of the rule.** If a family/operation
 combination that §22.9C.5 refuses a switch for later becomes
@@ -2145,18 +2184,35 @@ are not made strict here.
 3. an operation key that is not one of the operation names above;
 4. a value of the wrong type;
 5. an operation key naming a family/operation combination for which
-   §22.9C.5 specifies **no** switch — for example `eip155` with a
-   `swap` key.
+   **this build enforces no switch**. Two things make a key
+   acceptable, not one: §22.9C.5 must specify the switch, *and* its
+   enforcement must have landed. `eip155` with a `swap` key fails
+   the first test and is rejected in every release; `bip122` with a
+   `withdraw` key fails the second until D11's wiring lands, and is
+   rejected until then.
 
-Case 5 is the configuration-level expression of RS5: silently
-accepting `{"eip155": {"swap": false}}` would hand the operator a
-dormant switch through the configuration file rather than through
-the code, and would report protection that does not exist. Cases 1
-and 3 matter for the same reason in the dangerous direction: a
-misspelled operation key that is silently ignored turns an intended
-*deny* into an *allow*. When a refused combination becomes
-reachable, RS5.2 requires the switch, its enforcement, its test
-**and** its acceptance in this parser to land in one change.
+Case 5 is keyed off **enforced** switches rather than specified ones
+deliberately, and the consequence is worth stating plainly because
+it is unusual: **the accepted key set grows release by release**, in
+lockstep with the four rows of the implementation plan's rollout
+table and with the same sequencing RS5.1 already imposes on the
+switches themselves. A forward-compatible configuration file written
+for a later release therefore fails to load on an earlier one. That
+is the same deliberate trade the end of this section records for
+strictness generally, in a second form.
+
+The alternative is worse, and is why case 5 is written this way.
+Accepting a key whose enforcement is not yet wired hands the
+operator a dormant switch through the configuration file rather than
+through the code — they set `{"bip122": {"withdraw": false}}`, the
+node loads, nothing refuses anything, and RS5's whole argument
+applies: the operator stops looking. Silently accepting
+`{"eip155": {"swap": false}}` is the same defect in its permanent
+form. Cases 1 and 3 matter for the same reason in the dangerous
+direction: a misspelled operation key that is silently ignored turns
+an intended *deny* into an *allow*. When a refused combination
+becomes reachable, RS5.2 requires the switch, its enforcement, its
+test **and** its acceptance in this parser to land in one change.
 
 The cost of strictness is that a configuration file shared across
 node versions can fail on the older binary. That is accepted
@@ -2215,9 +2271,21 @@ RS8 claims.
 ### 22.9C.8 Acceptance criteria
 
 - ACS1. With `enabled: false`, activation of a coin naming a
-  WalletConnect session fails with a structured error for each of
-  the three request shapes of RP8, and no `WcCoinSigner` is
-  constructed.
+  WalletConnect session fails with a structured error, and the coin
+  is **not activated under that policy** — so no signing request is
+  ever emitted to the wallet for it. (The second clause is stated
+  this way on purpose: `WcCoinSigner` is a trait implemented *on*
+  the coin types, not an object that gets constructed, so "no
+  `WcCoinSigner` is constructed" is not a predicate a test can
+  assert.) The criterion is discharged **per RP8 request shape**, in
+  step with the activation port of D10, and its state is not
+  uniform: for the EVM shape the refusal half is required now
+  (RS2.1) and the *proceeds-when-on* half lands with D10, because
+  the build-unsupported refusal fires either way until then; for the
+  other two shapes the whole criterion lands with their activation
+  arms. A release in which some shapes are outstanding satisfies
+  ACS1 for the shapes that have landed and does not claim the
+  others.
 - ACS2. With `enabled: false`, no relay connection is established,
   no pairing is created, no persisted session is restored, and the
   three RPCs of §22.9A.2 that RS4.3 does not exempt refuse with a
@@ -2253,7 +2321,13 @@ RS8 claims.
   it exists to catch is a misconfigured node running happily until
   somebody calls a WalletConnect RPC. In particular
   `{"eip155": {"swap": false}}` is rejected rather than accepted as
-  a dormant switch.
+  a dormant switch. Case 5 is tested in **both** directions: a
+  combination §22.9C.5 specifies no switch for is rejected, and a
+  combination it does specify but whose enforcement has not yet
+  landed in this build is *also* rejected — the second is the
+  direction a release-by-release rollout actually traverses, and
+  testing only the first leaves the rollout state assumed rather
+  than asserted.
 - ACS7. The chokepoint is the only route, tested over the **funnel**
   and not only over the trait (RS7.2). A compile-fail test (or an
   equivalent build-time check) fails to build a caller outside the

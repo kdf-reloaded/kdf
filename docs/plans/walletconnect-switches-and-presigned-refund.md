@@ -46,7 +46,8 @@ mistaken for the higher priority.
 | Fact | Where |
 | --- | --- |
 | The WalletConnect subsystem pairs but cannot sign for a user: no activation policy, withdrawal route or swap path reaches a `WcCoinSigner` | ch.22 §22.0, D10; `mm2src/kdf_walletconnect/src/integration.rs` |
-| `PrivKeyPolicy` has no WalletConnect variant | `mm2src/coins/lp_coins_context.rs` (`KeyPair` / `HDWallet` / `Trezor` only) |
+| `PrivKeyPolicy<T>` has no WalletConnect variant — but it is **not** the type activation requests use | `mm2src/coins/lp_coins_context.rs` (`KeyPair` / `HDWallet` / `Trezor` only) |
+| The **EVM activation request** type *does* have one, and it is constructible from the wire today: `EthPrivKeyPolicy::WalletConnect { session_topic }`, adjacently tagged exactly as ch.22 RP8 describes, parsed in a real activation request and refused with a 400 by `unsupported_policy_error`, both covered by tests | `mm2src/coins_activation/src/eth_with_tokens_activation.rs` and its `tests.rs` |
 | `TendermintActivationPolicy` has one variant, `PrivateKey(..)` | `mm2src/coins/tendermint/tendermint_types.rs` |
 | A `walletconnect` config object already exists, carrying `project_id` (**required**) and `relay_address` (optional) | `mm2src/kdf_walletconnect/src/lib.rs`, `WalletConnectConfig::from_ctx` |
 | `wc_session_persistence` is a separate **top-level** string with a strict parser. ch.22 §22.5.1 / R7 / D8 say a bad value "stops startup"; **it does not** — the parser is reachable only through `WalletConnectConfig::from_ctx` → `WalletConnectCtx::init` → the private lazy `wc_ctx` helper, so a bad value fails the **first WalletConnect RPC**. Nothing resolves this object at startup | `WcSessionPersistence::from_conf` (same file); `wc_ctx` in `mm2src/mm2_main/src/rpc/lp_commands/wallet_connect.rs`; ch.22 §22.9C.9 item 1 |
@@ -199,12 +200,27 @@ funnel on the wire side, but the switch decision needs the *coin* and the
 
 ### S4 — The activation enforcement point
 
-Activation refusal (RS2(1)) can only be written once a WalletConnect key source
-exists in the activation types — it does not today (see *Current state*). This
-step therefore lands **with** ch.22 D10's activation port, in the same change
-that introduces the key-source variant, as a refusal arm on each of the three
-request shapes of ch.22 RP8. Writing it earlier would mean writing a check
-against a variant that cannot be constructed.
+Per request shape, not wholesale — and **one of the three can be written now**.
+
+- **EVM: now, with the global switch** (ch.22 RS2.1). The activation request
+  type already carries `EthPrivKeyPolicy::WalletConnect { session_topic }`,
+  already parses it from the wire, and already refuses it through
+  `unsupported_policy_error`. The switch arm goes beside that one and **takes
+  precedence** over it, so an operator who turned WalletConnect off is told
+  that, not "not supported by this build". Its *refuses-when-off* half is
+  testable immediately; its *proceeds-when-on* half is not, because the
+  build-unsupported refusal fires either way until ch.22 D10's activation port
+  lands, so ACS1's EVM row is half-discharged until then.
+- **Tendermint and UTXO: with their activation arms.** Those request types
+  genuinely have no WalletConnect variant (`TendermintActivationPolicy` has
+  one variant, `PrivateKey(..)`), so a check there would be written against
+  something that cannot be constructed. They land with ch.22 D10.
+
+The earlier plan deferred all three on the premise that no WalletConnect key
+source exists in the activation types. That premise is true of
+`PrivKeyPolicy<T>` and false of the type the EVM activation route actually
+uses, and deferring the one shape that can be written is what would leave
+ch.22 RS2's "shall enforce at both" unsatisfied for no reason.
 
 ### S5 — Per-family switches, each behind its own operation
 
@@ -221,6 +237,17 @@ reachable, never before:
 A switch whose operation slips out of a release slips with it. Shipping the
 parser's acceptance of a key whose enforcement is not yet wired is the same
 defect as shipping a dormant switch, only harder to see.
+
+The chapter now agrees with that rather than contradicting it: ch.22 RS10 case
+5 keys the accepted key set off the switches **this build enforces**, not the
+switches §22.9C.5 specifies, so the parser's accepted set grows row by row with
+this table. The earlier wording keyed it off the specification, which would
+have required the first release to accept `{"bip122": {"withdraw": true}}`
+with nothing behind it. Two consequences to implement deliberately: each row of
+this table extends the parser in the same change that wires its enforcement
+(ch.22 RS5.2), and a configuration file written for a later release fails to
+load on an earlier one — the same deliberate trade as strict parsing generally,
+in a second form. ACS6 tests both directions.
 
 ### S6 — The RS6.1 / D14 Tendermint gate, and the RS6.2 / D15 UTXO gate
 
