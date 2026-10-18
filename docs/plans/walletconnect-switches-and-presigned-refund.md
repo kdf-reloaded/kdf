@@ -18,7 +18,8 @@ do not control.
 **Phase 1 (security).** WalletConnect is the only subsystem in the tree holding
 a persistent, relay-mediated, externally-pairable session with key material at
 rest, and that key material is in **plaintext** on disk under the default
-`wc_session_persistence` value (ch.22 §22.5.1, R5, D3 — unmet). An operator who
+`wc_session_persistence` value (ch.22 §22.5.1; the fix for *that* exposure is
+the reserved encrypted at-rest format of **D8**, unimplemented). An operator who
 learns of a relay or pairing vulnerability has no way to shut the subsystem off
 without waiting for a release. They should.
 
@@ -28,12 +29,17 @@ the absent wallet for a signature. Pre-signing the refund while the user is
 present and holding it closes that, and degrades to today's behaviour when it
 cannot be used.
 
-Phase 1 is containment and Phase 2 is a capability. Neither is the at-rest key
-hole: **ch.22 R5 / D3 (zeroize-on-drop, and in time the encrypted at-rest
-format of D8) should be done before either of these.** A switch protects the
-operator who knows to flip it; fixing at-rest key handling protects everyone.
-That ordering is stated in ch.22 §22.9C.1 and is repeated here so this plan is
-not mistaken for the higher priority.
+Phase 1 is containment and Phase 2 is a capability. Neither is a key-handling
+fix, and there are **two** of those, answering two different threats:
+**ch.22 D8** (the encrypted at-rest record) answers the plaintext session key
+on disk, and **ch.22 R5 / D3** (zeroize-on-drop for the in-memory session-key
+type) answers in-memory disclosure through core dumps, swap and freed-heap
+reads. Zeroizing an in-memory key does nothing about a key at rest, so the two
+are not substitutes and D8 is the one that closes the hole named above. **Both
+should be done before either phase of this plan.** A switch protects the
+operator who knows to flip it; fixing key handling protects everyone. That
+ordering is stated in ch.22 §22.9C.1 and is repeated here so this plan is not
+mistaken for the higher priority.
 
 ## Current state — verified in this repository, 2026-10-17
 
@@ -46,9 +52,11 @@ not mistaken for the higher priority.
 | `wc_session_persistence` is a separate **top-level** string with a strict parser that stops startup on a bad value | same file, `WcSessionPersistence::from_conf` |
 | The handle's single outbound signing funnel is `WalletConnectCtx::send_session_request` | same file |
 | The v1 UTXO HTLC refund branch is `<time_lock> OP_CHECKLOCKTIMEVERIFY OP_DROP <pub_0> OP_CHECKSIG` | `payment_script`, `mm2src/coins/utxo/utxo_common/utxo_common_swap.rs` |
-| The UTXO per-swap v2 key accessor errors for any non-key-pair policy | `get_htlc_key_pair_v2` (same file), `try_derive_htlc_pubkey_v2` in `mm2src/coins/utxo/utxo_standard_swap_v2.rs` |
+| The UTXO per-swap v2 **key** accessor errors for a policy with no local secret | `get_htlc_key_pair_v2` (same file) |
+| The UTXO per-swap v2 **public-key** accessor is a separate function on a separate path — neither calls the other — and it **answers** for the one non-key-pair policy in the tree, returning the enabled HD address's public key | `try_derive_htlc_pubkey_v2` in `mm2src/coins/utxo/utxo_standard_swap_v2.rs` (its `Trezor` arm); this is why ch.22 RS6.2 / D15 adds a gate there |
 | The Tendermint v1 HTLC key comes from the activated **local** secret | `get_htlc_key_pair` in `mm2src/coins/tendermint/tendermint_swap_ops.rs` → `activated_key_or_err` |
 | An absent per-swap key is **not** an error in the v1 machine: it substitutes the node's own persistent public key | `derive_htlc_pubkeys` in `mm2src/mm2_main/src/lp_swap.rs` (`map_or(&node_pubkey, ..)`) |
+| A Tendermint **token** forwards the per-swap key accessor to its platform coin, so it inherits the hazard above | `get_htlc_key_pair` in `mm2src/coins/tendermint/tendermint_token.rs` |
 
 The last two rows together are why ch.22 §22.9C.5 refuses a `cosmos` swap switch
 and ch.22 RS6.1 / D14 adds a gate instead: the Tendermint legacy HTLC path is
@@ -155,7 +163,7 @@ A switch whose operation slips out of a release slips with it. Shipping the
 parser's acceptance of a key whose enforcement is not yet wired is the same
 defect as shipping a dormant switch, only harder to see.
 
-### S6 — The RS6.1 / D14 Tendermint gate
+### S6 — The RS6.1 / D14 Tendermint gate, and the RS6.2 / D15 UTXO gate
 
 Independent of the switches and worth doing on its own: refuse a key-less
 Tendermint coin entry to the legacy HTLC paths at order placement / swap start
@@ -163,7 +171,17 @@ with a structured unsupported-operation error, on the same terms as ch.22
 RP11.1 and ch.47 R47.5.13a. Today the absent key is not an error — the v1
 machine substitutes the node's own persistent public key, which announces a key
 the paired wallet cannot sign with. That is a silent wrong answer, and it is
-the reason `cosmos` gets a gate instead of a switch.
+the reason `cosmos` gets a gate instead of a switch. The gate must cover a
+Tendermint **token** as well: a token forwards the accessor to its platform
+coin, so a test written against the platform coin alone does not prove it
+(ACS9).
+
+The UTXO counterpart (ch.22 RS6.2 / D15) is the same shape one path over and
+belongs in the same work: the swap-protocol-v2 per-swap **public-key** accessor
+answers for a non-key-pair policy today, so the WalletConnect arm added there
+must refuse rather than mirror the existing arm (ACS10). This one is *not*
+independently shippable — there is nothing to gate until the policy arm exists
+— so it lands with the change that introduces the arm, not before.
 
 ### S7 — Documentation
 
@@ -431,8 +449,12 @@ chapter.
 
 ## Sequencing
 
-0. **ch.22 R5 / D3 — zeroize-on-drop for session-key material.** Not part of
-   this plan, and ahead of all of it. Stated here so the ordering is not lost.
+0. **ch.22 D8 — the encrypted at-rest session record** — and **ch.22 R5 / D3 —
+   zeroize-on-drop for session-key material.** Neither is part of this plan and
+   both are ahead of all of it. Stated here so the ordering is not lost. D8 is
+   the one that closes the plaintext-on-disk exposure; R5 / D3 closes in-memory
+   disclosure. Which of the two comes first is a maintainer choice between two
+   threats, not something this plan decides.
 1. **Phase 1 S1–S3, S6.** The resolved config type, the global switch at
    `init`, the chokepoint, and the independent Tendermint gate. S6 is
    independently shippable and independently useful.
@@ -459,8 +481,10 @@ chapter.
 
 ## Out of scope
 
-- **ch.22 R5 / D3 and D8** (zeroize, encrypted at-rest format). Higher priority,
-  separate work, explicitly not addressed by either phase.
+- **ch.22 D8** (encrypted at-rest format — the fix for the plaintext session key
+  on disk) and **ch.22 R5 / D3** (zeroize-on-drop — the fix for in-memory
+  disclosure). Higher priority, separate work, two different threats, explicitly
+  not addressed by either phase.
 - **ch.22's existing implementation-status claims.** The accuracy of the chapter's
   `Port status. Implemented.` / `STATUS. Implemented.` lines against unmet AC1
   and R5 / D3 is a separate, already-tracked question and is untouched here.

@@ -1083,6 +1083,21 @@ D14. **[REQUIRED — §22.9C, not implemented]** RS6.1's gate: a
     returns "no key of my own", on which the swap machine substitutes
     the node's persistent public key. This is a gate rather than a
     switch and is why §22.9C.5 specifies no `cosmos` swap switch.
+    It covers a Tendermint **token** as well: a token forwards the
+    per-swap key accessor to its platform coin, so a token whose
+    platform coin is activated under a WalletConnect key source
+    inherits the same hazard and must be refused on the same terms.
+
+D15. **[REQUIRED — §22.9C, not implemented]** RS6.2's gate: a UTXO
+    coin activated under a WalletConnect key source must be refused
+    at the swap-protocol-v2 **public-key** accessor, not only at the
+    per-swap key accessor. The key accessor would refuse a policy
+    with no local secret; the public-key accessor's HD arm answers
+    for a non-key-pair policy, so an implementation that adds a
+    WalletConnect arm by mirroring it announces a public key the
+    paired wallet cannot sign with. This is the UTXO counterpart of
+    D14 and, like it, a gate rather than a switch. It must land no
+    later than the change that introduces the policy arm.
 
 ## 22.9A Required Port — Coin Integration and Public RPC Surface (driving-spec)
 
@@ -1492,8 +1507,16 @@ nowhere else:
   (§22.4); and
 - the session symmetric key is written to disk **unencrypted** under
   the default `open` value of `wc_session_persistence` (§22.5.1) —
-  the gap R5 states and D3 tracks, and which is **unmet** at the
-  time of writing.
+  the deliberate, documented Security-versus-compatibility departure
+  §22.5.1 records, whose fix is the reserved encrypted at-rest format
+  **D8** tracks and which is **unimplemented** at the time of writing.
+
+R5 / D3 are a *different* obligation answering a *different* threat
+and are not the fix for this one: zeroize-on-drop binds the
+**in-memory** session-key type, which addresses core dumps, swap
+files and freed-heap reads. Zeroizing an in-memory key does nothing
+about a key sitting at rest on disk. Both obligations are open; this
+section conflates neither with the other.
 
 The bounded exposure §22.5.1 records — theft of a persisted session
 key permits soliciting a signing prompt from the paired wallet, not
@@ -1504,15 +1527,23 @@ vulnerability in a wallet their users pair with has today no way to
 remove the exposure short of waiting for a release. This section is
 that way.
 
-> **Containment versus the actual hole (engineering judgement).** A
+> **Containment versus the actual holes (engineering judgement).** A
 > switch is *containment*: it protects whoever knows to flip it, from
-> the moment they know. Closing R5 / D3 — zeroize-on-drop for session
-> key material, and in time the encrypted at-rest format of D8 —
-> protects *everyone*, including every operator who never reads this
-> chapter. Both are wanted and neither substitutes for the other,
-> but where sequencing must be chosen, **the zeroize gap comes
-> first**. Nothing in this section addresses R5 / D3, and this
-> section must not be read as having reduced their priority.
+> the moment they know. Closing a key-handling gap protects
+> *everyone*, including every operator who never reads this chapter.
+> There are **two** such gaps and they are not interchangeable:
+> **D8** — the encrypted at-rest record — answers the exposure this
+> section opens with, a session key readable from a stolen disk image
+> or a backup; **R5 / D3** — zeroize-on-drop for the in-memory
+> session-key type — answers in-memory disclosure through core dumps,
+> swap and freed-heap reads. Both are wanted, neither substitutes for
+> the other, and **both come before this section's switches**. Which
+> of the two comes first is a maintainer choice about which threat is
+> being answered, and this section does not make it: it only records
+> that a reader sequencing against the *at-rest* exposure described
+> above takes **D8**, not R5 / D3. Nothing in this section addresses
+> either gap, and this section must not be read as having reduced
+> the priority of either.
 
 ### 22.9C.2 Not compatibility switches, and why our variant is the default
 
@@ -1681,19 +1712,53 @@ rules just named are what govern.) The determination is:
 |---|---|---|---|
 | `bip122` (UTXO) | withdrawal | **yes** | Reachable in reloaded by requirement. RP9 records the reference refusing it, but **D11 binds reloaded to make it reachable** through the same delegated PSBT signing operation the legacy swap path already uses, and §22.9B.4 finding 1 calls it the one RP9 `no` reloaded should turn into a `yes`. The switch ships with that wiring (RS5.1), not before it. |
 | `bip122` (UTXO) | legacy (v1) swap HTLC | **yes** | Reachable. RP9 marks UTXO the one family the reference announces as swap-capable, and RP11 gives the structural reason: the UTXO HTLC public key *is* the activated address's public key, no per-swap key is derived, and every HTLC signature is obtained by a no-broadcast PSBT request with the framework retaining broadcast control. Chapter 47 R47.5.13a carves exactly this case out of its swap ban. |
-| `bip122` (UTXO) | swap-protocol-v2 HTLC | **no** | Unreachable, and already bindingly gated. RP11.1 requires a key-less coin to be refused at the earliest lifecycle point because the per-swap key accessor has no implementation for it; in this tree that accessor (`get_htlc_key_pair_v2` in `mm2src/coins/utxo/utxo_common/utxo_common_swap.rs`, surfaced through `try_derive_htlc_pubkey_v2` in `mm2src/coins/utxo/utxo_standard_swap_v2.rs`) errors for every policy that is not a local key pair. A switch would gate nothing. |
+| `bip122` (UTXO) | swap-protocol-v2 HTLC | **no** | Unreachable, and gated **by requirement** — RP11.1 — rather than by anything the tree enforces today. A switch would gate nothing, but the basis is narrower than it first looks, and RS6.2 closes the difference. The family has **two independent** accessors on two different code paths, and neither calls the other: the per-swap *key* accessor (`get_htlc_key_pair_v2` in `mm2src/coins/utxo/utxo_common/utxo_common_swap.rs`) builds a key pair from a local secret and errors for a policy that has none, while the per-swap *public-key* accessor (`try_derive_htlc_pubkey_v2` in `mm2src/coins/utxo/utxo_standard_swap_v2.rs`) **answers** for the one non-key-pair policy in the tree, returning the enabled HD address's public key for `Trezor`. The second is the same hazard shape RS6.1 identifies for Tendermint, one path over: an accessor that answers instead of refusing, with the refusal deferred to a later signing step. |
 | `eip155` (EVM) | withdrawal | **yes** | Reachable. RP9 records `yes` on both the legacy and the task withdrawal route. |
 | `eip155` (EVM) | swap (either protocol) | **no** | Structurally unreachable, and bindingly gated for a different reason than operator policy. Chapter 47 R47.5.13 records that the EVM-family HTLC paths require a per-swap HTLC key pair derived from a **local** secret, which no key-less policy can produce, and R47.5.13a extends its early structured rejection to *every* non-keypair signing policy for the EVM-family HTLC paths — carving out only a family that needs no per-swap key and can delegate every HTLC signature, which RP11 establishes is the UTXO case and not this one. RP9 agrees: swap-protocol-v2 `no`, and for legacy v1 only "transaction-send path is wired; not announced as supported". §22.9B.4 finding 3 adds that an unresolved account-nonce serialization hazard would have to be closed before EVM swaps could run over this policy at all. A switch here would be a permanent no-op reporting protection that R47.5.13a provides for an unrelated reason, and it would silently decide the security question if the combination ever became reachable — RS5.2 is how that question gets decided instead. |
 | `cosmos` (Tendermint) | withdrawal | **yes** | Reachable. RP9 records `yes`. |
 | `cosmos` (Tendermint) | swap (either protocol) | **no** | Unreachable. The legacy Tendermint HTLC path takes its signing key from the activated local secret — `get_htlc_key_pair` in `mm2src/coins/tendermint/tendermint_swap_ops.rs`, which resolves `activated_key_or_err` on the activation policy — and a key-less policy cannot satisfy it; swap-protocol-v2 is refused by RP11.1 as it is for every family. RP9 records only "generic send path is wired; not announced as supported" for the v1 row, which is not reachability. See RS6.1: this is the one refusal the existing record does not already gate explicitly, and it is closed with a gate rather than with a switch. |
 | all three | activation; learning the address and public key from the wallet | global only | Reachable for all three families (RP9 row 1) and governed by the global switch's activation enforcement point, RS2(1). A **per-family** activation switch would also be reachable and is deliberately left unspecified (D13) rather than specified and left dormant; RS5.2 governs if it is added. |
-| all three | watcher participation | **no** | RP10 already requires a coin whose signing policy holds no local secret to report itself unsupported by the watcher subsystem, unconditionally and for reasons unrelated to operator policy. A switch would gate nothing. |
+| all three | watcher participation | **no** | RP10 **requires** a coin whose signing policy holds no local secret to report itself unsupported by the watcher subsystem, unconditionally and for reasons unrelated to operator policy. A switch would gate nothing. (Required, not yet enforced: D10 lists RP10's watcher gate among the port's remaining work.) |
 | all three | stand-alone message-signing RPC | **no** | RP9 / RP9.1: wallet message signing is reachable only as the activation-time public-key-recovery step of RP8.3; it is wired to no user-facing message-signing RPC for any family. Nothing to gate. |
 | all three | private-key export / display | **no** | RP9 records it refused for all three families (the framework cannot export a key it does not hold; Chapter 47 R47.5.14 is the same rule for the MetaMask policy). Nothing to gate, and nothing an operator could usefully tighten. |
 | all three | any other delegated operation | global only | RP9's "ordinary transaction build → wallet signature → broadcast" row is `yes` for all three families but does **not** enumerate the family-specific operation classes it covers (Tendermint staking and IBC transfer, EVM contract calls, and so on). Those reach the chokepoint in the `Other` operation class of RS7.1 and are governed by the global switch alone, until RS5.2 is applied to one of them. |
 
 Four switches are therefore specified: `bip122` withdrawal,
 `bip122` legacy swap, `eip155` withdrawal, `cosmos` withdrawal.
+
+**Reading the *Basis* column.** The column distinguishes two things
+a reader must not conflate, because §22.9C.5 is where a reader comes
+to learn what already protects them. "Required" means a rule of this
+document set binds it (RP10, RP11.1, R47.5.13a); "enforced" would
+mean the tree refuses it today. For every `no` row above the basis
+is **required**, and for RP10's watcher gate and RP11.1's early
+rejection it is *only* required — D10 lists both among the port's
+remaining work. The reachability conclusions hold either way (an
+operation that is unreachable needs no switch), but no row of this
+table should be read as evidence that a path is closed in the
+shipped artifact.
+
+**RS6.2 — Gate the UTXO swap-protocol-v2 public-key accessor too
+(gap closure).** RP11.1 requires a key-less coin to be refused entry
+to the swap-protocol-v2 HTLC paths at the earliest lifecycle point,
+and the UTXO per-swap *key* accessor would refuse a policy with no
+local secret. The per-swap *public-key* accessor would not: its
+HD-wallet arm answers for a non-key-pair policy by returning the
+enabled address's public key, and RP11 establishes that for this
+family the HTLC public key *is* the activated address's compressed
+public key with no per-swap derivation — which is exactly the shape
+a WalletConnect UTXO policy would be written against. An
+implementation that adds a WalletConnect arm there by mirroring the
+existing non-key-pair arm reproduces RS6.1's failure mode: a
+**silent wrong answer** (a public key announced to the counterparty)
+rather than a refusal, with the refusal deferred to a signing step
+that then cannot be served. A UTXO coin activated under a
+WalletConnect key source shall therefore be refused at the
+swap-protocol-v2 public-key accessor as well as at the key accessor,
+at the **earliest** lifecycle point and on the same terms RP11.1
+states; the work is tracked as D15. Like RS6.1 this is a gate, not a
+switch: unconditional and not operator-configurable, which is part
+of why this combination gets no `bip122` swap-v2 switch.
 
 **RS6.1 — Gate the Tendermint legacy HTLC paths too (gap closure).**
 The early structured rejection RP11.1 requires covers the
@@ -1925,7 +1990,17 @@ failure mode chosen is the loud one.
   source is refused entry to the legacy HTLC paths at order
   placement / swap start with a structured unsupported-operation
   error, and never reaches the node-public-key fallback of
-  `derive_htlc_pubkey` (RS6.1).
+  `derive_htlc_pubkey` (RS6.1). The criterion covers a Tendermint
+  **token** whose platform coin is so activated as well as the
+  platform coin itself: the token forwards the per-swap key accessor
+  to its platform coin, so a test that exercises only the platform
+  coin does not discharge this criterion.
+- ACS10. A UTXO coin activated under a WalletConnect key source is
+  refused at the swap-protocol-v2 per-swap **public-key** accessor
+  with a structured unsupported-operation error, and never returns
+  a public key from it (RS6.2). The negative half matters as much as
+  the positive one: the test asserts that no public key is produced,
+  not merely that a later signing step fails.
 
 ## 22.10 External References
 
@@ -2066,8 +2141,9 @@ V3. The third-party Cargo dependencies that provide the relay
   widened to cover it — the next item states §22.9C's position
   instead, and states a different thing.
 - *Clean-room-original material:* this item scopes §22.9C in full
-  (RS1 through RS10 and ACS1–ACS9), the §22.0 paragraph headed
-  *Operator availability switches*, deferrals D12, D13 and D14, and
+  (RS1 through RS11 with their sub-numbered parts, and ACS1–ACS13),
+  the §22.0 paragraph headed
+  *Operator availability switches*, deferrals D12 through D15, and
   the two §22.12 additions that describe them — and nothing else.
   (It is therefore disjoint from the *Dirty Gate clearance* item
   below, which scopes the §22.0 paragraph headed *What is not yet
