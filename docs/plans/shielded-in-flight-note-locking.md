@@ -1,15 +1,45 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-**Status:** parked (swap paths shipped; the `withdraw` path and most of T39.8.0h are open) — **Last reviewed:** 2026-10-18
+**Status:** parked (swap and `withdraw` paths shipped; the rest of T39.8.0h and Native-mode withdraw are open) — **Last reviewed:** 2026-10-18
 
+> **Withdraw path closed (Light mode), 2026-10-18.** A user sent 0.01 ARRR to themselves,
+> never saw it in the history, and the next send failed with
+> `bad-txns-duplicate-nullifier-requirements-not-met`: `withdraw` built through the old
+> `gen_tx`, recorded nothing, and returned the transaction for the client to broadcast, so the
+> next withdrawal re-selected the same note. The fix is `ZCoin::gen_tx_for_withdraw`
+> (`mm2src/coins/z_coin/z_coin_ops.rs`), specified as CRD ch.39 R39.8.0av. Under the
+> withdraw contract (build and return; the client broadcasts, so a GUI can offer a confirmation
+> and a cancel) the only moment the daemon is involved is build time, so that is when the
+> transaction is recorded -- in the same critical section as the selection, before it is
+> returned. Neither the request nor the response changes, and `withdraw` still does not
+> broadcast. **Unlock semantics:** because the client may never broadcast, the notes are held
+> until the block is scanned (the normal release) or the wallet's scanned tip passes the
+> transaction's expiry height, which is the builder's default delta of 40 blocks (about forty
+> minutes on ARRR's 60-second blocks) -- verified against the wallet database's own predicate
+> (`expiry_height >= target height`, target = tip + 1) by a test that advances the scanned tip
+> across the boundary. A cancelled withdrawal therefore holds its notes for up to that window;
+> this is accepted, and is why the exception to R39.8.0ap's "record after broadcast" is confined
+> to the one path whose broadcast cannot be observed. A withdrawal never waits for an in-flight
+> spend; when this process's own in-flight spends explain a shortfall it fails at once with
+> `NotSufficientBalanceInFlightSpend`, which names the value held and the release rule. The
+> in-memory map behind that message now also drops entries once their expiry has passed, so an
+> abandoned withdrawal does not make later swap sends wait for a spend that can no longer clear;
+> the map is lost on restart, after which the exclusion still holds and the refusal is the bare
+> insufficient-balance one. **Not covered:** Native mode (the daemon builds the withdrawal and
+> cannot know of it until submitted); two daemons on one seed with *separate* wallet databases,
+> which cannot see each other's in-flight spends -- this fix does not make that arrangement
+> safe (a possible detection, not implemented: noticing a nullifier on chain that this wallet did
+> not create); and the T39.8.0h cases for a rejected broadcast, a restart and two concurrent
+> sends.
+>
 > **Re-checked against the tree 2026-10-18.** Selection, construction, broadcast and recording
 > run as one critical section in `ZCoin::send_outputs`
 > (`mm2src/coins/z_coin/z_coin_ops.rs`), and both v1 ARRR swap sends — the dex fee and the
 > HTLC payment (`mm2src/coins/z_coin/z_htlc.rs`) — go through it, so a taker fee followed by a
 > taker payment can no longer pick the same note. The residual gap is the one named below:
 > `withdraw` builds through `gen_tx` and the caller broadcasts, so a withdrawal is not
-> recorded (CRD ch.39 D39.8.0e), and T39.8.0h's broadcast/restart/expiry/concurrency cases
-> are still uncovered (D39.8.0f).
+> recorded (CRD ch.39 D39.8.0e) -- *since fixed, see above* -- and T39.8.0h's
+> broadcast/restart/concurrency cases are still uncovered (D39.8.0f).
 >
 > **Context:** implemented 2026-09-22; specification is now CRD ch.39 §39.8.0.7
 > (R39.8.0ao–R39.8.0at, T39.8.0h), which supersedes the design sketch below.
@@ -40,12 +70,11 @@
 > which our own recording would have satisfied immediately — that predicate was
 > corrected to require a mined height, with a regression test.
 >
-> Known gaps: a withdrawal broadcast outside the daemon is still not covered
-> (CRD ch.39 D39.8.0e), and T39.8.0h is only partially covered — one
-> deterministic predicate test exists, the broadcast/restart/expiry/concurrency
-> cases do not, because no harness can yet drive a shielded wallet database
-> through those transitions (CRD ch.39 D39.8.0f). The testing section below
-> states the intended cases and stands as the specification for that work.
+> Known gaps: T39.8.0h is only partially covered. The withdrawal-side cases and expiry
+> release now have tests that drive a real shielded wallet database (a scanned note, a real
+> spend proof, a recorded transaction); the broadcast-rejection, restart, scan-transition and
+> concurrent-send cases do not (CRD ch.39 D39.8.0f). The testing section below states the
+> intended cases and stands as the specification for that work.
 
 ## The protocol constraint this plan lives under
 

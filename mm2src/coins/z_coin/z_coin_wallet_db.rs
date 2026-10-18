@@ -5727,6 +5727,231 @@ mod tests {
             "an output belonging to another wallet must not decrypt"
         );
     }
+    // -----------------------------------------------------------------------------------------
+    // A withdrawal is built here and broadcast by the caller (CRD ch.39 R39.8.0av / T39.8.0h)
+    // -----------------------------------------------------------------------------------------
+
+    /// One scanned 1.25 ARRR note, one spending key, and the pieces `build_from_wallet_db` needs.
+    /// `None` when the Sapling parameter files are absent: a spend proof cannot be made without them
+    /// (the same arrangement as the version-6 construction tests).
+    struct WithdrawFixture {
+        history: ZCoinShieldedHistory,
+        params: ZcoinConsensusParams,
+        extsk: ExtendedSpendingKey,
+        prover: zcash_proofs::prover::LocalTxProver,
+        my_addr: sapling::PaymentAddress,
+        to_addr: sapling::PaymentAddress,
+    }
+
+    impl WithdrawFixture {
+        const NOTE_VALUE: u64 = 125_000_000;
+        const FEE_SAT: u64 = 10_000;
+        const SEND_SAT: u64 = 1_000_000;
+
+        fn new() -> Option<WithdrawFixture> {
+            let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
+                .map(PathBuf::from)
+                .unwrap_or_else(crate::utxo::zcash_params_path);
+            let (spend, output) = (
+                dir.join(crate::z_coin::SAPLING_SPEND_NAME),
+                dir.join(crate::z_coin::SAPLING_OUTPUT_NAME),
+            );
+            if !spend.exists() || !output.exists() {
+                eprintln!(
+                    "SKIPPED: Sapling parameters not found in {} (set ARRR_SAPLING_PARAMS); a spend proof can be \
+                     neither made nor checked without them",
+                    dir.display()
+                );
+                return None;
+            }
+            let prover = zcash_proofs::prover::LocalTxProver::new(&spend, &output);
+
+            let params = test_params_with_zip212();
+            let extsk = ExtendedSpendingKey::master(&[15; 32]);
+            #[allow(deprecated)]
+            let extfvk = extsk.to_extended_full_viewing_key();
+            let checkpoint = CheckPointBlockInfo {
+                height: 10,
+                hash: rpc::v1::types::H256([9u8; 32]),
+                time: 10,
+                sapling_tree: empty_sapling_tree_bytes().into(),
+            };
+            let history = ZCoinShieldedHistory::open_or_create(
+                "ARRR",
+                test_db_dir("withdraw-lock"),
+                params.clone(),
+                &extfvk,
+                Some(&checkpoint),
+            )
+            .unwrap();
+            history
+                .insert_compact_block(compact_block_with_received_note(11, 11, 9, &extfvk, Self::NOTE_VALUE))
+                .unwrap();
+            assert_eq!(
+                history
+                    .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                    .unwrap(),
+                11
+            );
+            assert_eq!(history.balance(params.clone()).unwrap(), Self::NOTE_VALUE);
+
+            let to_addr = ExtendedSpendingKey::master(&[99; 32]).default_address().1;
+            let my_addr = extsk.default_address().1;
+            Some(WithdrawFixture {
+                history,
+                params,
+                extsk,
+                prover,
+                my_addr,
+                to_addr,
+            })
+        }
+
+        fn inputs(&self) -> crate::z_coin::z_coin_ops::WalletDbBuild<'_> {
+            crate::z_coin::z_coin_ops::WalletDbBuild {
+                ticker: "ARRR",
+                decimals: 8,
+                wallet_db_path: self.history.wallet_db_path(),
+                params: &self.params,
+                spending_key: &self.extsk,
+                my_addr: &self.my_addr,
+                prover: &self.prover,
+            }
+        }
+
+        fn output(&self) -> crate::z_coin::ZOutput {
+            crate::z_coin::ZOutput {
+                to_addr: self.to_addr.clone(),
+                amount: zcash_protocol::value::Zatoshis::const_from_u64(Self::SEND_SAT),
+                viewing_key: None,
+                memo: None,
+            }
+        }
+
+        fn fee(&self) -> BigDecimal { big_decimal_from_sat_unsigned(Self::FEE_SAT, 8) }
+    }
+
+    fn sapling_nullifiers(tx: &zcash_primitives::transaction::Transaction) -> Vec<[u8; 32]> {
+        tx.sapling_bundle()
+            .map(|bundle| {
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|spend| spend.nullifier().0)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The defect, as it reaches the wallet database: two withdrawals built one after the other,
+    /// with nothing broadcast and no scan in between, are handed the same note, so the second is
+    /// rejected by the network as a duplicate nullifier. Building without locking is what the
+    /// withdraw path did before R39.8.0av.
+    #[test]
+    fn unlocked_withdraw_builds_select_the_same_note() {
+        use crate::z_coin::z_coin_ops::build_from_wallet_db;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let build = || {
+            build_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
+                .map_err(|e| e.to_string())
+                .unwrap()
+                .0
+        };
+        let (first, second) = (build(), build());
+        assert_eq!(sapling_nullifiers(&first).len(), 1);
+        assert_eq!(
+            sapling_nullifiers(&first),
+            sapling_nullifiers(&second),
+            "both builds spend the same note: the second would be rejected as a duplicate nullifier"
+        );
+    }
+
+    /// T39.8.0h, withdrawal side: the build locks the notes it commits to, so a second build before
+    /// anything is broadcast or scanned cannot be handed the same note, and is told it is short
+    /// rather than producing a transaction that reuses it.
+    #[test]
+    fn locked_withdraw_builds_do_not_select_the_same_note() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::build_and_lock_from_wallet_db;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let (first, _) =
+            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
+                .map_err(|e| e.to_string())
+                .unwrap();
+        assert_eq!(sapling_nullifiers(&first).len(), 1);
+
+        let second =
+            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12);
+        match second.map_err(|e| e.into_inner()) {
+            Err(GenTxError::InsufficientBalance { available, .. }) => {
+                assert_eq!(
+                    available,
+                    BigDecimal::from(0),
+                    "the locked note must not be offered at all"
+                )
+            },
+            Err(other) => panic!("expected an insufficient-balance failure, got {other}"),
+            Ok(_) => panic!("a second build before broadcast or scan must not produce a transaction"),
+        }
+    }
+
+    /// The release the lock depends on, since the caller may never broadcast: a built transaction
+    /// stops holding its notes once the chain passes its expiry height, and not a block earlier.
+    /// The wallet database counts the transaction as unexpired while `expiry_height >= target`,
+    /// where target is the chain tip plus one.
+    #[test]
+    fn locked_withdraw_notes_are_released_once_the_expiry_height_passes() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::build_and_lock_from_wallet_db;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+        let build = || {
+            build_and_lock_from_wallet_db(&fixture.inputs(), vec![], vec![fixture.output()], fixture.fee(), 12)
+                .map_err(|e| e.into_inner())
+        };
+
+        let (first, _) = build().unwrap();
+        let expiry: u32 = first.expiry_height().into();
+        assert_eq!(
+            expiry,
+            12 + 40,
+            "the builder's default expiry delta is what bounds the lock"
+        );
+
+        // Advance the wallet's scanned tip block by block, as the sync loop does; a bare
+        // `update_chain_tip` would leave unscanned ranges that make every note unspendable.
+        let advance_to = |tip: u32| {
+            let from = fixture.history.scanned_height().unwrap().unwrap();
+            let blocks = (from + 1..=u64::from(tip))
+                .map(|h| {
+                    let mut block = empty_compact_block(h, h as u8, (h - 1) as u8);
+                    // The tree size is derived while scanning; the fixture's zero would contradict the note.
+                    block.chain_metadata = None;
+                    block
+                })
+                .collect::<Vec<_>>();
+            fixture.history.insert_compact_blocks(&blocks).unwrap();
+            fixture
+                .history
+                .scan_cached_blocks_to_height(fixture.params.clone(), u64::from(tip), 1_000, 0, |_, _| {})
+                .unwrap();
+        };
+        let shortfall = |result: Result<_, GenTxError>| match result {
+            Err(GenTxError::InsufficientBalance { available, .. }) => available == BigDecimal::from(0),
+            _ => false,
+        };
+
+        // Tip = expiry - 1, so target = expiry: the transaction can still be mined in that block.
+        advance_to(expiry - 1);
+        assert!(shortfall(build()), "still held while the transaction can yet be mined");
+        // Tip = expiry, so target = expiry + 1: it can no longer be mined.
+        advance_to(expiry);
+        let (retry, _) = build()
+            .map_err(|e| e.to_string())
+            .expect("the notes are free once the transaction has expired");
+        assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
+    }
 }
 
 /// A wallet-owned Sapling output observed in a mempool transaction that the

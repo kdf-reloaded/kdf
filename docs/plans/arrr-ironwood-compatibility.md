@@ -1174,16 +1174,15 @@ that reads differently from before) are worth capturing even when the shielded l
 
 ### 11.6 Known gaps that could surface mid‑test
 
-- **A withdrawal is still not recorded as an in‑flight spend.** In‑flight shielded note
-  locking itself **is implemented** — selection, construction, broadcast and recording are one
-  critical section in `ZCoin::send_outputs`, and both v1 swap sends, the dex fee and the HTLC
-  payment, go through it (`mm2src/coins/z_coin/z_coin_ops.rs`,
-  `mm2src/coins/z_coin/z_htlc.rs`). The remaining hole is the **withdraw** path: it builds
-  through `gen_tx` and the caller broadcasts, so its notes are not recorded (CRD ch.39
-  D39.8.0e). Practical consequence for the tests: a `withdraw` immediately followed by another
-  shielded send can still pick the same note and lose the second one as a duplicate
-  nullifier. Avoid back‑to‑back withdrawals from the same wallet, or wait for a confirmation
-  between them. See [`shielded-in-flight-note-locking.md`](shielded-in-flight-note-locking.md).
+- **A withdrawal records its notes when it is built (Light mode).** In‑flight shielded note
+  locking covers the swap sends (selection, construction, broadcast and recording are one
+  critical section in `ZCoin::send_outputs`) and, since the fix for D39.8.0e, the **withdraw**
+  path too: it cannot broadcast (the caller does), so `ZCoin::gen_tx_for_withdraw` records the
+  built transaction in the shielded wallet database (CRD ch.39 R39.8.0av). A `withdraw`
+  immediately followed by another send no longer picks the same note. The cost: a withdrawal the
+  caller never submits holds its notes until its expiry height, 40 blocks after it was built.
+  Two daemons on one seed with separate wallet databases are still not protected. See
+  [`shielded-in-flight-note-locking.md`](shielded-in-flight-note-locking.md).
 - **The P2SH / HTLC spend path is deliberately refused**, not silently wrong: the R‑address
   workaround for Pirate's transparent‑index defect is still unproved on a funded HTLC, so
   `find_output_spend` / `check_if_my_payment_sent` fail with an explicit error and a P2SH

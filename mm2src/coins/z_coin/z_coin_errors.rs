@@ -28,6 +28,24 @@ pub enum GenTxError {
         available: BigDecimal,
         required: BigDecimal,
     },
+    /// The notes that would have funded the request are committed to a transaction of this
+    /// process's that is not yet scanned (R39.8.0av): the shortfall is the in-flight spend, not a
+    /// lack of funds.
+    #[display(
+        fmt = "Not enough spendable {} right now: available {}, required at least {}. {} is committed to a \
+               transaction you built or sent that has not been mined yet; it becomes spendable again once \
+               that transaction is mined (its change) or it expires unmined, about 40 blocks after it was built",
+        coin,
+        available,
+        required,
+        in_flight
+    )]
+    InsufficientBalanceInFlightSpend {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        in_flight: BigDecimal,
+    },
     NumConversion(NumConversError),
     Rpc(UtxoRpcError),
     PrevTxNotConfirmed,
@@ -113,6 +131,17 @@ impl From<GenTxError> for WithdrawError {
                 coin,
                 available,
                 required,
+            },
+            GenTxError::InsufficientBalanceInFlightSpend {
+                coin,
+                available,
+                required,
+                in_flight,
+            } => WithdrawError::NotSufficientBalanceInFlightSpend {
+                coin,
+                available,
+                required,
+                in_flight,
             },
             GenTxError::Rpc(e) => WithdrawError::Transport(e.to_string()),
             GenTxError::BuilderHeight(BuilderHeightError::TipUnavailable(e)) => WithdrawError::Transport(e),

@@ -680,6 +680,15 @@ impl ZcoinBackend {
     }
 }
 
+/// What an in-flight shielded spend has committed: the value of the notes it
+/// spends and the height after which it can no longer be mined.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InFlightSpend {
+    pub(crate) value: u64,
+    pub(crate) expiry_height: u32,
+}
+
 pub struct ZCoinFields {
     mode: ZcoinMode,
     dex_fee_addr: PaymentAddress,
@@ -693,16 +702,18 @@ pub struct ZCoinFields {
     /// Serializes note selection, construction, broadcast and in-flight recording
     /// into one critical section per shielded wallet (CRD ch.39 R39.8.0at).
     z_unspent_mutex: AsyncMutex<()>,
-    /// Value in zatoshi of the notes each transaction this process broadcast
-    /// committed, keyed by txid, retained until the transaction is observed as
-    /// scanned. The authoritative exclusion is the wallet database record written
-    /// by R39.8.0ap; this map exists only to tell a shortfall that an in-flight
-    /// spend will clear from one that no amount of waiting can fix, so a request
-    /// that is unfundable even with every note unexcluded fails at once instead of
-    /// consuming the wait budget (R39.8.0at). Being process-local costs nothing
-    /// after a restart: the map is empty, so a shortfall simply fails fast.
+    /// The notes each transaction this process broadcast, or built for a caller to
+    /// broadcast (a withdrawal, R39.8.0av), committed, keyed by txid, retained until
+    /// the transaction is observed as scanned or its expiry height has passed. The
+    /// authoritative exclusion is the wallet database record written by R39.8.0ap;
+    /// this map exists only to tell a shortfall that an in-flight spend will clear
+    /// from one that no amount of waiting can fix, so a request that is unfundable
+    /// even with every note unexcluded fails at once instead of consuming the wait
+    /// budget (R39.8.0at), and to name the in-flight spend when a withdrawal is
+    /// refused for it. Being process-local costs nothing after a restart: the map
+    /// is empty, so a shortfall simply fails fast.
     #[cfg(not(target_arch = "wasm32"))]
-    in_flight_spends: Mutex<HashMap<[u8; 32], u64>>,
+    in_flight_spends: Mutex<HashMap<[u8; 32], InFlightSpend>>,
     /// Message from the most recent shielded sync failure, cleared by the next
     /// successful scan. Without it a failed scan is reported as a scan still in
     /// progress, because both leave `wallet_db_scan_complete` false (R39.8.0au).
@@ -1366,6 +1377,33 @@ mod ironwood_consensus_param_tests {
             "{reported}"
         );
         assert!(reported.contains(&message), "{reported}");
+    }
+
+    /// A withdrawal refused because an earlier spend holds the notes must say so. With 2.5 ARRR
+    /// showing, a bare "not enough funds" cannot be connected to the send that just happened. It
+    /// keeps its own error type rather than reusing `NotSufficientBalance`, and is the user's to
+    /// resolve (400), not a server fault.
+    #[test]
+    fn a_shortfall_caused_by_an_in_flight_spend_names_it() {
+        use crate::lp_coins_errors::WithdrawError;
+        use common::HttpStatusCode;
+
+        let shortfall = GenTxError::InsufficientBalanceInFlightSpend {
+            coin: "ARRR".to_owned(),
+            available: "0.5".parse().unwrap(),
+            required: "1.0101".parse().unwrap(),
+            in_flight: "2".parse().unwrap(),
+        };
+        let withdraw: WithdrawError = shortfall.into();
+        assert!(
+            matches!(withdraw, WithdrawError::NotSufficientBalanceInFlightSpend { .. }),
+            "{withdraw:?}"
+        );
+        assert_eq!(withdraw.status_code(), common::StatusCode::BAD_REQUEST);
+        let reported = withdraw.to_string();
+        assert!(reported.contains("has not been mined yet"), "{reported}");
+        assert!(reported.contains("expires unmined"), "{reported}");
+        assert!(reported.contains('2'), "{reported}");
     }
 
     /// Step E binds `Nu6_3` to the Ironwood height, and only that upgrade: the unused Zcash
@@ -2650,7 +2688,7 @@ impl MmCoin for ZCoin {
                     memo: None,
                 };
 
-                let (tx, data) = coin.gen_tx(vec![], vec![z_output]).await.mm_err(Into::into)?;
+                let (tx, data) = coin.gen_tx_for_withdraw(vec![z_output]).await.mm_err(Into::into)?;
                 let mut tx_bytes = Vec::with_capacity(1024);
                 tx.write(&mut tx_bytes)
                     .map_to_mm(|e| WithdrawError::InternalError(e.to_string()))?;

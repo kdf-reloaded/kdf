@@ -911,7 +911,7 @@ outputs and outgoing spends shall become reflected in balance and
 `z_coin_tx_history` only through the wallet database scan state. The observable
 contract for that coordination -- its ordering relative to broadcast, its release
 conditions, its durability and its serialization scope -- is bound by §39.8.0.7
-(R39.8.0ao--R39.8.0at); this rule states only that the coordination exists.
+(R39.8.0ao--R39.8.0av); this rule states only that the coordination exists.
 
 R39.8.0q Unconfirmed shielded outputs are not spendable merely because the local
 process created or observed them. Spendable balance, transaction history, and
@@ -1633,6 +1633,9 @@ The window this ordering opens -- between choosing notes and recording the
 broadcast, during which nothing marks them -- is closed by the serialization
 requirement of R39.8.0at, not by moving the record earlier.
 
+This ordering governs a transaction that this daemon broadcasts. A withdrawal is
+not one: R39.8.0av.
+
 R39.8.0aq **Release.** The release in the normal case is the block scan: once the
 block containing the transaction is scanned into the shielded wallet database, the
 notes it spends are recorded as spent there and the separate in-flight exclusion
@@ -1703,6 +1706,42 @@ failure rather than blocking indefinitely, and a request that cannot be funded
 even with every note unexcluded shall fail immediately with an
 insufficient-balance error rather than consuming the wait budget.
 
+R39.8.0av **A withdrawal records its notes when it is built.** A withdrawal is
+built and returned as a signed transaction; the caller submits it, or does not.
+This daemon never observes that submission, so the ordering of R39.8.0ap (record
+after the backend accepted the broadcast) cannot be applied to it, and recording
+nothing leaves the notes selectable while the caller's transaction is in flight --
+the failure R39.8.0ao exists to prevent. In Light mode, therefore, a withdrawal
+shall record the transaction it built in the shielded wallet database, in the same
+critical section as the selection that chose its notes (R39.8.0at), before the
+transaction is returned. Neither the request nor the response of the withdrawal
+changes, and the withdrawal never broadcasts: a caller that shows the transaction
+for confirmation and lets the user cancel it is unaffected.
+
+Because the caller may never submit, the release of R39.8.0aq and R39.8.0ar is the
+only release: the notes are held until the containing block is scanned or the
+wallet's scanned tip passes the transaction's expiry height (the builder's default
+expiry delta, 40 blocks, which is about forty minutes on a 60-second chain). A
+withdrawal the user cancelled therefore holds its notes for that window; this is
+the deliberate cost of R39.8.0av and the reason the exception is confined to the
+one path whose broadcast is not observable. A failure to record shall fail the
+build rather than degrade, since handing out a signed transaction whose notes
+remain selectable is the defect itself and nothing has been sent that a retry
+could duplicate.
+
+A withdrawal does not wait for an in-flight spend to clear: it neither blocks nor
+retries. When the notes held by this process's own in-flight spends account for
+the shortfall, the refusal shall name them -- a distinct error, reporting the
+value held and the release rule, not a bare insufficient balance -- because with
+the balance showing, a bare refusal cannot be connected to the send that caused it.
+The process-local memory that makes this possible is not durable (R39.8.0as does
+not require it to be); after a restart the exclusion still holds and the refusal
+is the bare one.
+
+The record is local to the wallet database of one process. Two daemons running on
+the same seed with separate wallet databases cannot see each other's in-flight
+spends, and nothing here makes that arrangement safe.
+
 > **Code-quality finding (informative).** The deployed upstream implementation
 > does not satisfy R39.8.0at either: its exclusive section covers construction,
 > broadcast and recording, but the notes are chosen just before that section is
@@ -1745,9 +1784,9 @@ insufficient-balance error rather than consuming the wait budget.
 > ends in a typed failure. A shortfall that no in-flight spend could cover fails
 > immediately rather than consuming that budget.
 >
-> One path remains uncovered and is tracked as D39.8.0e: a withdrawal is built
-> but not broadcast by this daemon, so nothing on the send path observes its
-> broadcast and no in-flight record is written for it.
+> A withdrawal, which this daemon builds but does not broadcast, is covered by
+> R39.8.0av: its notes are recorded at build time and released by the scan or by
+> expiry (D39.8.0e, resolved 2026-10-18 in Light mode).
 
 #### Tests
 
@@ -1778,6 +1817,16 @@ broadcast for reusing a nullifier.
 > needs a harness able to drive a shielded wallet database through
 > broadcast/scan/expiry transitions, which this tree does not yet have. Tracked
 > as D39.8.0f.
+>
+> **Update (2026-10-18).** Three withdrawal-side cases are now covered by
+> deterministic tests against a real shielded wallet database (a scanned note, a
+> real spend proof, a real transaction recorded): two withdrawals built in
+> sequence, with nothing broadcast and no scan between them, are not handed the
+> same note; the second reports a shortfall; and the first's notes are held while
+> its expiry height can still be mined in and are free once the chain passes it.
+> The tests need the Sapling parameter files and say so and return where they are
+> absent. The broadcast-rejection, restart, mined-and-scanned and two-concurrent-
+> send cases remain unwritten.
 
 #### Deferred Work
 
@@ -1787,16 +1836,15 @@ section that covers construction, broadcast and recording, and keeps both the
 sapling-state gate and the wait for an in-flight spend outside it, so the scanner
 can still advance while a send waits and each attempt re-selects.
 
-D39.8.0e The exclusion does not yet cover a withdrawal broadcast outside this
-daemon. A withdrawal is built and returned as a signed transaction for the caller
-to submit, so the send path never observes its broadcast and writes no in-flight
-record for it; a shielded send issued between that external submission and the
-scan of the containing block can therefore still select the withdrawal's inputs
-and be rejected as a duplicate nullifier. Closing this requires the coin to
-observe the broadcast of a transaction it did not send itself, which the generic
-raw-transaction submission path does not currently expose to the shielded layer.
-Swap payments and DEX fees are unaffected: those are broadcast by the send path
-and are recorded (R39.8.0ap).
+D39.8.0e The exclusion did not cover a withdrawal, which is built and returned for the
+caller to submit, so the send path never observed its broadcast. **Resolved
+2026-10-18 (Light mode) by R39.8.0av**, which records the notes at build time instead
+of observing the broadcast: the withdrawal contract leaves no other moment at which
+this daemon is involved. The trade is R39.8.0av's: a cancelled withdrawal holds its
+notes until expiry. Not covered: Native mode, where the daemon builds the withdrawal
+and does not know of it until it is submitted (R39.8.0ao leaves Native mode to the
+node's own accounting, which a transaction nobody has submitted does not reach), and
+two processes sharing a seed with separate wallet databases.
 
 D39.8.0f T39.8.0h is only partially covered; see the coverage status under that
 rule for what exists and what does not. The missing cases share one prerequisite:

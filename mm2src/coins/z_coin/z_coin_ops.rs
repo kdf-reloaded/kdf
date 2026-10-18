@@ -362,16 +362,55 @@ impl ZCoin {
         }
     }
 
-    /// Generates a tx sending outputs from our address
+    /// Generates a transaction this process will not broadcast itself -- a withdrawal, which the
+    /// caller submits (R39.8.0av) -- and, in Light mode, locks the notes it spends.
+    ///
+    /// The locking happens here because build time is the only moment the daemon is involved: the
+    /// withdrawal contract is "build and return, the client broadcasts", so a later send cannot be
+    /// told apart from "the user cancelled" except by the transaction's expiry. The notes are
+    /// therefore held until the transaction is scanned as mined or the chain passes its expiry
+    /// height, whichever comes first.
+    ///
+    /// A shortfall that the notes held by this process's own in-flight spends explain is reported
+    /// as such ([`GenTxError::InsufficientBalanceInFlightSpend`]) instead of as a bare insufficient
+    /// balance, and is refused at once: a withdrawal does not block waiting for a spend to clear.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) async fn gen_tx(
+    pub(crate) async fn gen_tx_for_withdraw(
         &self,
-        t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         self.prepare_shielded_build().await?;
         let _lock = self.z_fields.z_unspent_mutex.lock().await;
-        self.gen_tx_locked(t_outputs, z_outputs).await
+        self.forget_released_in_flight_spends();
+
+        let (tx, additional_data) = match self.gen_tx_locked(vec![], z_outputs, true).await {
+            Ok(built) => built,
+            Err(e) => {
+                let named = match e.get_inner() {
+                    GenTxError::InsufficientBalance {
+                        coin,
+                        available,
+                        required,
+                    } if self.shortfall_can_clear(e.get_inner()) => {
+                        Some(GenTxError::InsufficientBalanceInFlightSpend {
+                            coin: coin.clone(),
+                            available: available.clone(),
+                            required: required.clone(),
+                            in_flight: big_decimal_from_sat_unsigned(self.in_flight_spend_total(), self.decimals()),
+                        })
+                    },
+                    _ => None,
+                };
+                return match named {
+                    Some(named) => MmError::err(named),
+                    None => Err(e),
+                };
+            },
+        };
+        if self.is_light() {
+            self.note_in_flight_spend(&tx, &additional_data);
+        }
+        Ok((tx, additional_data))
     }
 
     /// The gates that must clear before the critical section is entered.
@@ -401,18 +440,23 @@ impl ZCoin {
     /// Selects notes and builds the transaction. The caller must already hold
     /// `z_unspent_mutex` and must keep holding it through broadcast and recording
     /// (R39.8.0at).
+    ///
+    /// `lock_notes` records the built transaction in the shielded wallet database before it is
+    /// returned (Light mode only; R39.8.0av). A caller that broadcasts the transaction itself
+    /// passes `false` and records after the broadcast instead (R39.8.0ap).
     #[cfg(not(target_arch = "wasm32"))]
     async fn gen_tx_locked(
         &self,
         t_outputs: Vec<TxOut>,
         z_outputs: Vec<ZOutput>,
+        lock_notes: bool,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         let tx_fee = self.get_one_kbyte_tx_fee().await.mm_err(Into::into)?;
         // One height authority for every construction path (R39.11.11); the read fails the build
         // rather than falling back to another source.
         let builder_height = self.builder_target_height().await.mm_err(GenTxError::from)?;
         if self.is_light() {
-            return self.gen_tx_from_shielded_wallet_db(t_outputs, z_outputs, tx_fee, builder_height);
+            return self.gen_tx_from_shielded_wallet_db(t_outputs, z_outputs, tx_fee, builder_height, lock_notes);
         }
 
         let t_output_sat: u64 = t_outputs.iter().fold(0, |cur, out| cur + u64::from(out.value()));
@@ -585,6 +629,7 @@ impl ZCoin {
         z_outputs: Vec<ZOutput>,
         tx_fee: BigDecimal,
         builder_height: u32,
+        lock_notes: bool,
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         if !self.shielded_wallet_db_scan_complete() {
             return MmError::err(GenTxError::ShieldedWalletDb(
@@ -592,160 +637,20 @@ impl ZCoin {
             ));
         }
 
-        let t_output_sat: u64 = t_outputs.iter().fold(0, |cur, out| cur + u64::from(out.value()));
-        let z_output_sat: u64 = z_outputs.iter().fold(0, |cur, out| cur + u64::from(out.amount));
-        let tx_fee_sat = sat_from_big_decimal(&tx_fee, self.decimals()).mm_err(Into::into)?;
-        let total_required_sat = t_output_sat
-            .checked_add(z_output_sat)
-            .and_then(|outputs_sat| outputs_sat.checked_add(tx_fee_sat))
-            .or_mm_err(|| GenTxError::NumConversion(NumConversError("ZCoin total output overflow".to_owned())))?;
-        let target_value = Amount::from_u64(total_required_sat).map_to_mm(|_| {
-            GenTxError::NumConversion(NumConversError(format!(
-                "Failed to get ZCash target amount from {}",
-                total_required_sat
-            )))
-        })?;
-
-        let mut wallet_db = WalletDb::for_path(
-            self.z_fields.shielded_history.wallet_db_path(),
-            self.z_fields.consensus_params.clone(),
-            zcash_client_sqlite::util::SystemClock,
-            rand::rngs::OsRng,
-        )
-        .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?;
-        let account_id = wallet_db
-            .get_account_ids()
-            .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
-            .into_iter()
-            .next()
-            .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet DB has no account".to_owned()))?;
-        let (height, anchor_height) = wallet_db
-            .get_target_and_anchor_heights(NonZeroU32::MIN)
-            .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
-            .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet DB scan is required".to_owned()))?;
-        let selected_notes = wallet_db
-            .select_spendable_notes(
-                account_id,
-                TargetValue::AtLeast(target_value),
-                &[ShieldedPool::Sapling],
-                height,
-                ConfirmationsPolicy::MIN,
-                &[],
-                // The wallet takes no shielded note locks, so lock state is ignored.
-                LockFilter::Unfiltered,
-            )
-            .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
-            .take_sapling();
-        let selected_value_sat = selected_notes
-            .iter()
-            .try_fold(0u64, |sum, note| {
-                note.note_value()
-                    .ok()
-                    .and_then(|value| sum.checked_add(u64::from(value)))
-            })
-            .or_mm_err(|| GenTxError::NumConversion(NumConversError("ZCoin selected note overflow".to_owned())))?;
-        if selected_value_sat < total_required_sat {
-            return MmError::err(GenTxError::InsufficientBalance {
-                coin: self.ticker().into(),
-                available: big_decimal_from_sat_unsigned(selected_value_sat, self.decimals()),
-                required: big_decimal_from_sat_unsigned(total_required_sat, self.decimals()),
-            });
-        }
-
-        let sapling_anchor = wallet_db
-            .with_sapling_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
-            .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
-            .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet anchor is unavailable".to_owned()))?;
-        let mut selected_notes_with_paths = Vec::with_capacity(selected_notes.len());
-        for selected in selected_notes {
-            let merkle_path = wallet_db
-                .with_sapling_tree_mut(|tree| {
-                    tree.witness_at_checkpoint_id_caching(selected.note_commitment_tree_position(), &anchor_height)
-                })
-                .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
-                .or_mm_err(|| GenTxError::FailedToGetMerklePath)?;
-            selected_notes_with_paths.push((selected.note().clone(), merkle_path));
-        }
-
-        // `height` above only selects notes and picks the anchor from the wallet database. The builder
-        // takes the single height authority's value so this path and the HTLC spend/refund path can
-        // never disagree about a transaction's expiry (R39.11.11).
-        let mut tx_builder = ZTxBuilder::new(
-            self.z_fields.consensus_params.clone(),
-            builder_height.into(),
-            BuildConfig::Standard {
-                sapling_anchor: Some(sapling_anchor.into()),
-                orchard_anchor: None,
-                ironwood_anchor: None,
-                orchard_padding: BundlePadding::DEFAULT,
-                ironwood_padding: BundlePadding::DEFAULT,
-            },
-        );
-        let fvk = FullViewingKey::from_expanded_spending_key(&self.z_fields.z_spending_key.expsk);
-        for (note, merkle_path) in selected_notes_with_paths {
-            tx_builder.add_sapling_spend(fvk.clone(), note, merkle_path)?;
-        }
-
-        let mut received_by_me = 0u64;
-        for z_out in z_outputs {
-            if z_out.to_addr == self.z_fields.my_z_addr {
-                received_by_me += u64::from(z_out.amount);
-            }
-            tx_builder.add_sapling_output(
-                z_out.viewing_key,
-                z_out.to_addr,
-                z_out.amount,
-                z_out.memo.unwrap_or_else(MemoBytes::empty),
-            )?;
-        }
-
-        let change_sat = selected_value_sat - total_required_sat;
-        if change_sat > 0 {
-            received_by_me += change_sat;
-            tx_builder.add_sapling_output(
-                None,
-                self.z_fields.my_z_addr.clone(),
-                Amount::from_u64(change_sat).map_to_mm(|_| {
-                    GenTxError::NumConversion(NumConversError(format!(
-                        "Failed to get ZCash change amount from {}",
-                        change_sat
-                    )))
-                })?,
-                MemoBytes::empty(),
-            )?;
-        }
-
-        // Swap HTLCs are transparent P2SH outputs paid for out of shielded notes, so the
-        // light-wallet path has to emit them too. Added last to keep the vout ordering the
-        // native path produces: `z_p2sh_spend` spends transparent output 0.
-        for output in t_outputs {
-            tx_builder.add_transparent_output_raw(output);
-        }
-
-        let fee_rule = FixedFeeRule::non_standard(
-            Amount::from_u64(tx_fee_sat)
-                .map_to_mm(|_| GenTxError::NumConversion(NumConversError("Invalid ZCash fee amount".to_owned())))?,
-        );
-        let tx = tokio::task::block_in_place(|| {
-            tx_builder.build(
-                &TransparentSigningSet::new(),
-                std::slice::from_ref(&self.z_fields.z_spending_key),
-                &[],
-                rand::rngs::OsRng,
-                &self.z_fields.z_tx_prover,
-                &self.z_fields.z_tx_prover,
-                &fee_rule,
-            )
-        })?
-        .into_transaction();
-        let additional_data = AdditionalTxData {
-            received_by_me,
-            spent_by_me: selected_value_sat,
-            fee_amount: tx_fee_sat,
-            unused_change: None,
-            kmd_rewards: None,
+        let inputs = WalletDbBuild {
+            ticker: self.ticker(),
+            decimals: self.decimals(),
+            wallet_db_path: self.z_fields.shielded_history.wallet_db_path(),
+            params: &self.z_fields.consensus_params,
+            spending_key: &self.z_fields.z_spending_key,
+            my_addr: &self.z_fields.my_z_addr,
+            prover: &self.z_fields.z_tx_prover,
         };
-        Ok((tx, additional_data))
+        if lock_notes {
+            build_and_lock_from_wallet_db(&inputs, t_outputs, z_outputs, tx_fee, builder_height)
+        } else {
+            build_from_wallet_db(&inputs, t_outputs, z_outputs, tx_fee, builder_height)
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -764,9 +669,9 @@ impl ZCoin {
             // by the network as a duplicate nullifier (R39.8.0at).
             let broadcast = {
                 let _lock = self.z_fields.z_unspent_mutex.lock().await;
-                self.forget_scanned_in_flight_spends();
+                self.forget_released_in_flight_spends();
 
-                match self.gen_tx_locked(t_outputs.clone(), z_outputs.clone()).await {
+                match self.gen_tx_locked(t_outputs.clone(), z_outputs.clone(), false).await {
                     Ok((tx, additional_data)) => {
                         let mut tx_bytes = Vec::with_capacity(1024);
                         tx.write(&mut tx_bytes).expect("Write should not fail");
@@ -834,12 +739,13 @@ impl ZCoin {
             return;
         }
 
-        match self.try_record_sent_shielded_tx(tx, additional_data.fee_amount) {
-            Ok(()) => {
-                if let Ok(mut in_flight) = self.z_fields.in_flight_spends.lock() {
-                    in_flight.insert(*tx.txid().as_ref(), additional_data.spent_by_me);
-                }
-            },
+        match record_sent_in_wallet_db(
+            self.z_fields.shielded_history.wallet_db_path(),
+            &self.z_fields.consensus_params,
+            tx,
+            additional_data.fee_amount,
+        ) {
+            Ok(()) => self.note_in_flight_spend(tx, additional_data),
             Err(e) => log::warn!(
                 "ZCoin {}: could not record sent transaction {:?} in the shielded wallet DB: {}. \
                  Its notes stay selectable until the containing block is scanned.",
@@ -850,59 +756,52 @@ impl ZCoin {
         }
     }
 
+    /// Remembers that `tx` commits the notes it spends, so a shortfall can be told apart from one
+    /// no waiting will fix, and so a refused withdrawal can name the cause.
     #[cfg(not(target_arch = "wasm32"))]
-    fn try_record_sent_shielded_tx(&self, tx: &ZTransaction, fee_sat: u64) -> Result<(), MmError<RecordSentTxErr>> {
-        let mut wallet_db = WalletDb::for_path(
+    fn note_in_flight_spend(&self, tx: &ZTransaction, additional_data: &AdditionalTxData) {
+        if let Ok(mut in_flight) = self.z_fields.in_flight_spends.lock() {
+            in_flight.insert(*tx.txid().as_ref(), InFlightSpend {
+                value: additional_data.spent_by_me,
+                expiry_height: tx.expiry_height().into(),
+            });
+        }
+    }
+
+    /// The height the wallet database judges transaction expiry against, when it has one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn wallet_db_target_height(&self) -> Option<u32> {
+        let wallet_db = WalletDb::for_path(
             self.z_fields.shielded_history.wallet_db_path(),
             self.z_fields.consensus_params.clone(),
             zcash_client_sqlite::util::SystemClock,
             rand::rngs::OsRng,
         )
-        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?;
-        let account_id = wallet_db
-            .get_account_ids()
-            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
-            .into_iter()
-            .next()
-            .or_mm_err(|| RecordSentTxErr::NoAccount)?;
-        let (target_height, _) = wallet_db
-            .get_target_and_anchor_heights(NonZeroU32::MIN)
-            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
-            .or_mm_err(|| RecordSentTxErr::ScanRequired)?;
-        let fee_amount = Amount::from_u64(fee_sat).map_to_mm(|_| RecordSentTxErr::InvalidFeeAmount(fee_sat))?;
-
-        // No outputs are declared. The only wallet-internal output we create is change, which
-        // cannot be spent until mined regardless, is already surfaced as a pending mempool
-        // receipt, and is recorded for real when the block is scanned. Declaring none keeps
-        // this write to the part that is load-bearing: marking the spent nullifiers, which
-        // `select_spendable_notes` then excludes on its own.
-        wallet_db
-            .store_transactions_to_be_sent(&[SentTransaction::new(
-                tx,
-                time::OffsetDateTime::now_utc(),
-                target_height,
-                account_id,
-                &[],
-                fee_amount,
-                &[],
-            )])
-            .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))
+        .ok()?;
+        let (target_height, _) = wallet_db.get_target_and_anchor_heights(NonZeroU32::MIN).ok()??;
+        Some(target_height.into())
     }
 
-    /// Drops in-flight entries whose transaction the wallet database has since
-    /// scanned. From that point the database's own spend record is the exclusion
-    /// (R39.8.0aq), so keeping the entry would only delay a later send.
+    /// Drops in-flight entries that no longer hold anything: those whose transaction the wallet
+    /// database has since scanned (from then on the database's own spend record is the exclusion,
+    /// R39.8.0aq, so keeping the entry would only delay a later send), and those whose expiry
+    /// height the chain has passed, which can never be mined (R39.8.0ar).
     ///
-    /// An entry whose transaction is never mined is not dropped here; it lapses
-    /// with the wallet-database record at the transaction's expiry height
-    /// (R39.8.0ar), and until then it costs at most one wait budget.
+    /// The expiry test uses the same height the wallet database uses to decide that the
+    /// transaction's notes are free again, so this map and the database release together. Without
+    /// the second rule an abandoned withdrawal, which is never scanned, would stay here for the
+    /// life of the process.
     #[cfg(not(target_arch = "wasm32"))]
-    fn forget_scanned_in_flight_spends(&self) {
+    fn forget_released_in_flight_spends(&self) {
+        let target_height = self.wallet_db_target_height();
         let mut in_flight = match self.z_fields.in_flight_spends.lock() {
             Ok(in_flight) => in_flight,
             Err(_) => return,
         };
-        in_flight.retain(|txid, _| !matches!(self.z_fields.shielded_history.transaction_is_scanned(txid), Ok(true)));
+        in_flight.retain(|txid, spend| {
+            let scanned = matches!(self.z_fields.shielded_history.transaction_is_scanned(txid), Ok(true));
+            !scanned && !in_flight_spend_expired(spend, target_height)
+        });
     }
 
     /// Total value currently committed to this process's in-flight spends.
@@ -914,8 +813,7 @@ impl ZCoin {
             .map(|in_flight| {
                 in_flight
                     .values()
-                    .copied()
-                    .fold(0u64, |acc, value| acc.saturating_add(value))
+                    .fold(0u64, |acc, spend| acc.saturating_add(spend.value))
             })
             .unwrap_or(0)
     }
@@ -1000,5 +898,299 @@ impl ZCoin {
         let z_fields = z_fields.upgrade()?;
 
         Some(ZCoin { utxo_arc, z_fields })
+    }
+}
+
+/// The parts of a [`ZCoin`] that building from the shielded wallet database reads. Taken
+/// as a value so the build can run against a wallet database alone.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct WalletDbBuild<'a> {
+    pub(crate) ticker: &'a str,
+    pub(crate) decimals: u8,
+    pub(crate) wallet_db_path: &'a Path,
+    pub(crate) params: &'a ZcoinConsensusParams,
+    pub(crate) spending_key: &'a ExtendedSpendingKey,
+    pub(crate) my_addr: &'a PaymentAddress,
+    pub(crate) prover: &'a LocalTxProver,
+}
+
+/// Builds a transaction from the notes the shielded wallet database offers as spendable.
+/// Records nothing: the caller decides whether and when the notes it spends are locked.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn build_from_wallet_db(
+    inputs: &WalletDbBuild<'_>,
+    t_outputs: Vec<TxOut>,
+    z_outputs: Vec<ZOutput>,
+    tx_fee: BigDecimal,
+    builder_height: u32,
+) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
+    let t_output_sat: u64 = t_outputs.iter().fold(0, |cur, out| cur + u64::from(out.value()));
+    let z_output_sat: u64 = z_outputs.iter().fold(0, |cur, out| cur + u64::from(out.amount));
+    let tx_fee_sat = sat_from_big_decimal(&tx_fee, inputs.decimals).mm_err(Into::into)?;
+    let total_required_sat = t_output_sat
+        .checked_add(z_output_sat)
+        .and_then(|outputs_sat| outputs_sat.checked_add(tx_fee_sat))
+        .or_mm_err(|| GenTxError::NumConversion(NumConversError("ZCoin total output overflow".to_owned())))?;
+    let target_value = Amount::from_u64(total_required_sat).map_to_mm(|_| {
+        GenTxError::NumConversion(NumConversError(format!(
+            "Failed to get ZCash target amount from {}",
+            total_required_sat
+        )))
+    })?;
+
+    let mut wallet_db = WalletDb::for_path(
+        inputs.wallet_db_path,
+        inputs.params.clone(),
+        zcash_client_sqlite::util::SystemClock,
+        rand::rngs::OsRng,
+    )
+    .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?;
+    let account_id = wallet_db
+        .get_account_ids()
+        .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
+        .into_iter()
+        .next()
+        .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet DB has no account".to_owned()))?;
+    let (height, anchor_height) = wallet_db
+        .get_target_and_anchor_heights(NonZeroU32::MIN)
+        .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
+        .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet DB scan is required".to_owned()))?;
+    let selected_notes = wallet_db
+        .select_spendable_notes(
+            account_id,
+            TargetValue::AtLeast(target_value),
+            &[ShieldedPool::Sapling],
+            height,
+            ConfirmationsPolicy::MIN,
+            &[],
+            // The wallet takes no shielded note locks, so lock state is ignored.
+            LockFilter::Unfiltered,
+        )
+        .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
+        .take_sapling();
+    let selected_value_sat = selected_notes
+        .iter()
+        .try_fold(0u64, |sum, note| {
+            note.note_value()
+                .ok()
+                .and_then(|value| sum.checked_add(u64::from(value)))
+        })
+        .or_mm_err(|| GenTxError::NumConversion(NumConversError("ZCoin selected note overflow".to_owned())))?;
+    if selected_value_sat < total_required_sat {
+        return MmError::err(GenTxError::InsufficientBalance {
+            coin: inputs.ticker.into(),
+            available: big_decimal_from_sat_unsigned(selected_value_sat, inputs.decimals),
+            required: big_decimal_from_sat_unsigned(total_required_sat, inputs.decimals),
+        });
+    }
+
+    let sapling_anchor = wallet_db
+        .with_sapling_tree_mut(|tree| tree.root_at_checkpoint_id(&anchor_height))
+        .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
+        .or_mm_err(|| GenTxError::ShieldedWalletDb("shielded wallet anchor is unavailable".to_owned()))?;
+    let mut selected_notes_with_paths = Vec::with_capacity(selected_notes.len());
+    for selected in selected_notes {
+        let merkle_path = wallet_db
+            .with_sapling_tree_mut(|tree| {
+                tree.witness_at_checkpoint_id_caching(selected.note_commitment_tree_position(), &anchor_height)
+            })
+            .map_to_mm(|e| GenTxError::ShieldedWalletDb(e.to_string()))?
+            .or_mm_err(|| GenTxError::FailedToGetMerklePath)?;
+        selected_notes_with_paths.push((selected.note().clone(), merkle_path));
+    }
+
+    // `height` above only selects notes and picks the anchor from the wallet database. The builder
+    // takes the single height authority's value so this path and the HTLC spend/refund path can
+    // never disagree about a transaction's expiry (R39.11.11).
+    let mut tx_builder = ZTxBuilder::new(inputs.params.clone(), builder_height.into(), BuildConfig::Standard {
+        sapling_anchor: Some(sapling_anchor.into()),
+        orchard_anchor: None,
+        ironwood_anchor: None,
+        orchard_padding: BundlePadding::DEFAULT,
+        ironwood_padding: BundlePadding::DEFAULT,
+    });
+    let fvk = FullViewingKey::from_expanded_spending_key(&inputs.spending_key.expsk);
+    for (note, merkle_path) in selected_notes_with_paths {
+        tx_builder.add_sapling_spend(fvk.clone(), note, merkle_path)?;
+    }
+
+    let mut received_by_me = 0u64;
+    for z_out in z_outputs {
+        if z_out.to_addr == *inputs.my_addr {
+            received_by_me += u64::from(z_out.amount);
+        }
+        tx_builder.add_sapling_output(
+            z_out.viewing_key,
+            z_out.to_addr,
+            z_out.amount,
+            z_out.memo.unwrap_or_else(MemoBytes::empty),
+        )?;
+    }
+
+    let change_sat = selected_value_sat - total_required_sat;
+    if change_sat > 0 {
+        received_by_me += change_sat;
+        tx_builder.add_sapling_output(
+            None,
+            inputs.my_addr.clone(),
+            Amount::from_u64(change_sat).map_to_mm(|_| {
+                GenTxError::NumConversion(NumConversError(format!(
+                    "Failed to get ZCash change amount from {}",
+                    change_sat
+                )))
+            })?,
+            MemoBytes::empty(),
+        )?;
+    }
+
+    // Swap HTLCs are transparent P2SH outputs paid for out of shielded notes, so the
+    // light-wallet path has to emit them too. Added last to keep the vout ordering the
+    // native path produces: `z_p2sh_spend` spends transparent output 0.
+    for output in t_outputs {
+        tx_builder.add_transparent_output_raw(output);
+    }
+
+    let fee_rule = FixedFeeRule::non_standard(
+        Amount::from_u64(tx_fee_sat)
+            .map_to_mm(|_| GenTxError::NumConversion(NumConversError("Invalid ZCash fee amount".to_owned())))?,
+    );
+    let tx = tokio::task::block_in_place(|| {
+        tx_builder.build(
+            &TransparentSigningSet::new(),
+            std::slice::from_ref(inputs.spending_key),
+            &[],
+            rand::rngs::OsRng,
+            inputs.prover,
+            inputs.prover,
+            &fee_rule,
+        )
+    })?
+    .into_transaction();
+    let additional_data = AdditionalTxData {
+        received_by_me,
+        spent_by_me: selected_value_sat,
+        fee_amount: tx_fee_sat,
+        unused_change: None,
+        kmd_rewards: None,
+    };
+    Ok((tx, additional_data))
+}
+
+/// [`build_from_wallet_db`], then records the built transaction in the wallet database so the
+/// notes it spends are not offered to the next selection (R39.8.0av).
+///
+/// For a transaction this process builds but does not broadcast (a withdrawal): the caller of
+/// the withdrawal broadcasts it, if at all, so build time is the only moment this process is
+/// involved. A failure to record fails the build: handing out a signed transaction whose notes
+/// stay selectable is the defect itself, and nothing has been sent yet, so refusing costs the
+/// user a retry rather than a stuck send.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn build_and_lock_from_wallet_db(
+    inputs: &WalletDbBuild<'_>,
+    t_outputs: Vec<TxOut>,
+    z_outputs: Vec<ZOutput>,
+    tx_fee: BigDecimal,
+    builder_height: u32,
+) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
+    let (tx, additional_data) = build_from_wallet_db(inputs, t_outputs, z_outputs, tx_fee, builder_height)?;
+    record_sent_in_wallet_db(inputs.wallet_db_path, inputs.params, &tx, additional_data.fee_amount)
+        .mm_err(|e| GenTxError::ShieldedWalletDb(format!("could not lock the notes of the built transaction: {e}")))?;
+    Ok((tx, additional_data))
+}
+
+/// Writes a transaction this wallet built into the shielded wallet database as sent and
+/// unmined, which marks the notes it spends so `select_spendable_notes` stops offering them.
+/// The wallet database releases them by itself once the transaction is mined (the scan
+/// re-marks them) or once the chain passes the transaction's expiry height (R39.8.0ar).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn record_sent_in_wallet_db(
+    wallet_db_path: &Path,
+    params: &ZcoinConsensusParams,
+    tx: &ZTransaction,
+    fee_sat: u64,
+) -> Result<(), MmError<RecordSentTxErr>> {
+    let mut wallet_db = WalletDb::for_path(
+        wallet_db_path,
+        params.clone(),
+        zcash_client_sqlite::util::SystemClock,
+        rand::rngs::OsRng,
+    )
+    .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?;
+    let account_id = wallet_db
+        .get_account_ids()
+        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
+        .into_iter()
+        .next()
+        .or_mm_err(|| RecordSentTxErr::NoAccount)?;
+    let (target_height, _) = wallet_db
+        .get_target_and_anchor_heights(NonZeroU32::MIN)
+        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?
+        .or_mm_err(|| RecordSentTxErr::ScanRequired)?;
+    let fee_amount = Amount::from_u64(fee_sat).map_to_mm(|_| RecordSentTxErr::InvalidFeeAmount(fee_sat))?;
+
+    // No outputs are declared. The only wallet-internal output we create is change, which
+    // cannot be spent until mined regardless, is already surfaced as a pending mempool
+    // receipt, and is recorded for real when the block is scanned. Declaring none keeps
+    // this write to the part that is load-bearing: marking the spent nullifiers, which
+    // `select_spendable_notes` then excludes on its own.
+    wallet_db
+        .store_transactions_to_be_sent(&[SentTransaction::new(
+            tx,
+            time::OffsetDateTime::now_utc(),
+            target_height,
+            account_id,
+            &[],
+            fee_amount,
+            &[],
+        )])
+        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))
+}
+
+/// Whether the chain has passed an in-flight spend's expiry height, so the transaction can never
+/// be mined. Mirrors the wallet database's own "unexpired" test (`expiry_height >= target height`,
+/// zero meaning it never expires) so that the two release together. With no target height known
+/// the spend is kept: releasing early is the unsafe direction.
+#[cfg(not(target_arch = "wasm32"))]
+fn in_flight_spend_expired(spend: &InFlightSpend, target_height: Option<u32>) -> bool {
+    match target_height {
+        Some(target) => spend.expiry_height != 0 && spend.expiry_height < target,
+        None => false,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod in_flight_tests {
+    use super::*;
+
+    const SPEND: InFlightSpend = InFlightSpend {
+        value: 1,
+        expiry_height: 100,
+    };
+
+    /// The wallet database holds the notes while `expiry_height >= target height`; the map must
+    /// release on exactly the same boundary or the error would name a spend the database has
+    /// already let go of.
+    #[test]
+    fn an_in_flight_spend_expires_when_the_target_height_passes_its_expiry() {
+        assert!(!in_flight_spend_expired(&SPEND, Some(99)));
+        assert!(
+            !in_flight_spend_expired(&SPEND, Some(100)),
+            "can still be mined in block 100"
+        );
+        assert!(in_flight_spend_expired(&SPEND, Some(101)));
+    }
+
+    #[test]
+    fn an_in_flight_spend_is_kept_when_no_height_is_known() {
+        assert!(!in_flight_spend_expired(&SPEND, None));
+    }
+
+    #[test]
+    fn a_spend_with_no_expiry_never_expires() {
+        let never = InFlightSpend {
+            value: 1,
+            expiry_height: 0,
+        };
+        assert!(!in_flight_spend_expired(&never, Some(u32::MAX)));
     }
 }
