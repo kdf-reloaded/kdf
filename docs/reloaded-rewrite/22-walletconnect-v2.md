@@ -1532,6 +1532,31 @@ vulnerability in a wallet their users pair with has today no way to
 remove the exposure short of waiting for a release. This section is
 that way.
 
+**Which part of the exposure the switch removes, and which it does
+not.** Being precise here matters more than the switch sounding
+useful, because an operator acting in an incident will act on this
+paragraph.
+
+- *Removed by the switch.* Everything prospective: no relay
+  connection, no new pairing, no settlement of a proposed session,
+  no persisted session restored into memory, and no signing request
+  reaching any wallet. After a restart with the switch off, nothing
+  this subsystem can do happens.
+- *Not removed by the switch.* Everything already at rest. The
+  plaintext session symmetric keys written under the default `open`
+  value stay on disk exactly as they were — RS4.1 requires that,
+  deliberately, so that re-enabling does not force every user to
+  re-pair. A stolen disk image or backup taken after the switch was
+  flipped is worth precisely what one taken before it was worth.
+  The control that changes that is D8's encrypted at-rest record,
+  not this switch.
+- *Removed by the operator, through the affordance RS4.3
+  specifies.* Because the at-rest material is usually what an
+  operator reaching for an off switch after a key-exposure incident
+  wants gone, the disabled state must not take away their ability to
+  delete it. RS4.3 is that requirement, and it is why this section
+  does not simply refuse all five RPCs when disabled.
+
 > **Containment versus the actual holes (engineering judgement).** A
 > switch is *containment*: it protects whoever knows to flip it, from
 > the moment they know. Closing a key-handling gap protects
@@ -1624,10 +1649,12 @@ implementation shall enforce it at both:
 2. *Session establishment and restore.* When the switch is off, the
    subsystem shall not create a new pairing, shall not settle a
    proposed session, shall not restore a persisted session into
-   memory, and shall not establish the relay connection. The five
-   public RPC handlers of §22.9A.2 shall refuse with a structured
-   error rather than returning an empty result, so that "disabled"
-   is distinguishable from "no sessions".
+   memory, and shall not establish the relay connection. The public
+   RPC handlers of §22.9A.2 shall refuse with a structured error
+   rather than returning an empty result, so that "disabled" is
+   distinguishable from "no sessions" — with the two exceptions
+   RS4.3 specifies, which read and delete local records only and
+   establish nothing.
 
 **RS3 — The switch fails closed.** Where the effective value of the
 switch cannot be determined — an unreadable or unparsable
@@ -1663,6 +1690,46 @@ subsystem connects to the relay and therefore whether the loader
 runs at all. A disabled subsystem reads nothing because it starts
 nothing; it does not read selectively. R8 is unweakened and
 unamended.
+
+This requirement binds what **disabling** does, not what the
+operator may do while disabled. An operator who deletes a session
+record through the affordance RS4.3 specifies is not the switch
+acting destructively; they are exercising a capability they have
+while the subsystem runs and must not lose by turning it off.
+
+**RS4.3 — Disabling shall not take away the purge.** When the global
+switch is off, two of the five RPCs of §22.9A.2 shall remain
+available in a **local-records-only** form, and the rest shall
+refuse per RS2(2):
+
+- the session **enumeration** RPC shall answer from the persistence
+  backend alone, listing the persisted records so that the operator
+  can see what is still on disk and name it; and
+- the session **deletion** RPC shall delete the named persisted
+  record from the persistence backend alone and return success.
+
+Both forms shall establish no relay connection, create no pairing,
+restore nothing into memory, and send no `wc_sessionDelete`
+courtesy message to the wallet — a disabled subsystem has no live
+session to send one on, and reaching the relay to be polite would
+undo the thing the operator just asked for. The deletion RPC's
+disabled form therefore needs a storage-only path that does not go
+through the handle construction RS2(2) refuses; specifying and
+building that path is part of the work D12 tracks, and it is the one
+place where this section requires a code route that exists in no
+form today.
+
+The reasoning, stated because the asymmetry will otherwise read as
+an oversight: refusing deletion while disabled serves no threat
+model. Deleting a session record is a *reduction* of exposure, not a
+use of the subsystem; it emits no relay traffic, cannot acquire a
+dependent, and cannot solicit a signature. Refusing it would mean
+that an operator who flips the switch after a key-exposure incident
+is left with the plaintext keys they were worried about unreachable
+to them and unchanged on disk, their only recourse being to
+hand-edit SQLite or IndexedDB. Enumeration is exempted with it
+because an operator who cannot list the records cannot name one to
+delete, and the enumeration answers from those same local records.
 
 **RS4.2 — Restart scope.** The switch is resolved from the node
 configuration at startup and is **not** hot-reloadable: shutting the
@@ -2072,10 +2139,10 @@ failure mode chosen is the loud one.
   constructed.
 - ACS2. With `enabled: false`, no relay connection is established,
   no pairing is created, no persisted session is restored, and the
-  five RPCs of §22.9A.2 refuse with a structured error rather than
-  returning an empty result. The persisted records are still
-  present afterwards, and a subsequent run with `enabled: true`
-  restores them (RS4.1).
+  three RPCs of §22.9A.2 that RS4.3 does not exempt refuse with a
+  structured error rather than returning an empty result. The
+  persisted records are still present afterwards, and a subsequent
+  run with `enabled: true` restores them (RS4.1).
 - ACS3. A `walletconnect` block that cannot be parsed into the
   resolved configuration results in the subsystem being disabled or
   startup being refused — never in the subsystem running with an
@@ -2134,6 +2201,14 @@ failure mode chosen is the loud one.
   enumerated class. A reviewer can read the enumeration and compare
   it to the fund-moving RPC routes; that comparison is the thing
   ACS4's per-switch matrix cannot make.
+- ACS12. With `enabled: false`, the operator can still complete a
+  purge (RS4.3): the enumeration RPC lists the persisted records,
+  the deletion RPC removes a named one, and a subsequent
+  enumeration no longer shows it. The test also asserts the
+  negatives that make the exemption safe — no relay connection is
+  established and no outbound message is published by either call —
+  so that the exemption cannot be satisfied by quietly building the
+  handle the rest of RS2(2) refuses.
 
 ## 22.10 External References
 

@@ -105,8 +105,16 @@ per-context lazy init, so a disabled subsystem never builds a handle:
   configuration" error — distinguishable from the existing
   "`walletconnect.project_id` is required" misconfiguration error, because an
   operator must be able to tell a deliberate off state from a broken config;
-- the five public RPC handlers surface that error rather than an empty result
-  (ACS2);
+- three of the five public RPC handlers surface that error rather than an empty
+  result (ACS2). The other two — session enumeration and session deletion —
+  stay available in a **local-records-only** form (RS4.3, ACS12), which is the
+  one piece of this step that needs a code route the tree has in no form today:
+  a storage-only list and delete that do not go through `WalletConnectCtx::
+  init`. Without it, an operator who disables after a key-exposure incident
+  cannot delete the plaintext session keys they were worried about, because
+  `wc_delete_session` is the only supported way to remove a persisted row
+  (`drop_session` → `forget_session` → `storage.delete_session`) and it goes
+  through the lazy `wc_ctx` helper that the disabled state refuses;
 - `restore_sessions` is never reached, so no session is restored and no row is
   touched. Nothing deletes or rewrites rows (RS4.1), and ch.22 R8's
   unconditional load is untouched because the loader does not run — R8 binds
@@ -491,6 +499,7 @@ chapter.
 
 | Risk | Mitigation |
 | --- | --- |
+| Disabling leaves the operator unable to delete the at-rest session keys the incident was about | RS4.3 / ACS12 — storage-only enumeration and deletion stay available while disabled, and §22.9C.1 states which part of the exposure the switch does and does not remove |
 | A per-family switch ships before its operation is reachable and is dormant | RS5.1 and the S5 table; ACS4's "proceeds" half cannot be written for a dormant switch, so the test matrix catches it |
 | Enforcement leaks to a second call site over time | RS7.2 / ACS7 — a capability witness the compiler enforces, over the funnel as well as the trait, not a review convention |
 | A check passes on `WcCoinSigner` while `send_session_request` stays open to every holder of the handle | RS7.2's funnel clause and ACS7's three compile-fail cases; a trait-only check certifies a property that does not protect the channel |
@@ -512,7 +521,9 @@ chapter.
   `Port status. Implemented.` / `STATUS. Implemented.` lines against unmet AC1
   and R5 / D3 is a separate, already-tracked question and is untouched here.
 - **A runtime or RPC-level kill switch** (ch.22 D13). Needs its own
-  authorization story first.
+  authorization story first. Note that RS4.3's storage-only enumeration and
+  deletion are *not* this: they cannot change the switch, cannot start the
+  subsystem, and emit nothing on the relay.
 - **A per-family activation switch** (ch.22 D13).
 - **Giving a watcher the pre-signed artifact** (P7). Open question only.
 - **Pre-signing the claim/spend side.** Forbidden by P0's corollary, not merely
