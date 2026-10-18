@@ -8,7 +8,8 @@
 > the whole of it, and the last section argues that it needs one before it is
 > built.
 >
-> Created 2026-10-17. Nothing here is implemented.
+> Created 2026-10-17; revised 2026-10-18 in response to an independent audit
+> of this document and of ch.22 §22.9C. Nothing here is implemented.
 
 ## Why this exists
 
@@ -325,8 +326,13 @@ weight:
   WalletConnect RPC. In particular `{"eip155": {"legacy_swap": false}}` is
   **rejected** rather than silently accepted. ACS13 adds the mechanical
   one-parser check.
-- **ACS7** — the mechanical check that no second call site reaches a
-  `WcCoinSigner` signing method.
+- **ACS7 and ACS11** — the mechanical checks. ACS7 is three compile-fail cases,
+  not one: a caller outside the chokepoint module cannot call a `WcCoinSigner`
+  signing method, cannot call `send_session_request`, and cannot obtain a
+  session symmetric key. A check that covers only the first certifies a
+  property the other two defeat. ACS11 adds the residual-class refusal (tested
+  with the global switch **on**, so it proves RS7.3 and not RS1 firing) and the
+  call-site enumeration.
 - **ACS8 / ACS8a** — the regression gate, and it has to be written against the
   right configuration: a `walletconnect` block **present** with a valid
   `project_id` and none of the new keys. Written against an absent block it

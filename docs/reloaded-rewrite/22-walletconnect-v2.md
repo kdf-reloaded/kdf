@@ -2199,7 +2199,7 @@ be resolved as follows:
 | `walletconnect` **present** with a valid `project_id` and none of this section's keys | The subsystem is available and every switch §22.9C.5 specifies is available. **This is the configuration that is actually today's behaviour**, and is the one a regression test must use (ACS8). |
 | `walletconnect` present, `families` absent | As above for the per-family switches; `enabled` is read as given. The operator expressed a global policy and no per-family policy. |
 | `families` present, a family **named**, an operation key absent | `unnamed_operation_policy` governs, default `deny`. A `families` map is an allowlist at **both** levels; see the paragraph below. |
-| `families` present, a family **not named** | `unnamed_family_policy` governs, default `deny`. Writing a `families` map at all is therefore an **allowlist**, which is what keeps a family added to the code in a later release from becoming available by omission in an existing operator's configuration. |
+| `families` present, a family **not named** | `unnamed_family_policy` governs the whole family and is **final** for it — `unnamed_operation_policy` does not apply, because that key resolves operations *within a named entry*, and an unnamed family has no entry. So `unnamed_family_policy: "allow"` makes every switch of an unnamed family available. Writing a `families` map at all is therefore an **allowlist**, which is what keeps a family added to the code in a later release from becoming available by omission in an existing operator's configuration. |
 | `enabled` absent | `true`. |
 | `unnamed_family_policy` absent | `"deny"`. |
 | `unnamed_operation_policy` absent | `"deny"`. |
@@ -2404,10 +2404,17 @@ RS8 claims.
   Four pairs of assertions, one pair per switch. This criterion is
   the discharge of RS5 and is not satisfied by a sample of the
   switches.
-- ACS5. With `families` present and not naming `cosmos`, a
-  Tendermint withdrawal under a WalletConnect key source is refused
+- ACS5. Both policy keys, each on its own axis (RS9). (a) With
+  `families` present and not naming `cosmos`, a Tendermint
+  withdrawal under a WalletConnect key source is refused
   (`unnamed_family_policy` default `deny`); with
-  `unnamed_family_policy: "allow"` and the same map, it proceeds.
+  `unnamed_family_policy: "allow"` and the same map, it proceeds —
+  which also asserts that the family-level allow is **final** for an
+  unnamed family and is not then re-denied by
+  `unnamed_operation_policy`. (b) With `families` naming `bip122`
+  and carrying only `withdraw`, the `bip122` legacy swap is refused
+  (`unnamed_operation_policy` default `deny`); with
+  `unnamed_operation_policy: "allow"` and the same map, it proceeds.
 - ACS6. Each of the five cases of RS10 stops startup with an error
   naming the offending key — *startup*, at RS11's resolution point,
   not the first WalletConnect RPC; a test that drives the resolver
