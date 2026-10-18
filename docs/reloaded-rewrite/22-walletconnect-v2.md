@@ -1810,15 +1810,26 @@ why `cosmos` gets no swap switch.
 
 ### 22.9C.6 One enforcement chokepoint
 
-**RS7 — Signer selection is a single chokepoint.** Enforcement of
+**RS7 — Signing goes through a single chokepoint.** Enforcement of
 the switches shall happen at exactly two places: the activation-time
-refusal of RS2(1), and **one** chokepoint through which a
-WalletConnect signer is selected for a coin operation. Every
+refusal of RS2(1), and **one** chokepoint through which every
+WalletConnect signing request for a coin operation passes. Every
 delegated-signing route — withdrawal, legacy swap HTLC, ordinary
 send, and any route added later — shall reach a `WcCoinSigner`
-implementation (§22.3) only through that chokepoint. Scattered
+signing method (§22.3) only through that chokepoint. Scattered
 per-call-site checks are **forbidden**, including as a transitional
 state.
+
+The chokepoint **performs** the signing call; it does not hand back
+a signer for the caller to use. A chokepoint that returns the signer
+has, by returning it, permitted the signing method to be invoked
+outside itself, which is precisely the property RS7.2 exists to deny
+— so "select a signer and give it to the caller" is not a
+conforming shape, however natural it reads. The chokepoint takes the
+coin, the session, the operation class of RS7.1 and the
+chain-specific unsigned-transaction description, and returns either
+the signature / signed transaction / transaction hash, or a
+structured refusal.
 
 The reason is not tidiness. Scattered checks produce *partial*
 enforcement, and partial enforcement is the worst outcome available
@@ -1850,14 +1861,52 @@ remove it — from a missing per-call-site check, which RS7 forbids,
 to a mislabelled call site, which nothing in this section would
 catch.
 
-**RS7.2 — The chokepoint is the only route.** The property RS7
-asserts shall be enforced structurally rather than by convention:
-the trait's signing and sign-and-send methods shall not be callable
-from outside the chokepoint's module. Rust visibility is the
-intended instrument; where the module layout makes that impractical
-for a particular family, an equivalent mechanical check that fails
-the build or a test is acceptable, and a code-review convention is
-not.
+**RS7.2 — The chokepoint is the only route, and the restricted
+surface is the outbound signing funnel.** The property RS7 asserts
+shall be enforced structurally rather than by convention. Two things
+have to be right about *how*, and both are places where the obvious
+answer fails.
+
+*Rust visibility is not the instrument, and must not be named as
+one.* `WcCoinSigner` is a public trait of the WalletConnect crate
+and is implemented in a different crate, one implementation per
+family. A trait method's visibility **is** the trait's visibility:
+there is no way to keep a cross-crate public trait implementable
+elsewhere while making its methods callable only from one module,
+and the sealed-supertrait pattern restricts who may *implement*, not
+who may *call*. The instrument shall instead be a **capability
+witness**: a token type whose only constructor is private to the
+chokepoint's module, which is neither `Clone` nor `Copy` nor
+`Default` nor constructible by deserialization, and which the
+restricted methods take **by value** as a parameter. Code outside
+the chokepoint module can name the methods but cannot produce the
+argument, so the restriction holds across crates and is enforced by
+the compiler rather than by a reviewer.
+
+*The trait is not the whole surface.* A check that constrains only
+`WcCoinSigner` would certify a property that does not protect the
+signing channel, because the subsystem's own outbound funnel is
+reachable without the trait: the handle's public session-request
+method takes an arbitrary JSON payload that becomes the
+`wc_sessionRequest` params, and the public session index hands out a
+session's symmetric key, so any holder of the handle can emit
+`signPsbt`, `eth_signTransaction` or `cosmos_signDirect` with no
+`WcCoinSigner` in sight. **Every public entry point that can emit a
+`wc_sessionRequest` or hand a session symmetric key to a caller
+shall therefore carry the same witness requirement** as the trait's
+signing methods — concretely, in this tree,
+`WalletConnectCtx::send_session_request` and the public session-key
+accessor reached through `WalletConnectCtx::sessions()` and
+`SessionManager::transport_for`. The subsystem's own non-signing
+lifecycle traffic — the session-delete courtesy publish, the ping,
+the expiry extension, the inbound decrypt loop — is unaffected and
+shall use crate-private accessors rather than the witness-gated
+public ones; it emits no `wc_sessionRequest` and is not a signing
+route.
+
+Where a particular family's module layout makes the witness
+impractical, an equivalent mechanical check that fails the build or
+a test is acceptable. A code-review convention is not.
 
 **RS7.3 — The residual operation class is a refusal, and the call
 sites are enumerated.** Two obligations, and neither substitutes for
@@ -2046,11 +2095,16 @@ failure mode chosen is the loud one.
 - ACS6. Each of the five cases of RS10 stops startup with an error
   naming the offending key; in particular `{"eip155": {"swap":
   false}}` is rejected rather than accepted as a dormant switch.
-- ACS7. The chokepoint is the only route: a mechanical check — the
-  trait's signing methods being private outside the chokepoint
-  module, or an equivalent build- or test-time check — fails if a
-  second call site reaches a `WcCoinSigner` signing method directly
-  (RS7.2).
+- ACS7. The chokepoint is the only route, tested over the **funnel**
+  and not only over the trait (RS7.2). A compile-fail test (or an
+  equivalent build-time check) fails to build a caller outside the
+  chokepoint's module that attempts each of: a `WcCoinSigner`
+  signing or sign-and-send method; `send_session_request`; and the
+  public session-key accessor. Three cases, because a check that
+  covers only the first certifies a property the second and third
+  defeat. The criterion is not satisfied by a test that asserts the
+  chokepoint refuses when a switch is off — that is ACS4 — nor by
+  one that asserts the trait alone is unreachable.
 - ACS8. With no `walletconnect` block in the configuration, every
   operation §22.9C.5 names behaves exactly as it does without this
   feature. No existing deployment changes behaviour on upgrade.

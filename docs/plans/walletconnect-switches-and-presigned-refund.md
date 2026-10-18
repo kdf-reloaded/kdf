@@ -133,13 +133,26 @@ funnel on the wire side, but the switch decision needs the *coin* and the
   fund-moving routes that a catch-all would let through while the operator's
   `cosmos.withdraw: false` reported protection it was not giving;
 - it evaluates: global switch → namespace lookup → `unnamed_family_policy` →
-  per-operation switch, and returns either the signer or a structured refusal;
+  per-operation switch → `unnamed_operation_policy`, and on a permit it
+  **performs the signing call itself**, returning the signature / signed
+  transaction / transaction hash. It does **not** return the signer: handing the
+  signer back is what lets the signing method be invoked outside the
+  chokepoint, which is the property RS7.2 denies (RS7);
 - every family's `wc_integration.rs` signing entry point goes through it;
-- enforce structurally (RS7.2): the `WcCoinSigner` signing and sign-and-send
-  methods become unreachable outside the chokepoint's module. Rust visibility
-  first; where the module layout makes that impractical, a build- or test-time
-  mechanical check. **A review convention is not acceptable here** — the whole
-  point of one chokepoint is that the property is checkable by reading one
+- enforce structurally (RS7.2), and note that **Rust visibility cannot do this**
+  — `WcCoinSigner` is a `pub` trait of `kdf_walletconnect` implemented in
+  `coins`, and a trait method's visibility is the trait's visibility. Use a
+  **capability witness**: a token type in the chokepoint's module with a private
+  constructor, not `Clone`/`Copy`/`Default`, taken by value by every restricted
+  method. Outside code can name the method and cannot build the argument.
+- the witness goes on the **funnel**, not only the trait. `send_session_request`
+  is `pub` and takes an arbitrary payload, and `sessions()` → `transport_for()`
+  hands out the session symmetric key, so a trait-only restriction leaves the
+  signing channel open to any holder of the handle. Both of those take the
+  witness too; the subsystem's own non-signing lifecycle traffic (delete
+  courtesy publish, ping, expiry extension, inbound decrypt) moves to
+  crate-private accessors. **A review convention is not acceptable here** — the
+  whole point of one chokepoint is that the property is checkable by reading one
   function instead of by enumerating call sites, and partial enforcement is
   indistinguishable from protection.
 
@@ -479,7 +492,8 @@ chapter.
 | Risk | Mitigation |
 | --- | --- |
 | A per-family switch ships before its operation is reachable and is dormant | RS5.1 and the S5 table; ACS4's "proceeds" half cannot be written for a dormant switch, so the test matrix catches it |
-| Enforcement leaks to a second call site over time | RS7.2 / ACS7 — structural, not a review convention |
+| Enforcement leaks to a second call site over time | RS7.2 / ACS7 — a capability witness the compiler enforces, over the funnel as well as the trait, not a review convention |
+| A check passes on `WcCoinSigner` while `send_session_request` stays open to every holder of the handle | RS7.2's funnel clause and ACS7's three compile-fail cases; a trait-only check certifies a property that does not protect the channel |
 | A fund-moving route reaches the wallet through the chokepoint's residual operation class while a per-family switch reports it blocked | RS7.3 — the residual class is refused unconditionally, and ACS11(b)'s mechanical call-site enumeration is reviewable against the fund-moving RPC routes |
 | Strict config parsing breaks a config shared across node versions | Accepted deliberately and documented: a security switch the operator believes they set is worth more than a config that loads everywhere |
 | Phase 2 pre-signs something not consensus-enforced | P0's corollary as a binding CRD requirement with a named consensus rule per pre-sign site |
@@ -514,8 +528,12 @@ chapter.
 2. **Phase 1 chokepoint home:** in `kdf_walletconnect` (keeps the subsystem's
    policy with the subsystem, but the crate must then know the operation
    taxonomy) or in `coins` (knows the operations, but spreads the policy). The
-   `WcOperation` enum makes either workable; the visibility requirement RS7.2
-   is easier in `kdf_walletconnect`.
+   `WcOperation` enum makes either workable. RS7.2's capability witness is
+   cross-crate by construction, so it no longer argues for one home over the
+   other — but the funnel half of RS7.2 does: `send_session_request` and the
+   session-key accessor live in `kdf_walletconnect`, and the witness type has
+   to be visible to them, so putting the chokepoint there keeps the whole
+   restricted surface in one crate. **Recommendation: `kdf_walletconnect`.**
 3. **Phase 1 `unnamed_family_policy` spelling and placement:** a sibling key, as
    specified, versus a reserved `default` entry inside `families`. Specified as
    a sibling because a CAIP-2 namespace could in principle be spelled
