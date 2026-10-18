@@ -125,8 +125,13 @@ funnel on the wire side, but the switch decision needs the *coin* and the
 *operation*, which that function does not have. So:
 
 - add one chokepoint that takes the coin's CAIP-2 namespace, the session topic,
-  and an explicit `WcOperation { Withdraw, Swap, Activation, Other }` (RS7.1) —
-  supplied by the caller, never inferred;
+  and an explicit `WcOperation { Withdraw, Swap, Activation, Unclassified }`
+  (RS7.1) — supplied by the caller, never inferred. `Unclassified` is the
+  residual variant and the chokepoint **refuses** it unconditionally (RS7.3):
+  it is not a catch-all that passes on the global switch. `experimental::
+  staking::delegate` and its siblings are the concrete reason — they are live,
+  fund-moving routes that a catch-all would let through while the operator's
+  `cosmos.withdraw: false` reported protection it was not giving;
 - it evaluates: global switch → namespace lookup → `unnamed_family_policy` →
   per-operation switch, and returns either the signer or a structured refusal;
 - every family's `wc_integration.rs` signing entry point goes through it;
@@ -475,6 +480,7 @@ chapter.
 | --- | --- |
 | A per-family switch ships before its operation is reachable and is dormant | RS5.1 and the S5 table; ACS4's "proceeds" half cannot be written for a dormant switch, so the test matrix catches it |
 | Enforcement leaks to a second call site over time | RS7.2 / ACS7 — structural, not a review convention |
+| A fund-moving route reaches the wallet through the chokepoint's residual operation class while a per-family switch reports it blocked | RS7.3 — the residual class is refused unconditionally, and ACS11(b)'s mechanical call-site enumeration is reviewable against the fund-moving RPC routes |
 | Strict config parsing breaks a config shared across node versions | Accepted deliberately and documented: a security switch the operator believes they set is worth more than a config that loads everywhere |
 | Phase 2 pre-signs something not consensus-enforced | P0's corollary as a binding CRD requirement with a named consensus rule per pre-sign site |
 | Phase 2 broadcast gets stuck in the mempool | P2's pre-flight feerate gate as a **precondition** of broadcast |

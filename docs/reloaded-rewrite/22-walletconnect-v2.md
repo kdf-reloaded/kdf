@@ -61,7 +61,10 @@ decide whether a reachable WalletConnect operation is *offered*: a
 global enable/disable switch for the whole subsystem, enforced at
 activation and at session establishment and failing closed, and
 per-family switches for the withdrawal and swap operations that can
-actually occur. They are a security control rather than a
+actually occur. A delegated operation that has no enumerated
+operation class is **refused** rather than passed on the global
+switch, so a fund-moving route cannot become available to a paired
+wallet by falling through a catch-all (§22.9C.6). They are a security control rather than a
 GLEEC-compatibility control (§22.9C.2), they default to today's
 behaviour, and none of them is implemented yet (D12).
 
@@ -1056,10 +1059,12 @@ D11. The UTXO withdrawal refusal recorded in RP9 is a reference gap,
 
 D12. **[REQUIRED — §22.9C, not implemented]** The operator
     availability switches of §22.9C: the global WalletConnect
-    enable/disable switch (RS1–RS4.2), the four per-family
+    enable/disable switch (RS1–RS4.3), the four per-family
     per-operation switches RS6 specifies, the single signer-selection
-    chokepoint of RS7, the nested configuration block of RS8–RS10,
-    and the per-switch tests ACS4 requires. Nothing of this exists
+    chokepoint of RS7 with the residual-class refusal and call-site
+    enumeration of RS7.3, the nested configuration block of
+    RS8–RS10, the single resolution point of RS11, and the
+    per-switch tests ACS4 requires. Nothing of this exists
     in the tree today. The implementation plan is
     [`docs/plans/walletconnect-switches-and-presigned-refund.md`](../plans/walletconnect-switches-and-presigned-refund.md),
     phase 1. Each per-family switch is sequenced behind the change
@@ -1737,7 +1742,7 @@ rules just named are what govern.) The determination is:
 | all three | watcher participation | **no** | RP10 **requires** a coin whose signing policy holds no local secret to report itself unsupported by the watcher subsystem, unconditionally and for reasons unrelated to operator policy. A switch would gate nothing. (Required, not yet enforced: D10 lists RP10's watcher gate among the port's remaining work.) |
 | all three | stand-alone message-signing RPC | **no** | RP9 / RP9.1: wallet message signing is reachable only as the activation-time public-key-recovery step of RP8.3; it is wired to no user-facing message-signing RPC for any family. Nothing to gate. |
 | all three | private-key export / display | **no** | RP9 records it refused for all three families (the framework cannot export a key it does not hold; Chapter 47 R47.5.14 is the same rule for the MetaMask policy). Nothing to gate, and nothing an operator could usefully tighten. |
-| all three | any other delegated operation | global only | RP9's "ordinary transaction build → wallet signature → broadcast" row is `yes` for all three families but does **not** enumerate the family-specific operation classes it covers (Tendermint staking and IBC transfer, EVM contract calls, and so on). Those reach the chokepoint in the `Other` operation class of RS7.1 and are governed by the global switch alone, until RS5.2 is applied to one of them. |
+| all three | any other delegated operation | **none, and the operation is refused** | RP9's "ordinary transaction build → wallet signature → broadcast" row is `yes` for all three families but does **not** enumerate the family-specific operation classes it covers (Tendermint staking and IBC transfer, EVM contract calls, and so on). Several are live RPC routes in this tree already — `experimental::staking::delegate`, `undelegate` and `claim_rewards` reach `TendermintCoin::delegate` through `add_delegation` — and every one of them **moves funds**. They are therefore *not* governed by the global switch alone and *not* governed by a per-family `withdraw` switch either: they reach the chokepoint in the residual class of RS7.1 and RS7.3 **refuses** them. Making one of them available to a WalletConnect wallet means enumerating its operation class and adding its switch under RS5.2, in the change that makes it reachable. |
 
 Four switches are therefore specified: `bip122` withdrawal,
 `bip122` legacy swap, `eip155` withdrawal, `cosmos` withdrawal.
@@ -1831,9 +1836,19 @@ per-operation decision cannot be made from the coin and the session
 alone, so the chokepoint shall take the **operation class** as an
 explicit argument supplied by the caller, never inferred from
 context. Its variants shall be exactly the switched classes of
-§22.9C.5 plus the catch-all class, that is: withdrawal, swap, the
-activation-time wallet interaction, and `Other`. Adding a new
-operation class is the trigger for RS5.2.
+§22.9C.5, plus the activation-time wallet interaction, plus **one
+residual variant** whose meaning is "this call site has not declared
+an enumerated class". Adding a new operation class is the trigger
+for RS5.2.
+
+The residual variant is **not** a catch-all that passes on the
+global switch. It is the subject of RS7.3, and the distinction is
+the whole of this requirement's security value: a class argument
+that a careless or hurried call site can set to "other" and thereby
+reach the wallet would move the enforcement hazard rather than
+remove it — from a missing per-call-site check, which RS7 forbids,
+to a mislabelled call site, which nothing in this section would
+catch.
 
 **RS7.2 — The chokepoint is the only route.** The property RS7
 asserts shall be enforced structurally rather than by convention:
@@ -1843,6 +1858,43 @@ intended instrument; where the module layout makes that impractical
 for a particular family, an equivalent mechanical check that fails
 the build or a test is acceptable, and a code-review convention is
 not.
+
+**RS7.3 — The residual operation class is a refusal, and the call
+sites are enumerated.** Two obligations, and neither substitutes for
+the other.
+
+1. *The residual class refuses.* The chokepoint shall refuse any
+   call whose operation class is the residual variant of RS7.1,
+   with a structured unsupported-operation error, **irrespective of
+   the global switch and of every per-family value**. There is no
+   configuration under which the residual class reaches a wallet.
+   The reason is RS5's rule read the other way round: a per-family
+   `withdraw: false` that leaves a fund-moving route open through an
+   unenumerated class is a switch reporting protection it does not
+   provide, which is the condition RS5 forbids, reached through the
+   catch-all instead of through a dormant switch and harder to see
+   because the per-switch test matrix is green. Refusing the
+   residual class is also the conservative direction: nothing
+   regresses, because no delegated signing route is reachable by a
+   user today at all (D10).
+2. *The call sites are enumerated and the enumeration is
+   mechanical.* Every call site that reaches the chokepoint shall
+   declare its operation class, and the set of call sites together
+   with their declared classes shall be checked mechanically — a
+   build-time or test-time check, not a review convention — so that
+   a newly added call site either declares an enumerated class or
+   fails the check. A call site cannot satisfy the check by
+   declaring the residual class, because obligation 1 makes that a
+   refusal at run time: the two obligations close the gap from both
+   ends, one at the chokepoint and one at the call site.
+
+The consequence is deliberate and is the cost of the rule: making a
+new delegated operation available over WalletConnect is never a
+matter of routing it through the chokepoint and relying on the
+global switch. It requires enumerating the operation class, deciding
+whether it needs its own switch, and landing both with the
+reachability — which is RS5.2, now with teeth rather than as an
+instruction a later author must remember.
 
 ### 22.9C.7 Configuration shape
 
@@ -2017,6 +2069,17 @@ failure mode chosen is the loud one.
   a public key from it (RS6.2). The negative half matters as much as
   the positive one: the test asserts that no public key is produced,
   not merely that a later signing step fails.
+- ACS11. Two halves, both required (RS7.3). (a) A call at the
+  chokepoint carrying the residual operation class is refused with a
+  structured unsupported-operation error, and is refused with the
+  global switch *on* and with every per-family switch at its
+  available default — so the test proves the refusal is not the
+  global switch firing. (b) A mechanical check enumerates every call
+  site that reaches the chokepoint together with its declared
+  operation class, and fails when a call site is added without an
+  enumerated class. A reviewer can read the enumeration and compare
+  it to the fund-moving RPC routes; that comparison is the thing
+  ACS4's per-switch matrix cannot make.
 
 ## 22.10 External References
 
