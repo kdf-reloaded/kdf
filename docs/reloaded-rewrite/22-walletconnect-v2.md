@@ -2051,10 +2051,31 @@ nothing already in it. Note in particular that `project_id` is
 **required** today, so a node that configures none already fails to
 bring the subsystem up. That is not an off switch and must not be
 treated as one: it is a misconfiguration that surfaces as an error
-at first use, it does not refuse activation, and an operator cannot
-tell it apart from a mistake. Making the off state explicit,
-early, and distinguishable from a broken configuration is part of
-what RS1–RS3 are for.
+at first use and it does not refuse activation. Making the off state
+**explicit** and **early** is part of what RS1–RS3 and RS11 are
+for — explicit, because `enabled: false` says what an absent
+`project_id` only implies; early, because RS11 resolves it at
+startup rather than at the first RPC.
+
+**What this section does *not* claim, and what dropping the claim
+costs.** It does not claim that an API caller can tell the
+deliberate off state from a broken configuration **on the wire**.
+RP7 fixes this subsystem's RPC surface at three `error_type`
+tokens, one of which covers every initialisation and precondition
+failure, and states that the human-readable message each token
+carries is diagnostic and not part of the contract. A
+disabled-by-configuration refusal therefore reaches a caller as the
+same token, with the same status code, as a missing `project_id` or
+an unreachable relay; a GUI could separate them only by
+string-matching a message the contract disclaims. The off state is
+distinguishable to the **operator**, in the node log and in the
+configuration file they wrote, and that is the whole of it. The cost
+is specific and worth naming rather than glossing: a GUI cannot
+render "your administrator turned this off" differently from
+"someone forgot to configure this", so the improvement RS1–RS3
+deliver over the status quo reaches the operator and not the
+operator's tooling. §22.9C.9 item 2 records what changing that
+would take.
 
 A flat list of independent booleans is explicitly rejected as the
 shape. Flattened over the three families and the two operations plus
@@ -2331,6 +2352,37 @@ to implemented material under a requirement marked implemented,
 which is a maintainer's call and not a revision's. **Decision
 needed: (a) or (b).** Until it is taken, R7 / D8 and §22.5.1 stand
 as written and the discrepancy is this item.
+
+**2. RP7's three error tokens cannot carry an on-the-wire "disabled
+by configuration" signal.** RP7 fixes the subsystem's RPC error
+surface at three `error_type` tokens — an initialisation /
+precondition failure (400), a session-request failure (500) and a
+generic internal failure (500) — and states that the human-readable
+messages are diagnostic and not part of the contract. Every
+initialisation failure collapses into the first token today, so a
+missing `project_id`, a bad `wc_session_persistence`, an unreachable
+relay and a deliberate off state are indistinguishable to a caller
+except by string-matching a disclaimed message. RS8 has been
+written to drop the on-wire distinguishability claim and to state
+what dropping it costs; nothing in this section now requires a
+property RP7 forecloses.
+
+*What a real fix requires, and why it is not taken here.* Either
+(a) a **fourth** `error_type` token for "disabled by configuration",
+which amends a pre-existing wire contract marked implemented; or
+(b) a contractual discriminator inside `error_data`. Option (b) is
+worth noting because it is cheaper than it first looks: RP7
+constrains `error_type` and is silent about the *content* of
+`error_data`, so admitting a discriminator there arguably widens
+nothing RP7 states. It is still a change to the implemented wire
+shape — all three tokens carry a bare string payload today, so a
+structured payload for one of them is a shape change a client could
+be parsing — and therefore still a wire-contract decision rather
+than a revision's. **Decision needed: (a), (b), or accept that the
+off state is distinguishable only in the log.** The third option is
+what this section is written against today, so no work is blocked by
+leaving the decision open; what is lost is one of the three
+advantages RS8 claims over the status quo, and RS8 now says so.
 
 ## 22.10 External References
 

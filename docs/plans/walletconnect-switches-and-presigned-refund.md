@@ -129,10 +129,15 @@ per-context lazy init, so a disabled subsystem never builds a handle. The
 
 - read the startup-resolved value **before** `open_storage` and before
   `relay_auth_token`;
-- when disabled, return a distinct, structured "WalletConnect is disabled by
-  configuration" error — distinguishable from the existing
-  "`walletconnect.project_id` is required" misconfiguration error, because an
-  operator must be able to tell a deliberate off state from a broken config;
+- when disabled, return a structured refusal and log, at startup and on each
+  refusal, that WalletConnect is disabled by configuration. Be aware of what
+  this cannot be: ch.22 RP7 fixes the RPC surface at three `error_type` tokens
+  and every initialisation failure collapses into one of them, so the refusal
+  reaches an API caller as the same token and status code as a missing
+  `project_id`. Do **not** add a fourth token to fix that — it is a
+  pre-existing wire contract marked implemented, and the decision is recorded
+  as ch.22 §22.9C.9 item 2. The distinction is for the operator, in the log and
+  in the config they wrote, not for a GUI;
 - three of the five public RPC handlers surface that error rather than an empty
   result (ACS2). The other two — session enumeration and session deletion —
   stay available in a **local-records-only** form (RS4.3, ACS12), which is the
