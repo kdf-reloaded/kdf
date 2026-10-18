@@ -341,23 +341,72 @@ the thing it reveals is not harmless.
 ### P2 — The one way this can be worse than today
 
 **The stuck-in-mempool middle state.** A refund broadcast at too low a feerate
-sits unmined, locks the output, and **cannot be fee-bumped**:
+sits unmined and locks the output. While the wallet is absent it cannot be
+fee-bumped at all:
 
-- RBF needs a **new signature** — from the wallet that is absent by assumption;
-- CPFP needs a signature on the **child** — same wallet, same assumption.
+- RBF needs a **new signature**, and while the wallet is away there is nobody
+  to produce one;
+- CPFP needs a signature on the **child** — same wallet, same problem.
 
-So the user ends up unable to refund *and* unable to retry, which is strictly
-worse than being asked to sign a fresh refund. This is the only state in the
-design that breaks weak dominance, and it must be designed out, not accepted:
+So during the absence the user is unable to refund *and* unable to retry, which
+is worse than being asked to sign a fresh refund. This is the only state in the
+design that breaks weak dominance. Three measures are specified below; the
+first reduces how often the state is entered, and the second and third decide
+whether entering it is recoverable.
 
-> **Gate the broadcast on a pre-flight feerate (or gas price) check.** If the
-> held transaction would not be mined at current conditions, **do not broadcast
-> it** — skip straight to asking the user for a fresh refund. A rejected
-> broadcast is free; a stuck one is not.
+**P2.1 — Gate the broadcast on a pre-flight feerate (or gas price) check.**
+
+> If the held transaction would not be mined at current conditions, **do not
+> broadcast it** — skip straight to asking the user for a fresh refund. A
+> rejected broadcast is free; a stuck one is not.
 
 The check must be a precondition of broadcast, not a reaction to a stuck
-transaction, because by the time it is stuck there is no instrument left to fix
-it with.
+transaction. But be exact about what it buys: **it narrows the window, it does
+not close it.** Feerates rise *after* broadcast, and once the transaction is in
+mempools the fee is committed. A gate evaluated at time T cannot bind
+conditions at T+1, so "designed out" is the wrong claim and this plan should
+not make it. What the gate delivers is a large reduction in the probability of
+entering the unrecoverable state — large because the common cause is a stale
+artifact signed at a quiet moment and broadcast during a fee spike, which is
+exactly what the gate catches.
+
+**P2.2 — Sign the pre-signed refund with an RBF-signalling nSequence.** This is
+free at signing time and it converts "unrecoverable" into "fixable the moment
+the wallet is back", which is the difference between breaking weak dominance
+and merely degrading. **Do not inherit the surrounding code's value.** The
+existing refund paths sign with `SEQUENCE_FINAL - 1` = `0xfffffffe`
+(`mm2src/coins/utxo/utxo_common/utxo_common_swap.rs`, five call sites;
+`SEQUENCE_FINAL` is `0xffff_ffff` in `mm2src/kdf_chain/src/constants_.rs`).
+That value was chosen to satisfy CLTV, which needs only a non-final nSequence,
+and it is **not** BIP-125 opt-in RBF: BIP-125's explicit signal requires an
+input with nSequence **strictly less than** `0xffffffff - 1`, and `0xfffffffe`
+is not less than `0xfffffffe`. A refund pre-signed on this machinery is
+therefore unreplaceable even after the wallet returns, until mempool eviction —
+conventionally around two weeks of the user being told their funds are stuck
+while the instrument that could free them sits in their returned wallet,
+useless.
+
+So the pre-signed refund's nSequence is a **decision, not an inheritance**, and
+this plan makes it: `0xffff_fffd`. It satisfies all three constraints at once —
+non-final, so CLTV is enforced and P0's inertness argument is untouched (the
+RBF flag has no bearing on CLTV); strictly below `0xfffffffe`, so BIP-125
+explicit signalling applies; and bit 31 set, so BIP-68 relative locktime stays
+disabled and no unintended sequence lock is created on a version-2
+transaction. Nothing in the tree validates a refund's nSequence, so the value
+is genuinely free to choose here — the one existing sequence assertion is on a
+v2 taker-payment-**spend** preimage, not a refund.
+
+**P2.3 — Consider asking the wallet for a ladder of refunds, not one.** The
+design goal is "ask the wallet once, while the user is present", and that
+permits **N** signatures in one sitting as easily as one: several refunds over
+the same outpoint at escalating feerates, all RBF-signalling, broadcast in
+ascending order as conditions require. This is the measure that actually
+*designs the stuck state out* rather than gating or recovering from it, because
+a higher rung is always available without the wallet. The costs are real and
+are why it is an open decision rather than a specified requirement: more
+wallet-side prompting to explain to the user, a storage and
+invalidation-tracking multiplier on P1's privacy argument, and a rung-selection
+policy that has to be written. Recorded as **open decision 9**.
 
 ### P3 — Detect failure and escalate promptly
 
@@ -459,7 +508,12 @@ reasons:
    kind of invariant that belongs in an R-numbered requirement with an
    acceptance criterion, because the failure mode is a bearer instrument and
    the failure is silent. A bullet in a plan does not survive three refactors;
-   a CRD requirement with a test does.
+   a CRD requirement with a test does. **P2.2's nSequence belongs in the same
+   class and for the same reason**: the failure is silent, the inherited
+   default is the wrong one, and an implementer working inside
+   `utxo_common_swap.rs` will reach for `SEQUENCE_FINAL - 1` without noticing
+   it is a decision. An R-numbered requirement with an acceptance criterion
+   asserting the signalled value on the pre-signed artifact is what stops that.
 3. P2's broadcast gate and P3's failure detection are **conformance
    properties** with testable acceptance criteria, which is what a CRD chapter
    is for.
@@ -506,7 +560,8 @@ chapter.
 | A fund-moving route reaches the wallet through the chokepoint's residual operation class while a per-family switch reports it blocked | RS7.3 — the residual class is refused unconditionally, and ACS11(b)'s mechanical call-site enumeration is reviewable against the fund-moving RPC routes |
 | Strict config parsing breaks a config shared across node versions | Accepted deliberately and documented: a security switch the operator believes they set is worth more than a config that loads everywhere |
 | Phase 2 pre-signs something not consensus-enforced | P0's corollary as a binding CRD requirement with a named consensus rule per pre-sign site |
-| Phase 2 broadcast gets stuck in the mempool | P2's pre-flight feerate gate as a **precondition** of broadcast |
+| Phase 2 broadcast gets stuck in the mempool | P2.1's pre-flight feerate gate as a **precondition** of broadcast. This **narrows** the window and does not close it — feerates rise after broadcast — so it is not a retired risk |
+| A stuck pre-signed refund is unreplaceable even after the wallet returns | P2.2 — an RBF-signalling nSequence (`0xffff_fffd`) chosen deliberately instead of inheriting `SEQUENCE_FINAL - 1`, which is **not** BIP-125 opt-in. Open decision 9 (P2.3's fee ladder) would remove the need to wait for the wallet at all |
 | Phase 2 held EVM refund silently invalidated by the user's own wallet activity | P5 best-effort framing plus P3 detection; prefer lowest-nonce-only |
 | Phase 2 retry loop silently delays a refund | P3's bounded attempts and loud escalation |
 | The leaked artifact's privacy cost is dismissed because it is not a fund risk | P1; encrypt at rest, plausibly reusing ch.22 D8's machinery |
@@ -560,6 +615,15 @@ chapter.
    artifacts across families, versus a §22.9D. Argued above for the former.
 8. **S7:** when (not whether) `docs/OPERATOR_SECURITY_CONTROLS.md` is created.
    Proposed trigger: a third control.
+9. **Phase 2 fee ladder** (P2.3): one pre-signed refund, or N at escalating
+   feerates signed in the same user session? The ladder is the only measure
+   that removes the stuck state rather than narrowing it (P2.1) or making it
+   recoverable once the wallet returns (P2.2), and it costs nothing extra in
+   *safety* — every rung is inert under the same CLTV argument as the first.
+   It costs user-visible prompting, a storage and invalidation multiplier on
+   P1's privacy concern, and a rung-selection policy. **Not** decided here.
+   P2.2 is decided (RBF-signalling nSequence); this is the question of whether
+   P2.2 is enough.
 
 ## References
 
