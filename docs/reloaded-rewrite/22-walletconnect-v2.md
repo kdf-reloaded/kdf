@@ -1746,6 +1746,23 @@ record through the affordance RS4.3 specifies is not the switch
 acting destructively; they are exercising a capability they have
 while the subsystem runs and must not lose by turning it off.
 
+**RS4.2 — Restart scope.** The switch is resolved from the node
+configuration **once, at the resolution point RS11 specifies**, and
+is **not** hot-reloadable: shutting the subsystem off requires a
+node restart, not a release. Read RS11 before implementing this:
+that resolution point does not exist today and is new work, because
+the whole `walletconnect` configuration object is resolved lazily at
+the first WalletConnect RPC. Without RS11 this requirement's
+"at startup" is not satisfiable, and RS10's and ACS6's
+"stops startup" are not either.
+
+A runtime-reconfiguration or RPC-level kill switch would need its
+own authorization story — an RPC that can disable a security control
+can also be the thing an attacker calls — and is deliberately not
+specified here (D13). RS4.3's storage-only enumeration and deletion
+are not such a switch: they cannot change the resolved value, cannot
+start the subsystem, and emit nothing on the relay.
+
 **RS4.3 — Disabling shall not take away the purge.** When the global
 switch is off, two of the five RPCs of §22.9A.2 shall remain
 available in a **local-records-only** form, and the rest shall
@@ -1779,20 +1796,6 @@ to them and unchanged on disk, their only recourse being to
 hand-edit SQLite or IndexedDB. Enumeration is exempted with it
 because an operator who cannot list the records cannot name one to
 delete, and the enumeration answers from those same local records.
-
-**RS4.2 — Restart scope.** The switch is resolved from the node
-configuration **once, at the resolution point RS11 specifies**, and
-is **not** hot-reloadable: shutting the subsystem off requires a
-node restart, not a release. Read RS11 before implementing this:
-that resolution point does not exist today and is new work, because
-the whole `walletconnect` configuration object is resolved lazily at
-the first WalletConnect RPC. Without RS11 this requirement's
-"at startup" is not satisfiable and RS10's and ACS6's
-"stops startup" are not either. A
-runtime-reconfiguration or RPC-level kill switch would need its own
-authorization story — an RPC that can disable a security control can
-also be the thing an attacker calls — and is deliberately not
-specified here (D13).
 
 ### 22.9C.4 No dormant security switches
 
@@ -1892,28 +1895,6 @@ operation that is unreachable needs no switch), but no row of this
 table should be read as evidence that a path is closed in the
 shipped artifact.
 
-**RS6.2 — Gate the UTXO swap-protocol-v2 public-key accessor too
-(gap closure).** RP11.1 requires a key-less coin to be refused entry
-to the swap-protocol-v2 HTLC paths at the earliest lifecycle point,
-and the UTXO per-swap *key* accessor would refuse a policy with no
-local secret. The per-swap *public-key* accessor would not: its
-HD-wallet arm answers for a non-key-pair policy by returning the
-enabled address's public key, and RP11 establishes that for this
-family the HTLC public key *is* the activated address's compressed
-public key with no per-swap derivation — which is exactly the shape
-a WalletConnect UTXO policy would be written against. An
-implementation that adds a WalletConnect arm there by mirroring the
-existing non-key-pair arm reproduces RS6.1's failure mode: a
-**silent wrong answer** (a public key announced to the counterparty)
-rather than a refusal, with the refusal deferred to a signing step
-that then cannot be served. A UTXO coin activated under a
-WalletConnect key source shall therefore be refused at the
-swap-protocol-v2 public-key accessor as well as at the key accessor,
-at the **earliest** lifecycle point and on the same terms RP11.1
-states; the work is tracked as D15. Like RS6.1 this is a gate, not a
-switch: unconditional and not operator-configurable, which is part
-of why this combination gets no `bip122` swap-v2 switch.
-
 **RS6.1 — Gate the Tendermint legacy HTLC paths too (gap closure).**
 The early structured rejection RP11.1 requires covers the
 swap-protocol-v2 HTLC paths and the watcher-message paths, and
@@ -1939,7 +1920,33 @@ unsupported-operation error, on the same terms and at the same
 lifecycle point as RP11.1 and R47.5.13a require for the paths they
 name; the work is tracked as D14. This is a gate, not a switch: it
 is unconditional and not operator-configurable, which is precisely
-why `cosmos` gets no swap switch.
+why `cosmos` gets no swap switch. It covers a Tendermint **token**
+as well as a platform coin: a token forwards the per-swap key
+accessor to its platform coin, so a token whose platform coin is
+activated under a WalletConnect key source inherits the same silent
+wrong answer and must be refused on the same terms (ACS9).
+
+**RS6.2 — Gate the UTXO swap-protocol-v2 public-key accessor too
+(gap closure).** RP11.1 requires a key-less coin to be refused entry
+to the swap-protocol-v2 HTLC paths at the earliest lifecycle point,
+and the UTXO per-swap *key* accessor would refuse a policy with no
+local secret. The per-swap *public-key* accessor would not: its
+HD-wallet arm answers for a non-key-pair policy by returning the
+enabled address's public key, and RP11 establishes that for this
+family the HTLC public key *is* the activated address's compressed
+public key with no per-swap derivation — which is exactly the shape
+a WalletConnect UTXO policy would be written against. An
+implementation that adds a WalletConnect arm there by mirroring the
+existing non-key-pair arm reproduces RS6.1's failure mode: a
+**silent wrong answer** (a public key announced to the counterparty)
+rather than a refusal, with the refusal deferred to a signing step
+that then cannot be served. A UTXO coin activated under a
+WalletConnect key source shall therefore be refused at the
+swap-protocol-v2 public-key accessor as well as at the key accessor,
+at the **earliest** lifecycle point and on the same terms RP11.1
+states; the work is tracked as D15. Like RS6.1 this is a gate, not a
+switch: unconditional and not operator-configurable, which is part
+of why this combination gets no `bip122` swap-v2 switch.
 
 ### 22.9C.6 One enforcement chokepoint
 

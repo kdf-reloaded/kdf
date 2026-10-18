@@ -2,7 +2,7 @@
 
 > **Status: planning only.** Two maintainer-approved designs for external-signer
 > coins, in the order they should be built. Phase 1 is specified normatively in
-> CRD ch.22 §22.9C (RS1–RS10, ACS1–ACS9, tracked as ch.22 D12–D14) and this
+> CRD ch.22 §22.9C (RS1–RS11, ACS1–ACS13, tracked as ch.22 D12–D15) and this
 > document is its implementation plan, not its specification — where the two
 > disagree, the chapter governs. Phase 2 has no chapter yet; this document is
 > the whole of it, and the last section argues that it needs one before it is
@@ -306,7 +306,7 @@ independently shippable — there is nothing to gate until the policy arm exists
 
 ### Tests (Phase 1)
 
-ACS1–ACS9 of ch.22 §22.9C.8 are the acceptance gate. The ones that carry the
+ACS1–ACS13 of ch.22 §22.9C.8 are the acceptance gate. The ones that carry the
 weight:
 
 - **ACS4 is per switch, not per section** — four pairs of assertions, one pair
@@ -745,9 +745,10 @@ chapter.
 ## References
 
 - CRD [ch.22 §22.9C](../reloaded-rewrite/22-walletconnect-v2.md) — the Phase 1
-  specification (RS1–RS10, ACS1–ACS9); §22.9B (RP8–RP13) for reachability;
+  specification (RS1–RS11, ACS1–ACS13); §22.9B (RP8–RP13) for reachability;
   §22.5.1 / R5 / R7 / R8 / D3 / D8 for the at-rest and persistence contract;
-  D12–D14 for the tracked work.
+  D12–D15 for the tracked work; §22.9C.9 for the two pre-existing items this
+  plan depends on and does not resolve.
 - CRD [ch.47](../reloaded-rewrite/47-metamask-integration.md) R47.5.13 /
   R47.5.13a — why the EVM-family HTLC paths are gated for every non-keypair
   policy, and the carve-out that makes UTXO the exception.
