@@ -1732,8 +1732,14 @@ because an operator who cannot list the records cannot name one to
 delete, and the enumeration answers from those same local records.
 
 **RS4.2 — Restart scope.** The switch is resolved from the node
-configuration at startup and is **not** hot-reloadable: shutting the
-subsystem off requires a node restart, not a release. A
+configuration **once, at the resolution point RS11 specifies**, and
+is **not** hot-reloadable: shutting the subsystem off requires a
+node restart, not a release. Read RS11 before implementing this:
+that resolution point does not exist today and is new work, because
+the whole `walletconnect` configuration object is resolved lazily at
+the first WalletConnect RPC. Without RS11 this requirement's
+"at startup" is not satisfiable and RS10's and ACS6's
+"stops startup" are not either. A
 runtime-reconfiguration or RPC-level kill switch would need its own
 authorization story — an RPC that can disable a security control can
 also be the thing an attacker calls — and is deliberately not
@@ -2097,12 +2103,18 @@ leaves `unnamed_family_policy` at its default.
 
 **RS10 — Unknown keys and unswitchable combinations are startup
 errors.** The configuration block shall be parsed strictly. Each of
-the following shall stop startup with an explanatory error naming the
-offending key — the same treatment R7 / D8 already give the
-unimplemented `encrypted` value of `wc_session_persistence`. The
-strictness applies to the keys this section introduces and to
-everything nested under them; `project_id` and `relay_address` keep
-their existing handling and are not made strict here.
+the following shall stop startup with an explanatory error naming
+the offending key, at the resolution point RS11 specifies — which is
+what makes "stop startup" a statement about this build rather than
+an aspiration. (R7 and D8 state the same intent for the
+unimplemented `encrypted` value of `wc_session_persistence`, and
+this section was drafted by analogy to them; but the code resolves
+that value lazily too, so they are not the working precedent they
+look like. §22.9C.9 item 1 records that as a pre-existing matter and
+this section does not rely on it.) The strictness applies to the
+keys this section introduces and to everything nested under them;
+`project_id` and `relay_address` keep their existing handling and
+are not made strict here.
 
 1. an unknown key nested under `families`, or under a family entry,
    or an unrecognised sibling of `enabled` /
@@ -2131,6 +2143,54 @@ deliberately: a security switch an operator believes they set is
 worth more than a configuration file that loads everywhere, and the
 failure mode chosen is the loud one.
 
+**RS11 — One resolution point, one resolved value, one parser.**
+Three enforcement points must agree on the same answer: the
+activation refusal of RS2(1), the session-establishment refusal of
+RS2(2), and the chokepoint of RS7. RS3 requires an enforcement point
+that cannot reach the resolved value to fail closed, which is the
+right behaviour but is not a design: it says what to do when the
+value is unreachable without saying where the value lives. This
+requirement says.
+
+1. *One resolution point, and it is at startup.* The
+   `walletconnect` object shall be resolved into the section's
+   resolved-configuration value exactly once per node run, during
+   node startup, before any RPC is served. A parse failure under
+   RS10 stops startup there.
+2. *The caller is named, and it is new work.* The resolution shall
+   be invoked from the node's existing startup configuration-
+   validation path — in this tree, `lp_init` in
+   `mm2src/mm2_main/src/lp_native_dex.rs`, alongside the netid and
+   passphrase-form validation it already performs and which already
+   fails startup. **No such call exists today**, and nothing else in
+   the tree resolves this object at startup: the only existing
+   resolution runs inside the WalletConnect handle's construction,
+   which is reached only from the lazy, cached first-use path behind
+   the five public RPCs. An implementation that resolves the switch
+   where the handle is built satisfies neither RS4.2 nor RS10 nor
+   ACS6, however natural the placement looks.
+3. *One cached value, read by all three points.* The resolved value
+   shall be stored on the node context and read from there by every
+   enforcement point. In particular the activation point of RS2(1)
+   shall **not** re-derive it: when the switch is off no handle
+   exists to read it from — ACS1 requires exactly that — so a
+   second resolution in the activation crate is the implementation
+   an implementer will otherwise reach for.
+4. *Exactly one parser.* There shall be exactly one function in the
+   tree that maps the `walletconnect` object to the resolved value.
+   Two parsers for one security policy is the partial enforcement
+   RS7 calls the worst outcome available here, reintroduced across
+   *enforcement points* rather than across call sites: they agree on
+   the easy cases and diverge on the hard ones — a wrong type, an
+   unknown key, a `families` map present without the coin's
+   namespace — and the divergence is invisible until it matters.
+
+Resolving at startup also discharges RS8's claim that the off state
+is surfaced **early**: with RS11 the off state and a broken
+configuration are both known before the first RPC, which is the
+improvement over `project_id`'s surface-at-first-use behaviour that
+RS8 claims.
+
 ### 22.9C.8 Acceptance criteria
 
 - ACS1. With `enabled: false`, activation of a coin naming a
@@ -2146,9 +2206,15 @@ failure mode chosen is the loud one.
 - ACS3. A `walletconnect` block that cannot be parsed into the
   resolved configuration results in the subsystem being disabled or
   startup being refused — never in the subsystem running with an
-  assumed value (RS3). A unit test asserts that the resolver yields
-  *disabled* on an error input, and a separate test asserts that
-  the **absent** block yields *available* (RS9).
+  assumed value (RS3). The resolver unit test is stated so that it
+  is writable under either choice: on an error input the resolver
+  **either yields *disabled* or returns an error that stops
+  startup, and never yields *available***. (RS10 and RS11 make
+  startup refusal the choice for the keys this section introduces,
+  so that is the arm to expect; the criterion is written to the
+  property rather than to the mechanism because RS3 permits both and
+  refusing startup is the stronger of the two.) A separate test
+  asserts that the **absent** block yields *available* (RS9).
 - ACS4. **Per switch**, for each of the four switches of §22.9C.5:
   the operation fails with a structured error when that switch is
   off, and proceeds when it is on, with no other switch changed.
@@ -2160,8 +2226,13 @@ failure mode chosen is the loud one.
   (`unnamed_family_policy` default `deny`); with
   `unnamed_family_policy: "allow"` and the same map, it proceeds.
 - ACS6. Each of the five cases of RS10 stops startup with an error
-  naming the offending key; in particular `{"eip155": {"swap":
-  false}}` is rejected rather than accepted as a dormant switch.
+  naming the offending key — *startup*, at RS11's resolution point,
+  not the first WalletConnect RPC; a test that drives the resolver
+  in isolation does not discharge this criterion, because the defect
+  it exists to catch is a misconfigured node running happily until
+  somebody calls a WalletConnect RPC. In particular
+  `{"eip155": {"swap": false}}` is rejected rather than accepted as
+  a dormant switch.
 - ACS7. The chokepoint is the only route, tested over the **funnel**
   and not only over the trait (RS7.2). A compile-fail test (or an
   equivalent build-time check) fails to build a caller outside the
@@ -2209,6 +2280,57 @@ failure mode chosen is the loud one.
   established and no outbound message is published by either call —
   so that the exemption cannot be satisfied by quietly building the
   handle the rest of RS2(2) refuses.
+- ACS13. One resolution point and one parser (RS11). A mechanical
+  check — the same kind ACS7 and ACS11(b) ask for — asserts that
+  exactly one function in the tree maps the `walletconnect` object
+  to the resolved value, and that the activation enforcement point
+  of RS2(1) reads the cached resolved value rather than parsing the
+  configuration itself. Separately, a test asserts that a
+  configuration rejected under RS10 stops startup **before** any
+  RPC is served, which is the half of ACS6 that a resolver unit test
+  cannot reach.
+
+### 22.9C.9 Pre-existing matters this section depends on (maintainer decision)
+
+Two things this section leans on are inaccurate or insufficient in
+**pre-existing** material. In both cases the requirements of this
+section have been written so that they are true and implementable on
+their own, without relying on the pre-existing statement; neither
+pre-existing requirement is amended here, because amending binding
+material that other work depends on is a larger decision than
+revising this section. They are recorded so that the next reader
+finds the problem described rather than rediscovers it, and so that
+the decision is visibly outstanding rather than silently taken.
+
+**1. "Stops startup" is not what the code does for
+`wc_session_persistence`.** §22.5.1's `encrypted` row, R7 and D8 all
+state that selecting `encrypted` must stop startup with an
+explanatory error. It does not: the setting is parsed inside the
+WalletConnect configuration resolution, which runs inside the
+handle's construction, which is reached only from the lazy, cached
+first-use path behind the five public RPCs. A node configured with
+`encrypted` therefore starts normally and fails the **first
+WalletConnect RPC**. §22.9C was drafted by analogy to that pattern
+and inherited the inaccuracy; RS4.2, RS10, ACS3, ACS6 and RS11 have
+been rewritten so that they stand on RS11's own startup resolution
+point instead, and they no longer cite R7 / D8 as a precedent the
+code delivers.
+
+*What a real fix requires, and why it is not taken here.* Either
+(a) §22.5.1 / R7 / D8 are amended to say "at first use", which makes
+the chapters match the code and weakens a stated protection against
+a misconfigured node running on an unimplemented at-rest format; or
+(b) the `wc_session_persistence` resolution moves to the startup
+resolution point RS11 introduces, which makes the code match the
+chapters and changes the behaviour of an existing, implemented,
+released path. Option (b) is cheap once RS11 exists — the resolver
+is already written and would simply be called earlier, with the
+handle reading the already-resolved value — and it is the option
+this section's author would choose. It is still a behaviour change
+to implemented material under a requirement marked implemented,
+which is a maintainer's call and not a revision's. **Decision
+needed: (a) or (b).** Until it is taken, R7 / D8 and §22.5.1 stand
+as written and the discrepancy is this item.
 
 ## 22.10 External References
 

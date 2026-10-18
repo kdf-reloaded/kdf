@@ -49,7 +49,8 @@ mistaken for the higher priority.
 | `PrivKeyPolicy` has no WalletConnect variant | `mm2src/coins/lp_coins_context.rs` (`KeyPair` / `HDWallet` / `Trezor` only) |
 | `TendermintActivationPolicy` has one variant, `PrivateKey(..)` | `mm2src/coins/tendermint/tendermint_types.rs` |
 | A `walletconnect` config object already exists, carrying `project_id` (**required**) and `relay_address` (optional) | `mm2src/kdf_walletconnect/src/lib.rs`, `WalletConnectConfig::from_ctx` |
-| `wc_session_persistence` is a separate **top-level** string with a strict parser that stops startup on a bad value | same file, `WcSessionPersistence::from_conf` |
+| `wc_session_persistence` is a separate **top-level** string with a strict parser. ch.22 §22.5.1 / R7 / D8 say a bad value "stops startup"; **it does not** — the parser is reachable only through `WalletConnectConfig::from_ctx` → `WalletConnectCtx::init` → the private lazy `wc_ctx` helper, so a bad value fails the **first WalletConnect RPC**. Nothing resolves this object at startup | `WcSessionPersistence::from_conf` (same file); `wc_ctx` in `mm2src/mm2_main/src/rpc/lp_commands/wallet_connect.rs`; ch.22 §22.9C.9 item 1 |
+| The node *does* have a startup configuration-validation path that fails startup, and it is where ch.22 RS11 puts the new resolution | `lp_init` in `mm2src/mm2_main/src/lp_native_dex.rs` (netid range, netid support, `parse_passphrase_form`) |
 | The handle's single outbound signing funnel is `WalletConnectCtx::send_session_request` | same file |
 | The v1 UTXO HTLC refund branch is `<time_lock> OP_CHECKLOCKTIMEVERIFY OP_DROP <pub_0> OP_CHECKSIG` | `payment_script`, `mm2src/coins/utxo/utxo_common/utxo_common_swap.rs` |
 | The UTXO per-swap v2 **key** accessor errors for a policy with no local secret | `get_htlc_key_pair_v2` (same file) |
@@ -73,9 +74,12 @@ Specification: ch.22 §22.9C. Steps below are the implementation of it.
 
 Add a `WcAvailability` (name provisional) resolved-configuration type beside
 `WcSessionPersistence` in `mm2src/kdf_walletconnect/src/lib.rs`, parsed from the
-existing `walletconnect` object by a `from_conf`-shaped constructor, following
-that type's established pattern exactly: strict parse, explanatory error naming
-the key and the offending value, absent-means-default.
+existing `walletconnect` object by a `from_conf`-shaped constructor. Follow that
+type's *parser* pattern — strict parse, explanatory error naming the key and the
+offending value, absent-means-default — but **not** its placement: it is
+resolved lazily at the first WalletConnect RPC, which is the thing ch.22 RS11
+forbids for this value. Resolve it from `lp_init` instead and cache it on the
+context (see S1a).
 
 - `enabled: bool`, default `true` (RS1).
 - `families: Option<BTreeMap<CaipNamespace, FamilySwitches>>` — `None` means "no
@@ -94,12 +98,36 @@ the key and the offending value, absent-means-default.
 tighten them in this change; that would be a behaviour change for existing
 operators and belongs to its own commit if it is wanted at all.
 
+### S1a — The startup resolution point (ch.22 RS11)
+
+This is new work and it has no analogue in the tree, so it is called out as its
+own step rather than folded into S1.
+
+- call the S1 resolver **once** from `lp_init` in
+  `mm2src/mm2_main/src/lp_native_dex.rs`, next to `validate_netid_range` and
+  `parse_passphrase_form`, which already fail startup on a bad configuration;
+- store the resolved value on the context, and have all three enforcement
+  points (activation, session establishment, chokepoint) read it from there;
+- **exactly one parser** in the tree (ch.22 RS11(4), ACS13). The activation
+  point in `coins_activation` must not re-parse `ctx.conf`: when the switch is
+  off there is no handle to read the value from — ACS1 requires that — so a
+  second, simpler `enabled`-only check in the activation crate is what an
+  implementer will otherwise write, and two parsers for one security policy
+  agree on the easy cases and diverge on the hard ones;
+- `WalletConnectCtx::init` then reads the already-resolved value instead of
+  parsing. Do **not** also move `wc_session_persistence`'s resolution in this
+  step: that is a behaviour change to implemented, released material and is the
+  maintainer decision recorded as ch.22 §22.9C.9 item 1. If that decision comes
+  back as option (b), it is a one-line follow-up on top of S1a.
+
 ### S2 — The global switch at the session enforcement point
 
-`WalletConnectCtx::init` is the natural place and is reached through the
-per-context lazy init, so a disabled subsystem never builds a handle:
+`WalletConnectCtx::init` is where the refusal goes — it is reached through the
+per-context lazy init, so a disabled subsystem never builds a handle. The
+*value* it reads is the one S1a resolved at startup; `init` does not resolve it
+(ch.22 RS11(2), RS4.2):
 
-- resolve `WcAvailability` **before** `open_storage` and before
+- read the startup-resolved value **before** `open_storage` and before
   `relay_auth_token`;
 - when disabled, return a distinct, structured "WalletConnect is disabled by
   configuration" error — distinguishable from the existing
@@ -246,11 +274,16 @@ weight:
   no-dormant-switches requirement (RS5), and it is the reason each switch is
   sequenced behind its operation: a switch whose "proceeds" half cannot be
   written does not gate anything.
-- **ACS3** — resolver unit tests: absent block yields *available*, unparsable
-  block yields *disabled* or refuses startup. The two cases must not be
-  conflated in either direction.
-- **ACS6** — one startup-error test per RS10 case, in particular that
-  `{"eip155": {"swap": false}}` is **rejected** rather than silently accepted.
+- **ACS3** — resolver unit tests: absent block yields *available*; an
+  unparsable block never yields *available* (it yields *disabled* or an error
+  that stops startup — here, the latter, per open decision 1). The two cases
+  must not be conflated in either direction.
+- **ACS6 and ACS13** — one startup-error test per RS10 case, driven through
+  **startup** and not through the resolver alone, because the defect being
+  guarded against is a misconfigured node running until somebody calls a
+  WalletConnect RPC. In particular `{"eip155": {"swap": false}}` is
+  **rejected** rather than silently accepted. ACS13 adds the mechanical
+  one-parser check.
 - **ACS7** — the mechanical check that no second call site reaches a
   `WcCoinSigner` signing method.
 - **ACS8** — with no new keys configured, nothing changes. This one is cheap and
@@ -538,9 +571,13 @@ chapter.
    the one that closes the plaintext-on-disk exposure; R5 / D3 closes in-memory
    disclosure. Which of the two comes first is a maintainer choice between two
    threats, not something this plan decides.
-1. **Phase 1 S1–S3, S6.** The resolved config type, the global switch at
-   `init`, the chokepoint, and the independent Tendermint gate. S6 is
-   independently shippable and independently useful.
+1. **Phase 1 S1, S1a, S2, S3, S6.** The resolved config type, the startup
+   resolution point, the global switch at the session enforcement point, the
+   chokepoint, and the independent Tendermint gate. S1a is a prerequisite of
+   S2, not a refinement of it: the switch must be resolved before the handle is
+   built, because when it is off no handle is built at all. S6's Tendermint
+   half is independently shippable and independently useful; its UTXO half
+   (RS6.2 / D15) is not, and goes with the policy arm.
 2. **Phase 1 S4–S5**, each piece with the ch.22 D10 / D11 wiring that makes its
    operation reachable. Not before.
 3. **Phase 1 S7** documentation, with the phase it documents.
@@ -586,11 +623,17 @@ chapter.
 
 ## Open decisions
 
-1. **Phase 1 fail-closed form:** does an unparsable `walletconnect` block refuse
-   startup, or start with the subsystem disabled? RS3 permits either. Refusing
-   startup is louder; disabling is kinder to a node whose other coins are fine.
-   My inclination is refuse startup, matching `wc_session_persistence`'s
-   existing treatment of a bad value.
+1. **Phase 1 fail-closed form: closed — refuse startup.** RS3 permits either
+   refusing startup or starting disabled, and ch.22 RS10 / RS11 settle it as
+   refuse-startup for the keys this section introduces; ACS3 is written to the
+   property ("never yields *available*") so it is satisfiable either way.
+   Recorded as closed because two documents disagreeing about which arm is
+   normative is how an implementer ends up writing a test that asserts
+   something other than what it claims. Note that the original justification
+   for this choice — "matching `wc_session_persistence`'s existing treatment of
+   a bad value" — was **false**: that value does not refuse startup today (see
+   *Current state* and ch.22 §22.9C.9 item 1). The decision stands on RS3's
+   fail-closed reasoning and on loudness, not on that precedent.
 2. **Phase 1 chokepoint home:** in `kdf_walletconnect` (keeps the subsystem's
    policy with the subsystem, but the crate must then know the operation
    taxonomy) or in `coins` (knows the operations, but spreads the policy). The
