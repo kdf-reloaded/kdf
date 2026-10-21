@@ -477,6 +477,24 @@ pub enum WithdrawError {
         available: BigDecimal,
         required: BigDecimal,
     },
+    /// CRD ch.39 D39.8.0e: the withdrawal is short only because notes it would spend are committed
+    /// to an earlier transaction of this daemon that is not confirmed yet. Distinct from
+    /// `NotSufficientBalance` so the cause reaches the user: with the balance showing, a bare
+    /// "not enough funds" cannot be connected to the send that just happened. Temporary.
+    #[display(
+        fmt = "Not enough spendable {} right now: available {}, required at least {}. {} is committed to a \
+               transaction of yours that is not confirmed yet; retry once it confirms",
+        coin,
+        available,
+        required,
+        locked
+    )]
+    BalanceLockedByUnconfirmedTransaction {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        locked: BigDecimal,
+    },
     #[display(fmt = "Balance is zero")]
     ZeroBalanceToWithdrawMax,
     #[display(fmt = "The amount {} is too small, required at least {}", amount, threshold)]
@@ -536,6 +554,7 @@ impl HttpStatusCode for WithdrawError {
             WithdrawError::CoinDoesntSupportInitWithdraw { .. }
             | WithdrawError::UnexpectedUserAction { .. }
             | WithdrawError::NotSufficientBalance { .. }
+            | WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }
             | WithdrawError::ZeroBalanceToWithdrawMax
             | WithdrawError::AmountTooLow { .. }
             | WithdrawError::InvalidAddress(_)

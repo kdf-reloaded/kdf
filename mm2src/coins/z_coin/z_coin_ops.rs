@@ -371,7 +371,12 @@ impl ZCoin {
     ) -> Result<(ZTransaction, AdditionalTxData), MmError<GenTxError>> {
         self.prepare_shielded_build().await?;
         let _lock = self.z_fields.z_unspent_mutex.lock().await;
-        self.gen_tx_locked(t_outputs, z_outputs).await
+        self.forget_released_in_flight_spends();
+        // Only this entry point names the cause: `send_outputs` calls `gen_tx_locked` directly and
+        // waits out a transient shortfall, so it must keep seeing the plain error (D39.8.0e).
+        self.gen_tx_locked(t_outputs, z_outputs)
+            .await
+            .map_err(|e| e.map(|e| explain_shortfall(e, self.in_flight_spend_total(), self.decimals())))
     }
 
     /// The gates that must clear before the critical section is entered.
@@ -1120,6 +1125,32 @@ pub(crate) fn record_sent_in_wallet_db(
             &[],
         )])
         .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))
+}
+
+/// Names the cause of a shortfall that notes committed to a not-yet-scanned transaction explain:
+/// the request would have been funded had those notes been free. Any other error, and a shortfall
+/// no in-flight spend accounts for, is returned unchanged.
+///
+/// `in_flight_sat` is only what this process knows; after a restart it is zero and the bare
+/// `InsufficientBalance` stands (D39.8.0e).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn explain_shortfall(err: GenTxError, in_flight_sat: u64, decimals: u8) -> GenTxError {
+    let locked = big_decimal_from_sat_unsigned(in_flight_sat, decimals);
+    match err {
+        GenTxError::InsufficientBalance {
+            coin,
+            available,
+            required,
+        } if locked > BigDecimal::from(0u8) && &available + &locked >= required => {
+            GenTxError::BalanceLockedByUnconfirmedTransaction {
+                coin,
+                available,
+                required,
+                locked,
+            }
+        },
+        other => other,
+    }
 }
 
 /// Whether the chain has passed an in-flight spend's expiry height, so the transaction can never

@@ -1816,6 +1816,18 @@ wallet databases, which cannot see each other's records, and a transaction whose
 cannot be derived from its bytes (it has transparent inputs or a non-Sapling shielded
 bundle -- none this daemon builds), which is logged and not recorded.
 
+*Naming the cause (2026-10-21).* A withdrawal that is short only because its notes are
+committed to such a recorded, unconfirmed transaction is refused with a dedicated
+`BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the coin, the available
+amount, the required amount and the amount committed, rather than a bare
+`NotSufficientBalance` that contradicts the balance on display. The name is applied only
+when the committed amount would have covered the request, so a real lack of funds still
+reports as one. The committed amount is read from this process's in-memory record of
+in-flight spends, not from the wallet database; after a restart that record is empty and
+the same shortfall reports as the bare `NotSufficientBalance`. This is a limit of the
+explanation only -- the exclusion itself is durable (R39.8.0as). The swap send path is
+unaffected: it waits out such a shortfall (R39.8.0at) and never surfaces this error.
+
 D39.8.0g A built but unsubmitted withdrawal is invisible to the user. The history
 (`z_coin_tx_history`) is derived from the scanned chain (R39.8.0q, §39.8.0.6), so a
 transaction that has been built and not broadcast appears nowhere, and one that was

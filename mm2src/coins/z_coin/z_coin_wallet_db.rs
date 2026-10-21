@@ -5923,6 +5923,82 @@ mod tests {
         }
     }
 
+    /// The user-visible half of the same scenario: the second withdrawal is short only because the
+    /// first one's note is committed, and the refusal must say so instead of reporting an empty
+    /// balance (D39.8.0e). Driven through the wallet database exactly as `ZCoin::gen_tx` sees it:
+    /// the shortfall from the build, and the value the recorded transaction committed.
+    #[test]
+    fn a_shortfall_caused_by_an_unconfirmed_broadcast_names_it() {
+        use crate::lp_coins_errors::WithdrawError;
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::explain_shortfall;
+        use common::HttpStatusCode;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let first = fixture.build().unwrap();
+        fixture.broadcast(&first);
+        let committed = fixture
+            .history
+            .spent_value_of_transaction(first.txid().as_ref())
+            .unwrap();
+
+        let shortfall = fixture.build().err().expect("the committed note must not be offered");
+        let named = explain_shortfall(shortfall, committed, 8);
+        let withdraw: WithdrawError = match named {
+            GenTxError::BalanceLockedByUnconfirmedTransaction {
+                ref available,
+                ref locked,
+                ..
+            } => {
+                assert_eq!(*available, BigDecimal::from(0));
+                assert_eq!(*locked, big_decimal_from_sat_unsigned(WithdrawFixture::NOTE_VALUE, 8));
+                named.into()
+            },
+            other => panic!("expected the named shortfall, got {other}"),
+        };
+        assert!(
+            matches!(withdraw, WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }),
+            "{withdraw:?}"
+        );
+        assert_eq!(withdraw.status_code(), common::StatusCode::BAD_REQUEST);
+        let reported = withdraw.to_string();
+        assert!(reported.contains("not confirmed yet"), "{reported}");
+        assert!(reported.contains("1.25"), "{reported}");
+    }
+
+    /// The explanation is a claim about cause, so it is made only when the in-flight value would
+    /// have covered the request. After a restart nothing is known and the bare error stands.
+    #[test]
+    fn a_shortfall_is_named_only_when_an_unconfirmed_spend_explains_it() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::explain_shortfall;
+        let short = || GenTxError::InsufficientBalance {
+            coin: "ARRR".to_owned(),
+            available: BigDecimal::from(0),
+            required: "1.0101".parse().unwrap(),
+        };
+        // Nothing in flight (e.g. after a restart): unchanged.
+        assert!(matches!(
+            explain_shortfall(short(), 0, 8),
+            GenTxError::InsufficientBalance { .. }
+        ));
+        // In flight, but not enough to have funded the request: a real lack of funds.
+        assert!(matches!(
+            explain_shortfall(short(), 50_000_000, 8),
+            GenTxError::InsufficientBalance { .. }
+        ));
+        // In flight and enough: named.
+        assert!(matches!(
+            explain_shortfall(short(), 125_000_000, 8),
+            GenTxError::BalanceLockedByUnconfirmedTransaction { .. }
+        ));
+        // Other errors pass through.
+        assert!(matches!(
+            explain_shortfall(GenTxError::PrevTxNotConfirmed, 125_000_000, 8),
+            GenTxError::PrevTxNotConfirmed
+        ));
+    }
+
     /// What the redesign buys, and the most likely thing to regress: a build the caller never
     /// submits (the user cancelled the confirmation) records nothing, so the next build reuses the
     /// note freely and nothing is stranded until expiry.

@@ -2,6 +2,17 @@
 
 **Status:** in progress (swap and `withdraw` paths shipped; remaining T39.8.0h cases and two-process detection open) — **Last reviewed:** 2026-10-19
 
+> **Shortfall named, 2026-10-21.** A withdrawal short only because its notes are committed to a
+> recorded, unconfirmed transaction now fails with `BalanceLockedByUnconfirmedTransaction`
+> (HTTP 400; coin, available, required, committed) instead of a bare `NotSufficientBalance`
+> showing `available: 0` beside a healthy balance. The check lives in `ZCoin::gen_tx`
+> (`mm2src/coins/z_coin/z_coin_ops.rs`, `explain_shortfall`), after the in-flight map is
+> pruned; `send_outputs` is untouched and keeps waiting out the same shortfall. Locking
+> behaviour is unchanged. **Limit:** the committed amount comes from the per-process in-memory
+> map, so after a restart the explanation is gone and the bare `NotSufficientBalance` returns,
+> although the exclusion itself (the wallet database record) survives. Recorded in CRD ch.39
+> D39.8.0e and `docs/GLEEC_COMPATIBILITY.md`.
+>
 > **Withdraw path closed, 2026-10-19.** A user sent 0.01 ARRR to themselves, never saw it in the
 > history, and the next send failed with `bad-txns-duplicate-nullifier-requirements-not-met`:
 > `withdraw` built a transaction and recorded nothing, and the client's `send_raw_transaction`
