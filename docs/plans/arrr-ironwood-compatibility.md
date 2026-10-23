@@ -1435,3 +1435,16 @@ that reads differently from before) are worth capturing even when the shielded l
   checked and **found wrong** while writing that section: in‑flight shielded note locking is
   *not* missing — it covers both v1 swap sends; only the `withdraw` path remains unrecorded
   (§11.6).
+- **2026‑10‑23 — endpoint admission also rejects a stale compact‑block cache** (PR #51, branch
+  `feat/lwd-staleness-admission`; CRD ch.39 R39.11.7a(j), T39.11.k). Live on this date
+  `pirate.mathnodes.com:443` reported node height 4 181 383 on branch `37a5165b` but its
+  `GetLatestBlock` stood at 840 761 (the monitor showed 921 231 a few hours later, still catching
+  up), and admission, which read only `GetLightdInfo`, would have admitted it. Admission now reads
+  `GetLatestBlock` too and excludes an endpoint whose cache fails or is empty, trails its own node
+  by more than 40 blocks (the builder expiry delta), or whose served height trails the lower median
+  of the endpoints' node heights by more than 40. Against the nine published endpoints: six admitted
+  (cryptoforge 1–2, qortal `arrr` and `arrr2`, cipig 1–2), mathnodes excluded, `arrr3.qortal.link` and
+  `lightd1.pirate.black` unreachable at the time. A failed admission also now lists the excluded
+  endpoints, and the activation error no longer reads "not on this coin's chain". Not exercised:
+  the daemon's own gRPC transport against a stale‑cache endpoint (the criterion was evaluated with
+  the monitor's readings). Status transitions are the maintainer's.

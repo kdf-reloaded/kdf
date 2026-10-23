@@ -590,6 +590,8 @@ impl LightwalletdTransport for Scripted {
         }
     }
 
+    async fn cache_height(&self, _server: &str) -> Result<u64, EndpointError> { Ok(TIP) }
+
     async fn latest_block(&self, server: &str) -> Result<u64, EndpointError> {
         Ok(self
             .endpoints

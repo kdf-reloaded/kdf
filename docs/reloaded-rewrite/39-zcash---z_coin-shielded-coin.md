@@ -40,7 +40,7 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   backend of a Light-mode shielded coin, with Electrum support for ZHTLC removed.
   **Implemented (ARRR Ironwood plan Step C, the wallet half):** the function table
   (R39.11.1--R39.11.4g) except the swap-path consumers named below, the activation
-  requirements (R39.11.5--R39.11.7a), the single height authority
+  requirements (R39.11.5--R39.11.7a, (j) staleness included), the single height authority
   (R39.11.8--R39.11.12), and the tests T39.11.a--T39.11.d and T39.11.f,
   T39.11.h--T39.11.j (T39.11.a--T39.11.d in part; each test's note says what it
   does not cover). **Implemented (plan Step D):** the swap-path parser routing
@@ -3277,7 +3277,41 @@ precise opposite of the intent. The rule shall therefore be:
 - (i) **Admission shall be logged.** Every evaluation shall log, at a level a
   deployment captures by default, each endpoint probed with the chain, branch
   identifier and height it reported or the reason it was unreachable, each exclusion
-  with its reason, and the admitted set; a failed evaluation shall log its error.
+  with its reason, and the admitted set; a failed evaluation shall log its error,
+  and that error shall itself name every endpoint that was excluded or unreachable
+  and why -- including the failure that reports observed identifiers (R39.11.7a(e)),
+  so that "one endpoint reports branch X" is never the only thing a reader learns.
+- (j) **A stale endpoint shall be excluded.** *(New requirement; original to this
+  design.)* `GetLightdInfo` reports the height of the endpoint's *node*; the
+  compact-block cache that actually serves blocks is reported by a different method
+  (`GetLatestBlock`), and the two can disagree arbitrarily -- on 2026-10-23 an ARRR
+  endpoint reported the consensus tip and the right branch while its cache stood at
+  height 840,761, so it could serve nothing above it. Admission shall therefore also
+  read the tip method of each endpoint that answered the server-information read, and
+  exclude it, with a distinct reason, when:
+  - (j1) the tip method fails or the cache is empty while the server-information read
+    succeeded (the cache is "not yet ready");
+  - (j2) the cache height trails the endpoint's own reported node height by **more
+    than** the tolerance; or
+  - (j3) the lower of the two (what the endpoint can actually serve) trails the
+    *consensus height* by more than the tolerance. The consensus height is the lower
+    median of the node heights reported by the endpoints on this coin's network
+    (matching network name and Sapling activation height), so a minority -- up to
+    just under half of them -- cannot move it, and with two endpoints it is the lower
+    one, so a single stale endpoint is never the reference that condemns a healthy
+    one. An endpoint ahead of the consensus height is never excluded by this rule.
+
+  **The tolerance** is a named constant equal to the transaction-builder's expiry
+  delta (R39.11.8(e), 40 blocks): the monotonic-tip rule (R39.11.11) already refuses a
+  tip more than that far behind a height the activation has observed, so a tighter
+  bound would exclude endpoints the wallet can use, and a looser one would admit
+  endpoints the wallet would then refuse. An endpoint trailing by exactly the
+  tolerance is admitted. An endpoint a few blocks behind -- a cache that is
+  ingesting the block just found, a node one block behind its peers -- is healthy
+  and shall be admitted. The rule is applied after (h) and before (d) and (e),
+  so a stale endpoint neither counts in a majority nor hides how few current
+  endpoints remain. The reasons are reported through the same channels as the
+  others ((f), (i)).
 
 > **Status update (reloaded, Step C).** Implemented in `decide_admission` and tested
 > (T39.11.f). (a), (b), (d) and (e) are as written. The configuration determines the
@@ -3302,6 +3336,19 @@ precise opposite of the intent. The rule shall therefore be:
 > the exclusions are logged, listed in the message of an admission failure and
 > available from `ZCoin::excluded_lightwalletd_endpoints`, but a successful
 > admission does not write them into the sync-state channel.
+>
+> **Status update (reloaded, staleness, (j)).** Implemented in `decide_admission_at` and
+> tested (T39.11.k). Admission now reads the cache height through a separate transport
+> method (`cache_height`) so a fixture can make it disagree with the server-information
+> read. Three exclusion reasons: cache unavailable (j1), cache behind its own node (j2),
+> behind the consensus height (j3); `STALENESS_TOLERANCE_BLOCKS` is `BUILDER_EXPIRY_DELTA`.
+> The probe log line now shows the cache height. The failure with observed identifiers
+> (`NoBranchMajority`) carries the excluded and unreachable endpoints, and the activation
+> error for an all-excluded or no-majority admission no longer says that "no endpoint is on
+> this coin's chain" -- it was wrong for a lone endpoint on the right branch and for stale
+> ones. Not covered: the tolerance is not configurable; a live run of the Rust transport
+> against a stale-cache endpoint has not been done (the criterion was evaluated against the
+> real endpoint set with the monitor script's readings, not with the daemon).
 
 ### 39.11.3 Chain-height authority
 
@@ -3911,6 +3958,14 @@ requirement exists for -- that a configuration which does *not* declare the
 chain's newest upgrade height does **not** exclude the endpoints on the chain's
 current branch in favour of the pre-upgrade ones.
 
+T39.11.k A staleness test shall prove (R39.11.7a(j)), against fixtures in which the
+node height and the cache height are separate inputs: that an endpoint reporting the
+current node height with a cache far behind it is excluded and never asked for
+anything; that an empty or failing cache read is excluded; that an endpoint behind the
+consensus height of the others is excluded; that lags of a few blocks are admitted and
+the tolerance is exact on both sides; that a stale endpoint does not vote; and that a
+failure to establish a majority names the excluded and the unreachable endpoints.
+
 T39.11.g A P2SH-coverage test shall prove (R39.11.4d): that both address
 encodings of the same redeem-script hash are queried, with neither hard-coded;
 that a fixture answering only under the pubkey-hash re-encoding is handled, and
@@ -4198,4 +4253,8 @@ different cause. At least one live endpoint was observed in this state on
   consulted subsection is subject to KDF Dirty Gate clearance, as its
   derivation record states; §39.10 and §39.11 have passed it. Every other
   section of this chapter rests on the permitted inputs listed above with no
-  corpus read.
+  corpus read. R39.11.7a(j) and T39.11.k, and the logging sentence added to
+  R39.11.7a(i), are original to this design (like R39.11.7a(h)'s branch admission
+  they have no counterpart in the reference): they derive from no forbidden-class
+  input, only from the lightwalletd gRPC contract, public-network observation of
+  the endpoints (2026-10-23) and this repository's code.

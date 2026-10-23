@@ -51,6 +51,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A ZCash-family (ARRR) light-server endpoint whose block cache is stale is no longer used.**
+  An endpoint can report the current chain height and the right branch while its cache of blocks
+  stopped much earlier, so it cannot serve anything newer; it is now excluded at admission, as is
+  one whose cache answers with an error or whose height is more than 40 blocks behind the others.
+  A failed admission now lists every excluded endpoint and why, and its message no longer claims
+  that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through

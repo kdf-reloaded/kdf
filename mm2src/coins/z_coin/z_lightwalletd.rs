@@ -100,13 +100,14 @@ pub enum LightwalletdError {
     /// At least one endpoint answered, and every one that did was excluded by admission.
     #[display(
         fmt = "every reachable lightwalletd endpoint was excluded by admission (they serve another chain or \
-               branch): {}",
+               branch, or are stale): {}",
         _0
     )]
     AllExcluded(String),
     /// A fresh wallet found no consensus-branch partition with a strict majority (R39.11.7a(e)).
     #[display(
-        fmt = "no consensus branch is reported by a strict majority of the reachable lightwalletd endpoints: {}",
+        fmt = "fewer than two lightwalletd endpoints agree on a consensus branch, so none can be trusted as the \
+               majority (observed branches: {})",
         _0
     )]
     NoBranchMajority(String),
@@ -203,6 +204,31 @@ pub(crate) struct ServerInfo {
     /// Hex, as the service sends it.
     pub consensus_branch_id: String,
     pub block_height: u64,
+}
+
+/// What admission learns about one reachable endpoint: its `GetLightdInfo` answer, and how far its
+/// compact-block cache (`GetLatestBlock`) has got. The two come from different RPCs and disagree on
+/// a lightwalletd whose cache is behind its node (R39.11.7a(j)).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AdmissionProbe {
+    pub info: ServerInfo,
+    /// The height `GetLatestBlock` reported, or the error it returned (an empty cache answers
+    /// "Cache is empty" while `GetLightdInfo` succeeds).
+    pub cache_height: Result<u64, String>,
+}
+
+/// How many blocks an endpoint may trail and still be admitted (R39.11.7a(j)): the builder's own
+/// expiry delta, because a tip further behind than that is refused by the monotonic-tip rule
+/// (R39.11.11) anyway. A tolerance below it would exclude endpoints the wallet can use; above it,
+/// admit endpoints the wallet would then refuse.
+pub(crate) const STALENESS_TOLERANCE_BLOCKS: u64 = BUILDER_EXPIRY_DELTA as u64;
+
+/// The lower median of the node heights the endpoints report: the height most of them have reached.
+/// With three or more endpoints a minority cannot move it; with two it is the lower one, so a lone
+/// stale endpoint is never the reference that condemns a healthy one.
+fn consensus_height(mut heights: Vec<u64>) -> Option<u64> {
+    heights.sort_unstable();
+    heights.get(heights.len().checked_sub(1)? / 2).copied()
 }
 
 /// Parses the service's hex consensus branch identifier (`76b809bb`, optionally `0x`-prefixed).
@@ -385,6 +411,30 @@ pub(crate) enum ExclusionReason {
         majority
     )]
     OutvotedBranch { reported: u32, majority: u32 },
+    #[display(
+        fmt = "answers GetLightdInfo but its compact-block cache does not answer GetLatestBlock: {}",
+        _0
+    )]
+    CacheUnavailable(String),
+    #[display(
+        fmt = "its compact-block cache is at height {} while its own node reports {} (more than {} blocks behind)",
+        cache,
+        node,
+        tolerance
+    )]
+    CacheBehindNode { cache: u64, node: u64, tolerance: u64 },
+    #[display(
+        fmt = "it can serve blocks only up to {} while the endpoints' consensus height is {} (more than {} blocks \
+               behind)",
+        served,
+        consensus,
+        tolerance
+    )]
+    BehindConsensus {
+        served: u64,
+        consensus: u64,
+        tolerance: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -406,13 +456,20 @@ fn describe_excluded(excluded: &[(String, ExclusionReason)]) -> String {
         .join("; ")
 }
 
-fn describe_probes(probes: &[(String, Result<ServerInfo, String>)]) -> String {
+fn describe_probes(probes: &[(String, Result<AdmissionProbe, String>)]) -> String {
     probes
         .iter()
         .map(|(server, probe)| match probe {
-            Ok(info) => format!(
-                "{} [chain {}, branch {}, height {}]",
-                server, info.chain_name, info.consensus_branch_id, info.block_height
+            Ok(AdmissionProbe { info, cache_height }) => format!(
+                "{} [chain {}, branch {}, height {}, cache {}]",
+                server,
+                info.chain_name,
+                info.consensus_branch_id,
+                info.block_height,
+                match cache_height {
+                    Ok(height) => height.to_string(),
+                    Err(e) => format!("unavailable: {}", e),
+                }
             ),
             Err(e) => format!("{} [unreachable: {}]", server, e),
         })
@@ -428,13 +485,15 @@ fn describe_probes(probes: &[(String, Result<ServerInfo, String>)]) -> String {
 ///    mismatch excludes it ((d)).
 /// 2a. Once the Ironwood activation time has passed, an endpoint reporting the pre-Ironwood branch
 ///    is excluded outright ((h)), before any vote, and a wallet binding to that branch is released.
+/// 2b. An endpoint whose compact-block cache is unavailable or materially behind its own node, or
+///    that trails the endpoints' consensus height, is excluded before any vote ((j)).
 /// 3. Where it does not ((e)) the local expectation is **not** consulted. A wallet carrying scanned
 ///    state with a recorded identifier admits only that partition; any other wallet admits the
 ///    partition a strict majority of at least two endpoints reports, and fails with every observed
 ///    identifier when there is none -- including the single-endpoint case.
 #[cfg(test)]
 pub(crate) fn decide_admission(
-    probes: Vec<(String, Result<ServerInfo, String>)>,
+    probes: Vec<(String, Result<AdmissionProbe, String>)>,
     policy: &AdmissionPolicy,
     wallet: &WalletBranchState,
 ) -> Result<AdmissionOutcome, LightwalletdError> {
@@ -443,7 +502,7 @@ pub(crate) fn decide_admission(
 
 /// [`decide_admission`] at the wall-clock time `now_sec`, which only the stale-fork rule (h) reads.
 pub(crate) fn decide_admission_at(
-    probes: Vec<(String, Result<ServerInfo, String>)>,
+    probes: Vec<(String, Result<AdmissionProbe, String>)>,
     policy: &AdmissionPolicy,
     wallet: &WalletBranchState,
     now_sec: u64,
@@ -458,10 +517,22 @@ pub(crate) fn decide_admission_at(
     // Endpoints the configuration cannot judge, with their reported branch.
     let mut undetermined: Vec<(String, u32)> = Vec::new();
     let mut reachable = 0usize;
+    // The height most endpoints have reached, among those on this coin's network (R39.11.7a(j)).
+    let consensus = consensus_height(
+        probes
+            .iter()
+            .filter_map(|(_, probe)| probe.as_ref().ok())
+            .filter(|p| {
+                policy.network_matches(&p.info.chain_name)
+                    && p.info.sapling_activation_height == policy.sapling_activation_height
+            })
+            .map(|p| p.info.block_height)
+            .collect(),
+    );
 
     for (server, probe) in &probes {
-        let info = match probe {
-            Ok(info) => info,
+        let (info, cache_height) = match probe {
+            Ok(AdmissionProbe { info, cache_height }) => (info, cache_height),
             Err(e) => {
                 unreachable.push((server.clone(), e.clone()));
                 continue;
@@ -502,6 +573,34 @@ pub(crate) fn decide_admission_at(
                 }));
                 continue;
             }
+        }
+
+        // (j) Staleness: judged on what the endpoint can actually serve, before the vote so that a
+        // stale endpoint neither counts in a majority nor is mistaken for the healthy branch.
+        let tolerance = STALENESS_TOLERANCE_BLOCKS;
+        let cache = match cache_height {
+            Ok(cache) => *cache,
+            Err(e) => {
+                excluded.push((server.clone(), ExclusionReason::CacheUnavailable(e.clone())));
+                continue;
+            },
+        };
+        if cache.saturating_add(tolerance) < info.block_height {
+            excluded.push((server.clone(), ExclusionReason::CacheBehindNode {
+                cache,
+                node: info.block_height,
+                tolerance,
+            }));
+            continue;
+        }
+        let served = cache.min(info.block_height);
+        if let Some(consensus) = consensus.filter(|c| served.saturating_add(tolerance) < *c) {
+            excluded.push((server.clone(), ExclusionReason::BehindConsensus {
+                served,
+                consensus,
+                tolerance,
+            }));
+            continue;
         }
 
         match policy.schedule.expected_at(info.block_height) {
@@ -569,7 +668,22 @@ pub(crate) fn decide_admission_at(
                         .map(|(branch, n)| format!("{:08x} x{}", branch, n))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    return Err(LightwalletdError::NoBranchMajority(observed));
+                    // Name what else was dropped, so the failure says why so few endpoints voted.
+                    let mut detail = observed;
+                    if !excluded.is_empty() {
+                        detail.push_str(&format!("; excluded: {}", describe_excluded(&excluded)));
+                    }
+                    if !unreachable.is_empty() {
+                        detail.push_str(&format!(
+                            "; unreachable: {}",
+                            unreachable
+                                .iter()
+                                .map(|(server, e)| format!("{}: {}", server, e))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ));
+                    }
+                    return Err(LightwalletdError::NoBranchMajority(detail));
                 };
                 for (server, branch) in &undetermined {
                     if *branch == majority {
@@ -702,6 +816,9 @@ pub(crate) struct WindowError {
 pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
     async fn light_info(&self, server: &str) -> Result<ServerInfo, EndpointError>;
     async fn latest_block(&self, server: &str) -> Result<u64, EndpointError>;
+    /// How far the endpoint's compact-block cache has got (`GetLatestBlock`), read by admission
+    /// (R39.11.7a(j)); a separate method so a fixture can make it disagree with `light_info`.
+    async fn cache_height(&self, server: &str) -> Result<u64, EndpointError>;
     /// The compact block's block-time field (R39.11.4f).
     async fn block_time(&self, server: &str, height: u64) -> Result<u32, EndpointError>;
     /// `txid` is in internal byte order (R39.11.4c).
@@ -809,6 +926,8 @@ impl LightwalletdTransport for GrpcTransport {
             .map(|block| block.height);
         self.evict_on_transport_failure(server, result)
     }
+
+    async fn cache_height(&self, server: &str) -> Result<u64, EndpointError> { self.latest_block(server).await }
 
     async fn block_time(&self, server: &str, height: u64) -> Result<u32, EndpointError> {
         let mut client = self.client(server).await?;
@@ -1254,7 +1373,14 @@ impl LightwalletdBackend {
             let transport = self.transport.clone();
             async move {
                 let probe = match tokio::time::timeout(PROBE_TIMEOUT, transport.light_info(&server)).await {
-                    Ok(Ok(info)) => Ok(info),
+                    Ok(Ok(info)) => {
+                        let cache_height =
+                            match tokio::time::timeout(PROBE_TIMEOUT, transport.cache_height(&server)).await {
+                                Ok(result) => result.map_err(|e| e.to_string()),
+                                Err(_) => Err("GetLatestBlock timed out".to_owned()),
+                            };
+                        Ok(AdmissionProbe { info, cache_height })
+                    },
                     Ok(Err(e)) => Err(e.to_string()),
                     Err(_) => Err("GetLightdInfo timed out".to_owned()),
                 };

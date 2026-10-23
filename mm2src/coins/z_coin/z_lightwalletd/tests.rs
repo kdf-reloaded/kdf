@@ -64,11 +64,26 @@ fn info(branch: u32, height: u64) -> ServerInfo {
     }
 }
 
-fn probes(entries: Vec<(&str, Result<ServerInfo, &str>)>) -> Vec<(String, Result<ServerInfo, String>)> {
+/// Endpoints whose compact-block cache is as current as their node.
+fn probes(entries: Vec<(&str, Result<ServerInfo, &str>)>) -> Vec<(String, Result<AdmissionProbe, String>)> {
     entries
         .into_iter()
-        .map(|(server, probe)| (server.to_owned(), probe.map_err(str::to_owned)))
+        .map(|(server, probe)| {
+            let probe = probe.map_err(str::to_owned).map(|info| AdmissionProbe {
+                cache_height: Ok(info.block_height),
+                info,
+            });
+            (server.to_owned(), probe)
+        })
         .collect()
+}
+
+/// An endpoint whose two heights come from different RPCs and disagree.
+fn probe_with_cache(info: ServerInfo, cache_height: Result<u64, &str>) -> Result<AdmissionProbe, String> {
+    Ok(AdmissionProbe {
+        info,
+        cache_height: cache_height.map_err(str::to_owned),
+    })
 }
 
 fn fresh_wallet() -> WalletBranchState { WalletBranchState::default() }
@@ -360,6 +375,8 @@ fn branch_identifiers_parse_as_the_service_sends_them() {
 #[derive(Default)]
 struct Script {
     info: Option<Result<ServerInfo, EndpointError>>,
+    /// What `GetLatestBlock` answers to admission; follows the info height when unset.
+    cache: Option<Result<u64, EndpointError>>,
     tips: VecDeque<Result<u64, EndpointError>>,
     transaction: Option<Result<RawTx, EndpointError>>,
     send: Option<Result<(), EndpointError>>,
@@ -403,6 +420,19 @@ impl LightwalletdTransport for FakeTransport {
             .get(server)
             .and_then(|s| s.info.clone())
             .unwrap_or_else(|| Err(Self::unscripted()))
+    }
+
+    async fn cache_height(&self, server: &str) -> Result<u64, EndpointError> {
+        self.record(server, "cache");
+        let scripts = self.scripts.lock();
+        let script = scripts.get(server);
+        match script.and_then(|s| s.cache.clone()) {
+            Some(cache) => cache,
+            None => match script.and_then(|s| s.info.clone()) {
+                Some(Ok(info)) => Ok(info.block_height),
+                _ => Err(Self::unscripted()),
+            },
+        }
     }
 
     async fn latest_block(&self, server: &str) -> Result<u64, EndpointError> {
@@ -1187,7 +1217,7 @@ fn timed_policy() -> AdmissionPolicy {
     AdmissionPolicy::from_params(&arrr_params()).with_ironwood_activation_time(Some(ARRR_ACTIVATION_TIME))
 }
 
-fn stale_three_with_healthy_unreachable() -> Vec<(String, Result<ServerInfo, String>)> {
+fn stale_three_with_healthy_unreachable() -> Vec<(String, Result<AdmissionProbe, String>)> {
     probes(vec![
         ("lightd1", Err("timed out")),
         ("piratelightd1", Err("timed out")),
@@ -1276,13 +1306,16 @@ fn a_stale_majority_cannot_outvote_the_current_chain() {
 /// current endpoint and leave only the stale fork.
 #[test]
 fn a_wallet_bound_to_the_pre_ironwood_branch_is_released_after_activation() {
-    let entries = || {
+    let entries_with = |cipig_height: u64| {
         probes(vec![
             ("healthy1", Ok(info(IRONWOOD_BRANCH, ARRR_TIP))),
             ("healthy2", Ok(info(IRONWOOD_BRANCH, ARRR_TIP))),
-            ("cipig1", Ok(info(SAPLING_BRANCH, STALE_TIP))),
+            ("cipig1", Ok(info(SAPLING_BRANCH, cipig_height))),
         ])
     };
+    // After activation the frozen node sits at its old tip; before it, the chain is still one
+    // chain, so its node is level with the others (a frozen tip would be stale, R39.11.7a(j)).
+    let entries = || entries_with(STALE_TIP);
     let bound = scanned_wallet(SAPLING_BRANCH);
 
     let after = decide_admission_at(entries(), &timed_policy(), &bound, AFTER_ACTIVATION).unwrap();
@@ -1290,7 +1323,13 @@ fn a_wallet_bound_to_the_pre_ironwood_branch_is_released_after_activation() {
     assert_eq!(after.branch_to_record, Some(IRONWOOD_BRANCH));
 
     // Before activation the binding holds exactly as before.
-    let before = decide_admission_at(entries(), &timed_policy(), &bound, ARRR_ACTIVATION_TIME as u64 - 1).unwrap();
+    let before = decide_admission_at(
+        entries_with(ARRR_TIP),
+        &timed_policy(),
+        &bound,
+        ARRR_ACTIVATION_TIME as u64 - 1,
+    )
+    .unwrap();
     assert_eq!(before.admitted, vec!["cipig1"]);
 
     // A binding to any other branch is never released by this rule.
@@ -1326,4 +1365,213 @@ async fn the_backend_fails_closed_when_only_stale_endpoints_answer() {
     }
     // Every configured endpoint is probed, including the unreachable one.
     assert_eq!(transport.called("lightd1", "info"), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// T39.11.k -- staleness (R39.11.7a(j))
+// ---------------------------------------------------------------------------------------------
+
+const RECOVERED_TIP: u64 = 4_181_383;
+const MATHNODES_CACHE: u64 = 840_761;
+
+fn at_tip(height: u64) -> ServerInfo { info(IRONWOOD_BRANCH, height) }
+
+fn healthy_probe(height: u64) -> Result<AdmissionProbe, String> { probe_with_cache(at_tip(height), Ok(height)) }
+
+fn excluded_reason<'a>(outcome: &'a AdmissionOutcome, server: &str) -> Option<&'a ExclusionReason> {
+    outcome.excluded.iter().find(|(s, _)| s == server).map(|(_, r)| r)
+}
+
+/// The live 2026-10-23 specimen: the node is at the tip and on the right branch, the compact-block
+/// cache stopped at 840,761. Admission read only `GetLightdInfo`, so it admitted this endpoint.
+#[test]
+fn an_endpoint_with_a_current_node_and_a_stale_cache_is_excluded() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let mut entries: Vec<(String, Result<AdmissionProbe, String>)> = ["a", "b", "c", "d", "e"]
+        .into_iter()
+        .map(|s| (s.to_owned(), healthy_probe(RECOVERED_TIP)))
+        .collect();
+    entries.insert(
+        2,
+        (
+            "mathnodes".to_owned(),
+            probe_with_cache(at_tip(RECOVERED_TIP), Ok(MATHNODES_CACHE)),
+        ),
+    );
+
+    let outcome = decide_admission(entries, &policy, &fresh_wallet()).unwrap();
+    assert_eq!(outcome.admitted, vec!["a", "b", "c", "d", "e"]);
+    assert_eq!(
+        excluded_reason(&outcome, "mathnodes"),
+        Some(&ExclusionReason::CacheBehindNode {
+            cache: MATHNODES_CACHE,
+            node: RECOVERED_TIP,
+            tolerance: STALENESS_TOLERANCE_BLOCKS
+        })
+    );
+}
+
+/// `GetLightdInfo` answers while `GetLatestBlock` says "Cache is empty. Server is probably not yet
+/// ready".
+#[test]
+fn an_endpoint_whose_cache_is_empty_or_errors_is_excluded() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let outcome = decide_admission(
+        vec![
+            ("a".to_owned(), healthy_probe(RECOVERED_TIP)),
+            ("b".to_owned(), healthy_probe(RECOVERED_TIP)),
+            (
+                "empty".to_owned(),
+                probe_with_cache(
+                    at_tip(RECOVERED_TIP),
+                    Err("Unknown: Cache is empty. Server is probably not yet ready"),
+                ),
+            ),
+        ],
+        &policy,
+        &fresh_wallet(),
+    )
+    .unwrap();
+    assert_eq!(outcome.admitted, vec!["a", "b"]);
+    match excluded_reason(&outcome, "empty") {
+        Some(ExclusionReason::CacheUnavailable(e)) => assert!(e.contains("Cache is empty"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A node that is itself far behind the other endpoints is excluded, with its cache in step.
+#[test]
+fn an_endpoint_behind_the_consensus_of_the_others_is_excluded() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let lagging = RECOVERED_TIP - STALENESS_TOLERANCE_BLOCKS - 1;
+    let outcome = decide_admission(
+        probes(vec![
+            ("a", Ok(at_tip(RECOVERED_TIP))),
+            ("b", Ok(at_tip(RECOVERED_TIP))),
+            ("c", Ok(at_tip(RECOVERED_TIP))),
+            ("slow", Ok(at_tip(lagging))),
+        ]),
+        &policy,
+        &fresh_wallet(),
+    )
+    .unwrap();
+    assert_eq!(outcome.admitted, vec!["a", "b", "c"]);
+    assert!(matches!(
+        excluded_reason(&outcome, "slow"),
+        Some(ExclusionReason::BehindConsensus { served, .. }) if *served == lagging
+    ));
+}
+
+/// Both sides of the threshold, and the normal lag a wallet must tolerate.
+#[test]
+fn ordinary_lag_is_tolerated_and_the_threshold_is_exact() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let tol = STALENESS_TOLERANCE_BLOCKS;
+    let decide = |node_lag: u64, cache_lag: u64| {
+        decide_admission(
+            vec![
+                ("a".to_owned(), healthy_probe(RECOVERED_TIP)),
+                ("b".to_owned(), healthy_probe(RECOVERED_TIP)),
+                (
+                    "x".to_owned(),
+                    probe_with_cache(
+                        at_tip(RECOVERED_TIP - node_lag),
+                        Ok(RECOVERED_TIP - node_lag - cache_lag),
+                    ),
+                ),
+            ],
+            &policy,
+            &fresh_wallet(),
+        )
+        .unwrap()
+    };
+    // A cache a few blocks behind its node, and a node a few blocks behind the others: healthy.
+    assert!(decide(0, 3).admitted.contains(&"x".to_owned()));
+    assert!(decide(3, 0).admitted.contains(&"x".to_owned()));
+    assert!(decide(2, 2).admitted.contains(&"x".to_owned()));
+    // Exactly the tolerance is still admitted; one block more is not.
+    assert!(decide(0, tol).admitted.contains(&"x".to_owned()));
+    assert!(!decide(0, tol + 1).admitted.contains(&"x".to_owned()));
+    assert!(decide(tol, 0).admitted.contains(&"x".to_owned()));
+    assert!(!decide(tol + 1, 0).admitted.contains(&"x".to_owned()));
+}
+
+/// A stale endpoint is excluded before the vote: it neither counts toward the majority nor hides
+/// that only one current endpoint remains, and the failure names every endpoint that was dropped.
+#[test]
+fn a_stale_endpoint_does_not_vote_and_the_failure_names_it() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let err = decide_admission(
+        vec![
+            ("current".to_owned(), healthy_probe(RECOVERED_TIP)),
+            (
+                "stalecache".to_owned(),
+                probe_with_cache(at_tip(RECOVERED_TIP), Ok(MATHNODES_CACHE)),
+            ),
+            ("down".to_owned(), Err("timed out".to_owned())),
+        ],
+        &policy,
+        &fresh_wallet(),
+    )
+    .unwrap_err();
+    match err {
+        LightwalletdError::NoBranchMajority(detail) => {
+            assert!(detail.contains("37a5165b x1"), "{detail}");
+            assert!(
+                detail.contains("stalecache") && detail.contains("compact-block cache"),
+                "{detail}"
+            );
+            assert!(detail.contains("down: timed out"), "{detail}");
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// When every endpoint is stale, the failure says so.
+#[test]
+fn all_endpoints_stale_fails_with_every_reason() {
+    let policy = AdmissionPolicy::from_params(&arrr_params());
+    let err = decide_admission(
+        vec![
+            (
+                "a".to_owned(),
+                probe_with_cache(at_tip(RECOVERED_TIP), Ok(MATHNODES_CACHE)),
+            ),
+            (
+                "b".to_owned(),
+                probe_with_cache(at_tip(RECOVERED_TIP), Err("Cache is empty")),
+            ),
+        ],
+        &policy,
+        &fresh_wallet(),
+    )
+    .unwrap_err();
+    match err {
+        LightwalletdError::AllExcluded(text) => assert!(text.contains("a ") && text.contains("b "), "{text}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Through the backend and the transport trait: the two heights come from different RPCs and the
+/// fixture lets them disagree. The stale-cache endpoint is never asked for anything.
+#[tokio::test]
+async fn the_backend_probes_the_cache_and_never_uses_a_stale_cache_endpoint() {
+    let transport = Arc::new(FakeTransport::default());
+    let mut stale = healthy(&[MATHNODES_CACHE]);
+    stale.info = Some(Ok(at_tip(RECOVERED_TIP)));
+    stale.cache = Some(Ok(MATHNODES_CACHE));
+    transport.serve("mathnodes", stale);
+    for name in ["a", "b"] {
+        let mut ok = healthy(&[RECOVERED_TIP]);
+        ok.info = Some(Ok(at_tip(RECOVERED_TIP)));
+        transport.serve(name, ok);
+    }
+    let backend = backend_over(&transport, &["mathnodes", "a", "b"]);
+
+    assert_eq!(backend.chain_tip().await.unwrap(), RECOVERED_TIP);
+    assert_eq!(transport.called("mathnodes", "cache"), 1);
+    assert_eq!(transport.called("mathnodes", "tip"), 0);
+    let excluded = backend.excluded_endpoints();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].0, "mathnodes");
 }
