@@ -189,6 +189,19 @@ struct LightwalletdFetchPlan {
     reset_scan_state: bool,
 }
 
+/// Whether the default recent scan window decided the start height of a caller that supplied no
+/// `sync_params`: either the wallet has no scanned state yet, or the empty-wallet skip-forward
+/// fired. Resuming an already-scanned wallet, and any caller that supplied or skipped
+/// `sync_params`, never qualifies (R39.8.0aw).
+fn default_window_applied(
+    requested_start_height: Option<u64>,
+    skip_sync_params: bool,
+    had_scanned_state: bool,
+    plan: &LightwalletdFetchPlan,
+) -> bool {
+    requested_start_height.is_none() && !skip_sync_params && (!had_scanned_state || plan.reset_stale_empty_checkpoint)
+}
+
 impl ZCoinShieldedHistory {
     pub(crate) fn open_or_create(
         ticker: &str,
@@ -345,6 +358,7 @@ impl ZCoinShieldedHistory {
 
     pub(crate) async fn fetch_compact_blocks_from_lightwalletd(
         &self,
+        ticker: &str,
         consensus_params: &ZcoinConsensusParams,
         servers: &[String],
         target_height: u64,
@@ -353,6 +367,7 @@ impl ZCoinShieldedHistory {
         progress: &(dyn Fn(u64, u64) + Send + Sync),
     ) -> Result<u64, ShieldedFetchError> {
         // Local wallet storage that cannot be read means the sync cannot start.
+        let had_scanned_state = self.scanned_height().map_err(ShieldedFetchError::BeforeSync)?.is_some();
         let Some(fetch_plan) = self
             .lightwalletd_fetch_plan(
                 consensus_params,
@@ -371,6 +386,21 @@ impl ZCoinShieldedHistory {
                 .map_err(ShieldedFetchError::BeforeSync)?
                 .unwrap_or(0));
         };
+
+        // One warning per activation: this function runs once per activation, and the
+        // post-activation poll resumes with `skip_sync_params: true`, which never qualifies
+        // (R39.8.0aw).
+        if default_window_applied(requested_start_height, skip_sync_params, had_scanned_state, &fetch_plan) {
+            log::warn!(
+                "ZCoin {ticker}: no sync_params were supplied, so the shielded scan starts at the default recent \
+                 height {start} ({window} blocks before the chain tip {target_height}). Funds received before \
+                 height {start} will not be visible. If this is an existing wallet, re-activate it with \
+                 sync_params ({{\"height\": N}}, {{\"date\": T}} or \"earliest\") preceding its first funds. \
+                 See docs/GLEEC_COMPATIBILITY.md#zhtlc-zero-balance-after-migrating-a-wallet",
+                start = fetch_plan.start_height,
+                window = DEFAULT_LIGHT_WALLETD_RECENT_SCAN_BLOCKS,
+            );
+        }
 
         log::info!(
             "ZCoin lightwalletd fetch plan: service={}, start_height={}, target_height={}, requested_start_height={:?}, reset_stale_empty_checkpoint={}, reset_scan_state={}, servers={}",
@@ -3226,6 +3256,47 @@ mod tests {
                 reset_scan_state: false,
             })
         );
+    }
+
+    /// Evaluates the R39.8.0aw warning condition the way the fetch entry point does.
+    fn warns(history: &ZCoinShieldedHistory, target: u64, requested: Option<u64>, skip: bool) -> bool {
+        let had_state = history.scanned_height().unwrap().is_some();
+        let plan = history
+            .lightwalletd_fetch_plan(&test_params(), target, requested, skip)
+            .unwrap()
+            .expect("a plan is expected");
+        default_window_applied(requested, skip, had_state, &plan)
+    }
+
+    #[test]
+    fn default_window_warning_fires_for_a_fresh_wallet_without_sync_params() {
+        assert!(warns(&open_test_history(), 10_000, None, false));
+    }
+
+    #[test]
+    fn default_window_warning_fires_when_the_empty_wallet_skips_forward() {
+        // Born far behind the recent window and still empty: the skip-forward applies.
+        assert!(warns(&open_checkpointed_test_history(42), 10_000, None, false));
+    }
+
+    #[test]
+    fn default_window_warning_is_silent_when_sync_params_were_supplied() {
+        assert!(!warns(&open_test_history(), 10_000, Some(7_000), false));
+        assert!(!warns(&open_checkpointed_test_history(42), 10_000, Some(7_000), false));
+    }
+
+    #[test]
+    fn default_window_warning_is_silent_when_resuming_a_scanned_wallet() {
+        // Resumes from the scanned height; the default window is not used.
+        assert!(!warns(&open_checkpointed_test_history(42), 100, None, false));
+    }
+
+    #[test]
+    fn default_window_warning_is_silent_for_the_post_activation_poll() {
+        // The poll passes no start and `skip_sync_params: true`, even on a wallet that
+        // would otherwise skip forward.
+        assert!(!warns(&open_checkpointed_test_history(42), 10_000, None, true));
+        assert!(!warns(&open_test_history(), 10_000, None, true));
     }
 
     #[test]

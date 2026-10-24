@@ -211,6 +211,7 @@ impl ZCoin {
         self.z_fields
             .shielded_history
             .fetch_compact_blocks_from_lightwalletd(
+                self.ticker(),
                 &self.z_fields.consensus_params,
                 servers,
                 target_height,
