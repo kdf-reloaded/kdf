@@ -74,6 +74,15 @@ step.
   | `RVN` | RVN, AIPG, AVN, XNA, EVR |
 
   Every KawPoW-family coin in the registry already carries `"RVN"`.
+
+  **Superseded counts.** The figures above are the 2026-07 snapshot as
+  verified on the date in this section's heading, and stay as recorded.
+  Ch.37 §37.5.1 carries a newer snapshot (2026-10-18) whose counts differ;
+  read the registry counts there rather than from the table above. The one
+  difference that changes this plan's own reasoning: the newer snapshot's
+  Ravencoin-family set is `RVN`, `AVN`, `EVR` and `XNA` — it does not
+  include the `AIPG` listed above — so the registry coverage H4 relies on
+  should be read from §37.5.1.
 - **Stores.** Both stores persist `header.raw()`, which is the re-encoded
   header. `get_block_height_by_hash` compares `header.hash()`, the
   double-SHA256 of the re-encoding, so for AuxPoW headers the hash also covers
