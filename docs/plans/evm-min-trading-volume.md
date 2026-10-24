@@ -1,6 +1,6 @@
 # Plan: the EVM minimum trading volume
 
-**Status:** proposed — **Last reviewed:** 2026-10-24
+**Status:** planning — **Last reviewed:** 2026-10-24
 
 > **Context:** a field report of a refused WBTC-PLG20 buy traced to
 > `min_trading_vol` for EVM coins, which is computed from the coin's decimals by

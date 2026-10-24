@@ -1,6 +1,6 @@
 # Plan: Radiant signature-hash support
 
-**Status:** proposed — **Last reviewed:** 2026-10-24
+**Status:** planning — **Last reviewed:** 2026-10-24
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build does not implement.
