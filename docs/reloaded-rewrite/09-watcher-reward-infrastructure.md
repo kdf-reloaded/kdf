@@ -111,6 +111,44 @@ R6. **Self-contained per-swap context.** The taker's payload
     confirmations, and notarisation-required fields for the
     taker coin; and the start-block for the maker coin.
 
+R6a. **The two transaction-hash fields carry hashes, and the
+     fee hash is length-checked.** The taker-fee and
+     taker-payment fields of R6 shall carry the respective
+     transactions' **hash bytes**, not their serialized
+     bodies. A watcher that receives a payload whose
+     taker-fee field is not exactly 32 bytes shall refuse
+     the payload and **not** spawn a state machine for it;
+     the refusal happens before the Validate-taker-fee state
+     of §9.6 is entered. This is a hard length check on the
+     field, not a best-effort parse.
+
+> **Code-quality finding (informative) — reloaded violates R6a
+> today.** Reloaded's taker populates both fields with the
+> **serialized transaction** rather than with its hash: the
+> taker-fee field receives the fee transaction's raw bytes and
+> the taker-payment field receives the taker-payment
+> transaction's raw bytes. A watcher of the reference lineage
+> receiving such a payload fails R6a's 32-byte check on the
+> fee field and silently declines to help; a reloaded watcher
+> receiving a *reference* taker's payload gets 32 bytes where
+> its own taker would have put a whole transaction. So no
+> watcher assists any reloaded taker's swap, in either
+> direction, for any coin — which also means the defect has
+> been invisible, because a watcher declining to help looks
+> exactly like no watcher being present. No funds are at risk
+> (the watcher substrate is a fallback, and both parties can
+> always act for themselves), but the whole substrate is inert
+> across the wire until the two fields carry hashes.
+>
+> The fix is to put each transaction's hash in its field; the
+> hash is already computed on both paths. It is a parity
+> **fix** with no compatibility switch, because R6a is both the
+> chapter's existing rule (R6 already says "transaction
+> hashes") and the reference's behaviour. It should be done
+> together with a test that asserts the field's length is 32,
+> since a test that only round-trips the payload through the
+> project's own code cannot see the difference.
+
 R7. **Public-key formats.** The maker's published public key
     on the canonical taker payload shape shall be the
     public-key format the underlying coin's swap script
@@ -152,6 +190,45 @@ with the following bound states and transitions:
 | Spend-maker-payment         | On spend: extract secret; broadcast first preimage     |
 | Refund-taker-payment        | On deadline: broadcast second preimage                 |
 | Stopped (with outcome)      | Terminal; log the outcome                              |
+
+R10a. **No watcher assists a no-fee swap.** A taker whose
+      swap carries no DEX fee — the network burn/waiver key
+      case of [Chapter 8](08-fee-routing-engine.md) and
+      [Chapter 51](51-legacy-v1-swap-state-machine.md) R14 —
+      sends no fee transaction and therefore records an
+      **empty** fee-transaction identifier. Its watcher
+      payload consequently carries an empty taker-fee field,
+      which fails the length check of R6a, and no watcher
+      spawns a state machine for that swap.
+
+      This is the **bound** behaviour and it is **parity**:
+      the reference reaches exactly the same outcome by the
+      same route — it records an empty fee-transaction
+      identifier for a no-fee taker, publishes it in the
+      payload, and refuses the payload on the fee-field
+      length check before spawning. There is no special
+      no-fee watcher path, no sentinel value, and no
+      fee-validation bypass on either side.
+
+      Consequences a Coder must not "fix" unilaterally:
+
+      - The affected population is exactly the holders of the
+        two network burn/waiver keys, so the practical loss of
+        watcher coverage is negligible.
+      - Making a reloaded watcher accept an empty fee field
+        would be a **divergence**: a reference watcher would
+        still refuse, so only reloaded watchers would act, and
+        the asymmetry needs a `docs/COMPAT_SWITCHES.md` entry
+        and a `docs/GLEEC_COMPATIBILITY.md` note. It would also
+        require deciding what the Validate-taker-fee state of
+        §9.6 means when there is no fee transaction to find —
+        a skip is a real weakening, because that state is also
+        where the watcher establishes that the publisher is
+        the taker of a swap that actually began.
+      - The honest minimum, which R6a already gives, is that
+        the refusal is a deliberate decision on a
+        length-checked field rather than an accident.
+        Recorded as D5.
 
 R11. **Compile-time legal transitions.** The set of legal
      transitions shall be fixed at compile time per the
@@ -311,6 +388,37 @@ D4. **Operator-tunable timing.** R13's constants are
     for safety margin in environments with non-default
     latency profiles. Not in scope today.
 
+D5. **Watcher coverage for a no-fee swap.** R10a records that
+    neither this project nor the reference lets a watcher assist
+    a swap that pays no DEX fee, and that the gap is structural
+    rather than accidental: the watcher's first state is a
+    fee-transaction validation, and that validation is also what
+    binds the publisher to a swap that really started. Giving
+    no-fee swaps watcher coverage therefore needs a replacement
+    for that binding — the obvious candidate being the taker
+    payment itself, validated first instead of second — and it
+    needs the divergence treatment named in R10a, because a
+    reference watcher would go on refusing. It is deferred, not
+    rejected: the population affected is the two network
+    burn/waiver keys, so the cost of leaving it open is small
+    and the cost of getting the replacement binding wrong is
+    not. Also, nothing in it should be attempted before the R6a
+    defect is fixed, since no watcher assists any reloaded swap
+    at all until then.
+
+D6. **Per-node de-duplication keyed on a variable-length field.**
+    R14 keys the one-state-machine-per-swap lock on the
+    taker-fee hash. Under R6a that key is a fixed 32 bytes, so
+    the keying is sound once the fee field carries a hash. Two
+    residual cases are unaddressed and are not worth separate
+    rules until R6a lands: a no-fee swap's empty field, which
+    would collide across all such swaps if the lock were ever
+    taken before the length check (this project should take it
+    after), and a payload whose fee field is 32 bytes of a
+    hash that names no on-chain transaction, which the lock
+    accepts and the Validate-taker-fee state then rejects
+    after its retry budget (R13) has elapsed.
+
 ## 9.13 External References
 
 - The atomic-cross-chain-swap pattern (informal references
@@ -377,4 +485,27 @@ V3. The publish-subscribe overlay the substrate rides on is
   cross-checked against this repository's own
   `is_supported_by_watchers` overrides across
   `mm2src/coins/`, not the forbidden corpus).
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* not consulted for anything in this chapter
+  **except** R6a, R10a and deferred items D5 and D6, which were
+  authored under the chapter-01 §1.4A two-team workflow and are
+  scoped to three facts: that the taker-fee field of the watcher
+  payload carries 32 hash bytes and that a watcher length-checks
+  it and declines the payload before entering its first state;
+  that a taker paying no DEX fee records an empty
+  fee-transaction identifier and therefore publishes an empty
+  field, so no watcher assists such a swap; and that the
+  reference has no no-fee-specific watcher path, sentinel, or
+  fee-validation bypass. Established under the public release
+  designations `v2.6.0-beta` and `v3.0.0-beta`; the record is no
+  more precise than those designations. The code-quality finding
+  under R6a concerns **this repository's** own code and takes no
+  forbidden-class input. No discretionary expression — no private
+  type, field or function name, no body, control-flow
+  transcription, local name, or error literal — was reproduced.
+- *Dirty Gate clearance (chapter 01 T1, R43) for R6a, R10a, D5 and
+  D6:* **not yet recorded.** Those additions are post-adoption
+  revisions carrying forbidden-class-sourced material, so T1
+  reaches them; the gate has not yet returned a verdict and the
+  extent, method and measure are to be written into this item
+  when it does. The rest of the chapter keeps the
+  `not consulted` position stated above.
