@@ -131,7 +131,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
   one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
   protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
-  PR #TBD; CRD ch.37 R37.5.2, R37.5.4.
+  PR #55; CRD ch.37 R37.5.2, R37.5.4.
 
 ### Plans touched
 
@@ -152,7 +152,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — stays parked; the
-  AuxPoW coins left the set of coins whose median-time-past errors (PR #TBD).
+  AuxPoW coins left the set of coins whose median-time-past errors (PR #55).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
