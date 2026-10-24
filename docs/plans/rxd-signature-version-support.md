@@ -45,11 +45,16 @@ description for the reasoning and the eleven conf-builder tests behind it, and
 read `docs/reloaded-rewrite/58-utxo-signature-version-and-radiant-sighash.md`
 for the contract rather than this plan's summary of it.
 
-**The chapter is ready to implement from.** Ch.58 §58.2 (the configuration
-contract) and §58.5 (the implementation status) were authored by the KDF Spec
-Reader under the chapter-01 §1.4A two-team procedure and **passed the KDF Dirty
-Gate on 2026-10-24** with an empty finding list, so neither is a candidate
-awaiting a gate. §58.3 — the Radiant dialect itself, a BIP-143 preimage with
+**The chapter is ready for the Coder.** Every forbidden-class-sourced part of
+ch.58 is cleared: §58.2 (the configuration contract), §58.4 (the
+reference-against-Radiant comparison) and §58.5 (the implementation status)
+were authored by the KDF Spec Reader under the chapter-01 §1.4A two-team
+procedure and **passed the KDF Dirty Gate on 2026-10-24** with an empty
+finding list; §58.4A (the reference change's extent, coverage and
+designations, added the same day) passed in a **second pass** after a
+first-pass FAIL was remediated, also with an empty finding list. Nothing in
+the chapter is a candidate awaiting a gate, and §58.10 carries both
+clearance records. §58.3 — the Radiant dialect itself, a BIP-143 preimage with
 one inserted per-output summary digest as field 8, before the outputs digest
 and not appended — takes its authority from Radiant-Core, which is a permitted
 clean input (ch.01 R4, with BIP-143 under R3). **R58.4.3** settles the route:
@@ -65,7 +70,18 @@ falling back to the `base` algorithm when the gate is not satisfied; and
 extending the strict-encoding sighash-validity check so the new value masks
 `0x40` as well as `0x80`. No new transaction-hash algorithm, no `chain_variant`
 work, no address-format work, no fee-policy work, and no change to any other
-signature version's behaviour.
+signature version's behavior. **Confirmed from the cleared §58.4A:** R58.4A.1
+finds the reference change itself confined to exactly those three items (plus
+one unrelated documentation-comment edit that binds nothing), and the
+informative note beneath it records that no Radiant `chain_variant` value is
+recognized at any released designation — a coin entry naming one is rejected
+at activation under ch.37 R37.5.1, whatever it says under `signature_version`.
+
+**Designations.** Per R58.4A.4, the reference change is first carried by
+`v3.0.0-beta`, is absent from `v2.6.0-beta` (which carries only the first
+three values), and no newer release existed on 2026-10-24. A `v2.6.0-beta`
+node cannot produce a valid Radiant signature and so cannot be a Radiant swap
+counterparty at all (R58.4A.5).
 
 ## The gating practical requirement: test vectors
 
@@ -109,20 +125,38 @@ the switch exists, and that support is planned rather than withdrawn.
    previous output value, recorded with its source. Verify by hand, once, that
    the transaction's own signature verifies against the digest computed under
    R58.3.1 with sighash type `0x41`, before any production code exists.
+   Per the cleared **R58.4A.2**, Radiant-Core publishes no fixed sighash
+   vector for its dialect (its data-driven vector test is disabled and its
+   remaining sighash test uses random scripts with no reference opcode), so
+   *any* vector — the reference's included — can only come from a transaction
+   the Radiant network accepted. Derive ours from the public chain under
+   ch.01 R6, and prefer an independently chosen transaction over whichever one
+   the reference used: that makes T3 an independent corroboration of R58.4.1
+   rather than a re-run of the reference's check. A vector for the
+   reference-bearing form (**D3**) can likewise come only from a public-chain
+   artifact, and none is known; D3 stays open on that basis alone.
 3. **Implementation via the Coder**, from ch.58 — the three changes of R58.5.2
    and nothing else. The Coder implements the algorithm against Radiant-Core
-   per R58.4.3.
+   per R58.4.3. Scope is confirmed, not merely asserted: the cleared R58.4A.1
+   finds nothing in the reference change beyond R58.5.2's three items, and no
+   Radiant `chain_variant` value is recognized at any released designation,
+   so there is no fourth item to discover.
 4. **Tests T1–T8** of §58.6, with T3 and T4 built on the step-2 vector. T4 in
    particular must assert the digest *changes* when field 8 is appended after
    the lock time instead of inserted before the outputs digest — a
    constant-equality test would not catch a correctly computed, wrongly placed
    summary digest.
 5. **Close the records.** Mark R58.5.1 closed in ch.58 §58.5 and answer **D1**
-   (the unrecognised-value warning, which PR #54 settled in practice by failing
-   activation behind a switch). Note that ch.58's §58.6 preamble and **D4**
-   record the missing Reference × Network test matrix as deferred — this change
-   affects signature-hash modes and signed preimages, so `AGENTS.md` §3 asks
-   for that matrix, and it is owed once D4's question is answered.
+   (the unrecognized-value warning, which PR #54 settled in practice by failing
+   activation behind a switch). **D4's question is answered** in the cleared
+   §58.4A: R58.4A.5 finds exactly one inter-designation difference on this
+   contract — the fourth value is present at `v3.0.0-beta` and absent at
+   `v2.6.0-beta` — and no netid dimension at all (nothing in the two keys'
+   resolution or in the signing substrate reads the network identifier). The
+   `AGENTS.md` §3 matrix is therefore satisfied by the stated difference on the
+   reference row and the stated equivalence on the network row; what remains
+   is to carry that finding into §58.6 alongside the implementation and close
+   D4 together with D1 in this step.
 6. **Compatibility bookkeeping.** Implementing a value the reference already
    implements is parity, not divergence, so per ch.58 R58.5.1 it needs no
    compatibility switch and no `docs/COMPAT_SWITCHES.md` entry of its own.
@@ -130,25 +164,30 @@ the switch exists, and that support is planned rather than withdrawn.
    `RELOADED_VS_GLEEC.md`; check whether its wording needs amending once RXD
    is no longer the coin it refuses.
 
-## Reference pointer for a KDF Spec Reader dispatch
+## Reference pointer for a KDF Spec Reader dispatch (dispatched 2026-10-24)
 
 > **A clean context must not open this.** It is recorded here solely to direct a
-> future KDF Spec Reader dispatch — the only role permitted to read
-> upstream/GLEEC KDF material. The number and description were supplied by a
-> community maintainer and transcribed without being fetched, opened, previewed
-> or verified.
+> KDF Spec Reader dispatch — the only role permitted to read upstream/GLEEC KDF
+> material. The number and description were supplied by a community maintainer
+> and transcribed without being fetched, opened, previewed or verified.
 
 | Upstream reference | As described to us |
 |---|---|
 | pull request **#2713** | what Radiant "did to get it working" |
 
-Note that this pointer is **not** on the critical path: ch.58 §58.4 already
-established, on public-network evidence, that the reference's dialect and
-Radiant-Core's own sighash **match** for every transaction shape this project
-can produce, and R58.4.3 therefore routes implementation through Radiant-Core.
-Dispatch a Spec Reader on #2713 only if an implementation that satisfies T3
-still fails against a reference-lineage counterparty, or to answer **D2**
-(whether Radiant is fit for swaps at all beyond signing).
+**Dispatched on 2026-10-24.** The Spec Reader's findings are in ch.58 §58.4A,
+which passed the KDF Dirty Gate in a second pass the same day (a first pass
+returned FAIL and was remediated); see ch.58 §58.10 for the clearance record.
+The findings confirm the route of R58.4.3 rather than change it: the change is
+confined to the three items of R58.5.2 (R58.4A.1); its only on-chain vector is
+a public-chain artifact and Radiant-Core publishes no fixed vector of its own
+(R58.4A.2); no Radiant-specific behavior exists outside the signing substrate
+(R58.4A.3); the designations are `v3.0.0-beta` (first) and `v2.6.0-beta`
+(absent) (R58.4A.4); and D4 is answered (R58.4A.5). No further dispatch is
+needed for this work package. A second dispatch would be warranted only if an
+implementation that satisfies T3 still fails against a reference-lineage
+counterparty, or to verify rather than report what the lineage says about
+**D2** (below).
 
 ## What done looks like
 
@@ -167,11 +206,15 @@ still fails against a reference-lineage counterparty, or to answer **D2**
 
 - **D2 — Radiant beyond signing.** HTLC script acceptance, the relay-fee floor
   against the configured transaction fee, its block-header family, its Electrum
-  server behaviour, and whether its roughly 300-second block time interacts
-  badly with the swap lock-time rules are all unestablished. Closing R58.5.2
-  enables correct **signing**; enabling RXD for *trading* is a separate decision
-  with its own verification, and should not be announced as a side effect of
-  this one.
+  server behavior, and whether its roughly 300-second block time interacts
+  badly with the swap lock-time rules are all unestablished. The cleared
+  R58.4A.3 records that the reference lineage *reports* a completed legacy
+  (version-one) RXD/KMD swap under the dialect; that is reported, not verified
+  by this project, bears on the legacy swap path only, and says nothing about
+  version-two swaps, watchers or the trade preimage. It does not close D2.
+  Closing R58.5.2 enables correct **signing**; enabling RXD for *trading* is a
+  separate decision with its own verification, and should not be announced as
+  a side effect of this one.
 - The other coin-configuration enumerations PR #54's switch is named for
   (`estimate_fee_mode`, `trezor_coin`, `mtp_block_count`,
   `estimate_fee_blocks`, the address-format keys). None is wired to it; adopting
