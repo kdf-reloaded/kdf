@@ -451,10 +451,11 @@ As built:
   single-header Electrum reads, header lists for the sync loop, the anchor
   check of R37.1.3, re-reads from both header stores, and the genesis-hash
   lookup. This falls short of R37.5.1a.
-- Under the default variant, the AuxPoW layout (recognised by two specific
-  version values only, not by the bit-8 rule), the Equihash-style layout
-  (version 4), Verus, Firo MTP and ProgPoW, and KawPoW are all chosen from the
-  version value alone. The LBRY, PIVX and Peercoin families and the
+- Under the default variant, the AuxPoW layout is recognised by the bit-8 rule
+  of R37.5.2 and R37.5.4, per header; it was once matched against two exact
+  version values, which this implementation no longer does. The Equihash-style
+  layout (version 4), Verus, Firo MTP and ProgPoW, and KawPoW are all chosen
+  from the version value alone. The LBRY, PIVX and Peercoin families and the
   RICK/MORTY genesis rule are not implemented. So R37.5.3 and R37.5.4 are not
   met: KawPoW is still recognised by its version value for every non-Qtum
   coin. Withdrawing that before the configuration key exists would leave

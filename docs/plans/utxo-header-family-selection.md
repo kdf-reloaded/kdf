@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, four open decisions) — **Last reviewed:** 2026-10-18
+**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, four open decisions) — **Last reviewed:** 2026-10-24
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -18,7 +18,10 @@
 >    confirmed.
 > 4. The behaviour change of the fix: a header list with leftover bytes is now
 >    rejected, so coins whose headers we cannot parse (LBRY, PIVX) now get an
->    error from median-time-past where they used to get a wrong value.
+>    error from median-time-past where they used to get a wrong value. The
+>    AuxPoW coins were in this set while the reader recognised AuxPoW only by
+>    two exact version values; it now uses the bit-8 rule of R37.5.2, so they
+>    have left it (2026-10-24). LBRY, PIVX, RIC, RUNES and XPM remain.
 
 ## How the four items connect
 
