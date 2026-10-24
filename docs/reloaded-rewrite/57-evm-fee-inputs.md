@@ -301,7 +301,10 @@ of that set.
 > Its clearance is therefore *complete* and not pending: nothing in this
 > section is a candidate awaiting a gate. The extent, method and measure
 > of that pass are recorded once, in the *Dirty Gate clearance* item of
-> §57.12, and are not restated here.
+> §57.12, and are not restated here. Two later items — R57.5.3a and, in
+> §57.8, T9 — were added after that pass and cleared by a second one; their
+> record is the scoped-addition item of §57.12, and the derivation record
+> above R57.5.3a carries the statement at the point they appear.
 
 **R57.5.1** *The key and its shape.* A coin's configuration entry may
 carry a `gas_limit` object whose members override the built-in gas limits
@@ -348,6 +351,63 @@ inheritance applies to `gas_limit_v2` (R57.6), `gas_price_adjust`
 (R57.2.4), the envelope-type cap, the swap gas-fee policy default, and
 the gas-estimate multiplier of D3. For a platform coin, only its own
 entry is consulted.
+
+> **Dirty-side derivation record (sanitized).** R57.5.3a and T9 were
+> added after this section's 2026-10-24 clearance and are **not** covered by
+> it. They were authored by the KDF Spec Reader under the chapter-01 two-team
+> workflow (§1.4A), from the GLEEC KDF public release designations
+> `v3.0.0-beta` (reference) and `v2.6.0-beta` (legacy cross-check), which
+> agree. Nothing else in §57.5 changed.
+>
+> **Clearance (chapter 01 T1, R40).** That material — R57.5.3a and T9 —
+> **passed the KDF Dirty Gate** on 2026-10-24, in a second pass that left this
+> section's earlier clearance untouched: PASS, discretionary-expression measure
+> 0.01, finding list empty, and accordingly no remedy class for any line or for
+> the candidate as a whole. Its clearance is therefore *complete* and not
+> pending, and R40 withholds nothing in it. One limit of that pass belongs here
+> and not only in the footer: the comparison reached material at the
+> `v3.0.0-beta` designation only, so the agreement between the two designations
+> that the record above asserts **is not attested by the clearance** and rests
+> on the derivation record alone. The extent, method and measure of the pass
+> are recorded once, in the scoped-addition item of §57.12, and are not
+> restated here.
+
+**R57.5.3a** *There is no ceiling on a configured gas limit: a configured value
+is honoured verbatim.* A value supplied for any member of `gas_limit` or of
+`gas_limit_v2` shall be used exactly as configured. It shall **not** be clamped
+to a maximum, compared against a built-in upper bound, or rejected for being
+large. Four points make the rule unambiguous, because each has been mistaken
+for a ceiling:
+
+- `eth_max_trade_gas` is **not** a ceiling on the other members. Despite its
+  name it is one of the nine overridable members in its own right (R57.5.2),
+  it prices exactly one thing — the flat trade-fee figure the non-preimage
+  trade-fee query reports — and a configuration may set it above or below any
+  other member with no interaction between them. The reference's own
+  configuration-reading tests set it to a value that is not its default and
+  assert it is honoured;
+- the per-coin envelope-type cap (`max_eth_tx_type`,
+  [Chapter 35](35-evm-v2-activation-rpcs.md) D35.7) caps the EIP-2718
+  *transaction type*, never a gas limit, and the two are independent;
+- the gas-estimate multiplier (D3) scales a value **obtained from the node by
+  estimation**; it neither bounds nor scales a value read from the
+  configuration. A configured limit bypasses estimation entirely at the call
+  sites of R57.5.2;
+- the only rejection on this path is a **type** rejection. A member whose
+  value is not a non-negative integer fails coin activation with a
+  configuration error naming the key (R57.5.1). A member that is absent takes
+  the default of R57.5.2. An unrecognised member inside the block is ignored
+  (R57.5.1, and [Chapter 45](45-startup-configuration-and-environment-tolerance.md)
+  R45.3.7 for the same tolerance at coin-entry level).
+
+The consequence a Coder must not reverse: an over-large configured limit is a
+configuration defect whose cost is an over-reserved gas allowance and an
+over-stated trade fee, not a refusal. Clamping it silently would make two nodes
+reading the same shared coins file build transactions with different gas
+limits — a divergence invisible to both operators — and would do so in the
+refund paths R57.5.2's call-out identifies as the worst place in the system to
+under-fund. Rejecting it would make a coins file that a reference node accepts
+refuse to activate here.
 
 **R57.5.4** *Implementation status (gap).* Reloaded reads neither
 `gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
@@ -627,6 +687,18 @@ computed from the EIP-1559 estimate; for a coin whose policy is the
 legacy one, from the legacy price (R57.4.1). The test MUST fail if the
 legacy price is used under a priority-tier policy.
 
+**T9.** *No clamp on a configured gas limit.* For at least one `gas_limit`
+member and one `gas_limit_v2` member, a configured value far above every
+built-in default (for example an order of magnitude above
+`eth_max_trade_gas`'s default) MUST appear unchanged at the call site that
+consumes it, and activation MUST succeed. A configured `eth_max_trade_gas`
+below another member's configured value MUST leave that other member
+unchanged. A member set to a negative number, a decimal, or a string MUST fail
+activation with a configuration error naming the key (R57.5.3a). The test MUST
+fail if any clamp, saturating comparison, or maximum is introduced on this
+path. *(Cleared with R57.5.3a — see the clearance statement in the derivation
+record in §57.5 and the scoped-addition item in §57.12.)*
+
 ## 57.9 Deferred Work
 
 **D1.** *Upper-bound and watcher approximation stages.* R57.3.4's three
@@ -763,7 +835,10 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   further stages of R57.3.4; that swap-side figures are computed from the
   policy-resolved fee form (R57.4.1); the complete recognised key sets,
   per-key call sites, absent-key defaults and token inheritance of
-  §57.5–§57.6; and the withdraw fee-form tags, member names,
+  §57.5–§57.6, together with the absence of any ceiling, clamp or
+  upper-bound comparison on a configured value (R57.5.3a, cleared under the
+  scoped-addition item below); and the withdraw
+  fee-form tags, member names,
   estimation rule and envelope-type derivation of §57.7. Every dictated
   fact in §57.2's method semantics and §57.7's envelope types is sourced
   from the public specifications (R3/R4); every configuration key name,
@@ -774,9 +849,98 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   reproduced. The numeric defaults and percentages are bound as parity
   data on the justification stated in §57.0 and are observable at the
   external boundary of any node of the reference lineage.
+- *Scoped addition, and its Dirty Gate clearance (chapter 01 T1, R40, R43).*
+  **R57.5.3a and T9** were added after the gate pass recorded below and are
+  **not** covered by it: they bind that a configured per-coin gas limit carries
+  no ceiling, is never clamped and is rejected only on a type failure. They
+  were taken from the same forbidden-class surface as §57.5, under §1.4A, at
+  the release designations `v3.0.0-beta` and `v2.6.0-beta`. They were authored
+  by the KDF Spec Reader under that procedure and **passed the KDF Dirty Gate**
+  on 2026-10-24 in a second pass, scoped to these two numbered items and to the
+  footer changes that accompany them: PASS, discretionary-expression measure
+  0.01, finding list empty, and accordingly no remedy class for any line or for
+  the candidate as a whole. Their clearance is therefore **complete and not
+  pending**, and R40 withholds nothing in them, as the derivation record in
+  §57.5 states at the point the material appears. The clearance item below is
+  unchanged by this pass and keeps its own date and scope: the sections it
+  covers were not re-examined here and are neither reopened nor re-dated. This
+  item is written on the clean side from the verdict, which reached the clean
+  side as relayed text rather than as a gate-written file; that is
+  record-keeping and adds no chapter content.
+
+  *Which parts carry an inline pointer to this item.* The derivation record
+  that sits immediately above R57.5.3a carries the clearance statement, and T9
+  carries a one-line pointer back to it — the same two places the pending
+  statements stood, converted where they were. Both items are numbered, rule-
+  or test-bearing text an implementer codes from, inserted among R- and
+  T-numbers that have stood in this chapter since earlier revisions, which is
+  the case in which long-settled requirement and newly-cleared requirement are
+  easiest to confuse. §57.5's section-head block gained one sentence naming
+  this item, because that block would otherwise read as though a single pass
+  covered the whole section. The six section-head pointers the clearance item
+  below describes are otherwise left as they are: they belong to that earlier
+  pass, and this one neither adds to nor widens them.
+
+  The three elements of this pass's R39 scope attestation, carried forward here
+  in corpus-free terms as chapter 01 T1 requires. One of the three is
+  incomplete, and it is recorded as a gap rather than completed from elsewhere:
+
+  - *Extent.* The per-coin gas-limit configuration surface and its
+    consumption: the two configuration blocks' members as configured values;
+    the absence of any upper-bound comparison, clamp or saturating maximum on a
+    configured value anywhere on that path; the sole type-level rejection at
+    activation; the one member whose name invites confusion with a ceiling,
+    together with the single figure it prices; the per-coin
+    transaction-envelope-type cap; and the multiplier applied to an estimated
+    rather than a configured value. Quantity examined: **four files** read in
+    substance, together with token-level searches across the relevant
+    subsystem's file set, of the order of ten files. Reference designation: the
+    publicly published release designation `v3.0.0-beta`. **The record is no
+    more precise than that designation** — no post-anchor commit identifier, no
+    branch state and no location within the compared material is given
+    (chapter 01 R11 and the reference-version limit of §1.7).
+
+    **The gap in this element, left visible rather than completed.** The scoped
+    record above names two designations, and the derivation record in §57.5
+    asserts that they agree. This clearance reached material at one of them
+    only: no material at the `v2.6.0-beta` designation was available to the
+    pass, so **the asserted agreement between the two designations is not
+    attested here**. The element is incomplete rather than approximated, and
+    chapter 01 T1 is satisfied by saying so — a completed clearance statement
+    carries the three elements **or** states that an element is not recorded.
+    Nothing in this clearance supports the legacy-cross-check half of that
+    record: it rests on the Spec Reader's record alone, and this item neither
+    confirms nor contradicts it. Whether either designation is a publicly
+    published release designation of the kind R11's carve-out admits is a
+    separate question, checkable on the clean side against public release
+    records, and is not answered here.
+
+  - *Method.* **Combined.** Reading, together with a mechanical token
+    comparison over the tokens extracted from a line-level comparison of this
+    chapter against the branch tip — only added and modified lines were judged
+    — each then put through the forced-versus-free test individually; and with
+    targeted searches used to test the addition's negative claim, that no
+    bound, clamp or maximum exists on the path, across the subsystem rather
+    than at a single site. No aggregate match-density judgement was used or
+    admitted. **This repository's own R35 gate tooling under `tools/` was not
+    applicable and was not run:** the added material embeds no code block and
+    that tooling's test is defined over source-file bodies, so the instrument
+    had no operand. The absence is stated so that it is visible rather than
+    implied.
+
+  - *Measure.* **0.01** on the discretionary-expression basis — the same figure
+    the leak report carries, not a second one — read against the same standard
+    the chapter's earlier sections were read against at their own 0.02: one
+    item of genuine discretionary expression fails a candidate however much
+    legitimately dictated content surrounds it. All four quoted tokens on the
+    added lines are configuration keys of the shared public coins file and were
+    excluded from the measured set as dictated; no default value, internal type
+    name, helper name or message literal was carried. With the finding list
+    empty, no added line was classified into any leak category.
 - *Dirty Gate clearance (chapter 01 T1, R40, R43).* The whole of this
-  chapter's forbidden-class-sourced material — the scoped item above,
-  which is the legacy gas-price resolution of §57.2, the
+  chapter's forbidden-class-sourced material as it stood on 2026-10-24 — the
+  *Forbidden corpus* item above, less the scoped addition that follows it,
+  which is to say the legacy gas-price resolution of §57.2, the
   proportional-increase arithmetic and its stages in §57.3, the swap fee
   form of §57.4, the two per-coin gas-limit configuration blocks of
   §57.5 and §57.6, and the withdraw fee resolution, gas-limit estimation
