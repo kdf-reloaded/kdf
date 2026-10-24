@@ -7,7 +7,24 @@
 
 KDF Reloaded is an open-source [atomic-swap](https://en.wikipedia.org/wiki/Atomic_swap) engine for trustless peer-to-peer trading across blockchains, derived from the Komodo DeFi Framework / AtomicDEX-API codebase as it stood under the GPLv2 license.
 
-> **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
+## Why this project exists
+
+The Komodo DeFi Framework was published under the GNU General Public License, version 2. Shortly after the commit this project is anchored to (`c1d46c0`, 2022-06-03), the upstream codebase was relicensed, and the new license added two copyright-holder conditions, identified in it as Condition (e) and Condition (f). Both restrict modification of the code that handles the trading fee. Condition (f) names four locations: the DEX-fee receiver public key, the initializer that decodes it, the Z-coin shielded-fee outgoing viewing key, and the fee-emission path in the swap module. Condition (e) is broader: it covers any code region reachable from a `DEX_FEE`-prefixed identifier, together with the software logic related to it. A recipient of the relicensed codebase is told not to modify those regions. Our reading of the two conditions is recorded in [`docs/reloaded-rewrite/29-license-conditions-e-f.md`](docs/reloaded-rewrite/29-license-conditions-e-f.md).
+
+The fee those regions carry is a per-network parameter, and the two production networks differ:
+
+| Network | Base trading fee | Discounted rate |
+|---|---|---|
+| netid 8762 — AtomicDEX, the original network | 1/777 of the trade (~0.129%) | 9/7770 (~0.116%) when KMD is one side of the pair |
+| netid 6133 — GLEEC DEX | 2/100 of the trade (2%) | 1/100 (1%) when GLEEC is one side of the pair |
+
+Each network's complete fee parameters — discounts, minimums, burn behavior and fee keys — are documented in [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
+
+KDF Reloaded continues the codebase from its last unambiguously GPLv2-only commit, so everything we distribute stays modifiable on GPLv2 terms — the fee path included. We do not change either network's fee values: the fee receiver keys and the rates are wire-format facts that every peer on a network has to agree on, so we preserve them exactly and resolve them per network at runtime through a small configuration crate ([`mm2src/mm2_net_config/`](mm2src/mm2_net_config/)) instead of reading them from frozen global constants. The difference is where they live: in this repository they are configuration, and under GPLv2 §6 a downstream distributor cannot add further restrictions to GPL-covered code.
+
+Credit for the original design and the bulk of the pre-anchor code is due to Komodo Platform and the AtomicDEX-API contributors, and for continued development on the parallel branch to GLEEC and the GLEEC KDF contributors. We follow that work and adopt compatible changes where it is legally and technically feasible, and we aim to stay operationally compatible with GLEEC KDF where practical; see [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+
+Post-anchor upstream material is not an input a contributor here may read, so behavior we need to match is written down as a specification first and implemented from that specification. This is why the repository ships a chapter set — the Clean-Room Documentation — alongside the code; see [`docs/reloaded-rewrite/00-overview.md`](docs/reloaded-rewrite/00-overview.md) and [`docs/reloaded-rewrite/01-clean-room-rules.md`](docs/reloaded-rewrite/01-clean-room-rules.md). The method is applied selectively rather than everywhere, and we do not claim that every file is a clean-room rewrite — the Heritage section below and the provenance ledger say exactly what each part of the tree is.
 
 ## Heritage
 
@@ -25,6 +42,8 @@ For the relationship to other downstream projects (notably the GLEEC fork), see 
 ## Alpha disclaimer
 
 KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
+
+> **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
 
 - The `kdf` binary is provided for evaluation, testing, and review.
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
