@@ -14,6 +14,9 @@ use serde_json::{self as json, Value as Json};
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
 
+/// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
+const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\"";
+
 pub type UtxoConfResult<T> = Result<T, MmError<UtxoConfError>>;
 
 #[derive(Debug, Display)]
@@ -39,6 +42,14 @@ pub enum UtxoConfError {
     ErrorDeserializingDerivationPath(String),
     InvalidConsensusBranchId(String),
     InvalidVersionGroupId(String),
+    #[display(
+        fmt = "Invalid 'signature_version' {}: expected one of {}, or omit the key to use the coin's default",
+        found,
+        ACCEPTED_SIGNATURE_VERSIONS
+    )]
+    InvalidSignatureVersion {
+        found: String,
+    },
     InvalidAddressFormat(String),
     InvalidSpvConf(String),
     InvalidDecimals(String),
@@ -80,7 +91,7 @@ impl<'a> UtxoConfBuilder<'a> {
         let tx_fee_volatility_percent = self.tx_fee_volatility_percent();
         let version_group_id = self.version_group_id(tx_version, overwintered)?;
         let consensus_branch_id = self.consensus_branch_id(tx_version)?;
-        let signature_version = self.signature_version();
+        let signature_version = self.signature_version()?;
         let fork_id = self.fork_id();
 
         // should be sufficient to detect zcash by overwintered flag
@@ -230,13 +241,20 @@ impl<'a> UtxoConfBuilder<'a> {
         Ok(consensus_branch_id)
     }
 
-    fn signature_version(&self) -> SignatureVersion {
-        let default_signature_version = if self.ticker == "BCH" || self.fork_id() != 0 {
-            SignatureVersion::ForkId
-        } else {
-            SignatureVersion::Base
-        };
-        json::from_value(self.conf["signature_version"].clone()).unwrap_or(default_signature_version)
+    fn signature_version(&self) -> UtxoConfResult<SignatureVersion> {
+        let value = &self.conf["signature_version"];
+        // An absent key (or an explicit `null`) takes the default; a present value that is not
+        // recognised must not, or the coin would sign under a sighash algorithm nobody asked for.
+        if value.is_null() {
+            return Ok(if self.ticker == "BCH" || self.fork_id() != 0 {
+                SignatureVersion::ForkId
+            } else {
+                SignatureVersion::Base
+            });
+        }
+        json::from_value(value.clone()).map_to_mm(|_| UtxoConfError::InvalidSignatureVersion {
+            found: value.to_string(),
+        })
     }
 
     fn fork_id(&self) -> u32 {
@@ -289,4 +307,90 @@ impl<'a> UtxoConfBuilder<'a> {
     }
 
     fn enable_spv_proof(&self) -> bool { self.conf["enable_spv_proof"].as_bool().unwrap_or(false) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utxo::EnableCoinScanPolicy;
+    use crate::utxo::UtxoRpcMode;
+    use crate::PrivKeyActivationPolicy;
+    use serde_json::json;
+
+    fn params() -> UtxoActivationParams {
+        UtxoActivationParams {
+            mode: UtxoRpcMode::Native,
+            utxo_merge_params: None,
+            tx_history: false,
+            required_confirmations: None,
+            requires_notarization: None,
+            address_format: None,
+            gap_limit: None,
+            min_addresses_number: None,
+            scan_policy: EnableCoinScanPolicy::default(),
+            priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
+            check_utxo_maturity: None,
+            path_to_address: None,
+        }
+    }
+
+    fn build(ticker: &str, conf: Json) -> UtxoConfResult<UtxoCoinConf> {
+        UtxoConfBuilder::new(&conf, &params(), ticker).build()
+    }
+
+    #[test]
+    fn unrecognised_signature_version_fails_the_build() {
+        let err = build(
+            "RXD",
+            json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}),
+        )
+        .err()
+        .expect("an unrecognised signature_version must not fall back to a default");
+        let msg = err.to_string();
+        assert!(msg.contains("fork_id_rxd"), "the offending value must be named: {msg}");
+        assert!(msg.contains("witness_v0"), "the accepted set must be listed: {msg}");
+
+        // A present value of the wrong JSON type is equally unrecognised.
+        assert!(build("XYZ", json!({"coin": "XYZ", "signature_version": 1})).is_err());
+        assert!(build("XYZ", json!({"coin": "XYZ", "signature_version": ""})).is_err());
+    }
+
+    #[test]
+    fn recognised_signature_version_is_honoured() {
+        for (name, expected) in [
+            ("base", SignatureVersion::Base),
+            ("witness_v0", SignatureVersion::WitnessV0),
+            ("fork_id", SignatureVersion::ForkId),
+        ] {
+            let conf = build("XYZ", json!({"coin": "XYZ", "signature_version": name})).unwrap();
+            assert_eq!(conf.signature_version, expected);
+        }
+    }
+
+    #[test]
+    fn absent_signature_version_keeps_the_default() {
+        // No `fork_id` (or a zero one) and not BCH: `Base`.
+        let conf = build("XYZ", json!({"coin": "XYZ"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build("XYZ", json!({"coin": "XYZ", "fork_id": "0x00"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+
+        // Non-zero `fork_id`: `ForkId`.
+        let conf = build("XYZ", json!({"coin": "XYZ", "fork_id": "0x40"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+
+        // BCH has both defaults built in.
+        let conf = build("BCH", json!({"coin": "BCH"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+
+        // An explicit JSON `null` is treated as absent.
+        let conf = build("XYZ", json!({"coin": "XYZ", "signature_version": null})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build(
+            "XYZ",
+            json!({"coin": "XYZ", "fork_id": "0x40", "signature_version": null}),
+        )
+        .unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+    }
 }

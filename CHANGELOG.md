@@ -55,6 +55,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
+  signing with a different algorithm.** The accepted values are `base`, `witness_v0` and `fork_id`;
+  any other value (for example RXD's shipped `fork_id_rxd`) used to be silently replaced by the
+  coin's default, so its transactions were signed wrongly and rejected by the network. Activation now
+  reports the offending value and the accepted set. A coin with no `signature_version` is unchanged.
+  Detail: PR #54.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
