@@ -303,6 +303,11 @@ implementation projects its in-memory record down to these eight
 fields before encoding is discretionary (R36); the *resulting
 bytes* are dictated.
 
+When a maker sets no minimum volume, `min_volume` carries the per-coin
+default of [Chapter 57](57-evm-fee-inputs.md) §57.7A R57.7A.4 (cleared
+there on 2026-10-24 — see the second scoped-addition item of its §57.12);
+a receiver validates it only for non-negativity.
+
 ### 32.5.2 In-memory enrichment and the side channel (behaviour)
 
 **R-W2.** The in-memory order record extends the eight wire
