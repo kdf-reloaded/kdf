@@ -1,21 +1,24 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, four open decisions) — **Last reviewed:** 2026-10-18
+**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-24
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
 > §37.5.8). That fix made header reads consume the served bytes exactly and fall
 > back to the standard 80-byte layout, which removed the observed failure. It
 > did not give the reader what ch.37 §37.5 actually requires: a header family
-> chosen per coin from its configuration. Four open items remain, and they
-> depend on each other:
+> chosen per coin from its configuration. Of the four items below, three are
+> open and depend on each other; item 3 is now largely answered:
 >
 > 1. ch.37 §37.9 **D1**: accept `protocol.chain_variant` and carry the family
 >    into every header read path.
 > 2. ch.37 §37.9 **D2**: identity hashes and stored bytes from the served bytes
 >    (including the 80-byte AuxPoW hash scope), and the linkage check.
-> 3. The open `SPEC` note in ch.37 §37.5.7: chain rules that are not yet
->    confirmed.
+> 3. What is left of the former open `SPEC` note in ch.37 §37.5.7: the
+>    served header shapes of the KawPoW-family and Firo coins, and the
+>    chain-definition detail that only R37.5.5 and R37.5.7's identity-hash
+>    divergence need. §37.5.7b answered the rest, and neither residual
+>    blocks parity (H0).
 > 4. The behaviour change of the fix: a header list with leftover bytes is now
 >    rejected, so coins whose headers we cannot parse (LBRY, PIVX) now get an
 >    error from median-time-past where they used to get a wrong value.
@@ -24,15 +27,17 @@
 
 The header family is the root. It decides the byte layout (item 1), and the
 layout decides where one header ends and the next begins, and so which bytes
-make up a header's identity (item 2). For some families the layout, and the
-identity hash, depend on chain rules that are not confirmed yet (item 3). Item 4
-is a symptom of item 1: LBRY and PIVX headers fail only because no family
-exists for them. It needs no fix of its own; it goes away when those families
-are parsed.
+make up a header's identity (item 2). The layouts and the identity hashes no
+longer wait on unconfirmed chain rules: §37.5.7b establishes that the
+reference defines none of them (item 3). Item 4 is a symptom of item 1: LBRY
+and PIVX headers fail only because no family exists for them. It needs no fix
+of its own; it goes away when those families are parsed.
 
-So the order is: confirm the rules (item 3) → add the family and thread it
-(item 1) → parse the missing families (which closes item 4) → switch identity
-and storage to served bytes (item 2).
+So the order is: add the family and thread it (item 1) → parse the missing
+families (which closes item 4) → switch identity and storage to served bytes
+(item 2). Item 3 no longer comes first: what is left of it is a check to make
+before a KawPoW-family or Firo coin syncs headers, not a prerequisite for any
+step.
 
 ## Current state (verified 2026-09-23)
 
@@ -92,19 +97,28 @@ apart from the KawPoW withdrawal, which is gated in step H4.
 
 ### H0 — Confirm the chain rules (item 3; dirty side)
 
-Dispatch KDF Spec Reader to resolve the `SPEC` note of ch.37 §37.5.7, using
-public chain definitions:
+Largely discharged. The dispatch happened and its result is gated: ch.37
+§37.5.7b answers four of the five items, and every one of the four comes back
+negative — no Firo MTP start rule, no KawPoW activation time on any network,
+no chain-defined identity hash for the KawPoW, Firo or Verus families, and no
+PIVX header-version threshold. The reference keys these families on exact
+version values — with one timestamp for Firo's ProgPoW switch — instead of
+the structural rules this plan expected. Read §37.5.7b for the detail rather
+than restating it here. The consequence for this plan is that none of those
+rules blocks parity, so H4 and H5 no longer wait on them.
 
-- PIVX header-version thresholds;
-- Firo MTP start and ProgPoW switch rules;
-- KawPoW activation time per network for each `"RVN"` coin (RVN, AIPG, AVN,
-  XNA, EVR may differ);
-- the KawPoW, Firo and Verus identity hashes;
-- the header shapes Electrum servers serve for those families.
+What remains is the narrowed `SPEC` note of §37.5.7 — two residual items,
+neither of them a blocker for parity:
 
-Gate the result with KDF Dirty Gate. Where a rule cannot be pinned, the chapter
-keeps the upstream version key as the interim reading (R37.5.5), and H4 uses
-that.
+- the header shapes Electrum servers serve for the KawPoW-family and Firo
+  coins, which the project has not observed directly. Measure the served
+  bytes per header at a known post-switch height before relying on either
+  family's header sync; the exact-consumption guard turns a truncation into
+  a runtime rejection rather than a silent misread;
+- the chain-definition detail needed only by R37.5.5 and by R37.5.7's
+  identity-hash divergence: the PIVX version boundaries, the per-network
+  KawPoW activation times, the Firo MTP lower bound, and the three
+  chain-defined identity hashes.
 
 ### H1 — A copyable family type
 
@@ -118,7 +132,7 @@ Extend the reader hint rather than add a parallel type, because the
 | `Ppc` | Standard; version 4 is not Equihash |
 | `Qtum` | Qtum proof-of-stake header |
 | `Lbc` | LBRY claim-trie header |
-| `Rvn` | Standard before the KawPoW switch, KawPoW after |
+| `Rvn` | Standard; KawPoW at its version value, with no switch time |
 | `Pivx` | Sapling root after the nonce |
 | `KomodoAssetChain` | Equihash for every block, genesis included (RICK/MORTY) |
 
@@ -159,12 +173,15 @@ coverage: each path is exercised with a non-default family.
 
 ### H4 — Family rules (closes item 4)
 
-Implement R37.5.2–R37.5.5 in the header deserializer:
+Implement R37.5.2–R37.5.4 in the header deserializer:
 
 - `Btc`/`Ppc` exclusivity;
-- the `Lbc`, `Pivx` and `KomodoAssetChain` layouts;
-- KawPoW only under `Rvn`, by the H0 switch rule, or by the version key if H0
-  could not pin it.
+- the `Lbc`, `Pivx` and `KomodoAssetChain` layouts; under `Pivx` the trailing
+  32 bytes are read after the nonce for every version value, there being no
+  threshold to key them on (§37.5.7b);
+- KawPoW only under `Rvn`, and there by the exact version value `0x30000000`:
+  no activation time exists on any network, so there is no switch rule to
+  apply (§37.5.7b).
 
 Last, withdraw version-only KawPoW detection under `Default`. The registry
 survey shows no registry coin depends on it. A hand-written configuration for
@@ -173,6 +190,11 @@ changelog and in `docs/GLEEC_COMPATIBILITY.md` if upstream differs.
 
 Once LBRY and PIVX parse, item 4's regression is gone. The strict list check
 itself stays; it is required by R37.5.6.
+
+R37.5.5's own structural readings — the PIVX version boundaries, the
+per-network KawPoW activation times and the Firo MTP lower bound — sit on top
+of this step as a Reloaded improvement and wait on what is left of H0 (ch.37
+§37.9 D1). Parity does not need them, and no other part of this step does.
 
 ### H5 — Served-byte identity and linkage (item 2)
 
@@ -184,8 +206,9 @@ itself stays; it is required by R37.5.6.
   `get_block_height_by_hash` uses that identity.
 - **Linkage check:** in list reads, check each header's previous-block hash
   against the identity of the header before it, for families whose identity
-  is a double-SHA256. Skip the check for KawPoW, Firo and Verus unless H0
-  supplies their identity hashes.
+  is a double-SHA256. Skip it for KawPoW, Firo and Verus: no chain-defined
+  identity hash is available for them, so R37.5.7's own escape applies
+  (ch.37 §37.5.7a).
 - **Migration:** rows written so far hold re-encoded bytes. Since
   `47ede628c`, those equal the served bytes for every family except AuxPoW,
   where the difference is the hash scope, not the bytes. Recommendation: no
@@ -207,15 +230,15 @@ itself stays; it is required by R37.5.6.
 
 | Step | Depends on | Size | PR |
 |---|---|---|---|
-| H0 spec confirmation | — | small, dirty side | chapter only |
+| H0 spec confirmation | — | done 2026-10-24 | chapter only |
 | H1 + H2 type and config | — | small | 1 |
 | H3 threading | H1, H2 | medium (≈10 call sites, both stores) | 2 |
-| H4 family rules | H0, H3 | medium | 3 |
-| H5 identity, storage, linkage | H0, H4 | medium, touches persisted data | 4 |
+| H4 family rules | H3 | medium | 3 |
+| H5 identity, storage, linkage | H4 | medium, touches persisted data | 4 |
 
-H0 and H1+H2 can run in parallel. Each PR updates ch.37 §37.5.8 and §37.9 in
-the same commit as its code, and closes the corresponding D paragraph when it
-lands.
+H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
+§37.5.8 and §37.9 in the same commit as its code, and closes the
+corresponding D paragraph when it lands.
 
 ## Risks
 
@@ -264,7 +287,8 @@ lands.
 
 ## References
 
-- CRD ch.37 §37.5 (R37.5.1–R37.5.7), §37.5.8, §37.9 D1–D2.
+- CRD ch.37 §37.5 (R37.5.1–R37.5.7), §37.5.7a, §37.5.7b, §37.5.8,
+  §37.9 D1–D2.
 - Commit `47ede628c` (the collision fix) and its tests in
   `mm2src/kdf_chain/src/header.rs`.
 - Public coin registry `coins` file: `protocol.chain_variant` usage (survey
