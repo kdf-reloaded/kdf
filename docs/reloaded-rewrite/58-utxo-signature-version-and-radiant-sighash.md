@@ -329,6 +329,156 @@ of §58.2 (which is not in Radiant-Core at all), the
 no-accompanying-change findings of R58.2.4 and R58.2.6, and the
 cross-check obligation of T3.
 
+## 58.4A The reference change that introduced the dialect: extent, coverage and designations
+
+> **Clearance (chapter 01 R40) — PENDING.** This section was added on
+> 2026-10-24 by the KDF Spec Reader under the two-team procedure of
+> chapter 01 §1.4A, from forbidden-class input: the reference lineage's
+> single change that introduced the Radiant dialect, and that change's
+> public review record. It is a **candidate awaiting the KDF Dirty Gate**
+> and, until the gate passes, MUST NOT be relied on as a statement of
+> required behaviour or implemented from (R40). A first gate pass on
+> 2026-10-24 returned FAIL; the lines its leak report named were removed,
+> or re-established from the permitted-input classes, under R40, and the
+> section now awaits re-clearance. The clearances of §58.2,
+> §58.4 and §58.5 are complete and are not affected by this addition;
+> nothing cleared was altered. The reference change is identified here
+> only by the released designation that first carries it (chapter 01
+> R11, §1.7); commit and change identifiers are deliberately kept out of
+> the chapter.
+
+This section exists to answer four questions a maintainer put to the
+project after a community pointer to the reference change: whether the
+change does anything beyond the sighash dialect §58.3 binds; what test
+coverage it carries and where that coverage's vectors come from; whether
+it touches the watcher, version-two swap or trade-preimage paths; and
+which released designation first carries it. The answers confirm the
+route of R58.4.3 rather than changing it.
+
+**R58.4A.1** *The change is confined to the signing substrate.* The
+externally observable effect of the reference change is exactly the
+three items of R58.5.2 — the fourth accepted `signature_version` value,
+the dialect of §58.3 selected under the fork-id gate of R58.2.3, and the
+extension of the strict-encoding mask and of the per-input fork-id-bit
+recognition to the new value — and nothing else. Each candidate for an
+accompanying change was checked against the change as merged and against
+the whole tree at the first designation carrying it:
+
+| Candidate accompanying change | In the reference change? | Already covered by this chapter |
+| --- | --- | --- |
+| Address format, address prefixes or a new address-format key | no | R58.2.6 (ordinary UTXO entry) |
+| Transaction version or a transaction-version override | no | R58.2.6 |
+| Output-script construction, HTLC script or script-type handling | no — the only script handling added is the *reading* of output scripts for reference extraction, inside the sighash computation (R58.3.3) | R58.3.3, R58.3.5 |
+| Fee, relay-fee or dust rules | no | R58.2.6 |
+| Electrum protocol behaviour, server selection or request shape | no | — (nothing to cover) |
+| Activation-time checks beyond deserializing the new value | no — the resolution of R58.2.2 is unchanged, and the new value is reached only by naming it | R58.2.1, R58.2.2 |
+| Transaction-hash (identifier) algorithm | no | R58.2.4 |
+| `chain_variant` or any other coin-configuration key | no (see the informative note below) | R58.2.6 |
+| Swap, HTLC, watcher, version-two swap or trade-preimage construction | no (see R58.4A.3) | §58.1 (uniform reach of the resolved version) |
+| Coins-file content | none shipped with the change; the two keys of §58.2 are the whole configuration surface | R58.2.1, R58.2.5 |
+
+The change additionally carried one edit unrelated to Radiant — a
+documentation-comment correction in a derive-macro crate — which binds
+nothing and is recorded here only so that the statement "confined to the
+signing substrate" is exact about the one file it does not describe.
+
+> **Note (informative) — no Radiant `chain_variant` value exists.** The
+> `chain_variant` key of [Chapter 37](37-utxo-spv-and-block-header-validation.md)
+> §37.5 selects a coin's block-header family and nothing else. Its
+> accepted value set (R37.5.1) contains no Radiant value at either
+> released designation this section compares (R58.4A.4), and the Radiant
+> dialect is reached only by naming the fourth value of R58.2.1 under
+> `signature_version` (R58.2.2). The consequence for configuration
+> authors follows from chapter 37, not from this chapter: a coin entry
+> that names an unrecognised `chain_variant` value — a Radiant one
+> included — is rejected at activation with a configuration error under
+> R37.5.1, with no fallback to the default header family, whatever the
+> entry says or omits under `signature_version`; and a recognised value
+> pins a header family only (R37.5.3), never a signing dialect. R58.2.6
+> stands exactly as written: the two keys of §58.2 are the whole
+> configuration surface for the dialect.
+
+**R58.4A.2** *Test coverage of the reference change, and its provenance.*
+The reference change carries three tests. Two of them are characterised
+here, by source and limits only, so that an implementer can build
+equivalent coverage without reading them:
+
+1. *One on-chain signature vector*, taken from a live transaction on the
+   public Radiant chain: the mainnet evidence R58.4.1 already describes,
+   which covers the zero-reference form only (R58.4.2). **Provenance:**
+   Radiant-Core publishes no fixed signature-hash test vector for its
+   dialect at all. Verified on 2026-10-24 against the public Radiant-Core
+   repository cited in §58.9: its data-driven sighash vector test is
+   disabled, with a note that the vectors it would read predate the
+   dialect, and its remaining sighash test draws random scripts from a
+   short opcode list that contains no reference opcode. A fixed vector
+   for the dialect — and in particular one for the reference-bearing
+   opcode path of R58.3.3 — can therefore come only from a transaction
+   the Radiant network accepted, never from Radiant-Core's test suite.
+   The project derives its own under chapter 01 R6 (T3; see the
+   consequence below).
+2. *An extension of the pre-existing strict-encoding test* asserting, for
+   the new value, the same three accepted sighash-type integers the
+   Bitcoin-Cash value already accepted (`0x81`, `0xC2`, `0x43`). T2 of
+   this chapter covers these and adds `0x41`.
+
+**The practical consequence for T3.** Because the reference's only
+signature vector is itself a public-chain artefact, the project's
+implementer can — and shall — derive an equivalent vector from the same
+public source under chapter 01 R6, without reading the reference's.
+Any Radiant mainnet transaction with at least one pay-to-public-key-hash
+input and outputs that push no reference serves. Choosing a *different*
+transaction from the reference's is preferable, not merely acceptable:
+it makes T3 an independent corroboration of R58.4.1 rather than a
+re-execution of the reference's check, and it keeps the chapter's
+deliberate decision not to carry the reference's bytes intact.
+
+**R58.4A.3** *Watcher, version-two swap and trade-preimage paths.* At
+the first designation carrying the dialect, the reference contains **no
+Radiant-specific behaviour anywhere outside the signing substrate**:
+not in the watcher paths, not in the version-two swap paths, not in the
+trade-preimage computation, not in activation, and not in any swap or
+HTLC construction. Those paths reach the dialect only through the coin's
+resolved signature version, exactly as §58.1 describes for every signing
+site, and they were not modified by the change. The reference's public
+change record reports a completed legacy (version-one) atomic swap
+between Radiant and `KMD` under the dialect. That swap is
+**reported, not verified by this project**, and bears on the legacy
+swap path only; it says nothing about version-two swaps, watchers or
+the trade preimage for Radiant, and it does not by itself answer D2.
+
+**R58.4A.4** *Released designations.* The reference change is first
+carried by the publicly published release designation **`v3.0.0-beta`**,
+whose published change list records it under UTXO. It is **not** carried
+by `v2.6.0-beta`, which carries only the first three values of R58.2.1.
+No released designation newer than `v3.0.0-beta` existed on 2026-10-24,
+and the unreleased lineage tips carry no further change to the signing
+substrate after that designation.
+
+**R58.4A.5** *The two-designation and netid question of D4, answered.*
+The two designations differ on this chapter's contract in exactly one
+respect: the fourth value of R58.2.1 is present at `v3.0.0-beta` and
+absent at `v2.6.0-beta`. Everything else — the silent fallback of
+R58.2.2, the ticker- and fork-identifier-based default, the fork-id gate
+of R58.2.3 and the strict-encoding mask for the three pre-existing
+values, and the per-coin final-hashing selection of R58.2.4 — is
+identical at both; the configuration-resolution logic for the two keys
+did not change between the designations, and the signing substrate did
+not change between `v2.6.0-beta` and the Radiant change itself.
+Consequently, a coin entry carrying `"signature_version": "fork_id_rxd"`
+at `v2.6.0-beta` takes the fallback of R58.2.2 and signs with the
+Bitcoin-Cash dialect: a `v2.6.0-beta` node cannot produce a valid
+Radiant signature and so cannot be a Radiant swap counterparty at all.
+Neither designation carries a **netid** dimension in this contract:
+nothing in the resolution of the two keys and nothing in the signing
+substrate reads the network identifier. For the matrix `AGENTS.md` §3
+asks for, the two rows are therefore: *Reference* — `v2.6.0-beta`: no
+Radiant dialect (Radiant unusable, fallback to the Bitcoin-Cash
+dialect); `v3.0.0-beta`: the dialect of §58.3 — and *Network* — no
+difference between `8762` and `6133`, satisfied by this stated
+equivalence. The project's own behaviour follows the newer designation,
+because that is the only one with which a Radiant swap can complete.
+
 ## 58.5 Implementation status in reloaded
 
 > **Clearance (chapter 01 T1, R40).** This section was authored by the
@@ -414,6 +564,12 @@ stating rather than leaving implicit — this test, alone among the tests
 of §58.6, cannot be written from the chapter alone. T4 depends on the
 same vector.
 
+*Added 2026-10-24 (pointer only; the substance is in §58.4A, whose
+clearance is pending under R40).* R58.4A.2 records the provenance of
+the reference's own vector, so that the implementer can choose an
+equivalent — preferably different — public-chain transaction and know
+what it does and does not corroborate.
+
 **T4.** *Field-8 position.* Assert that the digest of T3 changes if field
 8 of R58.3.1 is appended after the lock time instead of inserted before
 the outputs digest. A test that only checks "the digest equals this
@@ -464,11 +620,20 @@ swap lock-time rules — is out of scope here and unestablished. A Coder
 closing R58.5.2 enables correct **signing**; enabling the coin for
 trading is a separate decision with its own verification.
 
+*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
+under R40).* R58.4A.3 records what the reference lineage *reports* about
+Radiant on the legacy swap path, and why that report does not close this
+item.
+
 **D3.** *Reference-bearing outputs.* R58.4.2 leaves the non-zero-
 reference form corroborated only by Radiant-Core and not by an on-chain
 vector. If a Radiant mainnet transaction spending a reference-bearing
 output becomes available, add it as a second vector under T3; until then
 the project's own transactions never reach the path (R58.3.5).
+
+*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
+under R40).* R58.4A.2 records where a vector for this form can come
+from.
 
 **D4.** *The two-reference question, recorded as open.* This chapter
 binds its configuration contract (§58.2), its change scope (R58.5.2) and
@@ -506,6 +671,14 @@ R58.5.2 and §58.6 are the places that must carry it and the §3 matrix is
 owed at that point; should it establish that the two designations agree
 on this contract, that finding is recorded here and the matrix is
 satisfied by a stated equivalence.
+
+*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
+under R40).* R58.4A.5 answers the question this item records — one
+inter-designation difference (the presence of the fourth value), no
+netid dimension — and states the two matrix rows. This item stays open
+as written until §58.4A clears; once it has, R58.4A.5 is the record and
+the §3 matrix is satisfied by the stated equivalence on the network row
+and the stated difference on the reference row.
 
 ## 58.8 Baseline Verifications
 
@@ -673,3 +846,36 @@ satisfied by a stated equivalence.
     which an interop-dense prose candidate would warrant a finding; a
     high volume of dictated matches is the expected shape of such a
     candidate and was not read as evidence.
+
+- *Forbidden corpus — scoped addition of 2026-10-24 (§58.4A), clearance
+  pending.* Consulted, for §58.4A only, under reference designation
+  `v3.0.0-beta` and against `v2.6.0-beta` for the comparison of
+  R58.4A.5: the reference lineage's single change that introduced the
+  Radiant dialect, as merged and in its pre-merge revisions; that
+  change's public review record and published change-list entry; and the
+  whole tree at `v3.0.0-beta` for the absence checks of R58.4A.1 and
+  R58.4A.3. Taken from it, as behaviour only: that the change's effect is
+  confined to the three items of R58.5.2 plus one unrelated
+  documentation-comment edit (R58.4A.1); that no Radiant `chain_variant`
+  value is recognised (the informative note following R58.4A.1); the
+  count, source and limits of its tests (R58.4A.2); the absence of any
+  Radiant-specific behaviour outside the signing substrate and the
+  reported legacy-swap validation (R58.4A.3); the designations
+  (R58.4A.4); and the inter-designation and netid comparison (R58.4A.5).
+  Not taken: any private type, variant, field or function name, any
+  function body or control flow, any test identifier, the vector's
+  bytes, identifiers, amounts or pinned digest, and no error or log
+  literal. The pointer sentences appended to T3, D2, D3 and D4 carry no
+  substance of their own.
+- *Dirty Gate clearance for §58.4A (chapter 01 T1, R40): PENDING.*
+  §58.4A is a candidate produced under R38 that has **not yet** been
+  cleared by the R39 gate: a first gate pass on 2026-10-24 returned FAIL,
+  the lines its leak report named were removed or re-established under
+  R40, and the section awaits re-clearance. It says so at the point it
+  appears, as R40
+  requires; the pointer sentences appended to T3, D2, D3 and D4 say so
+  too. Until the gate returns PASS, R40 withholds the whole of §58.4A.
+  When it has passed, this item is to be replaced by the three-element
+  attestation (extent, method, measure) in corpus-free terms, in the same
+  form as the item above, and the PENDING markers in §58.4A and the four
+  pointers are to be rewritten as complete clearances.
