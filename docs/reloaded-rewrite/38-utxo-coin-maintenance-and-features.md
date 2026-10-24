@@ -275,6 +275,20 @@ contract). Chapter 37 additionally binds the SPV activation configuration,
 header-store, and confirmation-proof behaviour a UTXO coin may separately
 opt into; this chapter does not restate it.
 
+R38.5.4 The coin's **signature-hash algorithm** is selected by a separate
+coin-configuration contract, bound in
+[chapter 58](58-utxo-signature-version-and-radiant-sighash.md) §58.2: the
+`signature_version` key over a closed set of four values, the `fork_id` key
+that forms the signed sighash byte, and the per-coin final-hashing selection
+that is orthogonal to both. That contract reaches **every** signing site of
+the coin, the `sign_raw_transaction` RPC of R38.5.1 included — which matters
+for R38.5.1 specifically, because that RPC accepts caller-supplied scripts
+and so can reach parts of a signature-hash algorithm the project's own
+transaction construction never does (ch. 58 R58.3.5). `signature_version` and
+`chain_variant` are independent: neither implies the other, and the one coin
+whose dialect reloaded does not yet support needs no `chain_variant` at all
+(ch. 58 R58.2.6).
+
 ---
 
 ## Part B -- Required, NOT yet in reloaded (T-PORT)
