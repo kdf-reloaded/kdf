@@ -487,6 +487,35 @@ R6a / R10a.
 
 ---
 
+## #12 — EVM/QRC20 minimum trading volume: baseline formula, and the maker price floor — **OPEN (chapter cleared 2026-10-24)**
+
+CRD reference: [`57-evm-fee-inputs.md`](./57-evm-fee-inputs.md) §57.7A
+(Part D), R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4. Reference designations:
+`v2.0.0-beta` (first), `v2.6.0-beta` and `v3.0.0-beta`, which agree. The
+section **passed the KDF Dirty Gate** on 2026-10-24 (PASS,
+discretionary-expression measure 0.01, finding list empty), recorded in
+ch. 57 §57.12's second scoped-addition item; both items below may be
+implemented from the cleared chapter.
+
+- [ ] **EVM and QRC20 minimum trading volume (ch. 57 R57.7A.1, R57.7A.6).**
+  Reloaded derives it as ten to the power of minus `decimals / 3` with integer
+  division — a pre-anchor baseline formula (ch. 57 V4) — so every
+  eight-decimal ERC-20 token has a 0.01 floor (36 entries in the deployed
+  coins file, the four WBTC variants being the serious cases). The reference
+  reports one smallest unit of the coin (10^-decimals) at every designation
+  since `v2.0.0-beta`. The floor is applied to the node's own maker and
+  taker orders and trade previews and is advertised as the default
+  `min_volume` of its maker orders; it is never applied to a peer's order, so
+  the defect is one-sided against reloaded's users and closing it is a parity
+  **fix** with no compatibility switch (ch. 57 R57.7A.5). The EVM minimum
+  *transaction* amount is zero in both trees and stays zero (R57.7A.3).
+- [ ] **Maker price floor (ch. 57 D7, finding under R57.7A.6).** Reloaded
+  refuses a maker price below 10^-8; the reference accepts any positive
+  price since the same designation. Coin-agnostic, one-line, no switch; no
+  order-match chapter binds order validation yet, so ch. 57 D7 is the record.
+
+---
+
 ## Audit method (for reproducibility)
 
 1. Extracted the 223 unique upstream wire-method strings from
