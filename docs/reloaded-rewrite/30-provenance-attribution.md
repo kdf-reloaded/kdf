@@ -300,7 +300,7 @@ preserved-for-history substrate retained for git-archaeology continuity
 ## 30.6 Document-Set Composition (binding rules)
 
 **R1.** *Per-chapter self-containment.* Each substantive chapter (03
-through 28, 31 through 33, and 35 through 55) MUST
+through 28, 31 through 33, and 35 through 59) MUST
 satisfy the project's chapter-shape rules (Chapter 01 §6): executive
 summary, subsystem shape, the binding-rule sections appropriate to the
 chapter's substrate, tests / deferred work / external references /
