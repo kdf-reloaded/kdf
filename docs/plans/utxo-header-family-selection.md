@@ -20,8 +20,12 @@
 >    divergence need. §37.5.7b answered the rest, and neither residual
 >    blocks parity (H0).
 > 4. The behaviour change of the fix: a header list with leftover bytes is now
->    rejected, so coins whose headers we cannot parse (LBRY, PIVX) now get an
->    error from median-time-past where they used to get a wrong value.
+>    rejected, so coins whose headers we cannot parse now get an error from
+>    median-time-past where they used to get a wrong value. The AuxPoW coins
+>    were in this set while the reader recognised AuxPoW only by two exact
+>    version values; recognition now uses the AuxPoW flag bit 8 per R37.5.2 and
+>    R37.5.4, so they have left it (2026-10-24, see *Resolved* below). LBRY,
+>    PIVX, RIC, RUNES and XPM remain.
 
 ## How the four items connect
 
@@ -91,7 +95,24 @@ step.
   and hashes them. The SPV proof path already carries a `RawBlockHeader`
   alongside the parsed header.
 
-## Goal
+## Resolved
+
+- **AuxPoW recognition (2026-10-24).** The reader gated the whole AuxPoW branch
+  on equality with two hardcoded block-version values, so every current
+  Syscoin-family header missed the test, was read as a plain 80-byte header,
+  and the list was rejected at median-time-past — which both HTLC spend
+  directions and both refund directions need. Recognition now tests the AuxPoW
+  flag bit 8 (`version & 0x100`) per header, per CRD ch.37 **R37.5.2** and
+  **R37.5.4**, and both stale constants are gone. Fixed on branch
+  `fix/auxpow-bit8-recognition` (**PR #55**); it is a parity fix, so it needed
+  no compatibility switch. Consequences for this plan: the AuxPoW coins have
+  left item 4's set (above), and the std-80 fallback is now load-bearing for
+  correctness — a BIP9 chain may legitimately signal deployment bit 8 in an
+  ordinary 80-byte header, and the fallback is what reads it — so H4 must not
+  weaken it. The AuxPoW *identity-hash scope* question is untouched and stays
+  open as item 2 / §37.9 D2: AuxPoW coins are still not SPV-ready.
+
+## Goal (what done looks like)
 
 Every header read of a UTXO coin parses with the family its configuration
 names (ch.37 R37.5.1, R37.5.1a). Explicit families are exclusive (R37.5.3).
@@ -303,12 +324,37 @@ corresponding D paragraph when it lands.
    compatibility switch for a release, or remove it outright. Removing it is
    simpler and the registry does not need it.
 
+## Upstream reference pointers for a KDF Spec Reader dispatch
+
+> **A clean context must not open any of these.** They are recorded here solely
+> to direct a future KDF Spec Reader dispatch — the only role permitted to read
+> upstream/GLEEC KDF material. The numbers and descriptions below were supplied
+> by a community maintainer and transcribed without being fetched, opened,
+> previewed or verified.
+
+| Upstream reference | As described to us |
+|---|---|
+| pull request **#2692** | the large rework of the coin-variant / chain-variant logic. Before it the variants were hardcoded in the code, keyed on tickers; after it they are read from the coins configuration file. |
+| pull request **#2572** | PIVX block headers, made while the variants were still hardcoded. |
+| pull request **#2563** | KawPoW headers, also from the hardcoded era. |
+| pull request **#2583** | further header work. |
+
+**Take #2692 first.** That is the maintainer's recommendation: it affects
+multiple coins at once, and his stated minimum goal for this plan is that our
+build also reads the variants from the coins file instead of using hardcoded
+values — which is exactly H2 and H3 here. The three header-specific pull
+requests predate that rework, so anything read from them has to be re-read
+against the configuration-driven shape #2692 introduced; order the dispatch
+accordingly.
+
 ## References
 
 - CRD ch.37 §37.5 (R37.5.1–R37.5.7), §37.5.7a, §37.5.7b, §37.5.8,
   §37.9 D1–D2.
 - Commit `47ede628c` (the collision fix) and its tests in
   `mm2src/kdf_chain/src/header.rs`.
+- Branch `fix/auxpow-bit8-recognition` (PR #55) and its tests in the same file
+  — the AuxPoW recognition fix recorded under *Resolved*.
 - Public coin registry `coins` file: `protocol.chain_variant` usage (survey
   above).
 - Electrum protocol: `blockchain.block.header`, `blockchain.block.headers`.
