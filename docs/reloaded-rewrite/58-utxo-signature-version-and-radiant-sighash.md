@@ -331,21 +331,30 @@ cross-check obligation of T3.
 
 ## 58.4A The reference change that introduced the dialect: extent, coverage and designations
 
-> **Clearance (chapter 01 R40) — PENDING.** This section was added on
+> **Clearance (chapter 01 T1, R40).** This section was added on
 > 2026-10-24 by the KDF Spec Reader under the two-team procedure of
 > chapter 01 §1.4A, from forbidden-class input: the reference lineage's
 > single change that introduced the Radiant dialect, and that change's
-> public review record. It is a **candidate awaiting the KDF Dirty Gate**
-> and, until the gate passes, MUST NOT be relied on as a statement of
-> required behaviour or implemented from (R40). A first gate pass on
-> 2026-10-24 returned FAIL; the lines its leak report named were removed,
-> or re-established from the permitted-input classes, under R40, and the
-> section now awaits re-clearance. The clearances of §58.2,
-> §58.4 and §58.5 are complete and are not affected by this addition;
-> nothing cleared was altered. The reference change is identified here
-> only by the released designation that first carries it (chapter 01
-> R11, §1.7); commit and change identifiers are deliberately kept out of
-> the chapter.
+> public review record. It **passed the KDF Dirty Gate** on 2026-10-24 in
+> a **second pass**: PASS, discretionary-expression measure 0.02, finding
+> list empty, and accordingly no remedy class for any line or for the
+> candidate as a whole. A first pass the same day returned FAIL; the
+> lines its leak report named were removed, or re-established from the
+> permitted-input classes, under R40, and the second pass re-examined
+> every leak category the first had found over the whole section rather
+> than only at the flagged positions. The first verdict is superseded by
+> the second and is not relayed further. The clearance is therefore
+> **complete and not pending**, and R40 withholds nothing here. The
+> clearances of §58.2, §58.4 and §58.5 are earlier, separate and
+> unaffected; nothing they cleared was altered or re-examined. The
+> reference change is identified here only by the publicly published
+> release designations `v3.0.0-beta` (the first that carries it) and
+> `v2.6.0-beta` (the comparison point of R58.4A.5); its merged form and
+> its pre-merge revisions are branch states that chapter 01 R11 and §1.7
+> do not allow to be named, and that limit is left visible rather than
+> papered over. The extent, method and measure of the pass are recorded
+> once, in the *Dirty Gate clearance for §58.4A* item of §58.10, and are
+> not restated here.
 
 This section exists to answer four questions a maintainer put to the
 project after a community pointer to the reference change: whether the
@@ -394,7 +403,7 @@ signing substrate" is exact about the one file it does not describe.
 > included — is rejected at activation with a configuration error under
 > R37.5.1, with no fallback to the default header family, whatever the
 > entry says or omits under `signature_version`; and a recognised value
-> pins a header family only (R37.5.3), never a signing dialect. R58.2.6
+> pins a header family only (R37.5.1), never a signing dialect. R58.2.6
 > stands exactly as written: the two keys of §58.2 are the whole
 > configuration surface for the dialect.
 
@@ -564,9 +573,10 @@ stating rather than leaving implicit — this test, alone among the tests
 of §58.6, cannot be written from the chapter alone. T4 depends on the
 same vector.
 
-*Added 2026-10-24 (pointer only; the substance is in §58.4A, whose
-clearance is pending under R40).* R58.4A.2 records the provenance of
-the reference's own vector, so that the implementer can choose an
+*Added 2026-10-24 (pointer only; the substance is in §58.4A, cleared by
+the KDF Dirty Gate on 2026-10-24 in a second pass — see the *Dirty Gate
+clearance for §58.4A* item of §58.10).* R58.4A.2 records the provenance
+of the reference's own vector, so that the implementer can choose an
 equivalent — preferably different — public-chain transaction and know
 what it does and does not corroborate.
 
@@ -620,10 +630,11 @@ swap lock-time rules — is out of scope here and unestablished. A Coder
 closing R58.5.2 enables correct **signing**; enabling the coin for
 trading is a separate decision with its own verification.
 
-*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
-under R40).* R58.4A.3 records what the reference lineage *reports* about
-Radiant on the legacy swap path, and why that report does not close this
-item.
+*Added 2026-10-24 (pointer only; substance in §58.4A, cleared by the KDF
+Dirty Gate on 2026-10-24 in a second pass — §58.10).* R58.4A.3 records
+what the reference lineage *reports* about Radiant on the legacy swap
+path, and why that report — reported, not verified by this project —
+does not close this item.
 
 **D3.** *Reference-bearing outputs.* R58.4.2 leaves the non-zero-
 reference form corroborated only by Radiant-Core and not by an on-chain
@@ -631,9 +642,10 @@ vector. If a Radiant mainnet transaction spending a reference-bearing
 output becomes available, add it as a second vector under T3; until then
 the project's own transactions never reach the path (R58.3.5).
 
-*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
-under R40).* R58.4A.2 records where a vector for this form can come
-from.
+*Added 2026-10-24 (pointer only; substance in §58.4A, cleared by the KDF
+Dirty Gate on 2026-10-24 in a second pass — §58.10).* R58.4A.2 records
+where a vector for this form can come from: only from a transaction the
+Radiant network accepted, never from Radiant-Core's test suite.
 
 **D4.** *The two-reference question, recorded as open.* This chapter
 binds its configuration contract (§58.2), its change scope (R58.5.2) and
@@ -672,13 +684,16 @@ owed at that point; should it establish that the two designations agree
 on this contract, that finding is recorded here and the matrix is
 satisfied by a stated equivalence.
 
-*Added 2026-10-24 (pointer only; substance in §58.4A, clearance pending
-under R40).* R58.4A.5 answers the question this item records — one
-inter-designation difference (the presence of the fourth value), no
-netid dimension — and states the two matrix rows. This item stays open
-as written until §58.4A clears; once it has, R58.4A.5 is the record and
-the §3 matrix is satisfied by the stated equivalence on the network row
-and the stated difference on the reference row.
+*Added 2026-10-24 (pointer with a one-line summary; substance in §58.4A,
+cleared by the KDF Dirty Gate on 2026-10-24 in a second pass — §58.10).*
+R58.4A.5 answers the question this item records — one inter-designation
+difference (the presence of the fourth value), no netid dimension — and
+states the two matrix rows. §58.4A has cleared, so R58.4A.5 is the
+record: the §3 matrix is satisfied by the stated equivalence on the
+network row and the stated difference on the reference row. What remains
+of this item is bookkeeping, not an open question — carrying that
+finding into §58.6 when R58.5.2 is implemented — and the item closes
+together with D1 at that point.
 
 ## 58.8 Baseline Verifications
 
@@ -847,8 +862,9 @@ and the stated difference on the reference row.
     high volume of dictated matches is the expected shape of such a
     candidate and was not read as evidence.
 
-- *Forbidden corpus — scoped addition of 2026-10-24 (§58.4A), clearance
-  pending.* Consulted, for §58.4A only, under reference designation
+- *Forbidden corpus — scoped addition of 2026-10-24 (§58.4A), cleared by
+  the KDF Dirty Gate the same day in a second pass (the item below).*
+  Consulted, for §58.4A only, under reference designation
   `v3.0.0-beta` and against `v2.6.0-beta` for the comparison of
   R58.4A.5: the reference lineage's single change that introduced the
   Radiant dialect, as merged and in its pre-merge revisions; that
@@ -865,17 +881,129 @@ and the stated difference on the reference row.
   Not taken: any private type, variant, field or function name, any
   function body or control flow, any test identifier, the vector's
   bytes, identifiers, amounts or pinned digest, and no error or log
-  literal. The pointer sentences appended to T3, D2, D3 and D4 carry no
-  substance of their own.
-- *Dirty Gate clearance for §58.4A (chapter 01 T1, R40): PENDING.*
-  §58.4A is a candidate produced under R38 that has **not yet** been
-  cleared by the R39 gate: a first gate pass on 2026-10-24 returned FAIL,
-  the lines its leak report named were removed or re-established under
-  R40, and the section awaits re-clearance. It says so at the point it
-  appears, as R40
-  requires; the pointer sentences appended to T3, D2, D3 and D4 say so
-  too. Until the gate returns PASS, R40 withholds the whole of §58.4A.
-  When it has passed, this item is to be replaced by the three-element
-  attestation (extent, method, measure) in corpus-free terms, in the same
-  form as the item above, and the PENDING markers in §58.4A and the four
-  pointers are to be rewritten as complete clearances.
+  literal. Nothing in the *taken* list is attributed to the pre-merge
+  revisions alone; they were consulted alongside the merged form and are
+  recorded as inputs so that the record withholds nothing. The merged
+  form and the pre-merge revisions are branch states, which chapter 01
+  R11 and §1.7 do not allow to be designated more precisely than by the
+  release that first carries the change; the record is no more precise
+  than the two designations it names. The pointer sentences appended to
+  T3, D2 and D3 carry no substance of their own; the one appended to D4
+  summarizes R58.4A.5's answer in a line and rests on that rule's
+  clearance, which the item below records.
+- *Dirty Gate clearance for §58.4A (chapter 01 T1, R40, R43).* §58.4A,
+  the four pointer sentences appended to T3, D2, D3 and D4, and the two
+  footer items of 2026-10-24 (the scoped addition above and this item)
+  were authored by the KDF Spec Reader under the two-team procedure of
+  chapter 01 §1.4A and **passed the KDF Dirty Gate** on 2026-10-24 in a
+  **second pass**: PASS, discretionary-expression measure 0.02, finding
+  list empty, and accordingly no remedy class for any line or for the
+  candidate as a whole. The clearance is therefore **complete and not
+  pending**, and R40 withholds nothing in §58.4A; the section-head block
+  of §58.4A and the four pointers say so at the point each appears. The
+  clearance item above is unchanged by this pass and keeps its own date,
+  measure and scope: §58.2, §58.4 and §58.5 were not re-examined and are
+  neither reopened nor re-dated. This item is written on the clean side
+  from the verdict, which reached the clean side as relayed text rather
+  than as a gate-written file; that is record-keeping and adds no
+  chapter content.
+
+  *A second pass, and what the first one decided.* A first pass on the
+  same day returned FAIL, discretionary-expression measure 0.20, with
+  seven findings, each relayed as a line location, a leak category and a
+  remedy class and nothing else. The categories were: development-process
+  narration, test-body transcription, review-record paraphrase offered as
+  provenance, pinned-constant characterization, test-fixture
+  transcription, quoted review-record wording, and dependent repetition
+  of a flagged passage. The remedy classes offered were `remove` and
+  `re-establish`. Each finding was answered in the manner its class
+  requires — deletion with nothing substituted, or deletion followed by
+  a fresh statement of the matter as behavior or as a permitted-input
+  fact (R40); the informative note following R58.4A.1 and the provenance
+  statement of R58.4A.2 are where the two re-established matters now
+  stand. The second pass re-examined all seven categories over the whole
+  candidate — §58.4A, the four pointers and the two footer items — and
+  not only at the first pass's line positions, and found none recurring.
+  The first verdict is superseded by the second and is not relayed
+  further.
+
+  The three elements of this pass's R39 scope attestation, carried
+  forward here in corpus-free terms as chapter 01 T1 requires. One of
+  the three carries a limit, recorded as a visible gap rather than
+  completed from elsewhere:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    §58.4A names for itself: the reference lineage's single change that
+    introduced the Radiant signature-hash dialect, compared in full
+    (**two files** changed by it); that change's public review record,
+    read in full (its description and every review, inline review
+    comment and discussion comment), and its entry in the published
+    change list of the release that first carries it; the resolution of
+    the two coin-configuration keys of §58.2 at both released
+    designations (**one file**, compared across the two); the signing
+    substrate's change history from the older designation through the
+    newer one and onward to the unreleased tips; and the whole tree at
+    the newer designation, searched once for any Radiant-specific
+    behavior (**three files** inspected as a result). Reference
+    designations: the publicly published release designations
+    `v3.0.0-beta` (the first that carries the change) and `v2.6.0-beta`
+    (the comparison point of R58.4A.5), which the lineage's own release
+    artifacts carry and which §1.7 admits as public-release facts. Each
+    of the first pass's seven leak categories was re-examined over the
+    whole candidate, not only at the first pass's line positions. Not
+    compared: §58.1–§58.3, §58.5–§58.9 and the earlier footer items,
+    which lie outside the material added on 2026-10-24; the earlier
+    clearance of §58.2, §58.4 and §58.5 stands as the item above
+    records.
+
+    **The gap in this element, left visible rather than completed.** The
+    change's merged form and the revision history its review record
+    carries were also compared, but a merged form and a pre-merge
+    revision are branch states, and chapter 01 R11 and §1.7 admit no
+    designation for a branch state more precise than the release that
+    first carries the change. No post-anchor commit identifier, no
+    branch name and no location within the compared material is given,
+    and the record is no more precise than the two designations above.
+
+  - *Method.* **Combined.** By reading, with the per-token
+    forced-versus-free test applied to every identifier, string value,
+    numeric constant and designation the candidate carries; supplemented
+    by mechanical repository queries on the forbidden-class material —
+    tag ancestry of the change, per-file change listings between the two
+    designations and after the newer one, a tree-wide text search at the
+    newer designation, and a textual comparison of the two keys'
+    resolution across the designations — used only to check the
+    candidate's factual claims and not as a similarity instrument. This
+    repository's R35 gate tool was not run: the candidate embeds no code
+    block, so that instrument was not applicable; the absence is stated
+    so that it is visible rather than implied. One cross-check outside
+    the forbidden-class material was made, on permitted input: the
+    provenance statement of R58.4A.2 was verified directly against the
+    public Radiant-Core repository cited in §58.9 (R3 / R6), and its
+    three assertions about that repository hold.
+
+  - *Measure.* **0.02** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one. Excluded from the
+    measured set as dictated or already cleared: the two
+    coin-configuration key names and their accepted string values
+    (public third-party configuration schema; R58.2.1); the sighash-type
+    byte values (the public Bitcoin / Bitcoin-Cash sighash definition;
+    the three values R58.4A.2 names are moreover baseline-existing, R1);
+    the ticker `KMD`; the two network identifiers (bound by `AGENTS.md`
+    §3); the two release designations (public-release facts, §1.7); and
+    every restatement of rules already cleared in §58.2, §58.4 and
+    §58.5. **Judgement standard read against:** a pass requires zero
+    findings in R39's closed leak-category set, with each residual match
+    individually attributable to one of the excluded classes; every
+    residual match met that standard. The residual figure is the
+    ordinary cost of describing, in the same dictated vocabulary, the
+    behavior the reference implements; a high volume of dictated matches
+    was not read as evidence.
+
+  *Which parts carry an inline pointer to this item.* The section-head
+  block of §58.4A carries the clearance statement, and the pointer
+  sentences appended to T3, D2, D3 and D4 each name the clearance in
+  their opening parenthesis — the same places the pending statements
+  stood, converted where they were. The D4 pointer is the one that also
+  summarizes R58.4A.5's answer in a line; it depends on that rule's
+  clearance, which this item records.
