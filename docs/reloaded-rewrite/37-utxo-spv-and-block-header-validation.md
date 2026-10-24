@@ -188,6 +188,16 @@ a list of consecutive headers (`blockchain.block.headers`, used by the sync
 loop of §37.2 and by the Electrum-side median-time-past computation of
 R37.6.2).
 
+> **Clearance (chapter 01 T1, R40).** The material the later
+> re-confirmation pass added here was authored by the KDF Spec Reader
+> under the chapter-01 §1.4A two-team procedure and **passed the KDF
+> Dirty Gate** on 2026-10-24 before being relied on (PASS, finding list
+> empty), so nothing it added is a candidate awaiting a gate. Its extent,
+> method and measure are recorded once, in the *Dirty Gate clearance*
+> item of §37.10, and are not restated here; the chapter's earlier
+> forbidden-class-sourced material stands on the separate pre-adoption
+> record of the same section and was not part of that candidate.
+
 ### 37.5.1 Selection authority
 
 R37.5.1 The header family of a UTXO coin shall be selected **per coin, from
@@ -201,16 +211,60 @@ and shall be accepted verbatim:
 | `chain_variant` value | Family it pins (see §37.5.2) |
 |---|---|
 | *(key absent)* | Default: standard 80-byte header, plus the version-signalled families of R37.5.4 subject to the guard of R37.5.6. |
-| `"BTC"` | Standard 80-byte header only, whatever the version value (R37.5.3). |
+| `"BTC"` | Standard 80-byte header only, whatever the version value (R37.5.3). **†** |
 | `"PPC"` | Standard 80-byte header (Peercoin-style); a version value of 4 does not select the Equihash-style layout. |
 | `"QTUM"` | Qtum proof-of-stake header. |
 | `"LBC"` | LBRY claim-trie header. |
-| `"RVN"` | Standard header before the chain's KawPoW switch, KawPoW header after it. |
+| `"RVN"` | Standard header before the chain's KawPoW switch, KawPoW header after it. **†** |
 | `"PIVX"` | PIVX header with the trailing Sapling root. |
 | `"RICK"`, `"MORTY"` | Komodo asset-chain Equihash-style header for every block, including a genesis block whose version value is 1. |
 
+**† This cell states a requirement of this chapter and not a ported
+behaviour.** The distinction matters here and not only two subsections
+away: the whole column reads as one list, and a reader who takes every
+cell for as-built reference behaviour will under-count what has to be
+built. Unmarked cells fall within the scope of the port note in §37.5.8 —
+the key, the closed value set, the rejection of an unrecognised value,
+and the family each of those values pins. The two marked cells do not:
+`"BTC"`'s exclusivity is bound by R37.5.3, and the finding beneath that
+rule records that the value is a partial guard rather than the
+exclusivity the rule requires; `"RVN"`'s time-switched reading is bound
+by R37.5.5, and §37.5.7b records that this family is keyed on a version
+value with no time comparison. §37.5.8's closing list is the full
+inventory of what remains this project's own, and §37.9 D1 is what
+closing the ported part takes.
+
 An unrecognised `chain_variant` string shall reject coin activation with a
 configuration error; it shall not silently fall back to the default.
+
+> **Reference vintage of R37.5.1 (confirmed).** The configuration-selected
+> family, the accepted-value set in the table above, and the
+> reject-on-unrecognised-value rule are all **as-built in the reference**
+> from release designation `v2.6.0-beta` onward, unchanged at
+> `v3.0.0-beta`. The accepted set is closed at exactly the eight strings
+> named above (`BTC`, `QTUM`, `LBC`, `PPC`, `RICK`, `MORTY`, `RVN`,
+> `PIVX`); the key-absent default is not expressible as a string. R37.5.1
+> is therefore a **port**, not an invention, and the value spellings are
+> dictated by the deployed coin files rather than chosen here.
+>
+> *Deployed values.* The public third-party coins configuration (snapshot
+> of 2026-10-18) uses six of the eight: `BTC` on fourteen entries, `QTUM`
+> on eleven, `RVN` on four, `PIVX` on two, `LBC` on two and `PPC` on one.
+> `RICK` and `MORTY` no longer appear in it — they are the two
+> development asset chains the value set was introduced for — so the
+> project must still accept them but no shipped coin exercises them.
+>
+> *Operator check worth making before R37.5.3 is enforced.* `MEWC` is
+> configured with `"chain_variant": "BTC"`. If that chain's headers
+> actually carry the KawPoW shape of §37.5.2, then under the exclusivity
+> of R37.5.3 its header-list reads consume 80 bytes per 120-byte header:
+> the reference accepts the result silently as a list of wrongly shaped
+> headers (see the finding in §37.5.6) and the project rejects the list
+> under R37.5.6. Either outcome breaks that coin's median-time-past, and
+> therefore the refund path of R37.6.2, so the coin's own published header
+> definition should be checked against its configured value and the coin
+> file corrected if they disagree. The same check applies to any further
+> KawPoW-family entry added later.
 
 R37.5.1a The configured family shall apply identically to **every** header
 read path of the coin: single-header reads, header-list reads, the starting
@@ -229,6 +283,21 @@ another path of the same coin parses with the configured one.
 > `chain_variant` (for example a Qtum-, LBRY-, PIVX- or KawPoW-family coin)
 > those reads either fail on leftover bytes or produce a wrongly shaped header.
 > R37.5.1a closes this: the coin's configured family travels with every read.
+>
+> *Confirmed at the current vintage.* The finding was re-checked and still
+> holds at release designation `v3.0.0-beta`. The split is now precise: the
+> configured family **does** travel with header-list reads, with the
+> starting-header check, with the median-time-past header list, and with both
+> header stores' re-reads; it does **not** travel with the two single-header
+> fetches named above, which still parse through the family-agnostic generic
+> entry point. That makes the asymmetry sharper rather than broader — those
+> two paths are exactly the ones that supply a block's timestamp and a
+> confirmation proof, so a configured-family coin can sync and store its
+> headers correctly and still mis-read the one header a swap confirmation
+> decision rests on. One compensation applies only to those two paths: the
+> generic entry point requires the parse to consume the served bytes exactly
+> (see §37.5.6), so for a fixed-size family longer than 80 bytes the read
+> fails loudly instead of returning a wrongly shaped header.
 
 ### 37.5.2 Header families and their dictated layouts
 
@@ -280,6 +349,35 @@ AuxPoW-flagged block when the bytes served are exactly 80 (see R37.5.6).
 > chapter requires the configured family's own rule where it is known
 > (R37.5.5). Where a chain's rule is not yet pinned, the upstream version
 > keys are an acceptable interim reading.
+>
+> *Confirmed at the current vintage.* Every entry in the "Upstream
+> recognition" column above was re-verified at release designations
+> `v2.6.0-beta` and `v3.0.0-beta` and is accurate as written, including
+> the PIVX row's unconditional trailing read and the three rows whose
+> recognition ignores `chain_variant` entirely (Verus and both Firo
+> layouts). No family was added or removed between the two designations.
+
+R37.5.2b **The AuxPoW parent header is std-80.** Inside the AuxPoW proof
+of the merged-mining row above, the trailing parent block header shall be
+read as a plain 80-byte header, whatever its version value and whatever
+family the coin is configured as. The merged-mining specification places
+the parent chain's own header there, and a parent header never carries a
+nested proof of its own, so no family inference applies to it.
+
+> **Code-quality finding (informative).** Upstream reads the parent header
+> through the same family-sensitive path as the outer header, carrying the
+> coin's configured family and the whole version-inference set into it. A
+> parent header whose version value happens to set the AuxPoW flag bit
+> would therefore be read as carrying a nested proof of its own, and a
+> parent header whose version value is 4 on a coin configured as neither
+> `"BTC"` nor `"PPC"` would be read as an Equihash-style header — in both
+> cases consuming far past the end of the real parent header. Neither is
+> reachable on the merged-mined chains deployed today, because their
+> parent chains' version values set neither pattern; but the version
+> values in question belong to the *parent* chain and not to this project
+> or to the coin being activated, so neither is a safe implicit
+> assumption. R37.5.2b removes the inference. *(Confirmed at release
+> designation `v3.0.0-beta`.)*
 
 ### 37.5.3 Explicit families are exclusive
 
@@ -297,6 +395,12 @@ layout at 80 bytes.
 > `"BTC"` included. A Bitcoin-derived chain whose blocks signal only version
 > bit 12 (version `0x20001000`) after late October 2021 would have each
 > header read as a 120-byte ProgPoW header.
+>
+> *Confirmed at the current vintage.* Re-verified at release designation
+> `v3.0.0-beta`: the AuxPoW, Equihash-style and KawPoW readings are gated
+> on the configured family, and the two Firo readings and the Verus
+> reading are not gated on it at all. The `"BTC"` value is therefore still
+> a partial guard rather than the exclusivity R37.5.3 requires.
 
 ### 37.5.4 Default family (key absent) and version-signalled families
 
@@ -360,23 +464,59 @@ A rejected list shall be surfaced as a transient backend/format error of the
 sync loop (R37.2.3) or of the median-time-past query (R37.6.2). It shall not
 be stored, and it shall not be turned into a median from a truncated set.
 
-> **Code-quality finding (informative).** Upstream has no defence against a
-> version value that belongs to two families. Its only protection is the
-> per-coin `chain_variant` gate on some families. Header lists are read as
-> "count headers, one after another" with no check that the bytes end exactly
-> where the last header ends, so a misparse that reads too few bytes goes
-> unnoticed and one that reads too many shows up only as an unexpected end.
-> Nothing checks lengths or linkage and falls back to the standard layout.
-> On an Electrum-connected coin, a header-list failure stops the
-> median-time-past query. That value feeds the refund-eligibility check of an
-> HTLC and the lock-time of the refund transaction, so a collision can stop
-> such a coin from refunding until the parse is fixed. The proposed correct
-> behaviour is R37.5.3, R37.5.4 and R37.5.6: explicit families are
-> exclusive, KawPoW needs `"RVN"`, and any version-derived layout choice is
-> confirmed by exact byte consumption and, where computable, by linkage, with
-> std-80 as the fallback.
+> **Code-quality finding (informative) — corrected and re-confirmed.** An
+> earlier revision of this note claimed upstream checks no lengths at all.
+> That was too strong, and the corrected statement is more useful because
+> it localises exactly where the protection is missing. As re-verified at
+> release designations `v2.6.0-beta` and `v3.0.0-beta`:
+>
+> - **Single header through the generic entry point** — the two paths
+>   named in §37.5.1a: the parse **must** consume the served bytes
+>   exactly, and leftover bytes are a hard error. So a length check does
+>   exist here. It is the one place it exists, and it is also the one
+>   place that ignores the configured family, so the two properties never
+>   help each other.
+> - **Single header through a family-aware entry point** — the
+>   starting-header check and both header stores' re-reads: the configured
+>   family is honoured and **no** exact-consumption check is applied.
+> - **Header list** — the sync loop and the median-time-past query: the
+>   served count is prefixed as a compact-size integer and that many
+>   headers are read one after another, with **no** check that the read
+>   ends exactly at the end of the served bytes. A misparse that consumes
+>   too few bytes per header therefore **succeeds silently** and yields
+>   that many wrongly shaped headers; only one that consumes too many
+>   surfaces, and then as an unexpected end.
+> - **Nowhere** is there a retry under the standard layout, and nowhere is
+>   there a linkage check between consecutive headers.
+>
+> The silent-success case is the dangerous one and it is reachable from
+> configuration alone: a coin whose headers are longer than 80 bytes but
+> whose configured family does not select that length reads 80 bytes per
+> header and returns a full list of headers whose time fields were taken
+> from the wrong offsets. On an Electrum-connected coin the
+> median-time-past query consumes that list; the value feeds the
+> refund-eligibility check of an HTLC and the lock-time of the refund
+> transaction, so a wrong median can delay or mis-time a refund **without
+> any error being reported**. A header-list parse failure, by contrast,
+> stops the query loudly. The proposed correct behaviour is unchanged:
+> R37.5.3, R37.5.4 and R37.5.6 — explicit families are exclusive, KawPoW
+> needs `"RVN"`, and any version-derived layout choice is confirmed by
+> exact byte consumption and, where computable, by linkage, with std-80 as
+> the fallback. Reloaded already applies exact consumption on every path
+> (§37.5.8), which is what turns the silent-success case into a rejected
+> list.
 
 ### 37.5.7 Identity hash and stored bytes
+
+> **Clearance (chapter 01 T1, R40).** The material the later
+> re-confirmation pass added here was authored by the KDF Spec Reader
+> under the chapter-01 §1.4A two-team procedure and **passed the KDF
+> Dirty Gate** on 2026-10-24 before being relied on (PASS, finding list
+> empty), so nothing it added is a candidate awaiting a gate. Its extent,
+> method and measure are recorded once, in the *Dirty Gate clearance*
+> item of §37.10, and are not restated here; the chapter's earlier
+> forbidden-class-sourced material stands on the separate pre-adoption
+> record of the same section and was not part of that candidate.
 
 R37.5.7 A header's block-identity hash, and the bytes the header store keeps
 (§37.3), shall be derived from the bytes as served. They shall not come from a
@@ -404,8 +544,76 @@ be skipped.
 > as well as its 80-byte base, so hash-keyed lookups and parent-hash checks
 > on merged-mined chains cannot match the chain's real block hashes. R37.5.7
 > removes both problems.
+>
+> *Confirmed at the current vintage.* Both halves were re-verified at
+> release designation `v3.0.0-beta` and both still hold: the nonce is
+> omitted from the re-encoding when the header actually carries a
+> KawPoW/ProgPoW nonce trailer **or** when its version value equals the
+> KawPoW value and its 32-bit nonce is zero — the second condition is keyed
+> on values rather than on the family, which is the defect — and the
+> identity hash is a double-SHA256 over the whole re-encoding, AuxPoW proof
+> included.
 
-<<<SPEC Chain-rule details cited from public chain definitions and not re-verified in this pass: the PIVX header-version thresholds for its zerocoin-era field and its Sapling-root field; the Firo MTP start and ProgPoW switch rules; the Ravencoin KawPoW activation time per network; the KawPoW, Firo and Verus identity hashes; and whether Electrum servers for the KawPoW and Firo families serve the full header shapes of §37.5.2. Confirm them against each chain's published header definition before R37.5.5 is implemented for those families. SPEC>>>
+#### 37.5.7a Chain-identity hashes: what the reference does, and the divergence R37.5.7 creates
+
+R37.5.7a The reference computes **every** family's block-identity hash the
+same way: a double-SHA256 over the re-encoded header. It implements no
+chain-defined identity hash for any family, including the three whose
+chains define one (KawPoW, both Firo layouts, and Verus). R37.5.7's
+requirement that those three use their chains' own identity hashes is
+therefore a deliberate **Reloaded divergence** from the reference, and
+this rule bounds it:
+
+- The divergence is **local, not on the wire.** A header's identity hash
+  is the header store's hash-keyed lookup key and an input to the linkage
+  checks of R37.5.6 and R37.7.2. It is never sent to a peer, never part of
+  a signed preimage, and never part of an RPC response shape, so two nodes
+  computing it differently cannot disagree over the wire.
+- It therefore needs **no** `docs/COMPAT_SWITCHES.md` entry, but it does
+  need a storage decision: changing the hash changes an existing store's
+  keys, so adopting it carries the migration-or-resync decision already
+  recorded in §37.9 D2.
+- Until a chain's own identity hash is implemented for one of those three
+  families, R37.5.7's own escape applies — the linkage checks skip that
+  family rather than compare a hash that cannot match.
+
+#### 37.5.7b Resolution of the former open `SPEC` note
+
+The `SPEC` note that stood here listed five chain-rule details to confirm
+before R37.5.5 could be implemented for the time-switched and
+version-thresholded families. Four of the five are now answered, and the
+answers collapse most of the blocker — because what they establish is
+that **the reference implements none of these chain rules**, so reaching
+parity on R37.5.1–R37.5.4 needs none of them:
+
+| Former open item | Resolution |
+| --- | --- |
+| Firo MTP start and ProgPoW switch rules | The reference has **no MTP start rule at all**. It keys both Firo layouts on one exact version value together with one switch timestamp, `1635228000`: the MTP layout when the block time is **before** it, the ProgPoW layout when the time is **at or after** it. There is no lower bound on the MTP layout. Confirmed at `v2.6.0-beta` and `v3.0.0-beta`. |
+| Ravencoin KawPoW activation time per network | The reference has **no activation time** for this family on any network. The KawPoW layout is keyed on the exact version value plus the configured `"RVN"` family, with no time comparison anywhere. There is therefore no per-network constant to obtain for parity. Confirmed at both designations. |
+| KawPoW, Firo and Verus identity hashes | The reference uses **no** chain-defined identity hash for these families (§37.5.7a). None needs to be sourced for parity; they are needed only for R37.5.7's divergence, whose adoption is gated on §37.9 D2 regardless. |
+| PIVX header-version thresholds | The reference applies **no version threshold**: for a coin configured as `"PIVX"` it reads one 32-byte field after the nonce for every header, whatever the version value. That is consistent with being byte-correct over the chain's recent history, because the chain's zerocoin-era field and its Sapling-root field occupy the same 32-byte position and differ only in meaning — a single unconditional read is correct for every version carrying **either**, and wrong only for the chain's earliest versions, which carry neither. The exact version boundaries remain unverified and are still needed for R37.5.5. |
+| Whether Electrum servers for the KawPoW and Firo families serve the full header shapes | **Still open.** The reference's reader expects the 120-byte KawPoW/ProgPoW shape and the 180-byte Firo MTP shape from server-served bytes, which is indirect evidence that the servers deployed for those coins do serve them. It is not a direct observation and the project has not made one. |
+
+> **Superseded `SPEC` note — retained for the record, not an open item.**
+> The note below carried the `SPEC` markers until §37.5.7b answered four
+> of its five items. The markers have been removed and the text kept in
+> full, so that a reader, and equally a count of open `SPEC` items in
+> this chapter, finds exactly one open note — the one immediately after
+> this block — rather than two of which one is closed. The superseded
+> text, unchanged:
+>
+> *Chain-rule details cited from public chain definitions and not
+> re-verified in this pass: the PIVX header-version thresholds for its
+> zerocoin-era field and its Sapling-root field; the Firo MTP start and
+> ProgPoW switch rules; the Ravencoin KawPoW activation time per network;
+> the KawPoW, Firo and Verus identity hashes; and whether Electrum
+> servers for the KawPoW and Firo families serve the full header shapes
+> of §37.5.2. Confirm them against each chain's published header
+> definition before R37.5.5 is implemented for those families. Superseded
+> by §37.5.7b: four of the five are answered there, and the two residual
+> items are restated in the note immediately below.*
+
+<<<SPEC Two residual chain-rule items, both narrower than the note above they replace, and neither of them a blocker for parity with the reference (§37.5.7b). (1) Not directly observed: whether the Electrum servers configured for the KawPoW-family and Firo coins serve the full 120-byte and 180-byte header shapes of §37.5.2 rather than an 80-byte truncation. Confirm by querying a configured server for a known post-switch height and measuring the served byte length per header before relying on either family's header sync; the exact-consumption guard of §37.5.8 makes a truncation safe to discover at runtime rather than fatal. (2) Not re-verified against the chains' published definitions, and needed only for the structural rules of R37.5.5 and for the divergence of R37.5.7a: the exact PIVX header-version boundaries at which its trailing 32-byte field appears and changes meaning; the per-network Ravencoin KawPoW activation times; the Firo MTP lower bound; and the three chain-defined identity hashes. SPEC>>>
 
 > **Interop note (R29/R31).** Each family's byte layout is dictated by its
 > chain, and the `chain_variant` key and values are dictated by third-party
@@ -415,12 +623,36 @@ be skipped.
 
 ### 37.5.8 Implementation status
 
+> **Clearance (chapter 01 T1, R40).** The material the later
+> re-confirmation pass added here was authored by the KDF Spec Reader
+> under the chapter-01 §1.4A two-team procedure and **passed the KDF
+> Dirty Gate** on 2026-10-24 before being relied on (PASS, finding list
+> empty), so nothing it added is a candidate awaiting a gate. Its extent,
+> method and measure are recorded once, in the *Dirty Gate clearance*
+> item of §37.10, and are not restated here; the chapter's earlier
+> forbidden-class-sourced material stands on the separate pre-adoption
+> record of the same section and was not part of that candidate.
+
 The requirement of R37.5.1 is correct and the shipped reader falls short of
 it. Selection by configuration is the contract; the version-value selection
 described below is a gap to be closed (§37.9 D1), not an alternative
 contract. The chain-variant set the reader knows is much smaller than the
 set of families it branches on, and that mismatch is the source of the
 collision of R37.5.4a.
+
+> **Closing D1 is a port, not a design.** Confirmed at release
+> designations `v2.6.0-beta` and `v3.0.0-beta`: the reference implements
+> exactly the configuration-selected family of R37.5.1 — the same
+> `protocol.chain_variant` key, the same closed set of eight accepted
+> strings, the same reject-on-unrecognised-value rule, and the same
+> propagation of the coin's family into the header-list reads, the
+> starting-header check, the median-time-past read and both header
+> stores. Everything §37.9 D1 asks for therefore has a reference
+> implementation to be compatible with, and the only parts of §37.5 that
+> remain Reloaded's own are the exclusivity of R37.5.3 for the
+> non-family-gated layouts, the structural rules of R37.5.5, the linkage
+> rule of R37.5.6, the served-bytes and chain-identity rules of R37.5.7
+> and §37.5.7a, and the parent-header rule of R37.5.2b.
 
 As built:
 
@@ -645,6 +877,16 @@ reported rather than an unbounded walk-back.
 
 ## 37.9 Deferred Work
 
+> **Clearance (chapter 01 T1, R40).** The material the later
+> re-confirmation pass added here was authored by the KDF Spec Reader
+> under the chapter-01 §1.4A two-team procedure and **passed the KDF
+> Dirty Gate** on 2026-10-24 before being relied on (PASS, finding list
+> empty), so nothing it added is a candidate awaiting a gate. Its extent,
+> method and measure are recorded once, in the *Dirty Gate clearance*
+> item of §37.10, and are not restated here; the chapter's earlier
+> forbidden-class-sourced material stands on the separate pre-adoption
+> record of the same section and was not part of that candidate.
+
 **D1.** *Configuration-selected header family.* R37.5.1, R37.5.1a, R37.5.3,
 R37.5.4 and R37.5.5 are not implemented (§37.5.8). Closing this takes four
 steps:
@@ -656,22 +898,45 @@ steps:
 3. Carry each coin's configured family into every header read path of
    §37.5.8, on native and WASM alike. That includes both header stores,
    which need the family to re-read what they stored.
-4. Withdraw version-only KawPoW recognition under the default family
-   (R37.5.4), and make `"BTC"` exclusive (R37.5.3).
+4. Two halves, which the rest of §37.5 keeps apart: **(4a)** withdraw
+   version-only KawPoW recognition under the default family (R37.5.4);
+   **(4b)** make `"BTC"` exclusive (R37.5.3).
 
 It is deferred because it changes the coin-activation configuration surface
 and every header read path at once, and it touches both storage backends.
-Its last step also changes behaviour for KawPoW coins that are configured
-today without the key, so it needs coordinated coin-file updates and its own
-compatibility review. The length guard of §37.5.8 removes the observed
-failure without any of that.
+The length guard of §37.5.8 removes the observed failure without any of
+that.
+
+> **The step-4a blocker is smaller than it looks.** This note is about
+> step **4a** and not step 4b: the coordination worry it answers was
+> about KawPoW coins configured without the key, which is what 4a
+> withdraws, and 4a is also the half within the scope of §37.5.8's port
+> note. Step 4b is the exclusivity of R37.5.3, which §37.5.8's closing
+> list records as remaining this project's own and which concerns coins
+> configured **with** `"BTC"`, so neither the coin-file census below nor
+> the release-note point reaches it. This item previously
+> said the last step needs coordinated coin-file updates because it
+> changes behaviour for KawPoW coins configured without the key. In the
+> public third-party coins configuration (snapshot of 2026-10-18) **every**
+> Ravencoin-family entry already carries `"chain_variant": "RVN"`
+> (`RVN`, `AVN`, `EVR`, `XNA`), so withdrawing version-only KawPoW
+> recognition breaks none of them as shipped. What remains is (a) the
+> operator check of §37.5.1 for an entry that may be configured with the
+> wrong family, and (b) the possibility of a *locally* supplied coin file
+> that sets no `chain_variant` for a KawPoW chain — which is a release-note
+> matter, not a coordination matter. Step 4a should therefore be done in
+> the same change as steps 1–3 rather than held back.
 
 Until this is closed:
 
 - A standard chain whose blocks carry the colliding version value works
   through that guard.
 - A Qtum coin's single-header and stored-header reads use the default family.
-- The R37.5.5 families also wait on the open `SPEC` note in §37.5.7.
+- The R37.5.5 families wait on residual item (2) of the `SPEC` note in
+  §37.5.7, which is now narrower: §37.5.7b establishes that reaching parity
+  with the reference needs **none** of those chain rules, because the
+  reference implements none of them. R37.5.5 remains a Reloaded improvement
+  on top of the port, and only it waits.
 
 **D2.** *Linkage check and served-byte identity.* Two rules are not
 implemented:
@@ -685,8 +950,16 @@ implemented:
 Storing served bytes changes what both header stores persist, so existing
 stores need a migration or re-sync decision. Narrowing the AuxPoW hash
 changes the store's height-by-hash lookup, and the chain-defined hashes wait
-on the `SPEC` note in §37.5.7. The length guard does not depend on any of
-these.
+on residual item (2) of the `SPEC` note in §37.5.7. The length guard does
+not depend on any of these.
+
+All three parts of this item are **Reloaded divergences** from the
+reference rather than ports, and §37.5.7a bounds why that is acceptable:
+the reference keeps re-encoded bytes, hashes an AuxPoW header over its
+proof, and uses a double-SHA256 of the re-encoding for every family. None
+of those values crosses the wire, so the divergence is confined to the
+local header store and the local linkage checks and needs no
+compatibility switch — only the storage decision named above.
 
 ## 37.10 Provenance Footer
 
@@ -755,7 +1028,187 @@ these.
   The consistency guards, exclusivity rule and identity-hash rule in §37.5
   are this chapter's own proposed behaviour, not corpus expression. No other
   section of this chapter draws on the forbidden corpus.
+
+  A **later re-confirmation pass** extended that consultation, under the
+  same two-team workflow and under the public release designations
+  `v2.6.0-beta` and `v3.0.0-beta` (the record is no more precise than those
+  designations). It added the following behavioural facts, all restated in
+  this chapter's own words:
+  - that the configuration-selected family of R37.5.1 is as-built in the
+    reference from `v2.6.0-beta` onward, that its accepted-value set is
+    closed at exactly the eight strings of R37.5.1's table, and that an
+    unrecognised value rejects activation (the vintage note in §37.5.1 and
+    the port note in §37.5.8);
+  - which read paths now carry the configured family and which two still do
+    not, and that the two that do not are the ones that enforce exact byte
+    consumption (the confirmation added to the R37.5.1a note);
+  - that every entry of §37.5.2's recognition column is unchanged between
+    the two designations, including the PIVX row's unconditional trailing
+    read;
+  - that the AuxPoW parent header is read through the same family-sensitive
+    path as the outer header (the R37.5.2b note);
+  - the correction of the §37.5.6 note: exact byte consumption is enforced
+    on the generic single-header entry point and nowhere else, header lists
+    are read without an end-of-buffer check so a short-per-header misparse
+    succeeds silently, and there is no standard-layout retry and no linkage
+    check anywhere;
+  - that the re-encoding and identity-hash defects of the §37.5.7 note are
+    unchanged, and that no chain-defined identity hash is implemented for
+    any family (§37.5.7a);
+  - the four resolutions tabulated in §37.5.7b: the single Firo switch
+    timestamp with no lower bound, the absence of any per-network KawPoW
+    activation time, the absence of chain-defined identity hashes, and the
+    absence of any PIVX version threshold.
+
+  §37.5.7a's divergence bound, §37.5.7b's residual `SPEC` items, and the
+  step-4 and divergence notes added to §37.9 D1 and D2 are this chapter's
+  own reasoning over those facts and over the public coins configuration.
 - *Clean-side reconciliation:* §37.5.8 and §37.9 D1–D2 were written on the
   clean side of the wall, from this repository's own tree and the gated
   text of §37.5, without access to the forbidden corpus. They record how
   the shipped reader compares with §37.5 and what this change implements.
+  The additions made to them by the later re-confirmation pass (the port
+  note in §37.5.8 and the step-4a and divergence notes in §37.9 D1–D2) were
+  not: they were written in the same pass as the §37.5 additions and rest
+  on the facts that pass established.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for the later
+  re-confirmation pass.* This item records one clearance and deliberately
+  not two. The chapter's **original** forbidden-class-consulting material
+  was cleared before the adoption of chapter 01 R37–R44 and those verdicts
+  were recorded only in the commit messages of the revisions concerned, so
+  no extent/method/measure attestation for them survives in the document
+  set; under R43, T1 does not reach those revisions, and the derivation
+  record above continues to carry them on their own pre-adoption footing.
+  They were **not re-gated**, and nothing below is to be read as clearing
+  them or as a record of their clearance.
+
+  The **later re-confirmation pass** described above is a post-adoption
+  revision and T1 does reach it. The material it added — the vintage note
+  and the deployed-values and operator-check notes in §37.5.1, the
+  confirmation appended to the R37.5.1a note, the confirmation appended to
+  the §37.5.2 divergence note, R37.5.2b with its finding, the confirmation
+  appended to the §37.5.3 finding, the corrected and re-confirmed §37.5.6
+  finding, the confirmation appended to the §37.5.7 finding, §37.5.7a,
+  §37.5.7b with its table and its residual `SPEC` note, the port note in
+  §37.5.8, the step-4a note and the closing bullet of §37.9 D1, the
+  divergence note of §37.9 D2, and the re-confirmation paragraph of the
+  derivation record above together with this item — was authored by the
+  KDF Spec Reader under the two-team procedure of chapter 01 §1.4A and
+  **passed the KDF Dirty Gate** on 2026-10-24: PASS,
+  discretionary-expression measure 0.00, finding list empty, and
+  accordingly no remedy class for any line or for the candidate as a
+  whole. That was the first gate pass on this material; no earlier verdict
+  for it exists or was relayed. **Only that added material was gated.**
+  The clearance for the later pass is therefore **complete and not
+  pending**, and R40 withholds nothing here; the re-confirmation additions
+  are no longer candidate text.
+
+  *One consequence of the two footings sitting side by side.* The
+  pre-adoption sentence of the derivation record above identifies its
+  reference partly by a development-line tip, which is a branch state and
+  therefore of the class §1.7's reference-version constraint withholds.
+  That constraint, by its own wording and by R43, binds a scoped record
+  written on or after its adoption, so the older sentence is grandfathered
+  and this chapter is not defective for carrying it; the record below is
+  the one the constraint binds, and it names nothing beyond the two public
+  release designations. Chapter 01's R25 re-check paragraph nevertheless
+  states that one pre-adoption record in the document set names an
+  identifier of that withheld class and that no other does. A reader
+  comparing that statement with this footer may read the two as
+  inconsistent. Reconciling them is chapter 01's business and the subject
+  of that chapter's own deferred item (D5), not this chapter's, and
+  nothing is changed here on that account.
+
+  *Which sections carry a pointer to this item, and how that set was
+  fixed.* §37.5, §37.5.7, §37.5.8 and §37.9 each carry a short clearance
+  pointer, so that a reader or an implementer entering at the material
+  passes the notice where the material appears (R40) and not only on
+  reaching this footer. The set was fixed from where readers demonstrably
+  enter — inbound references within this repository, ranked, rather than
+  taste — crossed with where the pass left numbered or rule-bearing text.
+  §37.5 is the highest-traffic entry by a wide margin: chapters 38, 58 and
+  39 and the implementation plan under `docs/plans/` all cite it, and its
+  pointer sits immediately above §37.5.1, so it is also what an entrant
+  arriving at §37.5.1 or at R37.5.1a by name from chapter 39 passes first.
+  Reading forward from it reaches the three sections that carry new
+  material but have no inbound reference of their own — §37.5.2 with
+  R37.5.2b, §37.5.3 and §37.5.6 — so none of them needs a pointer of its
+  own. §37.5.7 is a separate entry and not reached by reading forward from
+  the head: the implementation plan dispatches a Spec Reader to the `SPEC`
+  note that stood there, and an entrant arriving that way lands on
+  §37.5.7a, §37.5.7b and the residual note, which is where three of the
+  four numbered-or-rule-bearing additions sit. §37.5.8 and §37.9 D1–D2 are
+  what an implementer actually works from — the plan names them in its
+  scope list and requires each change to update them — and both carry new
+  material. The remaining sections carry none, and that is a scope
+  judgement rather than an oversight: §37.0–§37.4 and §37.6–§37.8 took
+  nothing from this pass, §37.6 is well referenced but entirely unchanged
+  by it, §37.8's acceptance criteria are derivative of rules the pointed
+  sections already bind, and §37.10 is the record itself.
+
+  The three elements of the R39 scope attestation for that pass, carried
+  forward here in corpus-free terms as chapter 01 T1 requires:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    matter this chapter's §37.5 names in its own terms: the reference's
+    UTXO block-header codec, the header-read surface of its
+    Electrum-backed UTXO coin layer, and the configuration surface that
+    selects a header family — that is, family selection, the per-family
+    byte layouts, and the single-header, header-list,
+    trusted-anchor-check, header-store-re-read and median-time-past read
+    occasions. Quantity examined: **seven files** of that surface at the
+    newer designation, five of them read in the relevant part or in full
+    and all seven covered by the mechanical checks named below, two of
+    them additionally in full at the older designation, together with a
+    designation-to-designation comparison across that surface. Reference
+    designations: the publicly published release designations
+    `v2.6.0-beta` and `v3.0.0-beta`, which the lineage's own releases
+    carry and which chapter 01 §1.7 admits as public-release facts.
+    **The record is no more precise than those two designations** — no
+    post-anchor commit identifier, no branch state and no location within
+    the compared material is given (chapter 01 R11 and the
+    reference-version limit of §1.7), and that limit is left visible
+    rather than papered over.
+
+  - *Method.* A stated **combination**: by reading, and by two mechanical
+    comparisons run for this pass — an identifier-shape extraction over
+    the candidate's added lines, checked against the identifier set of the
+    compared material, and a word-level n-gram and string-literal overlap
+    measurement between the added lines and that material. **This
+    repository's own residual-similarity gate tooling was not run:** it
+    compares embedded code blocks and the added material embeds none, so
+    the instrument had no operand and its figure would not have been
+    informative. The absence is stated so that it is visible rather than
+    implied.
+
+  - *Measure.* **0.00** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — with
+    dictated-interop and pinned-interface content excluded from the
+    measured set before the judgement was made, per token under the
+    forced-versus-free test rather than by the group a token sits in.
+    Excluded on that basis, so that the figure's coverage is visible: the
+    chain-dictated header byte layouts, field orders and byte lengths; the
+    chain and BIP-9 version-signalling values, bit positions and masks;
+    the merged-mining flag bit; the chain-dictated switch timestamp; the
+    double-SHA256 proof-of-work and identity rule; the third-party
+    coin-configuration key and its accepted string values; and the public
+    coin tickers. **Judgement standard read against:** zero tolerance —
+    one identified item of genuine discretionary expression fails a
+    candidate however much of the surrounding content is legitimately
+    dictated, and match volume alone is not evidence either way, so the
+    pass is not a function of the low figure and each candidate item was
+    judged individually. What the figure reflects: the only multi-token
+    coincidence found anywhere in the added lines lies wholly inside the
+    dictated configuration-value set this chapter already frames as
+    config-compat interop that must be accepted verbatim, and is excluded
+    on that ground; no other coincidence of five or more consecutive words
+    was found; no string literal of the compared material is reproduced;
+    and the added lines carry exactly two identifier-shaped tokens, the
+    dictated configuration key and the filename of a document of this
+    repository. Absent throughout, as the verdict's classification
+    records: private non-wire identifiers; verbatim and near-verbatim
+    bodies; step-by-step control-flow, branch or loop transcription;
+    diagnostic, error and log **message wording**; per-method tables keyed
+    to internal names; internal module trees; internal test identifiers;
+    any location within the compared material; and any post-anchor commit
+    identifier or branch designation.
