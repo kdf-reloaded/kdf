@@ -176,7 +176,7 @@ R7. **Public-key formats.** The maker's published public key
 R8. **Maker-payment-spend preimage.** The first preimage is
     a transaction that, when augmented with the secret
     revealed by the on-chain taker-payment spend, lets the
-    maker claim the maker payment. The watcher fills in
+    taker claim the maker payment. The watcher fills in
     the secret and rebroadcasts.
 
 R9. **Taker-payment-refund preimage.** The second preimage
