@@ -111,6 +111,20 @@ R6. **Self-contained per-swap context.** The taker's payload
     confirmations, and notarisation-required fields for the
     taker coin; and the start-block for the maker coin.
 
+> **Clearance (chapter 01 T1, R40).** R6a and the
+> informative block beneath it are forbidden-class-sourced
+> material: both were authored by the KDF Spec Reader under
+> the two-team procedure of chapter 01 §1.4A and **passed
+> the KDF Dirty Gate** on 2026-10-24 before being relied on
+> (PASS, finding list empty; the material's second gate
+> pass). Their clearance is therefore *complete* and not
+> pending — neither is a candidate awaiting a gate — while
+> R6 above and R7 below were not part of that candidate.
+> The extent and method of the pass, the measure, and the
+> one attestation element the gate could not record, are in
+> the *Dirty Gate clearance* item of §9.15 and are not
+> restated here.
+
 R6a. **The two transaction-hash fields carry hashes, and the
      fee hash is length-checked.** The taker-fee and
      taker-payment fields of R6 shall carry the respective
@@ -190,6 +204,19 @@ with the following bound states and transitions:
 | Spend-maker-payment         | On spend: extract secret; broadcast first preimage     |
 | Refund-taker-payment        | On deadline: broadcast second preimage                 |
 | Stopped (with outcome)      | Terminal; log the outcome                              |
+
+> **Clearance (chapter 01 T1, R40).** R10a, and the
+> deferred item D5 it records, are forbidden-class-sourced
+> material: both were authored by the KDF Spec Reader under
+> the two-team procedure of chapter 01 §1.4A and **passed
+> the KDF Dirty Gate** on 2026-10-24 before being relied on
+> (PASS, finding list empty; the material's second gate
+> pass). Their clearance is therefore *complete* and not
+> pending. The state table above and R11 and R12 below were
+> not part of that candidate. The extent and method of the
+> pass, the measure, and the one attestation element the
+> gate could not record, are in the *Dirty Gate clearance*
+> item of §9.15.
 
 R10a. **No watcher assists a no-fee swap.** A taker whose
       swap carries no DEX fee — the network burn/waiver key
@@ -502,10 +529,128 @@ V3. The publish-subscribe overlay the substrate rides on is
   forbidden-class input. No discretionary expression — no private
   type, field or function name, no body, control-flow
   transcription, local name, or error literal — was reproduced.
-- *Dirty Gate clearance (chapter 01 T1, R43) for R6a, R10a, D5 and
-  D6:* **not yet recorded.** Those additions are post-adoption
-  revisions carrying forbidden-class-sourced material, so T1
-  reaches them; the gate has not yet returned a verdict and the
-  extent, method and measure are to be written into this item
-  when it does. The rest of the chapter keeps the
-  `not consulted` position stated above.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for R6a, R10a, D5
+  and D6:* the forbidden-class-sourced material in this chapter is
+  exactly what the scoped item above names — R6a and the informative
+  block beneath it, R10a, and the deferred items D5 and D6 — together
+  with the two footer items as they stood when that material was
+  committed: the scoped record above, and the pending statement this
+  item replaces. All of it was authored by the KDF Spec Reader under
+  the two-team procedure of chapter 01 §1.4A and **passed the KDF
+  Dirty Gate** on 2026-10-24: PASS, discretionary-expression measure
+  0.00, finding list empty, and accordingly no remedy class for any
+  line or for the candidate as a whole. The clearance is therefore
+  **complete and not pending** for that material, and R40 withholds
+  nothing in it. This item is written on the clean side from the
+  verdict, which is record-keeping and adds no chapter content.
+
+  *A second pass, and what the first one decided.* The first pass
+  returned FAIL with one finding: one clause of the deferred item now
+  numbered D6, leak category an ordering transcription, remedy class
+  `remove`. It was remediated by deletion and not by rewording, as
+  R40 requires. The second pass confirms that the removal is genuine,
+  that no statement of equivalent content appears anywhere else in
+  the chapter — inside the gated material or outside it — and it
+  upholds rather than overturns the first pass's reasoning on both
+  halves of that finding: the ordering requirement R6a states
+  distinguishes two orderings whose difference an outside observer
+  sees, which makes it abstract behavioral and lifecycle content,
+  while the removed clause was the same form of statement with no
+  such difference. The first verdict is superseded by the second and
+  is not relayed further.
+
+  **Only the named material was gated.** The remainder of the chapter
+  was not re-examined in either pass and its earlier position is
+  untouched by the verdict, so the `not consulted` position of the
+  scoped item above continues to cover it; that item keeps its scoped
+  form and is not generalized.
+
+  *Which parts carry an inline pointer to this item, and why those.*
+  R6a and R10a each carry a short clearance pointer, so that a reader
+  or an implementer entering at the material passes the notice where
+  the material appears (R40) and not only on reaching this footer.
+  The set follows from what the gated material consists of: two of
+  its four items are numbered, rule-bearing text — a hard length
+  check an implementer codes from, and a bound behavior whose point
+  is to tell a Coder what not to "fix" — inserted among R-numbers
+  that have stood in this chapter since earlier revisions, which is
+  exactly the case in which long-settled requirement and
+  newly-cleared requirement are easy to confuse. The pointers sit at
+  those two rules rather than at the heads of §9.4 and §9.6, because
+  the surrounding rules of both sections (R6, R7, the state table,
+  R11, R12) were never part of the candidate and a section-head
+  notice would claim more than the verdict covers. D5 and D6 carry no
+  pointer: a deferral binds nothing, so there is nothing in either to
+  implement from, and each hands back to the rule that binds its
+  subject — D5 to R10a, which names it, and D6 to R14 read under R6a
+  — so a reader entering at either reaches a rule that does carry the
+  notice. The footer items carry none for the reason that this
+  section is where the record lives.
+
+  The three elements of the R39 scope attestation, carried forward
+  here in corpus-free terms as chapter 01 T1 requires. One of the
+  three is a gap, and it is recorded as a gap:
+
+  - *Extent.* The forbidden-class material corresponding to the
+    subject matter this chapter names in its own terms: the
+    third-party swap-watcher subsystem — the gossip payload surface
+    of §9.4, the watcher lifecycle and the path by which a watcher is
+    or is not started, the taker-side swap path that populates the
+    payload, and the coin-layer watcher fee-validation surface.
+    Quantity examined: **four files** of that subsystem — one in
+    full, two in targeted regions, one at search level — together
+    with a tree-wide identifier search across the compared tree to
+    establish that no further material of the subsystem was left out
+    of the comparison. **Reference version: not recorded, and not
+    recordable in a record of this kind.** The gate reports that this
+    element cannot be given within R39's limits: the single reference
+    state available to it carries no publicly published release
+    designation of its own, so identifying it would take a
+    post-anchor commit identifier or a branch state, which chapter 01
+    R11 and the reference-version limit of §1.7 withhold. The element
+    is therefore absent rather than approximated, and T1 is satisfied
+    by saying so — a completed clearance statement carries the three
+    elements **or** states that an element is not recorded. Nothing
+    in this clearance attests that the comparison was made against
+    any named release. In particular, the two public release
+    designations the scoped item above names are that item's record
+    of where the Spec Reader established its three facts; **this
+    clearance supplies no support for either of them**. Whether each
+    is a publicly published release designation of the kind R11's
+    carve-out admits is a separate question, checkable on the clean
+    side against public release records, and it is not answered here.
+
+  - *Method.* **Combined.** Reading, together with mechanical
+    identifier and pattern searches over both the candidate and the
+    compared tree, and a line-level comparison of the candidate's
+    committed additions against the immediately preceding revision of
+    this chapter to fix the gated extent. **This repository's own
+    mechanical chapter-comparison tooling was not applicable and was
+    not run:** the gated material embeds no code block, so the
+    instrument had no operand. The absence is stated so that it is
+    visible rather than implied.
+
+  - *Measure.* **0.00** on the discretionary-expression basis — the
+    same figure the leak report carries, not a second one — with
+    dictated-interop and pinned-interface content excluded from the
+    measured set before the judgment was made. **Judgment standard
+    read against:** zero tolerance — one item of genuine
+    discretionary expression fails a candidate however much
+    legitimately dictated content surrounds it. The measured set was
+    empty, so the PASS rests on that and not on a numeric margin.
+    What the gated material touches the reference on is, in the
+    verdict's terms: a field width that is part of the wire contract,
+    outcome-level behavior, lifecycle ordering with externally
+    observable consequences, the chapter's own descriptive labels,
+    and statements about this repository's own code. Two further
+    ordering statements in the gated material — the parity passage of
+    R10a and the second residual case of D6 — were tested on the same
+    standard as the first pass's finding and are clean, each
+    distinguishing orderings whose difference is externally
+    observable and each entailed by rules the chapter already
+    carried. Absent throughout, as the verdict's classification
+    records: private type, field, variable and function names;
+    verbatim and near-verbatim bodies; step-by-step control-flow
+    transcription; error and log string literals; per-method behavior
+    tables keyed to internal names; internal module trees; and
+    internal test-function names.
