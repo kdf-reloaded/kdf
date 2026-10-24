@@ -36,7 +36,10 @@ axes that do *not* change the on-chain HTLC protocol:
 
 The chapter is intentionally silent on every specific numeric: rate, share,
 floor, burn destination, etc. are network policy bound in Chapter 06, not
-substrate.
+substrate. Chapter 06 §6.6A additionally records which published reference
+designation each production netid's parameter set comes from, and its §6.8
+R17 forbids propagating a later designation's change onto the other netid or
+blending the two sets.
 
 ## 8.2 Subsystem Shape
 
@@ -570,3 +573,56 @@ git -C <baseline> grep -nE 'fn (validate_fee|send_taker_fee)\b'
   (R16 finding cross-reference).
 - *Author of this chapter:* clean-room round-2 driving-spec working set.
 - *Forbidden corpus:* not consulted.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for the §8.1
+  cross-reference sentence:* the material this item covers is exactly one
+  sentence — the cross-reference added at the end of §8.1, which points at
+  chapter 06 §6.6A and §6.8 R17. It was examined by the KDF Dirty Gate in
+  the same pass that cleared chapter 06 §6.6A and **passed** on 2026-10-24:
+  PASS, discretionary-expression measure 0.00, **leak-finding list empty**,
+  and accordingly no remedy class for the sentence or for the candidate as a
+  whole, and no non-leak finding either. The clearance is **complete and not
+  pending**. The gate's confirmation is that the sentence **carries no
+  independent claim**: it states a cross-reference and restates the
+  direction of a rule chapter 06 owns, and introduces no numeric, no ticker,
+  no identifier and no designation-attributed fact of its own, so this
+  chapter's deliberate silence on specific numerics is intact. This item is
+  written on the clean side from the verdict, which reached the clean side
+  as relayed and transcribed text rather than as a gate-written file; that
+  is record-keeping and adds no chapter content.
+
+  **Only that sentence was gated, and this chapter's earlier clearance is
+  untouched.** Nothing outside the added sentence was examined or re-judged
+  in this pass, and the chapter's earlier clearance is **not reopened**. The
+  *Forbidden corpus* item above is unchanged by the pass and keeps the
+  position it already had: the added sentence took no forbidden-class input
+  of its own, resting entirely on chapter 06 §6.6A, where that section's own
+  input and clearance are recorded. The sentence carries no inline clearance
+  pointer, which is a scope judgment rather than an oversight: it binds
+  nothing, defers its whole substance to the chapter that owns it, and this
+  footer is where the record lives.
+
+  The three elements of the R39 scope attestation, carried forward here in
+  corpus-free terms as chapter 01 T1 requires:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    matter this chapter names in its own terms, confined to what a single
+    cross-reference sentence could carry: the taker trading-fee rate surface
+    and the fee-collection-identity surface. Quantity examined: **two units
+    at two reference points**, for four unit-at-designation comparisons.
+    Reference points: the published release designations `v2.6.0-beta` and
+    `v3.0.0-beta`. **The record is no more precise than those
+    designations:** no post-anchor commit identifier, no branch state, and
+    no location within the compared material is given (chapter 01 R11 and
+    the reference-version limit of §1.7).
+  - *Method.* **Combined.** Reading, with mechanical retrieval used solely
+    to address each comparison to a published release designation rather
+    than to any materialised undesignated state. **This repository's own
+    clean-room gate tooling was not applied and was not run:** no source
+    block was in scope, so the instrument had no operand.
+  - *Measure.* **0.00** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — with dictated-interop
+    and pinned-interface content excluded from the measured set before the
+    judgment was made. **Judgment standard read against:** a presence
+    standard rather than a proportion — any genuine discretionary expression
+    fails a candidate irrespective of volume. The measured set was empty, so
+    the PASS rests on that and not on a numeric margin.
