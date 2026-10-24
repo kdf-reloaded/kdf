@@ -109,6 +109,9 @@ and a one-sentence capsule of what the chapter documents.
 | 53 | [Siacoin Transaction History](53-sia-transaction-history.md) | walletd address-event projection, coin-generic runtime history store, Sia transaction-type wire values | Sia transaction history as a projection of walletd's per-address event log into the shared transaction-details record, served through the framework's history RPC surface. |
 | 54 | [Siacoin Atomic-Swap Version-Two Path](54-sia-swap-v2-path.md) | Sia V2 swap path over the coin-generic V2 trait surface | DRAFT, not yet approved for implementation: binds the coin-generic V2 trait surface to Siacoin's V1 primitives and the shared V2 state-machine substrate; closes chapter 20 §20.10 D5. |
 | 55 | [Coin Activation Wire Contract](55-coin-activation-wire-contract.md) | coin-activation RPC error envelope, task-framework method errors, per-family unresponsive-backend outcomes, baseline activation families | The cross-family wire contract of coin activation, and the full contracts of the activation families that no other chapter owns. |
+| 57 | [EVM Fee Inputs](57-evm-fee-inputs.md) | legacy gas-price resolution, the proportional-increase arithmetic, per-coin `gas_limit` / `gas_limit_v2` / `gas_price_adjust` configuration blocks, the withdraw fee form and envelope-type derivation | How an EVM transaction's gas price and gas limit are resolved: the two-source maximum, the no-absolute-floor increase arithmetic, the per-coin override blocks and their defaults, and the withdraw fee object that decides the signed envelope type. |
+| 58 | [UTXO `signature_version` Contract and the Radiant Sighash](58-utxo-signature-version-and-radiant-sighash.md) | the `signature_version` / `fork_id` configuration contract, per-value sighash selection, the Radiant fork-id preimage | The closed set of signature-version values a UTXO coin configuration may name, the algorithm each selects, and the Radiant dialect in full — a BIP-143 preimage with one inserted per-output summary digest. |
+| 59 | [Legacy Order-Match Negotiation Loop](59-legacy-ordermatch-negotiation.md) | the four-message V1 negotiation exchange, taker-side reservation selection, negotiation timeouts, the peer penalty, keep-alive liveness | The legacy negotiation loop: collect-then-choose taker selection, at-most-once maker reservation, the two timeout arms, the one-hour penalty on a counterparty whose negotiation fails, and liveness kept on the receiver's own clock. |
 
 ## 30.4 Aggregated Input Register
 
@@ -232,13 +235,13 @@ subject, the citation is marked *(ref)*.
 | Substrate                                                              | Chapter(s)                                          |
 | ---------------------------------------------------------------------- | --------------------------------------------------- |
 | coin-handle abstraction (top-level)                                    | 13 *(ref)*, 15, 16, 17, 18, 19, 20, 21, 29          |
-| EVM coin substrate                                                     | 17, 19, 21                                          |
+| EVM coin substrate                                                     | 17, 19, 21, 35 *(ref)*, 56, 57                      |
 | EVM V2 swap contract pair                                              | 17                                                  |
 | Tron coin substrate                                                    | 21                                                  |
 | NFT substrate                                                          | 19, 25 *(ref)*                                      |
 | Sia coin substrate                                                     | 20                                                  |
 | Tendermint coin substrate                                              | 18                                                  |
-| UTXO coin substrate                                                    | 15, 16                                              |
+| UTXO coin substrate                                                    | 15, 16, 37 *(ref)*, 38 *(ref)*, 58                  |
 | Zcash-family coin substrate                                            | 29                                                  |
 | coin-activation substrate                                              | 18 *(ref)*, 35, 36, 39, 40, 41, 46, 48, 55          |
 | shared-utility substrate (Chapter 27 §27.x)                            | 03 *(ref)*, 14, 26, 29                              |
@@ -262,9 +265,9 @@ subject, the citation is marked *(ref)*.
 | file-IO substrate (native-only)                                        | 26                                                  |
 | application-root substrate                                             | 07, 08, 09, 10, 11, 12, 13, 14, 17, 29              |
 | node-init substrate                                                    | 06, 29                                              |
-| order-matching substrate                                               | 11, 12                                              |
-| orderbook Patricia-trie + orderbook sync substrate                     | 32                                                  |
-| atomic-swap substrate                                                  | 08, 09, 13, 15, 16, 17, 29, 33                      |
+| order-matching substrate                                               | 11, 12, 13 *(ref)*, 59                              |
+| orderbook Patricia-trie + orderbook sync substrate                     | 32, 59 *(ref)*                                      |
+| atomic-swap substrate                                                  | 08, 09, 13, 15, 16, 17, 29, 33, 51, 52, 59          |
 | wallet-lifecycle substrate                                             | 07                                                  |
 | RPC-dispatcher substrate                                               | 10 *(ref)*, 27 *(ref)*                              |
 | browser-wallet-bridge substrate                                        | 05 *(ref)*, 26                                      |

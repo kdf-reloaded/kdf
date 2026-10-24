@@ -334,6 +334,159 @@ and bad external provider endpoints.
 
 ---
 
+## #7 — EVM fee inputs: per-coin overrides never read, and an absolute gas-price floor — **OPEN**
+
+CRD reference: [`57-evm-fee-inputs.md`](./57-evm-fee-inputs.md) (new chapter).
+Reference designations: `v2.6.0-beta` and `v3.0.0-beta`, which agree.
+
+Four independent gaps on the same surface. They compound, so a sub-gigawei
+chain's fee quote needs at least the first two closed before it matches.
+
+- [ ] **The one-gigawei increment floor (ch. 57 R57.3.2).** Reloaded's
+  proportional gas-price increase substitutes a fixed one-gigawei increment
+  whenever the proportional one is smaller. The reference removed that floor;
+  no release designation at or after `v2.6.0-beta` carries it. It is a
+  pre-anchor baseline defect (ch. 57 V1), so removing it is a parity **fix**
+  with no compatibility switch. Effect: inactive at and above ≈7.70 gwei,
+  roughly 1.8× at 1 gwei, ≈89× at 0.01 gwei, ≈443× at 0.002 gwei, and applied
+  twice on the trade-preimage path. The floor is what the signed price carries
+  on any coin that resolves to the legacy fee form — notably the
+  Binance-Smart-Chain platform coin, whose configuration entry caps the
+  envelope type at `0` — so this is an overpayment and not only a display
+  error.
+- [ ] **Swap figures ignore the swap gas-fee policy (ch. 57 R57.4.1).** All
+  four swap-side fee figures are computed from the legacy gas price
+  unconditionally. The reference computes them from the policy-resolved fee
+  form, and the public coins configuration selects the medium EIP-1559 tier
+  for the Arbitrum, Base, Ethereum, Avalanche, Polygon, Gnosis and several
+  other platform coins. This is the larger half of the reported fee error on
+  those chains.
+- [ ] **`gas_limit` and `gas_limit_v2` coin-configuration blocks are never
+  read (ch. 57 R57.5.1–R57.5.4, R57.6.1–R57.6.4).** This is the gap the
+  tracker previously did not record at all. Reloaded hard-codes 21000 for a
+  native send, 210000 for a token send, 150000 for every V1 HTLC send, spend
+  and refund, 300000 for the platform-coin sender preimage, and builds its V2
+  gas-limit set from its own defaults. The deployed coins configuration sets
+  per-coin overrides on dozens of entries (the Arbitrum platform coin's
+  native-send limit, the Moonriver entry's payment, receiver-spend and
+  sender-refund limits, and the payment/spend/refund sets on the
+  Binance-Smart-Chain, Polygon and Avalanche token entries), all silently
+  ignored. Closing it also adopts the reference's differing defaults, which
+  ch. 57 R57.5.4 requires be done in the same change. The two refund keys are
+  called out separately in ch. 57 R57.5.2 because a failed refund is the worst
+  failure mode in the system.
+- [ ] **`gas_price_adjust` is never read (ch. 57 R57.2.4).** The reference's
+  only chain-relative gas-price mechanism. No deployed coin sets it today, so
+  adopting it changes nothing immediately; it is the sanctioned remedy for a
+  chain the shared defaults misprice, and the alternative a Coder would
+  otherwise be tempted to hard-code.
+
+Three smaller items on the same surface are recorded as deferred rather than
+tracked here: the three additional fee-approximation stages (ch. 57 D1), the
+per-coin gas-estimate multiplier the configuration sets to 1.3 for two
+layer-two platform coins (ch. 57 D3), and the removal of reloaded's inert
+third (external gas-oracle) price source (ch. 57 D4).
+
+---
+
+## #8 — EVM withdraw: no EIP-1559 fee form, no envelope-type derivation — **OPEN**
+
+CRD reference: [`57-evm-fee-inputs.md`](./57-evm-fee-inputs.md) §57.7, and
+[`19-nft-module-layout.md`](./19-nft-module-layout.md) §19.7 / D8 for the
+non-fungible flavours.
+
+- [ ] Reloaded's withdraw fee enumeration accepts only the legacy `EthGas`
+  form; the reference also accepts an `EthGasEip1559` form and derives the
+  signed envelope type from whichever was resolved, checking it against the
+  per-coin envelope-type cap before building. Reloaded always builds the
+  untyped envelope and performs no cap check on this path. A caller sending
+  the EIP-1559 fee form today receives an expected-`EthGas` error. Applies to
+  the platform-coin, token and both non-fungible withdrawals; ch. 57 R57.7.5
+  requires them to land together.
+- [ ] Note the hazard in ch. 57 R57.7.1a before implementing: the nested
+  explicit-gas-limit form has **no** valid JSON encoding in the reference, so
+  only the estimating form is reachable from an RPC caller and inventing an
+  encoding for the other is a deliberate divergence (ch. 57 D5).
+- [ ] The enumeration also lacks the Cosmos-family gas form the reference
+  accepts, so the Tendermint withdraw path cannot be driven by an explicit
+  fee (ch. 57 §57.7 finding).
+
+---
+
+## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **OPEN**
+
+CRD reference:
+[`58-utxo-signature-version-and-radiant-sighash.md`](./58-utxo-signature-version-and-radiant-sighash.md).
+Reference designation: `v3.0.0-beta` (the dialect is not in `v2.6.0-beta`).
+
+- [ ] The shipped coins configuration gives the Radiant entry
+  `"signature_version": "fork_id_rxd"` with `"fork_id": "0x40"`. Reloaded's
+  value set has three entries and not that one, so the value fails to
+  deserialize and the coin silently falls back to the Bitcoin-Cash BIP-143
+  preimage — producing signatures Radiant rejects on every transaction.
+  Parity **gap**; no compatibility switch. Scope is exactly three things
+  (ch. 58 R58.5.2): the fourth accepted value, the dialect itself, and the
+  strict-encoding mask. **No** new transaction-hash algorithm is needed
+  (ch. 58 R58.2.4) and no `chain_variant` work is needed
+  (ch. 58 R58.2.6).
+- [ ] Implement the algorithm **from Radiant-Core**, which is public and
+  permitted: ch. 58 R58.4.1 establishes on public-network evidence that the
+  reference's dialect matches Radiant's own, so the public source is both the
+  correct and the authoritative route (ch. 58 R58.4.3). Add the mainnet
+  signature vector of ch. 58 T3 as the parity guard.
+- [ ] Separately: enabling Radiant for **trading** is not covered by the above
+  and is unestablished (ch. 58 D2).
+
+---
+
+## #10 — Order matching: no penalty on a failed negotiation — **OPEN**
+
+CRD reference:
+[`59-legacy-ordermatch-negotiation.md`](./59-legacy-ordermatch-negotiation.md).
+Reference designation: `v2.6.0-beta`.
+
+- [ ] Reloaded penalises a counterparty's public key for an hour on two
+  taker-swap outcomes; the reference also penalises on a **failed
+  negotiation** (ch. 59 R59.5.2, R59.5.4). This single missing trigger is the
+  whole delta for the field-reported "a dead maker keeps absorbing my trade
+  attempts" problem: with it, the maker that just failed is out of the next
+  attempt's candidate set for an hour. One-line widening plus the regression
+  test of ch. 59 T4.
+- [ ] Expectations to set, because the fix is narrower than the symptom: the
+  taker still does **not** retry a different maker inside one order (ch. 59
+  R59.3.4 — that is parity, and a retry would be a divergence), and dead rows
+  do **not** leave the orderbook faster (ch. 59 §59.6 owns that).
+- [ ] Related, same chapter, separate items: the own-pubkey exemption from
+  liveness eviction covers only the persistent key and not the per-order keys,
+  so a node can evict its own live orders from its own read index (ch. 59
+  R59.6.5); and the coin protocol-support check cannot carry the amount, lock
+  duration or maker-side flag the reference's carries, so neither side can
+  refuse a match the reference would refuse (ch. 59 D1).
+
+---
+
+## #11 — Watcher payload carries transaction bodies where hashes are required — **OPEN**
+
+CRD reference:
+[`09-watcher-reward-infrastructure.md`](./09-watcher-reward-infrastructure.md)
+R6a / R10a.
+
+- [ ] Reloaded's taker publishes the **serialized transactions** in the
+  watcher payload's taker-fee and taker-payment hash fields. A watcher
+  length-checks the fee field for 32 bytes before spawning, so no watcher
+  assists any reloaded taker's swap, for any coin, in either direction. The
+  defect is invisible in operation because a declining watcher is
+  indistinguishable from an absent one. Parity **fix**; the hash is already
+  computed on both paths. Add a test asserting the field length is 32 — a
+  round-trip through the project's own code cannot see the difference.
+- [ ] A no-fee (network burn/waiver key) swap publishes an **empty** fee field
+  and gets no watcher. That is **parity**, not a gap: the reference reaches
+  the same outcome by the same route (ch. 09 R10a). Changing it is a
+  divergence needing a compatibility switch, and it is deferred (ch. 09 D5).
+  Nothing about it should be attempted before the item above is fixed.
+
+---
+
 ## Audit method (for reproducibility)
 
 1. Extracted the 223 unique upstream wire-method strings from
