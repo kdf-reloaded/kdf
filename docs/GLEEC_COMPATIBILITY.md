@@ -22,6 +22,7 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 | Shielded network upgrade | `ironwood_gate_disabled` *(coin config, `protocol.protocol_data.consensus_params`)* | **No GLEEC-compatible value exists any more.** KDF Reloaded builds the version-6 transactions Pirate Chain's Ironwood upgrade requires (below the activation height, version 4); GLEEC KDF cannot, and every transaction it builds for a post-Ironwood chain is rejected. The activation height is configured (`ironwood_activation_height`) or discovered at runtime (CRD ch.39 R39.6.4e). With version 6 supported the swap freeze and build refusal this switch used to suppress never engage, so the switch is accepted and does nothing; it does not disable version-6 construction. | No | [CRD ch.39 R39.6.4a–e](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Shielded (ZHTLC) coin backend | **none -- no switch exists** | Cannot be reproduced. GLEEC KDF serves a Light-mode ZHTLC coin's whole transparent side from the activation payload's `electrum_servers`; KDF Reloaded serves the coin from `light_wallet_d_servers` alone and ignores `electrum_servers`. `light_wallet_d_servers` must therefore be present and non-empty. | No | [see below](#zhtlc-backend) |
 | EVM foreign-transaction decoding | **none -- no switch exists** | Cannot be reproduced. Reloaded refuses trailing bytes after a complete transaction and a typed envelope with an all-zero signature; the reference accepts both, folding trailing bytes into the identifier it reports and reporting a placeholder sender for the latter. No opt-back is offered: a switch would be an opt-in to weaken validation (`AGENTS.md` §5), and either acceptance lets a counterparty choose a value we report as fact. Accepting EIP-2930 / EIP-1559, the identifier and sender derivation, and refusing EIP-4844 / EIP-7702 are all **parity**. | No | [CRD ch.35 §35.6A](reloaded-rewrite/35-evm-v2-activation-rpcs.md), D35.1 |
+| Shielded (ZHTLC) balance reads zero after migrating a wallet | **none -- no switch exists** | Not a divergence to configure: activating a shielded coin with no `sync_params` scans only a recent window, in both implementations. Pass `sync_params` to reach older funds. | No | [see below](#zhtlc-zero-balance-after-migrating-a-wallet) |
 | Shielded withdrawal short because of an unconfirmed transaction | **none -- no switch exists** | Cannot be reproduced, and none is wanted. A Light-mode ZHTLC (ARRR) `withdraw` that is short only because its notes are committed to an earlier, unconfirmed transaction of the same node fails with the additive `error_type` `BalanceLockedByUnconfirmedTransaction` (HTTP 400, naming the coin, available, required and committed amounts); the reference reports the bare `NotSufficientBalance`. No wire format and no other node is affected, so by the second arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule) Reloaded's variant is the default. A client that matches only on `NotSufficientBalance` sees a different token for this one case; after a node restart the bare `NotSufficientBalance` is reported again. | No | [CRD ch.39 D39.8.0e](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Key export | `allow_insecure_key_export` | `true` — enables GLEEC-parity offline / no-activation / HD-range / shielded key export. Default `false`. | Yes | [CRD ch.07 §7.3A](reloaded-rewrite/07-wallet-lifecycle-and-key-export.md) |
 | Sia activation result under an HD wallet | `sia_activation_single_address_balance` | `true` -- `wallet_balance` is always the single-address `"Iguana"` form, as GLEEC KDF reports it. Default `false`: under an HD wallet Reloaded reports the HD per-account report (`"wallet_type": "HD"`), like the other coins of an HD wallet. Both shapes carry the same single address and balance. | No | [CRD ch.46 R46.2.4](reloaded-rewrite/46-sia-v2-activation-rpcs.md) |
@@ -86,6 +87,49 @@ What an integrator observes:
 the single builder-height authority; both are additive for a deployment whose endpoints
 are all on the chain they claim, and the only observable change there is that HTLC
 spends and refunds stop being built from a different height than ordinary sends.
+
+### ZHTLC zero balance after migrating a wallet
+
+**Symptom:** a shielded (ZHTLC) coin such as ARRR activates, the sync completes and keeps
+pace with the chain, the logs look healthy, and the balance is zero or lower than expected.
+
+**Warning.** Activating a shielded coin **without `sync_params`** scans only a recent
+window below the chain tip. A wallet whose funds are older than that window shows a zero or
+partial balance even though nothing failed. Ship this knowledge to your users: a wallet
+that migrates an existing wallet must pass `sync_params`.
+
+This is expected behavior, not a bug to report. GLEEC KDF behaves the same way with a
+shorter window: it uses one day of blocks, worked out from the coin's `avg_blocktime`,
+which is 1,440 blocks for ARRR. KDF Reloaded uses a fixed window of **2,880 blocks** for
+every shielded coin. That is two days **at a 60-second block time**; on a chain with a
+different block time the same block count spans a different interval. The window is
+floored at Sapling activation.
+
+**Why a migrated wallet hits it.** KDF Reloaded keeps its shielded databases under
+distinct file names, `<TICKER>_RELOADED_WALLET.db` and `<TICKER>_RELOADED_COMPACT_BLOCKS.db`
+(for example `ARRR_RELOADED_WALLET.db`). The files a GLEEC KDF node wrote
+(`<TICKER>_WALLET.db`, `<TICKER>_COMPACT_BLOCKS.db`) are never opened, migrated or deleted.
+So the first run on a migrated node starts from a fresh wallet database, and the default
+window applies. **Do not rename, copy or reuse the old database files under the new
+names.** Their schema differs, Reloaded fingerprints every database it opens, and a file
+that does not match is preserved and refused rather than adopted.
+
+**Remedy.** Activate with `sync_params` inside the Light-mode `rpc_data`
+(`activation_params.mode.rpc_data.sync_params`; it is not a top-level field), chosen to
+precede the wallet's first received funds. Exactly three forms are accepted:
+
+| Form | JSON | Start |
+|------|------|-------|
+| height | `"sync_params": {"height": 2000000}` | that block height |
+| date | `"sync_params": {"date": 1700000000}` | the block matching that Unix timestamp, in seconds |
+| earliest | `"sync_params": "earliest"` | Sapling activation; slowest, always sufficient |
+
+Each is floored at Sapling activation. When unsure of the first-receive date, use
+`"earliest"`. The activation result's `first_sync_block` reports the start that was
+actually used, which is the quickest way to confirm which window applied. A start that
+differs from the wallet's current scan state rewinds and rescans, so correcting a wallet
+that already activated with the default window is done by activating again with
+`sync_params`.
 
 ### `netid`
 

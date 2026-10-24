@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
   `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
   that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
+  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
+  60-second block time), so funds older than that are invisible while the sync completes
+  normally. This matches the reference, whose window is shorter; the remedy is to pass
+  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
 
 ### Changed
 
