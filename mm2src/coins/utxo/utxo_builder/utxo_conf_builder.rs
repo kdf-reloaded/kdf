@@ -2,17 +2,55 @@ use crate::utxo::rpc_clients::EstimateFeeMode;
 use crate::utxo::{parse_hex_encoded_u32, UtxoCoinConf, DEFAULT_DYNAMIC_FEE_VOLATILITY_PERCENT, KMD_MTP_BLOCK_COUNT,
                   MATURE_CONFIRMATIONS_DEFAULT};
 use crate::UtxoActivationParams;
+use common::log::warn;
 use crypto::trezor::utxo::TrezorUtxoCoin;
 use crypto::{Bip32Error, ChildNumber};
 use derive_more::Display;
 use kdf_crypto::ChecksumType;
 pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, KeyPair, Private, Public, Secret,
                Type as ScriptType};
+use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use script::SignatureVersion;
 use serde_json::{self as json, Value as Json};
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
+
+/// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
+const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\"";
+
+/// The top-level `MM2.json` compatibility switch that selects what a coin-configuration key holding an
+/// unrecognised enumeration member does: `false` (the default) fails the activation, the boolean `true` warns
+/// once per activation and falls back to the key's default, as the reference does. Only the boolean `true`
+/// turns it on. The name is deliberately not specific to one key: any enumeration read from a coin
+/// configuration can adopt it. The first consumer is `signature_version`.
+pub const COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY: &str = "coin_conf_unrecognised_enum_falls_back";
+
+/// What to do with a coin-configuration enumeration key that is present but holds an unrecognised member.
+/// An absent key (or JSON `null`) is not affected: it always takes the key's default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnrecognisedEnumPolicy {
+    /// Fail the build with an error naming the key and the value. The default.
+    Fail,
+    /// Take the key's default and warn, as the reference does silently.
+    WarnAndFallBack,
+    /// Take the key's default without a warning. For callers that read only address-related fields and never
+    /// the signing algorithm, so a value they do not use cannot make them fail.
+    NotUsed,
+}
+
+impl Default for UnrecognisedEnumPolicy {
+    fn default() -> Self { UnrecognisedEnumPolicy::Fail }
+}
+
+/// The policy the node's `MM2.json` selects through [`COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY`].
+pub fn unrecognised_enum_policy(ctx: &MmArc) -> UnrecognisedEnumPolicy {
+    if ctx.conf[COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY].as_bool() == Some(true) {
+        UnrecognisedEnumPolicy::WarnAndFallBack
+    } else {
+        UnrecognisedEnumPolicy::Fail
+    }
+}
 
 pub type UtxoConfResult<T> = Result<T, MmError<UtxoConfError>>;
 
@@ -39,6 +77,23 @@ pub enum UtxoConfError {
     ErrorDeserializingDerivationPath(String),
     InvalidConsensusBranchId(String),
     InvalidVersionGroupId(String),
+    #[display(
+        fmt = "Invalid 'fork_id' {}: expected a hexadecimal string such as \"0x40\" that fits 32 bits, or omit the key to use the coin's default",
+        found
+    )]
+    InvalidForkId {
+        found: String,
+    },
+    #[display(
+        fmt = "Invalid 'signature_version' {}: expected one of {}, or omit the key to use the coin's default \
+               (or set '{}' to true in MM2.json to warn and fall back instead of failing)",
+        found,
+        ACCEPTED_SIGNATURE_VERSIONS,
+        COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY
+    )]
+    InvalidSignatureVersion {
+        found: String,
+    },
     InvalidAddressFormat(String),
     InvalidSpvConf(String),
     InvalidDecimals(String),
@@ -52,14 +107,37 @@ pub struct UtxoConfBuilder<'a> {
     conf: &'a Json,
     ticker: &'a str,
     params: &'a UtxoActivationParams,
+    unrecognised_enum_policy: UnrecognisedEnumPolicy,
 }
 
 impl<'a> UtxoConfBuilder<'a> {
     pub fn new(conf: &'a Json, params: &'a UtxoActivationParams, ticker: &'a str) -> Self {
-        UtxoConfBuilder { conf, ticker, params }
+        UtxoConfBuilder {
+            conf,
+            ticker,
+            params,
+            unrecognised_enum_policy: UnrecognisedEnumPolicy::default(),
+        }
+    }
+
+    /// Selects what an unrecognised enumeration member in the coin configuration does; see
+    /// [`UnrecognisedEnumPolicy`]. Without this call the build fails.
+    pub fn with_unrecognised_enum_policy(mut self, policy: UnrecognisedEnumPolicy) -> Self {
+        self.unrecognised_enum_policy = policy;
+        self
     }
 
     pub fn build(&self) -> UtxoConfResult<UtxoCoinConf> {
+        let (conf, warnings) = self.build_with_warnings()?;
+        for warning in warnings {
+            warn!("{warning}");
+        }
+        Ok(conf)
+    }
+
+    /// Builds the configuration and returns, instead of logging them, the warnings the build produced.
+    fn build_with_warnings(&self) -> UtxoConfResult<(UtxoCoinConf, Vec<String>)> {
+        let mut warnings = Vec::new();
         let checksum_type = self.checksum_type();
         let pub_addr_prefix = self.pub_addr_prefix();
         let p2sh_addr_prefix = self.p2sh_address_prefix();
@@ -80,8 +158,8 @@ impl<'a> UtxoConfBuilder<'a> {
         let tx_fee_volatility_percent = self.tx_fee_volatility_percent();
         let version_group_id = self.version_group_id(tx_version, overwintered)?;
         let consensus_branch_id = self.consensus_branch_id(tx_version)?;
-        let signature_version = self.signature_version();
-        let fork_id = self.fork_id();
+        let fork_id = self.fork_id()?;
+        let signature_version = self.signature_version(fork_id, &mut warnings)?;
 
         // should be sufficient to detect zcash by overwintered flag
         let zcash = overwintered;
@@ -100,7 +178,7 @@ impl<'a> UtxoConfBuilder<'a> {
         let trezor_coin = self.trezor_coin();
         let enable_spv_proof = self.enable_spv_proof();
 
-        Ok(UtxoCoinConf {
+        let conf = UtxoCoinConf {
             ticker: self.ticker.to_owned(),
             is_pos,
             requires_notarization,
@@ -131,7 +209,8 @@ impl<'a> UtxoConfBuilder<'a> {
             estimate_fee_blocks,
             trezor_coin,
             enable_spv_proof,
-        })
+        };
+        Ok((conf, warnings))
     }
 
     fn checksum_type(&self) -> ChecksumType {
@@ -230,23 +309,62 @@ impl<'a> UtxoConfBuilder<'a> {
         Ok(consensus_branch_id)
     }
 
-    fn signature_version(&self) -> SignatureVersion {
-        let default_signature_version = if self.ticker == "BCH" || self.fork_id() != 0 {
-            SignatureVersion::ForkId
-        } else {
-            SignatureVersion::Base
+    fn signature_version(&self, fork_id: u32, warnings: &mut Vec<String>) -> UtxoConfResult<SignatureVersion> {
+        let default = || {
+            if self.ticker == "BCH" || fork_id != 0 {
+                SignatureVersion::ForkId
+            } else {
+                SignatureVersion::Base
+            }
         };
-        json::from_value(self.conf["signature_version"].clone()).unwrap_or(default_signature_version)
+        let value = &self.conf["signature_version"];
+        // An absent key (or an explicit `null`) takes the default. A present value that is not recognised
+        // takes it only if the node's policy says so, and then not silently: a coin that signs under a
+        // sighash algorithm nobody asked for is rejected by the network.
+        if value.is_null() {
+            return Ok(default());
+        }
+        match json::from_value(value.clone()) {
+            Ok(signature_version) => Ok(signature_version),
+            Err(_) => match self.unrecognised_enum_policy {
+                UnrecognisedEnumPolicy::Fail => MmError::err(UtxoConfError::InvalidSignatureVersion {
+                    found: value.to_string(),
+                }),
+                UnrecognisedEnumPolicy::WarnAndFallBack => {
+                    let fallback = default();
+                    warnings.push(format!(
+                        "{}: unrecognised 'signature_version' {} in the coin configuration (expected one of {}), \
+                         falling back to {:?} because '{}' is true",
+                        self.ticker,
+                        value,
+                        ACCEPTED_SIGNATURE_VERSIONS,
+                        fallback,
+                        COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY
+                    ));
+                    Ok(fallback)
+                },
+                UnrecognisedEnumPolicy::NotUsed => Ok(default()),
+            },
+        }
     }
 
-    fn fork_id(&self) -> u32 {
+    /// An absent key (or JSON `null`) takes the coin's default. A present value must be a hexadecimal string
+    /// that fits 32 bits: this is a malformed value, not an unrecognised enumeration member, so it fails under
+    /// every [`UnrecognisedEnumPolicy`].
+    fn fork_id(&self) -> UtxoConfResult<u32> {
         let default_fork_id = match self.ticker {
-            "BCH" => "0x40",
-            _ => "0x0",
+            "BCH" => 0x40,
+            _ => 0,
         };
-        let hex_string = self.conf["fork_id"].as_str().unwrap_or(default_fork_id);
-        let fork_id = u32::from_str_radix(hex_string.trim_start_matches("0x"), 16).unwrap();
-        fork_id
+        let value = &self.conf["fork_id"];
+        if value.is_null() {
+            return Ok(default_fork_id);
+        }
+        let invalid = || UtxoConfError::InvalidForkId {
+            found: value.to_string(),
+        };
+        let hex_string = value.as_str().or_mm_err(invalid)?;
+        u32::from_str_radix(hex_string.trim_start_matches("0x"), 16).map_to_mm(|_| invalid())
     }
 
     fn required_confirmations(&self) -> u64 {
@@ -289,4 +407,220 @@ impl<'a> UtxoConfBuilder<'a> {
     }
 
     fn enable_spv_proof(&self) -> bool { self.conf["enable_spv_proof"].as_bool().unwrap_or(false) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utxo::EnableCoinScanPolicy;
+    use crate::utxo::UtxoRpcMode;
+    use crate::PrivKeyActivationPolicy;
+    use serde_json::json;
+
+    fn params() -> UtxoActivationParams {
+        UtxoActivationParams {
+            mode: UtxoRpcMode::Native,
+            utxo_merge_params: None,
+            tx_history: false,
+            required_confirmations: None,
+            requires_notarization: None,
+            address_format: None,
+            gap_limit: None,
+            min_addresses_number: None,
+            scan_policy: EnableCoinScanPolicy::default(),
+            priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
+            check_utxo_maturity: None,
+            path_to_address: None,
+        }
+    }
+
+    fn build(ticker: &str, conf: Json) -> UtxoConfResult<UtxoCoinConf> {
+        UtxoConfBuilder::new(&conf, &params(), ticker).build()
+    }
+
+    fn build_with(ticker: &str, conf: Json, policy: UnrecognisedEnumPolicy) -> UtxoConfResult<UtxoCoinConf> {
+        UtxoConfBuilder::new(&conf, &params(), ticker)
+            .with_unrecognised_enum_policy(policy)
+            .build()
+    }
+
+    fn warnings_of(ticker: &str, conf: Json, policy: UnrecognisedEnumPolicy) -> (UtxoCoinConf, Vec<String>) {
+        UtxoConfBuilder::new(&conf, &params(), ticker)
+            .with_unrecognised_enum_policy(policy)
+            .build_with_warnings()
+            .unwrap()
+    }
+
+    fn rxd_conf() -> Json { json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}) }
+
+    #[test]
+    fn policy_follows_the_mm2_json_switch_and_only_the_boolean_true_turns_it_on() {
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        let policy = |conf: Json| unrecognised_enum_policy(&MmCtxBuilder::new().with_conf(conf).into_mm_arc());
+        assert_eq!(policy(json!({})), UnrecognisedEnumPolicy::Fail);
+        assert_eq!(
+            policy(json!({ COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY: true })),
+            UnrecognisedEnumPolicy::WarnAndFallBack
+        );
+        for off in [json!(false), json!("true"), json!(1), json!(null)] {
+            let conf = json!({ COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY: off });
+            assert_eq!(policy(conf), UnrecognisedEnumPolicy::Fail, "{off}");
+        }
+    }
+
+    #[test]
+    fn the_default_policy_is_fail() {
+        // `build` without `with_unrecognised_enum_policy` is what a caller that forgets the call gets.
+        assert!(build("RXD", rxd_conf()).is_err());
+        assert_eq!(UnrecognisedEnumPolicy::default(), UnrecognisedEnumPolicy::Fail);
+    }
+
+    #[test]
+    fn unrecognised_signature_version_warns_once_and_falls_back_when_the_switch_selects_it() {
+        let (conf, warnings) = warnings_of("RXD", rxd_conf(), UnrecognisedEnumPolicy::WarnAndFallBack);
+        // RXD's `fork_id` is non-zero, so the absent-key default is `ForkId`.
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let w = &warnings[0];
+        assert!(w.contains("signature_version"), "the key must be named: {w}");
+        assert!(w.contains("fork_id_rxd"), "the value must be named: {w}");
+        assert!(w.contains(COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY), "{w}");
+
+        // The fallback is the absent-key default, not a fixed value.
+        let conf = build_with(
+            "XYZ",
+            json!({"coin": "XYZ", "signature_version": "nope"}),
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+        )
+        .unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+    }
+
+    #[test]
+    fn not_used_policy_falls_back_without_a_warning() {
+        let (conf, warnings) = warnings_of("RXD", rxd_conf(), UnrecognisedEnumPolicy::NotUsed);
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn no_warning_for_recognised_absent_or_null_values_under_either_switch_setting() {
+        for policy in [UnrecognisedEnumPolicy::Fail, UnrecognisedEnumPolicy::WarnAndFallBack] {
+            for conf in [
+                json!({"coin": "XYZ"}),
+                json!({"coin": "XYZ", "signature_version": null}),
+                json!({"coin": "XYZ", "signature_version": "witness_v0"}),
+            ] {
+                let (_, warnings) = warnings_of("XYZ", conf.clone(), policy);
+                assert!(warnings.is_empty(), "{policy:?} {conf}: {warnings:?}");
+            }
+            let conf = build_with("XYZ", json!({"coin": "XYZ"}), policy).unwrap();
+            assert_eq!(conf.signature_version, SignatureVersion::Base);
+        }
+    }
+
+    #[test]
+    fn a_malformed_fork_id_fails_instead_of_panicking_under_every_policy() {
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            for bad in ["0xZZ", "", "0x", "zz", "0x1ffffffff"] {
+                let err = build_with("XYZ", json!({"coin": "XYZ", "fork_id": bad}), policy)
+                    .err()
+                    .unwrap_or_else(|| panic!("fork_id {bad:?} must fail under {policy:?}"));
+                let msg = err.to_string();
+                assert!(msg.contains("fork_id") && msg.contains(bad), "{msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_non_string_fork_id_fails_instead_of_taking_the_default() {
+        for bad in [json!(64), json!(true), json!(["0x40"]), json!({"a": 1})] {
+            let err = build("XYZ", json!({"coin": "XYZ", "fork_id": bad}))
+                .err()
+                .unwrap_or_else(|| panic!("fork_id {bad} must fail"));
+            assert!(err.to_string().contains(&bad.to_string()), "{err}");
+        }
+    }
+
+    #[test]
+    fn fork_id_is_parsed_and_an_absent_one_keeps_the_default() {
+        assert_eq!(build("XYZ", json!({"coin": "XYZ"})).unwrap().fork_id, 0);
+        assert_eq!(
+            build("XYZ", json!({"coin": "XYZ", "fork_id": null})).unwrap().fork_id,
+            0
+        );
+        assert_eq!(build("BCH", json!({"coin": "BCH"})).unwrap().fork_id, 0x40);
+        assert_eq!(
+            build("XYZ", json!({"coin": "XYZ", "fork_id": "0x40"})).unwrap().fork_id,
+            0x40
+        );
+        assert_eq!(
+            build("XYZ", json!({"coin": "XYZ", "fork_id": "40"})).unwrap().fork_id,
+            0x40
+        );
+        assert_eq!(
+            build("XYZ", json!({"coin": "XYZ", "fork_id": "0x0"})).unwrap().fork_id,
+            0
+        );
+    }
+
+    #[test]
+    fn unrecognised_signature_version_fails_the_build() {
+        let err = build(
+            "RXD",
+            json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}),
+        )
+        .err()
+        .expect("an unrecognised signature_version must not fall back to a default");
+        let msg = err.to_string();
+        assert!(msg.contains("fork_id_rxd"), "the offending value must be named: {msg}");
+        assert!(msg.contains("witness_v0"), "the accepted set must be listed: {msg}");
+
+        // A present value of the wrong JSON type is equally unrecognised.
+        assert!(build("XYZ", json!({"coin": "XYZ", "signature_version": 1})).is_err());
+        assert!(build("XYZ", json!({"coin": "XYZ", "signature_version": ""})).is_err());
+    }
+
+    #[test]
+    fn recognised_signature_version_is_honoured() {
+        for (name, expected) in [
+            ("base", SignatureVersion::Base),
+            ("witness_v0", SignatureVersion::WitnessV0),
+            ("fork_id", SignatureVersion::ForkId),
+        ] {
+            let conf = build("XYZ", json!({"coin": "XYZ", "signature_version": name})).unwrap();
+            assert_eq!(conf.signature_version, expected);
+        }
+    }
+
+    #[test]
+    fn absent_signature_version_keeps_the_default() {
+        // No `fork_id` (or a zero one) and not BCH: `Base`.
+        let conf = build("XYZ", json!({"coin": "XYZ"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build("XYZ", json!({"coin": "XYZ", "fork_id": "0x00"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+
+        // Non-zero `fork_id`: `ForkId`.
+        let conf = build("XYZ", json!({"coin": "XYZ", "fork_id": "0x40"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+
+        // BCH has both defaults built in.
+        let conf = build("BCH", json!({"coin": "BCH"})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+
+        // An explicit JSON `null` is treated as absent.
+        let conf = build("XYZ", json!({"coin": "XYZ", "signature_version": null})).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build(
+            "XYZ",
+            json!({"coin": "XYZ", "fork_id": "0x40", "signature_version": null}),
+        )
+        .unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+    }
 }
