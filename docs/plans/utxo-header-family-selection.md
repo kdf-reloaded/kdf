@@ -246,6 +246,15 @@ corresponding D paragraph when it lands.
   lacks the key. Mitigation: registry coverage (verified above), a changelog
   note, and an activation-time warning, rather than a silent misread, when a
   `Default` coin serves a header that parses only as KawPoW.
+- **`MEWC` may name the wrong family:** it is configured with
+  `"chain_variant": "BTC"`, and nobody has observed whether its headers in
+  fact carry the KawPoW shape (ch.37 §37.5.1). If they do, H4's `Btc`
+  exclusivity reads 80 bytes of each 120-byte header, so the strict list
+  check rejects the list and median-time-past errors instead of returning a
+  value; a wrong or rejected median-time-past feeds a wrong refund locktime.
+  Mitigation: observe that coin's served header bytes before H4 lands, and
+  correct the coin file if they disagree. The same check applies to any
+  KawPoW-family entry added later.
 - **H5 hash-scope change:** changes lookup results for AuxPoW stores. It needs
   the migration decision and a test on both backends.
 - **WASM:** H3 and H5 touch the IndexedDB store. Run
