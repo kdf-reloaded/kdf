@@ -198,6 +198,25 @@ R37.6.2).
 > forbidden-class-sourced material stands on the separate pre-adoption
 > record of the same section and was not part of that candidate.
 
+> **Clearance (chapter 01 T1, R40) — the chain-variant pass of
+> 2026-10-24.** The material the chain-variant pass added or rewrote in
+> this chapter was authored by the KDF Spec Reader on 2026-10-24 under the
+> chapter-01 §1.4A two-team procedure: from the forbidden corpus under the
+> release designations named in the *chain-variant pass* clearance item of
+> §37.10, from public-network observation of the Electrum servers the
+> public coin registry configures (R6), and from the published header
+> definitions of the chains concerned (R3). It **passed the KDF Dirty
+> Gate** on 2026-10-24 before being relied on (PASS,
+> discretionary-expression measure 0.02, finding list empty), so nothing
+> it added is a candidate awaiting a gate; the point-of-appearance markers
+> R40 required while the clearance was pending have been removed. Where a
+> passage of that pass replaces earlier text, the earlier text is
+> superseded on its substance. Its extent, method and measure are
+> recorded once, in that item of §37.10, and are not restated here; the
+> chapter's earlier forbidden-class-sourced material stands on the two
+> records above it in the same section and was not part of this
+> candidate.
+
 ### 37.5.1 Selection authority
 
 R37.5.1 The header family of a UTXO coin shall be selected **per coin, from
@@ -215,7 +234,7 @@ and shall be accepted verbatim:
 | `"PPC"` | Standard 80-byte header (Peercoin-style); a version value of 4 does not select the Equihash-style layout. |
 | `"QTUM"` | Qtum proof-of-stake header. |
 | `"LBC"` | LBRY claim-trie header. |
-| `"RVN"` | Standard header before the chain's KawPoW switch, KawPoW header after it. **†** |
+| `"RVN"` | Standard header, except that a header whose version value is exactly `0x30000000` carries the KawPoW trailer (R37.5.5); shared by several KawPoW-descended chains. |
 | `"PIVX"` | PIVX header with the trailing Sapling root. |
 | `"RICK"`, `"MORTY"` | Komodo asset-chain Equihash-style header for every block, including a genesis block whose version value is 1. |
 
@@ -225,17 +244,49 @@ away: the whole column reads as one list, and a reader who takes every
 cell for as-built reference behaviour will under-count what has to be
 built. Unmarked cells fall within the scope of the port note in §37.5.8 —
 the key, the closed value set, the rejection of an unrecognised value,
-and the family each of those values pins. The two marked cells do not:
+and the family each of those values pins. The one marked cell does not:
 `"BTC"`'s exclusivity is bound by R37.5.3, and the finding beneath that
 rule records that the value is a partial guard rather than the
-exclusivity the rule requires; `"RVN"`'s time-switched reading is bound
-by R37.5.5, and §37.5.7b records that this family is keyed on a version
-value with no time comparison. §37.5.8's closing list is the full
+exclusivity the rule requires. The `"RVN"`
+cell carried the same mark until the chain-variant pass of 2026-10-24,
+when it read "standard before the chain's KawPoW switch, KawPoW after
+it"; R37.5.5 as rewritten keeps the reference's version key for that
+family, so the cell now states a ported behaviour and the mark is
+removed. §37.5.8's closing list is the full
 inventory of what remains this project's own, and §37.9 D1 is what
 closing the ported part takes.
 
 An unrecognised `chain_variant` string shall reject coin activation with a
 configuration error; it shall not silently fall back to the default.
+
+Three details of that contract, as the reference implements it at the
+designations named in §37.10 (established by the chain-variant pass of
+2026-10-24 and cleared with it), which an implementer of §37.9 D1 needs:
+
+- **Where the key is read and what it may not disturb.** The value is read
+  from the coin's raw `protocol` object as a plain string, beside `type`.
+  It is not part of the typed protocol descriptor
+  [chapter 55](55-coin-activation-wire-contract.md) binds (`{type,
+  protocol_data}`) and does not change how that descriptor is parsed;
+  a protocol object that carries the key still parses as the same protocol
+  type with or without it. The comparison is exact and case-sensitive on
+  the eight spellings; no ticker-derived or protocol-type-derived default
+  is applied — a QTUM- or QRC20-protocol coin whose file omits the key is
+  the **default** family in the reference, not the Qtum family.
+- **How the rejection surfaces.** An unrecognised value fails the
+  coin-configuration step of the UTXO coin build, so the activation ends in
+  the error class chapter 55 binds for a coin that cannot be built
+  (`CoinCreationError`, carrying the ticker and a textual reason), not in
+  the protocol-parse error class; the textual reason is diagnostic wording
+  and not bound.
+- **Where the value lives at run time.** The resolved family is a field of
+  the coin's configuration, handed to the coin's RPC client object (the
+  Electrum backend and the native-daemon backend alike) and to its header
+  store at construction. Of these only the Electrum backend and the header
+  stores parse header bytes; the native-daemon backend takes a block's time
+  and the median-time-past from the node's own block data and never parses
+  a header, so R37.5.1a's read paths are the Electrum backend's and the two
+  header stores'.
 
 > **Reference vintage of R37.5.1 (confirmed).** The configuration-selected
 > family, the accepted-value set in the table above, and the
@@ -247,6 +298,28 @@ configuration error; it shall not silently fall back to the default.
 > is therefore a **port**, not an invention, and the value spellings are
 > dictated by the deployed coin files rather than chosen here.
 >
+> *Vintage, sharpened (chain-variant pass of 2026-10-24).* At the release
+> designation immediately preceding `v2.6.0-beta` — `v2.5.2-beta` — the
+> `chain_variant` key is **not read**: the family is chosen in code from
+> the coin ticker (suffixed forms such as `BTC-segwit` included). Between
+> the two designations the rework
+> replaced that ticker table with the configuration key, and its published
+> coin-file migration guidance mapped the then-hardcoded tickers onto the
+> values: `BTC`, `BCH`, `NAV`, `RIC` → `"BTC"`; `QTUM`, `RUNES` →
+> `"QTUM"`; `LBC` → `"LBC"`; `PPC` → `"PPC"`; `RICK`, `DOC` → `"RICK"`;
+> `MORTY`, `MARTY` → `"MORTY"`; `RVN`, `AIPG`, `XNA`, `EVR`, `MEWC`, `AVN`
+> → `"RVN"`; `PIVX`, `DOGEC` → `"PIVX"`; every other coin stays on the
+> key-absent default. Two consequences: a coin file that carries the key
+> is accepted by both designations (the older one ignores it), so adding
+> the key to a shared file is backward-compatible; and the public registry
+> departed from that guidance for one coin — `MEWC`, placed under `"BTC"`
+> the day before the rework landed — which the next note takes up with
+> observed facts. No value of the set selects a *time*- or
+> *height*-switched layout by itself: the only time comparison in the
+> reference's header reader is the Firo switch of §37.5.2, keyed on a
+> version value and applied to every family, and there is no height
+> comparison anywhere.
+>
 > *Deployed values.* The public third-party coins configuration (snapshot
 > of 2026-10-18) uses six of the eight: `BTC` on fourteen entries, `QTUM`
 > on eleven, `RVN` on four, `PIVX` on two, `LBC` on two and `PPC` on one.
@@ -254,17 +327,53 @@ configuration error; it shall not silently fall back to the default.
 > development asset chains the value set was introduced for — so the
 > project must still accept them but no shipped coin exercises them.
 >
-> *Operator check worth making before R37.5.3 is enforced.* `MEWC` is
-> configured with `"chain_variant": "BTC"`. If that chain's headers
-> actually carry the KawPoW shape of §37.5.2, then under the exclusivity
-> of R37.5.3 its header-list reads consume 80 bytes per 120-byte header:
-> the reference accepts the result silently as a list of wrongly shaped
-> headers (see the finding in §37.5.6) and the project rejects the list
-> under R37.5.6. Either outcome breaks that coin's median-time-past, and
-> therefore the refund path of R37.6.2, so the coin's own published header
-> definition should be checked against its configured value and the coin
-> file corrected if they disagree. The same check applies to any further
-> KawPoW-family entry added later.
+> *The `MEWC` check, made (chain-variant pass of 2026-10-24).* The earlier
+> revision of this note asked for an operator check of `MEWC`'s configured
+> value against its real header shape. The check was made on 2026-10-24
+> against the registry's own Electrum servers for the coin (R6) and the
+> chain's published header definition (R3), and the answer is that **no
+> value of the reference's set describes the chain**:
+>
+> - the chain's header rule is a time switch with a merged-mining
+>   exception — a block carrying the AuxPoW flag bit (bit 8) has the
+>   standard nonce followed by the AuxPoW proof whatever its time, and a
+>   block without it carries the KawPoW-shaped trailer (height, 64-bit
+>   nonce, mix hash) once past the chain's switch time;
+> - the chain's **current** blocks interleave both kinds. The servers
+>   serve the merged-mined ones as **80 bytes** (the AuxPoW proof is
+>   stripped; the version value observed was `0x30090100`) and the native
+>   ones as **120 bytes** (version `0x30090000`); a three-header list at
+>   the tip measured 80 + 80 + 120 bytes. Earlier history is uniform:
+>   120-byte headers with version `0x30000000` up to roughly height 1.5
+>   million, then 120-byte headers with version `0x30090000`, then the
+>   mixed régime from roughly height 1.7 million on;
+> - under `"BTC"` (the registry's value) the reference reads 80 bytes per
+>   header: the list read is the silent misparse of the §37.5.6 finding,
+>   so the coin's median-time-past is **wrong without an error**; under
+>   `"RVN"` (the rework's own guidance) neither kind parses — version
+>   `0x30090000` is not the exact KawPoW value, so the native headers read
+>   as 80 bytes, and the flag bit on the merged-mined ones starts an
+>   AuxPoW read on bytes the server did not send;
+> - under this chapter's rules the coin fails **loudly** instead: with the
+>   AuxPoW recognition of R37.5.2 and the fallback of R37.5.6 the 80-byte
+>   merged-mined headers parse, the 120-byte native ones do not under
+>   `"BTC"` or the default, and a mixed list is rejected whole.
+>
+> The coin therefore needs a family of its own, which the reference does
+> not have and which the shared registry cannot name without the reference
+> rejecting the entry; §37.9 D3 records the gap and the options. The same
+> check was made for every other registry entry whose family this chapter
+> models, and two more entries turned out to be mis-described by their
+> value or by its absence — `RIC` under `"BTC"` and `XPM` with no key — for
+> the same structural reason (their chains' own layouts, §37.5.2); they
+> are in D3 as well. Everything else checked matches its value: the
+> `"RVN"` entries `RVN`, `EVR`, `XNA` serve 120-byte KawPoW headers, and
+> `AVN` serves 80-byte headers whose version value is not the KawPoW one,
+> so it reads correctly as std-80 under `"RVN"` by the version key of
+> R37.5.5; `RUNES` under `"QTUM"` serves Qtum-shaped headers; `LBC` 112
+> bytes; `PIVX` 112 bytes at the tip. The check is repeatable: fetch one
+> header and one short header list from a configured server at a recent
+> height and compare the byte count with §37.5.2.
 
 R37.5.1a The configured family shall apply identically to **every** header
 read path of the coin: single-header reads, header-list reads, the starting
@@ -298,6 +407,16 @@ another path of the same coin parses with the configured one.
 > generic entry point requires the parse to consume the served bytes exactly
 > (see §37.5.6), so for a fixed-size family longer than 80 bytes the read
 > fails loudly instead of returning a wrongly shaped header.
+>
+> Re-confirmed by the chain-variant pass of 2026-10-24 at both
+> designations named in §37.10, reading the rework that introduced
+> the key: the rework threaded the configured family into exactly the
+> paths listed as carrying it — the header-list read of the sync loop, the
+> trusted-anchor check, the median-time-past list and both header stores'
+> re-reads — and left the two single-header fetches on the family-agnostic
+> entry point. Nothing merged after it and before `v3.0.0-beta` touches
+> those two paths. No read path of the reference is keyed on a block
+> *height* or on a *time* taken from configuration.
 
 ### 37.5.2 Header families and their dictated layouts
 
@@ -311,15 +430,18 @@ time (4) + compact difficulty bits (4) + nonce (4)`, fields in that order.
 |---|---|---|---|
 | Standard (Bitcoin) | std-80 = 80 bytes | Default for Bitcoin-derived chains. | Default; the only layout under `"BTC"`/`"PPC"` except as noted in R37.5.3. |
 | AuxPoW / merged mining | std-80, then the AuxPoW proof: parent-chain coinbase transaction (full transaction encoding); parent block hash (32); coinbase Merkle branch (compact-size count, count×32 hashes, 4-byte side mask); chain Merkle branch (same shape); parent block header (std-80) | The block's version value has the AuxPoW flag, bit 8 (`0x100`), set; the chain ID sits in the version's upper 16 bits. | Bit 8 set and `chain_variant` is not `"BTC"`. |
-| KawPoW (Ravencoin-style) | `version (4) + previous hash (32) + Merkle root (32) + time (4) + bits (4) + height (4) + 64-bit nonce (8) + mix hash (32)` = 120 bytes; there is no 32-bit nonce field | The chain's own KawPoW activation time (a block time at or after it uses this layout). | Version value exactly `0x30000000` **and** `chain_variant` = `"RVN"`. |
+| KawPoW (Ravencoin-style) | `version (4) + previous hash (32) + Merkle root (32) + time (4) + bits (4) + height (4) + 64-bit nonce (8) + mix hash (32)` = 120 bytes; there is no 32-bit nonce field | Ravencoin: block time at or after the chain's published mainnet switch time `1588788000` (first such block observed at height 1219736; the block before it carries the same version value with the 80-byte layout). Each other chain sharing the `"RVN"` value has its own rule — Evrmore from its first block, Neurai likewise at the tip, Avian **no longer** (80-byte headers at the tip, version not the KawPoW value) — so no single time rule serves the value (R37.5.5). | Version value exactly `0x30000000` **and** `chain_variant` = `"RVN"`. |
 | Equihash-style (Zcash / Komodo; Sapling-root before time) | `version (4) + previous hash (32) + Merkle root (32) + final Sapling root / reserved (32) + time (4) + bits as plain 4-byte integer (4) + nonce (32) + solution (compact-size length + bytes; 1344 bytes for Equihash 200,9)` | Chain family (Zcash-derived headers are always this shape; version value is 4). | Version value 4 and `chain_variant` neither `"BTC"` nor `"PPC"`; or `chain_variant` `"RICK"`/`"MORTY"` for every version value. |
 | Verus | Same shape as the Equihash-style row; the solution is the chain's own proof-of-work solution vector | The version field carries the value 4 with the solution-version marker bit 16 (`0x00010000`) set, i.e. `0x00010004`. | Version value `0x00010004`, whatever `chain_variant` says; the marker bit is cleared for the in-memory version and restored on re-encoding. |
-| Firo MTP | std-80, then `MTP version (4) + MTP hash value (32) + reserved (32) + reserved (32)` = 180 bytes | Block time from the chain's MTP start until its ProgPoW switch. | Version value exactly `0x20001000` and time before `1635228000` (the chain's ProgPoW switch time), whatever `chain_variant` says. |
+| Firo MTP | std-80, then `MTP version (4) + MTP hash value (32) + reserved (32) + reserved (32)` = 180 bytes | Block time from the chain's MTP start until its ProgPoW switch. On mainnet the MTP start is the chain's published block 117564 (observed: 80-byte headers with version `0x20000000` through 117563, 180-byte headers from 117564), and the ProgPoW switch is block 419264 (observed: 180 bytes at 419263, 120 at 419264), matching the switch time. Because pre-MTP headers never carry the version value the reference keys on, the missing lower bound is harmless on mainnet. | Version value exactly `0x20001000` and time before `1635228000` (the chain's ProgPoW switch time), whatever `chain_variant` says. |
 | Firo ProgPoW | `version (4) + previous hash (32) + Merkle root (32) + time (4) + bits (4) + height (4) + 64-bit nonce (8) + mix hash (32)` = 120 bytes; no 32-bit nonce | Block time at or after the chain's ProgPoW switch time (`1635228000`). | Version value exactly `0x20001000` and time at or after `1635228000`, whatever `chain_variant` says. |
 | Qtum proof-of-stake | std-80, then `state root (32) + UTXO root (32) + stake prevout (32-byte txid + 4-byte index) + block signature (compact-size length + bytes)` | Every Qtum header carries these fields, whatever its version value. | Version value exactly `0x20000000` **and** `chain_variant` = `"QTUM"`. |
 | LBRY claim trie | `version (4) + previous hash (32) + Merkle root (32) + claim-trie root (32) + time (4) + bits (4) + nonce (4)` = 112 bytes | Every LBRY header carries the claim-trie root. | Version value exactly `0x20000000` **and** `chain_variant` = `"LBC"`. |
-| PIVX (Sapling root after nonce) | std-80, then final Sapling root (32) = 112 bytes | Chain's own header rule: the Sapling root follows the nonce from header version 8 onward; zerocoin-era versions carry a different 32-byte field instead, and the earliest versions carry none. | Always read after the nonce when `chain_variant` = `"PIVX"`, whatever the version value. |
+| PIVX (32-byte field after nonce) | std-80, then one 32-byte field = 112 bytes **or** std-80 alone, by header version | The chain's published header definition: header versions **4, 5 and 6** carry a 32-byte zerocoin accumulator checkpoint after the nonce; version **7 carries nothing** (std-80); versions **8 and above** carry the final Sapling root in the same position; versions 3 and below carry nothing. Observed boundaries on mainnet: version 4 from height 863787 (80 bytes at 863786, 112 from 863787), version 7 from 2153200 (112 bytes at 2153199, 80 from 2153200 through 2700499), version 8 from 2700500 (112 bytes), version 11 and 112 bytes at the tip. | Always read after the nonce when `chain_variant` = `"PIVX"`, whatever the version value — correct for versions 4–6 and 8+, **wrong for version 7 and for 3 and below**. |
 | Peercoin | std-80 (the block signature is outside the header) | Chain family. | `chain_variant` = `"PPC"` only suppresses the Equihash-style reading of version-4 headers. |
+| Riecoin *(added by the chain-variant pass; cleared, §37.10)* | `version (4) + previous hash (32) + Merkle root (32) + time (8, a 64-bit integer) + bits (4) + prime offset (32)` = 112 bytes; there is no 32-bit nonce | Every Riecoin header (observed from height 1 through the tip on 2026-10-24, with version values 2 and `0x20000000`; the field layout was decoded from the served bytes and shall be confirmed against the chain's published header definition before it is implemented). | **None.** The reference has no value for this layout; the registry's `"BTC"` entry for `RIC` reads 80 bytes per header (§37.9 D3). |
+| Primecoin *(added by the chain-variant pass; cleared, §37.10)* | std-80, then the prime-chain multiplier as a compact-size-prefixed byte string (observed 8–9 bytes, so 89–90 bytes per header); variable length | Every Primecoin header (observed at height 1000000 and at the tip; confirm against the chain's published definition before implementing). | **None.** The registry's `XPM` entry carries no key; the default reads 80 bytes per header (§37.9 D3). |
+| Meowcoin *(added by the chain-variant pass; cleared, §37.10)* | A native block past the chain's switch time: the KawPoW layout, 120 bytes. A merged-mined block (version flag bit 8 set): std-80 followed by the AuxPoW proof — which the registry's servers serve **stripped to 80 bytes** | The chain's published rule, in this order: the AuxPoW flag selects the nonce-plus-proof form whatever the time; otherwise the time switch selects the KawPoW trailer. The two kinds interleave in the current chain. | **None** that parses the current chain (§37.5.1 note, §37.9 D3). |
 
 R37.5.2a **What an Electrum-protocol server returns.** `blockchain.block.header`
 returns one header as hex (or an object with a `header` field when a
@@ -337,6 +459,30 @@ behaves this way). The project requests headers without a checkpoint, so it
 shall expect full AuxPoW headers; but because the served shape is
 server-controlled, a reader shall accept an 80-byte header for an
 AuxPoW-flagged block when the bytes served are exactly 80 (see R37.5.6).
+
+*Served shapes, observed (chain-variant pass of 2026-10-24; cleared — see
+the clearance item of §37.10).* On 2026-10-24 the
+servers the public coin registry configures were queried directly
+(`blockchain.block.header` at several heights and a short
+`blockchain.block.headers` list at the tip, without a checkpoint height),
+and the served byte counts per header were: Ravencoin, Evrmore and Neurai
+**120** (Evrmore from height 1; Ravencoin 120 from height 1219736 and 80
+before it); Avian **80** at the tip; Firo **80** through height 117563,
+**180** from 117564 through 419263, **120** from 419264 and at the tip;
+PIVX **80** or **112** by version exactly as the row above states; LBRY
+**112** from height 1; Verus **1487** (Equihash-style with a 1344-byte
+solution); Runebase (`"QTUM"`) Qtum-shaped and variable, 251–311 bytes;
+Riecoin **112**; Primecoin **89–90**; Meowcoin **80** for merged-mined and
+**120** for native blocks, interleaved. Two conclusions bind: (a) the
+servers deployed for the KawPoW-family and Firo coins **do** serve the
+full 120- and 180-byte shapes this section expects, which closes the
+former residual item on served shapes (§37.5.7b); (b) the AuxPoW-stripping
+behaviour above is **not** confined to the checkpoint case — a second
+server implementation (the Meowcoin servers identify as an electrs/esplora
+derivative) stripped the proof with no checkpoint height requested — so the
+sentence "the project shall expect full AuxPoW headers" is a default
+expectation and not an assumption a reader may rely on; the 80-byte
+acceptance is the binding rule.
 
 > **Upstream divergence (informative).** Upstream keys four families to an
 > exact version value inside their own configured family, whereas the chain
@@ -356,6 +502,23 @@ AuxPoW-flagged block when the bytes served are exactly 80 (see R37.5.6).
 > the PIVX row's unconditional trailing read and the three rows whose
 > recognition ignores `chain_variant` entirely (Verus and both Firo
 > layouts). No family was added or removed between the two designations.
+>
+> *What the observations of the chain-variant pass add to this note.*
+> Three of the mismatches above are now measured rather than argued, and
+> one of them changes the conclusion. **PIVX:** the unconditional read is
+> wrong for a whole régime, not only the earliest blocks — every version-7
+> header (observed heights 2153200–2700499, about a year and a half of the
+> chain) is 80 bytes and reads 32 bytes into the next header. **Ravencoin:**
+> blocks shortly before the switch carry the KawPoW version value with the
+> 80-byte layout (observed at height 1219735), so the version key misreads
+> them; this only matters for an anchor or a median window placed at the
+> switch. **Avian:** its current 80-byte headers carry a version value
+> other than the KawPoW one, so the version key reads them correctly under
+> `"RVN"`, whereas a Ravencoin time rule applied to the `"RVN"` value would
+> read them wrongly. That last point is why R37.5.5 now keeps the version
+> key for the KawPoW trailer within `"RVN"` rather than requiring a time
+> rule: the value is shared by chains whose activation rules differ, so a
+> time rule is not derivable from the value.
 
 R37.5.2b **The AuxPoW parent header is std-80.** Inside the AuxPoW proof
 of the merged-mining row above, the trailing parent block header shall be
@@ -427,13 +590,49 @@ by 40 bytes, and the list ends early (an unexpected-end failure).
 
 ### 37.5.5 Within-family rule
 
-R37.5.5 Inside a pinned family, the reader shall use that chain's structural
-rule where §37.5.2 names one: Qtum and LBRY extra fields always; the
-KawPoW/ProgPoW layout by block time against the chain's switch time; PIVX's
-trailing field by its version thresholds. A family whose chain rule is keyed
-to activation time needs that chain's switch time for the configured network.
-When no switch time is known, the upstream version key is the interim
-reading (see the divergence note in §37.5.2).
+> **Clearance (chapter 01 T1, R40).** This rule was rewritten by the
+> chain-variant pass of 2026-10-24 — the earlier wording required a
+> block-time rule for the KawPoW/ProgPoW layout and is superseded on its
+> substance — and the rewritten rule **passed the KDF Dirty Gate** on
+> 2026-10-24 (PASS, discretionary-expression measure 0.02, finding list
+> empty), so it is a cleared requirement and not a candidate. Its extent,
+> method and measure are recorded once, in the *chain-variant pass*
+> clearance item of §37.10, and are not restated here.
+
+R37.5.5 Inside a pinned family, the reader shall use the rule below for the
+layout choices that remain after the family is fixed. Every such choice is a
+*within-family* choice and is subject to the structural guard of R37.5.6 in
+the same way as a version-signalled choice under the default family.
+
+- **Qtum and LBRY** (`"QTUM"`, `"LBC"`): the extra fields are present in
+  every header of the chain, whatever the version value (observed for LBRY
+  from height 1; Qtum-shaped from the first block for Runebase). The
+  reference reads them only when the version value is exactly
+  `0x20000000`; the project reads them unconditionally within the family.
+- **PIVX** (`"PIVX"`): the trailing 32-byte field is read when the header
+  version is **4, 5, 6, or 8 and above**, and not read for version 7 or
+  for 3 and below (the chain's published header definition, §37.5.2). The
+  reference's unconditional read is wrong for version 7 and is not
+  followed.
+- **KawPoW trailer** (`"RVN"`): read when the version value is exactly
+  `0x30000000`, as the reference does, and not by a time rule. The value is
+  shared by several chains whose switch rules differ (Ravencoin by time,
+  Evrmore from its first block, Avian no longer at all — §37.5.2), so a
+  time rule is not derivable from the value, while every post-switch
+  header of every chain observed under the value carries that exact
+  version and every current non-KawPoW header under it carries another.
+  The one known exception — a pre-switch Ravencoin header carrying the
+  KawPoW version at 80 bytes — is a within-family version choice and so
+  falls to R37.5.6: served alone it is re-read as std-80; in a list it is
+  rejected with the list, which is the correct outcome for a window that
+  straddles the chain's switch.
+- **Firo** (default family): the version value `0x20001000` together with
+  the chain's ProgPoW switch time `1635228000`, as the reference does. On
+  mainnet this coincides exactly with the chain's published time rule
+  (§37.5.2), and no lower bound is needed because pre-MTP headers carry a
+  different version value.
+- A chain with no family in the set (§37.9 D3) has no within-family rule
+  here until a family exists for it.
 
 ### 37.5.6 Structural-consistency guard against ambiguous version values
 
@@ -459,6 +658,15 @@ structural consistency before it is accepted:
   as its previous-block hash the identity hash of the header before it. A
   version-signalled parse that breaks this linkage while the std-80 reading
   keeps it shall be discarded in favour of the std-80 reading.
+
+*Extension by the chain-variant pass of 2026-10-24 (cleared — see the
+clearance item of §37.10).* The guard applies equally to a layout chosen
+**within** a pinned family from the version value (the KawPoW trailer under
+`"RVN"`, the PIVX trailing field by its version, the Firo switch), because
+such a choice is as exposed to a colliding or pre-switch version value as a
+default-family choice is. It does not apply to a layout the family fixes
+unconditionally (Qtum, LBRY, Riecoin, Primecoin): there a header of the
+wrong length is simply malformed under that family.
 
 A rejected list shall be surfaced as a transient backend/format error of the
 sync loop (R37.2.3) or of the median-time-past query (R37.6.2). It shall not
@@ -607,18 +815,18 @@ parity on R37.5.1–R37.5.4 needs none of them:
 
 | Former open item | Resolution |
 | --- | --- |
-| Firo MTP start and ProgPoW switch rules | The reference has **no MTP start rule at all**. It keys both Firo layouts on one exact version value together with one switch timestamp, `1635228000`: the MTP layout when the block time is **before** it, the ProgPoW layout when the time is **at or after** it. There is no lower bound on the MTP layout. Confirmed at `v2.6.0-beta` and `v3.0.0-beta`. |
-| Ravencoin KawPoW activation time per network | The reference has **no activation time** for this family on any network. The KawPoW layout is keyed on the exact version value plus the configured `"RVN"` family, with no time comparison anywhere. There is therefore no per-network constant to obtain for parity. Confirmed at both designations. |
+| Firo MTP start and ProgPoW switch rules | The reference has **no MTP start rule at all**. It keys both Firo layouts on one exact version value together with one switch timestamp, `1635228000`: the MTP layout when the block time is **before** it, the ProgPoW layout when the time is **at or after** it. There is no lower bound on the MTP layout. Confirmed at `v2.6.0-beta` and `v3.0.0-beta`. *Closed by observation and the chain's published parameters:* the mainnet MTP start is block 117564 and the ProgPoW switch is block 419264 (the block whose time first reaches `1635228000`); headers before the MTP start carry version `0x20000000` and 80 bytes, so the absent lower bound cannot misfire on mainnet. |
+| Ravencoin KawPoW activation time per network | The reference has **no activation time** for this family on any network. The KawPoW layout is keyed on the exact version value plus the configured `"RVN"` family, with no time comparison anywhere. There is therefore no per-network constant to obtain for parity. Confirmed at both designations. *Closed, with a changed conclusion:* Ravencoin's published mainnet switch time is `1588788000` (first 120-byte header observed at height 1219736; its testnet value differs), but R37.5.5 no longer asks for it — the `"RVN"` value is shared by chains with other rules (Evrmore from genesis, Avian none at the tip), so the version key is kept and the time is informative only. |
 | KawPoW, Firo and Verus identity hashes | The reference uses **no** chain-defined identity hash for these families (§37.5.7a). None needs to be sourced for parity; they are needed only for R37.5.7's divergence, whose adoption is gated on §37.9 D2 regardless. |
-| PIVX header-version thresholds | The reference applies **no version threshold**: for a coin configured as `"PIVX"` it reads one 32-byte field after the nonce for every header, whatever the version value. That is consistent with being byte-correct over the chain's recent history, because the chain's zerocoin-era field and its Sapling-root field occupy the same 32-byte position and differ only in meaning — a single unconditional read is correct for every version carrying **either**, and wrong only for the chain's earliest versions, which carry neither. The exact version boundaries remain unverified and are still needed for R37.5.5. |
-| Whether Electrum servers for the KawPoW and Firo families serve the full header shapes | **Still open.** The reference's reader expects the 120-byte KawPoW/ProgPoW shape and the 180-byte Firo MTP shape from server-served bytes, which is indirect evidence that the servers deployed for those coins do serve them. It is not a direct observation and the project has not made one. |
+| PIVX header-version thresholds | The reference applies **no version threshold**: for a coin configured as `"PIVX"` it reads one 32-byte field after the nonce for every header, whatever the version value. That is consistent with being byte-correct over the chain's recent history, because the chain's zerocoin-era field and its Sapling-root field occupy the same 32-byte position and differ only in meaning — a single unconditional read is correct for every version carrying **either**. *Corrected and closed:* the earlier claim that it is wrong "only for the chain's earliest versions" was too narrow. The chain's published definition carries the field for versions 4–6 and 8+, and **not** for version 7 or for 3 and below; observed on mainnet, version-7 headers are 80 bytes from height 2153200 through 2700499. The thresholds R37.5.5 needs are therefore known and R37.5.5 now states them. |
+| Whether Electrum servers for the KawPoW and Firo families serve the full header shapes | **Closed by direct observation (2026-10-24, R37.5.2a):** the registry's Ravencoin, Evrmore and Neurai servers serve 120 bytes per post-switch header, and the Firo servers 180 bytes per MTP-era header and 120 per ProgPoW-era header, on both the single-header and the header-list methods, without a checkpoint height. The earlier text — that the reference's expectation was only indirect evidence — is superseded. |
 
 > **Superseded `SPEC` note — retained for the record, not an open item.**
 > The note below carried the `SPEC` markers until §37.5.7b answered four
 > of its five items. The markers have been removed and the text kept in
 > full, so that a reader, and equally a count of open `SPEC` items in
-> this chapter, finds exactly one open note — the one immediately after
-> this block — rather than two of which one is closed. The superseded
+> this chapter, finds exactly one open note — the narrowed one that
+> follows this block — rather than two of which one is closed. The superseded
 > text, unchanged:
 >
 > *Chain-rule details cited from public chain definitions and not
@@ -632,7 +840,21 @@ parity on R37.5.1–R37.5.4 needs none of them:
 > by §37.5.7b: four of the five are answered there, and the two residual
 > items are restated in the note immediately below.*
 
-<<<SPEC Two residual chain-rule items, both narrower than the note above they replace, and neither of them a blocker for parity with the reference (§37.5.7b). (1) Not directly observed: whether the Electrum servers configured for the KawPoW-family and Firo coins serve the full 120-byte and 180-byte header shapes of §37.5.2 rather than an 80-byte truncation. Confirm by querying a configured server for a known post-switch height and measuring the served byte length per header before relying on either family's header sync; the exact-consumption guard of §37.5.8 makes a truncation safe to discover at runtime rather than fatal. (2) Not re-verified against the chains' published definitions, and needed only for the structural rules of R37.5.5 and for the divergence of R37.5.7a: the exact PIVX header-version boundaries at which its trailing 32-byte field appears and changes meaning; the per-network Ravencoin KawPoW activation times; the Firo MTP lower bound; and the three chain-defined identity hashes. SPEC>>>
+> *The residual note, narrowed again (chain-variant pass of 2026-10-24).* The
+> two-item `SPEC` note that stood here is superseded: item (1), the served
+> header shapes, is closed by the observation recorded in R37.5.2a; of
+> item (2), the PIVX version boundaries, the Ravencoin switch time and the
+> Firo MTP lower bound are closed in the table above. What remains is the
+> single item below, which is a dependency of §37.9 D2 only and not of
+> parity. For the record, the superseded text read: *"Two residual
+> chain-rule items … (1) Not directly observed: whether the Electrum
+> servers configured for the KawPoW-family and Firo coins serve the full
+> 120-byte and 180-byte header shapes … (2) Not re-verified against the
+> chains' published definitions … the exact PIVX header-version
+> boundaries …; the per-network Ravencoin KawPoW activation times; the
+> Firo MTP lower bound; and the three chain-defined identity hashes."*
+
+<<<SPEC One residual item, needed only for the identity-hash divergence of R37.5.7 and R37.5.7a (§37.9 D2) and not for parity with the reference: the three chain-defined block-identity hashes — the KawPoW-family header hash, the Firo MTP and ProgPoW header hashes, and the Verus header hash — have not been specified from the chains' published definitions. Until they are, R37.5.7's own escape applies and the linkage checks skip those families. SPEC>>>
 
 > **Interop note (R29/R31).** Each family's byte layout is dictated by its
 > chain, and the `chain_variant` key and values are dictated by third-party
@@ -885,6 +1107,20 @@ reported rather than an unbounded walk-back.
     headers is rejected whole: neither stored nor used for median-time-past.
   - An 80-byte header served for an AuxPoW-flagged block is accepted as
     std-80.
+  - Under `"PIVX"`, a version-4 and a
+    version-8 header of 112 bytes each parse with the trailing field, and a
+    version-7 header of 80 bytes parses as std-80; a list mixing the two
+    lengths in the chain's own order parses whole (R37.5.5).
+  - Under `"RVN"`, a list of 120-byte headers
+    with version `0x30000000` parses as KawPoW; a single 80-byte header
+    with that version is re-read as std-80; an 80-byte header with another
+    version value (the Avian case) parses as std-80 directly (R37.5.5,
+    R37.5.6).
+  - A header list in which the configured
+    family's layout does not account for every served byte — for example
+    112-byte Riecoin headers read under `"BTC"`, or an interleaved 80/120
+    Meowcoin list — is rejected whole and surfaces as an error; it never
+    yields a median (R37.5.6, §37.9 D3).
 - `get_current_mtp` returns a plausible median-time-past for an SPV-enabled coin
   (R37.6.2).
 - A swap-relevant payment on an Electrum-connected coin with `enable_spv_proof`
@@ -951,11 +1187,14 @@ Until this is closed:
 - A standard chain whose blocks carry the colliding version value works
   through that guard.
 - A Qtum coin's single-header and stored-header reads use the default family.
-- The R37.5.5 families wait on residual item (2) of the `SPEC` note in
-  §37.5.7, which is now narrower: §37.5.7b establishes that reaching parity
-  with the reference needs **none** of those chain rules, because the
-  reference implements none of them. R37.5.5 remains a Reloaded improvement
-  on top of the port, and only it waits.
+- The R37.5.5 families no longer wait on
+  anything: the chain-variant pass of 2026-10-24 pinned the PIVX version thresholds, kept
+  the version key for the KawPoW trailer and confirmed the Firo rule, so
+  R37.5.5 can be implemented together with step 2. It remains a Reloaded
+  improvement on top of the port — the reference's PIVX read is wrong for
+  version-7 headers and its Qtum/LBRY reads are keyed on one version value
+  — but it is no longer blocked. Step 2 shall implement the PIVX rule in
+  R37.5.5's thresholded form, not the reference's unconditional read.
 
 **D2.** *Linkage check and served-byte identity.* Two rules are not
 implemented:
@@ -969,8 +1208,9 @@ implemented:
 Storing served bytes changes what both header stores persist, so existing
 stores need a migration or re-sync decision. Narrowing the AuxPoW hash
 changes the store's height-by-hash lookup, and the chain-defined hashes wait
-on residual item (2) of the `SPEC` note in §37.5.7. The length guard does
-not depend on any of these.
+on the narrowed `SPEC` note of §37.5.7 (now the only item left open
+there: the three chain-defined identity hashes). The length guard does not
+depend on any of these.
 
 All three parts of this item are **Reloaded divergences** from the
 reference rather than ports, and §37.5.7a bounds why that is acceptable:
@@ -979,6 +1219,46 @@ proof, and uses a double-SHA256 of the re-encoding for every family. None
 of those values crosses the wire, so the divergence is confined to the
 local header store and the local linkage checks and needs no
 compatibility switch — only the storage decision named above.
+
+**D3.** *Chains the reference's value set cannot describe.* *(Added by the
+chain-variant pass of 2026-10-24 and cleared with it — see the clearance
+item of §37.10.)* Three registry entries were found, by direct observation
+of their configured servers (§37.5.1, §37.5.2a), to carry headers that no
+value of the closed set of R37.5.1 lays out correctly:
+
+| Entry | Registry value | Served shape | Under the reference | Under this chapter after D1 |
+|---|---|---|---|---|
+| `RIC` | `"BTC"` | 112 bytes, every header (Riecoin layout, §37.5.2) | silent misparse of every list (§37.5.6 finding) | every list rejected; median-time-past errors |
+| `XPM` | *(absent)* | 89–90 bytes, variable (Primecoin layout) | silent misparse | every list rejected |
+| `MEWC` | `"BTC"` | 80 (merged-mined, proof stripped) and 120 (native) interleaved (Meowcoin rule) | silent misparse under `"BTC"`; failure under `"RVN"` | mixed lists rejected; uniform 80-byte lists parse |
+
+Rejection is the better of the two outcomes — a wrong median-time-past
+mis-times a refund without any report, §37.5.6 — but it still leaves the
+three coins without a working median-time-past, and therefore without
+working HTLC spend and refund lock-times, on an Electrum connection. Closing
+this needs three families the reference does not have (the Riecoin,
+Primecoin and Meowcoin rows of §37.5.2, the first two to be confirmed
+against the chains' published definitions) **and** a decision on how a coin
+selects them, because the shared public registry cannot carry a value the
+reference rejects at activation. The options, none chosen here:
+
+1. accept Reloaded-only `chain_variant` values in addition to the eight (a
+   coin file carrying one is rejected by the reference, so such a file is a
+   Reloaded coin file and `docs/GLEEC_COMPATIBILITY.md` records it);
+2. a separate Reloaded-only configuration key beside `chain_variant` that
+   the reference ignores, so one registry entry serves both — the
+   backward-compatible shape the rework itself relied on when it added
+   `chain_variant` to files an older release ignored (§37.5.1 vintage
+   note);
+3. no new configuration: recognise the three layouts structurally under the
+   default family, each confirmed by exact byte consumption (R37.5.6) —
+   simplest for operators, but it reintroduces version-free inference for
+   exactly the families whose lengths collide least, and cannot read the
+   Meowcoin mixed list without a per-header AuxPoW-or-trailer decision.
+
+Whichever is chosen, the registry's `"BTC"` on `RIC` and `MEWC` should be
+raised with the registry's maintainer as a mis-description, since it makes
+the reference return a wrong median silently for both coins.
 
 ## 37.10 Provenance Footer
 
@@ -1231,3 +1511,164 @@ compatibility switch — only the storage decision named above.
     to internal names; internal module trees; internal test identifiers;
     any location within the compared material; and any post-anchor commit
     identifier or branch designation.
+- *Scoped addition, and its Dirty Gate clearance (chapter 01 T1, R40,
+  R43) — the chain-variant pass of 2026-10-24.* This item is the scoped
+  record for the material the chain-variant pass added or rewrote
+  throughout the chapter: the `"RVN"` cell of R37.5.1's table and the
+  sentence beneath the table that records its mark's removal; the three
+  contract details under R37.5.1; the sharpened vintage note and the
+  `MEWC` note in §37.5.1; the re-confirmation appended to the R37.5.1a
+  note; the amended KawPoW, Firo MTP and PIVX rows and the new Riecoin,
+  Primecoin and Meowcoin rows of §37.5.2; the served-shapes observation
+  beneath R37.5.2a and the addition to the §37.5.2 divergence note; the
+  rewritten R37.5.5; the within-family extension of R37.5.6; the four
+  amended cells of §37.5.7b's table and the narrowed residual note there;
+  three acceptance criteria in §37.8; the closing bullet of §37.9 D1, the
+  parenthetical in D2 and the whole of D3; and this item. That material
+  was authored by the KDF Spec Reader under the two-team procedure of
+  chapter 01 §1.4A and **passed the KDF Dirty Gate** on 2026-10-24: PASS,
+  discretionary-expression measure 0.02, finding list empty, and
+  accordingly no remedy class for any line or for the candidate as a
+  whole. That was the first gate pass on this material; no earlier
+  verdict for it exists or was relayed. **Only that added and rewritten
+  material was gated.** Its clearance is therefore **complete and not
+  pending**, and R40 withholds nothing here: the point-of-appearance
+  markers that R40 required while the clearance was pending have been
+  removed, and the two clearance records above are unchanged by this pass
+  and keep their own dates and scopes — they neither cover this material
+  nor are reopened by it. This item is written on the clean side from the
+  verdict, which reached the clean side as relayed text rather than as a
+  gate-written file; that is record-keeping and adds no chapter content.
+
+  *Which parts carry an inline pointer to this item.* The block at the
+  head of §37.5, where the pending notice stood, now carries the
+  clearance statement. The rule-bearing items the pass added or rewrote —
+  R37.5.5 (rewritten), the within-family extension of R37.5.6, §37.9 D3,
+  and the three new rows and the served-shapes observation of §37.5.2 —
+  each carry a short pointer back here, converted where the pending
+  markers stood. Those are numbered, rule- or layout-bearing text an
+  implementer codes from, inserted among rules that have stood in this
+  chapter since earlier revisions, which is the case in which
+  long-settled requirement and newly-cleared requirement are easiest to
+  confuse. The informative notes of §37.5.1 and §37.5.2, the §37.5.7b
+  table cells and residual note, the §37.8 criteria and the D1–D2
+  amendments carry a short label naming the pass but no pointer: each is
+  reached by reading forward from a pointed section, or is derivative of
+  a rule a pointed item binds; §37.9 is in addition headed by the
+  clearance block of the earlier pass, and D3 carries its own pointer.
+
+  *One classification the gate recorded, carried here because it bears
+  on this record's own wording.* The ticker-to-value mapping in §37.5.1's
+  vintage note was classified by the gate as coin-file configuration data
+  under R11's externally-visible inter-operability carve-out — public
+  tickers mapped onto the closed value set of R37.5.1, whose correctness
+  is fixed by the chains' header layouts and whose deployed form is the
+  public registry (R4) — and was excluded from the measure on that
+  ground; the scoped record below lists it as R4 on the same footing, and
+  the chapter's R4 footer item already names the registry as the
+  authoritative source. The gate also recorded that this item's
+  reference to "the four pull requests the plan under `docs/plans/`
+  names" keeps change-request numbers out of the chapter: paired with a
+  section scope such a number is a locator into forbidden-class material
+  under §1.7, so the numbers stay confined to the process document and
+  the wording here is kept as it is.
+
+  *Forbidden-class input taken, and under which designations.* The
+  reference's UTXO header codec, the configuration-reading step of its UTXO
+  coin builder, its Electrum-backed header read surface and both header
+  stores, read at the release designations `v2.6.0-beta` and
+  `v3.0.0-beta`, together with the designation-to-designation changes that
+  introduced the configuration key between `v2.5.2-beta` and
+  `v2.6.0-beta` and the published coin-file migration guidance that
+  accompanied them. **The record is no more precise than those
+  designations** (chapter 01 §1.7). Behavioural facts taken, all restated
+  in the chapter's own words: that at `v2.5.2-beta` the key is not read
+  and the family is ticker-keyed; the migration guidance's ticker-to-value
+  mapping (coin-file data, R4); that the key is read from the raw
+  protocol object beside `type` with no protocol-type default and an
+  exact string match; that an unrecognised value fails the configuration
+  step and surfaces through the coin-build failure class; that the family
+  is carried into both RPC backends and both stores, that the native
+  backend parses no header bytes, and that nothing merged between the
+  rework and `v3.0.0-beta` touched the two family-agnostic single-header
+  paths; that no read path is keyed on configured time or height; and that
+  the four pull requests the plan under `docs/plans/` names changed no
+  identity-hash or stored-bytes behaviour (§37.5.7, §37.9 D2 stand).
+
+  *Permitted-input classes added by this pass.* R6, public-network
+  observation on 2026-10-24 of the Electrum servers the public coin
+  registry (snapshot of 2026-10-18) configures for `MEWC`, `RVN`, `EVR`,
+  `AVN`, `XNA`, `FIRO`, `PIVX`, `LBC`, `RIC`, `XPM`, `RUNES` and `VRSC`:
+  per-header byte counts and version values at the heights §37.5.2 and
+  R37.5.2a name, by `blockchain.block.header` and
+  `blockchain.block.headers` without a checkpoint height. R3, the
+  published node sources of PIVX (header version thresholds), Ravencoin
+  (mainnet switch time), Firo (MTP start block, ProgPoW switch time and
+  block) and Meowcoin (AuxPoW-first, then time-switched header rule); the
+  Riecoin and Primecoin layouts in §37.5.2 were decoded from served bytes
+  only and are marked for confirmation. R4, the public coin registry's
+  `chain_variant` values and the registry's own revision history for the
+  `MEWC` entry. §37.9 D3 and the rewritten R37.5.5 are this chapter's own
+  reasoning over those facts.
+
+  The three elements of the R39 scope attestation for that pass, carried
+  forward here in corpus-free terms as chapter 01 T1 requires. Two gaps
+  in the first element are recorded as gaps rather than completed from
+  elsewhere:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    matter this chapter's §37.5 names in its own terms: the reference's
+    UTXO block-header codec and its chain-variant configuration surface —
+    the header reader, the chain-variant value parser, the
+    coin-configuration step of the UTXO coin build, the Electrum-backed
+    header read paths, the native-daemon median-time-past path and both
+    header stores. Quantity examined: **nine files** of that surface,
+    compared at the release designations `v2.6.0-beta` and `v3.0.0-beta`
+    and taken at the lineage's current state, which was confirmed
+    unchanged on this surface since `v3.0.0-beta`; **one file** carrying
+    the pre-rework ticker-keyed selection, at `v2.5.2-beta`; the merged
+    rework change that introduced the configuration key, by its file
+    inventory (**22 files**) and its published description; and the
+    published release change lists at `v2.6.0-beta` and `v3.0.0-beta`.
+    Reference designations: the publicly published release designations
+    `v2.5.2-beta`, `v2.6.0-beta` and `v3.0.0-beta`, which the lineage's
+    own releases carry and which chapter 01 §1.7 admits as public-release
+    facts. **The record is no more precise than those designations** — no
+    post-anchor commit identifier, no branch state and no location within
+    the compared material is given (chapter 01 R11 and the
+    reference-version limit of §1.7). The public coin registry and the
+    Electrum-server observations are permitted-class input (R4, R6) and
+    were not part of the corpus comparison.
+
+    **Two gaps in this element, left visible rather than completed.**
+    First, the comparison also reached the rework's merge state and the
+    lineage's current unreleased tip; both are branch states, which
+    chapter 01 R11 and §1.7 withhold, so the record can say only that the
+    tip is unchanged on this surface since `v3.0.0-beta` and that the
+    rework landed between `v2.5.2-beta` and `v2.6.0-beta` — nothing
+    finer. Second, `v2.5.1-beta` was not compared: nothing in this
+    clearance attests to any designation earlier than `v2.5.2-beta`, and
+    the vintage note's statement about the pre-rework reading rests on
+    that one designation. Chapter 01 T1 is satisfied by saying so — a
+    completed clearance statement carries the three elements **or**
+    states that an element is not recorded.
+
+  - *Method.* A stated **combination**: by reading, together with
+    mechanical history queries over the lineage's history — file-set,
+    tag-containment and content searches — and the public hosting
+    interface for the rework's published description. **This
+    repository's own residual-similarity gate tooling was not run:** it
+    compares embedded code blocks and the candidate embeds none, so the
+    instrument had no operand. The absence is stated so that it is
+    visible rather than implied.
+
+  - *Measure.* **0.02** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — read against the
+    standard that any single line carrying discretionary expression fails
+    the candidate however much legitimately dictated content surrounds
+    it; no such line was found, and no aggregate match-density judgment
+    was used or admitted. Dictated-interop and public-surface tokens —
+    request-method and field names, coin-file key names and values, wire
+    error tokens, public chain constants and published release
+    designations — were excluded from the measured set before the
+    judgment was made, per token under the forced-versus-free test.
