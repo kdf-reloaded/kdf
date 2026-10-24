@@ -1,4 +1,4 @@
-# Chapter 57 — EVM Fee Inputs: Legacy Gas-Price Resolution, Per-Coin Gas Limits, and the Withdraw Fee Form
+# Chapter 57 — EVM Fee and Amount Inputs: Legacy Gas-Price Resolution, Per-Coin Gas Limits, the Withdraw Fee Form, and the Minimum Trading Volume
 
 **Status:** driving-spec (mixed treatment — see §57.0).
 
@@ -9,11 +9,13 @@
 > floor), a per-coin configuration block that overrides every default gas
 > limit by named key, and a withdraw request fee form that admits both the
 > legacy and the EIP-1559 shape and derives the signed transaction's
-> envelope type from whichever was resolved.
+> envelope type from whichever was resolved — and shall report, as an EVM
+> coin's minimum trading volume, one smallest representable unit of that
+> coin (Part D, §57.7A), never a figure derived by dividing its decimals.
 
 ## 57.0 Treatment & scope split
 
-This chapter is new and spans three adjacent surfaces of the EVM coin
+This chapter is new and spans four adjacent surfaces of the EVM coin
 layer. Reloaded ships part of each, so the chapter is split:
 
 - **Part A (§57.2–§57.4), legacy gas-price resolution.** Mostly as-built
@@ -26,6 +28,16 @@ layer. Reloaded ships part of each, so the chapter is split:
 - **Part C (§57.7), the withdraw fee form.** Partly in reloaded: the
   legacy fee form is accepted, the EIP-1559 fee form is not, and the
   envelope-type derivation that follows from the resolved form is absent.
+- **Part D (§57.7A), the minimum trading volume.** Required and **not**
+  in reloaded: reloaded still derives an EVM coin's minimum trading volume
+  from its decimals by integer division — a pre-anchor baseline formula
+  (V4) that the reference lineage replaced, at `v2.0.0-beta`, with one
+  smallest representable unit of the coin. The order-match layer's
+  *consumption* of the value is as-built baseline behaviour and is
+  restated in §57.7A only so far as is needed to say where the value is
+  observable. Part D **passed the KDF Dirty Gate** on 2026-10-24 (chapter
+  01 T1, R40); see the clearance statement at the head of §57.7A and the
+  second scoped-addition item of §57.12.
 
 > **Binding scope (R57.1).** This chapter binds observable behaviour,
 > coins-configuration key names and value shapes, JSON-RPC request field
@@ -53,6 +65,7 @@ against public release designations only:
 | `v2.6.0-beta` | The legacy behavioural reference for netid `8762` (AGENTS.md §3). Every rule in this chapter that cites the reference holds at this designation unless stated otherwise. |
 | `v3.0.0-beta` | The newest public release of the v3 lineage. Where this chapter notes "unchanged at `v3.0.0-beta`", the two designations agree. |
 | `v2.1.0-beta` | Named only in R57.2.3, as the designation at which the third (external gas-oracle) price source had already been withdrawn. |
+| `v2.0.0-beta` | Named only in Part D (§57.7A), as the first public release designation at which an EVM coin's minimum trading volume is one smallest unit of the coin and a maker order's price floor is "any positive value". Every later designation, including the two above, agrees. |
 
 The section-number form `§57.1` refers to this section; the binding-scope
 rule R57.1 lives in §57.0 above (rule numbers and section numbers run
@@ -630,6 +643,156 @@ expected-`EthGas` error where the reference would honour it.
 > [Chapter 18](18-tendermint-ibc-htlc.md) / ch. 36 to pick up.
 > *(Trigger: apparent while enumerating the fee-form tags for R57.7.1.)*
 
+---
+
+## Part D — The minimum trading volume
+
+## 57.7A An EVM coin's minimum trading volume and minimum transaction amount
+
+> **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
+> material in this section — every rule R57.7A.1–R57.7A.6 with the two
+> informative notes beneath them, the tests T10–T12, the deferrals D7–D8
+> and the matching footer items in §57.12 — was authored by the KDF Spec
+> Reader under the two-team procedure of chapter 01 §1.4A, under the
+> reference designations named in §57.1, and **passed the KDF Dirty
+> Gate** on 2026-10-24 in a third pass that left the chapter's two earlier
+> clearances untouched: PASS, discretionary-expression measure 0.01,
+> finding list empty, and accordingly no remedy class for any line or for
+> the candidate as a whole. Its clearance is therefore *complete* and not
+> pending, and R40 withholds nothing in it. The extent, method and
+> measure of the pass are recorded once, in the second scoped-addition
+> item of §57.12, and are not restated here. V4 in §57.10 rests on the
+> pinned baseline tree alone (R1) and was not part of the candidate.
+
+*Why this section is in this chapter.* The minimum trading volume is a
+per-coin property that the coin layer reports and the order-match layer
+consumes. For UTXO coins the property is bound where the UTXO coin layer is
+bound ([Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.6); the
+EVM coin layer's analogue belongs with the EVM amount inputs here. The
+order-match chapters ([Chapter 11](11-order-match-cancellation.md),
+[Chapter 12](12-order-match-state-store.md),
+[Chapter 59](59-legacy-ordermatch-negotiation.md)) bind coin-agnostic
+behaviour, and the consumption contract they would carry is unchanged by
+this section; only the value an EVM coin feeds into it changes.
+
+*The problem this section answers.* A field report describes a refused
+purchase of roughly seven ten-thousandths of a unit of a Bitcoin-pegged
+ERC-20 token carrying eight decimals, refused because the coin's minimum
+trading volume was one hundredth of a unit — at the time of the report
+roughly three orders of magnitude above the volume asked for. Reloaded
+derives the value by the baseline formula of V4: ten to the power of minus
+the integer quotient of the coin's decimals by three. For eight decimals
+that is 10^-2; for eighteen decimals 10^-6; for six decimals 10^-2. The
+formula has no recorded basis anywhere in the baseline or in this
+document set.
+
+**R57.7A.1** *One smallest unit.* An EVM platform coin's and an ERC-20
+token's minimum trading volume shall be exactly one smallest representable
+unit of the coin: ten to the power of minus the coin's configured
+`decimals`. For an eighteen-decimal coin that is 10^-18; for an
+eight-decimal token 10^-8; for a six-decimal token 10^-6. The value shall
+be computed exactly (as a rational, not a floating-point number) and shall
+not be rounded, clamped or raised by any other floor. No integer division
+of the decimals, and no other quotient of them, shall participate.
+
+**R57.7A.2** *Not configurable, not chain-aware.* The value is a function
+of the coin's `decimals` alone. The reference lineage reads no
+coins-configuration key for it, carries no per-chain or per-netid variant
+of it, and the public coins-configuration file carries no such key on any
+entry. The project shall not introduce a configuration key for it as part
+of closing this gap; doing so would be a deliberate extension of the
+public configuration surface and is D8's question, not this rule's.
+
+**R57.7A.3** *The minimum transaction amount stays zero.* An EVM coin's
+*minimum transaction amount* — the distinct per-coin accessor that the DEX
+fee pipeline uses as its floor ([Chapter 08](08-fee-routing-engine.md)
+R6, [Chapter 16](16-swap-v2-pre-burn-output.md) R10) and that the
+maximum-taker-volume and maximum-maker-volume computations subtract and
+compare against — is **zero** for EVM coins in the reference at every
+designation of §57.1, before and after the change R57.7A.1 records, and
+is zero in reloaded today. It shall stay zero. The two accessors are
+therefore not interchangeable for EVM coins: the trading-volume floor is
+10^-decimals and the transaction-amount floor is nil, so an EVM taker
+coin's DEX fee is the rate times the amount with no absolute minimum, and
+an EVM maker's or taker's maximum volume is bounded by balance and fees
+alone. Chapter 08's note that the reference uses only the taker coin's
+minimum-transferable amount as the fee floor is consistent with this: for
+EVM coins that amount is zero.
+
+**R57.7A.4** *Where the value is consumed — one accessor, every path.* The
+reference applies a single per-coin value on every path below, and so
+shall the project; no path carries its own EVM floor:
+
+| Path | How the value is applied |
+| --- | --- |
+| Maker order creation (`setprice`) and maker order update | The order's maximum base volume must be at least the base coin's floor, and that volume times the price at least the rel coin's floor. The order's minimum volume, when the operator sets none, defaults to the larger of the base coin's floor and the rel coin's floor divided by the price; an operator-set minimum below that default is refused. |
+| Taker order creation (`buy`, `sell`) | The base amount must be at least the base coin's floor and the rel amount at least the rel coin's floor; the taker order's minimum volume follows the same default-and-refusal rule as a maker order's. |
+| `trade_preimage` (maker and taker previews) | A preview builds the same order the real request would and reports the same refusals with the same thresholds; the maker preview additionally reports the base coin's floor as the threshold when a zero volume is asked for. |
+| `min_trading_vol` (legacy and version-2 methods) | Report the value verbatim as the coin's minimum trading volume. |
+| `max_taker_vol`, `max_maker_vol` | **Not** consumers of this value; they consume the minimum transaction amount of R57.7A.3. |
+
+The default-and-refusal arithmetic in the first two rows is as-built
+pinned-baseline behaviour (V4) and is unchanged in the reference at every
+designation of §57.1; it is restated here so that an implementer can tell
+which observable refusals R57.7A.1 changes. It is bound by whichever
+order-match chapter comes to own order validation, not by this one.
+
+**R57.7A.5** *Observability and compatibility.* The value is local policy
+at order creation: a node applies its own coins' floors to orders *it*
+creates, and never applies them to a peer's order — the only validation a
+received order record undergoes on this point is that its minimum volume
+is non-negative and its price and maximum volume are positive
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.5). The value is
+nonetheless visible to other nodes in one place: when a maker sets no
+minimum volume, the default of R57.7A.4 travels on the wire as the order
+record's `min_volume` field (Chapter 32 R-W1) and is shown to every peer
+in orderbook and best-orders responses. Two consequences follow:
+
+- a reloaded node carrying the baseline formula advertises a minimum
+  roughly a million times the reference's on an eight-decimal token
+  (10^-2 against 10^-8) and refuses to take any reference maker's order
+  below 10^-2 — while a reference node can take a reloaded maker's order
+  of any size at or above the advertised minimum. The defect is therefore
+  one-sided against reloaded's own users and does not break any peer;
+- adopting R57.7A.1 makes a reloaded node indistinguishable, on this
+  point, from a reference node at every designation of §57.1 on **both**
+  production netids (the `v2.6.0-beta` and `v3.0.0-beta` behaviour is
+  identical, so no `NetConfig` selection is involved). It is a parity
+  **fix** of pre-anchor baseline behaviour, in the same class as R57.3.2,
+  and the project's default-side rule (`docs/COMPAT_SWITCHES.md`) does
+  not call for a compatibility switch to recover the baseline formula.
+  The visible change in the `min_trading_vol` responses a wallet caches is
+  a changelog matter, not a compatibility one.
+
+**R57.7A.6** *The same rule for QRC20 tokens.* The QRC20 token layer in
+reloaded derives its minimum trading volume by the same baseline formula
+and sets the same zero minimum transaction amount, and the reference
+changed it at the same designation to the same one-smallest-unit value.
+R57.7A.1–R57.7A.5 therefore bind the QRC20 token layer alike. The rule is
+stated here rather than in [Chapter 38](38-utxo-coin-maintenance-and-features.md)
+only because the two layers share one defect and one remedy; D8 records
+the placement question.
+
+> **Code-quality finding (informative).** Reading the reference's change
+> side by side with reloaded's order builders showed a second, adjacent
+> baseline floor that the reference lifted at the same designation and
+> reloaded still carries: a maker order's **price** must today be at least
+> 10^-8 (one hundred-millionth), whereas the reference at and after
+> `v2.0.0-beta` accepts any strictly positive price and refuses only zero
+> and negative prices. The floor is coin-agnostic, so it is not bound here
+> (D7). Its effect is the same shape as this section's: an order a
+> reference node would place is refused locally, with no effect on any
+> peer. A one-line remedy — refuse `price <= 0` instead of `price <
+> 10^-8` — needs no compatibility switch for the reason R57.7A.5 gives.
+> *(Trigger: an apparent contradiction between two things read side by
+> side while establishing R57.7A.4.)*
+
+> **Upstream divergence (informative).** None. The reference's behaviour
+> on this surface is a numerical fact of the kind an operator of any
+> reference node can read from its `min_trading_vol` response; nothing in
+> this section describes how the reference computes it beyond the value
+> itself.
+
 ## 57.8 Tests
 
 **T1.** *Proportional increase, no floor.* For a 256-bit value `v` and
@@ -699,6 +862,37 @@ fail if any clamp, saturating comparison, or maximum is introduced on this
 path. *(Cleared with R57.5.3a — see the clearance statement in the derivation
 record in §57.5 and the scoped-addition item in §57.12.)*
 
+**T10.** *One smallest unit, exactly.* For EVM coins constructed with
+`decimals` of 18, 8 and 6, the reported minimum trading volume MUST equal
+exactly 10^-18, 10^-8 and 10^-6 as rationals, and the reported minimum
+transaction amount MUST be exactly zero (R57.7A.1, R57.7A.3). The test
+MUST fail if the eight-decimal case returns 10^-2 — the value the baseline
+formula yields — so that the integer-division formula cannot return
+unnoticed. The same three cases MUST pass for a QRC20 token (R57.7A.6).
+*(Cleared with §57.7A — see the clearance statement at its head and the
+second scoped-addition item in §57.12.)*
+
+**T11.** *The field report, end to end.* Against an eight-decimal ERC-20
+token with the floor of R57.7A.1, a taker order, a maker order and a
+maker and a taker trade preview for a volume of 0.00072437 of that token
+(a rel-side amount and price such that neither side's floor is crossed)
+MUST each succeed or fail for a reason other than a volume-below-minimum
+refusal; the same four requests for a volume of 0.5 × 10^-8 MUST each be
+refused with the typed volume-too-low refusal carrying 10^-8 as the
+threshold. Both the legacy and the version-2 `min_trading_vol` methods
+MUST report 10^-8 for that token. *(Cleared with §57.7A — see the
+clearance statement at its head and the second scoped-addition item in
+§57.12.)*
+
+**T12.** *Fee and maximum-volume paths are untouched.* For an EVM taker
+coin, the DEX fee for a trade amount `a` MUST equal `a` times the pair's
+rate with no absolute floor, and the maximum taker volume for an
+available balance MUST be unchanged by R57.7A.1 — both depend on the
+minimum transaction amount of R57.7A.3, not on the trading-volume floor.
+The test MUST fail if either path begins to read the trading-volume
+floor. *(Cleared with §57.7A — see the clearance statement at its head and
+the second scoped-addition item in §57.12.)*
+
 ## 57.9 Deferred Work
 
 **D1.** *Upper-bound and watcher approximation stages.* R57.3.4's three
@@ -748,6 +942,34 @@ record (chapter 01 R24) is a set-wide question that is recorded here and
 not answered by this chapter; resolving it is a change to a meta-chapter
 under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
 
+**D7.** *The maker price floor and the home of order validation.* The
+finding under R57.7A.6 records that reloaded still refuses a maker price
+below 10^-8 where the reference accepts any positive price. The floor is
+coin-agnostic order-match validation, which no chapter of the set binds
+today ([Chapter 59](59-legacy-ordermatch-negotiation.md) binds the
+negotiation loop, [Chapter 12](12-order-match-state-store.md) the maker
+store, [Chapter 32](32-orderbook-p2p-and-trie.md) the wire record). The
+remedy is one line and carries no compatibility question (R57.7A.5), but
+binding it — together with the default-and-refusal arithmetic R57.7A.4
+restates — belongs to whichever order-match chapter comes to own order
+validation. Until then this entry is the record. *(Cleared with §57.7A —
+see the clearance statement at its head and the second scoped-addition
+item in §57.12.)*
+
+**D8.** *Placement of the QRC20 rule, and whether a per-coin override is
+ever wanted.* R57.7A.6 binds the QRC20 token layer from an EVM chapter
+because the defect and the remedy are shared; when
+[Chapter 38](38-utxo-coin-maintenance-and-features.md) next revises its
+Qtum material, R57.7A.6 should move there as a pointer back to R57.7A.1.
+Separately, R57.7A.2 records that neither the reference nor the public
+coins file carries a per-coin minimum-volume key; if operators ever want
+one (for example to keep a token's dust-sized orders off their own
+books), it is an extension of the public configuration surface and needs
+the compatibility-switch treatment of `docs/COMPAT_SWITCHES.md` — a
+maintainer's decision, not a Coder's. *(Cleared with §57.7A — see the
+clearance statement at its head and the second scoped-addition item in
+§57.12.)*
+
 ## 57.10 Baseline Verifications
 
 **V1.** *The one-gigawei floor is pre-anchor baseline code.*
@@ -783,6 +1005,31 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   configuration read; the V2 gas-limit set is constructed from its type's
   default at every construction site.
 
+**V4.** *The integer-division volume floor and the 10^-8 price floor are
+pre-anchor baseline code.*
+
+- *Claim.* Both the EVM minimum-trading-volume formula R57.7A.1 replaces
+  (ten to the power of minus the integer quotient of `decimals` by three)
+  and the maker price floor of D7 (one hundred-millionth) exist in the
+  pinned baseline tree, as does the zero EVM minimum transaction amount of
+  R57.7A.3 and the default-and-refusal arithmetic R57.7A.4 restates. They
+  are inherited, not introduced after the anchor, so closing the gap is a
+  parity fix of baseline behaviour and not a reversal of a reloaded
+  decision.
+- *Verification.*
+  `git show c1d46c0c1592faa0860f704008b2b2381bc3840f:mm2src/coins/eth.rs`
+  contains the quotient-by-three formula in the EVM coin's
+  market-operations implementation, next to a zero minimum transaction
+  amount; `git show
+  c1d46c0c1592faa0860f704008b2b2381bc3840f:mm2src/mm2_main/src/lp_ordermatch.rs`
+  contains the one-hundred-millionth price floor in the maker-order price
+  validation, and the minimum-volume default and refusal checks in the
+  maker and taker order builders. The present reloaded workspace carries
+  all four unchanged (the EVM formula in the EVM market-operations file,
+  the QRC20 copy in the QRC20 market-operations file, the price floor and
+  the builders in the order-match types file).
+- *Cross-reference.* [Chapter 2 — Baseline State](02-baseline-state.md).
+
 ## 57.11 External References
 
 - Ethereum JSON-RPC `eth_gasPrice`, `eth_feeHistory` and
@@ -808,6 +1055,23 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   non-fungible withdrawal flows R57.7.5 binds.
 - [Chapter 49 — Withdrawal task path](49-withdrawal-task-path.md) for the
   withdraw RPC surface the fee object of R57.7.1 travels on.
+- The public release history of the historical lineage, for the release
+  designations of §57.1 and the fact that `v2.0.0-beta` is a published
+  release (Part D).
+- The public third-party coins-configuration file, for the absence of
+  any per-coin minimum-trading-volume key (R57.7A.2) and for the set of
+  eight-decimal ERC-20 entries the baseline formula affects (Part D).
+- [Chapter 32 — Orderbook Patricia-Trie and P2P Surface](32-orderbook-p2p-and-trie.md)
+  §32.5 R-W1, for the `min_volume` wire field through which the default of
+  R57.7A.4 becomes visible to peers (R57.7A.5).
+- [Chapter 38 — UTXO Coin Maintenance & Features](38-utxo-coin-maintenance-and-features.md)
+  R38.6.6, for the UTXO counterpart of Part D and the Qtum material D8
+  concerns.
+- [Chapter 08 — Fee Routing Engine](08-fee-routing-engine.md) R6 and
+  [Chapter 16 — Swap V2 Pre-Burn Output](16-swap-v2-pre-burn-output.md)
+  R10, for the minimum-transaction-amount accessor R57.7A.3 keeps at zero.
+- `docs/COMPAT_SWITCHES.md`, "The default-side rule", for the
+  compatibility assessment of R57.7A.5.
 
 ## 57.12 Provenance Footer
 
@@ -816,14 +1080,21 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   and the envelope types of §57.7); the public third-party
   coins-configuration file (the deployed `gas_limit` member sets, the
   per-coin swap gas-fee policy and envelope-type-cap values, and the
-  absence of a `gas_price_adjust` entry); the pinned baseline tree (V1,
-  V2); the present reloaded workspace (V3 and every
-  implementation-status statement).
+  absence of a `gas_price_adjust` entry, and the absence of any
+  minimum-trading-volume key together with the eight-decimal ERC-20
+  entry set of Part D); the pinned baseline tree (V1, V2, V4); the
+  present reloaded workspace (V3, V4 and every implementation-status
+  statement); the public release history of the historical lineage (the
+  designations of §57.1); a field report from a community maintainer, as
+  the statement of the problem Part D answers — a third-party report of
+  observed behaviour, carrying no implementation material.
 - *Permitted-input classes used:* R3 (external public specifications —
   EIP-1559, EIP-2718), R4 (wire formats and external interfaces the
-  project must inter-operate with — the three JSON-RPC methods and the
-  coins-configuration key schema), R1 (the baseline tree, for V1 and V2),
-  and the project's own tree and revision history.
+  project must inter-operate with — the three JSON-RPC methods, the
+  coins-configuration key schema, and the orderbook wire record's
+  `min_volume` field cited from chapter 32), R1 (the baseline tree, for
+  V1, V2 and V4), R6 (public-release facts and the field report of
+  Part D), and the project's own tree and revision history.
 - *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* consulted **only** to establish, for §57.2–§57.7
   and under the reference designations named in §57.1: that the absolute
@@ -837,9 +1108,19 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
   per-key call sites, absent-key defaults and token inheritance of
   §57.5–§57.6, together with the absence of any ceiling, clamp or
   upper-bound comparison on a configured value (R57.5.3a, cleared under the
-  scoped-addition item below); and the withdraw
+  scoped-addition item below); the withdraw
   fee-form tags, member names,
-  estimation rule and envelope-type derivation of §57.7. Every dictated
+  estimation rule and envelope-type derivation of §57.7; and, for §57.7A
+  and under the designation `v2.0.0-beta` as the first and `v2.6.0-beta`
+  and `v3.0.0-beta` as the agreeing later designations: that an EVM
+  coin's and a QRC20 token's minimum trading volume is one smallest unit
+  of the coin and its minimum transaction amount zero, that no
+  configuration key feeds either, that the maker price floor is "any
+  positive value", that a received order record is checked only for a
+  non-negative minimum volume and positive price and maximum volume, and
+  which public request paths consume which of the two accessors
+  (R57.7A.1–R57.7A.6, cleared under the second scoped-addition item
+  below). Every dictated
   fact in §57.2's method semantics and §57.7's envelope types is sourced
   from the public specifications (R3/R4); every configuration key name,
   value shape and deployed value is sourced from the public coins
@@ -937,10 +1218,102 @@ under chapter 01 R25–R26 and is the maintainer's, not a Coder's.
     excluded from the measured set as dictated; no default value, internal type
     name, helper name or message literal was carried. With the finding list
     empty, no added line was classified into any leak category.
+- *Second scoped addition — Part D, and its Dirty Gate clearance (chapter
+  01 T1, R40, R43).* **§57.7A (R57.7A.1–R57.7A.6, the two informative
+  notes beneath them), T10–T12, D7–D8,** the Part D bullet of §57.0, the
+  `v2.0.0-beta` row of §57.1, the Part D additions to this footer's
+  *Inputs*, *Permitted-input classes* and *Forbidden corpus* items, and
+  the title and one-sentence-claim extension were added after both passes
+  recorded in this footer and are covered by **neither** of them. They
+  were taken from the forbidden-class surface that reports a coin's
+  minimum trading volume and minimum transaction amount and from the
+  order-match validation that consumes them, under §1.4A, at the release
+  designations `v2.0.0-beta`, `v2.6.0-beta` and `v3.0.0-beta`, and were
+  authored by the KDF Spec Reader under that procedure. They **passed the
+  KDF Dirty Gate** on 2026-10-24 in a third pass, scoped to exactly that
+  material: PASS, discretionary-expression measure 0.01, finding list
+  empty, and accordingly no remedy class for any line or for the candidate
+  as a whole. That was the first gate pass on this material; no earlier
+  verdict for it exists or was relayed. Their clearance is therefore
+  **complete and not pending**, and R40 withholds nothing in them, as the
+  clearance statement at the head of §57.7A states at the point the
+  material appears. V4 is not part of the candidate: it rests on the
+  pinned baseline tree and the present reloaded workspace alone. The two
+  items above and the completed item below are unchanged by this pass and
+  keep their own dates and scopes; the gate confirmed that the only change
+  to the completed item below is its scope phrase, from one scoped
+  addition to two, so the substance of the two earlier attestations is
+  intact and not reopened. This item is written on the clean side from
+  the verdict, which reached the clean side as relayed text rather than
+  as a gate-written file; that is record-keeping and adds no chapter
+  content.
+
+  *Which parts carry an inline pointer to this item.* The block at the
+  head of §57.7A carries the clearance statement, and T10–T12 and D7–D8
+  each carry a one-line pointer back to it — the same places the pending
+  statements stood, converted where they were. The Part D bullet of
+  §57.0 names the clearance in one sentence. The one-line pointers to
+  §57.7A in chapters 32, 38 and 59, which carried the pending marker as
+  dependent text, were updated in the same change, as was entry #12 of
+  the parity-gap register.
+
+  The three elements of this pass's R39 scope attestation, carried
+  forward here in corpus-free terms as chapter 01 T1 requires. Two gaps
+  in the first element are recorded as gaps rather than completed from
+  elsewhere:
+
+  - *Extent.* The EVM platform-coin and ERC-20 token coin-layer
+    minimum-trading-volume and minimum-transaction-amount accessors, the
+    QRC20 token layer's counterparts, and the order-match maker and taker
+    order-builder validation that consumes them — Part D's scope as §57.0
+    states it. Quantity examined: **three files** of that surface at the
+    lineage's current state, and the same three at the pre-anchor
+    baseline chapter 02 names, to verify V4's baseline-existence claims;
+    the single merged change that moved the value to one smallest unit
+    and lifted the price floor, by its file inventory (**11 files**) and
+    its diff for the order-match file; and tag-containment history
+    establishing `v2.0.0-beta` as the first published release
+    designation carrying it, with `v2.6.0-beta` and `v3.0.0-beta`
+    agreeing. Reference designations: the three publicly published
+    release designations §57.1 names, which the lineage's own releases
+    carry and which chapter 01 §1.7 admits as public-release facts. **The
+    record is no more precise than those designations** — no post-anchor
+    commit identifier, no branch state and no location within the
+    compared material is given (chapter 01 R11 and the reference-version
+    limit of §1.7).
+
+    **Two gaps in this element, left visible rather than completed.**
+    First, the lineage's current unreleased state was compared; it is a
+    branch state, which chapter 01 R11 and §1.7 withhold, so the record
+    says only that the three named designations agree and nothing about
+    where the tip stands. Second, one further release tag also contains
+    the change, but its name embeds a commit abbreviation, which is an
+    identifier of the withheld class; it is not named here. Chapter 01 T1
+    is satisfied by saying so — a completed clearance statement carries
+    the three elements **or** states that an element is not recorded.
+
+  - *Method.* **Reading**, combined with mechanical history queries —
+    content search, tag containment and retrieval of the files at the
+    baseline anchor. **The repository's own R35 gate tooling was not
+    run:** it operates on files of source and the added material embeds
+    no source-code block, so the instrument had no operand. The absence
+    is stated so that it is visible rather than implied.
+
+  - *Measure.* **0.01** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — read against the
+    standard that any single line carrying discretionary expression fails
+    the candidate however much legitimately dictated content surrounds
+    it; none was found, and no aggregate match-density judgment was used
+    or admitted. Excluded from the measured set, so that the figure's
+    coverage is visible: the default-and-refusal arithmetic R57.7A.4
+    restates and the maker price-floor remedy form in the code-quality
+    finding, both verified as pre-anchor baseline behavior (R1); and the
+    one-smallest-unit value and the "any positive price" rule, which are
+    numerical behavior observable through public RPC responses.
 - *Dirty Gate clearance (chapter 01 T1, R40, R43).* The whole of this
   chapter's forbidden-class-sourced material as it stood on 2026-10-24 — the
-  *Forbidden corpus* item above, less the scoped addition that follows it,
-  which is to say the legacy gas-price resolution of §57.2, the
+  *Forbidden corpus* item above, less the two scoped additions that follow
+  it, which is to say the legacy gas-price resolution of §57.2, the
   proportional-increase arithmetic and its stages in §57.3, the swap fee
   form of §57.4, the two per-coin gas-limit configuration blocks of
   §57.5 and §57.6, and the withdraw fee resolution, gas-limit estimation
