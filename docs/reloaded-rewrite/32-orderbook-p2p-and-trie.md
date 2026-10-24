@@ -223,6 +223,20 @@ its *own local receipt time* (in seconds) as the pubkey's last
 keep-alive, not the sender-provided timestamp. The stored value
 is "when this process last heard from the pubkey".
 
+The sender-provided timestamp remains part of the dictated wire
+shape (§32.5) and MUST still be accepted, but the receiver MUST
+make no use of it at all: it is not stored, not compared against
+the local clock, not bounds-checked, and not a reason to reject
+the message. [Chapter 59](59-legacy-ordermatch-negotiation.md)
+R59.6.2 states the same rule from the negotiation side and
+R59.6.3 draws the consequence this chapter's read paths depend
+on — because every node on both sides of the wire expires peers
+on its own receipt clock, a stale row cannot be inherited from a
+peer by way of a mis-stated timestamp, so the orderbook read
+index of §32.3 needs **no** consumer-side freshness filter and
+adding one would be a divergence. R-P3 corrects the baseline,
+which used the sender's timestamp here; see ch. 59 V3.
+
 **R-P4.** The stored trie roots are the receiver's record of
 each tracked `(pubkey, pair)` root. When a keep-alive advertises
 a *different* root for a pair the receiver already tracks, the
@@ -736,6 +750,18 @@ per-pair delta history is independently TTL-bounded (§32.4
 R-P5). Expiry sweeps are part of the subsystem's periodic
 maintenance.
 
+The TTL's concrete value, its operator override, the
+advertisement interval R-K2 runs at, and the exemption of the
+node's **own** pubkeys (both the persistent one and the
+per-order ones) from this eviction are bound by
+[Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.4 and
+R59.6.5, which owns the liveness window because the same sweep
+also drives that chapter's dead-order behaviour. The per-order
+half of the own-pubkey exemption is **not** implemented here
+today (ch. 59 R59.6.5), so this subsystem can currently evict a
+pubkey the node itself makes orders under and drop those orders
+from its own read index.
+
 ## 32.10 Deferred Work
 
 D1. **Module split.** The subsystem is a single large module.
@@ -873,3 +899,109 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   historical lineage — of either epoch — is governed by the R35
   gate and the R36 binding-scope notes that head every code-
   bearing section of this chapter.
+
+  A **later pass** added two paragraphs — the keep-alive-timestamp
+  clarification under §32.4 R-P3 and the liveness-window
+  cross-reference under §32.9 R-K3 — whose substance is bound by
+  [Chapter 59](59-legacy-ordermatch-negotiation.md) and whose
+  forbidden-class scope is recorded there (ch. 59's own footer).
+  What crosses into this chapter from that pass is only: that the
+  reference likewise records local receipt time and makes no use
+  of the sender's timestamp, and that the liveness window, its
+  operator override and the own-pubkey exemption live with the
+  negotiation chapter. Established under the public release
+  designations `v2.6.0-beta` and `v3.0.0-beta`.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for the later
+  pass:* the two paragraphs named immediately above — the
+  keep-alive-timestamp clarification under §32.4 R-P3 and the
+  liveness-window cross-reference under §32.9 R-K3 — together
+  with the derivation record above and this item, were authored
+  by the KDF Spec Reader under the two-team procedure of
+  chapter 01 §1.4A and **passed the KDF Dirty Gate** on
+  2026-10-24: PASS, discretionary-expression measure 0.00,
+  finding list empty, and accordingly no remedy class for any
+  line or for the candidate as a whole. That was the first gate
+  pass on this material; no earlier verdict for it exists or was
+  relayed. **Only the added material was gated:** the rest of
+  this chapter was not re-examined in that pass, and its earlier
+  clearance position — including the R35-gate and R36
+  binding-scope position of the item above — is untouched by
+  that verdict. The clearance for the later pass is therefore
+  **complete and not pending**, and R40 withholds nothing here.
+
+  *Why no section carries an inline pointer to this item.* The
+  companion [Chapter 59](59-legacy-ordermatch-negotiation.md)
+  puts a short clearance pointer at the head of each of its four
+  consulted sections; this chapter records the clearance here
+  only. That is a scope judgement, written down so that it
+  cannot be read as an oversight, and three things fix it.
+  First, the at-the-point duty of R40 attaches to a *pending*
+  clearance; completing the record discharges that duty rather
+  than relocating it, and the pending statement these two
+  paragraphs previously relied on is what this item replaces.
+  Second, what the duty guards against is a reader or an
+  implementer mistaking a **candidate** for a cleared binding
+  requirement, and neither paragraph can be mistaken that way
+  now. Each is cleared, so reading it as cleared is accurate;
+  and neither is the binding authority for what it states. The
+  §32.9 paragraph says on its face that the window, the operator
+  override and the own-pubkey exemption are bound by
+  [Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.4 and
+  R59.6.5, and the §32.4 paragraph's requirement on the
+  sender-supplied member restates that chapter's R59.6.2 and
+  cross-references it, so a reader who follows either paragraph
+  to the rule that binds it arrives in a section that does carry
+  a pointer. Third, this chapter's other sections rest on the
+  inputs the item above records and were not part of this
+  candidate; a fresh clearance notice inserted at two mid-chapter
+  points of an otherwise unchanged chapter would imply a
+  distinction in clearance position among its sections that this
+  verdict did not draw. Two short cross-referencing paragraphs
+  in an otherwise already-cleared chapter are the lighter case,
+  and one record scoped to them is the proportionate answer to
+  it.
+
+  The three elements of the R39 scope attestation for that pass,
+  carried forward here in corpus-free terms as chapter 01 T1
+  requires:
+
+  - *Extent.* The forbidden-class material corresponding to the
+    subject matter the two added paragraphs address: the
+    keep-alive processing path and the periodic tracked-pubkey
+    eviction behaviour of this subsystem's peer-to-peer surface,
+    in the narrow respects those paragraphs claim — the basis on
+    which liveness is recorded, the treatment of the
+    sender-supplied wire member, and the ownership of the
+    liveness window, its operator override and the own-pubkey
+    exemption. Quantity examined: **one file**, read in part.
+    Reference designations: the publicly published release
+    designations `v2.6.0-beta` and `v3.0.0-beta`. **The record
+    is no more precise than those designations** — no
+    post-anchor commit identifier, no branch state and no
+    location within the compared material is given (chapter 01
+    R11 and the reference-version limit of §1.7).
+
+  - *Method.* By **reading**, on both sides. **No mechanical
+    comparison was run:** the added material embeds no code
+    block, so this repository's own residual-similarity gate
+    tooling had no operand. The absence is stated so that it is
+    visible rather than implied.
+
+  - *Measure.* **0.00** on the discretionary-expression basis —
+    the same figure the leak report carries, not a second one —
+    read against the same judgement standard as the
+    [Chapter 59](59-legacy-ordermatch-negotiation.md) pass of
+    the same date: one identified item of genuine discretionary
+    expression fails a candidate however much of the surrounding
+    content is legitimately dictated. The figure reflects what
+    the added material consists of: a negative behavioural claim
+    about one dictated wire member, a cross-reference handing two
+    bound values and one exemption to
+    [Chapter 59](59-legacy-ordermatch-negotiation.md), a
+    statement of this repository's own implementation state, and
+    the two footer records. It carries no identifier outside
+    R11's carve-out classes and no discretionary expression of
+    any category — no private identifier, no function body, no
+    control-flow transcription, no local name, no error or log
+    literal, no per-method table keyed to internal names, no
+    internal module tree and no test identifier.
