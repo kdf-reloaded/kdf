@@ -360,6 +360,17 @@ R46.2.4, ch.55 R55.4.6):
   no other node is affected. **Compatibility:** for behaviour matching GLEEC KDF,
   set this to `true`. See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
+  **The switch is scoped to an unrecognized enumeration member, not to an
+  unknown key.** A coin-configuration key no consumer reads is ignored
+  silently — at the top level and inside a recognized nested object alike —
+  and no setting changes that; it is parity, kept so that a shared coins file
+  newer than the binary reading it cannot break activation (CRD ch.45
+  R45.3.7). A recognized key whose value is of the wrong type remains a
+  per-coin activation error naming the key, also outside the switch. Only an
+  unrecognized *value* of the recognized `signature_version` key is this
+  project's divergence, and that alone is what the switch hands back to GLEEC
+  KDF; the malformed `fork_id` above stays outside it under every setting.
+
 ## Detail sections
 
 Detail subsections will be added as features land. Each entry above expands here with: rationale, code locations, test coverage, migration notes, and links to relevant pull requests.
