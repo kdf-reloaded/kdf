@@ -103,6 +103,63 @@ is set to an empty string shall be treated as equivalent to a *missing* file at
 that slot: the empty value selects neither a usable path nor the built-in
 default, so the corresponding "file absent" rule applies.
 
+> **Dirty-side derivation record (sanitized).** R45.3.7 and T45.9 were
+> authored by the KDF Spec Reader under
+> the chapter-01 two-team workflow (§1.4A), from the GLEEC KDF public release
+> designations `v3.0.0-beta` (reference) and `v2.6.0-beta` (legacy
+> cross-check), which agree. They carry only the externally observable
+> tolerance of a coins-list entry towards keys the reader does not recognise.
+>
+> **Clearance (chapter 01 T1, R40).** That material -- R45.3.7 and T45.9 --
+> **passed the KDF Dirty Gate** on 2026-10-24: PASS, discretionary-expression
+> measure 0.01, finding list empty, and accordingly no remedy class for any
+> line or for the candidate as a whole. Its clearance is therefore *complete*
+> and not pending, and R40 withholds nothing in it. One limit of that pass
+> belongs here and not only in the footer: the comparison reached material at
+> the `v3.0.0-beta` designation only, so the agreement between the two
+> designations that the record above asserts **is not attested by the
+> clearance** and rests on the derivation record alone. The extent, method and
+> measure of the pass are recorded once, in the *Dirty Gate clearance* item of
+> §45.12, and are not restated here.
+
+R45.3.7 **An unrecognised key in a coins-list entry is tolerated.** A coin
+entry in the resolved coins list is a loosely-typed JSON object from which each
+consumer reads the keys it needs by name. An entry carrying a **top-level key
+no consumer recognises** shall be accepted: the daemon shall start, the coin
+shall remain activatable, and the unknown key shall neither refuse the launch
+nor refuse the coin's activation. Specifically:
+
+- the key is **silently ignored**. No rejection, and no warning or diagnostic
+  is emitted for it -- the daemon has no inventory of permitted coin-entry keys
+  against which to notice one, so an unknown key is indistinguishable from a
+  key belonging to a consumer that is not active in this build;
+- the same tolerance holds for an unrecognised member *inside* a recognised
+  nested object (for instance the per-coin gas-limit blocks of
+  [Chapter 57](57-evm-fee-inputs.md) R57.5.1);
+- the tolerance is a property of the reader, not of a version check. It
+  therefore holds for **older** nodes reading a **newer** shared coins file:
+  publishing a new top-level coin-entry key into the shared public coins file
+  cannot break a node that predates the key. This is the interoperability fact
+  the rule exists to record, because the shared coins file is consumed by nodes
+  of many versions at once;
+- what *is* rejected is a **recognised** key whose value fails to convert to
+  the type that key's consumer expects. That is a per-coin activation error
+  naming the key (R45.5.1's "unexpected type" column, and R57.5.1 for the
+  gas-limit case), not a launch refusal, and it is unaffected by this rule;
+- two keys are nonetheless load-bearing for startup and are **not** covered by
+  this tolerance, because a consumer does read them for every entry: the
+  entry's ticker key, and the order-book alias key that the order-matching
+  subsystem reads across the whole list at startup. An entry whose ticker key
+  is absent or not a string, or whose alias key is present but not a string,
+  fails that whole-list read and refuses the launch with a clean configuration
+  error (R45.3.5's class). A coins file is therefore tolerant of *extra* keys
+  and intolerant of a *malformed* ticker or alias.
+
+Reloaded shall preserve this tolerance exactly. A typed coins-entry schema
+introduced under D45.1 shall be permissive about unknown members by
+construction; making it strict would be a silent compatibility break against
+every shared coins file that is newer than the binary reading it.
+
 ## 45.4 Identity Resolution and Passphrase Tolerance
 
 R45.4.1 **No-login mode is a supported start.** When no signing identity is
@@ -296,6 +353,16 @@ T45.8 *Bad logging env vars.* An `MM_LOG` value not ending in `.log`, and an
 unparsable `RUST_LOG` value, MUST each allow the daemon to start (file logging
 disabled / default level), not refuse or panic (R45.6.3, R45.6.4).
 
+T45.9 *Unknown coin-entry key.* A coins list in which one entry carries an
+extra top-level key no consumer reads MUST start the daemon and MUST leave that
+coin activatable, with the key ignored (R45.3.7). The same list with the entry's
+ticker key removed, and with the order-book alias key set to a non-string, MUST
+each refuse the launch cleanly instead. The test MUST fail if a strict schema is
+introduced that rejects the extra key: that is the regression the rule exists to
+prevent, and it would break every node older than the shared coins file it
+reads. *(Cleared with R45.3.7 -- see the clearance statement above that rule in
+§45.3 and the record in §45.12.)*
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -328,6 +395,13 @@ operator-experience enhancement.
 - Chapter 43 (daemon RPC dispatcher) — the `rpc_password` strength policy
   (§43.3.2) and the no-panic-via-RPC obligation (§43.4) referenced in §45.5.2
   and §45.7.
+- Chapter 57 (EVM fee inputs) §57.5 — the per-coin gas-limit configuration
+  blocks, whose own unknown-member tolerance (R57.5.1) and type-rejection
+  behaviour are the nested-object instance of the coin-entry rule bound in
+  R45.3.7.
+- The public third-party coins-configuration file, consumed concurrently by
+  nodes of many versions, which is the interoperability setting R45.3.7
+  exists to protect.
 
 ## 45.11 Upstream Divergence (informative)
 
@@ -360,10 +434,113 @@ operator-experience enhancement.
   start-versus-refuse semantics stated abstractly; public project
   documentation.
 - *Sibling chapters cross-referenced:* Chapter 02, Chapter 06, Chapter 07,
-  Chapter 43.
+  Chapter 43, Chapter 57.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the
-  daemon, in what mode, and which refuse). No private identifiers, function
+  daemon, in what mode, and which refuse), and -- for R45.3.7 and T45.9, under
+  the chapter-01 two-team workflow of §1.4A and at the GLEEC KDF public release
+  designations `v3.0.0-beta` and `v2.6.0-beta` -- the coins-list entry's
+  tolerance of an unrecognised key. No private identifiers, function
   bodies, control flow, or error/log string literals were carried across; all
-  behaviour is restated as functional requirements.
+  behaviour is restated as functional requirements. R45.3.7 and T45.9 have
+  passed KDF Dirty Gate clearance, as their derivation record in §45.3 states
+  and as the item below records; that item also records the one element of the
+  attestation that is a gap.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for R45.3.7 and T45.9:* the
+  forbidden-class-sourced material this item covers is exactly what the
+  derivation record in §45.3 names: R45.3.7 and T45.9. The two
+  external-reference entries added in §45.10 were inside the gated extent too,
+  but they only name R45.3.7 and the public coins-configuration file and carry
+  no fact beyond what that rule states, so they are not separately consulted
+  material. The rule and the test were authored by the KDF Spec Reader under
+  the two-team procedure of chapter 01 §1.4A and **passed the KDF Dirty Gate**
+  on 2026-10-24: PASS, discretionary-expression measure 0.01, finding list
+  empty, and accordingly no remedy class for any line or for the candidate as
+  a whole. That was the first gate pass on this material; no earlier verdict
+  for it exists or was relayed. The clearance is therefore **complete and not
+  pending**, and R40 withholds nothing in it. This item is written on the
+  clean side from the verdict, which reached the clean side as relayed text
+  rather than as a gate-written file; that is record-keeping and adds no
+  chapter content.
+
+  **Only the named material was gated.** The rest of this chapter was not
+  re-examined, and the first clause of the *Forbidden corpus* item above --
+  the externally observable startup tolerance contract this chapter rests on
+  elsewhere -- keeps the position it already had. This pass neither extends to
+  it nor reopens it.
+
+  *Which parts carry an inline pointer to this item, and why those.* R45.3.7
+  carries the clearance statement at the point the material appears (R40), and
+  T45.9 carries a one-line pointer back to it, because those two are the
+  numbered, rule-bearing and test-bearing text an implementer codes from and
+  they sit among R- and T-numbers that have stood in this chapter through
+  earlier revisions, which is the case in which long-settled requirement and
+  newly-cleared requirement are easiest to confuse. Nothing else carries a
+  pointer, and that is a scope judgment rather than an oversight: the two
+  §45.10 entries are external-reference citations that bind nothing and name
+  R45.3.7 as the rule they serve, §45.11's divergence note was not part of the
+  candidate, and every other section of this chapter rests on the position the
+  item above already records. §45.12 is where the record lives and carries
+  none.
+
+  The three elements of the R39 scope attestation, carried forward here in
+  corpus-free terms as chapter 01 T1 requires. One of the three is incomplete,
+  and it is recorded as a gap rather than completed from elsewhere:
+
+  - *Extent.* The forbidden-class material corresponding to the subject matter
+    this chapter names in its own terms: the startup read of the resolved coin
+    registry -- how a registry entry is consumed key by key by each consumer,
+    what becomes of a top-level key no consumer reads, the equivalent case
+    inside a recognised nested object, the distinction between an unrecognised
+    key and a recognised key of the wrong type, and the whole-list read the
+    order-matching subsystem performs at launch together with the two entry
+    keys that read requires. Quantity examined: **one file** read in
+    substance, together with token-level searches across the startup and
+    order-matching file set, of the order of five files. Reference
+    designation: the publicly published release designation `v3.0.0-beta`.
+    **The record is no more precise than that designation** -- no post-anchor
+    commit identifier, no branch state and no location within the compared
+    material is given (chapter 01 R11 and the reference-version limit of
+    §1.7).
+
+    **The gap in this element, left visible rather than completed.** The
+    derivation record in §45.3 establishes its facts at two designations and
+    asserts that they agree. This clearance reached material at one of them
+    only: no material at the `v2.6.0-beta` designation was available to the
+    pass, so **the asserted agreement between the two designations is not
+    attested here**. The element is incomplete rather than approximated, and
+    chapter 01 T1 is satisfied by saying so -- a completed clearance statement
+    carries the three elements **or** states that an element is not recorded.
+    Nothing in this clearance supports the legacy-cross-check half of the
+    derivation record: that half rests on the Spec Reader's record alone, and
+    this item neither confirms nor contradicts it. Whether either designation
+    is a publicly published release designation of the kind R11's carve-out
+    admits is a separate question, checkable on the clean side against public
+    release records, and is not answered here.
+
+  - *Method.* **Combined.** Reading, together with a mechanical token
+    comparison: the extent was fixed by a line-level comparison of this
+    chapter against the branch tip so that only added and modified lines were
+    judged, and every quoted token on an added line was then extracted
+    mechanically and put through the forced-versus-free test individually. No
+    aggregate match-density judgment was used or admitted. **This
+    repository's own clean-room gate tooling under `tools/` was not applicable
+    and was not run:** the added material embeds no code block and that
+    tooling's test is defined over source-file bodies, so the instrument had
+    no operand. The absence is stated so that it is visible rather than
+    implied.
+
+  - *Measure.* **0.01** on the discretionary-expression basis -- the same
+    figure the leak report carries, not a second one -- read against the
+    standard that a measure at or near zero passes only if, in addition, no
+    added line falls into any leak category, one item of genuine discretionary
+    expression being enough to fail a candidate however much legitimately
+    dictated content surrounds it. The added material quotes no identifier at
+    all from the compared surface: it states both load-bearing entry keys by
+    their function rather than by name, so the measured set is effectively
+    empty and the figure is a floor rather than the measurement of a residue.
+    With the finding list empty, no added line was classified into any leak
+    category -- no private identifier, no body or control-flow transcription,
+    no error or log literal, no internal module tree, and no internal test
+    identifier.
