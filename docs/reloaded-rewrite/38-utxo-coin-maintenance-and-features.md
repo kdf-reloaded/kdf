@@ -535,8 +535,8 @@ R38.8.6 **Tests (two-direction, observable).**
   derivation), and Electrum protocol documentation (public specifications
   for the §38.6/§38.8 port targets); KIP-0001 and the public Komodo daemon
   interest rule, plus the issue #11 KMD mainnet observations (§38.4,
-  §38.10); [Chapter 5](05-hd-wallet-and-key-derivation.md)
-  §5.9A (the software-HD crypto substrate §38.8 consumes); [Chapter 7](07-mnemonic-and-passphrase-management.md)
+  §38.10); [Chapter 5](05-hd-wallet-support.md)
+  §5.9A (the software-HD crypto substrate §38.8 consumes); [Chapter 7](07-wallet-lifecycle-and-key-export.md)
   (a cross-referenced sibling chapter); [Chapter 45](45-startup-configuration-and-environment-tolerance.md)
   (a cross-referenced sibling chapter).
 - *Permitted-input classes used:* baseline/as-built source (the shipped
@@ -548,7 +548,7 @@ R38.8.6 **Tests (two-direction, observable).**
   streaming, fixed-fee policy, FIRO Spark) exist upstream and are
   genuinely absent from reloaded's baseline -- Forbidden corpus, under
   the chapter-01 two-team clean-room workflow; see below.
-- *Sibling-allowlist consultations:* [Chapter 5](05-hd-wallet-and-key-derivation.md)
+- *Sibling-allowlist consultations:* [Chapter 5](05-hd-wallet-support.md)
   §5.9A, [Chapter 37](37-utxo-spv-and-block-header-validation.md) §37.5.
 - *Two-team workflow record:* the Spec Reader role (AGENTS.md §2) was
   used, and the Dirty Gate passed, for the absence-verification and
