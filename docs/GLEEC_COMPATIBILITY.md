@@ -108,11 +108,16 @@ floored at Sapling activation.
 **Why a migrated wallet hits it.** KDF Reloaded keeps its shielded databases under
 distinct file names, `<TICKER>_RELOADED_WALLET.db` and `<TICKER>_RELOADED_COMPACT_BLOCKS.db`
 (for example `ARRR_RELOADED_WALLET.db`). The files a GLEEC KDF node wrote
-(`<TICKER>_WALLET.db`, `<TICKER>_COMPACT_BLOCKS.db`) are never opened, migrated or deleted.
-So the first run on a migrated node starts from a fresh wallet database, and the default
-window applies. **Do not rename, copy or reuse the old database files under the new
-names.** Their schema differs, Reloaded fingerprints every database it opens, and a file
-that does not match is preserved and refused rather than adopted.
+(`<TICKER>_WALLET.db`, `<TICKER>_COMPACT_BLOCKS.db`) are a separate namespace that Reloaded
+does not open, rename, migrate, truncate or delete where they lie. So the first run on a
+migrated node starts from a fresh wallet database, and the default window applies.
+**Do not rename, copy or reuse the old database files under the new names.** Renaming them
+does not fail; it simply gains nothing, because Reloaded fingerprints every database before
+it opens one, and a recognized GLEEC-era wallet is preserved recoverably, replaced with a
+new current-generation wallet and fully rescanned, reusing no note, nullifier, witness,
+commitment tree or scan state. You land back on the same default window that caused the
+zero balance, having risked the old file for no gain. Only a file Reloaded cannot recognize,
+or a corrupt one, is preserved and refused with a typed activation failure.
 
 **Remedy.** Activate with `sync_params` inside the Light-mode `rpc_data`
 (`activation_params.mode.rpc_data.sync_params`; it is not a top-level field), chosen to
