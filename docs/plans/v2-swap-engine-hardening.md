@@ -1,6 +1,8 @@
 # Plan: V2 swap engine dedup, error-path hardening, and V1 driver consolidation
 
-> **Status:** T1-T7 and T9-T10 are done (commits `220f8cafc`, `ba0b0a739`,
+**Status:** parked (T1–T7, T9–T10 shipped; T8 deferred, T11–T13 queued) — **Last reviewed:** 2026-10-18
+
+> **Context:** T1-T7 and T9-T10 are done (commits `220f8cafc`, `ba0b0a739`,
 > `9f79af496`, `5923c4558`, `7c021ea47`). T8 was reassessed as riskier than
 > categorized and deferred, not attempted (see its own entry below). T11-T13
 > (V1 consolidation) remain queued for a future round, per the plan's own

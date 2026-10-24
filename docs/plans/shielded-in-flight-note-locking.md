@@ -1,6 +1,52 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-> **Status:** implemented 2026-09-22; specification is now CRD ch.39 §39.8.0.7
+**Status:** in progress (swap and `withdraw` paths shipped; remaining T39.8.0h cases and two-process detection open) — **Last reviewed:** 2026-10-19
+
+> **Shortfall named, 2026-10-21.** A withdrawal short only because its notes are committed to a
+> recorded, unconfirmed transaction now fails with `BalanceLockedByUnconfirmedTransaction`
+> (HTTP 400; coin, available, required, committed) instead of a bare `NotSufficientBalance`
+> showing `available: 0` beside a healthy balance. The check lives in `ZCoin::gen_tx`
+> (`mm2src/coins/z_coin/z_coin_ops.rs`, `explain_shortfall`), after the in-flight map is
+> pruned; `send_outputs` is untouched and keeps waiting out the same shortfall. Locking
+> behaviour is unchanged. **Limit:** the committed amount comes from the per-process in-memory
+> map, so after a restart the explanation is gone and the bare `NotSufficientBalance` returns,
+> although the exclusion itself (the wallet database record) survives. Recorded in CRD ch.39
+> D39.8.0e and `docs/GLEEC_COMPATIBILITY.md`.
+>
+> **Withdraw path closed, 2026-10-19.** A user sent 0.01 ARRR to themselves, never saw it in the
+> history, and the next send failed with `bad-txns-duplicate-nullifier-requirements-not-met`:
+> `withdraw` built a transaction and recorded nothing, and the client's `send_raw_transaction`
+> went through generic UTXO code that knows nothing of shielded notes, so the next withdrawal
+> re-selected the same note. The fix is in `ZCoin::send_raw_tx_bytes` (`mm2src/coins/z_coin.rs`,
+> with `record_broadcast_in_wallet_db` in `z_coin_ops.rs`): after the backend accepts the bytes,
+> the transaction is read back from them and recorded exactly as the swap send path records
+> its own (CRD ch.39 R39.8.0ap, D39.8.0e). The hook is on `ZCoin` rather than in `utxo_common`
+> because that code is shared by every UTXO coin. `withdraw` still builds and returns and does
+> not broadcast; its request and response are unchanged, so the GLEEC two-step contract holds.
+> A build that is never submitted records nothing, so a cancelled send strands no notes. The fee
+> recorded is derived from the bytes (value leaving the Sapling pool less the transparent outputs;
+> a transaction with transparent inputs or a non-Sapling bundle is not recorded). `withdraw` with
+> `max` no longer computes a negative amount when the spendable balance does not cover the fee.
+> The in-memory `in_flight_spends` map now also drops entries whose expiry has passed. ARRR is
+> lightwalletd-only, so there is no Native-mode path to cover.
+>
+> **Still to do for `done`:** the T39.8.0h cases for a rejected broadcast, a restart, the
+> mined-and-scanned transition and two concurrent sends (CRD ch.39 D39.8.0f); detection of two
+> daemons on one seed with separate wallet databases (this fix does not make that safe; a
+> possible cheap detection is noticing a nullifier on chain that this wallet did not create);
+> F3 (post-broadcast sync trigger, latency only). Deferred, not planned: showing built-but-unsent
+> transactions to the user (D39.8.0g).
+>
+> **Re-checked against the tree 2026-10-18.** Selection, construction, broadcast and recording
+> run as one critical section in `ZCoin::send_outputs`
+> (`mm2src/coins/z_coin/z_coin_ops.rs`), and both v1 ARRR swap sends — the dex fee and the
+> HTLC payment (`mm2src/coins/z_coin/z_htlc.rs`) — go through it, so a taker fee followed by a
+> taker payment can no longer pick the same note. The residual gap is the one named below:
+> `withdraw` builds through `gen_tx` and the caller broadcasts, so a withdrawal is not
+> recorded (CRD ch.39 D39.8.0e) -- *since fixed, see above* -- and T39.8.0h's
+> broadcast/restart/concurrency cases are still uncovered (D39.8.0f).
+>
+> **Context:** implemented 2026-09-22; specification is now CRD ch.39 §39.8.0.7
 > (R39.8.0ao–R39.8.0at, T39.8.0h), which supersedes the design sketch below.
 >
 > Created 2026-09-22 after a question about whether reloaded has an equivalent
@@ -29,12 +75,11 @@
 > which our own recording would have satisfied immediately — that predicate was
 > corrected to require a mined height, with a regression test.
 >
-> Known gaps: a withdrawal broadcast outside the daemon is still not covered
-> (CRD ch.39 D39.8.0e), and T39.8.0h is only partially covered — one
-> deterministic predicate test exists, the broadcast/restart/expiry/concurrency
-> cases do not, because no harness can yet drive a shielded wallet database
-> through those transitions (CRD ch.39 D39.8.0f). The testing section below
-> states the intended cases and stands as the specification for that work.
+> Known gaps: T39.8.0h is only partially covered. The withdrawal-side cases and expiry
+> release now have tests that drive a real shielded wallet database (a scanned note, a real
+> spend proof, a recorded transaction); the broadcast-rejection, restart, scan-transition and
+> concurrent-send cases do not (CRD ch.39 D39.8.0f). The testing section below states the
+> intended cases and stands as the specification for that work.
 
 ## The protocol constraint this plan lives under
 

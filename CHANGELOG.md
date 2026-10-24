@@ -6,118 +6,142 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **Releases and the runtime Docker image now ship the license files.** `COPYING`, `LICENSE` and
+  `THIRDPARTY-LICENSES` are attached to every release and covered by the signed `SHA256SUMS`, and
+  the image carries them in `/usr/share/doc/kdf/`. Detail: PR #36.
+- **A shielded (ARRR) withdrawal short only because of an unconfirmed transaction now says so.**
+  Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
+  `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
+  that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+
 ### Changed
 
 - **The initial swap gas-fee policy no longer depends on how the coin was activated, and a coin's
-  `max_eth_tx_type` now caps the transaction type it will sign.** Two related behaviors, chosen
-  together. First, the legacy `enable` / `electrum` route used to ignore the coin configuration and
-  start every EVM coin as `Legacy`, so ETH, MATIC, AVAX, ETH-ARB20, ETH-BASE and MOVR (which the
-  shipped coins file puts on `"Medium"`) emitted type-2 swap transactions when activated through
-  `enable_eth_with_tokens` or its task form but untyped ones when activated through `enable`: the
-  same coin from the same configuration, two different serialized forms, depending only on which
-  RPC the caller happened to use. The legacy route now resolves the policy the way the other routes
-  do: the `swap_gas_fee_policy` request field, else the `swap_gas_fee_policy` key of the coin's
-  entry, else `Legacy`. The request field is new on the legacy route and is parsed leniently there:
-  an unrecognised value is ignored in favour of the configured or default policy rather than
-  rejected, whereas `enable_eth_with_tokens` and `task::enable_eth` still reject it with
-  `InvalidRequest`. Second, the integer `max_eth_tx_type` key of a coin's configuration entry (a
-  token falling back to its platform coin's entry) is now honoured: a swap transaction whose
-  EIP-2718 type exceeds the maximum is refused at signing. The send fails; nothing is broadcast and
-  no lower type is substituted, because silently emitting a form the configuration says a chain
-  must not see would be worse than failing. The shipped coins file sets the key on exactly the
-  coins it means to speak about (`2` on the six `"Medium"` coins, `0` on BNB Chain), and an
-  operator who moves BNB to a non-legacy tier with `set_swap_gas_fee_policy` now gets a refused
-  send where before the type-2 transaction would have gone out. **A coin with no
-  `max_eth_tx_type` key at all is treated as `0`, as in the reference**, so a typed swap send for
-  it is refused exactly as for an explicit `0`. **Compatibility note:** an operator who prefers
-  Reloaded's divergence, an absent key meaning unrestricted, sets the node-level boolean
-  `max_eth_tx_type_absent_unrestricted` to `true` (default `false`; any other value, including the
-  string `"true"`, leaves the default). A key that is present is honoured either
-  way. The activation INFO line now also reports the effective cap and where it came from, for
-  example `MATIC: swap gas-fee policy Medium (source: coin config); max tx type 2 (source: coin
-  config)`, so "why did this coin emit that form?" is one grep. What a node can read is unchanged:
-  the cap and the policy only restrict what it sends. Code: `mm2src/coins/eth/eth_activation.rs`,
-  `mm2src/coins/eth/eth_impl.rs`; CRD ch.35 D35.6 and D35.7, ch.55 R55.4.4.
+  `max_eth_tx_type` now caps the transaction type it will sign.** The legacy `enable` / `electrum`
+  route resolves the policy the way the other routes do — the `swap_gas_fee_policy` request field,
+  else the `swap_gas_fee_policy` key of the coin's entry, else `Legacy` — and that request field is
+  new on the legacy route and parsed leniently there: an unrecognised value is ignored, whereas
+  `enable_eth_with_tokens` and `task::enable_eth` still reject it with `InvalidRequest`. A swap send
+  whose EIP-2718 type exceeds the coin's `max_eth_tx_type` (a token falls back to its platform
+  coin's entry) is now refused at signing, with nothing broadcast and no lower type substituted.
+  **A coin with no `max_eth_tx_type` key counts as `0`**, so a typed swap send for it is refused
+  too; an operator who wants an absent key to mean unrestricted sets the node-level boolean
+  `max_eth_tx_type_absent_unrestricted` to `true` (default `false`). Activation logs the effective
+  policy and cap and where each came from. Detail: PR #30; CRD ch.35 D35.6 and D35.7.
+- **The wss transport now uses rustls 0.23, and a malformed wss key file is a startup error instead
+  of a panic.** A relay whose configured wss key or certificate cannot be loaded now fails to start
+  with `P2PInitError::InvalidWssConfig`. Detail: PR #39.
+- **The Electrum TLS client moved to rustls 0.23, with a different trust-anchor set.**
+  `webpki-roots` goes from 0.22 to 1.0, which drops 45 root certificates — among them roots Mozilla
+  marks distrust-after (DigiCert Global Root CA, GlobalSign Root CA, Baltimore and others) and the
+  removed TrustCor — and adds 32. A server whose chain terminates only at a dropped root is now
+  refused where it was accepted; none of the 225 reachable servers in the public Electrum lists is
+  affected, but a privately configured server can be. TLS 1.2 is still offered, and
+  `skip_validation` keeps its previous meaning. Detail: PR #40.
+- **The native HTTP client and the RPC listener moved to hyper 1; rustls 0.20 and hyper 0.14 have
+  left the build.** The RPC port still serves both HTTP/1 and HTTP/2 prior-knowledge, the SSE
+  endpoint and its event format are unchanged, and TLS 1.2 is still offered. Error strings from a
+  failed HTTP fetch now carry the whole source chain (for example `client error (Connect): invalid
+  peer certificate: UnknownIssuer`), so anything that parses or logs them sees longer text. The
+  lightwalletd gRPC transport moved to the same stack earlier in the series, which changes its
+  default user-agent and the wording of its transport errors. Detail: PR #42 and PR #37.
+- **The WalletConnect relay transport moved to `tokio-tungstenite` 0.24 on rustls 0.23.** No
+  protocol or configuration change; not yet exercised against a live relay session. Detail: PR #40.
+- **The `sia-rust` pin now requires `web-sys >= 0.3.70`**, which reqwest 0.12's wasm backend needs;
+  our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
+  `wasm32` has a floor to raise. Detail: PR #38.
 
 ### Fixed
 
-- **`enable_erc20` now works on an HD wallet.** The one-shot `enable_erc20` refused every
-  HD-derived EVM platform with `UnexpectedDerivationMethod` (`"ExpectedSingleAddress"`),
-  while `task::enable_erc20` supported HD fully. The refusal's stated reason did not hold: a
-  token is enabled on the enabled address of its platform, and `path_to_address` is only
-  validated against that address, never used to pick another, so the one-shot call had
-  nothing to disambiguate. A client that only knows the one-shot call could therefore not add
-  an EVM token after startup in HD mode (one wallet's GUI was refused 63 times out of 68
-  calls). On an HD platform the call now reads the token balance of every known address and
-  returns them in `balances`, one entry per address; a `path_to_address` that selects another
-  address than the enabled one is still refused. It registers exactly the coin the task
-  variant registers. The response shape does not change: `balances` was already an
-  address-to-balance map, and on a single-address platform the response is byte-identical to
-  before. The call reports no progress, so on a wallet with many addresses the caller waits
-  for all balance reads; `task::enable_erc20` remains the variant that reports it. `enable_nft`
-  still refuses an HD platform, and so does `enable_erc20` for a hardware-backed platform: the
-  device confirms through the `user_action` channel of the task variant, which the one-shot
-  call does not have, so only a software HD wallet (HD mode) is admitted. The MM2.json boolean `erc20_hd_activation` (default `true`)
-  set to `false` restores the former refusal exactly (CRD ch.35 R35.2.5; listed in
-  `docs/GLEEC_COMPATIBILITY.md`).
-- **A shielded (ARRR) wallet that met a one-block reorg of its own tip no longer wedges forever.** 
-  A Light-mode wallet kept current by the 30-second sync scanned block H, then a reorg replaced H; 
-  from then on every pass refetched the compact-block cache and failed with `Compact block hash 
-  discontinuity at height H+1: prev_hash does not match the scan anchor`, and the wallet never 
-  rewound (539 and 213 consecutive failures on two installs on 2026-10-15). The anchor check 
-  returned early whenever the scan's own in-memory chain state was at the height being checked, 
-  so the chain was never asked and the divergence never detected; it now asks lightwalletd on 
-  every pass (CRD ch.39 R39.8.0al, R39.8.0n). The rewind that follows was sized at 100 blocks, 
-  which lands one block below the 100 commitment-tree checkpoints a wallet kept current retains, 
-  where the backend either refuses (recovery treated that as fatal and rebuilt) or falls back 
-  to the block before the wallet's earliest note, a rescan of its whole note history; it is now 
-  99 blocks, always inside the retained window, a refused rewind is redirected to the oldest retained 
-  checkpoint, and compact blocks cached above the rewound height are cleared so the orphaned block 
-  cannot be fed back. A divergence deeper than the wallet can rewind is rebuilt at the wallet's sync 
-  start (its account birthday) rather than at height 0, after the anchor's tree state has been fetched, 
-  with exactly one wallet-database backup per rebuild. A compact cache that fails validation is now 
-  deleted instead of renamed to `.invalid-chain.<ms>.bak`, the source of the multi-gigabyte backup 
-  flood seen after an ARRR reorg on 2026-09-29. No RPC or wire change. Code: `mm2src/coins/z_coin/z_coin_wallet_db.rs`.
+- **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
+  header list) whose length fields asked for gigabytes of memory could abort the process or kill the
+  sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
+  branches now have length limits, and an over-long one is rejected as a malformed header like any
+  other. Detail: PR #52; CRD ch.37 R37.5.6a.
+- **A maker that goes offline now drops out of the orderbook on schedule, whatever its clock says.**
+  The keep-alive expiry used the timestamp the maker put in its own message, so a maker with a fast
+  clock stayed listed for that skew plus 90 s after it died, and one that wrote a far-future
+  timestamp stayed listed indefinitely. The expiry now runs from when this node received the
+  keep-alive (CRD ch.32 R-P3); the wire format is unchanged. Keep-alives also no longer advertise
+  empty trie roots. Detail: PR #52.
+- **A ZCash-family (ARRR) light-server endpoint whose block cache is stale is no longer used.**
+  An endpoint can report the current chain height and the right branch while its cache of blocks
+  stopped much earlier, so it cannot serve anything newer; it is now excluded at admission, as is
+  one whose cache answers with an error or whose height is more than 40 blocks behind the others.
+  A failed admission now lists every excluded endpoint and why, and its message no longer claims
+  that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
+- **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
+  because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
+  (the client still broadcasts), but when the client submits the transaction through
+  `send_raw_transaction` the notes it spends are now reserved until it is mined and scanned, or
+  expires. A withdrawal that is built and never submitted reserves nothing. `withdraw` with `max`
+  now reports an insufficient balance instead of an internal error when the spendable balance does
+  not cover the fee. Two daemons on one seed with separate wallet databases are not protected.
+  Detail: PR #49; CRD ch.39 D39.8.0e.
+- **`enable_erc20` now works on an HD wallet.** The one-shot call refused every HD-derived EVM
+  platform with `UnexpectedDerivationMethod`, so a client that knows only this call could not add an
+  EVM token after startup in HD mode. It now activates the token on the platform's enabled address
+  and returns one `balances` entry per known address — the same response shape as before, and
+  byte-identical on a single-address platform. A `path_to_address` selecting another address is
+  still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
+  The MM2.json boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
+  refusal. Detail: PR #28; CRD ch.35 R35.2.5.
+- **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
+  sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
+  now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree
+  checkpoints the wallet retains, clears compact blocks cached above the rewound height, and, for a
+  divergence deeper than it can rewind, rebuilds at the wallet's sync start rather than at height 0.
+  A compact cache that fails validation is deleted instead of renamed to `.invalid-chain.<ms>.bak`,
+  which also ends the multi-gigabyte backup flood. No RPC or wire change. Detail: PR #31; CRD ch.39
+  R39.8.0al and R39.8.0n.
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and
-  `get_swap_gas_fee_policy` echoed it, but nothing read it: every swap transaction was priced from
-  one gas price and signed in the legacy form, so `High` behaved exactly like `Legacy`. The EVM
-  swap signing path now follows the policy. `Legacy` (the default) is unchanged: an untyped
-  EIP-155 transaction priced by the existing gas-price resolution. `Low`, `Medium` and `High`
-  emit an EIP-1559 (type 2) transaction whose `max_fee_per_gas` / `max_priority_fee_per_gas` are
-  the matching tier of the same fee estimate the fee-estimation RPC and stream report (the
-  configured gas API when present, otherwise the internal fee-history estimator). If the estimate
-  cannot be obtained the send fails rather than silently falling back to the legacy form.
-  `Legacy` is the built-in default, and it exists for peers on a reference build at or before
-  `v2.0.0-beta`, which cannot read a typed transaction. It is not what most EVM swaps use: the
-  initial policy of a platform coin activated through `enable_eth_with_tokens` (or its task form)
-  is the `swap_gas_fee_policy` activation parameter, else the `swap_gas_fee_policy` key of the
-  coin's entry in the coins file, else `Legacy`, and the coins file ships `"Medium"` for ETH
-  (chain 1), MATIC (137), AVAX (43114), ETH-ARB20 (42161), ETH-BASE (8453) and MOVR (1285). Swaps
-  of those coins and of their tokens therefore emit type 2 unless the operator overrides the
-  policy at activation or with `set_swap_gas_fee_policy`; BNB Chain, for instance, has no such
-  key and stays untyped. The legacy `enable` and `electrum` routes resolve the initial policy the
-  same way (see below).
-  Activation now logs the effective policy and which route set it at INFO, for example
-  `MATIC: swap gas-fee policy Medium (source: coin config)`. Not yet verified against a live
-  network send.
-- **A counterparty's EIP-1559 (type 2) and EIP-2930 (type 1) transaction can now be read.**
-  Swap transactions (such as the taker's dex-fee payment) were decoded only as legacy
-  9-field EIP-155 transactions, so a typed transaction failed with `unexpected string` and
-  the swap with it (issue #14); most Polygon traffic is type 2. A typed transaction is now
-  decoded through the EIP-2718 envelope: its id is the keccak-256 of the whole envelope, the
-  sender is recovered from the signature over the typed signing hash using the y-parity (not an
-  EIP-155 `v`), and re-encoding yields the original envelope bytes. A typed transaction taken
-  from a node's RPC (transaction history, spend search) goes through the same path, where it
-  previously recovered a wrong sender and reported a zero gas price. EIP-1559 has no single
-  gas price, so a decoded EIP-1559 transaction exposes none (`gas_price()` is `None`) rather
-  than its fee cap; transaction history now reports the fee actually paid from the receipt
-  for it. EIP-4844 and EIP-7702 are rejected deliberately with an error naming the type.
-  Legacy decoding, encoding and ids are unchanged. Verified against real Polygon and Ethereum
-  mainnet transactions (legacy, type 1 with an access list, type 2 with and without one).
-- **An undecodable EVM transaction now says what it is.** A transaction of an unsupported
-  type fails with an error naming the type byte and the supported types, and a payload that
-  is not a transaction at all reports its length and a short prefix, instead of the opaque
-  `unexpected string`.
+  `get_swap_gas_fee_policy` echoed it, but nothing read it, so every swap transaction was signed in
+  the legacy form and `High` behaved exactly like `Legacy`. `Low`, `Medium` and `High` now emit an
+  EIP-1559 (type 2) transaction priced from the matching tier of the same fee estimate the
+  fee-estimation RPC reports, and the send fails rather than falling back to the legacy form if no
+  estimate can be obtained. `Legacy` stays the built-in default, for peers on a reference build at
+  or before `v2.0.0-beta` that cannot read a typed transaction — but the shipped coins file puts
+  ETH, MATIC, AVAX, ETH-ARB20, ETH-BASE and MOVR on `"Medium"`, so swaps of those coins and of
+  their tokens now emit type 2 unless the policy is overridden at activation or with
+  `set_swap_gas_fee_policy`. Not yet verified against a live network send. Detail: PR #25.
+- **A counterparty's EIP-1559 (type 2) and EIP-2930 (type 1) transaction can now be read.** Typed
+  transactions — most Polygon traffic — failed to decode with `unexpected string` and took the swap
+  with them (issue #14). They are now decoded through the EIP-2718 envelope, in swaps and in the
+  node-RPC paths (transaction history, spend search), where the sender was previously recovered
+  wrongly and the gas price reported as zero. A decoded EIP-1559 transaction exposes no single gas
+  price (`gas_price()` is `None`) and transaction history reports the fee actually paid from the
+  receipt instead; EIP-4844 and EIP-7702 are rejected with an error naming the type. Legacy
+  decoding, encoding and ids are unchanged. Detail: PR #24.
+- **An undecodable EVM transaction now says what it is.** The error names the unsupported type byte
+  and the supported types, or, for a payload that is not a transaction at all, its length and a
+  short prefix — instead of the opaque `unexpected string`. Detail: PR #24.
+- **EIP-1559 swap transactions are no longer priced from a stale base fee.** The fee estimate took
+  the base fee of the oldest block in the fee-history window instead of the newest, so under a
+  rising base fee `max_fee_per_gas` could land below the actual block base fee and the send was
+  rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
+  price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
+  conforming client may do, could also panic inside a swap send path and no longer can. Detail: PR #48.
+
+### Plans touched
+
+Plans this cycle moved, in any sense; each plan file carries the detail.
+
+- [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — the
+  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50).
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — the reorg-wedge fix
+  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42).
+- [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — the rustls, webpki, ring
+  and tungstenite rows cleared, and the advisory ledger is green (PRs #37–#40, #42, #44).
+- [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — superseded: the fork
+  bump it proposed gave way to a `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 (PR #40).
+- [`secp256k1-migration`](docs/plans/secp256k1-migration.md) — its last follow-up closed: the real
+  WASM link step is back in CI and no longer `continue-on-error` (PRs #26, #27).
+- [`clippy-ci-gate`](docs/plans/clippy-ci-gate.md) — the gate shipped; the vendor-filter follow-up
+  stays open (PR #27).
+- [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
+  EVM tests ported to a scripted local node (PR #30).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

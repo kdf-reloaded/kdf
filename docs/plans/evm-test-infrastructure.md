@@ -1,9 +1,10 @@
 # EVM test infrastructure: a real local chain as the default
 
-**Status: planning only.** This document records what already exists, what has been
-decided, and what has been excluded. It deliberately contains **no architecture** —
-designing the next generation is the first task of a dedicated session, and this is
-that session's input.
+**Status:** planning (design pass not started; two tests ported 2026-10-16/17; `geth --dev` tests and the scripted-node ports wired into CI 2026-10-24) — **Last reviewed:** 2026-10-24
+
+> **Context:** this document records what already exists, what has been decided, and what
+> has been excluded. It deliberately contains **no architecture** — designing the next
+> generation is the first task of a dedicated session, and this is that session's input.
 
 ## Why this exists
 
@@ -50,23 +51,19 @@ tears it down on drop. It carries:
 payment→refund flows and asserts the on-chain state transition. One test in
 `mm2_main/src/mm2_tests.rs` uses it too.
 
-**The gap is two-part: `geth` is installed in no workflow, and three of the four tests are
-not selected by any CI cell either.** No workflow installs or mentions `geth`. And every
-`cargo test -p coins` invocation in `test.yml` is filtered — the named
-`eth_tests::test_*` items, `rpc_response_tests`, `z_coin::`, the Trezor-emulator feature
-run and `polygon_check_if_my_payment_sent` — and none of those filters matches
-`eth_swap_dev_tests`. So `send_and_refund_eth_payment`, `send_and_refund_erc20_payment`
-and `withdraw_eth_and_erc20` are never reached in CI at all. The fourth,
-`test_withdraw_and_send` (`mm2_main/src/mm2_tests.rs`), is `#[ignore]`d and *is* executed,
-in `external-network-tests` via `--include-ignored --exact`, where it takes the
-geth-missing branch and returns early — in a job that is `continue-on-error`, so it could
-not block a merge in any case. The module doc comment says "a CI job with geth installed
-runs them". No such job exists.
-
-The consequence is that EVM HTLC coverage against a real chain is **nil in CI**. But the
-remedy is two-part, not one: a selector that reaches `eth_swap_dev_tests` has to be added
-*and* `geth` installed. Installing the binary alone would change nothing for three of the
-four.
+**CI status (updated 2026-10-24).** Until this date `geth` was installed in no workflow and
+no CI filter reached `eth_swap_dev_tests`, so EVM HTLC coverage on a real chain was nil.
+Now the `evm-geth-tests` job in `test.yml` installs a pinned, checksum-verified `geth`
+(1.17.2) and runs `cargo test -p coins --lib eth::eth_swap_dev_tests::`, and it is in
+`tests-passed`'s `needs:`. Because `GethDev::start()` returns `None` when geth is missing
+and the tests then *pass*, the job sets `KDF_REQUIRE_GETH=1`, which makes the harness panic
+instead (see `geth_dev::REQUIRE_GETH_ENV`), and it asserts that exactly three tests ran.
+Any job copied from it must keep that variable. The fourth user,
+`test_withdraw_and_send` (`mm2_main/src/mm2_tests.rs`), is deliberately not in that job: it
+is `#[ignore]`d because its DOC/MARTY half needs live cipig electrums, so it stays in
+`external-network-tests` (`continue-on-error`), where `KDF_REQUIRE_GETH` is not set and it
+still skips when geth is absent. `scripted_node_ports` needs no binary and now runs as the
+`eth-scripted-node` leg of the `unit-tests` matrix.
 
 ### 2. The env-gated live-RPC pattern, with the free-tier problem already solved
 
@@ -167,10 +164,10 @@ gated — the same decay that killed the Ropsten tests, on a slower clock.
 1. Does the next generation standardise on `geth --dev`, on `anvil`, or on both
    behind one trait? What decides it — startup cost, EIP-1559 fidelity, fork-mode
    support, or something else?
-2. How does CI get a node, and how do the tests get selected? Installing `geth` in the
-   existing `docker-tests` job, a service container, or a new job? Three of the four
-   `geth --dev` tests match no CI filter today, so a selector is needed regardless of
-   how the binary arrives. Which of them becomes merge-gating once it can actually run?
+2. ~~How does CI get a node, and how do the tests get selected?~~ Answered 2026-10-24: a new
+   job, `evm-geth-tests`, with a pinned and checksummed release tarball and an explicit
+   test filter; the three `eth_swap_dev_tests` are merge-gating via `tests-passed`.
+   Still open: whether a later generation moves to a service container or `anvil`.
 3. Fork mode is the interesting question for the ported tests: a local node forked
    from a public archive endpoint at a fixed height would give a *real* node serving
    *real* historical state deterministically — which is what both ported tests
@@ -189,10 +186,13 @@ gated — the same decay that killed the Ropsten tests, on a slower clock.
 
 - ~~Port the three dex-fee/nonce tests and remove the four inline Infura URLs~~ -- done on
   `chore/evm-test-port` (also ported the two ETH dex-fee siblings and `test_nonce_several_urls`).
-  Remaining: add a CI selector for `eth::eth_tests::scripted_node_ports`.
-- Install `geth` in CI **and** add a test selector that reaches `eth_swap_dev_tests`.
-  Three of its tests match no current CI filter, so installing the binary alone would
-  leave them unrun. Until both land, EVM HTLC coverage on a real chain is nil.
+  The CI selector for `eth::eth_tests::scripted_node_ports` is done (`eth-scripted-node`
+  matrix leg).
+- ~~Install `geth` in CI **and** add a test selector that reaches `eth_swap_dev_tests`~~ --
+  done (`evm-geth-tests` job, 2026-10-24). Open: no live send/refund test yet exercises the
+  typed-transaction and base-fee changes beyond what those three tests cover; a
+  `test_withdraw_and_send` ETH/JST half that does not need the DOC/MARTY electrums would let
+  it join the gating job.
 - `cargo check --target wasm32-unknown-unknown -p coins --tests` fails with 17
   pre-existing errors (missing `sql_tx_history_storage`, `native_client_for_test`, no
   `tokio` in scope). CI does not build test targets for wasm32, so it is not a gate —

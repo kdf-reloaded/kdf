@@ -40,7 +40,7 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   backend of a Light-mode shielded coin, with Electrum support for ZHTLC removed.
   **Implemented (ARRR Ironwood plan Step C, the wallet half):** the function table
   (R39.11.1--R39.11.4g) except the swap-path consumers named below, the activation
-  requirements (R39.11.5--R39.11.7a), the single height authority
+  requirements (R39.11.5--R39.11.7a, (j) staleness included), the single height authority
   (R39.11.8--R39.11.12), and the tests T39.11.a--T39.11.d and T39.11.f,
   T39.11.h--T39.11.j (T39.11.a--T39.11.d in part; each test's note says what it
   does not cover). **Implemented (plan Step D):** the swap-path parser routing
@@ -1745,9 +1745,11 @@ insufficient-balance error rather than consuming the wait budget.
 > ends in a typed failure. A shortfall that no in-flight spend could cover fails
 > immediately rather than consuming that budget.
 >
-> One path remains uncovered and is tracked as D39.8.0e: a withdrawal is built
-> but not broadcast by this daemon, so nothing on the send path observes its
-> broadcast and no in-flight record is written for it.
+> A withdrawal is built and returned by this daemon but broadcast by its caller
+> through `send_raw_transaction`. That second call is handled by this daemon, so the
+> broadcast is observable after all: the coin's raw-transaction submission records
+> the accepted transaction exactly as the send path does (D39.8.0e, resolved
+> 2026-10-19). A withdrawal that is built and never submitted records nothing.
 
 #### Tests
 
@@ -1778,6 +1780,17 @@ broadcast for reusing a nullifier.
 > needs a harness able to drive a shielded wallet database through
 > broadcast/scan/expiry transitions, which this tree does not yet have. Tracked
 > as D39.8.0f.
+>
+> **Update (2026-10-19).** Three withdrawal-side cases are now covered by deterministic
+> tests against a real shielded wallet database (a scanned note, a real spend proof, a
+> transaction submitted as raw bytes): once a withdrawal's bytes have been accepted, a
+> second build before any scan is not handed its note and is told it is short; a
+> withdrawal that is built and never submitted strands nothing, and the next build
+> reuses its note; and a submitted withdrawal's note is held while its expiry height
+> can still be mined in and is free once the chain passes it. The tests need the
+> Sapling parameter files and say so and return where they are absent. The
+> broadcast-rejection, restart, mined-and-scanned and two-concurrent-send cases remain
+> unwritten.
 
 #### Deferred Work
 
@@ -1787,16 +1800,41 @@ section that covers construction, broadcast and recording, and keeps both the
 sapling-state gate and the wait for an in-flight spend outside it, so the scanner
 can still advance while a send waits and each attempt re-selects.
 
-D39.8.0e The exclusion does not yet cover a withdrawal broadcast outside this
-daemon. A withdrawal is built and returned as a signed transaction for the caller
-to submit, so the send path never observes its broadcast and writes no in-flight
-record for it; a shielded send issued between that external submission and the
-scan of the containing block can therefore still select the withdrawal's inputs
-and be rejected as a duplicate nullifier. Closing this requires the coin to
-observe the broadcast of a transaction it did not send itself, which the generic
-raw-transaction submission path does not currently expose to the shielded layer.
-Swap payments and DEX fees are unaffected: those are broadcast by the send path
-and are recorded (R39.8.0ap).
+D39.8.0e The exclusion did not cover a withdrawal, which is built and returned as a
+signed transaction for the caller to submit. **Resolved 2026-10-19.** The caller's
+submission is a `send_raw_transaction` request that this daemon handles and
+forwards itself, so the shielded coin observes the broadcast: after the backend
+accepts the bytes, the transaction is read back from them (its Sapling spends carry
+the nullifiers; its fee is the value leaving the Sapling pool less the transparent
+outputs it pays) and recorded under R39.8.0ap, with the same release (R39.8.0aq,
+R39.8.0ar). Nothing is recorded at build time, so a withdrawal the user cancels
+strands no notes, and a second build made before any broadcast may reuse the first
+build's notes -- if both are then submitted, the network rejects the second as a
+duplicate nullifier, which is the same outcome as any two conflicting spends and not
+a defect of this daemon. Not covered: two daemons running on one seed with separate
+wallet databases, which cannot see each other's records, and a transaction whose fee
+cannot be derived from its bytes (it has transparent inputs or a non-Sapling shielded
+bundle -- none this daemon builds), which is logged and not recorded.
+
+*Naming the cause (2026-10-21).* A withdrawal that is short only because its notes are
+committed to such a recorded, unconfirmed transaction is refused with a dedicated
+`BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the coin, the available
+amount, the required amount and the amount committed, rather than a bare
+`NotSufficientBalance` that contradicts the balance on display. The name is applied only
+when the committed amount would have covered the request, so a real lack of funds still
+reports as one. The committed amount is read from this process's in-memory record of
+in-flight spends, not from the wallet database; after a restart that record is empty and
+the same shortfall reports as the bare `NotSufficientBalance`. This is a limit of the
+explanation only -- the exclusion itself is durable (R39.8.0as). The swap send path is
+unaffected: it waits out such a shortfall (R39.8.0at) and never surfaces this error.
+
+D39.8.0g A built but unsubmitted withdrawal is invisible to the user. The history
+(`z_coin_tx_history`) is derived from the scanned chain (R39.8.0q, §39.8.0.6), so a
+transaction that has been built and not broadcast appears nowhere, and one that was
+broadcast appears only as a pending receipt of change. Showing built-but-unsent
+transactions is a user-experience gap, deliberately out of scope here: it would need
+a record of unbroadcast builds, which is exactly the state R39.8.0ap declines to
+create.
 
 D39.8.0f T39.8.0h is only partially covered; see the coverage status under that
 rule for what exists and what does not. The missing cases share one prerequisite:
@@ -3251,7 +3289,41 @@ precise opposite of the intent. The rule shall therefore be:
 - (i) **Admission shall be logged.** Every evaluation shall log, at a level a
   deployment captures by default, each endpoint probed with the chain, branch
   identifier and height it reported or the reason it was unreachable, each exclusion
-  with its reason, and the admitted set; a failed evaluation shall log its error.
+  with its reason, and the admitted set; a failed evaluation shall log its error,
+  and that error shall itself name every endpoint that was excluded or unreachable
+  and why -- including the failure that reports observed identifiers (R39.11.7a(e)),
+  so that "one endpoint reports branch X" is never the only thing a reader learns.
+- (j) **A stale endpoint shall be excluded.** *(New requirement; original to this
+  design.)* `GetLightdInfo` reports the height of the endpoint's *node*; the
+  compact-block cache that actually serves blocks is reported by a different method
+  (`GetLatestBlock`), and the two can disagree arbitrarily -- on 2026-10-23 an ARRR
+  endpoint reported the consensus tip and the right branch while its cache stood at
+  height 840,761, so it could serve nothing above it. Admission shall therefore also
+  read the tip method of each endpoint that answered the server-information read, and
+  exclude it, with a distinct reason, when:
+  - (j1) the tip method fails or the cache is empty while the server-information read
+    succeeded (the cache is "not yet ready");
+  - (j2) the cache height trails the endpoint's own reported node height by **more
+    than** the tolerance; or
+  - (j3) the lower of the two (what the endpoint can actually serve) trails the
+    *consensus height* by more than the tolerance. The consensus height is the lower
+    median of the node heights reported by the endpoints on this coin's network
+    (matching network name and Sapling activation height), so a minority -- up to
+    just under half of them -- cannot move it, and with two endpoints it is the lower
+    one, so a single stale endpoint is never the reference that condemns a healthy
+    one. An endpoint ahead of the consensus height is never excluded by this rule.
+
+  **The tolerance** is a named constant equal to the transaction-builder's expiry
+  delta (R39.11.8(e), 40 blocks): the monotonic-tip rule (R39.11.11) already refuses a
+  tip more than that far behind a height the activation has observed, so a tighter
+  bound would exclude endpoints the wallet can use, and a looser one would admit
+  endpoints the wallet would then refuse. An endpoint trailing by exactly the
+  tolerance is admitted. An endpoint a few blocks behind -- a cache that is
+  ingesting the block just found, a node one block behind its peers -- is healthy
+  and shall be admitted. The rule is applied after (h) and before (d) and (e),
+  so a stale endpoint neither counts in a majority nor hides how few current
+  endpoints remain. The reasons are reported through the same channels as the
+  others ((f), (i)).
 
 > **Status update (reloaded, Step C).** Implemented in `decide_admission` and tested
 > (T39.11.f). (a), (b), (d) and (e) are as written. The configuration determines the
@@ -3276,6 +3348,19 @@ precise opposite of the intent. The rule shall therefore be:
 > the exclusions are logged, listed in the message of an admission failure and
 > available from `ZCoin::excluded_lightwalletd_endpoints`, but a successful
 > admission does not write them into the sync-state channel.
+>
+> **Status update (reloaded, staleness, (j)).** Implemented in `decide_admission_at` and
+> tested (T39.11.k). Admission now reads the cache height through a separate transport
+> method (`cache_height`) so a fixture can make it disagree with the server-information
+> read. Three exclusion reasons: cache unavailable (j1), cache behind its own node (j2),
+> behind the consensus height (j3); `STALENESS_TOLERANCE_BLOCKS` is `BUILDER_EXPIRY_DELTA`.
+> The probe log line now shows the cache height. The failure with observed identifiers
+> (`NoBranchMajority`) carries the excluded and unreachable endpoints, and the activation
+> error for an all-excluded or no-majority admission no longer says that "no endpoint is on
+> this coin's chain" -- it was wrong for a lone endpoint on the right branch and for stale
+> ones. Not covered: the tolerance is not configurable; a live run of the Rust transport
+> against a stale-cache endpoint has not been done (the criterion was evaluated against the
+> real endpoint set with the monitor script's readings, not with the daemon).
 
 ### 39.11.3 Chain-height authority
 
@@ -3885,6 +3970,14 @@ requirement exists for -- that a configuration which does *not* declare the
 chain's newest upgrade height does **not** exclude the endpoints on the chain's
 current branch in favour of the pre-upgrade ones.
 
+T39.11.k A staleness test shall prove (R39.11.7a(j)), against fixtures in which the
+node height and the cache height are separate inputs: that an endpoint reporting the
+current node height with a cache far behind it is excluded and never asked for
+anything; that an empty or failing cache read is excluded; that an endpoint behind the
+consensus height of the others is excluded; that lags of a few blocks are admitted and
+the tolerance is exact on both sides; that a stale endpoint does not vote; and that a
+failure to establish a majority names the excluded and the unreachable endpoints.
+
 T39.11.g A P2SH-coverage test shall prove (R39.11.4d): that both address
 encodings of the same redeem-script hash are queried, with neither hard-coded;
 that a fixture answering only under the pubkey-hash re-encoding is handled, and
@@ -4172,4 +4265,8 @@ different cause. At least one live endpoint was observed in this state on
   consulted subsection is subject to KDF Dirty Gate clearance, as its
   derivation record states; §39.10 and §39.11 have passed it. Every other
   section of this chapter rests on the permitted inputs listed above with no
-  corpus read.
+  corpus read. R39.11.7a(j) and T39.11.k, and the logging sentence added to
+  R39.11.7a(i), are original to this design (like R39.11.7a(h)'s branch admission
+  they have no counterpart in the reference): they derive from no forbidden-class
+  input, only from the lightwalletd gRPC contract, public-network observation of
+  the endpoints (2026-10-23) and this repository's code.

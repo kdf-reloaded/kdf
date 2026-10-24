@@ -7,9 +7,10 @@
 pub const SSE_ENDPOINT: &str = "/event-stream";
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Response<hyper::Body> {
+pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Response<super::RpcBody> {
     use futures::stream::unfold;
-    use hyper::Body;
+    use http_body_util::{BodyExt, StreamBody};
+    use hyper::body::Frame;
     use mm2_core::mm_ctx::MmArc;
     use serde_json::json;
 
@@ -18,7 +19,7 @@ pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Respons
         Err(e) => {
             return hyper::Response::builder()
                 .status(500)
-                .body(Body::from(format!("No context: {}", e)))
+                .body(super::full_body(format!("No context: {}", e)))
                 .unwrap();
         },
     };
@@ -38,7 +39,9 @@ pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Respons
     let manager = ctx.event_stream_manager.clone();
     let handle = manager.new_client(client_id);
 
-    // Build a streaming body: unfold yields SSE-formatted chunks from the event rx.
+    // Build a streaming body: unfold yields SSE-formatted chunks from the event rx. hyper 1 has no
+    // `Body::wrap_stream`; a `StreamBody` of `Frame`s is the equivalent and is polled lazily by the
+    // connection task, so a slow client applies backpressure to the stream exactly as before.
     let stream = unfold(handle.rx, |mut rx| async move {
         let event = rx.recv().await?;
         let (origin, payload) = event.get();
@@ -49,10 +52,10 @@ pub async fn handle_sse(req: http::request::Parts, ctx_h: u32) -> hyper::Respons
         });
         let formatted = format!("data: {}\n\n", msg);
         let bytes = hyper::body::Bytes::from(formatted);
-        Some((Ok::<_, std::convert::Infallible>(bytes), rx))
+        Some((Ok::<_, std::convert::Infallible>(Frame::data(bytes)), rx))
     });
 
-    let body = Body::wrap_stream(stream);
+    let body = StreamBody::new(stream).boxed_unsync();
 
     hyper::Response::builder()
         .status(200)

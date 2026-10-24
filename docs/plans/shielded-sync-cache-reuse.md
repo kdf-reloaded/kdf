@@ -1,6 +1,8 @@
 # Plan: shielded (ZHTLC) sync — reuse the compact-block cache on a start change
 
-> **Status:** deferred / not started. This is an optional performance
+**Status:** parked (not started; `reset_wallet_scan_state` still recreates both stores) — **Last reviewed:** 2026-10-18
+
+> **Context:** this is an optional performance
 > optimization, not a correctness fix. The current behavior is correct and
 > secure; this plan only removes avoidable re-downloading.
 

@@ -1,6 +1,8 @@
 # Plan: rust-lightning (LDK) uplift
 
-> **Status:** not started — scoping only, 2026-08-06. This is the largest and
+**Status:** parked (scoping only since 2026-08-06; sequence it last) — **Last reviewed:** 2026-10-18
+
+> **Context:** scoping only, 2026-08-06. This is the largest and
 > highest-risk item in the current dependency-hygiene family. It touches
 > funds-custody code (channel state, HTLCs, on-chain claims) directly, unlike
 > every other item tracked in `v0.2.0-dependency-hygiene.md`. Do not start

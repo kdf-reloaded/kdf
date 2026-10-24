@@ -5727,6 +5727,351 @@ mod tests {
             "an output belonging to another wallet must not decrypt"
         );
     }
+    // -----------------------------------------------------------------------------------------
+    // A withdrawal is built here and broadcast by the caller (CRD ch.39 R39.8.0ap, D39.8.0e / T39.8.0h)
+    // -----------------------------------------------------------------------------------------
+
+    /// One scanned 1.25 ARRR note, one spending key, and the pieces `build_from_wallet_db` needs.
+    /// `None` when the Sapling parameter files are absent: a spend proof cannot be made without them
+    /// (the same arrangement as the version-6 construction tests).
+    struct WithdrawFixture {
+        history: ZCoinShieldedHistory,
+        params: ZcoinConsensusParams,
+        extsk: ExtendedSpendingKey,
+        prover: zcash_proofs::prover::LocalTxProver,
+        my_addr: sapling::PaymentAddress,
+        to_addr: sapling::PaymentAddress,
+    }
+
+    impl WithdrawFixture {
+        const NOTE_VALUE: u64 = 125_000_000;
+        const FEE_SAT: u64 = 10_000;
+        const SEND_SAT: u64 = 1_000_000;
+
+        fn new() -> Option<WithdrawFixture> {
+            let dir = std::env::var_os("ARRR_SAPLING_PARAMS")
+                .map(PathBuf::from)
+                .unwrap_or_else(crate::utxo::zcash_params_path);
+            let (spend, output) = (
+                dir.join(crate::z_coin::SAPLING_SPEND_NAME),
+                dir.join(crate::z_coin::SAPLING_OUTPUT_NAME),
+            );
+            if !spend.exists() || !output.exists() {
+                eprintln!(
+                    "SKIPPED: Sapling parameters not found in {} (set ARRR_SAPLING_PARAMS); a spend proof can be \
+                     neither made nor checked without them",
+                    dir.display()
+                );
+                return None;
+            }
+            let prover = zcash_proofs::prover::LocalTxProver::new(&spend, &output);
+
+            let params = test_params_with_zip212();
+            let extsk = ExtendedSpendingKey::master(&[15; 32]);
+            #[allow(deprecated)]
+            let extfvk = extsk.to_extended_full_viewing_key();
+            let checkpoint = CheckPointBlockInfo {
+                height: 10,
+                hash: rpc::v1::types::H256([9u8; 32]),
+                time: 10,
+                sapling_tree: empty_sapling_tree_bytes().into(),
+            };
+            let history = ZCoinShieldedHistory::open_or_create(
+                "ARRR",
+                test_db_dir("withdraw-lock"),
+                params.clone(),
+                &extfvk,
+                Some(&checkpoint),
+            )
+            .unwrap();
+            history
+                .insert_compact_block(compact_block_with_received_note(11, 11, 9, &extfvk, Self::NOTE_VALUE))
+                .unwrap();
+            assert_eq!(
+                history
+                    .scan_cached_blocks_to_height(params.clone(), 11, 1_000, 0, |_, _| {})
+                    .unwrap(),
+                11
+            );
+            assert_eq!(history.balance(params.clone()).unwrap(), Self::NOTE_VALUE);
+
+            let to_addr = ExtendedSpendingKey::master(&[99; 32]).default_address().1;
+            let my_addr = extsk.default_address().1;
+            Some(WithdrawFixture {
+                history,
+                params,
+                extsk,
+                prover,
+                my_addr,
+                to_addr,
+            })
+        }
+
+        fn inputs(&self) -> crate::z_coin::z_coin_ops::WalletDbBuild<'_> {
+            crate::z_coin::z_coin_ops::WalletDbBuild {
+                ticker: "ARRR",
+                decimals: 8,
+                wallet_db_path: self.history.wallet_db_path(),
+                params: &self.params,
+                spending_key: &self.extsk,
+                my_addr: &self.my_addr,
+                prover: &self.prover,
+            }
+        }
+
+        fn output(&self) -> crate::z_coin::ZOutput {
+            crate::z_coin::ZOutput {
+                to_addr: self.to_addr.clone(),
+                amount: zcash_protocol::value::Zatoshis::const_from_u64(Self::SEND_SAT),
+                viewing_key: None,
+                memo: None,
+            }
+        }
+
+        fn fee(&self) -> BigDecimal { big_decimal_from_sat_unsigned(Self::FEE_SAT, 8) }
+
+        /// A withdrawal as `withdraw` builds it: selected from the wallet database, signed, returned.
+        /// Nothing is recorded.
+        fn build(
+            &self,
+        ) -> Result<zcash_primitives::transaction::Transaction, crate::z_coin::z_coin_errors::GenTxError> {
+            crate::z_coin::z_coin_ops::build_from_wallet_db(&self.inputs(), vec![], vec![self.output()], self.fee(), 12)
+                .map(|(tx, _)| tx)
+                .map_err(|e| e.into_inner())
+        }
+
+        /// The second step of the withdraw contract: the caller submits the serialized transaction
+        /// and the backend accepts it. Returns what was recorded.
+        fn broadcast(
+            &self,
+            tx: &zcash_primitives::transaction::Transaction,
+        ) -> Option<zcash_primitives::transaction::Transaction> {
+            let mut bytes = Vec::new();
+            tx.write(&mut bytes).unwrap();
+            crate::z_coin::z_coin_ops::record_broadcast_in_wallet_db(
+                self.history.wallet_db_path(),
+                &self.params,
+                &bytes,
+            )
+            .unwrap()
+        }
+
+        /// The fee column the wallet database holds for `tx`.
+        fn recorded_fee(&self, tx: &zcash_primitives::transaction::Transaction) -> Option<u64> {
+            let conn = Connection::open(self.history.wallet_db_path()).unwrap();
+            conn.query_row(
+                "SELECT fee FROM transactions WHERE txid = ?1",
+                params![&tx.txid().as_ref()[..]],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap()
+            .map(|fee| fee as u64)
+        }
+    }
+
+    fn sapling_nullifiers(tx: &zcash_primitives::transaction::Transaction) -> Vec<[u8; 32]> {
+        tx.sapling_bundle()
+            .map(|bundle| {
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|spend| spend.nullifier().0)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The defect, as it reaches the wallet database: two withdrawals built one after the other,
+    /// with nothing broadcast and no scan between them, are handed the same note. This is the
+    /// intended behaviour when the first is abandoned (see below), and the failure when it is not.
+    #[test]
+    fn unrecorded_withdraw_builds_select_the_same_note() {
+        let Some(fixture) = WithdrawFixture::new() else { return };
+        let (first, second) = (fixture.build().unwrap(), fixture.build().unwrap());
+        assert_eq!(sapling_nullifiers(&first).len(), 1);
+        assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&second));
+    }
+
+    /// T39.8.0h, withdrawal side (R39.8.0ap, D39.8.0e): withdraw builds and returns, and the caller
+    /// submits through `send_raw_transaction`. Once the backend has accepted those bytes, a second
+    /// build before any scan is not handed the same note and is told it is short.
+    #[test]
+    fn a_broadcast_withdrawal_holds_its_note_against_the_next_build() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let first = fixture.build().unwrap();
+        let recorded = fixture.broadcast(&first);
+        assert_eq!(recorded.as_ref().map(|tx| tx.txid()), Some(first.txid()));
+        assert_eq!(
+            fixture
+                .history
+                .spent_value_of_transaction(first.txid().as_ref())
+                .unwrap(),
+            WithdrawFixture::NOTE_VALUE
+        );
+        assert_eq!(
+            fixture.recorded_fee(&first),
+            Some(WithdrawFixture::FEE_SAT),
+            "the fee recorded from the raw bytes is the fee the build paid"
+        );
+
+        match fixture.build() {
+            Err(GenTxError::InsufficientBalance { available, .. }) => assert_eq!(available, BigDecimal::from(0)),
+            Err(other) => panic!("expected an insufficient-balance failure, got {other}"),
+            Ok(_) => panic!("a second build after the first was broadcast must not reuse its note"),
+        }
+    }
+
+    /// The user-visible half of the same scenario: the second withdrawal is short only because the
+    /// first one's note is committed, and the refusal must say so instead of reporting an empty
+    /// balance (D39.8.0e). Driven through the wallet database exactly as `ZCoin::gen_tx` sees it:
+    /// the shortfall from the build, and the value the recorded transaction committed.
+    #[test]
+    fn a_shortfall_caused_by_an_unconfirmed_broadcast_names_it() {
+        use crate::lp_coins_errors::WithdrawError;
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::explain_shortfall;
+        use common::HttpStatusCode;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let first = fixture.build().unwrap();
+        fixture.broadcast(&first);
+        let committed = fixture
+            .history
+            .spent_value_of_transaction(first.txid().as_ref())
+            .unwrap();
+
+        let shortfall = fixture.build().err().expect("the committed note must not be offered");
+        let named = explain_shortfall(shortfall, committed, 8);
+        let withdraw: WithdrawError = match named {
+            GenTxError::BalanceLockedByUnconfirmedTransaction {
+                ref available,
+                ref locked,
+                ..
+            } => {
+                assert_eq!(*available, BigDecimal::from(0));
+                assert_eq!(*locked, big_decimal_from_sat_unsigned(WithdrawFixture::NOTE_VALUE, 8));
+                named.into()
+            },
+            other => panic!("expected the named shortfall, got {other}"),
+        };
+        assert!(
+            matches!(withdraw, WithdrawError::BalanceLockedByUnconfirmedTransaction { .. }),
+            "{withdraw:?}"
+        );
+        assert_eq!(withdraw.status_code(), common::StatusCode::BAD_REQUEST);
+        let reported = withdraw.to_string();
+        assert!(reported.contains("not confirmed yet"), "{reported}");
+        assert!(reported.contains("1.25"), "{reported}");
+    }
+
+    /// The explanation is a claim about cause, so it is made only when the in-flight value would
+    /// have covered the request. After a restart nothing is known and the bare error stands.
+    #[test]
+    fn a_shortfall_is_named_only_when_an_unconfirmed_spend_explains_it() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        use crate::z_coin::z_coin_ops::explain_shortfall;
+        let short = || GenTxError::InsufficientBalance {
+            coin: "ARRR".to_owned(),
+            available: BigDecimal::from(0),
+            required: "1.0101".parse().unwrap(),
+        };
+        // Nothing in flight (e.g. after a restart): unchanged.
+        assert!(matches!(
+            explain_shortfall(short(), 0, 8),
+            GenTxError::InsufficientBalance { .. }
+        ));
+        // In flight, but not enough to have funded the request: a real lack of funds.
+        assert!(matches!(
+            explain_shortfall(short(), 50_000_000, 8),
+            GenTxError::InsufficientBalance { .. }
+        ));
+        // In flight and enough: named.
+        assert!(matches!(
+            explain_shortfall(short(), 125_000_000, 8),
+            GenTxError::BalanceLockedByUnconfirmedTransaction { .. }
+        ));
+        // Other errors pass through.
+        assert!(matches!(
+            explain_shortfall(GenTxError::PrevTxNotConfirmed, 125_000_000, 8),
+            GenTxError::PrevTxNotConfirmed
+        ));
+    }
+
+    /// What the redesign buys, and the most likely thing to regress: a build the caller never
+    /// submits (the user cancelled the confirmation) records nothing, so the next build reuses the
+    /// note freely and nothing is stranded until expiry.
+    #[test]
+    fn an_abandoned_withdrawal_strands_no_notes() {
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let abandoned = fixture.build().unwrap();
+        assert_eq!(
+            fixture
+                .history
+                .spent_value_of_transaction(abandoned.txid().as_ref())
+                .unwrap(),
+            0,
+            "building alone records nothing"
+        );
+        let retry = fixture
+            .build()
+            .expect("the note is free: the first build was never broadcast");
+        assert_eq!(sapling_nullifiers(&abandoned), sapling_nullifiers(&retry));
+    }
+
+    /// The release the record depends on when a broadcast transaction is never mined: it stops
+    /// holding its notes once the chain passes its expiry height, and not a block earlier. The
+    /// wallet database counts the transaction as unexpired while `expiry_height >= target`,
+    /// where target is the chain tip plus one.
+    #[test]
+    fn a_broadcast_withdrawal_releases_its_note_once_the_expiry_height_passes() {
+        use crate::z_coin::z_coin_errors::GenTxError;
+        let Some(fixture) = WithdrawFixture::new() else { return };
+
+        let first = fixture.build().unwrap();
+        fixture.broadcast(&first);
+        let expiry: u32 = first.expiry_height().into();
+        assert_eq!(
+            expiry,
+            12 + 40,
+            "the builder's default expiry delta is what bounds the hold"
+        );
+
+        // Advance the wallet's scanned tip block by block, as the sync loop does; a bare
+        // `update_chain_tip` would leave unscanned ranges that make every note unspendable.
+        let advance_to = |tip: u32| {
+            let from = fixture.history.scanned_height().unwrap().unwrap();
+            let blocks = (from + 1..=u64::from(tip))
+                .map(|h| {
+                    let mut block = empty_compact_block(h, h as u8, (h - 1) as u8);
+                    // The tree size is derived while scanning; the fixture's zero would contradict the note.
+                    block.chain_metadata = None;
+                    block
+                })
+                .collect::<Vec<_>>();
+            fixture.history.insert_compact_blocks(&blocks).unwrap();
+            fixture
+                .history
+                .scan_cached_blocks_to_height(fixture.params.clone(), u64::from(tip), 1_000, 0, |_, _| {})
+                .unwrap();
+        };
+
+        // Tip = expiry - 1, so target = expiry: the transaction can still be mined in that block.
+        advance_to(expiry - 1);
+        assert!(
+            matches!(fixture.build(), Err(GenTxError::InsufficientBalance { available, .. }) if available == BigDecimal::from(0)),
+            "still held while the transaction can yet be mined"
+        );
+        // Tip = expiry, so target = expiry + 1: it can no longer be mined.
+        advance_to(expiry);
+        let retry = fixture
+            .build()
+            .map_err(|e| e.to_string())
+            .expect("the note is free once the transaction has expired");
+        assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
+    }
 }
 
 /// A wallet-owned Sapling output observed in a mempool transaction that the
@@ -5859,6 +6204,25 @@ impl ZCoinShieldedHistory {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// Total value of the wallet's notes that the transaction `txid` spends, as recorded in
+    /// the wallet database. Zero when the transaction is unknown or spends none of them.
+    pub(crate) fn spent_value_of_transaction(&self, txid: &[u8; 32]) -> Result<u64, String> {
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(rn.value), 0)
+                 FROM sapling_received_note_spends s
+                 JOIN sapling_received_notes rn ON rn.id = s.sapling_received_note_id
+                 JOIN transactions t ON t.id_tx = s.transaction_id
+                 WHERE t.txid = ?1;",
+                params![&txid[..]],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        u64::try_from(total).map_err(|e| e.to_string())
     }
 }
 

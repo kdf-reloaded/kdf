@@ -28,7 +28,9 @@ env-gated tests:
   `geth --dev` chain with a clean-room `EtomicSwap` HTLC + ERC20 deployed
   locally (see `for_tests/*.sol`). They exercise the real payment -> refund
   flow and assert the on-chain state transition. They skip themselves when the
-  `geth` binary is not on `PATH`, so the default offline suite stays green.
+  `geth` binary is not on `PATH`, so the default offline suite stays green; the
+  `evm-geth-tests` CI job installs a pinned `geth` and sets `KDF_REQUIRE_GETH=1`,
+  which turns that skip into a failure.
 - `validate_dex_fee_invalid_sender_eth`, `validate_dex_fee_invalid_sender_erc`,
   `validate_dex_fee_eth_confirmed_before_min_block`,
   `validate_dex_fee_erc_confirmed_before_min_block`, `test_nonce_lock`,

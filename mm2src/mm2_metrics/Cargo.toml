@@ -15,5 +15,7 @@ base64 = "0.10.0"
 futures.workspace = true
 hdrhistogram = { version = "7.0", default-features = false, features = ["sync"] }
 http.workspace = true
-hyper = { version = "0.14.11", features = ["server", "http1", "tcp"] }
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["server-graceful", "tokio", "http1"] }
 itertools.workspace = true

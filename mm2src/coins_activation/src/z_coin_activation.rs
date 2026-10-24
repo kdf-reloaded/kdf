@@ -417,7 +417,11 @@ pub enum ZcoinInitError {
     },
     /// Endpoints answered, and admission excluded every one of them as serving another chain or
     /// branch (R39.11.6, R39.11.7a). Distinct from [`ZcoinInitError::LightwalletdUnreachable`].
-    #[display(fmt = "No lightwalletd endpoint of {} is on this coin's chain: {}", ticker, error)]
+    #[display(
+        fmt = "No lightwalletd endpoint of {} passed admission (wrong chain or branch, or stale): {}",
+        ticker,
+        error
+    )]
     LightwalletdExcluded {
         ticker: String,
         error: String,
@@ -431,8 +435,12 @@ impl ZcoinInitError {
         let ticker = ticker.to_owned();
         match error {
             LightwalletdError::AllUnreachable(error) => ZcoinInitError::LightwalletdUnreachable { ticker, error },
-            LightwalletdError::AllExcluded(error) | LightwalletdError::NoBranchMajority(error) => {
-                ZcoinInitError::LightwalletdExcluded { ticker, error }
+            LightwalletdError::AllExcluded(error) => ZcoinInitError::LightwalletdExcluded { ticker, error },
+            // The whole message: the bare payload (`37a5165b x1`) reads as a chain verdict, not as
+            // "this branch is reported by one endpoint only".
+            no_majority @ LightwalletdError::NoBranchMajority(_) => ZcoinInitError::LightwalletdExcluded {
+                ticker,
+                error: no_majority.to_string(),
             },
             LightwalletdError::NoEndpoints => ZcoinInitError::CoinCreationError {
                 ticker,
@@ -513,7 +521,10 @@ impl From<ZcoinInitError> for InitStandaloneCoinError {
             ZcoinInitError::LightwalletdUnreachable { .. } => InitStandaloneCoinError::Transport(err.to_string()),
             ZcoinInitError::LightwalletdExcluded { ticker, error } => InitStandaloneCoinError::CoinCreationError {
                 ticker,
-                error: format!("No lightwalletd endpoint is on this coin's chain: {}", error),
+                error: format!(
+                    "No lightwalletd endpoint passed admission (wrong chain or branch, or stale): {}",
+                    error
+                ),
             },
             // The coin was built and the shielded sync finished, but the transparent backend could not
             // deliver the height or the balance (CRD ch.39 R39.10.11).
@@ -1166,7 +1177,18 @@ mod tests {
             ZcoinInitError::from_lightwalletd("ARRR", LightwalletdError::NoBranchMajority("37a5165b x1".to_owned()));
         assert!(matches!(unreachable, ZcoinInitError::LightwalletdUnreachable { .. }));
         assert!(matches!(excluded, ZcoinInitError::LightwalletdExcluded { .. }));
-        assert!(matches!(no_majority, ZcoinInitError::LightwalletdExcluded { .. }));
+        match &no_majority {
+            ZcoinInitError::LightwalletdExcluded { error, .. } => {
+                // The branch is the healthy one; the endpoint is merely alone, and the message must
+                // not say it is off the coin's chain.
+                assert!(
+                    error.contains("37a5165b x1") && error.contains("fewer than two"),
+                    "{error}"
+                );
+            },
+            _ => panic!("expected LightwalletdExcluded"),
+        }
+        assert!(!no_majority.to_string().contains("on this coin's chain"));
         // Neither carries a tip.
         assert!(matches!(
             InitStandaloneCoinError::from(unreachable),

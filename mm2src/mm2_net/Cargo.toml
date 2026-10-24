@@ -16,7 +16,7 @@ common = { path = "../common" }
 mm2_err_handle = { path = "../mm2_err_handle" }
 mm2_core = { path = "../mm2_core" }
 derive_more = "0.99"
-http = "0.2"
+http = "1"
 rand = { version = "0.8", features = ["std", "small_rng"] }
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await", "thread-pool"] }
 lazy_static = "1.4"
@@ -32,5 +32,7 @@ web-sys = { version = "0.3.55", features = ["console", "CloseEvent", "DomExcepti
 js-sys = "0.3.27"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-hyper = { version = "0.14.11", features = ["client", "http2", "server", "tcp"] }
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
 gstuff = { version = "0.7", features = ["crossterm"] }

@@ -1,6 +1,8 @@
 # Plan: Clippy CI gate and vendored-tree follow-up
 
-> **Status:** shipped 2026-10-14. The `clippy` job in `.github/workflows/test.yml`
+**Status:** parked (the gate shipped 2026-10-14; the vendor-filter follow-up in §3 is open) — **Last reviewed:** 2026-10-18
+
+> **Context:** shipped 2026-10-14 (PR #27). The `clippy` job in `.github/workflows/test.yml`
 > enforces clippy on all first-party crates, and `docs/CODING_STANDARDS.md`'s
 > hard rule was reconciled to the invocation CI actually runs. One structural
 > follow-up remains open (§3); it is intentionally out of scope for the gate's

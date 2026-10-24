@@ -81,6 +81,8 @@ pub enum P2PInitError {
     InvalidRelayAddress(RelayAddressError),
     #[display(fmt = "Error listening on P2P address '{}': {}", address, error)]
     ErrorListeningOnAddress { address: String, error: String },
+    #[display(fmt = "Invalid WSS key/cert configuration: {}", _0)]
+    InvalidWssConfig(String),
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     #[display(fmt = "WASM node can be a seed if only 'p2p_in_memory' is true")]
     WasmNodeCannotBeSeed,
@@ -97,6 +99,7 @@ impl From<AdexBehaviourError> for P2PInitError {
         match e {
             AdexBehaviourError::ParsingRelayAddress(e) => P2PInitError::InvalidRelayAddress(e),
             AdexBehaviourError::ListenOn { address, error } => P2PInitError::ErrorListeningOnAddress { address, error },
+            AdexBehaviourError::WssConfig(error) => P2PInitError::InvalidWssConfig(error),
         }
     }
 }

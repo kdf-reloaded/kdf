@@ -36,7 +36,23 @@ The same chapter pattern can be reused for other significant forks or versions i
 
 ## Defaults
 
-Each divergent change picks its own default. The default does **not** have to be the GLEEC-compatible value; pick whichever value the majority of new operators are expected to want. The documentation in both locations above must make the GLEEC-compatible value unambiguous regardless of which side of the divergence is the default.
+Each divergent change has its own default, and that default does **not** have to be the GLEEC-compatible value. Which side it takes is not a free choice and not the implementer's preference: it follows the default-side rule below. Whichever side wins, the documentation in both locations above must make the GLEEC-compatible value unambiguous.
+
+### The default-side rule
+
+This is the project's standing policy on which side of a compatibility divergence the default falls. Cite it as *`docs/COMPAT_SWITCHES.md`, "The default-side rule"* (anchor `#the-default-side-rule`).
+
+> 1. **Parity by default wherever the change can reach anyone else.** Where a deferral or divergence touches wire compatibility, or would clearly break things for users or nodes other than our own, parity with GLEEC KDF is the default.
+> 2. **Reloaded by default where it cannot.** Where the divergence does **not** touch wire compatibility, does **not** affect other users or nodes, and only improves user experience or security, the KDF Reloaded variant is the default.
+> 3. **Anything in between is a project-team decision.** A change that is not clearly one of the two cases above must be weighed and decided by the project team. It is explicitly **not** a decision for whoever happens to be implementing it.
+
+Arm 3 is the operative one in practice: an implementer who cannot place a change squarely in arm 1 or arm 2 stops and asks, rather than picking a default and documenting it afterwards. A deferral counts the same as a divergence here -- choosing not to implement the GLEEC behaviour yet is itself a choice of default.
+
+The two subsections below are standing project-team decisions for their own classes of divergence. A change that falls into one of them follows that subsection directly and is not re-weighed under arm 3.
+
+The rule has governed the project's divergence decisions since before it was written down, and CRD chapter material already appeals to it as the project's standing rule -- but it existed only as a shared understanding, so a reader had no way to verify it. An audit flagged exactly that gap; this section closes it. The rule itself is unchanged by being recorded.
+
+The rule is about **compatibility-divergence defaults**. It is not a rule about operator-facing security controls; see [What this convention is not](#what-this-convention-is-not).
 
 ### Departures from GPLv2-or-fair-trading principles
 
@@ -65,6 +81,7 @@ The reduced-security cost must be stated in the per-setting documentation and in
 - **Not** a code interface. There is no `CompatMode` enum, no `compat_value_for(...)` helper, no `MmCtx::compat_*` field common to all switches.
 - **Not** a single global mode. An operator who wants GLEEC behaviour in one area and KDF Reloaded behaviour in another sets exactly the values they want and leaves the rest alone.
 - **Not** a versioned bundle. There is no "GLEEC-classic profile". The central chapter lists settings; the operator picks the ones they need.
+- **Not** a rule about operator-facing security controls. The two are different mechanisms with different purposes and must not be conflated: a compatibility switch exists to let an operator recover GLEEC-compatible behaviour from a deliberate divergence, whereas a security control exists to let an operator reduce attack surface on their own node. A security control's default is a security decision for the feature that owns it, not a parity question, and [the default-side rule](#the-default-side-rule) does not reach it. Such a control enters this convention only if enabling or disabling it also diverges from GLEEC KDF behaviour in the way [the rule](#the-rule) describes -- in which case it needs the usual opt-back mechanism and both documentation entries for *that* divergence, and the default-side rule applies to that divergence alone.
 
 ## Removing a divergence
 

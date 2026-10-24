@@ -329,6 +329,22 @@ impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     }
 }
 
+/// Selects the trie roots worth advertising in a keep-alive: zero and empty-trie roots are skipped.
+pub(crate) fn keep_alive_roots_and_topics(
+    all_roots: &HashMap<AlbOrderedOrderbookPair, H64>,
+) -> (HashMap<AlbOrderedOrderbookPair, H64>, HashSet<String>) {
+    let mut trie_roots = HashMap::new();
+    let mut topics = HashSet::new();
+    for (alb_pair, root) in all_roots.iter() {
+        if *root == H64::default() || *root == hashed_null_node::<Layout>() {
+            continue;
+        }
+        topics.insert(orderbook_topic_from_ordered_pair(alb_pair));
+        trie_roots.insert(alb_pair.clone(), *root);
+    }
+    (trie_roots, topics)
+}
+
 pub(crate) fn broadcast_keep_alive_for_pub(
     ctx: &MmArc,
     pubkey: &str,
@@ -340,15 +356,7 @@ pub(crate) fn broadcast_keep_alive_for_pub(
         None => return,
     };
 
-    let mut trie_roots = HashMap::new();
-    let mut topics = HashSet::new();
-    for (alb_pair, root) in state.trie_roots.iter() {
-        if *root == H64::default() && *root == hashed_null_node::<Layout>() {
-            continue;
-        }
-        topics.insert(orderbook_topic_from_ordered_pair(alb_pair));
-        trie_roots.insert(alb_pair.clone(), *root);
-    }
+    let (trie_roots, topics) = keep_alive_roots_and_topics(&state.trie_roots);
 
     let message = new_protocol::PubkeyKeepAlive {
         trie_roots,

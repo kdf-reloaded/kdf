@@ -1,6 +1,8 @@
 # Plan: Solana SDK ed25519-dalek 1.x → 2.x
 
-> **Status: scoped, deferred by choice — 2026-08-06.** Checked reloaded's
+**Status:** parked (deferred by choice 2026-08-06; upstream-pinned, would need a fork) — **Last reviewed:** 2026-10-18
+
+> **Context: scoped, deferred by choice — 2026-08-06.** Checked reloaded's
 > actual Solana signing code (see "Confirmed root cause" below): the
 > vulnerable-pattern precondition for RUSTSEC-2022-0093 doesn't appear to be
 > met, and both advisories are DoS/side-channel-class rather than directly

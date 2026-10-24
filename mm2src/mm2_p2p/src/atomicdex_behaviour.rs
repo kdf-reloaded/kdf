@@ -753,6 +753,8 @@ pub enum AdexBehaviourError {
     ParsingRelayAddress(RelayAddressError),
     #[display(fmt = "Error listening on '{}': {}", address, error)]
     ListenOn { address: String, error: String },
+    #[display(fmt = "Invalid WSS key or certificate configuration: {}", _0)]
+    WssConfig(String),
 }
 
 impl From<RelayAddressError> for AdexBehaviourError {
@@ -974,7 +976,7 @@ fn start_gossipsub(
     let network_info = node_type.to_network_info();
     let transport = match network_info {
         NetworkInfo::InMemory => build_memory_transport(&local_key),
-        NetworkInfo::Distributed { .. } => build_dns_ws_transport(&local_key, node_type.wss_certs()),
+        NetworkInfo::Distributed { .. } => build_dns_ws_transport(&local_key, node_type.wss_certs())?,
     };
 
     let (cmd_tx, mut cmd_rx) = channel(CHANNEL_BUF_SIZE);
@@ -1147,17 +1149,17 @@ fn start_gossipsub(
 fn build_dns_ws_transport(
     keypair: &identity::Keypair,
     _wss_certs: Option<&WssCerts>,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     let websocket = libp2p::wasm_ext::ffi::websocket_transport();
     let transport = libp2p::wasm_ext::ExtTransport::new(websocket);
-    upgrade_transport(transport, keypair)
+    Ok(upgrade_transport(transport, keypair))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_dns_ws_transport(
     keypair: &identity::Keypair,
     wss_certs: Option<&WssCerts>,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     use libp2p::websocket::tls as libp2p_tls;
 
     // The DNS-over-TCP transport is not `Clone` in the 0.52 API, so a fresh instance is built for
@@ -1172,17 +1174,19 @@ fn build_dns_ws_transport(
     let mut ws_dns_tcp = libp2p::websocket::WsConfig::new(new_dns_tcp());
 
     if let Some(certs) = wss_certs {
-        let server_priv_key = libp2p_tls::PrivateKey::new(certs.server_priv_key.clone());
+        let server_priv_key = libp2p_tls::PrivateKey::new(certs.server_priv_key.clone())
+            .map_err(|e| AdexBehaviourError::WssConfig(e.to_string()))?;
         let certs = certs
             .certs
             .iter()
             .map(|cert| libp2p_tls::Certificate::new(cert.clone()));
-        let wss_config = libp2p_tls::Config::new(server_priv_key, certs).unwrap();
+        let wss_config = libp2p_tls::Config::new(server_priv_key, certs)
+            .map_err(|e| AdexBehaviourError::WssConfig(e.to_string()))?;
         ws_dns_tcp.set_tls_config(wss_config);
     }
 
     let transport = dns_tcp.or_transport(ws_dns_tcp);
-    upgrade_transport(transport, keypair)
+    Ok(upgrade_transport(transport, keypair))
 }
 
 fn build_memory_transport(

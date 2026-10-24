@@ -11,6 +11,13 @@
 //! can skip the test and keep the default offline suite green; a CI job with
 //! geth installed runs them.
 //!
+//! That skip is a hazard in a job whose purpose is to run these tests: a missing or
+//! broken geth would make every one of them pass vacuously. Setting
+//! [`REQUIRE_GETH_ENV`] (`KDF_REQUIRE_GETH=1`) turns every `None` into a panic with the
+//! reason, so such a job fails instead of skipping. The `evm-geth-tests` job in
+//! `.github/workflows/test.yml` sets it; any job copied from that one inherits the
+//! guarantee only if it keeps the variable.
+//!
 //! Deployable bytecode for a clean-room `EtomicSwap` HTLC contract and a minimal
 //! ERC20 is embedded here (compiled with solc 0.8.26; sources in
 //! `for_tests/*.sol`). Addresses are passed around as `0x`-prefixed hex strings
@@ -28,6 +35,21 @@ pub const ETOMIC_SWAP_BYTECODE: &str = include_str!("../for_tests/EtomicSwap_sol
 /// Deployable bytecode of a minimal ERC20 that mints its supply to the deployer. No `0x` prefix.
 pub const TEST_ERC20_BYTECODE: &str = include_str!("../for_tests/TestErc20_sol_TestErc20.bin");
 
+/// When this environment variable is set to a non-empty value, [`GethDev::start`] panics
+/// instead of returning `None`, so a missing or broken geth fails the test rather than
+/// skipping it.
+pub const REQUIRE_GETH_ENV: &str = "KDF_REQUIRE_GETH";
+
+fn geth_required() -> bool { std::env::var(REQUIRE_GETH_ENV).is_ok_and(|v| !v.is_empty()) }
+
+/// The `None` path of [`GethDev::start`]: panics when geth is required, otherwise skips.
+fn unavailable(reason: &str) -> Option<GethDev> {
+    if geth_required() {
+        panic!("{REQUIRE_GETH_ENV} is set but a geth --dev node is unavailable: {reason}");
+    }
+    None
+}
+
 /// A running `geth --dev` node. Killed and its datadir removed on drop.
 pub struct GethDev {
     child: Child,
@@ -42,22 +64,31 @@ pub struct GethDev {
 
 impl GethDev {
     /// Starts a `geth --dev` node, or returns `None` if the `geth` binary is not
-    /// on `PATH` (so callers can skip the test) or it fails to come up.
+    /// on `PATH` (so callers can skip the test) or it fails to come up. With
+    /// [`REQUIRE_GETH_ENV`] set, those cases panic instead.
     pub fn start() -> Option<GethDev> {
-        if Command::new("geth").arg("version").output().is_err() {
-            return None;
+        match Command::new("geth").arg("version").output() {
+            Ok(out) if out.status.success() => {},
+            Ok(out) => return unavailable(&format!("`geth version` exited with {}", out.status)),
+            Err(e) => return unavailable(&format!("cannot run `geth version`: {e}")),
         }
 
         // Grab a free TCP port for the HTTP-RPC endpoint.
         let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
-            listener.local_addr().ok()?.port()
+            let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+                Ok(l) => l,
+                Err(e) => return unavailable(&format!("cannot bind a free port: {e}")),
+            };
+            match listener.local_addr() {
+                Ok(a) => a.port(),
+                Err(e) => return unavailable(&format!("cannot read the bound port: {e}")),
+            }
         };
         let rpc_url = format!("http://127.0.0.1:{}", port);
         let datadir = std::env::temp_dir().join(format!("kdf-geth-dev-{}-{}", std::process::id(), port));
         let _ = std::fs::create_dir_all(&datadir);
 
-        let child = Command::new("geth")
+        let spawned = Command::new("geth")
             .args([
                 "--dev",
                 "--http",
@@ -79,8 +110,11 @@ impl GethDev {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+            .spawn();
+        let child = match spawned {
+            Ok(child) => child,
+            Err(e) => return unavailable(&format!("cannot spawn geth --dev: {e}")),
+        };
 
         let mut node = GethDev {
             child,
@@ -100,7 +134,7 @@ impl GethDev {
             std::thread::sleep(Duration::from_millis(250));
         }
         if !ready {
-            return None;
+            return unavailable("geth --dev did not answer eth_blockNumber within 30 s");
         }
 
         let accounts = node.rpc("eth_accounts", json!([]));

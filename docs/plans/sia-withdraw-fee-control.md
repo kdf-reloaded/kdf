@@ -1,6 +1,8 @@
 # Plan: operator-selectable Siacoin withdraw fee
 
-> **Status:** deferred, not started. Parked deliberately on 2026-09-20 during the
+**Status:** parked (no Sia variant in `WithdrawFee` as of 2026-10-18) — **Last reviewed:** 2026-10-18
+
+> **Context:** parked deliberately on 2026-09-20 during the
 > beta triage of the Siacoin work. Nothing here is a defect fix: the gap is a
 > missing feature that the wallet's UI currently implies exists, and the
 > behaviour is at parity with the deployed interoperability reference, so it

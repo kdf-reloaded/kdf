@@ -16,7 +16,7 @@ serde = "1"
 ser_error = { path = "../derives/ser_error" }
 ser_error_derive = { path = "../derives/ser_error_derive" }
 common = { path = "../common" }
-http = "0.2"
+http = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gstuff = { version = "0.7" }

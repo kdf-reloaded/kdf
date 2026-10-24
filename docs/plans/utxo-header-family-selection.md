@@ -1,8 +1,8 @@
 # Plan: configuration-selected UTXO header families
 
-> **Status:** proposed 2026-09-23. Nothing below is implemented yet.
->
-> This plan closes the open work left by the fix for standard headers whose
+**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, four open decisions) — **Last reviewed:** 2026-10-18
+
+> **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
 > §37.5.8). That fix made header reads consume the served bytes exactly and fall
 > back to the standard 80-byte layout, which removed the observed failure. It

@@ -21,6 +21,10 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
+# Least privilege for every job; dependabot-alerts re-declares it explicitly.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -49,6 +53,22 @@ jobs:
           tool: cargo-deny@0.19.9
       - name: cargo-deny (advisories)
         run: cargo deny check advisories
+
+  bans:
+    # Targeted bans only (deny.toml [bans].deny): a second rustls CryptoProvider
+    # (aws-lc-rs / aws-lc-sys) panics at runtime on first connect, and rustls
+    # below 0.23.46 is under the RUSTSEC-2026-0349 floor. `multiple-versions` is
+    # deliberately "allow" -- this is not a duplicate-version gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - name: cargo-deny (bans)
+        run: cargo deny check bans
 
   licenses:
     # Fails when a dependency's license is neither in deny.toml's `allow` list

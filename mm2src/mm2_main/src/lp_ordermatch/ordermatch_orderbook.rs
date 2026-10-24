@@ -1217,7 +1217,9 @@ impl TrieStore {
         is_subscribed: impl Fn(&str) -> bool,
     ) -> Option<OrdermatchRequest> {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, from_pubkey);
-        pubkey_state.last_keep_alive = message.timestamp;
+        // CRD ch.32 R-P3: expiry is judged on the receiver's own clock; the sender-supplied
+        // `message.timestamp` is never stored.
+        pubkey_state.last_keep_alive = now_ms() / 1000;
 
         let mut trie_roots_to_request = HashMap::new();
         for (alb_pair, trie_root) in message.trie_roots {

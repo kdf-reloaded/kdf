@@ -316,7 +316,7 @@ impl From<HttpClientUrl> for Url {
     fn from(url: HttpClientUrl) -> Self { url.0 }
 }
 
-impl TryFrom<HttpClientUrl> for hyper::Uri {
+impl TryFrom<HttpClientUrl> for http::Uri {
     type Error = Error;
 
     fn try_from(value: HttpClientUrl) -> Result<Self, Error> {
@@ -330,33 +330,34 @@ impl TryFrom<HttpClientUrl> for hyper::Uri {
 
 mod sealed {
     use common::log::debug;
-    use http::HeaderValue;
-    use hyper::body::Buf;
-    use hyper::client::connect::Connect;
-    use hyper::client::HttpConnector;
-    use hyper::{header, Uri};
-    use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
-    use std::io::Read;
+    use common::wio::https_connector;
+    use http::{header, HeaderValue, Uri};
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_rustls::HttpsConnector;
+    use hyper_util::client::legacy::connect::{Connect, HttpConnector};
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::{TokioExecutor, TokioTimer};
     use tendermint_rpc::{Error, Response, SimpleRequest};
 
-    fn https_connector() -> HttpsConnector<HttpConnector> {
-        HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .build()
+    type RequestBody = Full<Bytes>;
+
+    /// The pool timer is what makes idle connections expire (hyper 0.14 had it built in).
+    fn client_builder() -> hyper_util::client::legacy::Builder {
+        let mut builder = Client::builder(TokioExecutor::new());
+        builder.pool_timer(TokioTimer::new());
+        builder
     }
 
     /// A wrapper for a `hyper`-based client, generic over the connector type.
     #[derive(Debug, Clone)]
     pub struct HyperClient<C> {
         uri: Uri,
-        inner: hyper::Client<C>,
+        inner: Client<C, RequestBody>,
     }
 
     impl<C> HyperClient<C> {
-        pub fn new(uri: Uri, inner: hyper::Client<C>) -> Self { Self { uri, inner } }
+        pub fn new(uri: Uri, inner: Client<C, RequestBody>) -> Self { Self { uri, inner } }
     }
 
     impl<C> HyperClient<C>
@@ -381,13 +382,13 @@ mod sealed {
 
     impl<C> HyperClient<C> {
         /// Build a request using the given Tendermint RPC request.
-        pub fn build_request<R: SimpleRequest>(&self, request: R) -> Result<hyper::Request<hyper::Body>, Error> {
+        pub fn build_request<R: SimpleRequest>(&self, request: R) -> Result<hyper::Request<RequestBody>, Error> {
             let body_bytes = request.into_json().into_bytes();
 
             let mut request = hyper::Request::builder()
                 .method("POST")
                 .uri(&self.uri)
-                .body(hyper::Body::from(body_bytes))
+                .body(Full::new(Bytes::from(body_bytes)))
                 .map_err(|e| Error::client_internal(e.to_string()))?;
 
             {
@@ -411,10 +412,10 @@ mod sealed {
     }
 
     impl HttpClient {
-        pub fn new_http(uri: Uri) -> Self { Self::Http(HyperClient::new(uri, hyper::Client::new())) }
+        pub fn new_http(uri: Uri) -> Self { Self::Http(HyperClient::new(uri, client_builder().build_http())) }
 
         pub fn new_https(uri: Uri) -> Self {
-            Self::Https(HyperClient::new(uri, hyper::Client::builder().build(https_connector())))
+            Self::Https(HyperClient::new(uri, client_builder().build(https_connector())))
         }
 
         pub async fn perform<R>(&self, request: R) -> Result<R::Response, Error>
@@ -435,15 +436,91 @@ mod sealed {
         }
     }
 
-    async fn response_to_string(response: hyper::Response<hyper::Body>) -> Result<String, Error> {
-        let mut response_body = String::new();
-        hyper::body::aggregate(response.into_body())
+    async fn response_to_string(response: hyper::Response<hyper::body::Incoming>) -> Result<String, Error> {
+        let bytes = response
+            .into_body()
+            .collect()
             .await
             .map_err(|e| Error::client_internal(e.to_string()))?
-            .reader()
-            .read_to_string(&mut response_body)
-            .map_err(Error::io)?;
+            .to_bytes();
+        String::from_utf8(bytes.to_vec())
+            .map_err(|e| Error::io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+}
 
-        Ok(response_body)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// Serves one canned HTTP/1.1 response on a loopback port; returns the port and the received request.
+    fn serve_once(body: &'static str) -> (u16, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // The head and the body may arrive in separate segments: read up to the declared length.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                request.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                    if body.len() >= length {
+                        break;
+                    }
+                }
+            }
+            tx.send(String::from_utf8_lossy(&request).into_owned()).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        (port, rx)
+    }
+
+    #[test]
+    fn http_client_posts_json_rpc_and_parses_the_answer() {
+        let (port, request) = serve_once(r#"{"jsonrpc":"2.0","id":"probe","result":{}}"#);
+        let client = HttpClient::new(format!("http://127.0.0.1:{port}").as_str()).unwrap();
+        common::block_on(async {
+            client.health().await.unwrap();
+        });
+        let request = request.recv().unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("post / http/1.1"), "{request}");
+        assert!(request.contains("content-type: application/json"), "{request}");
+        assert!(
+            request
+                .split_whitespace()
+                .collect::<String>()
+                .contains("\"method\":\"health\""),
+            "{request}"
+        );
+    }
+
+    #[test]
+    fn http_client_reports_a_non_utf8_body_as_an_io_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 8192];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n\xff\xfe")
+                .unwrap();
+        });
+        let client = HttpClient::new(format!("http://127.0.0.1:{port}").as_str()).unwrap();
+        let err = common::block_on(async { client.health().await.unwrap_err() });
+        assert!(err.to_string().to_ascii_lowercase().contains("utf-8"), "{err}");
     }
 }

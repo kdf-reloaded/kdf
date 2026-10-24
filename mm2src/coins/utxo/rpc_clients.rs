@@ -51,16 +51,16 @@ cfg_native! {
     use futures::io::Error;
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
-    use rustls::client::ServerCertVerified;
-    use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::{ring as rustls_ring, verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+    use rustls::pki_types::{CertificateDer, DnsName, ServerName, UnixTime};
+    use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
     use std::convert::TryFrom;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use std::time::SystemTime;
     use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
     use tokio::net::TcpStream;
     use tokio_rustls::{client::TlsStream, TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
     use webpki_roots::TLS_SERVER_ROOTS;
 }
 
@@ -90,21 +90,55 @@ pub struct AddressPurpose {
     purpose: String,
 }
 
-/// Skips the server certificate verification on TLS connection
-pub struct NoCertificateVerification {}
+/// Skips the server certificate verification on TLS connection.
+///
+/// Only the certificate *chain and name* checks are skipped. The handshake signature is still
+/// verified against the public key of the presented certificate (as rustls 0.20 did by default),
+/// so the certificate must still parse and the peer must prove possession of its key.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct NoCertificateVerification {
+    provider: Arc<CryptoProvider>,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
-impl rustls::client::ServerCertVerifier for NoCertificateVerification {
+impl NoCertificateVerification {
+    pub fn new(provider: Arc<CryptoProvider>) -> Self { NoCertificateVerification { provider } }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
         &self,
-        _: &Certificate,
-        _: &[Certificate],
-        _: &ServerName,
-        _: &mut dyn Iterator<Item = &[u8]>,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
         _: &[u8],
-        _: SystemTime,
+        _: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 

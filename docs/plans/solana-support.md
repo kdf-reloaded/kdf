@@ -1,6 +1,8 @@
 # Plan: finish Solana support
 
-> **Status:** planned, not started. Created 2026-10-11 on
+**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-18
+
+> **Context:** created 2026-10-11 on
 > `fix/activation-api-parity` when the coin-activation wire-parity work found
 > that Reloaded's Solana activation differs from the reference implementation in
 > every wire aspect. To be executed in a dedicated session.

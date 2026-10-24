@@ -506,6 +506,25 @@ be stored, and it shall not be turned into a median from a truncated set.
 > (§37.5.8), which is what turns the silent-success case into a rejected
 > list.
 
+R37.5.6a Every length-prefixed list read from header bytes shall be bounded
+before anything is allocated for it, and a length above the bound shall be a
+parse error, never a panic or an allocation failure. The bounds are: the
+Equihash `solution`, 1 MiB; Qtum's `vch_block_sig_dlgt`, 4096 bytes; each
+AuxPoW merkle branch, 32 hashes (the width of its side mask). A bound is a
+sanity ceiling well above any real value, not a validity rule. A rejection
+under this rule takes the same path as any other parse failure, including the
+std-80 fallback of R37.5.6. Independently of those bounds, the shared list
+reader shall never trust a wire length for preallocation: it reserves at most
+4096 items up front and grows as items are actually decoded, so an unbounded
+list elsewhere (block transactions, for instance) costs at most the bytes
+really present and a hostile length ends at the first missing byte.
+
+> **Provenance (informative).** R37.5.6a is clean-room-original hardening
+> written without reference to the upstream implementation, in the manner of
+> §22.9C. It follows from the finding above: on a header list, a layout chosen
+> from the version can read past its own 80 bytes, so a length field may come
+> from bytes the server chose.
+
 ### 37.5.7 Identity hash and stored bytes
 
 > **Clearance (chapter 01 T1, R40).** The material the later

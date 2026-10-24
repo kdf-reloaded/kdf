@@ -1,6 +1,8 @@
 # Plan: Lightning activation features
 
-> **Status:** planned, not started. Created 2026-10-11 on
+**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-18
+
+> **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings the Lightning task activation
 > to wire parity: error names and `error_data` shapes, HTTP statuses, `init`
 > error precedence including the `avg_blocktime` check, status-level failure

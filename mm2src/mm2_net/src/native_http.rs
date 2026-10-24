@@ -2,16 +2,43 @@ use crate::transport::{SlurpError, SlurpResult};
 use common::wio::{drive03, HYPER};
 use futures::channel::oneshot::Canceled;
 use http::{header, HeaderValue, Request};
-use hyper::Body;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper_util::client::legacy::Error as ClientError;
 use mm2_err_handle::prelude::*;
+use std::error::Error as StdError;
 
 impl From<Canceled> for SlurpError {
     fn from(_: Canceled) -> Self { SlurpError::Internal("Spawned Slurp future has been canceled".to_owned()) }
 }
 
 impl SlurpError {
-    fn from_hyper_error(e: hyper::Error, uri: String) -> SlurpError {
-        let error = e.to_string();
+    /// Classifies a `hyper` error. `hyper-util`'s legacy client wraps the `hyper::Error` raised by the
+    /// connection in its own error type, so the source chain is searched for it.
+    fn from_error(e: &(dyn StdError + 'static), uri: String) -> SlurpError {
+        // `hyper-util`'s client error displays only its kind ("client error (Connect)"), the cause is in the
+        // source chain, so the whole chain goes into the message.
+        let mut error = e.to_string();
+        let mut hyper_err = None;
+        let mut source = e.source();
+        if let Some(err) = e.downcast_ref::<hyper::Error>() {
+            hyper_err = Some(err);
+        }
+        while let Some(err) = source {
+            error.push_str(": ");
+            error.push_str(&err.to_string());
+            if hyper_err.is_none() {
+                hyper_err = err.downcast_ref::<hyper::Error>();
+            }
+            source = err.source();
+        }
+        match hyper_err {
+            Some(hyper_err) => Self::from_hyper_error(hyper_err, uri, error),
+            None => SlurpError::Transport { uri, error },
+        }
+    }
+
+    fn from_hyper_error(e: &hyper::Error, uri: String, error: String) -> SlurpError {
         if e.is_parse() || e.is_parse_status() || e.is_parse_too_large() {
             SlurpError::ErrorDeserializing { uri, error }
         } else if e.is_user() {
@@ -33,18 +60,20 @@ impl From<http::Error> for SlurpError {
 pub async fn slurp_req(request: Request<Vec<u8>>) -> SlurpResult {
     let uri = request.uri().to_string();
     let (head, body) = request.into_parts();
-    let request = Request::from_parts(head, Body::from(body));
+    let request = Request::from_parts(head, Full::new(Bytes::from(body)));
 
     let request_f = HYPER.request(request);
     let response = drive03(request_f)
         .await?
-        .map_to_mm(|e| SlurpError::from_hyper_error(e, uri.clone()))?;
+        .map_to_mm(|e: ClientError| SlurpError::from_error(&e, uri.clone()))?;
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.into_body();
-    let output = hyper::body::to_bytes(body)
+    let output = body
+        .collect()
         .await
-        .map_to_mm(|e| SlurpError::from_hyper_error(e, uri.clone()))?;
+        .map_to_mm(|e: hyper::Error| SlurpError::from_error(&e, uri.clone()))?
+        .to_bytes();
     Ok((status, headers, output.to_vec()))
 }
 
@@ -76,12 +105,55 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::native_http::slurp_url;
+    use crate::native_http::{slurp_post_json, slurp_url};
+    use crate::transport::SlurpError;
     use common::block_on;
 
     #[test]
     fn test_slurp_req() {
         let (status, headers, body) = block_on(slurp_url("https://httpbin.org/get")).unwrap();
         assert!(status.is_success(), "{:?} {:?} {:?}", status, headers, body);
+    }
+
+    /// Serves one canned HTTP/1.1 response on a loopback port and returns the port.
+    fn serve_once(response: &'static [u8]) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            stream.write_all(response).unwrap();
+        });
+        port
+    }
+
+    #[test]
+    fn test_slurp_post_json_over_loopback() {
+        let port =
+            serve_once(b"HTTP/1.1 201 Created\r\nX-Probe: yes\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+        let (status, headers, body) =
+            block_on(slurp_post_json(&format!("http://127.0.0.1:{port}/x"), "{}".to_owned())).unwrap();
+        assert_eq!(status.as_u16(), 201);
+        assert_eq!(headers.get("x-probe").unwrap(), "yes");
+        assert_eq!(body, b"hello");
+    }
+
+    #[test]
+    fn test_slurp_reports_the_cause_of_a_connect_failure() {
+        // Reserve a port and close it again, so that nothing listens there.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = block_on(slurp_url(&format!("http://127.0.0.1:{port}/"))).unwrap_err();
+        match err.into_inner() {
+            SlurpError::Transport { error, .. } => {
+                assert!(error.contains("Connect") && error.contains(": "), "{error}")
+            },
+            other => panic!("unexpected error {other:?}"),
+        }
     }
 }

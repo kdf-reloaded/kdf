@@ -5,11 +5,14 @@ use futures::executor::ThreadPool;
 use futures01::sync::oneshot::{self, Receiver};
 use futures01::{Async, Future, Poll};
 use gstuff::{duration_to_float, now_float};
-use hyper::client::HttpConnector;
-use hyper::Client;
+use http_body_util::Full;
+use hyper::body::Bytes;
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioTimer;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -160,13 +163,60 @@ pub fn init() {
     super::black_box(&*super::trace_name_buf());
 }
 
+/// Pending-connection queue length of the server listeners.
+///
+/// `std::net::TcpListener::bind` uses 128; the `hyper` 0.14 servers bound through tokio, which uses 1024.
+pub const LISTEN_BACKLOG: u32 = 1024;
+
+/// Binds a listening socket for the HTTP servers, synchronously, so a bind failure reaches the caller.
+///
+/// Built with `TcpSocket` to get a backlog of [`LISTEN_BACKLOG`]. `TcpSocket` does not do what
+/// `std::net::TcpListener::bind` does on Unix, which is to set `SO_REUSEADDR`; without it a restart
+/// can fail with "address already in use" while the old socket sits in `TIME_WAIT`, so it is set
+/// explicitly (and, like `std`, not at all on Windows, where it would allow port hijacking).
+/// `IPV6_V6ONLY` is left at the system default, as `std` leaves it.
+///
+/// The socket is registered with the shared reactor, so this enters the `CORE` runtime itself.
+pub fn bind_listener(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let _guard = CORE.0.enter();
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    #[cfg(unix)]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
+/// Builds the HTTPS connector shared by the native HTTP clients (`HYPER` and the Tendermint RPC client).
+///
+/// The `ring` crypto provider is passed explicitly instead of relying on the process-global default
+/// provider: that default is resolved at runtime on the first handshake and panics when it is ambiguous,
+/// and nothing here should depend on what else in the process installed. Trust anchors are the bundled
+/// `webpki-roots` set, TLS 1.2 and 1.3 are both enabled (`tls12` feature), and HTTP/1.1 and HTTP/2 are
+/// negotiated through ALPN.
+pub fn https_connector() -> HttpsConnector<HttpConnector> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    // Please note there was a problem on iOS if native roots are used instead.
+    HttpsConnectorBuilder::new()
+        .with_provider_and_webpki_roots(provider)
+        .expect("the ring provider supports the default protocol versions")
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build()
+}
+
+/// The shared HTTP client type: request bodies are fully buffered.
+pub type HyperClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
+
 lazy_static! {
     /// NB: With a shared client there is a possibility that keep-alive connections will be reused.
-    pub static ref HYPER: Client<HttpsConnector<HttpConnector>> = {
-        // Please note there was a problem on iOS if [`HttpsConnector::with_native_roots`] is used instead.
-        let https = HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().enable_http2().build();
-        Client::builder()
-            .executor(&*CORE)
+    pub static ref HYPER: HyperClient = {
+        Client::builder(&*CORE)
+            .pool_timer(TokioTimer::new())
             // Hyper had a lot of Keep-Alive bugs over the years and I suspect
             // that with the shared client we might be getting errno 10054
             // due to a closed Keep-Alive connection mismanagement.
@@ -178,6 +228,44 @@ lazy_static! {
             // Performance of Keep-Alive in the Hyper client is questionable as well,
             // should measure it on a case-by-case basis when we need it.
             .pool_max_idle_per_host(0)
-            .build(https)
+            .build(https_connector())
     };
+}
+
+#[cfg(all(test, unix))]
+mod listener_tests {
+    use super::*;
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    /// The server side closes first, so its socket is left in `TIME_WAIT`; a restart must still bind.
+    #[test]
+    fn bind_listener_rebinds_over_time_wait() {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_side, _) = CORE.0.block_on(listener.accept()).unwrap();
+        drop(server_side); // active close on the server: this socket goes to TIME_WAIT
+        assert_eq!(client.read(&mut [0u8; 1]).unwrap(), 0);
+        drop(listener);
+        let again = bind_listener(addr).expect("rebinding the same port right after a restart");
+        assert_eq!(again.local_addr().unwrap(), addr);
+    }
+
+    #[test]
+    fn bind_listener_reports_a_busy_port_synchronously() {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let err = bind_listener(listener.local_addr().unwrap()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    #[test]
+    fn bind_listener_accepts_ipv6_when_the_host_has_it() {
+        // IPv6 may be disabled on the host (CI containers); only a bind that is possible at all is checked.
+        if std::net::TcpListener::bind("[::1]:0").is_err() {
+            return;
+        }
+        let listener = bind_listener("[::1]:0".parse().unwrap()).unwrap();
+        assert!(listener.local_addr().unwrap().is_ipv6());
+    }
 }

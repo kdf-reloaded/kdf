@@ -57,6 +57,7 @@ exclude = [
     "vendor-patches/zcash_primitives-0.30.1",
     "vendor-patches/zcash_transparent-0.10.0",
     "vendor-patches/libp2p-gossipsub-0.45.0",
+    "vendor-patches/libp2p-websocket-0.42.0",
     "vendor-patches/libp2p-yamux-0.44.0",
     "vendor-patches/relay_rpc-0.1.0",
 ]
@@ -100,7 +101,7 @@ futures = { version = "0.3", package = "futures", features = ["compat", "async-a
 gstuff = "0.7"
 hex = "0.4.2"
 hkdf = "0.12.4"
-http = "0.2"
+http = "1"
 itertools = "0.10"
 lazy_static = "1.4"
 # KomodoPlatform rust-libp2p fork (~0.52.x). Pinned by tag; features are
@@ -135,7 +136,7 @@ mm2_metrics = { path = "mm2src/mm2_metrics" }
 mm2_number = { path = "mm2src/mm2_number" }
 prost = "0.12"
 prost-types = "0.12"
-sia-rust = { git = "https://github.com/kdf-reloaded/sia-rust", rev = "e1c07251afd8669df0b686edcfb1141eff0fcaff" }
+sia-rust = { git = "https://github.com/kdf-reloaded/sia-rust", rev = "63671c316358aaa6cb1bc329d8bdfb7d228243d8" }
 # using the same version as cosmrs
 tendermint-rpc = { version = "0.35", default-features = false }
 thiserror = "1"
@@ -197,8 +198,18 @@ strip = false
 # and has no fixed release (0.13.10 is the fix). We only ever call
 # `Config::default()`, so we were on the safe line by accident; the vendored copy
 # removes the 0.12 path outright so it cannot be reached by a future config call.
+#
+# libp2p-websocket 0.42.0 pins futures-rustls 0.22 and so rustls 0.20.4, which
+# carries RUSTSEC-2026-0349. That is hygiene, not an incident: the advisory is about
+# losing post-quantum confidentiality when a client is steered off a hybrid key
+# exchange group, and no affected rustls version implements one. The fork has no tag
+# newer than k-0.52.12 (its `master` is on rustls 0.21), and upstream reaches
+# rustls 0.23 only with libp2p 0.53, which means leaving the fork. The vendored copy
+# is the fork's source with only tls.rs/framed.rs ported to rustls 0.23 (ring, never
+# aws-lc). See vendor-patches/libp2p-websocket-0.42.0/PATCH-NOTES.md.
 [patch."https://github.com/KomodoPlatform/rust-libp2p.git"]
 libp2p-gossipsub = { path = "vendor-patches/libp2p-gossipsub-0.45.0" }
+libp2p-websocket = { path = "vendor-patches/libp2p-websocket-0.42.0" }
 libp2p-yamux = { path = "vendor-patches/libp2p-yamux-0.44.0" }
 
 # bitcoin 0.27 / bitcoin_hashes 0.10 both declare an optional `core2 = "^0.3"`
@@ -214,6 +225,16 @@ libp2p-yamux = { path = "vendor-patches/libp2p-yamux-0.44.0" }
 # patch if the fork bumps jsonwebtoken (see docs/plans/walletconnect-fork-upgrade.md).
 [patch."https://github.com/komodoplatform/walletconnectrust"]
 relay_rpc = { path = "vendor-patches/relay_rpc-0.1.0" }
+
+# relay_client pins KomodoPlatform/tokio-tungstenite-wasm@8fc7e2f, whose only
+# dependency on a websocket stack is tokio-tungstenite 0.16 (rustls 0.20.4,
+# RUSTSEC-2026-0349; tungstenite 0.16 also carried RUSTSEC-2023-0065). The fork
+# has no commit past that rev, but its crate name is the upstream's, so the
+# upstream 0.4.0 release (tokio-tungstenite 0.24 on rustls 0.23) replaces it
+# unmodified: no vendored copy. Drop this patch if relay_client moves off the
+# fork rev.
+[patch."https://github.com/KomodoPlatform/tokio-tungstenite-wasm.git"]
+tokio-tungstenite-wasm = { version = "=0.4.0" }
 
 [patch.crates-io]
 core2 = { path = "core2-shim" }

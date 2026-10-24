@@ -1,6 +1,17 @@
 # Dependabot triage — 2026-09-23
 
-> **Status:** done. Snapshot triage of all 76 open Dependabot alerts on `dev`,
+**Status:** done — **Last reviewed:** 2026-10-18
+
+> **Before deleting this at a release:** both vessels the deletion precondition asks for exist.
+> The work of this triage shipped as **PRs #5, #6 and #7** (the gossipsub panic fix with the
+> 76-alert triage, the Dependabot gate's App token with the `crossbeam-utils` correction, and
+> the `yamux` 0.12 / `jsonwebtoken` removal), whose descriptions carry the reasoning; and the
+> accepted-risk rationale for everything that stays is duplicated in
+> [`deny.toml`](../../deny.toml)'s comment blocks — including the correction that cargo-deny
+> does **not** hard-error on `unsound` advisories — with the alert dismissals on the GitHub
+> Security tab. Check that `deny.toml` still says so, then this file is an archive and can go.
+
+> **Context:** snapshot triage of all 76 open Dependabot alerts on `dev`,
 > the fixes that came out of it, and the accepted-risk record for what stays.
 > Ongoing dependency work continues to live in
 > [`v0.2.0-dependency-hygiene.md`](v0.2.0-dependency-hygiene.md); this file is the

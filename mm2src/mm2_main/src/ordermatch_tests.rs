@@ -2623,6 +2623,44 @@ fn test_orderbook_pubkey_sync_request() {
     }
 }
 
+/// CRD ch.32 R-P3: a keep-alive records the receiver's own receipt time, never the sender's timestamp.
+#[test]
+fn test_keep_alive_records_local_receipt_time_not_sender_timestamp() {
+    let (ctx, ..) = make_ctx_for_tests();
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    let pubkey = "pubkey";
+    let before = now_ms() / 1000;
+    let far_future = before + 10 * 365 * 24 * 3600;
+
+    let message = PubkeyKeepAlive {
+        trie_roots: HashMap::new(),
+        timestamp: far_future,
+    };
+    let mut trie_store = ordermatch_ctx.trie_store.lock();
+    trie_store.prepare_sync_request_for_keep_alive(pubkey, message, false, |_| false);
+    let after = now_ms() / 1000;
+
+    let stored = trie_store.pubkeys_state.get(pubkey).unwrap().last_keep_alive;
+    assert!(
+        (before..=after).contains(&stored),
+        "stored {stored} must be local receipt time in {before}..={after}"
+    );
+}
+
+/// Zero and empty-trie roots must not be advertised in outgoing keep-alives.
+#[test]
+fn test_keep_alive_skips_zero_and_null_trie_roots() {
+    let mut all_roots = HashMap::new();
+    all_roots.insert("A:B".to_owned(), H64::default());
+    all_roots.insert("C:D".to_owned(), hashed_null_node::<Layout>());
+    all_roots.insert("E:F".to_owned(), [1; 8]);
+
+    let (roots, topics) = keep_alive_roots_and_topics(&all_roots);
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots.get("E:F"), Some(&[1; 8]));
+    assert_eq!(topics.len(), 1);
+}
+
 #[test]
 fn test_orderbook_pubkey_sync_request_relay() {
     let (ctx, ..) = make_ctx_for_tests();

@@ -1,6 +1,8 @@
 # Plan: version-two dynamic-fee spend-estimate mismatch
 
-> **Status:** not scheduled. This is a problem statement and a set of options,
+**Status:** parked (options recorded, none chosen; staying at parity) — **Last reviewed:** 2026-10-18
+
+> **Context:** this is a problem statement and a set of options,
 > not a design. The maintainer decided to stay at parity with the reference
 > implementation for now; none of the options below has been chosen, and none
 > is planned. Found while implementing the version-two UTXO wire contract for

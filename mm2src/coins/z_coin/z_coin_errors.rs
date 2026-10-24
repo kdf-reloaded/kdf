@@ -28,6 +28,22 @@ pub enum GenTxError {
         available: BigDecimal,
         required: BigDecimal,
     },
+    /// The request is short only because notes it would have spent are committed to a transaction
+    /// of this process's that is not yet scanned (CRD ch.39 D39.8.0e).
+    #[display(
+        fmt = "Not enough spendable {} right now: available {}, required at least {}. {} is committed to a \
+               transaction of yours that is not confirmed yet; retry once it confirms",
+        coin,
+        available,
+        required,
+        locked
+    )]
+    BalanceLockedByUnconfirmedTransaction {
+        coin: String,
+        available: BigDecimal,
+        required: BigDecimal,
+        locked: BigDecimal,
+    },
     NumConversion(NumConversError),
     Rpc(UtxoRpcError),
     PrevTxNotConfirmed,
@@ -113,6 +129,17 @@ impl From<GenTxError> for WithdrawError {
                 coin,
                 available,
                 required,
+            },
+            GenTxError::BalanceLockedByUnconfirmedTransaction {
+                coin,
+                available,
+                required,
+                locked,
+            } => WithdrawError::BalanceLockedByUnconfirmedTransaction {
+                coin,
+                available,
+                required,
+                locked,
             },
             GenTxError::Rpc(e) => WithdrawError::Transport(e.to_string()),
             GenTxError::BuilderHeight(BuilderHeightError::TipUnavailable(e)) => WithdrawError::Transport(e),

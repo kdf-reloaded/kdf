@@ -1,6 +1,17 @@
 # Plan: secp256k1 0.20 → 0.29.x migration
 
-> **Status: DONE, verified 2026-08-06** on branch `dep/secp256k1-0.29` (merged
+**Status:** done (2026-08-06, CI follow-up closed; deletable once its decisions sit in the CRD) — **Last reviewed:** 2026-10-18
+
+> **Two updates since this plan was written.** The one remaining follow-up named below — the
+> real WASM link step in `.github/workflows/build-wasm.yml` — is **done**: `wasm-pack build
+> mm2src/mm2_main --target web` is back in that workflow's `build` job and is no longer
+> `continue-on-error`. And `deny.toml`'s `RUSTSEC-2022-0070` ignore is **still needed**: every
+> first-party pin is on 0.29, but `secp256k1 0.20.3` remains in `Cargo.lock` through the
+> vendored LDK 0.0.106 stack (`lightning-invoice` / `lightning-net-tokio` /
+> `lightning-persister` → `bitcoin 0.27.1`), so the row clears with
+> [`lightning-ldk-upgrade.md`](lightning-ldk-upgrade.md), not here.
+>
+> **Context: verified 2026-08-06** on branch `dep/secp256k1-0.29` (merged
 > `dep-hygiene` in to test the combined state). The workspace-wide bump landed,
 > the real WASM link (`cargo build --target wasm32-unknown-unknown -p
 > mm2_bin_lib --lib` — the actual `wasm-pack build` equivalent, not just

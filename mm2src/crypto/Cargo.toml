@@ -45,7 +45,7 @@ futures = "0.3"
 hex = "0.4.2"
 # HMAC-SHA256 for authenticated encryption
 hmac = "0.12.1"
-http = "0.2"
+http = "1"
 hw_common = { path = "../hw_common" }
 keys = { package = "kdf_keys", path = "../kdf_keys" }
 lazy_static = "1.4"
