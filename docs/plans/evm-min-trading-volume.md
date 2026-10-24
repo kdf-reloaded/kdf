@@ -11,6 +11,13 @@
 > it is an implementation question. Nothing here has been implemented; no branch
 > exists.
 
+**State (2026-10-24): ready for the Coder.** Steps 2 and 3 are done — the Spec
+Reader dispatch produced CRD ch.57 §57.7A (Part D: R57.7A.1–R57.7A.6, T10–T12,
+D7–D8, V4), and it passed the Dirty Gate the same day (PASS, measure 0.01,
+recorded in ch.57 §57.12's second scoped-addition item). The four questions
+below are answered in the chapter; step 4 can proceed from the cleared chapter
+alone.
+
 ## The defect (verified in this tree, 2026-10-24)
 
 `mm2src/coins/eth/eth_market_ops.rs` implements the floor as:
@@ -112,52 +119,88 @@ severity.
    coins, and if so how? Ours sets the former to zero, so the two are not
    interchangeable here.
 
+### Answers (ch.57 §57.7A, cleared 2026-10-24)
+
+1. **One smallest unit.** The reference reports exactly `10^-decimals` as an
+   EVM platform coin's and an ERC-20 token's minimum trading volume, computed
+   exactly as a rational with no rounding, clamp or other floor (R57.7A.1):
+   18 decimals → 10^-18, 8 → 10^-8, 6 → 10^-6. It is **not** configurable —
+   the reference reads no coins-file key for it and the public coins file
+   carries none (R57.7A.2). It was not removed.
+2. **Changed to `10^-decimals`**, at `v2.0.0-beta` as the first public release
+   designation carrying it; `v2.6.0-beta` and `v3.0.0-beta` agree (§57.1).
+   The QRC20 token layer changed at the same designation to the same value
+   (R57.7A.6).
+3. **Local policy, visible in one place.** A node applies its own coins' floors
+   only to orders it creates and never to a peer's order; a received order
+   record is checked only for a non-negative minimum volume and a positive
+   price and maximum volume (R57.7A.5, ch.32 §32.5). The value reaches the
+   wire only as the default `min_volume` a maker advertises when it sets
+   none (ch.32 R-W1), shown in orderbook and best-orders responses.
+4. **Yes, and they stay distinct.** `min_tx_amount` is **zero** for EVM coins
+   at every designation, before and after the change, and stays zero
+   (R57.7A.3). The DEX fee and the `max_taker_vol`/`max_maker_vol` paths read
+   that accessor, not the trading-volume floor, so they are untouched (T12).
+   The same single value is applied on every path that does consume it —
+   maker and taker order creation, both trade previews and both
+   `min_trading_vol` methods (R57.7A.4).
+
 ## Steps
 
-1. **Confirm the failing path, and its breadth.** From the four error sites that
-   share the `VolumeTooLow` wording (`check_balance.rs`, `trade_preimage.rs`,
-   `max_maker_vol_rpc.rs`, and the taker swap path), establish by test which
-   requests the floor actually refuses: taker buy, maker `setprice`, and
-   `trade_preimage` / `max_maker_vol`. If maker orders and previews are blocked
-   too, the defect is a severity higher than the report suggests.
-2. **Spec Reader dispatch** on the four questions above, carrying the three
-   reference pointers. The output is a CRD chapter section, not code.
-3. **Dirty Gate** on that candidate section. Nothing from the dispatch may be
-   used before it passes.
-4. **Implementation via the Coder**, from the gated chapter only.
-5. **Compatibility question.** Consult `docs/COMPAT_SWITCHES.md` and apply its
-   [default-side rule](../COMPAT_SWITCHES.md#the-default-side-rule) to decide
-   whether a changed floor needs a switch. Question 3 of the dispatch is what
-   decides the arm: a purely local policy change that only improves user
-   experience falls in arm 2 (Reloaded default, no switch); anything a
-   counterparty can observe falls in arm 1 (parity default plus a switch);
-   anything in between is a project-team decision and not the implementer's.
-   Record the outcome in `docs/GLEEC_COMPATIBILITY.md` and
-   `RELOADED_VS_GLEEC.md` either way.
+1. **Confirm the failing path, and its breadth.** Answered by the chapter
+   rather than by observation: ch.57 R57.7A.4 states that maker order
+   creation and update, taker order creation, both trade previews and both
+   `min_trading_vol` methods consume the floor, while `max_taker_vol` and
+   `max_maker_vol` do not. The end-to-end observation this step asked for is
+   now T11 (the field report's volume against all four request kinds) and is
+   the Coder's to write, not a prerequisite.
+2. **Spec Reader dispatch** — **done 2026-10-24.** Output: ch.57 §57.7A.
+3. **Dirty Gate** — **done 2026-10-24.** PASS, measure 0.01, finding list
+   empty; recorded in ch.57 §57.12 (second scoped-addition item).
+4. **Implementation via the Coder**, from the gated chapter only: R57.7A.1
+   (and R57.7A.6 for QRC20), with T10–T12 as the tests. D7's one-line price-
+   floor remedy is adjacent and needs no switch either (R57.7A.5), but it is
+   bound by no chapter yet — see Risks.
+5. **Compatibility question — answered; no switch.** The premise of this
+   step was that question 3 would decide the arm. It does not arise: the
+   change is **toward parity** — it replaces a pre-anchor baseline formula
+   (ch.57 V4) with the reference's value at every designation on both
+   production netids — so the
+   [default-side rule](../COMPAT_SWITCHES.md#the-default-side-rule) of
+   `docs/COMPAT_SWITCHES.md` does not call for a switch to recover the
+   baseline formula (ch.57 R57.7A.5). The visible change in the cached
+   `min_trading_vol` responses is a changelog line. `docs/GLEEC_COMPATIBILITY.md`
+   and `RELOADED_VS_GLEEC.md` need an entry only if either currently lists
+   the baseline formula as a divergence.
 
 ## Which CRD chapter owns this
 
-**To be checked, not assumed.** `docs/reloaded-rewrite/57-evm-fee-inputs.md`
-owns EVM fee and amount inputs and is the first candidate, but a *volume floor*
-is an order-match constraint rather than a fee input, so it may belong with the
-order-match chapters instead (ch.11 order-match cancellation, ch.12 order-match
-state store, ch.59 legacy ordermatch negotiation). Settle the ownership before
-the Spec Reader dispatch, so the candidate section is authored into the right
-chapter.
+**Settled: ch.57 §57.7A (Part D).** `docs/reloaded-rewrite/57-evm-fee-inputs.md`
+owns the EVM coin's *value* — the minimum trading volume is a per-coin property
+the coin layer reports, and the UTXO analogue is bound where the UTXO coin
+layer is bound (ch.38 R38.6.6). The order-match layer's *consumption* of the
+value (the default-and-refusal arithmetic, and the maker price floor of D7)
+is coin-agnostic validation that no chapter binds yet; ch.57 restates it only
+so far as needed to say where the value is observable, and ch.57 D7 records
+that it belongs to whichever order-match chapter comes to own order
+validation. Chapters 32, 38 and 59 carry one-line pointers to §57.7A.
 
 ## What done looks like
 
 - A buy, a maker order and a trade preview of `0.00072437 WBTC-PLG20` all
   succeed, or fail for a reason that is not this floor.
-- `min_trading_vol` for an EVM coin is derived from something with a written
-  basis — a per-coin configuration value, the coin's own smallest unit, or a
-  documented constant — and the `decimals / 3` expression is gone.
-- The governing CRD chapter binds the new rule, and the Spec Reader's four
-  questions are answered in it rather than left open.
-- The compatibility decision is recorded in `docs/GLEEC_COMPATIBILITY.md` and
-  `RELOADED_VS_GLEEC.md`, with a switch if the default-side rule asks for one.
-- A regression test pins the floor for an 8-decimal EVM token, so the 0.01
-  value cannot come back unnoticed.
+- `min_trading_vol` for an EVM coin and a QRC20 token is exactly
+  `10^-decimals` (ch.57 R57.7A.1, R57.7A.6) and the `decimals / 3` expression
+  is gone from both market-operations files; `min_tx_amount` stays zero
+  (R57.7A.3).
+- The governing CRD chapter binds the rule and answers the four questions
+  — done, ch.57 §57.7A, cleared 2026-10-24.
+- No compatibility switch (ch.57 R57.7A.5); a changelog line for the changed
+  `min_trading_vol` responses.
+- A regression test pins the floor for an 8-decimal EVM token and fails on
+  10^-2, so the baseline value cannot come back unnoticed (ch.57 T10); the
+  field report's volume passes end to end (T11); the fee and maximum-volume
+  paths are shown untouched (T12).
 
 ## Risks
 
@@ -169,17 +212,35 @@ chapter.
 - **`min_trading_vol` is reported over RPC.** A GUI caches it; changing it
   changes what wallets display as the minimum. Harmless, but it is a visible
   change worth a changelog line.
-- **Per-coin configuration would touch a third-party file.** If the reference
-  moved the value into the coins file, we depend on `komodo-coins-rin` carrying
-  the key for the affected entries. Verify before relying on it.
+- **Per-coin configuration would touch a third-party file** — **moot.** The
+  reference reads no coins-file key for the value and the public coins file
+  carries none on any entry (ch.57 R57.7A.2); nothing in `komodo-coins-rin`
+  needs to change. Introducing such a key would be an extension of the public
+  configuration surface and a maintainer's decision (ch.57 D8), not part of
+  closing this gap.
+- **The maker price floor is a second, adjacent gap.** Reloaded refuses a
+  maker price below 10^-8; the reference accepts any strictly positive price
+  since the same designation and refuses only zero and negative prices (ch.57
+  D7, the code-quality finding under R57.7A.6). Same shape — an order a
+  reference node would place is refused locally, no effect on any peer — and
+  a one-line remedy (`price <= 0` instead of `price < 10^-8`) with no switch.
+  It is coin-agnostic order validation that no chapter binds yet, so it is
+  not in the Coder's scope from ch.57 alone; decide whether to carry it in
+  the same change under D7 as the record, or wait for an order-match chapter
+  to own it.
+- **The QRC20 companion.** The QRC20 token layer carries the same formula and
+  the same zero `min_tx_amount`, and ch.57 R57.7A.6 binds it alike; the fix is
+  incomplete if only the EVM file changes. Ch.57 D8 records that the rule
+  should move to ch.38 when its Qtum material is next revised.
 
 ## Open decisions
 
-1. **Whether to wait for the Spec Reader at all.** A defensible floor could be
-   derived from first principles (for example the coin's smallest representable
-   unit, matching the SLP and Siacoin implementations). Parity with the
-   reference is the argument for waiting; a one-line fix for a user-visible
-   refusal is the argument against.
-2. **Whether `min_tx_amount` stays zero for EVM.** If the reference distinguishes
-   the two, ours may need both changed rather than one.
-3. **Chapter ownership** (above).
+1. **Whether to wait for the Spec Reader at all** — **resolved** by waiting:
+   the dispatch and the gate completed on 2026-10-24, and the reference's
+   answer is the coin's smallest representable unit.
+2. **Whether `min_tx_amount` stays zero for EVM** — **answered: it stays
+   zero** (ch.57 R57.7A.3). The two accessors are distinct in the reference
+   too, and only `min_trading_vol` changes.
+3. **Chapter ownership** — **settled**, ch.57 §57.7A (above).
+4. **Whether to carry the D7 price-floor remedy in the same change** (Risks
+   above) — open; a project-team call, since no chapter binds it.
