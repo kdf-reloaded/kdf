@@ -345,6 +345,20 @@ R46.2.4, ch.55 R55.4.6):
   balance read fails, so a retry fails as already active. By default Reloaded
   deregisters it, as GLEEC KDF's own `electrum` does. This switch only exists
   to reproduce that inconsistency and is not recommended.
+- Set `coin_conf_unrecognised_enum_falls_back` to `true` to get GLEEC KDF's
+  reading of a coin-configuration enumeration key that holds a value the node
+  does not recognise: the key's default is used and activation proceeds. By
+  default Reloaded fails the activation with an error naming the key and the
+  value. With the switch on, Reloaded still logs one warning per activation
+  naming the key, the value and the default it fell back to, which GLEEC KDF
+  does not. Today only a UTXO coin's `signature_version` (accepted values
+  `base`, `witness_v0`, `fork_id`) reads it; a coin carrying any other value,
+  such as RXD's shipped `fork_id_rxd`, cannot activate under the default and
+  would sign with a sighash algorithm the network rejects if the switch is on.
+  Only the boolean `true` turns it on. A malformed or non-string `fork_id` is
+  not an enumeration member and fails under either setting. No wire format and
+  no other node is affected. **Compatibility:** for behaviour matching GLEEC KDF,
+  set this to `true`. See [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
 ## Detail sections
 
