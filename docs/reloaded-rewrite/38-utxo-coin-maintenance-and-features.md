@@ -366,6 +366,9 @@ up), and shall, for fixed-fee coins, derive the minimum trading volume from the
 fixed fee (on the order of max(10x dust, 10x(fee-per-kB x ~496 bytes))) while
 dynamic-fee coins remain dust-based. Acceptance: a fixed-fee coin reports a
 fee-derived `min_trading_vol`; a dynamic-fee coin remains dust-based.
+The EVM and QRC20 counterparts of this policy are bound by
+[Chapter 57](57-evm-fee-inputs.md) §57.7A (cleared there on 2026-10-24 —
+see the second scoped-addition item of its §57.12).
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
