@@ -142,6 +142,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
+  discharged most of its chain-rule confirmation step, leaving three of the four open items and
+  two non-blocking spec residuals; the implementation steps no longer wait on that step.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
