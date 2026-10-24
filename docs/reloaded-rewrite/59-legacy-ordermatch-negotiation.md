@@ -519,6 +519,10 @@ and the per-order own-key exemption are not.*
   from) and §51.8 (the reserved-funds semantics R59.3.3 protects).
 - [Chapter 52 — Version-Two Atomic-Swap State Machine](52-swap-v2-state-machine.md)
   for the V2 loop D4 defers.
+- [Chapter 57 — EVM Fee and Amount Inputs](57-evm-fee-inputs.md) §57.7A
+  for the per-coin minimum trading volume the maker and taker order builders
+  enforce before any message of §59.2 is sent (cleared there on 2026-10-24 —
+  see the second scoped-addition item of its §57.12).
 
 ## 59.11 Provenance Footer
 
