@@ -157,6 +157,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
   price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
   conforming client may do, could also panic inside a swap send path and no longer can. Detail: PR #48.
+- **A swap on a merged-mined (AuxPoW) coin could be neither completed nor refunded once the chain
+  changed its block version.** The header reader recognized AuxPoW only by two exact version values,
+  so Syscoin headers at version `0x20100180` (from about height 1,320,000) were read as plain
+  80-byte headers and every header list was rejected. That broke median-time-past, which every HTLC
+  spend and refund needs, so a swap that reached the payment stage was stuck. SYS, NMC, PEP, DINGO,
+  MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
+  one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
+  protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
+  PR #55; CRD ch.37 R37.5.2, R37.5.4.
 
 ### Plans touched
 
@@ -178,7 +187,8 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   EVM tests ported to a scripted local node (PR #30).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
   discharged most of its chain-rule confirmation step, leaving three of the four open items and
-  two non-blocking spec residuals; the implementation steps no longer wait on that step.
+  two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
+  whose median-time-past errors (PR #55).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
