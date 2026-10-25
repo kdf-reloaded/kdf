@@ -342,9 +342,10 @@ Reference designations: `v2.6.0-beta` and `v3.0.0-beta`, which agree.
 Four independent gaps on the same surface. They compound, so a sub-gigawei
 chain's fee quote needs at least the first two closed before it matches.
 
-- [ ] **The one-gigawei increment floor (ch. 57 R57.3.2).** Reloaded's
-  proportional gas-price increase substitutes a fixed one-gigawei increment
-  whenever the proportional one is smaller. The reference removed that floor;
+- [x] **The one-gigawei increment floor (ch. 57 R57.3.2).** Fixed in PR #59.
+  Reloaded's
+  proportional gas-price increase substituted a fixed one-gigawei increment
+  whenever the proportional one was smaller. The reference removed that floor;
   no release designation at or after `v2.6.0-beta` carries it. It is a
   pre-anchor baseline defect (ch. 57 V1), so removing it is a parity **fix**
   with no compatibility switch. Effect: inactive at and above ≈7.70 gwei,
@@ -516,7 +517,7 @@ implemented from the cleared chapter.
 
 ---
 
-## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25, implementation pending)**
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25; implementation landed in PR #62 for the median-time-past path, header sync and stores pending)**
 
 CRD reference:
 [`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
@@ -566,8 +567,15 @@ this repository's own code and from public-network measurement alone.
   (R37.5.9c). No compatibility switch: nothing a counterparty observes
   changes (R37.5.9d). Implementation is step H4a of
   `docs/plans/utxo-header-family-selection.md`, placed ahead of the
-  remaining D1 family work as the **beta blocker**; this item stays open
-  until it lands and the ch. 37 §37.8 R37.5.9 criteria pass. `XPM` is out
+  remaining D1 family work as the **beta blocker**. **Implementation
+  landed in PR #62 (median-time-past path):** the key is read into the coin
+  configuration, the Riecoin and mixed readers are in the tree, and the
+  median-time-past the HTLC spend and refund query is computed from the
+  key's layout, so the spend no longer fails for an entry carrying the key.
+  The header-sync (SPV), single-header timestamp and header-store reads do
+  not yet use the layout (ch. 37 §37.5.8), so this item **stays open until
+  header sync and the stores follow** and the ch. 37 §37.8 R37.5.9 criteria
+  pass on every read path. `XPM` is out
   of scope (wallet-only). The ch. 37 material is clean-room-original and
   carries its own provenance note and §37.10 item; nothing here is gated or
   awaiting a gate.
