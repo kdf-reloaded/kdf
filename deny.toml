@@ -92,6 +92,17 @@ ignore = [
     "RUSTSEC-2022-0093", # ed25519-dalek 1.x (double public key signing oracle)
     "RUSTSEC-2024-0344", # curve25519-dalek (timing variability)
 
+    # --- EC stack (crypto-bigint 0.5.5 via elliptic-curve 0.13) ---
+    # RUSTSEC-2026-0387 (timing variability in constant-time operations) is fixed
+    # only in crypto-bigint >= 0.7.6. `cargo tree -i crypto-bigint@0.5.5` shows
+    # elliptic-curve 0.13 (k256, ecdsa 0.16, alloy-signer) as the sole consumer,
+    # i.e. the secp256k1 signing path of the EVM and Cosmos coins is within reach
+    # of the advisory. It cannot be cleared by a lockfile update: ecdsa 0.16 pins
+    # the 0.5 line, so clearing it needs a major move of the RustCrypto EC stack
+    # (and of alloy / cosmrs with it). Accepted until that migration; remove this
+    # entry when crypto-bigint leaves the lockfile at 0.5.x.
+    "RUSTSEC-2026-0387", # crypto-bigint 0.5.5 (elliptic-curve 0.13 / k256 / ecdsa 0.16)
+
     # --- Unsound advisories (transitive) ---
     # Listed as accepted risk. (These were added believing schema v2 made
     # `unsound` a hard error; it does not -- see the CORRECTION at the top of this

@@ -57,7 +57,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   intermediates) and `webpki-roots` 1.0.8 to 1.0.11 (RUSTSEC-2026-0381, emSign intermediates). The
   bundled trust store drops four roots (Atos TrustedRoot 2011, emSign Root CA - C1, emSign ECC Root
   CA - C3 and G3) and adds four (SECOM TLS RSA and ECC Root CA 2024, Telia EC and RSA TLS Root CA
-  v3); connections to servers chained only to a dropped root stop verifying. Detail: PR #TBD.
+  v3); connections to servers chained only to a dropped root stop verifying. A fourth advisory,
+  RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5 timing variability, reached through `k256`/`ecdsa` 0.16),
+  cannot be fixed by a lockfile update; it is accepted in `deny.toml` until the RustCrypto EC stack
+  moves to `crypto-bigint` 0.7. Detail: PR #68.
 
 ### Fixed
 
