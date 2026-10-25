@@ -1038,7 +1038,8 @@ collision of R37.5.4a.
 
 As built:
 
-- The reader knows two variants, the default and Qtum. The Qtum variant is
+- The reader knows two variants of the dictated kind, the default and Qtum,
+  plus the two Reloaded-only layouts of §37.5.9 (below). The Qtum variant is
   chosen by the coin's protocol type in code, and only for the Qtum and
   QRC20 median-time-past read. The `chain_variant` key of R37.5.1 is not
   read: a coin file that sets it is accepted and the value has no effect.
@@ -1054,12 +1055,23 @@ As built:
   met: KawPoW is still recognised by its version value for every non-Qtum
   coin. Withdrawing that before the configuration key exists would leave
   KawPoW coins unable to read their headers.
-- The Reloaded-only key `reloaded_header_layout` of §37.5.9 is not read,
-  and the Riecoin and mixed KawPoW/merged-mined layouts it selects are not
-  implemented; `RIC` and `MEWC` header lists are rejected whole, as the
-  table of §37.9 D3 records for a reader without the key. D3 is resolved
-  (2026-10-25); its implementation is the plan's own step under
-  `docs/plans/`.
+- The Reloaded-only key `reloaded_header_layout` of §37.5.9 **is read**
+  (PR #62): from the coin's raw `protocol` object into the coin
+  configuration, as a plain string, beside `type`, exactly where R37.5.9
+  places it. It has the two values of R37.5.9's table, `"riecoin"` and
+  `"kawpow_auxpow_mixed"`; an unknown value fails the coin build with an
+  error naming the ticker; an absent key has no effect. The layout it
+  selects governs the **median-time-past path only**: the sync loop's
+  header-list reads, the single-header Electrum reads (including the block
+  timestamp read), the SPV fetch and anchor check, and both header stores'
+  re-reads do not yet use the layout and still read standard headers, so
+  R37.5.9a is met for the median and not yet for every read path. Because
+  `chain_variant` is still not read, R37.5.9a's precedence over it is
+  vacuous until §37.9 D1 lands. The Riecoin and mixed KawPoW/merged-mined
+  readers of R37.5.9b are implemented and re-encode to the served bytes
+  (R37.5.9c); for an entry without the key, `RIC` and `MEWC` header lists
+  are still rejected whole, as the table of §37.9 D3 records. The remaining
+  threading is the plan's own work under `docs/plans/`.
 
 Implemented (part of R37.5.6 and part of R37.5.7):
 
@@ -1379,10 +1391,10 @@ median-time-past, computed from the relevant recent headers.
 > swap state machines as a sleep-then-re-check, so the effect of the floor
 > is a refund delayed by up to an hour per round beyond the moment it
 > became spendable; it does not lose funds and does not change what is
-> signed. Proposed fix: cap the wait at one hour instead of flooring it,
-> in both branches. The owning rule is chapter 51's refund timing, not
-> this chapter; the finding is recorded here because it fell out of
-> reading the median's consumers for §37.9 D3.
+> signed. **Fixed in PR #60:** the wait is capped at one hour instead of
+> floored, in both branches. The owning rule is chapter 51's refund
+> timing, not this chapter; the finding is recorded here because it fell
+> out of reading the median's consumers for §37.9 D3.
 
 ## 37.7 Chain-reorganization handling
 
@@ -1769,11 +1781,20 @@ column describes the reader **without** the key, which stays true for an
 entry that does not carry it. What remains of D3 is implementation, not
 decision: the plan under `docs/plans/` carries it as its own step (ahead
 of the remaining D1 family work, because it is the beta blocker), and
-§37.5.8 records the key as not yet read. **D1 and D2 are unchanged** by
+§37.5.8 records how much of it has landed. **D1 and D2 are unchanged** by
 the resolution: D1 still ports the reference's selector, and D2's
 served-bytes identity applies to the new layouts as R37.5.9c states. The
 key name and the value spellings are proposed pending the maintainer's
 veto (§37.5.9 provenance note).
+
+*Implementation note (PR #62).* The key, both layout readers and the
+median-time-past path landed in PR #62; §37.5.8 records what the other
+read paths still owe. Two details of the as-built form: the Riecoin
+64-bit-time overflow of R37.5.9c (a time above the 32-bit range) is
+reported as the codec's generic `Error::Custom` with a textual reason, not
+as a dedicated error variant — a typed parse error in the sense of the
+rule, carried by the existing class; and the key's *name* is still under
+maintainer review, as the provenance note of §37.5.9 reserves.
 
 ## 37.10 Provenance Footer
 
