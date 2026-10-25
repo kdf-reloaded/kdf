@@ -252,6 +252,6 @@ spl-associated-token-account-client = { version = "2", default-features = false 
 spl-token = { version = "8", default-features = false }
 
 [build-dependencies]
-prost-build = { version = "0.12", default-features = false }
+prost-build = { version = "0.12", default-features = false, features = ["format"] }
 prost_build_14 = { package = "prost-build", version = "0.14", default-features = false }
 tonic-prost-build = { version = "0.14", default-features = false }

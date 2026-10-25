@@ -615,6 +615,15 @@ swap-status broadcast of R48. Implementations MUST NOT invent additional
 refusal messages on the legacy topic, because a peer that does not
 recognise the message kind will fail to decode the envelope.
 
+> **Pointer (informative; Spec Reader 2026-10-25, cleared by the Dirty
+> Gate with chapter 60 on 2026-10-25).** None of R34's conditions concerns volume: a swap is never
+> refused at negotiation for being below a minimum trading volume, a dust
+> limit, or the fees it will deduct. A volume too small to complete fails
+> later, in the coin layer — for example as a spend failure of R31 when the
+> spend fee reaches the payment value. Where each such failure occurs and
+> what each party then observes is bound in
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.5.5–R60.5.6.
+
 **R39.** *Abort without any event.* Three conditions MUST abort a run
 without emitting or persisting any event at all: failure to acquire the
 per-swap exclusion lock after one retry (R5); resuming a swap whose
@@ -1428,7 +1437,12 @@ does not bind its payload shape.
   project must inter-operate with), R6 (behavioural observation of
   public networks), R7 (independent work).
 - *Sibling-allowlist consultations:* none.
-- *Forbidden corpus:* consulted, under the chapter-01 two-team
+- *Forbidden corpus:* (addition of 2026-10-25: the informative pointer
+  after R38 restates chapter 60's corpus-sourced finding that no volume
+  check precedes or accompanies negotiation; cleared by the Dirty Gate
+  with [Chapter 60](60-trading-floors-and-refusal-contract.md) on
+  2026-10-25, attestation in its §60.12.) Otherwise
+  consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the legacy swap state
   machine only — specifically the refusal-transmission conditions of
   R34, the reservation-release mechanism of R51, the fixed-width

@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
+  window applies.** It names the start height and window size, notes that earlier funds will not be
+  visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
+  signal (CRD ch.39 R39.8.0aw). Detail: PR #61.
 - **Releases and the runtime Docker image now ship the license files.** `COPYING`, `LICENSE` and
   `THIRDPARTY-LICENSES` are attached to every release and covered by the signed `SHA256SUMS`, and
   the image carries them in `/usr/share/doc/kdf/`. Detail: PR #36.
@@ -32,6 +36,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
+  `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
+  left a formatting-only diff in every worktree. The file is git-ignored and `prost-build` runs with
+  its `format` feature, producing the same text the repository used to carry. No runtime change.
+  Detail: PR #63.
 - **The initial swap gas-fee policy no longer depends on how the coin was activated, and a coin's
   `max_eth_tx_type` now caps the transaction type it will sign.** The legacy `enable` / `electrum`
   route resolves the policy the way the other routes do — the `swap_gas_fee_policy` request field,
@@ -109,6 +118,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   maintainer may still add the key (`"riecoin"`, `"kawpow_auxpow_mixed"`) to pin the layout, and
   other implementations ignore it. The header-sync (SPV) and header-store paths still read standard
   headers. Detail: PR #62; CRD ch.37 §37.5.9.
+- **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
+  gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
+  chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
+  and the trade-preimage path applied the floor twice. The increase is now purely proportional.
+  Detail: CRD ch.57 R57.3.2; PR #59.
 - **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
   eligibility check floored its "wait this long" answer at one hour, so a refund that became
   spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
@@ -232,6 +246,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   discharged most of its chain-rule confirmation step, leaving three of the four open items and
   two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
   whose median-time-past errors (PR #55).
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
+  ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
+  pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
+  `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

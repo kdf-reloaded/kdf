@@ -3108,7 +3108,7 @@ impl EthCoin {
                         .compat()
                         .await
                     {
-                        Ok(from_station) => Some(increase_by_percent_one_gwei(from_station, GAS_PRICE_PERCENT)),
+                        Ok(from_station) => Some(increase_by_percent(from_station, GAS_PRICE_PERCENT)),
                         Err(e) => {
                             error!("Error {} on request to gas station url {}", e, url);
                             None
@@ -3143,7 +3143,7 @@ impl EthCoin {
                     Ok(res) => res
                         .base_fee_per_gas
                         .first()
-                        .map(|val| increase_by_percent_one_gwei(*val, BASE_BLOCK_FEE_DIFF_PCT)),
+                        .map(|val| increase_by_percent(*val, BASE_BLOCK_FEE_DIFF_PCT)),
                     Err(e) => {
                         common::log::debug!(
                             "Optional eth_feeHistory gas-price source is unavailable: {}; using remaining sources",
@@ -3644,27 +3644,19 @@ pub fn get_addr_nonce(addr: Address, web3s: Vec<Web3Instance>) -> Box<dyn Future
     Box::new(Box::pin(fut).compat())
 }
 
-pub fn increase_by_percent_one_gwei(num: U256, percent: u64) -> U256 {
-    let one_gwei = U256::from(10u64.pow(9));
-    let percent = (num / U256::from(100)) * U256::from(percent);
-    if percent < one_gwei {
-        num + one_gwei
-    } else {
-        num + percent
-    }
-}
+/// Proportional increase: `num + (num / 100) * percent`, integer division applied first.
+///
+/// No absolute floor or cap on the increment (CRD ch.57 R57.3.1/R57.3.2); a `num` below 100 is
+/// returned unchanged.
+pub fn increase_by_percent(num: U256, percent: u64) -> U256 { num + (num / U256::from(100)) * U256::from(percent) }
 
 pub fn increase_gas_price_by_stage(gas_price: U256, level: &FeeApproxStage) -> U256 {
     match level {
         FeeApproxStage::WithoutApprox => gas_price,
-        FeeApproxStage::StartSwap => {
-            increase_by_percent_one_gwei(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_START_SWAP)
-        },
-        FeeApproxStage::OrderIssue => {
-            increase_by_percent_one_gwei(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_ORDER_ISSUE)
-        },
+        FeeApproxStage::StartSwap => increase_by_percent(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_START_SWAP),
+        FeeApproxStage::OrderIssue => increase_by_percent(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_ORDER_ISSUE),
         FeeApproxStage::TradePreimage => {
-            increase_by_percent_one_gwei(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_TRADE_PREIMAGE)
+            increase_by_percent(gas_price, GAS_PRICE_APPROXIMATION_PERCENT_ON_TRADE_PREIMAGE)
         },
     }
 }

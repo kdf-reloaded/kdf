@@ -183,6 +183,14 @@ information, and carries the order's negotiated swap version
 match keyed by the taker request's identifier, persists the order, and
 emits the order-status stream event.
 
+> **Pointer (informative; Spec Reader 2026-10-25, cleared by the Dirty
+> Gate with chapter 60 on 2026-10-25).** "Matches the request" includes a volume test: the matched
+> base volume must be at least the order's minimum base volume and at most
+> its available volume, at a price no worse than the order's. A request
+> failing it gets no message at all
+> ([Chapter 60](60-trading-floors-and-refusal-contract.md) R60.4.3,
+> R60.5.2).
+
 **R59.4.4** *Maker-side match pruning.* The periodic maintenance pass
 shall drop from each maker order's match map every match whose
 last-updated instant is older than **30 seconds**, **unless** that match
@@ -523,6 +531,11 @@ and the per-order own-key exemption are not.*
   for the per-coin minimum trading volume the maker and taker order builders
   enforce before any message of §59.2 is sent (cleared there on 2026-10-24 —
   see the second scoped-addition item of its §57.12).
+- [Chapter 60 — Per-Coin Trading Floors](60-trading-floors-and-refusal-contract.md)
+  for every family's floors, the order-builder arithmetic, and the one
+  volume effect on §59.2's exchange: a maker sends no reserved message for
+  a request below its order's minimum volume (R60.5.2; cleared there on
+  2026-10-25).
 
 ## 59.11 Provenance Footer
 
