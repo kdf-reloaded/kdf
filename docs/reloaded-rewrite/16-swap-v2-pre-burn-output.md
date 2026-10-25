@@ -54,7 +54,12 @@ chains.
 ### 16.1.1 Reloaded policy state (informative)
 
 The split substrate is shared, while the active policy is selected
-by the dedicated network-configuration crate:
+by the dedicated network-configuration crate. Which reference
+designation each of the two parameter sets below comes from, and why
+selecting them per netid inside one binary is a KDF Reloaded
+divergence rather than an inherited shape, is recorded in
+[Chapter 06](06-network-id-seed-node.md) §6.6A and bound by that
+chapter's §6.8 R17:
 
 - **Network identifier 8762** is pinned to the `v2.6.0-beta`
   swap contract. The base rate is 1/777 and the discounted rate is
@@ -788,3 +793,76 @@ chapter 15 R26–R28 and R40 now defer to this chapter.
 - *Sibling-allowlist consultations:* none beyond the
   cross-chapter references listed in *Inputs*.
 - *Forbidden corpus:* not consulted.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for the §16.1.1
+  cross-reference sentence:* the material this item covers is exactly one
+  sentence — the cross-reference added at the head of §16.1.1, which
+  points at chapter 06 §6.6A and is bound by that chapter's §6.8 R17.
+  It was examined by the KDF Dirty Gate in the same pass that cleared
+  chapter 06 §6.6A and **passed** on 2026-10-24: PASS,
+  discretionary-expression measure 0.00, **leak-finding list empty**, and
+  accordingly no remedy class for the sentence or for the candidate as a
+  whole. The clearance is **complete and not pending**. The gate's
+  confirmation is that the sentence **carries no independent claim**: it
+  defers the whole of its substance to chapter 06 §6.6A and §6.8 R17 and
+  introduces no new value of any kind. This item is written on the clean
+  side from the verdict, which reached the clean side as relayed and
+  transcribed text rather than as a gate-written file; that is
+  record-keeping and adds no chapter content.
+
+  *The one non-leak finding: a dependent restatement, not a standing
+  claim.* The verdict's separately labelled non-leak section carried one
+  advisory item, stated as a location, a category and one remedy class and
+  nothing further: the added sentence at the head of §16.1.1 —
+  dependent-restatement coupling — `none`. What it records is that one
+  phrase of the sentence is a minimal dependent echo of a statement
+  chapter 06 §6.6A.4 owns, so **this chapter inherits §6.6A's clearance at
+  that phrase rather than standing alone on it**. The coupling resolves on
+  this pass, because that clearance was granted in the same pass, which is
+  why the class is `none` and no remediation is owed. The consequence for
+  a later reader is that the sentence's standing is the standing of
+  chapter 06 §6.6A: if that section's clearance were ever reopened, this
+  sentence would travel with it. Chapter 06 §6.10 D5 does not reach this
+  sentence, chapter 16 being inside the document set.
+
+  **Only that sentence was gated, and this chapter's earlier clearance is
+  untouched.** Nothing outside the added lines was examined or re-judged in
+  this pass, and the chapter's earlier clearance is **not reopened**. The
+  two fee-collection identity keys and the per-network fee parameters
+  recorded below the added sentence in §16.1.1 predate this change, were
+  confirmed only to be pre-existing rather than newly introduced, and keep
+  the clearance they already had. The *Forbidden corpus* item above is
+  unchanged by the pass: the added sentence took no forbidden-class input
+  of its own, resting entirely on chapter 06 §6.6A, where that section's
+  own input and clearance are recorded. The sentence carries no inline
+  clearance pointer, which is a scope judgment rather than an oversight: it
+  binds nothing, names in its own text the chapter and rule it depends on,
+  and this footer is where the record lives.
+
+  The three elements of the R39 scope attestation, carried forward here in
+  corpus-free terms as chapter 01 T1 requires:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    matter this chapter names in its own terms, confined to what a single
+    cross-reference sentence could carry — the taker trading-fee rate
+    surface and the fee-collection-identity surface — together with a
+    check that the added lines newly introduce no fee-identity material.
+    Quantity examined: **two units at two reference points**, for four
+    unit-at-designation comparisons. Reference points: the published
+    release designations `v2.6.0-beta` and `v3.0.0-beta`. **The record is
+    no more precise than those designations:** no post-anchor commit
+    identifier, no branch state, and no location within the compared
+    material is given (chapter 01 R11 and the reference-version limit of
+    §1.7).
+  - *Method.* **Combined.** Reading, with mechanical retrieval used solely
+    to address each comparison to a published release designation rather
+    than to any materialised undesignated state. **This repository's own
+    clean-room gate tooling was not applied and was not run:** no source
+    block was in scope, so the instrument had no operand.
+  - *Measure.* **0.00** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — with
+    dictated-interop and pinned-interface content excluded from the
+    measured set before the judgment was made. **Judgment standard read
+    against:** a presence standard rather than a proportion — any genuine
+    discretionary expression fails a candidate irrespective of volume. The
+    measured set was empty, so the PASS rests on that and not on a numeric
+    margin.

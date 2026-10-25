@@ -474,6 +474,8 @@ mod tests {
     /// Dogecoin's block version (AuxPoW flag set, chain ID 0x0062).
     const DOGE_VERSION: u32 = 0x0062_0104;
 
+    /// Test fixture. `nonce` is the header's proof-of-work nonce field, an arbitrary constant here; it is not a
+    /// cryptographic nonce and protects nothing.
     fn standard_header(version: u32, prev: H256, time: u32, nonce: u32) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(MIN_RAW_HEADER_SIZE);
         bytes.extend_from_slice(&version.to_le_bytes());
