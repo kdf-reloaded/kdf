@@ -298,6 +298,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — its substance shipped: the
   minimum trading volume now matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins
   (PR #66).
+- [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — moved from parked to in
+  progress: a Siacoin `withdraw` now honors a custom fee (PR #77); the live test of a fee below the
+  node's estimate is still to do.
 
 ### Known limitations
 

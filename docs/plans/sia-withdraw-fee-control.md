@@ -1,6 +1,6 @@
 # Plan: operator-selectable Siacoin withdraw fee
 
-**Status:** parked (no Sia variant in `WithdrawFee` as of 2026-10-18) — **Last reviewed:** 2026-10-18
+**Status:** in progress (custom fee shipped in PR #77; waiting for the live below-estimate fee test) — **Last reviewed:** 2026-10-25
 
 > **Context:** parked deliberately on 2026-09-20 during the
 > beta triage of the Siacoin work. Nothing here is a defect fix: the gap is a
