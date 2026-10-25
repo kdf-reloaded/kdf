@@ -270,7 +270,7 @@ is what the parties observe:
 | 5 | Either side, refunding its own payment | as row 3 | The refund is refused; the payment stays locked. |
 | 6 | Version-two maker, generating the funding-spend preimage after validating the funding ([Chapter 52](52-swap-v2-state-machine.md) R17 step 3) | the funding value is below the spend fee plus dust (chapter 15 R21) | The maker aborts before paying, with nothing of its own committed; the taker reclaims its funding through the funding refund path. |
 | 7 | Version-two maker, finalising the taker-payment spend | `Standard` fee and the payment is below spend fee plus dust plus DEX fee (chapter 16 R18) | The maker cannot spend; refund paths of chapter 52 apply. |
-| 8 | Sia (both protocols), any HTLC spend or refund | the fixed 0.02 SC miner fee every Sia HTLC spend and refund deducts is not smaller than the HTLC value | No valid spend or refund can be built (finding F2). |
+| 8 | Sia (both protocols), any HTLC spend or refund | the fixed 0.00002 SC miner fee every Sia HTLC spend and refund deducts is not smaller than the HTLC value | No valid spend or refund can be built (finding F2). |
 
 The spend fee in rows 3–7 is the 496-byte estimate of chapter 16 R14A
 under the coin's fee policy of chapter 38 R38.6.6b; a dynamic-fee coin's
@@ -309,8 +309,8 @@ dynamic-fee coin it guarantees nothing (finding F1).
 
 > **Code-quality finding F2 (informative; explicit look requested).** In
 > both reference designations and in reloaded, every Sia HTLC spend and
-> refund deducts a fixed 0.02 SC miner fee from the HTLC value, while the
-> Sia floors (row S1) are one hasting. A Sia payment of 0.02 SC or less —
+> refund deducts a fixed 0.00002 SC miner fee from the HTLC value, while the
+> Sia floors (row S1) are one hasting. A Sia payment of 0.00002 SC or less —
 > accepted by every order builder — can be neither spent nor refunded,
 > and the arithmetic does not refuse cleanly beforehand. *Proposed
 > remedy:* refuse the spend or refund with an orderly error when the
@@ -452,6 +452,21 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    itself and in `docs/GLEEC_COMPATIBILITY.md`, as that document
    requires.
 
+   > **Compatibility:** for behaviour matching GLEEC KDF, set
+   > `pre_trade_spend_check` to `false`. GLEEC KDF has no such check: it
+   > accepts these orders, and the swap then fails in the coin layer.
+
+> **As-built note (2026-10-25, clean-side record).** R60.6.4 and R60.6.7
+> are implemented in PR #TBD, together with T60.5 and T60.6. The UTXO
+> legacy and version-two spends and refunds, the ZHTLC transparent spend
+> and the Sia spends and refund refuse a value not above the fee without
+> broadcasting. The version-two funding spend requires fee plus dust. The
+> pre-trade check runs in `setprice`, `update_maker_order`, `buy`, `sell`
+> and both trade previews. Only a JSON `false` for `pre_trade_spend_check`
+> disables it. For a ZHTLC coin the safe amount uses the R38.6.6c estimate,
+> which is conservative, because its transparent spend actually charges a
+> fixed 1,000 base units.
+
 ## 60.7 Tests
 
 **T60.1** *UTXO values.* For coins configured as the public coins file
@@ -525,7 +540,7 @@ itself remains tracked by chapter 57 D7 and the parity tracker's #12.
 - Bitcoin Core relay policy (dust threshold for standard outputs), the
   public basis of the "standard dust" figure in finding F1.
 - Sia: the `sia-rust` public crate's default miner-fee constant
-  (0.02 SC), shared by both trees (finding F2).
+  (0.00002 SC), shared by both trees (finding F2).
 - Public coins configuration file of the Komodo DeFi Framework coins
   registry (the `txfee`, `dust`, `dingo_fee` and `decimals` values used in
   T60.1).
@@ -556,7 +571,7 @@ itself remains tracked by chapter 57 D7 and the parity tracker's #12.
   third-party coins-configuration file in two published copies (the
   `txfee`, `dust`, `dingo_fee` and `decimals` values behind T60.1, and
   the absence of `txfee` and `dust` on the ARRR and Bitcoin entries); the
-  public `sia-rust` crate shared by both trees (the 0.02 SC miner fee of
+  public `sia-rust` crate shared by both trees (the 0.00002 SC miner fee of
   F2); public Bitcoin relay policy (the standard-dust figure of F1); the
   public release history of the historical lineage (the designations of
   §60.1).
@@ -754,3 +769,9 @@ itself remains tracked by chapter 57 D7 and the parity tracker's #12.
   chapter's cleared text. The design is this project's own; the reference
   has no such check. *Forbidden corpus:* not consulted for this
   addition.
+- *Clean-side correction (2026-10-25).* The Sia miner fee was given as
+  0.02 SC in R60.5.6 row 8, finding F2, §60.10 and this footer. That figure
+  came from the `sia-rust` constant's own comment. The constant is
+  2 × 10^19 hastings, and one SC is 10^24 hastings, so the fee is
+  0.00002 SC. The figures now say so. The finding stands, at that size.
+  This correction uses no forbidden-class input.
