@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
   `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
   that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
+  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
+  60-second block time), so funds older than that are invisible while the sync completes
+  normally. This matches the reference, whose window is shorter; the remedy is to pass
+  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
 
 ### Changed
 
@@ -158,6 +163,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
+  discharged most of its chain-rule confirmation step, leaving three of the four open items and
+  two non-blocking spec residuals; the implementation steps no longer wait on that step.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

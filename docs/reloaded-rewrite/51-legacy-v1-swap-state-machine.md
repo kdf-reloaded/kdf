@@ -1391,6 +1391,20 @@ does not bind its payload shape.
   R62 depends.
 - Ed25519 public-key encoding (32-byte compressed Edwards point), on
   which R64's padding convention operates.
+- The negotiation exchange that precedes this chapter's stage graphs —
+  the four-message order-match loop, its selection and timeout
+  semantics, and the one-hour counterparty penalty a taker applies when
+  negotiation fails — [chapter 59](59-legacy-ordermatch-negotiation.md).
+  That penalty is triggered by the `NegotiateFailed` taker event of
+  §51.6, so §51.6's refusal conditions are what arm it: ch. 59 R59.5.2
+  and R59.5.4 bind the penalty side, and ch. 59 R59.5.4 records that
+  reloaded does not yet arm it from this event.
+- The per-coin signature-hash selection every signing site of a UTXO
+  coin in this chapter's stage graphs goes through —
+  [chapter 58](58-utxo-signature-version-and-radiant-sighash.md) §58.2,
+  including the sighash byte that the coin's fork-identifier value forms
+  (ch. 58 R58.2.5), which this chapter's DEX-fee, payment, spend and
+  refund transactions all carry.
 
 ## 51.16 Provenance Footer
 
