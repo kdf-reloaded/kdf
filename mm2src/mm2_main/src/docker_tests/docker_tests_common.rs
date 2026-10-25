@@ -2,14 +2,13 @@
 pub use crate::mm2::mm2_tests::structs::*;
 pub use common::mm_number::MmNumber;
 pub use common::{block_on, now_ms};
-pub use mm2_test_helpers::for_tests::{check_my_swap_status, check_recent_swaps, check_stats_swap_status, enable_native,
-                                     enable_native_bch, mm_dump, MarketMakerIt, MAKER_ERROR_EVENTS,
-                                     MAKER_SUCCESS_EVENTS, TAKER_ERROR_EVENTS, TAKER_SUCCESS_EVENTS};
+pub use mm2_test_helpers::for_tests::{check_my_swap_status, check_recent_swaps, check_stats_swap_status,
+                                      enable_native, enable_native_bch, mm_dump, MarketMakerIt, MAKER_ERROR_EVENTS,
+                                      MAKER_SUCCESS_EVENTS, TAKER_ERROR_EVENTS, TAKER_SUCCESS_EVENTS};
 pub use secp256k1::{PublicKey, SecretKey};
 pub use std::env;
 pub use std::thread;
 
-use kdf_crypto::{dhash160, ChecksumType};
 use coins::qrc20::rpc_clients::for_tests::Qrc20NativeWalletOps;
 use coins::qrc20::{qrc20_coin_from_conf_and_params, Qrc20ActivationParams, Qrc20Coin};
 use coins::utxo::qtum::{qtum_coin_with_priv_key, QtumBasedCoin, QtumCoin};
@@ -18,12 +17,13 @@ use coins::utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardC
 use coins::utxo::{coin_daemon_data_dir, sat_from_big_decimal, zcash_params_path, UtxoActivationParams,
                   UtxoAddressFormat, UtxoCoinFields};
 use coins::MarketCoinOps;
-use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
 use common::mm_number::BigDecimal;
 use ethereum_types::H160 as H160Eth;
 use futures01::Future;
 use http::StatusCode;
+use kdf_crypto::{dhash160, ChecksumType};
 use keys::{Address, AddressHashEnum};
+use mm2_core::mm_ctx::{MmArc, MmCtxBuilder};
 use primitives::hash::{H160, H256};
 use secp256k1::Secp256k1;
 use serde_json::{self as json, Value as Json};
@@ -63,14 +63,8 @@ pub fn set_qtum_conf_path(conf_path: PathBuf) { *QTUM_CONF_PATH.lock().unwrap() 
 
 pub fn get_qrc20_contract_address(ticker: &str) -> H160Eth {
     match ticker {
-        "QICK" => (*QICK_TOKEN_ADDRESS
-            .lock()
-            .unwrap())
-        .expect("QICK_TOKEN_ADDRESS must be set already"),
-        "QORTY" => (*QORTY_TOKEN_ADDRESS
-            .lock()
-            .unwrap())
-        .expect("QORTY_TOKEN_ADDRESS must be set already"),
+        "QICK" => (*QICK_TOKEN_ADDRESS.lock().unwrap()).expect("QICK_TOKEN_ADDRESS must be set already"),
+        "QORTY" => (*QORTY_TOKEN_ADDRESS.lock().unwrap()).expect("QORTY_TOKEN_ADDRESS must be set already"),
         _ => panic!("Expected QICK or QORTY ticker"),
     }
 }
@@ -417,6 +411,53 @@ pub fn generate_segwit_qtum_coin_with_random_privkey(
     let my_address = coin.my_address().expect("!my_address");
     fill_address(&coin, &my_address, balance, timeout);
     (ctx, coin, *priv_key.as_ref())
+}
+
+/// CRD ch.38 R38.6.6b: the sizes in bytes of the sender's swap payment transaction and of the taker fee
+/// transaction, each with a change output, for a wallet that holds a single unspent.
+///
+/// The in-process test coins use a plain fixed fee of 1,000 per kB, which charges exactly one base unit per
+/// byte, so the fee the coin reports is the size. The sizes are then priced at the rate of the coin
+/// configuration a test hands to the node with [`fee_for_rate`].
+pub fn single_unspent_swap_tx_sizes(coin: &UtxoStandardCoin) -> (u64, u64) {
+    use coins::utxo::{ActualTxFee, UtxoTxGenerationOps};
+    use coins::{FeeApproxStage, MmCoin, TradePreimageValue};
+
+    assert_eq!(block_on(coin.get_tx_fee()).unwrap(), ActualTxFee::FixedPerKb(1000));
+    let to_sat = |amount: MmNumber| -> u64 {
+        (amount.to_decimal() * BigDecimal::from(100_000_000))
+            .with_scale(0)
+            .to_string()
+            .parse()
+            .unwrap()
+    };
+    let trade_fee = block_on(coin.get_sender_trade_fee(
+        TradePreimageValue::Exact("0.001".parse().unwrap()),
+        FeeApproxStage::WithoutApprox,
+    ))
+    .unwrap();
+    let taker_fee =
+        block_on(coin.get_fee_to_send_taker_fee("0.001".parse().unwrap(), FeeApproxStage::WithoutApprox)).unwrap();
+    (to_sat(trade_fee.amount), to_sat(taker_fee.amount))
+}
+
+/// CRD ch.38 R38.6.6b: the plain fixed fee of a transaction of `size` bytes at `rate` base units per kB,
+/// in whole coins (eight decimals).
+pub fn fee_for_rate(size: u64, rate: u64) -> BigDecimal {
+    let fee = coins::utxo::ActualTxFee::FixedPerKb(rate).fee_for_size(size);
+    BigDecimal::from(fee as i64) / BigDecimal::from(100_000_000)
+}
+
+/// The trade fees a taker pays out of its balance before the volume: the swap payment transaction and the
+/// transaction that sends the taker fee, priced at `rate` base units per kB (CRD ch.38 R38.6.6b).
+pub fn taker_send_fees(coin: &UtxoStandardCoin, rate: u64) -> BigDecimal {
+    let (payment_tx_size, taker_fee_tx_size) = single_unspent_swap_tx_sizes(coin);
+    fee_for_rate(payment_tx_size, rate) + fee_for_rate(taker_fee_tx_size, rate)
+}
+
+/// The maximum taker volume solving `volume + volume * dex_fee_rate + fees = balance`.
+pub fn expected_max_taker_vol(balance: BigDecimal, fees: BigDecimal, dex_fee_rate: MmNumber) -> MmNumber {
+    MmNumber::from(balance - fees) / (MmNumber::from(1) + dex_fee_rate)
 }
 
 pub fn fill_address<T>(coin: &T, address: &str, amount: BigDecimal, timeout: u64)
