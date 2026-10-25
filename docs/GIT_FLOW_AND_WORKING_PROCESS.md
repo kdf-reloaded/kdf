@@ -204,6 +204,11 @@ test scaffolding, CI, dependency moves with no observable effect — belongs in
 the PR description, and in a plan only while that work is live (**P3**). Entries
 stay brief and derive from commit history.
 
+User-facing text (README, CHANGELOG, release notes, compatibility docs) names
+functionality in plain words that stand alone; CRD chapters and rule numbers are
+added only as a pointer for readers who want more. A bare chapter number is never
+the name of a feature. Where an example coin is needed anywhere, use RIN.
+
 **The pull request is the vessel for the detail** — explicitly agreed with the
 maintainer. An entry says what a user or integrator would notice; the
 measurements, the alternatives weighed and the costs accepted stay in the PR
