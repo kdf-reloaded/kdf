@@ -52,6 +52,16 @@ fn eth_coin_for_test_with_netid(
     fallback_swap_contract: Option<Address>,
     netid: u16,
 ) -> (MmArc, EthCoin) {
+    eth_coin_for_test_with_netid_and_decimals(coin_type, urls, fallback_swap_contract, netid, 18)
+}
+
+fn eth_coin_for_test_with_netid_and_decimals(
+    coin_type: EthCoinType,
+    urls: Vec<String>,
+    fallback_swap_contract: Option<Address>,
+    netid: u16,
+    decimals: u8,
+) -> (MmArc, EthCoin) {
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
@@ -74,7 +84,7 @@ fn eth_coin_for_test_with_netid(
     let my_addr = key_pair.address();
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
         coin_type,
-        decimals: 18,
+        decimals,
         gas_station_url: None,
         gas_station_decimals: ETH_GAS_STATION_DECIMALS,
         history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
@@ -2717,4 +2727,48 @@ mod scripted_node_ports {
             "the disagreement between the nodes must have forced a second round"
         );
     }
+}
+
+/// ch.57 T10 (R57.7A.1, R57.7A.3): an EVM coin's minimum trading volume is exactly one smallest unit,
+/// 10^-decimals, and its minimum transaction amount is exactly zero.
+#[test]
+fn t10_evm_min_trading_vol_is_one_smallest_unit() {
+    let erc20 = || EthCoinType::Erc20 {
+        platform: "ETH".to_string(),
+        token_addr: Address::from_slice(&hex::decode("2b294F029Fde858b2c62184e8390591755521d8E").unwrap()),
+    };
+    // 24 > 19: `10u64.pow(24)` would overflow, so this pins the absence of a machine-integer power.
+    for decimals in [18u8, 8, 6, 24] {
+        for coin_type in [EthCoinType::Eth, erc20()] {
+            let (_ctx, coin) = eth_coin_for_test_with_netid_and_decimals(
+                coin_type,
+                vec!["http://dummy.dummy".into()],
+                None,
+                mm2_net_config::SUPPORTED_NETIDS[0],
+                decimals,
+            );
+            let expected = MmNumber::from(mm2_number::BigRational::new(1.into(), num_bigint_pow10(decimals)));
+            assert_eq!(coin.min_trading_vol(), expected, "decimals {decimals}");
+            assert_eq!(coin.min_tx_amount(), BigDecimal::from(0), "decimals {decimals}");
+        }
+    }
+
+    let (_ctx, coin8) = eth_coin_for_test_with_netid_and_decimals(
+        erc20(),
+        vec!["http://dummy.dummy".into()],
+        None,
+        mm2_net_config::SUPPORTED_NETIDS[0],
+        8,
+    );
+    // The baseline integer-division formula yields 10^-2 for eight decimals; it must not come back.
+    assert_ne!(coin8.min_trading_vol(), MmNumber::from((1, 100)));
+    assert_eq!(coin8.min_trading_vol(), MmNumber::from((1, 100_000_000)));
+}
+
+fn num_bigint_pow10(decimals: u8) -> mm2_number::BigInt {
+    let mut v = mm2_number::BigInt::from(1);
+    for _ in 0..decimals {
+        v *= 10;
+    }
+    v
 }

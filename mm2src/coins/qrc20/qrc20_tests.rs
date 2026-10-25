@@ -24,9 +24,13 @@ const CONTRACT_CALL_GAS_FEE: i64 = (QRC20_GAS_LIMIT_DEFAULT * QRC20_GAS_PRICE_DE
 const SWAP_PAYMENT_GAS_FEE: i64 = (QRC20_PAYMENT_GAS_LIMIT * QRC20_GAS_PRICE_DEFAULT) as i64;
 
 pub fn qrc20_coin_for_test(priv_key: &[u8], fallback_swap: Option<&str>) -> (MmArc, Qrc20Coin) {
+    qrc20_coin_for_test_with_decimals(priv_key, fallback_swap, 8)
+}
+
+fn qrc20_coin_for_test_with_decimals(priv_key: &[u8], fallback_swap: Option<&str>, decimals: u8) -> (MmArc, Qrc20Coin) {
     let conf = json!({
         "coin":"QRC20",
-        "decimals": 8,
+        "decimals": decimals,
         "required_confirmations":0,
         "pubtype":120,
         "p2shtype":110,
@@ -1022,4 +1026,29 @@ fn test_send_contract_calls_recoverable_tx() {
         discriminant(&tx_err),
         discriminant(&TransactionErr::TxRecoverable(TransactionEnum::from(tx), String::new()))
     );
+}
+
+/// ch.57 T10 for the QRC20 layer (R57.7A.6): minimum trading volume is exactly 10^-decimals, minimum
+/// transaction amount exactly zero, including a decimals value (24) for which `10u64.pow` would overflow.
+#[test]
+fn t10_qrc20_min_trading_vol_is_one_smallest_unit() {
+    let priv_key = [1u8; 32];
+    for decimals in [18u8, 8, 6, 24] {
+        let (_ctx, coin) = qrc20_coin_for_test_with_decimals(&priv_key, None, decimals);
+        assert_eq!(coin.utxo.decimals, decimals);
+        let mut denom = mm2_number::BigInt::from(1);
+        for _ in 0..decimals {
+            denom *= 10;
+        }
+        assert_eq!(
+            coin.min_trading_vol(),
+            MmNumber::from(mm2_number::BigRational::new(1.into(), denom)),
+            "decimals {decimals}"
+        );
+        assert_eq!(coin.min_tx_amount(), BigDecimal::from(0), "decimals {decimals}");
+        if decimals == 8 {
+            // The baseline integer-division formula yields 10^-2 for eight decimals.
+            assert_ne!(coin.min_trading_vol(), MmNumber::from((1, 100)));
+        }
+    }
 }
