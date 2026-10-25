@@ -2,6 +2,13 @@
 
 **Status:** in progress (swap and `withdraw` paths shipped; T39.8.0h covered by the harness 2026-10-25; open: two-daemon detection, F3) — **Last reviewed:** 2026-10-25
 
+> **Postponed until after the beta, 2026-10-25.** The two open items, detection of two daemons on one
+> seed with separate wallet databases and F3 (the post-broadcast sync trigger, latency only), are not
+> worked on before the beta. A documented limitation is enough for the beta: the two-daemon case is
+> listed under *Known limitations* in `CHANGELOG.md` (run one instance per seed), and F3 changes
+> latency, not correctness, because the lock is recorded in the wallet database. Nothing here is marked
+> done by this note.
+>
 > **T39.8.0h harness built, 2026-10-25.** A test harness now drives a real Light-mode `ZCoin` over
 > a real shielded wallet database in a temporary directory, with the lightwalletd backend replaced by
 > the scripted transport the lightwalletd tests already had (`mm2src/coins/z_coin/z_note_lock_tests.rs`).
