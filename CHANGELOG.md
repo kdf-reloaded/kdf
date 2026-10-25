@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
   `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
   that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
+  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
+  60-second block time), so funds older than that are invisible while the sync completes
+  normally. This matches the reference, whose window is shorter; the remedy is to pass
+  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
 
 ### Changed
 
@@ -53,6 +58,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
   `wasm32` has a floor to raise. Detail: PR #38.
 
+### Removed
+
+- **The legacy `iguana/` and `etomic_build/` directories are gone.** Both were remnants of the
+  codebase's early days with no build, runtime, CI or documentation dependency. `iguana/tools/`
+  held a single Python 2.7 byte-compiled file, `getos.pyc` — the only `.pyc` in the tree — that
+  nothing referenced; `etomic_build/` held outdated `curl` wrapper scripts for the legacy RPC that
+  launched a binary path and sourced a coins file which no longer exist. The `.gitignore` entries
+  for paths under them were dropped with them; no other document changed. Three dead root scripts
+  went with them: `start_ONE_ANOTHER_trade.sh` (drove a `docker-compose` setup the repository
+  never contained and called scripts from the removed `etomic_build/`), `travis_cmake_linux.sh`
+  and `travis_cmake_mac.sh` (Travis-era CMake installers; the repository has no Travis
+  configuration). Detail: PR #64.
+
 ### Fixed
 
 - **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum
@@ -64,6 +82,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   10^-6. `min_trading_vol` reports the new value, and the
   minimum transaction amount, which the DEX fee and maximum-volume paths use, stays zero. Detail:
   PR #66; CRD ch.57 R57.7A.1, R57.7A.6.
+- **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
+  signing with a different algorithm, unless the new node-level boolean
+  `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
+  `witness_v0` and `fork_id`; any other value (for example RXD's shipped `fork_id_rxd`) used to be
+  silently replaced by the coin's default, so its transactions were signed wrongly and rejected by
+  the network. This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
+  activation now reports the offending value and the accepted set; with the switch set to `true` the
+  coin activates with the default, as under GLEEC KDF, and the node logs one warning per activation
+  naming the key and value. A coin with no `signature_version` is unchanged. The switch is named for
+  coin-configuration enumerations in general; `signature_version` is its only reader so far.
+  Detail: PR #54.
+- **A malformed or non-string `fork_id` in a UTXO coin's configuration now fails the activation
+  instead of crashing the node or taking the default.** A string such as `"0xZZ"` used to panic; a
+  number such as `64` was silently replaced by the coin's default. An absent `fork_id` is unchanged,
+  and the new switch does not apply: a malformed value is not an unrecognised enumeration member.
+  Detail: PR #54.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
@@ -132,6 +166,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
   price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
   conforming client may do, could also panic inside a swap send path and no longer can. Detail: PR #48.
+- **A swap on a merged-mined (AuxPoW) coin could be neither completed nor refunded once the chain
+  changed its block version.** The header reader recognized AuxPoW only by two exact version values,
+  so Syscoin headers at version `0x20100180` (from about height 1,320,000) were read as plain
+  80-byte headers and every header list was rejected. That broke median-time-past, which every HTLC
+  spend and refund needs, so a swap that reached the payment stage was stuck. SYS, NMC, PEP, DINGO,
+  MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
+  one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
+  protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
+  PR #55; CRD ch.37 R37.5.2, R37.5.4.
 
 ### Plans touched
 
@@ -151,6 +194,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
+  discharged most of its chain-rule confirmation step, leaving three of the four open items and
+  two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
+  whose median-time-past errors (PR #55).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
