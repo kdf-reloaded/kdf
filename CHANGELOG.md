@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
   window applies.** It names the start height and window size, notes that earlier funds will not be
   visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
-  signal (CRD ch.39 R39.8.0aw). Detail: PR #TBD.
+  signal (CRD ch.39 R39.8.0aw). Detail: PR #61.
 - **Releases and the runtime Docker image now ship the license files.** `COPYING`, `LICENSE` and
   `THIRDPARTY-LICENSES` are attached to every release and covered by the signed `SHA256SUMS`, and
   the image carries them in `/usr/share/doc/kdf/`. Detail: PR #36.
