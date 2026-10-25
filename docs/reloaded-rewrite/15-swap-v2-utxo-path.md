@@ -364,6 +364,13 @@ hash-time-locked-contract keypair using the chapter-bound
 all-outputs sighash flag; (6) return the
 preimage-plus-signature pair.
 
+> **Code-quality pointer (informative, 2026-10-25; this repository's
+> code).** Step (2)'s lower bound is fee **plus dust**; reloaded's
+> funding-spend builder today refuses only when the funding value does not
+> exceed the fee. Recorded with the related unchecked spend arithmetic as
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) finding F3 and
+> requirement R60.6.4.
+
 **R22.** `validate_taker_funding_spend_preimage` (maker side)
 MUST re-derive the expected preimage as in R21, then: (1)
 compare the preimage's input outpoint, output script, and output

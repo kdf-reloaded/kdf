@@ -130,6 +130,13 @@ chapter the dust floor is the only binding floor for the total; the
 network-level minimum-fee override is informative only and MUST NOT raise the
 effective floor above the taker coin's minimum-transferable amount.
 
+Because each peer applies step 3 with its *own* node's figure for the taker
+coin, that figure is effectively negotiated: two nodes agree on a trade whose
+product is below it only if they agree on the figure. The per-family values,
+and what a disagreement does in each protocol, are bound in
+[Chapter 60](60-trading-floors-and-refusal-contract.md) §60.3 and R60.5.4
+(Spec Reader 2026-10-25; cleared there by the Dirty Gate on 2026-10-25).
+
 > **Compatibility correction (informative).** An earlier Reloaded
 > implementation bound the optional network-level minimum to 1/10000
 > (0.0001) on both network identifiers and combined it with coin dust via

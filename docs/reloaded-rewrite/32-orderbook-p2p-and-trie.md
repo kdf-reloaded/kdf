@@ -306,7 +306,11 @@ bytes* are dictated.
 When a maker sets no minimum volume, `min_volume` carries the per-coin
 default of [Chapter 57](57-evm-fee-inputs.md) §57.7A R57.7A.4 (cleared
 there on 2026-10-24 — see the second scoped-addition item of its §57.12);
-a receiver validates it only for non-negativity.
+a receiver validates it only for non-negativity. For every coin family,
+the default is `max(b, q ÷ p)` over the two coins' minimum trading
+volumes, and the maker answers no taker request below the order's
+minimum volume ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.4.2, R60.5.1–R60.5.3; cleared there on 2026-10-25).
 
 ### 32.5.2 In-memory enrichment and the side channel (behaviour)
 

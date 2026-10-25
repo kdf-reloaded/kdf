@@ -1,6 +1,6 @@
 # Plan: finish Solana support
 
-**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-18
+**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-25
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity` when the coin-activation wire-parity work found
@@ -76,3 +76,13 @@ From ch. 40 §40.6 and `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md`:
 ## Out of scope here
 
 Retiring the primary surface. It stays, per the decision above.
+
+## Trading floors (added 2026-10-25)
+
+The reference implements no minimum trading volume for Solana or SPL: its
+request ends abnormally (CRD ch. 60 row P1, finding F6). Its minimum
+transaction amount is one lamport for SOL and for every SPL token, whatever the
+token's decimals. Reloaded reports 0.00777 and 0 today and does not crash, so
+there is no parity target. Choose Solana's floors when this plan designs Solana
+trading, and record the choice in ch. 40 §40.6A. Decided by the maintainer on
+2026-10-25 under plan `trading-floors-parity`.

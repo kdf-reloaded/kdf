@@ -289,6 +289,21 @@ Reloaded currently ships the baseline-era Solana surface, which differs from
 > capability queries are also unimplemented in the reference and abort the
 > request if reached; reloaded shall return structured errors instead.
 
+## 40.6A Trading floors (pointer; Spec Reader 2026-10-25, cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+R40.6A.1 In both reference designations (`v2.6.0-beta` and `v3.0.0-beta`
+agree) neither SOL nor an SPL token has a usable minimum trading volume:
+the accessor is unimplemented and ends the request abnormally, so the
+reference cannot place an order in either. The minimum transaction amount
+is one lamport (10^-9) for SOL **and** for every SPL token, whatever the
+token's decimals. Reloaded reports a minimum trading volume of 0.00777
+and a minimum transaction amount of zero for both, values carried over
+from the baseline anchor (R1). Neither tree can swap Solana, so no peer can
+observe the difference; reloaded may keep its values, but no Solana
+request may terminate abnormally
+([Chapter 60](60-trading-floors-and-refusal-contract.md) row P1, R60.6.5,
+finding F6).
+
 ## 40.7 Tests
 
 T40.1 Both `experimental::` methods are routed on native and WASM builds.
@@ -368,7 +383,13 @@ with the shapes listed in §40.6 items 3-5.
   discriminants.
 - *Sibling-allowlist consultations:* [Chapter 36](36-tendermint-v2-activation-rpcs.md),
   [Chapter 55](55-coin-activation-wire-contract.md).
-- *Forbidden corpus:* consulted, under the chapter-01 two-team clean-room
+- *Forbidden corpus:* (addition of 2026-10-25, §40.6A, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12:
+  also consulted at the same two tags, only to establish that the
+  minimum trading volume is unimplemented for SOL and SPL tokens and that
+  their minimum transaction amount is one lamport; no discretionary
+  expression reproduced.) Otherwise consulted, under the chapter-01 two-team clean-room
   workflow, at the GLEEC KDF tags `v3.0.0-beta` (reference) and `v2.6.0-beta`
   (legacy comparison), for upstream wire parity of the Solana activation
   methods only -- specifically the method strings and targets of R40.1.1, the

@@ -423,6 +423,18 @@ Tron swap/NFT operation; the deferral sites exist to make the
 boundary explicit and MUST surface a typed refusal (or a guarded
 unreachable) rather than producing incorrect swap behaviour.
 
+## 21.11A Trading floors (pointer; Spec Reader 2026-10-25, cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+TRX and TRC20 tokens are cases of the EVM coin family in both trees, so
+their minimum trading volume is the EVM rule of
+[Chapter 57](57-evm-fee-inputs.md) R57.7A.1 — one smallest unit,
+`10^-decimals` (TRX: 10^-6) — and their minimum transaction amount is zero
+(R57.7A.3), in both reference designations (`v2.6.0-beta` and
+`v3.0.0-beta` agree). Reloaded today reports the baseline formula's
+10^-2 for TRX; the chapter-57 change (PR #66) corrects TRON with the rest
+of the EVM family. No peer observes the value while D1–D2 keep Tron out
+of swaps ([Chapter 60](60-trading-floors-and-refusal-contract.md) row T1).
+
 ## 21.12 Baseline Verifications
 
 The following are verifiable from the baseline state defined in
@@ -483,7 +495,13 @@ V3. The address encoding, protobuf transaction/contract formats,
   error-aggregation / defence-in-depth deferral pattern the
   swap/NFT refusals follow); Chapter 19 (the NFT-withdraw module
   whose chain-support boundary excludes Tron-family chains).
-- *Forbidden corpus:* consulted **only** to recover the
+- *Forbidden corpus:* (addition of 2026-10-25, §21.11A, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12:
+  also consulted under the chapter-01 two-team procedure, at
+  `v2.6.0-beta` and `v3.0.0-beta`, only to establish that TRON coins take
+  the EVM family's floors; no discretionary expression reproduced.)
+  Otherwise consulted **only** to recover the
   externally-dictated activation method strings and coin-config
   JSON shape of §21.4, the SLIP-44 coin type of §21.4/§21.12, and
   the dictated address/transaction/signing/fee/node-API interop
