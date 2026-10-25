@@ -536,7 +536,7 @@ price validator and fully separable, and remains open.
 
 ---
 
-## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25; implementation landed in PR #62 for the median-time-past path, header sync and stores pending)**
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25 in two legs; the key landed in PR #62 for the median-time-past path; the registry-free structural fallback R37.5.9e, the key rename and the header-sync/store threading pending on the PR #62 follow-up)**
 
 CRD reference:
 [`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
@@ -569,35 +569,62 @@ this repository's own code and from public-network measurement alone.
   precedence over `chain_variant` for `"BTC"`-pinned entries; the four
   options and the one the evidence favours are in ch. 37 §37.9 D3. Parity
   **gap**; the family work needs no compatibility switch, while the
-  stop-gap option 4 (spend without a median) would.
+  stop-gap option 4 (spend without a median) would. *(The structural
+  fallback later bound as the registry-free leg, below, is switch-governed
+  — a deliberate divergence with its `[]` opt-back — so the sentence before
+  this one holds for the key leg only.)*
 
-  **Resolution path (2026-10-25, maintainer decision; clean-room-original,
-  no gate).** Bound in ch. 37 §37.5.9 (R37.5.9–R37.5.9d): a Reloaded-only
-  coin-configuration key, `protocol.reloaded_header_layout` (name and value
-  spellings proposed, pending the maintainer's veto), which the reference
-  ignores (ch. 45 R45.3.7) and which takes precedence over `chain_variant`
-  for the coin it is set on — D3 option 2 with option 3's per-header
-  structural recognition as its mechanism; option 4 rejected. Values:
-  `"riecoin"` (112 bytes, fixed) for `RIC`; `"kawpow_auxpow_mixed"` (per
-  header: AuxPoW flag clear → 120-byte KawPoW, set → std-80) for `MEWC`.
-  Both entries keep their registry `"BTC"`, so the shared coins file serves
-  both implementations. Median-time-past is computed from each parsed
-  header's timestamp; stored bytes and identity are the full served bytes
-  (R37.5.9c). No compatibility switch: nothing a counterparty observes
-  changes (R37.5.9d). Implementation is step H4a of
-  `docs/plans/utxo-header-family-selection.md`, placed ahead of the
-  remaining D1 family work as the **beta blocker**. **Implementation
-  landed in PR #62 (median-time-past path):** the key is read into the coin
-  configuration, the Riecoin and mixed readers are in the tree, and the
-  median-time-past the HTLC spend and refund query is computed from the
-  key's layout, so the spend no longer fails for an entry carrying the key.
-  The header-sync (SPV), single-header timestamp and header-store reads do
-  not yet use the layout (ch. 37 §37.5.8), so this item **stays open until
-  header sync and the stores follow** and the ch. 37 §37.8 R37.5.9 criteria
-  pass on every read path. `XPM` is out
-  of scope (wallet-only). The ch. 37 material is clean-room-original and
-  carries its own provenance note and §37.10 item; nothing here is gated or
-  awaiting a gate.
+  **Resolution path (2026-10-25, maintainer decisions; clean-room-original,
+  no gate).** Bound in ch. 37 §37.5.9 (R37.5.9–R37.5.9e) in **two legs**.
+  *Leg 1, the key as local override:* a Reloaded-only coin-configuration
+  key, `protocol.header_layout` (renamed 2026-10-25 from the proposed
+  `reloaded_header_layout`: the key is **not expected in the shared public
+  registry** — its maintainer will not add a Reloaded-specific key to a
+  shared file — so it is a local-override feature for an operator's own
+  coins file and its name is unbranded), which the reference ignores
+  (ch. 45 R45.3.7) and which takes precedence over `chain_variant` for the
+  coin it is set on — D3 option 2 with option 3's per-header structural
+  recognition as its mechanism; option 4 rejected. Values: `"riecoin"`
+  (112 bytes, fixed) for `RIC`; `"kawpow_auxpow_mixed"` (per header: AuxPoW
+  flag clear → 120-byte KawPoW, set → std-80) for `MEWC`. *Leg 2, the
+  registry-free path (R37.5.9e):* a **structural fallback** under the
+  standard family — for a coin without the key whose family is in the
+  node-level `MM2.json` array `header_layout_fallback_families` (default
+  `["BTC"]`, which until ch. 37 §37.9 D1 lands is every coin), a header
+  list or lone header the standard read does not consume exactly is re-read
+  under the Riecoin layout, then the mixed layout, and accepted only on
+  exact consumption; ambiguous lists are rejected; one `info` line per coin
+  per activation names the layout chosen so the operator can pin the coin
+  with the key; a malformed switch value refuses the launch. This is what
+  makes the registry's `RIC` and `MEWC` entries swap **with no change to
+  the shared registry**. Both entries keep their registry `"BTC"`, so the
+  shared coins file serves both implementations. Median-time-past is
+  computed from each parsed header's timestamp; stored bytes and identity
+  are the full served bytes (R37.5.9c). Compatibility: the key needs no
+  switch (R37.5.9d: nothing a counterparty observes changes); the fallback
+  is a deliberate divergence from the reference (which has no fallback and
+  misparses to a random median silently), Reloaded side by default under
+  `docs/COMPAT_SWITCHES.md`'s default-side rule, arm 2, with the
+  reference's selection reachable by `[]`, and takes a
+  `docs/GLEEC_COMPATIBILITY.md` row and a `RELOADED_VS_GLEEC.md` entry on
+  the code branch. Implementation is steps H4a (key) and H4b (fallback and
+  switch) of `docs/plans/utxo-header-family-selection.md`, placed ahead of
+  the remaining D1 family work as the **beta blocker**. **Implementation
+  landed in PR #62 (median-time-past path, key leg):** the key is read into
+  the coin configuration (under its earlier name), the Riecoin and mixed
+  readers are in the tree, and the median-time-past the HTLC spend and
+  refund query is computed from the key's layout, so the spend no longer
+  fails for an entry carrying the key. **Pending on the PR #62 follow-up:**
+  the structural fallback and its switch (which is what fixes the two
+  coins for a node running the shared registry as it stands), the rename
+  to `header_layout`, and the threading of the layout to the header-sync
+  (SPV), single-header timestamp and header-store reads (ch. 37 §37.5.8).
+  This item **stays open until the fallback lands and header sync and the
+  stores follow**, and the ch. 37 §37.8 R37.5.9 and R37.5.9e criteria pass
+  on every read path. `XPM` is out of scope (wallet-only; no fallback
+  step). The ch. 37 material is clean-room-original and carries its own
+  provenance note and §37.10 item; nothing here is gated or awaiting a
+  gate.
 - [ ] **Refund-wait bound floored instead of capped (ch. 37 §37.6,
   code-quality finding).** This repository's UTXO refund-eligibility
   routine returns a wait of *at least* one hour where the reference, since
