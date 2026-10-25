@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-24
+**Status:** parked (proposed 2026-09-23; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-25
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -29,7 +29,14 @@
 >    PIVX and RUNES remain until D1 parses their families. RIC, XPM and
 >    MEWC do **not** leave the set with D1: no value of the reference's
 >    closed set lays out their headers, so they wait on ch.37 §37.9 D3
->    (cleared 2026-10-24).
+>    (cleared 2026-10-24; revised and re-cleared 2026-10-25). For them
+>    the error is not the safer failure this item once took it for: the
+>    median-time-past error reaches the **HTLC spend**, which queries the
+>    median before it signs (ch.37 §37.6 note), so on an Electrum
+>    connection RIC and MEWC swaps fail at the spend where the
+>    reference's complete — a **swap-breaking** gap, not a safer failure.
+>    XPM is wallet-only (registry `wallet_only: true`) and outside swap
+>    scope.
 
 ## How the four items connect
 
@@ -43,10 +50,14 @@ families, and they parse once those families exist. RIC, XPM and MEWC are a
 different case: no value of the reference's set lays out their headers
 (Riecoin, Primecoin and Meowcoin layouts, ch.37 §37.5.2), so D1 leaves them
 failing and they wait on ch.37 §37.9 D3, which needs a family the reference
-does not have and a decision on how a coin selects it.
+does not have and a decision on how a coin selects it. Because that failure
+reaches the HTLC spend (ch.37 §37.6 note), D3 is the step that restores RIC
+and MEWC swaps, and it ranks above item 2 (identity hashes), which blocks SPV
+readiness but no swap.
 
 So the order is: add the family and thread it (item 1) → parse the missing
-families (which closes item 4 for LBRY, PIVX and RUNES) → switch identity and
+families (which closes item 4 for LBRY, PIVX and RUNES) → the D3 families
+and their selector (which restores RIC and MEWC swaps) → switch identity and
 storage to served bytes (item 2). Item 3 no longer comes first: what is left
 of it is a dependency of item 2's linkage divergence only, not a prerequisite
 for any step.
@@ -247,9 +258,14 @@ changelog and in `docs/GLEEC_COMPATIBILITY.md` if upstream differs.
 Once LBRY, PIVX and RUNES parse, item 4's regression is gone for them. The
 strict list check itself stays; it is required by R37.5.6. RIC, XPM and MEWC
 stay in the failing set after this step: no family of the set lays out their
-headers, so their lists are rejected whole and median-time-past errors (the
-better of the two outcomes, ch.37 §37.5.6 — the reference misparses them
-silently) until ch.37 §37.9 D3 is decided (open decision 6).
+headers, so their lists are rejected whole and median-time-past errors until
+ch.37 §37.9 D3 is decided (open decision 6). That error is not the better
+outcome it was once called here: it reaches our HTLC spend, which queries the
+median before it signs, so our spend fails too (ch.37 §37.6 note, §37.9 D3).
+The reference's random median is tolerated by *its* spend — the spending
+transaction's final sequence makes consensus ignore the lock-time — and not
+by its refund, which is mis-timed and delayed by up to an hour per round.
+Reloaded is stricter and, until D3, less usable on these two coins.
 
 R37.5.5 no longer waits on anything (ch.37 §37.9 D1, closing bullet): the
 PIVX thresholds are pinned, the KawPoW trailer keeps the version key and the
@@ -314,14 +330,37 @@ corresponding D paragraph when it lands.
   120-byte headers** — merged-mined blocks (AuxPoW flag bit 8 set) stripped
   to 80 bytes, native blocks with the 120-byte KawPoW trailer; a three-header
   list at the tip measured 80 + 80 + 120. Under `"BTC"` the reference reads 80
-  bytes per header and returns a **silently wrong** median-time-past; under
-  `"RVN"` (the rework's own guidance for the ticker) neither kind parses, so
-  that value **fails** too. No value of the reference's set describes the
-  chain, and a corrected coin file cannot fix it. Under this plan's rules the
-  coin fails loudly instead: mixed lists are rejected whole, so median-time-
-  past errors rather than mis-timing a refund. Resolution is ch.37 §37.9 D3
-  (open decision 6); `RIC` (112-byte Riecoin headers under `"BTC"`) and `XPM`
-  (89–90-byte Primecoin headers, no key) are in the same position.
+  bytes per header and returns a **random** median-time-past, not a slightly
+  skewed one — measured 2026-10-25 against the registry's own servers over
+  eleven-header tip windows (ch.37 §37.5.1): RIC 2 of 11 records read
+  correctly, MEWC 4 of 11 with the median about eleven years early, XPM 1 of
+  11 with the median about thirty-four years late. The reference's default
+  family fails too: about half of the misaligned records carry a random
+  bit 8 and start an AuxPoW read that errors, so `"BTC"` is a deliberate,
+  still-load-bearing workaround — the one value that turns a failing list
+  into a silently wrong median — which the registry maintainer confirmed on
+  2026-10-25 (open decision 7). The reference's HTLC spend does not depend
+  on the value (final sequence, ch.37 §37.6 note); only its refund
+  mis-times. Under `"RVN"` (the rework's own guidance for the ticker)
+  neither kind parses, so that value **fails** too. No value of the
+  reference's set describes the chain, and a corrected coin file cannot fix
+  it. Under this plan's rules the coin fails loudly instead: mixed lists are
+  rejected whole, median-time-past errors, and the error reaches the HTLC
+  spend (item 4 above). Resolution is ch.37 §37.9 D3 (open decision 6);
+  `RIC` and `XPM` are in the same position, and their layouts are now
+  confirmed against the chains' public definitions (ch.37 §37.5.2,
+  2026-10-25): Riecoin `version (4) + prev (32) + merkle (32) + time (8,
+  64-bit) + bits (4) + nonce (32, 256-bit)` = 112 bytes, under `"BTC"`;
+  Primecoin std-80 plus a length-prefixed big-number multiplier, 88–91
+  bytes, no key.
+- **Refund-wait floor vs cap (ch.37 §37.6 code-quality finding, cleared
+  2026-10-25):** our UTXO refund-eligibility routine *floors* the wait it
+  returns at one hour where the reference *caps* it, so a refund is delayed
+  by up to an hour per round beyond the moment it became spendable; no funds
+  at risk, nothing signed changes. Own-repo fix in both branches (cap instead
+  of floor), no gate needed; owner is ch.51's refund timing, cross-referenced
+  from ch.52 (maker refund polling). Separate from this plan's steps —
+  recorded here because it fell out of reading the median's consumers for D3.
 - **H5 hash-scope change:** changes lookup results for AuxPoW stores. It needs
   the migration decision and a test on both backends.
 - **WASM:** H3 and H5 touch the IndexedDB store. Run
@@ -370,21 +409,43 @@ corresponding D paragraph when it lands.
    needs; dropping it is exact parity. If kept, it is a divergence and falls
    under `docs/COMPAT_SWITCHES.md`.
 6. **How a D3 chain selects its family** (ch.37 §37.9 D3 — `RIC`, `XPM`,
-   `MEWC`): the three options the chapter records, none chosen there — (a)
-   Reloaded-only `chain_variant` values beyond the eight, which the reference
-   rejects at activation, so such a coin file is a Reloaded coin file; (b) a
-   separate Reloaded-only key beside `chain_variant` that the reference
-   ignores, so one registry entry serves both; (c) no new configuration —
-   structural recognition of the three layouts under the default family by
-   exact byte consumption, which reintroduces version-free inference and
-   cannot read the Meowcoin mixed list without a per-header decision. The
-   Riecoin and Primecoin layouts in ch.37 §37.5.2 were decoded from served
-   bytes and must be confirmed against the chains' published definitions
-   before either is implemented.
-7. **Raise `RIC`'s and `MEWC`'s `"BTC"` with the registry maintainer:** ch.37
-   §37.9 D3 records both as mis-descriptions that make the reference return
-   a silently wrong median for both coins. Whether and how to report it is a
-   maintainer's call, not an implementer's.
+   `MEWC`): the four options the chapter records, none chosen there.
+   **Precedence constraint** (ch.37 §37.9 D3, 2026-10-25): the registry
+   keeps `"BTC"` on `RIC` and `MEWC`, so whatever selects a Reloaded-only
+   family must take precedence over `chain_variant` for `"BTC"`-pinned
+   entries — otherwise R37.5.3 (exclusive std-80) rejects their lists after
+   D1 exactly as the default does today. The options: (a) Reloaded-only
+   `chain_variant` values beyond the eight, which the reference rejects at
+   activation, so such a coin file is a Reloaded coin file — this forks the
+   coins file for three coins; (b) a separate Reloaded-only key beside
+   `chain_variant` that the reference ignores, so one registry entry serves
+   both, with the precedence rule as a one-line contract; (c) no new
+   configuration — structural recognition of the layouts under the default
+   family by exact byte consumption, which reintroduces version-free
+   inference, cannot read the Meowcoin mixed list without a per-header
+   decision, and does nothing for a `"BTC"`-pinned entry unless it may
+   override that value, which R37.5.3 forbids — viable only as a fallback
+   for `RIC` and `XPM` (fixed or self-delimiting lengths); (d) *(added
+   2026-10-25)* spend without a median: the HTLC spend needs no median for
+   its validity, so a spend that cannot obtain one falls back to the HTLC
+   lock-time alone. That restores the happy path for all three coins
+   without a new family, but it changes the lock-time field of a signed,
+   broadcast transaction relative to the reference (wire-visible),
+   substitutes a value in a funds-moving path for data the call site could
+   not obtain, and leaves the refund path as broken as today — a stop-gap
+   that would need a `docs/COMPAT_SWITCHES.md` record; not favored.
+   **Evidence favors (b)**, with (c) as the fallback for `RIC` and `XPM`
+   should the registry decline a Reloaded key. The Riecoin and Primecoin
+   layouts in ch.37 §37.5.2 are confirmed against the chains' published
+   definitions (2026-10-25), so nothing blocks implementing either once the
+   selector is chosen.
+7. **Raise `RIC`'s and `MEWC`'s `"BTC"` with the registry maintainer** —
+   **answered 2026-10-25.** The maintainer confirmed that the value is
+   intentional, that swaps with both coins completed on the reference under
+   it, and that `XPM` is wallet-only; ch.37 §37.5.1's re-examination shows
+   why the value is still load-bearing there. No registry change to request;
+   Reloaded selects its families by other means (decision 6). The chapter no
+   longer calls the entries a mis-description.
 
 ## Upstream reference pointers for a KDF Spec Reader dispatch
 
@@ -395,6 +456,21 @@ corresponding D paragraph when it lands.
 > the §37.5.7b table and §37.9 D3) and were cleared by the Dirty Gate the same
 > day (ch.37 §37.10, PASS 0.02). The table below stays as the record of what
 > was dispatched; the ch.37 footer deliberately does not carry these numbers.
+
+> **Dispatched 2026-10-25.** The `"BTC"`-family re-examination pass took,
+> beside the corpus at the release designations `v2.6.0-beta` and
+> `v3.0.0-beta` (and `v2.0.0-beta` and the baseline for the refund-wait
+> bound): the public issue threads **#2048**, **#2620** and **#2584** (the
+> reference's header-parsing failure reports, read for failure mode and
+> coins affected only); the pull requests **#2563**, **#2583** and **#2692**
+> (the three change-sets ch.37 §37.5.3 describes by kind — the last two are
+> also in the table below); and the release tag **`v3.0.0-beta`**. Its
+> results are in ch.37 (the §37.5.1 re-examination sub-note, the §37.5.2
+> confirmation cells, the §37.5.3 vintage paragraph, the §37.6 *Where the
+> median goes* note and code-quality finding, the §37.8 D3 sentence and the
+> revised §37.9 D3) and were cleared by the Dirty Gate the same day (ch.37
+> §37.10, PASS 0.02). As before, the numbers live here and not in the
+> chapter.
 
 > **A clean context must not open any of these.** They are recorded here solely
 > to direct a KDF Spec Reader dispatch — the only role permitted to read
@@ -420,7 +496,8 @@ accordingly.
 ## References
 
 - CRD ch.37 §37.5 (R37.5.1–R37.5.7), R37.5.2a, §37.5.7a, §37.5.7b, §37.5.8,
-  §37.9 D1–D3, and the chain-variant pass clearance item of §37.10.
+  §37.9 D1–D3, and the chain-variant pass and `"BTC"`-family
+  re-examination pass clearance items of §37.10.
 - Commit `47ede628c` (the collision fix) and its tests in
   `mm2src/kdf_chain/src/header.rs`.
 - Branch `fix/auxpow-bit8-recognition` (PR #55) and its tests in the same file
