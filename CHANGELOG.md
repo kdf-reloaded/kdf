@@ -44,7 +44,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   only the median-time-past. The structural fallback for `RIC` and `MEWC` now applies on all of those paths
   too. A coin configured `"LBC"` or `"PIVX"` still activates but every header read of it now fails with a
   "not implemented" error, where before it read the headers as standard 80-byte ones and mostly failed;
-  the other families still read the standard layout (CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e). Detail: PR #TBD.
+  the other families still read the standard layout (CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e). Detail: PR #74.
 
 - **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
   `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy

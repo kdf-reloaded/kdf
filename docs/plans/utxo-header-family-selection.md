@@ -220,7 +220,7 @@ The type becomes `Clone + Copy + PartialEq`. The fallback in
 
 ### H2 — Read the key at activation
 
-**Done (2026-10-25, PR #TBD).** `UtxoConfBuilder` reads `protocol.chain_variant`
+**Done (2026-10-25, PR #74).** `UtxoConfBuilder` reads `protocol.chain_variant`
 beside `header_layout` (exact, case-sensitive, eight values; unknown or non-string
 fails the coin build naming ticker and value, even when `header_layout` is
 present) into `UtxoCoinConf::chain_variant`. One layout per coin is resolved by
@@ -276,7 +276,7 @@ conf through the same builder, so check both.
 
 ### H3 — Carry the family everywhere
 
-**Done (2026-10-25, PR #TBD), for every path the Electrum backend has.** A cloneable
+**Done (2026-10-25, PR #74), for every path the Electrum backend has.** A cloneable
 `HeaderReadPolicy` (layout, optional fallback) is built once per coin and reaches:
 `retrieve_last_headers`, the sync loop and reorg walk, `get_block_timestamp`
 (policy-taking variant; the old method is the standard-layout wrapper), the SPV
