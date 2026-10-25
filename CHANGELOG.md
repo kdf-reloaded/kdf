@@ -24,6 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   with no on-chain check yet: duplicate references, the three reference opcodes that are skipped,
   and sighash modes other than `ALL | FORKID`. RXD's fitness for swaps beyond signing is not
   established, so this does not announce RXD trading. Detail: PR #65; CRD ch.58 §58.3, §58.5.
+- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
+  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
+  60-second block time), so funds older than that are invisible while the sync completes
+  normally. This matches the reference, whose window is shorter; the remedy is to pass
+  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
 
 ### Changed
 
@@ -170,6 +175,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   EVM tests ported to a scripted local node (PR #30).
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
   two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
+  discharged most of its chain-rule confirmation step, leaving three of the four open items and
+  two non-blocking spec residuals; the implementation steps no longer wait on that step.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

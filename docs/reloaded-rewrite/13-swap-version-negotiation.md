@@ -399,6 +399,11 @@ D3. **Anti-downgrade challenge.** R10 prohibits mutation
   on which R8's backward-compatibility hinge depends.
 - The hash-time-locked-contract atomic-swap protocol that
   the version tag governs the dispatch of.
+- [Chapter 59](59-legacy-ordermatch-negotiation.md) — the
+  negotiation loop that carries this chapter's version tag
+  on its first two messages (ch. 59 §59.2, R59.4.3) and
+  that performs the per-side protocol-support and
+  lock-duration checks alongside it (ch. 59 R59.4.5).
 
 ## 13.11 Baseline Verifications
 
