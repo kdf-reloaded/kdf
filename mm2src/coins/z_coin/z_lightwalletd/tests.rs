@@ -45,7 +45,7 @@ fn canopy_params() -> ZcoinConsensusParams {
     .unwrap()
 }
 
-fn test_addressing() -> HtlcAddressing {
+pub(crate) fn test_addressing() -> HtlcAddressing {
     HtlcAddressing {
         p2sh_prefix: 0xbd,
         p2sh_t_prefix: 0,
@@ -55,7 +55,7 @@ fn test_addressing() -> HtlcAddressing {
     }
 }
 
-fn info(branch: u32, height: u64) -> ServerInfo {
+pub(crate) fn info(branch: u32, height: u64) -> ServerInfo {
     ServerInfo {
         chain_name: "main".to_owned(),
         sapling_activation_height: 152855,
@@ -373,22 +373,35 @@ fn branch_identifiers_parse_as_the_service_sends_them() {
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Default)]
-struct Script {
-    info: Option<Result<ServerInfo, EndpointError>>,
+pub(crate) struct Script {
+    pub(crate) info: Option<Result<ServerInfo, EndpointError>>,
     /// What `GetLatestBlock` answers to admission; follows the info height when unset.
-    cache: Option<Result<u64, EndpointError>>,
-    tips: VecDeque<Result<u64, EndpointError>>,
-    transaction: Option<Result<RawTx, EndpointError>>,
-    send: Option<Result<(), EndpointError>>,
-    balance: Option<Result<i64, EndpointError>>,
+    pub(crate) cache: Option<Result<u64, EndpointError>>,
+    pub(crate) tips: VecDeque<Result<u64, EndpointError>>,
+    /// What `GetLatestBlock` answers once `tips` has run dry, instead of failing as unscripted. Lets a
+    /// fixture hold the chain at a height for as many reads as the code under test makes.
+    pub(crate) tip_floor: Option<u64>,
+    /// Set as `tip_floor` the moment a broadcast is accepted: the chain mines the transaction.
+    pub(crate) tip_after_send: Option<u64>,
+    pub(crate) transaction: Option<Result<RawTx, EndpointError>>,
+    pub(crate) send: Option<Result<(), EndpointError>>,
+    /// How long a broadcast takes to be answered, to widen a race around it.
+    pub(crate) send_delay: Option<std::time::Duration>,
+    pub(crate) balance: Option<Result<i64, EndpointError>>,
 }
 
+/// Called with the bytes of every broadcast, before the scripted answer is returned.
+pub(crate) type SendObserver = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 #[derive(Default)]
-struct FakeTransport {
-    scripts: Mutex<HashMap<String, Script>>,
-    calls: Mutex<Vec<(String, &'static str)>>,
+pub(crate) struct FakeTransport {
+    pub(crate) scripts: Mutex<HashMap<String, Script>>,
+    pub(crate) calls: Mutex<Vec<(String, &'static str)>>,
     last_balance_request: Mutex<Option<Vec<String>>>,
     last_txid: Mutex<Option<[u8; 32]>>,
+    /// The bytes handed to `send_transaction`, accepted or not, in call order.
+    pub(crate) sent: Mutex<Vec<Vec<u8>>>,
+    pub(crate) on_send: Mutex<Option<SendObserver>>,
 }
 
 impl fmt::Debug for FakeTransport {
@@ -396,11 +409,11 @@ impl fmt::Debug for FakeTransport {
 }
 
 impl FakeTransport {
-    fn serve(&self, server: &str, script: Script) { self.scripts.lock().insert(server.to_owned(), script); }
+    pub(crate) fn serve(&self, server: &str, script: Script) { self.scripts.lock().insert(server.to_owned(), script); }
 
     fn record(&self, server: &str, method: &'static str) { self.calls.lock().push((server.to_owned(), method)); }
 
-    fn called(&self, server: &str, method: &'static str) -> usize {
+    pub(crate) fn called(&self, server: &str, method: &'static str) -> usize {
         self.calls
             .lock()
             .iter()
@@ -440,7 +453,7 @@ impl LightwalletdTransport for FakeTransport {
         self.scripts
             .lock()
             .get_mut(server)
-            .and_then(|s| s.tips.pop_front())
+            .and_then(|s| s.tips.pop_front().or_else(|| s.tip_floor.map(Ok)))
             .unwrap_or_else(|| Err(Self::unscripted()))
     }
 
@@ -459,13 +472,34 @@ impl LightwalletdTransport for FakeTransport {
             .unwrap_or_else(|| Err(Self::unscripted()))
     }
 
-    async fn send_transaction(&self, server: &str, _data: Vec<u8>) -> Result<(), EndpointError> {
+    async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError> {
         self.record(server, "send");
-        self.scripts
-            .lock()
-            .get(server)
-            .and_then(|s| s.send.clone())
-            .unwrap_or_else(|| Err(Self::unscripted()))
+        let observer = self.on_send.lock().clone();
+        if let Some(observer) = observer {
+            observer(&data);
+        }
+        self.sent.lock().push(data);
+        let (delay, answer) = {
+            let scripts = self.scripts.lock();
+            let script = scripts.get(server);
+            (
+                script.and_then(|s| s.send_delay),
+                script
+                    .and_then(|s| s.send.clone())
+                    .unwrap_or_else(|| Err(Self::unscripted())),
+            )
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if answer.is_ok() {
+            if let Some(script) = self.scripts.lock().get_mut(server) {
+                if let Some(tip) = script.tip_after_send {
+                    script.tip_floor = Some(tip);
+                }
+            }
+        }
+        answer
     }
 
     async fn taddr_balance(&self, server: &str, addresses: Vec<String>) -> Result<i64, EndpointError> {

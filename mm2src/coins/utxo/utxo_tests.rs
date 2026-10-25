@@ -102,7 +102,7 @@ fn test_utxo_activation_params_min_addresses_number() {
     assert_eq!(params_without_minimum.min_addresses_number, None);
 }
 
-fn utxo_coin_fields_for_test(
+pub(crate) fn utxo_coin_fields_for_test(
     rpc_client: UtxoRpcClientEnum,
     force_seed: Option<&str>,
     is_segwit_coin: bool,
