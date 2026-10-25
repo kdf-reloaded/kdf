@@ -15,6 +15,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
   `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
   that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Radiant (RXD) now activates and signs with Radiant's own signature hash.** A UTXO coin whose
+  `signature_version` is `fork_id_rxd` signs every input with the Radiant dialect: the Bitcoin-Cash
+  BIP-143 preimage with one extra digest, a 76-byte summary per output, inserted before the outputs
+  digest. RXD's shipped entry therefore no longer refuses to activate, and needs no switch.
+  Withdrawals, swap transactions and `sign_raw_transaction` all use it. The digest is checked
+  against two Radiant mainnet transactions, one of whose outputs carry Radiant references. Shapes
+  with no on-chain check yet: duplicate references, the three reference opcodes that are skipped,
+  and sighash modes other than `ALL | FORKID`. RXD's fitness for swaps beyond signing is not
+  established, so this does not announce RXD trading. Detail: PR #65; CRD ch.58 §58.3, §58.5.
 - **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
   shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
   60-second block time), so funds older than that are invisible while the sync completes
@@ -57,6 +66,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The `sia-rust` pin now requires `web-sys >= 0.3.70`**, which reqwest 0.12's wasm backend needs;
   our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
   `wasm32` has a floor to raise. Detail: PR #38.
+- **Lockfile bumps clear three RustSec advisories:** `tokio` 1.52.0 to 1.54.1 (RUSTSEC-2026-0386,
+  `AsyncFd::new` I/O safety), `rustls-webpki` 0.103.15 to 0.103.16 (RUSTSEC-2026-0382, distrusted
+  intermediates) and `webpki-roots` 1.0.8 to 1.0.11 (RUSTSEC-2026-0381, emSign intermediates). The
+  bundled trust store drops four roots (Atos TrustedRoot 2011, emSign Root CA - C1, emSign ECC Root
+  CA - C3 and G3) and adds four (SECOM TLS RSA and ECC Root CA 2024, Telia EC and RSA TLS Root CA
+  v3); connections to servers chained only to a dropped root stop verifying. A fourth advisory,
+  RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5 timing variability, reached through `k256`/`ecdsa` 0.16),
+  cannot be fixed by a lockfile update; it is accepted in `deny.toml` until the RustCrypto EC stack
+  moves to `crypto-bigint` 0.7. Detail: PR #68.
 
 ### Removed
 
@@ -78,12 +96,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
   and the trade-preimage path applied the floor twice. The increase is now purely proportional.
   Detail: CRD ch.57 R57.3.2; PR #59.
+- **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
+  eligibility check floored its "wait this long" answer at one hour, so a refund that became
+  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
+  nothing signed changes and no funds were at risk. Detail: PR #60; CRD ch.37 §37.6 finding.
 - **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
   signing with a different algorithm, unless the new node-level boolean
   `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
-  `witness_v0` and `fork_id`; any other value (for example RXD's shipped `fork_id_rxd`) used to be
-  silently replaced by the coin's default, so its transactions were signed wrongly and rejected by
-  the network. This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
+  `witness_v0`, `fork_id` and `fork_id_rxd`; any other value used to be silently replaced by the
+  coin's default, so its transactions were signed wrongly and rejected by the network. RXD's
+  `fork_id_rxd` was such a value until the Radiant signature hash was implemented (see Added).
+  This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
   activation now reports the offending value and the accepted set; with the switch set to `true` the
   coin activates with the default, as under GLEEC KDF, and the node logs one warning per activation
   naming the key and value. A coin with no `signature_version` is unchanged. The switch is named for
@@ -190,6 +213,8 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
+  two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
 - [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
   discharged most of its chain-rule confirmation step, leaving three of the four open items and
   two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
