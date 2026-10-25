@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   against two Radiant mainnet transactions, one of whose outputs carry Radiant references. Shapes
   with no on-chain check yet: duplicate references, the three reference opcodes that are skipped,
   and sighash modes other than `ALL | FORKID`. RXD's fitness for swaps beyond signing is not
-  established, so this does not announce RXD trading. Detail: PR #TBD; CRD ch.58 §58.3, §58.5.
+  established, so this does not announce RXD trading. Detail: PR #65; CRD ch.58 §58.3, §58.5.
 
 ### Changed
 
@@ -169,7 +169,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
-  two mainnet test vectors sourced and the Radiant signature hash implemented (PR #TBD).
+  two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
