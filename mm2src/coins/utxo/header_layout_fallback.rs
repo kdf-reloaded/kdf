@@ -64,24 +64,59 @@ impl HeaderLayoutFallback {
     }
 }
 
-/// Runs `read` with `standard` and, only when that fails, with each layout of [`FALLBACK_CASCADE`]
-/// in order, returning the first success. With `fallback` `None`, or when every layout fails, the
-/// error of the standard read is returned. The fallback never runs when the standard read succeeded.
+/// Why a fallback-aware read failed.
+#[derive(Debug)]
+pub enum FallbackReadError<E> {
+    /// The standard read failed and no alternative consumed the bytes exactly (or the fallback was
+    /// off): the error of the standard read.
+    Rejected(E),
+    /// More than one alternative layout consumed the bytes exactly; the operator resolves it by
+    /// pinning the coin with `header_layout` (CRD ch.37 R37.5.9e).
+    Ambiguous(String),
+}
+
+fn layout_name(layout: CoinVariant) -> &'static str {
+    match layout {
+        CoinVariant::Riecoin => "riecoin",
+        CoinVariant::KawpowAuxpowMixed => "kawpow_auxpow_mixed",
+        CoinVariant::Standard => "standard",
+        CoinVariant::Qtum => "qtum",
+    }
+}
+
+/// Runs `read` with `standard` and, only when that fails, with every layout of [`FALLBACK_CASCADE`],
+/// accepting the result only if exactly one alternative consumed the bytes exactly. With `fallback`
+/// `None`, or when no alternative fits, the error of the standard read is returned; when two fit the
+/// read is [`FallbackReadError::Ambiguous`]. The fallback never runs when the standard read succeeded.
 pub(crate) fn read_with_fallback<T, E>(
     standard: CoinVariant,
     fallback: Option<&HeaderLayoutFallback>,
     read: impl Fn(CoinVariant) -> Result<T, E>,
-) -> Result<T, E> {
+) -> Result<T, FallbackReadError<E>> {
     let original = match read(standard) {
         Ok(parsed) => return Ok(parsed),
         Err(e) => e,
     };
-    let Some(fallback) = fallback else { return Err(original) };
-    for layout in FALLBACK_CASCADE {
-        if let Ok(parsed) = read(layout) {
+    let Some(fallback) = fallback else {
+        return Err(FallbackReadError::Rejected(original));
+    };
+    let mut fits: Vec<(CoinVariant, T)> = FALLBACK_CASCADE
+        .into_iter()
+        .filter_map(|layout| read(layout).ok().map(|parsed| (layout, parsed)))
+        .collect();
+    match fits.len() {
+        0 => Err(FallbackReadError::Rejected(original)),
+        1 => {
+            let (layout, parsed) = fits.remove(0);
             fallback.chosen(layout);
-            return Ok(parsed);
-        }
+            Ok(parsed)
+        },
+        _ => Err(FallbackReadError::Ambiguous(format!(
+            "{}: the served headers consume exactly under both the '{}' and '{}' layouts; \
+             pin the coin with \"header_layout\"",
+            fallback.ticker,
+            layout_name(fits[0].0),
+            layout_name(fits[1].0)
+        ))),
     }
-    Err(original)
 }

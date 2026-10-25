@@ -55,7 +55,7 @@ pub enum UtxoConfError {
         value: String,
     },
     #[display(
-        fmt = "'{}' in MM2.json must be an array of strings, got {}",
+        fmt = "'{}' in MM2.json must be an array of distinct chain_variant names (BTC, QTUM, LBC, PPC, RICK, MORTY, RVN, PIVX), got {}",
         HEADER_LAYOUT_FALLBACK_FAMILIES_KEY,
         _0
     )]
@@ -69,23 +69,37 @@ pub const HEADER_LAYOUT_FALLBACK_FAMILIES_KEY: &str = "header_layout_fallback_fa
 /// The families the fallback applies to when `MM2.json` does not carry the key.
 const HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT: &[&str] = &["BTC"];
 
-/// Reads the node switch `header_layout_fallback_families`: an array of strings, default `["BTC"]`
-/// when the key is absent. Any other type (a non-array, or an array holding a non-string) is a
-/// configuration error rather than a silent default, so a typo cannot quietly change which coins
-/// are probed. `[]` turns the fallback off.
+/// The `chain_variant` spellings (CRD ch.37 R37.5.1) a family in the switch may take.
+const HEADER_LAYOUT_FAMILY_SPELLINGS: [&str; 8] = ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"];
+
+/// Reads the node switch `header_layout_fallback_families` (CRD ch.37 R37.5.9e): an array whose every
+/// element is one of the eight `chain_variant` spellings, without duplicates; default `["BTC"]` when
+/// the key is absent. Anything else (a non-array, a non-string element, an unknown or lowercase
+/// spelling, a duplicate) is a configuration error, so a typo cannot quietly change which coins are
+/// probed. `[]` is valid and turns the fallback off.
 pub fn header_layout_fallback_families(ctx: &MmArc) -> UtxoConfResult<Vec<String>> {
-    match ctx.conf.get(HEADER_LAYOUT_FALLBACK_FAMILIES_KEY) {
-        None => Ok(HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
+    let Some(value) = ctx.conf.get(HEADER_LAYOUT_FALLBACK_FAMILIES_KEY) else {
+        return Ok(HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
             .iter()
             .map(|f| (*f).to_owned())
-            .collect()),
-        Some(Json::Array(items)) => items
-            .iter()
-            .map(|item| item.as_str().map(str::to_owned))
-            .collect::<Option<Vec<_>>>()
-            .or_mm_err(|| UtxoConfError::InvalidHeaderLayoutFallbackFamilies(Json::Array(items.clone()).to_string())),
-        Some(other) => MmError::err(UtxoConfError::InvalidHeaderLayoutFallbackFamilies(other.to_string())),
+            .collect());
+    };
+    let invalid = || UtxoConfError::InvalidHeaderLayoutFallbackFamilies(value.to_string());
+    let Json::Array(items) = value else {
+        return MmError::err(invalid());
+    };
+    let mut families: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let family = item
+            .as_str()
+            .filter(|f| HEADER_LAYOUT_FAMILY_SPELLINGS.contains(f))
+            .or_mm_err(invalid)?;
+        if families.iter().any(|f| f == family) {
+            return MmError::err(invalid());
+        }
+        families.push(family.to_owned());
     }
+    Ok(families)
 }
 
 impl From<Bip32Error> for UtxoConfError {

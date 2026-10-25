@@ -1,5 +1,5 @@
 use super::*;
-use crate::utxo::header_layout_fallback::read_with_fallback;
+use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError};
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -951,6 +951,10 @@ impl UtxoRpcClientOps for ElectrumClient {
                         usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
                     let headers = read_with_fallback(coin_variant, fallback.as_ref(), |layout| {
                         BlockHeader::list_from_served_bytes(&res.hex.0, count, layout)
+                    })
+                    .map_err(|e| match e {
+                        FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
+                        FallbackReadError::Ambiguous(reason) => MmError::new(UtxoRpcError::InvalidResponse(reason)),
                     })?;
                     let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
                     // can unwrap because count is non zero

@@ -6270,7 +6270,7 @@ fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
 
 mod header_layout_fallback_tests {
     use super::*;
-    use crate::utxo::header_layout_fallback::{read_with_fallback, HeaderLayoutFallback};
+    use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError, HeaderLayoutFallback};
     use crate::utxo::utxo_builder::header_layout_fallback_families;
     use mm2_core::mm_ctx::MmCtxBuilder;
     use std::sync::atomic::Ordering;
@@ -6297,7 +6297,11 @@ mod header_layout_fallback_tests {
             .build()
     }
 
-    fn list_times(conf: &UtxoCoinConf, bytes: &[u8], count: usize) -> Result<u32, serialization::Error> {
+    fn list_times(
+        conf: &UtxoCoinConf,
+        bytes: &[u8],
+        count: usize,
+    ) -> Result<u32, FallbackReadError<serialization::Error>> {
         let variant = utxo_common::header_variant(conf, CoinVariant::Standard);
         let fallback = HeaderLayoutFallback::for_conf(conf);
         let headers = read_with_fallback(variant, fallback.as_ref(), |layout| {
@@ -6317,24 +6321,23 @@ mod header_layout_fallback_tests {
     }
 
     #[test]
-    fn switch_defaults_to_btc_and_reads_arrays_of_strings() {
+    fn switch_defaults_to_btc_and_accepts_only_distinct_chain_variant_names() {
         assert_eq!(header_layout_fallback_families(&ctx_with(json!({}))).unwrap(), vec![
             "BTC"
         ]);
-        assert!(
-            header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": [] })))
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": ["BTC", "RVN"] })))
-                .unwrap(),
-            vec!["BTC", "RVN"]
-        );
+        for (value, expected) in [
+            (json!([]), vec![]),
+            (json!(["BTC"]), vec!["BTC"]),
+            (json!(["BTC", "PPC"]), vec!["BTC", "PPC"]),
+        ] {
+            let got = header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": value })))
+                .unwrap();
+            assert_eq!(got, expected);
+        }
     }
 
     #[test]
-    fn switch_of_the_wrong_type_is_a_configuration_error() {
+    fn switch_of_the_wrong_shape_is_a_configuration_error() {
         for bad in [
             json!("BTC"),
             json!(true),
@@ -6342,15 +6345,15 @@ mod header_layout_fallback_tests {
             json!(null),
             json!({}),
             json!(["BTC", 1]),
-            json!([["BTC"]]),
+            json!(["btc"]),
+            json!(["FOO"]),
+            json!(["BTC", "BTC"]),
         ] {
-            let err = conf(
-                json!({ "header_layout_fallback_families": bad.clone() }),
-                json!({ "type": "UTXO" }),
-            )
-            .expect_err("a wrong-typed switch must not default");
+            let ctx = ctx_with(json!({ "header_layout_fallback_families": bad.clone() }));
+            let err = header_layout_fallback_families(&ctx).expect_err("a malformed switch must not default");
             let text = err.to_string();
             assert!(text.contains("header_layout_fallback_families"), "{text}");
+            assert!(text.contains(&bad.to_string()), "{text}");
             assert!(
                 matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayoutFallbackFamilies(_)),
                 "{bad}"
@@ -6467,8 +6470,38 @@ mod header_layout_fallback_tests {
         bytes.push(0);
         let original = chain::BlockHeader::list_from_served_bytes(&bytes, 11, CoinVariant::Standard).unwrap_err();
         let err = list_times(&conf, &bytes, 11).unwrap_err();
-        assert_eq!(format!("{err:?}"), format!("{original:?}"));
+        assert!(matches!(&err, FallbackReadError::Rejected(e) if format!("{e:?}") == format!("{original:?}")));
         assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    /// Five headers, 560 bytes: read as 5 x 112 (Riecoin) and as 4 x 120 + 1 x 80 (mixed). The bytes
+    /// are built so both layouts consume exactly: zero upper time halves at every 112-byte boundary,
+    /// AuxPoW flag clear in the first four versions and set in the fifth.
+    #[test]
+    fn a_five_header_list_that_two_layouts_consume_is_ambiguous() {
+        let mut bytes = vec![0u8; 560];
+        bytes[481] = 0x01; // version of the 5th mixed header at 480: bit 8 set
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Riecoin).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::KawpowAuxpowMixed).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Standard).is_err());
+        match list_times(&conf, &bytes, 5) {
+            Err(FallbackReadError::Ambiguous(reason)) => {
+                assert!(
+                    reason.contains("riecoin") && reason.contains("kawpow_auxpow_mixed"),
+                    "{reason}"
+                );
+            },
+            other => panic!("expected an ambiguity, got {other:?}"),
+        }
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+        // Pinned, the same bytes parse.
+        let pinned = self::conf(
+            json!({}),
+            json!({ "type": "UTXO", "header_layout": "kawpow_auxpow_mixed" }),
+        )
+        .unwrap();
+        assert!(list_times(&pinned, &bytes, 5).is_ok());
     }
 
     #[test]
