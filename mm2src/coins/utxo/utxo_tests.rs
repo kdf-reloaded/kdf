@@ -3456,7 +3456,7 @@ fn firo_lelantus_tx_details() {
 
 #[test]
 fn test_generate_tx_doge_fee() {
-    // A tx below 1kb is always 0,01 doge fee per kb.
+    // DOGE is plain fixed 1,000,000 per kB with a forced minimum relay fee; both are proportional (R38.6.6b).
     let config = json!({
         "coin": "DOGE",
         "name": "dogecoin",
@@ -3487,63 +3487,35 @@ fn test_generate_tx_doge_fee() {
     ))
     .unwrap();
 
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![TransactionOutput {
-        value: 100000000,
-        script_pubkey: vec![0; 26].into(),
-    }];
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 1000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        40
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 2000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        60
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 3000000;
-    assert_eq!(expected_fee, data.fee_amount);
+    // CRD ch.38 R38.6.6b: the fee is proportional to the size of the final transaction, never below the
+    // forced minimum relay fee: max(floor(txfee * size / 1000), floor(relay_rate * size / 1000)).
+    let relay_rate_sat = {
+        let relay = block_on(doge.as_ref().rpc_client.get_relay_fee().compat()).unwrap();
+        sat_from_big_decimal(&relay, doge.as_ref().decimals).unwrap()
+    };
+    for outputs_count in [1usize, 40, 60] {
+        let unspents = vec![UnspentInfo {
+            outpoint: Default::default(),
+            value: 1000000000000,
+            height: None,
+        }];
+        let outputs = vec![
+            TransactionOutput {
+                value: 100000000,
+                script_pubkey: vec![0; 26].into(),
+            };
+            outputs_count
+        ];
+        let builder = UtxoTxBuilder::new(&doge)
+            .add_available_inputs(unspents)
+            .add_outputs(outputs);
+        let (tx, data) = block_on(builder.build()).unwrap();
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        let expected_fee = ActualTxFee::FixedPerKb(1000000)
+            .fee_for_size(size)
+            .max(ActualTxFee::Dynamic(relay_rate_sat).fee_for_size(size));
+        assert_eq!(expected_fee, data.fee_amount, "{outputs_count} outputs, {size} bytes");
+    }
 }
 
 #[test]
