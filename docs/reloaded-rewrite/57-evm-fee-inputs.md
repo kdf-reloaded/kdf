@@ -664,6 +664,20 @@ expected-`EthGas` error where the reference would honour it.
 > item of §57.12, and are not restated here. V4 in §57.10 rests on the
 > pinned baseline tree alone (R1) and was not part of the candidate.
 
+> **As-built status (2026-10-25, clean-side record).** R57.7A.1,
+> R57.7A.3 and R57.7A.6 are **implemented in PR #66**
+> (`fix/evm-min-trading-volume`, to be merged after PR #57), from this
+> cleared section alone: a shared helper in the coin-layer types computes
+> one smallest unit exactly as a rational, and both the EVM and the QRC20
+> market-operations `min_trading_vol` return it; `min_tx_amount` is
+> unchanged at zero; no compatibility switch (R57.7A.5). The tests of
+> T10–T12 are in the PR, with the as-built notes beneath T11 and T12
+> recording what they pin and what they do not. D7's price-floor remedy
+> was left out by maintainer decision. This note and the as-built notes
+> below describe this project's own implementation, contain no
+> forbidden-class material, and are not part of the cleared text; the
+> cleared rules and tests above and below are unchanged.
+
 *Why this section is in this chapter.* The minimum trading volume is a
 per-coin property that the coin layer reports and the order-match layer
 consumes. For UTXO coins the property is bound where the UTXO coin layer is
@@ -736,6 +750,14 @@ pinned-baseline behaviour (V4) and is unchanged in the reference at every
 designation of §57.1; it is restated here so that an implementer can tell
 which observable refusals R57.7A.1 changes. It is bound by whichever
 order-match chapter comes to own order validation, not by this one.
+
+> **As-built note (2026-10-25, PR #66) — the `min_trading_vol` response
+> fields.** The fourth row binds the value, not the field names, which
+> this chapter does not pin. As built, the legacy `min_trading_vol` method
+> returns the value in the fields `min_trading_vol` and
+> `min_trading_vol_fraction`; the version-2 method returns it in `amount`
+> and `amount_fraction`. Recorded here so that a wallet reading either
+> response has one place to look; it is not cleared rule text.
 
 **R57.7A.5** *Observability and compatibility.* The value is local policy
 at order creation: a node applies its own coins' floors to orders *it*
@@ -884,6 +906,18 @@ MUST report 10^-8 for that token. *(Cleared with §57.7A — see the
 clearance statement at its head and the second scoped-addition item in
 §57.12.)*
 
+> **As-built note (2026-10-25, PR #66).** The "typed volume-too-low
+> refusal" is, as built, the taker order builder's `BaseAmountTooLow` and
+> the maker order builder's `MaxBaseVolTooLow`; both trade previews map
+> them to `TradePreimageRpcError::VolumeTooLow` carrying 10^-8 as the
+> threshold. The PR's test covers those two refusals and their mapping, the
+> maker preview for a zero volume (the third row of R57.7A.4), and both
+> `min_trading_vol` methods. **Not driven:** the end-to-end maker and
+> taker preview for 0.00072437 on a real eight-decimal coin — the test
+> coin lacks the balance and fee mocks it would need — and the maker
+> order-update path, which shares the creation path's validator but is not
+> separately tested. Those two remain open against this test.
+
 **T12.** *Fee and maximum-volume paths are untouched.* For an EVM taker
 coin, the DEX fee for a trade amount `a` MUST equal `a` times the pair's
 rate with no absolute floor, and the maximum taker volume for an
@@ -892,6 +926,18 @@ minimum transaction amount of R57.7A.3, not on the trading-volume floor.
 The test MUST fail if either path begins to read the trading-volume
 floor. *(Cleared with §57.7A — see the clearance statement at its head and
 the second scoped-addition item in §57.12.)*
+
+> **As-built note (2026-10-25, PR #66) — R57.7A.3 and T12.** As built,
+> the DEX-fee pipeline's threshold is `max(net_cfg.dex_fee_min_threshold(),
+> min_tx_amount)`. The network-level value is zero by the trait's default,
+> so for an EVM taker coin the threshold is zero and the fee is the rate
+> times the amount, as R57.7A.3 requires. A nonzero per-netid override of
+> `dex_fee_min_threshold` would be the one place an absolute floor could
+> re-enter this path; none exists today, and any future override must be
+> weighed against R57.7A.3. The PR's test guards the DEX-fee half of this
+> test; the maximum-taker-volume half is **not** guarded — the test as
+> written cannot detect a future read of the trading-volume floor on that
+> path, which stays open against this test.
 
 ## 57.9 Deferred Work
 
