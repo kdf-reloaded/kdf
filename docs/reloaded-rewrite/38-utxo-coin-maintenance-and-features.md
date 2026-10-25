@@ -520,6 +520,12 @@ figure ([Chapter 60](60-trading-floors-and-refusal-contract.md) R60.6.2).
 Acceptance: the values of R38.6.6h and the
 tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 
+> **As-built note (2026-10-25, clean-side record).** Items 1 and 2 are
+> implemented in PR #66: the `BTC` exception is gone and the fee term is
+> truncated, with T60.1 (less its whole-kilobyte cases) and T60.2 as
+> tests. Items 3 and 4 remain, for the UTXO fee-policy PR of plan
+> `trading-floors-parity`. The cleared rule text above is unchanged.
+
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
 Spark-specific script/output types) so FIRO activates and transacts. Acceptance:

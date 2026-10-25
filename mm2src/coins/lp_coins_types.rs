@@ -15,6 +15,10 @@ pub enum PaymentInstructions {
     WatcherReward(BigDecimal),
 }
 
+/// Exactly one smallest unit of a coin with `decimals` decimals, i.e. 10^-decimals, as a rational.
+/// Valid for every `u8`: the scale is carried by `BigDecimal`, so no machine-integer power is formed.
+pub(crate) fn one_smallest_unit(decimals: u8) -> MmNumber { BigDecimal::new(1.into(), i64::from(decimals)).into() }
+
 pub type BalanceResult<T> = Result<T, MmError<BalanceError>>;
 pub type BalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<BalanceError>> + Send>;
 pub type NonZeroBalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<GetNonZeroBalance>> + Send>;

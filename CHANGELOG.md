@@ -100,6 +100,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum
+  trading volume was 10^-(decimals / 3) with integer division, so every 8-decimal token refused a
+  buy, a sell, a maker order or a trade preview below 0.01 (`The volume 0.00072437 of the
+  WBTC-PLG20 coin less than minimum transaction amount 0.01`), and a maker that set no minimum
+  advertised 0.01 to its peers. It is now one smallest unit of the coin, 10^-decimals, matching the
+  reference. QRC20 tokens get the same fix, and TRX, which shares the EVM path, moves from 10^-2 to
+  10^-6. `min_trading_vol` reports the new value. The minimum transaction amount, which the DEX fee
+  and maximum-volume paths use, stays zero. Detail: PR #66; CRD ch.57 R57.7A.1, R57.7A.6.
+- **BTC's minimum trading volume is now 0.0001, as for BTC-segwit and in the reference.** The exact
+  ticker `BTC` was fixed at 0.00777; it now follows the UTXO rule, the larger of ten times the dust
+  and ten times the fee for a 496-byte spend. That fee term is now truncated rather than rounded up,
+  which changes no coin in the public coins file. Detail: PR #66; CRD ch.60 R60.6.1, ch.38 R38.6.6e–f.
+- **`min_trading_vol`, `setprice`, `buy`, `sell` and `trade_preimage` no longer crash the request for
+  Lightning, Solana or SPL coins.** Lightning now reports its minimum trading volume and minimum
+  transaction amount as the reference does: the largest counterparty minimum HTLC over its open
+  channels, or 1 msat. Orders and trade previews involving Lightning, Solana or SPL, which cannot
+  trade yet, are refused with an error naming the coin; `trade_preimage` returns the new typed error
+  `TradingNotSupported` (HTTP 400). Detail: PR #66; CRD ch.60 R60.6.5, ch.41 R41.11A.
 - **RIC (Riecoin) and MEWC (Meowcoin) swaps could not complete the HTLC spend.** Their Electrum
   servers serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native
   blocks at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected,

@@ -678,7 +678,7 @@ match it exactly. In version two a UTXO taker's funding must match
 exactly (ch. 60 R60.5.4). Reloaded matches the reference on
 this value for every family that can swap.
 
-- [ ] **UTXO floor (ch. 38 R38.6.6i items 1–2).** Reloaded still fixes the
+- [x] **UTXO floor (ch. 38 R38.6.6i items 1–2)** — implemented in PR #66. Reloaded still fixes the
   exact ticker `BTC` at 0.00777 (BTC-segwit is already 0.0001, the
   reference value for both), and rounds the fee term up where the
   reference truncates. The rounding difference affects no entry of the
@@ -704,7 +704,7 @@ this value for every family that can swap.
   checking it. A fee that reaches the HTLC value then wraps and the
   daemon rejects the broadcast. The version-two funding-spend builder
   checks the fee but not the dust. Required: refuse cleanly.
-- [ ] **Lightning floors (ch. 41 R41.11A.2, finding F5).** Both accessors
+- [x] **Lightning floors (ch. 41 R41.11A.2, finding F5)** — implemented in PR #66. Both accessors
   are placeholders that end the request abnormally. Required: the
   reference value, or an orderly refusal while Lightning trading is
   unsupported.

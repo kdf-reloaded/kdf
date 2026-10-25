@@ -11,7 +11,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
 use super::{derive_htlc_pubkeys, validate_wire_field_len, validate_wire_pubkey};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{MatchBy, OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
+use crate::mm2::lp_ordermatch::{untradable_coin_ticker, MatchBy, OrderConfirmationsSettings, TakerAction,
+                                TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
@@ -2269,6 +2270,9 @@ pub async fn taker_swap_trade_preimage(
     base_coin: MmCoinEnum,
     rel_coin: MmCoinEnum,
 ) -> TradePreimageRpcResult<TakerTradePreimage> {
+    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
+        return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
+    }
     let action = req
         .swap_method
         .to_taker_action()
@@ -3348,5 +3352,156 @@ mod taker_swap_tests {
             NegotiationDataMsg::V2(data) => assert_eq!(data.persistent_pubkey, node_pubkey),
             other => panic!("one key for both coins must be sent as shape 2, got {other:?}"),
         }
+    }
+}
+
+/// ch.57 T11 (preview and version-2 parts) and T12 (R57.7A.3, R57.7A.4). `TestCoin::min_trading_vol` is mocked
+/// because a real EVM coin cannot be built here without live endpoints; the EVM values are pinned by T10 in the
+/// `coins` crate.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ch57_min_trading_vol_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::{MakerOrderBuilder, TakerOrderBuilder};
+    use crate::mm2::lp_swap::dex_fee::dex_fee_amount_from_taker_coin_ref;
+    use crate::mm2::lp_swap::maker_swap::maker_swap_trade_preimage;
+    use crate::mm2::lp_swap::trade_preimage::{TradePreimageRequest, TradePreimageRpcError};
+    use coins::{CoinsContext, MarketCoinOps, TestCoin};
+    use common::block_on;
+    use common::mm_number::BigRational;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use mocktopus::mocking::*;
+
+    fn one_smallest_unit_8() -> MmNumber { MmNumber::from(BigRational::new(1.into(), 100_000_000.into())) }
+
+    fn half_smallest_unit_8() -> MmNumber { MmNumber::from(BigRational::new(1.into(), 200_000_000.into())) }
+
+    fn mock_floor() { TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(one_smallest_unit_8())); }
+
+    fn conf_settings() -> OrderConfirmationsSettings {
+        OrderConfirmationsSettings {
+            base_confs: 1,
+            base_nota: false,
+            rel_confs: 1,
+            rel_nota: false,
+        }
+    }
+
+    fn coins() -> (MmCoinEnum, MmCoinEnum) {
+        (
+            MmCoinEnum::Test(TestCoin::new("WBTC8")),
+            MmCoinEnum::Test(TestCoin::new("REL")),
+        )
+    }
+
+    /// Both previews end by running the order builder of the real request and mapping its refusal with
+    /// `from_{maker,taker}_order_build_error`; the balance and fee steps before it need live coins. This pins
+    /// that tail: the same refusals map to the typed volume-too-low error carrying 10^-8.
+    #[test]
+    fn t11_preview_refusal_mapping_carries_the_floor() {
+        mock_floor();
+        let (base, rel) = coins();
+
+        let maker_err = match MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(half_smallest_unit_8())
+            .with_price(1.into())
+            .with_conf_settings(conf_settings())
+            .build()
+        {
+            Err(e) => e,
+            Ok(_) => panic!("maker build must be refused"),
+        };
+        match TradePreimageRpcError::from_maker_order_build_error(maker_err, "WBTC8", "REL") {
+            TradePreimageRpcError::VolumeTooLow { coin, threshold, .. } => {
+                assert_eq!(coin, "WBTC8");
+                assert_eq!(MmNumber::from(threshold), one_smallest_unit_8());
+            },
+            other => panic!("unexpected maker preview error: {}", other),
+        }
+
+        let taker_err = match TakerOrderBuilder::new(&base, &rel)
+            .with_base_amount(half_smallest_unit_8())
+            .with_rel_amount(1.into())
+            .with_sender_pubkey(H256Json::from([1u8; 32]))
+            .with_conf_settings(conf_settings())
+            .build()
+        {
+            Err(e) => e,
+            Ok(_) => panic!("taker build must be refused"),
+        };
+        match TradePreimageRpcError::from_taker_order_build_error(taker_err, "WBTC8", "REL") {
+            TradePreimageRpcError::VolumeTooLow { coin, threshold, .. } => {
+                assert_eq!(coin, "WBTC8");
+                assert_eq!(MmNumber::from(threshold), one_smallest_unit_8());
+            },
+            other => panic!("unexpected taker preview error: {}", other),
+        }
+    }
+
+    /// R57.7A.4: the maker preview reports the base coin's floor as the threshold for a zero volume. This
+    /// path returns before any balance or fee lookup, so the real preview function runs here.
+    #[test]
+    fn t11_maker_preview_zero_volume_reports_the_floor() {
+        mock_floor();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let (base, rel) = coins();
+        let req: TradePreimageRequest = json::from_value(json!({
+            "base": "WBTC8", "rel": "REL", "swap_method": "setprice", "price": "1", "volume": "0"
+        }))
+        .unwrap();
+        let err = match block_on(maker_swap_trade_preimage(&ctx, req, base, rel)) {
+            Err(e) => e,
+            Ok(_) => panic!("zero volume must be refused"),
+        };
+        match err.into_inner() {
+            TradePreimageRpcError::VolumeTooLow { coin, threshold, .. } => {
+                assert_eq!(coin, "WBTC8");
+                assert_eq!(MmNumber::from(threshold), one_smallest_unit_8());
+            },
+            other => panic!("unexpected error: {}", other),
+        }
+    }
+
+    #[test]
+    fn t11_v2_min_trading_vol_reports_the_floor() {
+        mock_floor();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new("WBTC8")))).unwrap();
+
+        let req: MinTradingVolV2Request = json::from_value(json!({"coin": "WBTC8"})).unwrap();
+        let v2 = match block_on(min_trading_vol_v2(ctx, req)) {
+            Ok(v2) => json::to_value(&v2).unwrap(),
+            Err(e) => panic!("min_trading_vol_v2 failed: {}", e),
+        };
+        assert_eq!(v2["coin"], "WBTC8");
+        assert_eq!(v2["amount"], "0.00000001");
+        assert_eq!(v2["amount_fraction"]["numer"], "1");
+        assert_eq!(v2["amount_fraction"]["denom"], "100000000");
+    }
+
+    /// T12: for a taker coin whose `min_tx_amount` is zero (the EVM case), the DEX fee is rate times amount with
+    /// no absolute floor, and the maximum taker volume ignores `min_trading_vol`. `min_trading_vol` is mocked to
+    /// panic, so the test fails if either path starts to read the trading-volume floor.
+    #[test]
+    fn t12_dex_fee_and_max_taker_vol_do_not_read_min_trading_vol() {
+        TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
+        TestCoin::min_trading_vol
+            .mock_safe(|_| panic!("the DEX fee and max taker volume must not read min_trading_vol"));
+
+        let net_cfg = net_config_or_panic(8762);
+        let taker = TestCoin::new("WBTC8");
+
+        // Amount far below any plausible floor: the fee must still be exactly rate * amount.
+        let tiny = one_smallest_unit_8();
+        let rate = dex_fee_rate(net_cfg, "WBTC8", "REL");
+        let fee = dex_fee_amount_from_taker_coin_ref(net_cfg, &taker, "REL", &tiny);
+        assert_eq!(fee, &tiny * &rate);
+        assert!(fee < one_smallest_unit_8(), "no absolute fee floor may apply");
+
+        // Max taker volume: the zero minimum transaction amount makes it balance / (1 + rate), exactly.
+        let available = MmNumber::from(1);
+        let max_vol = max_taker_vol_from_available(net_cfg, available.clone(), "WBTC8", "REL", &MmNumber::from(0))
+            .unwrap_or_else(|_| panic!("max taker volume must be computable"));
+        assert_eq!(max_vol, available / (MmNumber::from(1) + rate));
     }
 }

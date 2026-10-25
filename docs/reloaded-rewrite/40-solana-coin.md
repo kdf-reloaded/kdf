@@ -304,6 +304,14 @@ request may terminate abnormally
 ([Chapter 60](60-trading-floors-and-refusal-contract.md) row P1, R60.6.5,
 finding F6).
 
+> **As-built note (2026-10-25, clean-side record).** Implemented in PR
+> #66. Reloaded keeps its values. `setprice`, `buy`, `sell` and both trade
+> previews used to reach unimplemented Solana and SPL fee functions; they
+> now refuse a pair involving a Solana or SPL coin with an error naming
+> the coin, so no Solana request ends abnormally. The plan
+> `solana-support` chooses Solana's floors when Solana trading is
+> designed. The cleared rule text above is unchanged.
+
 ## 40.7 Tests
 
 T40.1 Both `experimental::` methods are routed on native and WASM builds.
