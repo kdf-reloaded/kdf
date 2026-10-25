@@ -132,6 +132,14 @@ node shall report exactly the reference value. Rows for families that
 cannot swap in one or both trees (T1, L1, P1) bind only R60.2.3 and the
 value given; no peer can observe them through a swap.
 
+> **As-built note (2026-10-25, clean-side record).** After PR #66 the
+> "Reloaded today" column reads as follows. U1: the `BTC` exception is
+> gone and the fee term is truncated; the whole-kilobyte option is still
+> missing. Q1, E1 and T1 match. L1 matches, and Lightning pairs are refused
+> while Lightning trading is unsupported. P1 keeps its values, and Solana
+> and SPL pairs are refused the same way (R60.6.5). The cleared table above
+> is unchanged.
+
 ## 60.4 Consumption contract
 
 **R60.4.1** *One accessor, every path.* The minimum trading volume of a

@@ -1,6 +1,6 @@
 # Plan: rust-lightning (LDK) uplift
 
-**Status:** parked (scoping only since 2026-08-06; sequence it last) — **Last reviewed:** 2026-10-18
+**Status:** parked (scoping only since 2026-08-06; sequence it last) — **Last reviewed:** 2026-10-25
 
 > **Context:** scoping only, 2026-08-06. This is the largest and
 > highest-risk item in the current dependency-hygiene family. It touches
@@ -104,7 +104,12 @@ and while preserving every local KDF patch already applied on top.
 - Every local KDF patch currently applied to the vendored tree (inventory
   required — start from `git log` / diff against a clean upstream 0.0.106
   checkout to enumerate them precisely; §41.8's channel-config-mutation
-  patch is at least one, there may be others accumulated since)
+  patch is at least one, there may be others accumulated since). Known so
+  far: the §41.8 channel-config mutation, and (2026-10-25, PR #66) a
+  `ChannelDetails::outbound_htlc_minimum_msat` field carrying the
+  counterparty's minimum HTLC amount, serialized under TLV type 65537, for
+  CRD ch.41 R41.11A.1. Drop it if the new LDK exposes the counterparty
+  minimum itself, and repoint `LightningCoin::min_tx_amount` there.
 
 ## Planned order
 

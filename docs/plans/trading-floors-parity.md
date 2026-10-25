@@ -60,6 +60,9 @@
 
 ## State
 
-- 0: PR #69 open.
-- 1: EVM/QRC20/TRON part done in PR #66; widening not started.
+- 0: PR #69 merged 2026-10-25.
+- 1: PR #66 widened 2026-10-25: UTXO floor (R60.6.1) and Lightning floors
+  with the untradable-pair refusal (R60.6.5) are implemented. Solana and SPL
+  are refused the same way, because their fee functions are unimplemented.
+  The vendored LDK fork gained one local patch (plan `lightning-ldk-upgrade`).
 - 2, 3: not started.

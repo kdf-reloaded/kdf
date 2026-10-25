@@ -105,10 +105,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   buy, a sell, a maker order or a trade preview below 0.01 (`The volume 0.00072437 of the
   WBTC-PLG20 coin less than minimum transaction amount 0.01`), and a maker that set no minimum
   advertised 0.01 to its peers. It is now one smallest unit of the coin, 10^-decimals, matching the
-  reference; QRC20 tokens get the same fix, and TRX, which shares the EVM path, moves from 10^-2 to
-  10^-6. `min_trading_vol` reports the new value, and the
-  minimum transaction amount, which the DEX fee and maximum-volume paths use, stays zero. Detail:
-  PR #66; CRD ch.57 R57.7A.1, R57.7A.6.
+  reference. QRC20 tokens get the same fix, and TRX, which shares the EVM path, moves from 10^-2 to
+  10^-6. `min_trading_vol` reports the new value. The minimum transaction amount, which the DEX fee
+  and maximum-volume paths use, stays zero. Detail: PR #66; CRD ch.57 R57.7A.1, R57.7A.6.
+- **BTC's minimum trading volume is now 0.0001, as for BTC-segwit and in the reference.** The exact
+  ticker `BTC` was fixed at 0.00777; it now follows the UTXO rule, the larger of ten times the dust
+  and ten times the fee for a 496-byte spend. That fee term is now truncated rather than rounded up,
+  which changes no coin in the public coins file. Detail: PR #66; CRD ch.60 R60.6.1, ch.38 R38.6.6e–f.
+- **`min_trading_vol`, `setprice`, `buy`, `sell` and `trade_preimage` no longer crash the request for
+  Lightning, Solana or SPL coins.** Lightning now reports its minimum trading volume and minimum
+  transaction amount as the reference does: the largest counterparty minimum HTLC over its open
+  channels, or 1 msat. Orders and trade previews involving Lightning, Solana or SPL, which cannot
+  trade yet, are refused with an error naming the coin; `trade_preimage` returns the new typed error
+  `TradingNotSupported` (HTTP 400). Detail: PR #66; CRD ch.60 R60.6.5, ch.41 R41.11A.
 - **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
   gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
   chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,

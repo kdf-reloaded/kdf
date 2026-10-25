@@ -616,6 +616,16 @@ an error (chapter 60 R60.6.5). This contradicts this chapter's "as-built"
 status line for these two accessors only; the activation and channel
 surfaces it documents are unaffected.
 
+> **As-built note (2026-10-25, clean-side record).** Implemented in PR
+> #66. Both accessors report R41.11A.1's value; a channel whose
+> counterparty has not yet stated a minimum counts as 1 msat, and a stated
+> minimum of zero counts as zero. The vendored LDK fork gained the
+> counterparty minimum in its channel details as a local patch, recorded in
+> plan `lightning-ldk-upgrade`. Orders and trade previews naming a
+> Lightning coin are refused with an error while Lightning trading is
+> unsupported (chapter 60 R60.6.5). The cleared rule text above is
+> unchanged.
+
 ## 41.12 Baseline Verifications
 
 V41.1 The GPLv2 baseline routes the one-shot `enable_lightning` and parses the
