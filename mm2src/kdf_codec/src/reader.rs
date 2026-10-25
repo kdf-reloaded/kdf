@@ -70,7 +70,7 @@ pub trait Deserializable {
 /// as Phase B reaches additional coins.
 ///
 /// `Riecoin` and `KawpowAuxpowMixed` are the two header layouts a coin selects through the
-/// Reloaded-only `protocol.reloaded_header_layout` key (CRD ch.37 R37.5.9); they are never
+/// Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9); they are never
 /// inferred from a version value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoinVariant {
@@ -85,9 +85,9 @@ pub enum CoinVariant {
 impl CoinVariant {
     pub fn is_qtum(&self) -> bool { matches!(self, CoinVariant::Qtum) }
 
-    /// The layout a `reloaded_header_layout` coin-configuration value names, or `None` for an
+    /// The layout a `header_layout` coin-configuration value names, or `None` for an
     /// unrecognized value. The one place the key's value spellings are defined.
-    pub fn from_reloaded_header_layout(value: &str) -> Option<Self> {
+    pub fn from_header_layout(value: &str) -> Option<Self> {
         match value {
             "riecoin" => Some(CoinVariant::Riecoin),
             "kawpow_auxpow_mixed" => Some(CoinVariant::KawpowAuxpowMixed),

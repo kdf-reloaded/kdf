@@ -183,7 +183,7 @@ fn utxo_coin_fields_for_test(
             estimate_fee_blocks: 1,
             trezor_coin: None,
             enable_spv_proof: false,
-            reloaded_header_layout: None,
+            header_layout: None,
         },
         decimals: TEST_COIN_DECIMALS,
         dust_amount: UTXO_DUST_AMOUNT,
@@ -6187,7 +6187,7 @@ fn ch15_r16_r17_funding_amount_uses_total_spend_amount_not_fee_amount() {
     );
 }
 
-// ---- protocol.reloaded_header_layout (CRD ch.37 R37.5.9) -------------------------------------
+// ---- protocol.header_layout (CRD ch.37 R37.5.9) -------------------------------------
 
 fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
     let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
@@ -6196,9 +6196,9 @@ fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
 }
 
 #[test]
-fn reloaded_header_layout_absent_has_no_effect() {
+fn header_layout_absent_has_no_effect() {
     let conf = conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
-    assert_eq!(conf.reloaded_header_layout, None);
+    assert_eq!(conf.header_layout, None);
     // No key: the per-coin default of the call site governs, exactly as before.
     assert_eq!(
         utxo_common::header_variant(&conf, CoinVariant::Standard),
@@ -6208,22 +6208,21 @@ fn reloaded_header_layout_absent_has_no_effect() {
 }
 
 #[test]
-fn reloaded_header_layout_values_are_read_beside_type_and_win_over_the_default() {
+fn header_layout_values_are_read_beside_type_and_win_over_the_default() {
     for (value, expected) in [
         ("riecoin", CoinVariant::Riecoin),
         ("kawpow_auxpow_mixed", CoinVariant::KawpowAuxpowMixed),
     ] {
         let conf =
-            conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "reloaded_header_layout": value }))
-                .unwrap();
-        assert_eq!(conf.reloaded_header_layout, Some(expected));
+            conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": value })).unwrap();
+        assert_eq!(conf.header_layout, Some(expected));
         assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Standard), expected);
         assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), expected);
     }
 }
 
 #[test]
-fn reloaded_header_layout_unknown_value_fails_the_coin_build_naming_the_ticker() {
+fn header_layout_unknown_value_fails_the_coin_build_naming_the_ticker() {
     for bad in [
         json!("foo"),
         json!("Riecoin"),
@@ -6232,21 +6231,18 @@ fn reloaded_header_layout_unknown_value_fails_the_coin_build_naming_the_ticker()
         json!(112),
         json!(null),
     ] {
-        let err = conf_with_header_layout(json!({ "type": "UTXO", "reloaded_header_layout": bad }))
+        let err = conf_with_header_layout(json!({ "type": "UTXO", "header_layout": bad }))
             .expect_err("an unrecognized value must not fall back to any layout");
         let text = err.to_string();
         assert!(text.contains("RIC"), "{text}");
-        assert!(text.contains("reloaded_header_layout"), "{text}");
-        assert!(matches!(
-            err.into_inner(),
-            UtxoConfError::InvalidReloadedHeaderLayout { .. }
-        ));
+        assert!(text.contains("header_layout"), "{text}");
+        assert!(matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayout { .. }));
     }
 }
 
 #[test]
-fn reloaded_header_layout_does_not_change_how_the_protocol_object_parses() {
-    let with = json!({ "type": "UTXO", "reloaded_header_layout": "riecoin" });
+fn header_layout_does_not_change_how_the_protocol_object_parses() {
+    let with = json!({ "type": "UTXO", "header_layout": "riecoin" });
     let without = json!({ "type": "UTXO" });
     let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
     assert_eq!(parse(with), parse(without));
@@ -6255,10 +6251,9 @@ fn reloaded_header_layout_does_not_change_how_the_protocol_object_parses() {
 /// The RIC tip list served by a public Electrum server, taken through the configured key to the
 /// median: the layout of the coin entry plus the key, the list read, the median of parsed times.
 #[test]
-fn reloaded_header_layout_ric_entry_yields_the_median_of_the_served_list() {
+fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
     let conf =
-        conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "reloaded_header_layout": "riecoin" }))
-            .unwrap();
+        conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" })).unwrap();
     let hex = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
     let served = hex::decode(hex.trim()).unwrap();
     let variant = utxo_common::header_variant(&conf, CoinVariant::Standard);

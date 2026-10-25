@@ -59,7 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   servers serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native
   blocks at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected,
   and with it the median-time-past the spend queries before it signs. A new per-coin key,
-  `protocol.reloaded_header_layout`, beside `type` in the coin's entry, selects the layout:
+  `protocol.header_layout`, beside `type` in the coin's entry, selects the layout:
   `"riecoin"` (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW
   flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
   median-time-past is then taken from each parsed header's time, and the full served bytes are what

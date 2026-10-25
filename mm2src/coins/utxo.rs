@@ -533,9 +533,9 @@ pub struct UtxoCoinConf {
     pub trezor_coin: Option<TrezorUtxoCoin>,
     /// Used in condition where the coin will validate spv proof or not
     pub enable_spv_proof: bool,
-    /// Header layout selected by the Reloaded-only `protocol.reloaded_header_layout` key (CRD ch.37
+    /// Header layout selected by the Reloaded-only `protocol.header_layout` key (CRD ch.37
     /// R37.5.9). `None` when the key is absent: header reads are then unchanged.
-    pub reloaded_header_layout: Option<CoinVariant>,
+    pub header_layout: Option<CoinVariant>,
 }
 
 #[derive(Debug)]
