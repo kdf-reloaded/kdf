@@ -191,7 +191,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   whose median-time-past errors (PR #55).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
   ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
-  pre-trade spend check (PR #TBD). The `lightning-activation-features`, `solana-support`,
+  pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
   `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
 
 ## [0.3.0-alpha.3] — development milestone, not released

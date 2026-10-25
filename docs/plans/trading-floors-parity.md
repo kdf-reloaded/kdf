@@ -53,13 +53,13 @@
 
 | # | Branch / PR | Content | Depends on |
 |---|---|---|---|
-| 0 | `crd/trading-floors-all-coins` (docs PR) | ch. 60, ch. 38 §38.6.6, R60.6.7, this plan | — |
+| 0 | `crd/trading-floors-all-coins` (PR #69) | ch. 60, ch. 38 §38.6.6, R60.6.7, this plan | — |
 | 1 | `fix/evm-min-trading-volume` (PR #66, widened) | EVM/QRC20/TRON (done); UTXO floor: no `BTC` exception, truncated fee term (R60.6.1, R38.6.6i items 1–2); Lightning floors (R60.6.5); Solana requests answer without abnormal end | 0 |
 | 2 | new: UTXO fee policy | `dingo_fee` classification and arithmetic, proportional plain fixed fees, the whole-kB fee term in the floor, the 496-byte legacy spend estimate (R38.6.6a–c, R38.6.6i items 3–4, R60.6.2) | 1 |
 | 3 | new: spend safety | orderly spend and refund refusal for UTXO and Sia, version-two funding fee plus dust (R60.6.4); pre-trade check and its switch (R60.6.7) | 2; PR #60 merged first (same refund code) |
 
 ## State
 
-- 0: committed; PR to be opened.
+- 0: PR #69 open.
 - 1: EVM/QRC20/TRON part done in PR #66; widening not started.
 - 2, 3: not started.
