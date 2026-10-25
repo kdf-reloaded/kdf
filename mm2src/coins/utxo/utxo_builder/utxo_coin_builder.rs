@@ -86,6 +86,29 @@ cfg_native! {
 
 pub type UtxoCoinBuildResult<T> = Result<T, MmError<UtxoCoinBuildError>>;
 
+/// CRD ch.38 R38.6.6a: the fee policy a coins-configuration entry declares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TxFeeConfClass {
+    /// Plain fixed, `r` base units per kilobyte (proportional, truncated).
+    Fixed(u64),
+    /// Whole-kilobyte fixed, `r` base units per started kilobyte (`dingo_fee: true`).
+    WholeKbFixed(u64),
+    /// `txfee: 0`, the rate is estimated per transaction.
+    Dynamic,
+}
+
+/// Classifies the `txfee` and `dingo_fee` keys of a coins-configuration entry (CRD ch.38 R38.6.6a).
+/// An absent `txfee`, or one that is not a non-negative JSON integer, is plain fixed at 1,000;
+/// `dingo_fee` matters only for a positive `txfee` and only as the JSON boolean `true`.
+pub(crate) fn classify_tx_fee_conf(conf: &Json) -> TxFeeConfClass {
+    match conf["txfee"].as_u64() {
+        None => TxFeeConfClass::Fixed(1000),
+        Some(0) => TxFeeConfClass::Dynamic,
+        Some(fee) if conf["dingo_fee"].as_bool() == Some(true) => TxFeeConfClass::WholeKbFixed(fee),
+        Some(fee) => TxFeeConfClass::Fixed(fee),
+    }
+}
+
 #[derive(Debug, Display)]
 pub enum UtxoCoinBuildError {
     ConfError(UtxoConfError),
@@ -585,9 +608,10 @@ pub trait UtxoCoinBuilderCommonOps {
                 ticker: self.ticker().to_owned(),
             });
         }
-        let tx_fee = match self.conf()["txfee"].as_u64() {
-            None => TxFee::FixedPerKb(1000),
-            Some(0) => {
+        let tx_fee = match classify_tx_fee_conf(self.conf()) {
+            TxFeeConfClass::Fixed(fee) => TxFee::FixedPerKb(fee),
+            TxFeeConfClass::WholeKbFixed(fee) => TxFee::FixedPerStartedKb(fee),
+            TxFeeConfClass::Dynamic => {
                 let fee_method = match &rpc_client {
                     UtxoRpcClientEnum::Electrum(_) => EstimateFeeMethod::Standard,
                     #[cfg(not(target_arch = "wasm32"))]
@@ -600,7 +624,6 @@ pub trait UtxoCoinBuilderCommonOps {
                 };
                 TxFee::Dynamic(fee_method)
             },
-            Some(fee) => TxFee::FixedPerKb(fee),
         };
         Ok(tx_fee)
     }
@@ -1020,5 +1043,41 @@ mod tests {
             Some(1)
         );
         assert_eq!(first_disconnected_electrum_server_index(&[Some(true), None]), None);
+    }
+
+    /// CRD ch.38 R38.6.6a: the classification table.
+    #[test]
+    fn test_classify_tx_fee_conf_r38_6_6a() {
+        use serde_json::json;
+        let cases = [
+            (json!({}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": "1000"}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": -5}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": 1000.5}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": null, "dingo_fee": true}), TxFeeConfClass::Fixed(1000)),
+            (json!({"dingo_fee": true}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": 0}), TxFeeConfClass::Dynamic),
+            (json!({"txfee": 0, "dingo_fee": true}), TxFeeConfClass::Dynamic),
+            (
+                json!({"txfee": 100_000_000, "dingo_fee": true}),
+                TxFeeConfClass::WholeKbFixed(100_000_000),
+            ),
+            (
+                json!({"txfee": 300_000, "dingo_fee": false}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+            (json!({"txfee": 300_000}), TxFeeConfClass::Fixed(300_000)),
+            (
+                json!({"txfee": 300_000, "dingo_fee": "true"}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+            (
+                json!({"txfee": 300_000, "dingo_fee": 1}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+        ];
+        for (conf, expected) in cases {
+            assert_eq!(classify_tx_fee_conf(&conf), expected, "{conf}");
+        }
     }
 }

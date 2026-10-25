@@ -356,11 +356,7 @@ impl ZCoin {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) async fn get_one_kbyte_tx_fee(&self) -> UtxoRpcResult<BigDecimal> {
         let fee = self.get_tx_fee().await?;
-        match fee {
-            ActualTxFee::Dynamic(fee) | ActualTxFee::FixedPerKb(fee) => {
-                Ok(big_decimal_from_sat_unsigned(fee, self.decimals()))
-            },
-        }
+        Ok(big_decimal_from_sat_unsigned(fee.rate_per_kb(), self.decimals()))
     }
 
     /// Generates a tx sending outputs from our address

@@ -74,7 +74,9 @@ impl MmCoin for SlpToken {
             match req.fee {
                 Some(WithdrawFee::UtxoFixed { amount }) => {
                     let fixed = sat_from_big_decimal(&amount, platform_decimals).mm_err(Into::into)?;
-                    tx_builder = tx_builder.with_fee(ActualTxFee::FixedPerKb(fixed))
+                    // An explicit fixed withdraw fee keeps its established meaning: the amount for every
+                    // started kilobyte of the transaction, independent of the coin's own fee policy.
+                    tx_builder = tx_builder.with_fee(ActualTxFee::FixedPerStartedKb(fixed))
                 },
                 Some(WithdrawFee::UtxoPerKbyte { amount }) => {
                     let dynamic = sat_from_big_decimal(&amount, platform_decimals).mm_err(Into::into)?;
