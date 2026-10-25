@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
+  wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
+  Any positive fee is accepted, including one below the estimate; whether the network relays such a
+  transaction is untested. Any other fee type sent for Siacoin is now rejected with an
+  invalid-fee-policy error instead of being silently ignored. More in
+  [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md).
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
   window applies.** It names the start height and window size, notes that earlier funds will not be
   visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
@@ -308,8 +314,7 @@ lives.
   swap with a Komodo or GLEEC counterparty cannot complete. Spending a swap's locked ARRR is under
   live testing. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
 - **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
-  Atomic swaps of SC are postponed until after the beta; the design is still a draft. A custom
-  withdraw fee for SC is being added. More in the
+  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
   [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
 - **Radiant (RXD), LBRY (LBC) and PIVX are only partly usable.** RXD activates and signs, but swaps
   with it are not established. LBC and PIVX activate, but swaps fail with a clear error until their

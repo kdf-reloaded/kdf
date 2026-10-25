@@ -67,6 +67,19 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   absence is not an error. Code: `coins/lp_coins_types.rs`,
   `coins/lp_coins_ops.rs`, `coins/siacoin/sia_withdraw.rs`.
 
+- **Siacoin withdraw accepts a custom fee; other fee types are rejected.**
+  GLEEC KDF uses a fixed fee for SC and silently ignores the request's `fee`
+  field. Reloaded accepts `fee: {"type":"UtxoPerKbyte","amount":"<n>"}` for SC,
+  `amount` in SC per kilobyte, replacing walletd's estimated rate (CRD ch.20
+  R-W3), which is what the Komodo wallet's custom-fee box already sends. Absent
+  `fee` behaves exactly as before. Accepting the field is additive; the one
+  stricter point is that any other `fee` type for SC (for example `UtxoFixed`
+  or `EthGas`) is now rejected with the invalid-fee-policy error instead of
+  being ignored. No compat switch: a client that sent such a value to GLEEC KDF
+  for SC and relied on it being ignored must stop sending it. A fee below
+  walletd's estimate is accepted; whether the network relays such a
+  transaction is untested. Code: `coins/siacoin/sia_withdraw.rs`.
+
 - Reloaded-specific Z-coin shielded database names isolate the upgraded stable
   `librustzcash` schema from GLEEC KDF's legacy schema. See
   [Shielded database isolation](#shielded-database-isolation) below.
