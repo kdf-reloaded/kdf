@@ -29,6 +29,16 @@ use zcash_primitives::block::BlockHash;
 use zcash_primitives::merkle_tree::read_commitment_tree;
 use zcash_protocol::consensus::{BlockHeight, NetworkUpgrade, Parameters};
 
+/// How many blocks below the chain tip a shielded scan starts when the caller supplies no
+/// `sync_params` and no prior local state exists (floored at Sapling activation).
+///
+/// This figure is this project's own choice, not derived from the reference. The reference
+/// expresses the same recent-window policy as one wall-clock day converted per coin through
+/// `avg_blocktime`, so the shape matches but the value differs: this is a fixed block count
+/// for every coin. At a 60-second block time (ARRR) it is two days, twice the reference's
+/// window. Funds that predate the window are invisible and the balance reads zero while the
+/// scan itself completes normally; the remedy is a caller-supplied `sync_params`. See CRD
+/// ch.39 R39.8.0av and its "Upstream divergence" note.
 const DEFAULT_LIGHT_WALLETD_RECENT_SCAN_BLOCKS: u64 = 2_880;
 const LIGHTWALLETD_BLOCK_BATCH_SIZE: u64 = 500;
 const LIGHTWALLETD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

@@ -805,6 +805,17 @@ native persistence contract.
    (`maxFeePerGas` / priority-fee) estimation derived from
    `eth_feeHistory` is bound in
    [Chapter 56](56-evm-eip1559-fee-estimation.md).
+6. **Per-coin gas limits for the V2 entry points** — the V2
+   maker, taker and non-fungible-maker entry points are priced
+   from a per-coin `gas_limit_v2` coin-configuration block whose
+   complete member set, selection matrix and absent-member
+   defaults are bound by
+   [Chapter 57](57-evm-fee-inputs.md) §57.6. Reloaded does not
+   read that block and uses its own differing defaults
+   (ch. 57 R57.6.4), so the gas limits this chapter's contract
+   calls carry are not yet configurable and not yet at parity.
+   The fee *price* those limits are multiplied by is bound by
+   ch. 57 Part A.
 
 ---
 

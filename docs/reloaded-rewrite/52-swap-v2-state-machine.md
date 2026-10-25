@@ -422,7 +422,13 @@ reason it carries:
 - in every other case the maker MUST poll the coin until it reports the
   maker payment refundable — sleeping the duration the coin reports, and
   retrying after thirty seconds on a transient error — and then
-  broadcast the timelock refund (chapter 15 R13).
+  broadcast the timelock refund (chapter 15 R13). The duration itself is
+  the coin layer's to bound; for UTXO coins
+  [chapter 37](37-utxo-spv-and-block-header-validation.md) §37.6 records
+  how it is derived from the median-time-past and a finding on its
+  one-hour bound (added 2026-10-25; cleared by the KDF Dirty Gate the
+  same day — see the `"BTC"`-family re-examination pass clearance item of
+  chapter 37 §37.10).
 
 On success it MUST transition to `MakerPaymentRefunded`, whose event
 carries the payment identifier, the refund identifier and the reason,

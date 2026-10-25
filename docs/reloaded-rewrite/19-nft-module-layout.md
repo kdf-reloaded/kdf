@@ -719,6 +719,33 @@ The flow is:
 7. Return transaction details with fee values denominated in
    the platform coin (`ETH`, `BNB`, `MATIC`, `AVAX`, `FTM`).
 
+> **Upstream divergence (informative) — the reference builds a typed
+> transaction at step 6.** Confirmed at release designations `v2.6.0-beta` and
+> `v3.0.0-beta`: the reference resolves **both** EVM withdraw fee forms on
+> this path, derives the transaction's envelope type from whichever was
+> resolved (untyped for the legacy form, type `2` for the EIP-1559 form),
+> checks that type against the coin's envelope-type cap **before** building,
+> and then builds and signs in that type. Both non-fungible withdraw
+> flavours go through the same shared fee resolution as the platform-coin
+> and token withdrawals, so an NFT withdrawal can be and routinely is a
+> type-`2` transaction there.
+>
+> The divergence is therefore a parity **gap** on a public request surface,
+> not a deliberate choice: a caller that sends the EIP-1559 fee form to a
+> reloaded node receives an expected-`EthGas` error where a reference node
+> would honour it, and a reloaded NFT withdrawal always signs the untyped
+> envelope even on a chain whose configuration entry caps the envelope type
+> at `2` and whose other withdrawals the reference would send as type `2`.
+> No funds are at risk — an untyped transaction remains valid on every EVM
+> chain this project supports — but the fee the user pays is priced from the
+> legacy gas price rather than from an EIP-1559 estimate.
+>
+> The contract to implement is bound once, for all four EVM withdraw
+> flavours together, in [Chapter 57](57-evm-fee-inputs.md) §57.7
+> (R57.7.1–R57.7.5); R57.7.5 names these flows explicitly. Step 6 above
+> describes reloaded as built and is superseded by that contract when the
+> gap is closed. The remaining work is tracked as §19.9 D8 below.
+
 The withdrawal path supports keypair-derived signing only.
 HD-wallet and hardware-wallet signing for NFT withdrawal are
 deliberately deferred (§19.9).
@@ -974,6 +1001,22 @@ D7. **Incremental activation snapshot.** Activation currently
     activation response shape does not currently carry
     ([Chapter 10](10-sse-streaming.md)).
 
+D8. **Typed (EIP-1559) NFT withdrawal.** The withdrawal path of
+    §19.7 accepts only the legacy fee form and always signs the
+    untyped envelope, where the reference resolves both fee forms
+    and derives the envelope type from the resolved one (see the
+    divergence note in §19.7). Closing it means routing both
+    non-fungible flows through the shared EVM withdraw fee
+    resolution bound in [Chapter 57](57-evm-fee-inputs.md) §57.7,
+    which also brings the envelope-type-cap check
+    ([Chapter 35](35-evm-v2-activation-rpcs.md) D35.7) onto this
+    path. It is deferred to that chapter rather than specified
+    here because the same change must land for the platform-coin
+    and token withdrawals at the same time — a fee-form
+    enumeration extended for one flavour and not the others would
+    leave the public request surface inconsistent across
+    withdrawals of the same coin.
+
 ## 19.10 External References
 
 - The ERC-721 standard (the on-chain interface used by the
@@ -982,8 +1025,12 @@ D7. **Incremental activation snapshot.** Activation currently
   withdrawal path's `safeTransferFrom` and `balanceOf`).
 - The Ethereum JSON-RPC `eth_call` method (used for the
   `balanceOf` query on the ERC-1155 max-balance drain path).
-- The EIP-1559 transaction format (named in §19.7 step 6 only as
-  a typed form the withdrawal path does not build).
+- The EIP-1559 transaction format, named in two registers in this
+  chapter: in §19.7 step 6 as the typed form this implementation's
+  withdrawal path does not build, and in the upstream-divergence note
+  that follows that step — with the deferred item §19.9 D8 that
+  follows from it — as the fee form and envelope type the reference
+  resolves and signs on the same path.
 - The EVM chain ecosystems named in §19.3 (Ethereum, BNB Smart
   Chain, Polygon, Avalanche, Fantom) and their respective
   platform-coin tickers.
@@ -1067,6 +1114,112 @@ V4. The ABI fragments embedded in §19.7 are byte-identical to
   form, whose signer in `coins::eth` does not consult the maximum; the
   EIP-1559 signer there enforces it. It describes no reference
   behavior and relies on no Dirty Gate clearance.
+- *Scoped forbidden-corpus record for the §19.7 divergence note and
+  §19.9 D8:* the "Upstream divergence (informative)" note appended to
+  §19.7, and the deferred item D8 that follows from it, were authored
+  under the chapter-01 §1.4A two-team workflow and do draw on
+  forbidden-class input, scoped to one fact and one question only: that
+  the reference's non-fungible withdraw flows resolve both EVM withdraw
+  fee forms through the same shared resolution as its other EVM
+  withdrawals, derive the transaction envelope type from the resolved
+  form, and check it against the per-coin envelope-type cap before
+  building. Established under the public release designations
+  `v2.6.0-beta` and `v3.0.0-beta`; the record is no more precise than
+  those designations. The contract a Coder implements from is bound in
+  [Chapter 57](57-evm-fee-inputs.md) §57.7 and not here. No
+  discretionary expression — no private type, field or function name, no
+  body, control-flow transcription, local name, or error literal — was
+  reproduced into this chapter.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for the §19.7
+  divergence note and §19.9 D8:* the forbidden-class-sourced material in
+  this chapter is exactly the two additions the scoped record above
+  names — the "Upstream divergence (informative)" note that follows the
+  step list of §19.7, and the deferred item §19.9 D8 that follows from
+  it. Both were authored by the KDF Spec Reader under the two-team
+  procedure of chapter 01 §1.4A and **passed the KDF Dirty Gate** on
+  2026-10-24: PASS, discretionary-expression measure 0.00, finding list
+  empty, and accordingly no remedy class for any line or for the
+  candidate as a whole. That was the first gate pass on this material; no
+  earlier verdict for it exists or was relayed, and the chapter's
+  pre-existing content was outside the gated candidate and was not
+  re-gated — it remains covered by the clean-context item above, which
+  still holds for step 6 of §19.7 and for what the §19.10 entry states
+  about this implementation. The clearance is therefore **complete and
+  not pending**, and R40 withholds nothing here. The EIP-1559
+  external-reference entry of §19.10 was brought into line with the note
+  at the same time; it cross-references the note and D8 and carries no
+  fact beyond what they state, so it is not a separately consulted
+  section and required no pass of its own.
+
+  *Why no section carries an inline pointer to this item.* The companion
+  [Chapter 57](57-evm-fee-inputs.md) puts a short clearance pointer at
+  the head of each of its six consulted sections; this chapter records
+  the clearance here only. That is a scope judgement, written down so
+  that it cannot be read as an oversight, and three things distinguish
+  the two cases. First, the at-the-point duty of R40 attaches to a
+  *pending* clearance; completing the record discharges that duty rather
+  than relocating it. Second, what the duty guards against — a reader or
+  an implementer mistaking a candidate for a cleared requirement — has
+  no purchase on these two insertions: neither binds anything, the note
+  is labelled informative in its own first line and names the reference
+  designations it was established at, D8 is a deferral, and both state
+  on their face that the contract to implement is bound in
+  [Chapter 57](57-evm-fee-inputs.md) §57.7 and not here, so there is
+  nothing here to implement from. Third, every substantive section of
+  this chapter — the storage, provider, wire-surface and
+  withdrawal-path rules — rests on the permitted-input classes alone,
+  and a clearance notice repeated across them would suggest the converse
+  of what the clean-context item above records. Chapter 57's shape
+  answers a chapter whose six substantive sections are themselves
+  forbidden-class-sourced and carry its binding rules; two short,
+  clearly labelled, non-binding insertions in an otherwise clean chapter
+  are the lighter case, and one record is the proportionate answer to
+  it.
+
+  The three elements of the R39 scope attestation, carried forward here
+  in corpus-free terms as chapter 01 T1 requires:
+
+  - *Extent.* The forbidden-class material corresponding to the subject
+    matter the two additions address: the EVM withdraw fee-input surface
+    and the non-fungible-token withdrawal flows of this project's coin
+    subsystem. Reference designations: the publicly published release
+    designations `v2.6.0-beta` and `v3.0.0-beta`, which the lineage's own
+    releases carry and which chapter 01 §1.7 admits as public-release
+    facts. **The record is no more precise than those two designations**
+    — no narrower locator is given, by R11: no post-anchor commit
+    identifier, no branch state, and no location within the compared
+    material. Quantity examined: **ten file-versions**, five files at
+    each of the two designations; within those, the withdrawal
+    fee-resolution and non-fungible withdrawal regions were additionally
+    examined by reading at both designations.
+
+  - *Method.* **Combined.** Direct reading of the compared material at
+    both reference designations, together with a mechanical comparison of
+    the candidate's added lines against that material: a token-level pass
+    over every code-like identifier in the added lines, and a
+    word-five-gram overlap pass of the added prose against all ten
+    file-versions. This repository's own clean-room gate tool under
+    `tools/` was **not applicable and was not run:** it operates on files
+    of source and the added material embeds no code block, so the
+    instrument had no operand. The absence is stated so that it is
+    visible rather than implied.
+
+  - *Measure.* **0.00** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one — read against the
+    judgement standard R39 takes from R35: discretionary expression only,
+    with dictated-interop and pinned-interface content excluded from the
+    measured set before the judgement was made. Two observations recorded
+    with the figure: of **653** word-five-grams in the added lines,
+    **none** occurs in any compared file-version; and the added lines
+    carry exactly **one** code-like token, a wire fee-form tag of the
+    public withdraw request surface, which chapter 57 §57.7 binds and
+    which this repository's own source already carries, so it is dictated
+    and excluded from the measured set. Absent throughout the added
+    material, as the verdict's classification records: private
+    identifiers; function bodies; control-flow transcription; local
+    names; error and log string literals; per-method behaviour tables
+    keyed to internal names; internal module trees; and internal
+    test-function names.
 
 ## 19.13 CoinProtocol::NFT Variant
 

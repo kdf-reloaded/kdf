@@ -19,6 +19,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
   `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
   that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Radiant (RXD) now activates and signs with Radiant's own signature hash.** A UTXO coin whose
+  `signature_version` is `fork_id_rxd` signs every input with the Radiant dialect: the Bitcoin-Cash
+  BIP-143 preimage with one extra digest, a 76-byte summary per output, inserted before the outputs
+  digest. RXD's shipped entry therefore no longer refuses to activate, and needs no switch.
+  Withdrawals, swap transactions and `sign_raw_transaction` all use it. The digest is checked
+  against two Radiant mainnet transactions, one of whose outputs carry Radiant references. Shapes
+  with no on-chain check yet: duplicate references, the three reference opcodes that are skipped,
+  and sighash modes other than `ALL | FORKID`. RXD's fitness for swaps beyond signing is not
+  established, so this does not announce RXD trading. Detail: PR #65; CRD ch.58 §58.3, §58.5.
+- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
+  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
+  60-second block time), so funds older than that are invisible while the sync completes
+  normally. This matches the reference, whose window is shorter; the remedy is to pass
+  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
 
 ### Changed
 
@@ -56,9 +70,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The `sia-rust` pin now requires `web-sys >= 0.3.70`**, which reqwest 0.12's wasm backend needs;
   our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
   `wasm32` has a floor to raise. Detail: PR #38.
+- **Lockfile bumps clear three RustSec advisories:** `tokio` 1.52.0 to 1.54.1 (RUSTSEC-2026-0386,
+  `AsyncFd::new` I/O safety), `rustls-webpki` 0.103.15 to 0.103.16 (RUSTSEC-2026-0382, distrusted
+  intermediates) and `webpki-roots` 1.0.8 to 1.0.11 (RUSTSEC-2026-0381, emSign intermediates). The
+  bundled trust store drops four roots (Atos TrustedRoot 2011, emSign Root CA - C1, emSign ECC Root
+  CA - C3 and G3) and adds four (SECOM TLS RSA and ECC Root CA 2024, Telia EC and RSA TLS Root CA
+  v3); connections to servers chained only to a dropped root stop verifying. A fourth advisory,
+  RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5 timing variability, reached through `k256`/`ecdsa` 0.16),
+  cannot be fixed by a lockfile update; it is accepted in `deny.toml` until the RustCrypto EC stack
+  moves to `crypto-bigint` 0.7. Detail: PR #68.
+
+### Removed
+
+- **The legacy `iguana/` and `etomic_build/` directories are gone.** Both were remnants of the
+  codebase's early days with no build, runtime, CI or documentation dependency. `iguana/tools/`
+  held a single Python 2.7 byte-compiled file, `getos.pyc` — the only `.pyc` in the tree — that
+  nothing referenced; `etomic_build/` held outdated `curl` wrapper scripts for the legacy RPC that
+  launched a binary path and sourced a coins file which no longer exist. The `.gitignore` entries
+  for paths under them were dropped with them; no other document changed. Three dead root scripts
+  went with them: `start_ONE_ANOTHER_trade.sh` (drove a `docker-compose` setup the repository
+  never contained and called scripts from the removed `etomic_build/`), `travis_cmake_linux.sh`
+  and `travis_cmake_mac.sh` (Travis-era CMake installers; the repository has no Travis
+  configuration). Detail: PR #64.
 
 ### Fixed
 
+- **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
+  eligibility check floored its "wait this long" answer at one hour, so a refund that became
+  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
+  nothing signed changes and no funds were at risk. Detail: PR #60; CRD ch.37 §37.6 finding.
+- **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
+  signing with a different algorithm, unless the new node-level boolean
+  `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
+  `witness_v0`, `fork_id` and `fork_id_rxd`; any other value used to be silently replaced by the
+  coin's default, so its transactions were signed wrongly and rejected by the network. RXD's
+  `fork_id_rxd` was such a value until the Radiant signature hash was implemented (see Added).
+  This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
+  activation now reports the offending value and the accepted set; with the switch set to `true` the
+  coin activates with the default, as under GLEEC KDF, and the node logs one warning per activation
+  naming the key and value. A coin with no `signature_version` is unchanged. The switch is named for
+  coin-configuration enumerations in general; `signature_version` is its only reader so far.
+  Detail: PR #54.
+- **A malformed or non-string `fork_id` in a UTXO coin's configuration now fails the activation
+  instead of crashing the node or taking the default.** A string such as `"0xZZ"` used to panic; a
+  number such as `64` was silently replaced by the coin's default. An absent `fork_id` is unchanged,
+  and the new switch does not apply: a malformed value is not an unrecognised enumeration member.
+  Detail: PR #54.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
@@ -127,6 +184,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
   price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
   conforming client may do, could also panic inside a swap send path and no longer can. Detail: PR #48.
+- **A swap on a merged-mined (AuxPoW) coin could be neither completed nor refunded once the chain
+  changed its block version.** The header reader recognized AuxPoW only by two exact version values,
+  so Syscoin headers at version `0x20100180` (from about height 1,320,000) were read as plain
+  80-byte headers and every header list was rejected. That broke median-time-past, which every HTLC
+  spend and refund needs, so a swap that reached the payment stage was stuck. SYS, NMC, PEP, DINGO,
+  MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
+  one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
+  protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
+  PR #55; CRD ch.37 R37.5.2, R37.5.4.
 
 ### Plans touched
 
@@ -146,6 +212,12 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
   EVM tests ported to a scripted local node (PR #30).
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
+  two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
+  discharged most of its chain-rule confirmation step, leaving three of the four open items and
+  two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
+  whose median-time-past errors (PR #55).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
