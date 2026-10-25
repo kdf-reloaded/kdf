@@ -395,6 +395,54 @@ the reference's (§60.3). Changing it for any such family is a wire change
 (W4) and needs the compatibility-switch treatment of
 `docs/COMPAT_SWITCHES.md`.
 
+**R60.6.7** *Pre-trade spend-safety check (clean-room-original;
+maintainer decision of 2026-10-25, resolving D60.1 and D60.2).* This is
+reloaded's own local policy, not reference behaviour: the reference
+accepts the orders this rule refuses, and the swap then fails in the
+coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
+
+1. *Scope.* The rule covers every coin whose HTLC spend and refund pay
+   their fee out of the HTLC value: the UTXO coins of chapter 38
+   R38.6.6g except SLP and QRC20 tokens (that is, the standard UTXO
+   coin, the BCH platform coin, the Qtum platform coin and the
+   transparent HTLCs of a ZHTLC coin), and Sia. Other families pay their
+   spend fee outside the HTLC value and are not covered.
+2. *Safe amount.* For a covered coin, the safe amount `S` is the
+   smallest HTLC value whose spend leaves a valid output:
+   - for a UTXO-family coin, the HTLC spend-fee estimate of chapter 38
+     R38.6.6c under the coin's fee policy at the moment of the check —
+     the current estimated rate for a dynamic-fee coin, the minimum relay
+     rate where the coin forces it — plus the coin's dust `D` of R38.6.6d;
+   - for Sia, the fixed HTLC miner fee of R60.5.6 row 8 plus one hasting.
+3. *Where it is checked.* When the node creates or updates an order of
+   its own (`setprice`, `update_maker_order`, `buy`, `sell`) and when it
+   answers `trade_preimage`, the smallest trade the order can produce
+   shall be safe on both legs: the order's minimum volume of the base
+   coin shall be at least the base coin's `S`, and that volume times the
+   order's price at least the rel coin's `S`, for each leg whose coin is
+   covered.
+4. *Refusal.* A request that fails item 3 is refused with the same typed
+   volume-too-low refusal the floors produce (R60.4.2), naming the coin
+   and carrying `S` as the threshold; `trade_preimage` reports the same
+   refusal. An order with no operator-set minimum volume is refused, not
+   silently raised: this rule never changes the default minimum volume a
+   maker advertises (R60.5.1, W1).
+5. *Nothing a peer can observe.* The check never runs on a received
+   order or request, never makes a maker withhold a reservation, and
+   never aborts a started swap; W1–W5 are unchanged, and the floors of
+   §60.3 stay at parity. A long-lived maker order is not re-checked when
+   fees rise after it was placed.
+6. *Estimate unavailable.* If the current fee estimate of a dynamic-fee
+   coin cannot be obtained, the request is refused with a typed error; no
+   placeholder estimate is substituted.
+7. *Switch.* The MM2.json boolean `pre_trade_spend_check`, default
+   `true`, enables the rule; `false` restores the reference behaviour
+   (no check). Under `docs/COMPAT_SWITCHES.md`, "The default-side rule",
+   this is arm 2: it has no wire effect, affects only the node's own
+   orders, and improves fund safety. The setting is documented next to
+   itself and in `docs/GLEEC_COMPATIBILITY.md`, as that document
+   requires.
+
 ## 60.7 Tests
 
 **T60.1** *UTXO values.* For coins configured as the public coins file
@@ -424,12 +472,29 @@ directions.
 **T60.5** *R60.6.4.* A legacy spend of an HTLC whose value equals the
 spend fee is refused without broadcasting.
 
+**T60.6** *R60.6.7.* With `pre_trade_spend_check` at its default:
+(a) a dynamic-fee UTXO coin with dust 1,000 and a current estimated rate
+of 20,000 base units per kilobyte has `S = 9,920 + 1,000 = 10,920` base
+units; a maker order whose minimum volume is 0.0001 (eight decimals) is
+refused with threshold 0.0001092, and one at 0.00011 is accepted;
+(b) a Sia leg whose amount equals the fixed HTLC miner fee is refused
+with the miner fee plus one hasting as threshold; (c) a KMD order at its
+floor of 0.0001 is accepted (`S` = 496 + 1,000 base units);
+(d) `trade_preimage` reports the refusal of (a) with the same threshold;
+(e) with `pre_trade_spend_check` set to `false`, the order of (a) is
+accepted; (f) an incoming order or taker request below `S` is handled
+exactly as without the rule.
+
 ## 60.8 Deferred Work
 
-**D60.1** *Finding F1 remedy* (local pre-trade spend-fee check or
-operator dust guidance). Maintainer decision; no wire effect.
+**D60.1** *Finding F1 remedy* — **resolved 2026-10-25.** The maintainer
+chose the local pre-trade check, now bound as R60.6.7; the floors stay at
+parity (R60.6.1).
 
-**D60.2** *Finding F2 remedy* for Sia. Maintainer decision.
+**D60.2** *Finding F2 remedy* for Sia — **resolved 2026-10-25.** The Sia
+floor stays at parity; the orderly spend and refund refusal of R60.6.4
+and the pre-trade check of R60.6.7 together keep a Sia payment at or
+below the miner fee from being created.
 
 **D60.3** *Order-validation home.* Chapter 57 D7's maker price floor is
 coin-agnostic and is now bound here as R60.4.2 step 4; the one-line fix
@@ -674,3 +739,9 @@ itself remains tracked by chapter 57 D7 and the parity tracker's #12.
   data: each is observable at the external boundary of a reference node
   through its `min_trading_vol` response, its advertised `min_volume`, or
   the DEX fee it pays or validates.
+- *Clean-room-original addition (2026-10-25).* R60.6.7, T60.6 and the
+  resolutions recorded under D60.1 and D60.2 were written by a clean-side
+  session from the maintainer's decision of 2026-10-25 and this
+  chapter's cleared text. The design is this project's own; the reference
+  has no such check. *Forbidden corpus:* not consulted for this
+  addition.

@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-10-18
+**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-10-25
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line
@@ -376,3 +376,11 @@ question and must be answered before anything else on this branch proceeds.**
   index row and external-specification list the branch also updates.
 - [Chapter 09](../reloaded-rewrite/09-watcher-reward-infrastructure.md) -- watcher rewards,
   which §21.18 D2 refuses for Tron (Spec Reader question 5).
+
+## Trading floors (added 2026-10-25)
+
+TRON coins share the EVM coin family's floor code. PR #66 sets TRX's minimum
+trading volume to one smallest unit (10^-6, previously 10^-2); the minimum
+transaction amount stays zero (CRD ch. 21 §21.11A, ch. 60 row T1). When TRON
+swaps land, these are the values the order builders consume. No further floor
+work is needed here.

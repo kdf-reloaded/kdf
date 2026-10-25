@@ -12,6 +12,10 @@
 > implemented and no branch existed; see the State line for the current
 > position.
 
+> **2026-10-25:** PR #66 is being widened to cover the minimum trading volume
+> of every coin family under plan `trading-floors-parity`, which now carries
+> the remaining steps. This plan's EVM/QRC20 scope is unchanged.
+
 **State (2026-10-25): implemented, PR #66, merge after #57.** Steps 2 and 3
 were done on 2026-10-24 — the Spec Reader dispatch produced CRD ch.57 §57.7A
 (Part D: R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4), and it passed the Dirty Gate

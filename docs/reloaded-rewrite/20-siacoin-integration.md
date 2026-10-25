@@ -390,6 +390,11 @@ error rather than build it ([Chapter 60](60-trading-floors-and-refusal-contract.
 row S1, R60.5.6 row 8, finding F2). Whether reloaded also raises its Sia
 floor is a maintainer decision (chapter 60 D60.2).
 
+> **Resolution (2026-10-25, clean-room-original).** The maintainer kept
+> the Sia floors at parity and chose chapter 60's local pre-trade check
+> (R60.6.7), which refuses an order of this node's own whose Sia leg does
+> not exceed the miner fee; chapter 60 D60.2 records the decision.
+
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
 > table keyed to private helpers, no method bodies, and no

@@ -189,6 +189,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   discharged most of its chain-rule confirmation step, leaving three of the four open items and
   two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
   whose median-time-past errors (PR #55).
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
+  ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
+  pre-trade spend check (PR #TBD). The `lightning-activation-features`, `solana-support`,
+  `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

@@ -655,9 +655,10 @@ this value for every family that can swap.
   exact ticker `BTC` at 0.00777 (BTC-segwit is already 0.0001, the
   reference value for both), and rounds the fee term up where the
   reference truncates. The rounding difference affects no entry of the
-  public coins file today. Local policy; no switch. The maintainer
-  decides whether ch. 60 finding F1's remedy (BTC at 0.0001 fails a
-  floor-sized legacy spend above roughly 19 sat/vB) ships with it.
+  public coins file today. Local policy; no switch. Finding F1 (BTC at
+  0.0001 fails a floor-sized legacy spend above roughly 19 sat/vB) is
+  answered by the local pre-trade check of ch. 60 R60.6.7 (maintainer
+  decision 2026-10-25), which ships with this fix.
 - [ ] **Whole-kilobyte fixed-fee option and proportional plain fixed fees
   (ch. 38 R38.6.6a–c, R38.6.6i item 3).** Reloaded ignores `dingo_fee`.
   It rounds every fixed-fee coin's transaction size up to a whole
@@ -683,8 +684,9 @@ this value for every family that can swap.
 - [ ] **Sia spend below the fixed miner fee (ch. 20 R-S11, finding F2).**
   In both trees and in reloaded, the Sia floors are one hasting while every
   HTLC spend or refund deducts 0.02 SC. Required in reloaded: an orderly
-  refusal. Whether reloaded also raises its Sia floor is the maintainer's
-  call (ch. 60 D60.2).
+  refusal. The Sia floor stays at parity; the pre-trade check of ch. 60
+  R60.6.7 keeps such a payment from being created (maintainer decision
+  2026-10-25, ch. 60 D60.2).
 - Informative, no action: TRON shares the EVM accessor, so PR #66 (#12)
   fixes its value too (ch. 21 §21.11A). Solana has no parity target,
   because neither tree can trade it (ch. 40 §40.6A, finding F6).
