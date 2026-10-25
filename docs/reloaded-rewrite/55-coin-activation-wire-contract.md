@@ -674,6 +674,14 @@ mmrpc level; no backend is contacted:
 4. the configured protocol is not the member's protocol -> `UnexpectedCoinProtocol`;
 5. the task cannot be created -> `Internal`.
 
+The list is exhaustive, so it contains no check that the coins-configuration
+entry carries only recognized keys. How an entry's unrecognized keys are
+treated is bound by
+[Chapter 45](45-startup-configuration-and-environment-tolerance.md) R45.3.7,
+which is the authority for it and carries both the derivation record and the
+clearance record for it; this paragraph states no outcome of its own and binds
+nothing.
+
 **R55.5.4** *Error set* (public catalogue set `InitStandaloneCoinError`). Used
 for the mmrpc-level errors of `init` and for every status-level error of every
 member; each member's internal failures are mapped into this set before they
@@ -1413,3 +1421,68 @@ R55.4.5 and the error body of R55.1.10.
     dictated-interop and public or serialized interface content, and read
     against the rule that one instance of genuine discretionary expression
     fails the chapter whatever the figure. No such instance was found.
+- *A later addition, and why it needs no clearance of its own (chapter 01 T1,
+  R40, §1.7).* The paragraph that follows R55.5.3's check list was added after
+  the pass recorded above and is **not** covered by it. As first drafted it
+  stated, in its own words, a positive outcome for an activation request whose
+  coins-configuration entry carries an unrecognized key, which is substantive
+  content however accurately it deferred authority elsewhere; a paragraph that
+  states an outcome is not a pointer in form, whatever it says about itself.
+  It has accordingly been **reduced to a genuine cross-reference**: it now
+  states only that the check list above it is exhaustive, which is a statement
+  about this chapter's own text, and it hands the treatment of such a key to
+  [Chapter 45](45-startup-configuration-and-environment-tolerance.md) R45.3.7,
+  which is the authority for it and carries both the derivation record and the
+  completed clearance for it. The paragraph therefore asserts no behavior of
+  its own and opens no new forbidden-class-sourced surface in this chapter, so
+  the clearance item above is left exactly as it stood -- not re-dated, not
+  widened, not reopened -- and no section of this chapter carries an inline
+  clearance pointer for the addition: a cross-reference that binds nothing
+  gives an implementer nothing to implement from, and the at-the-point notice
+  R40 asks for sits where the rule is, at Chapter 45 R45.3.7.
+
+  The route is recorded even so, because the record is what makes that
+  position checkable rather than merely asserted. The paragraph as first
+  drafted was authored by the KDF Spec Reader under the two-team procedure of
+  chapter 01 §1.4A and **passed the KDF Dirty Gate** on 2026-10-24: PASS,
+  discretionary-expression measure 0.00, finding list empty, and accordingly
+  no remedy class for any line or for the candidate as a whole. The reduction
+  removes material rather than rewording it, so it can only narrow what that
+  pass cleared. This item is written on the clean side from that verdict,
+  which reached the clean side as relayed text rather than as a gate-written
+  file; that is record-keeping and adds no chapter content. The three elements
+  of the pass's R39 scope attestation, in corpus-free terms as chapter 01 T1
+  requires, with the limits the gate stated left visible:
+
+  - *Extent.* The same coin-registry-entry tolerance surface compared for
+    Chapter 45 R45.3.7, in its bearing on the synchronous pre-task checks of a
+    standalone-coin activation request. Quantity examined: no file beyond
+    those compared for that rule. Reference designation: the publicly
+    published release designation `v3.0.0-beta`, and **the record is no more
+    precise than that designation** -- no post-anchor commit identifier, no
+    branch state and no location within the compared material is given
+    (chapter 01 R11 and the reference-version limit of §1.7). **Two things
+    this element does not attest, stated rather than papered over.** First,
+    the enumeration of synchronous checks that the addition characterizes was
+    **not** re-compared in this pass: that enumeration is pre-existing
+    material resting on the clearance recorded above, and this pass neither
+    reopens nor re-confirms it. Second, the pass reached material at the
+    `v3.0.0-beta` designation only, so it attests nothing about the legacy
+    designation the earlier record names beside it; that designation's half of
+    the earlier record continues to rest on the earlier record alone, and
+    nothing here supports or contradicts it.
+
+  - *Method.* By **reading**. No token on an added line was quoted material,
+    so no mechanical token comparison was applicable. **This repository's own
+    clean-room gate tooling under `tools/` was not applicable and was not
+    run:** it operates over source-file bodies and the addition embeds no code
+    block, so the instrument had no operand. The absence is stated so that it
+    is visible rather than implied.
+
+  - *Measure.* **0.00** on the discretionary-expression basis -- the same
+    figure the leak report carries, not a second one -- read against the same
+    standard the pass above was read against: one item of genuine
+    discretionary expression fails a candidate whatever the figure. The
+    addition quoted no identifier and reproduced nothing, and the single
+    behavioral statement it then carried was a restatement of material gated
+    with Chapter 45 R45.3.7 -- the statement the reduction has since removed.

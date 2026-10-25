@@ -17,10 +17,11 @@ use std::io;
 use crate::raw_header::MIN_RAW_HEADER_SIZE;
 use crate::transaction::{deserialize_tx, OutPoint, Transaction, TxType};
 
-// Multi-coin block-version magic numbers. Each value is a published consensus
-// constant of the upstream coin's reference client.
-const AUX_POW_VERSION_DOGE: u32 = 6_422_788;
-const AUX_POW_VERSION_SYS: u32 = 537_919_744;
+// Multi-coin block-version magic numbers.
+/// AuxPoW (merged-mining) flag, bit 8 of the block version (CRD ch.37 R37.5.2). The chain ID
+/// sits in the upper 16 bits; the rest of the version is chain-specific and changes over time,
+/// so the flag is the only stable discriminator.
+const AUX_POW_VERSION_BIT: u32 = 0x0000_0100;
 const MTP_POW_VERSION: u32 = 0x2000_1000;
 const PROG_POW_SWITCH_TIME: u32 = 1_635_228_000;
 const QTUM_BLOCK_HEADER_VERSION: u32 = 536_870_912;
@@ -528,7 +529,7 @@ impl Deserializable for BlockHeader {
             None
         };
 
-        let aux_pow = if version == AUX_POW_VERSION_DOGE || version == AUX_POW_VERSION_SYS {
+        let aux_pow = if version & AUX_POW_VERSION_BIT != 0 {
             // Parent coinbase is always a standard Bitcoin (witness) tx.
             let coinbase_tx = deserialize_tx(reader, TxType::StandardWithWitness)?;
             let parent_block_hash = reader.read()?;
@@ -614,6 +615,11 @@ mod tests {
     /// deployment is started or locked in. Equal to `KAWPOW_VERSION`.
     const BIT28_VERSION: u32 = 0x3000_0000;
 
+    /// Dogecoin's block version (AuxPoW flag set, chain ID 0x0062).
+    const DOGE_VERSION: u32 = 0x0062_0104;
+
+    /// Test fixture. `nonce` is the header's proof-of-work nonce field, an arbitrary constant here; it is not a
+    /// cryptographic nonce and protects nothing.
     fn standard_header(version: u32, prev: H256, time: u32, nonce: u32) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(MIN_RAW_HEADER_SIZE);
         bytes.extend_from_slice(&version.to_le_bytes());
@@ -874,7 +880,7 @@ mod tests {
 
     /// One AuxPoW-flagged header (std-80 base plus a minimal proof) whose parent header is `parent`.
     fn auxpow_header_around(parent: &[u8]) -> Vec<u8> {
-        let mut bytes = standard_header(AUX_POW_VERSION_DOGE, H256::default(), 1_700_000_000, 0);
+        let mut bytes = standard_header(DOGE_VERSION, H256::default(), 1_700_000_000, 0);
         // Minimal coinbase transaction: version, one input, one empty output, lock time.
         bytes.extend_from_slice(&1u32.to_le_bytes());
         bytes.push(1);
@@ -898,7 +904,7 @@ mod tests {
     #[test]
     fn auxpow_parent_header_is_read_as_std80() {
         // A parent whose version value collides with the AuxPoW flag is still just 80 bytes.
-        let parent = standard_header(AUX_POW_VERSION_DOGE, H256::default(), 1_699_999_999, 7);
+        let parent = standard_header(DOGE_VERSION, H256::default(), 1_699_999_999, 7);
         let served = auxpow_header_around(&parent);
         let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
         let aux = header.aux_pow.expect("AuxPoW proof is parsed");
@@ -914,5 +920,129 @@ mod tests {
         let mut served = level.repeat(20_000);
         served.extend_from_slice(&standard_header(0x2000_0000, H256::default(), 1_700_000_000, 0));
         assert!(BlockHeader::from_served_bytes(&served, CoinVariant::Standard).is_err());
+    }
+
+    /// Parses a hex fixture from `test_data/`, recorded from a public Electrum server.
+    fn fixture(hex: &str) -> Vec<u8> { hex.trim().from_hex().expect("fixture is valid hex") }
+
+    // Real served bytes, recorded 2026-10-24 over Electrum protocol 1.4 with
+    // `blockchain.block.headers` (no checkpoint), so AuxPoW proofs are included.
+
+    /// Syscoin height 2,331,301: 1,218 bytes, version `0x20100180`. The version is not the
+    /// `0x20100100` the reader once matched exactly; only the AuxPoW flag identifies the layout.
+    const SYS_CURRENT: &str = include_str!("test_data/sys_2331301_v20100180.hex");
+    /// Syscoin heights 2,331,290..=2,331,300: 11 headers, 13,041 bytes, all version `0x20100180`.
+    const SYS_CURRENT_LIST: &str = include_str!("test_data/sys_2331290_x11_v20100180.hex");
+    /// Syscoin height 1,200,000: 961 bytes, version `0x20100100` (the era the old constant covered).
+    const SYS_OLDER_ERA: &str = include_str!("test_data/sys_1200000_v20100100.hex");
+    /// Dogecoin height 6,428,700: 924 bytes, version `0x00620104`.
+    const DOGE_CONTROL: &str = include_str!("test_data/doge_6428700_v00620104.hex");
+    /// Myriad heights 3,733,417..=3,733,422: six headers, 2,930 bytes; multi-algo, so AuxPoW is
+    /// per block. Lengths 852/80/951/80/80/887; versions `205a0300 205a0c00 205a0100 205a0c00
+    /// 205a0a00 205a0100`.
+    const XMY_MIXED: &str = include_str!("test_data/xmy_3733417_x6.hex");
+    /// One 80-byte tip header per line (`COIN height hex`) of BTC, LTC, BCH, DASH, DGB, GRS, MONA,
+    /// VTC and AVN, each fetched with `blockchain.block.header` on 2026-10-24.
+    const STD80_TIPS: &str = include_str!("test_data/std80_tips_2026-10-24.txt");
+
+    #[test]
+    fn sys_current_header_is_auxpow_by_flag_bit() {
+        let served = fixture(SYS_CURRENT);
+        assert_eq!(served.len(), 1_218);
+        let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+        assert_eq!(header.version, 0x2010_0180);
+        assert!(header.aux_pow.is_some());
+        assert_eq!(&header.raw()[..], &served[..]);
+    }
+
+    #[test]
+    fn sys_current_list_of_eleven_parses_through_the_mtp_path() {
+        let served = fixture(SYS_CURRENT_LIST);
+        assert_eq!(served.len(), 13_041);
+        let headers = BlockHeader::list_from_served_bytes(&served, 11, CoinVariant::Standard).unwrap();
+        assert_eq!(headers.len(), 11);
+        assert!(headers.iter().all(|h| h.version == 0x2010_0180 && h.aux_pow.is_some()));
+        let reencoded: Vec<u8> = headers.iter().flat_map(|h| h.raw().to_vec()).collect();
+        assert_eq!(reencoded, served);
+        // A list that stops short, or leaves trailing bytes, is still rejected whole.
+        assert!(BlockHeader::list_from_served_bytes(&served, 10, CoinVariant::Standard).is_err());
+        assert!(BlockHeader::list_from_served_bytes(&served, 12, CoinVariant::Standard).is_err());
+    }
+
+    #[test]
+    fn sys_older_era_header_still_parses() {
+        let served = fixture(SYS_OLDER_ERA);
+        assert_eq!(served.len(), 961);
+        let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+        assert_eq!(header.version, 0x2010_0100);
+        assert!(header.aux_pow.is_some());
+        assert_eq!(&header.raw()[..], &served[..]);
+    }
+
+    #[test]
+    fn doge_control_header_still_parses() {
+        let served = fixture(DOGE_CONTROL);
+        assert_eq!(served.len(), 924);
+        let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+        assert_eq!(header.version, DOGE_VERSION);
+        assert!(header.aux_pow.is_some());
+        assert_eq!(&header.raw()[..], &served[..]);
+    }
+
+    #[test]
+    fn xmy_multi_algo_list_decides_auxpow_per_block() {
+        let served = fixture(XMY_MIXED);
+        assert_eq!(served.len(), 2_930);
+        let headers = BlockHeader::list_from_served_bytes(&served, 6, CoinVariant::Standard).unwrap();
+        let versions: Vec<u32> = headers.iter().map(|h| h.version).collect();
+        assert_eq!(versions, [
+            0x205a_0300,
+            0x205a_0c00,
+            0x205a_0100,
+            0x205a_0c00,
+            0x205a_0a00,
+            0x205a_0100
+        ]);
+        let lens: Vec<usize> = headers.iter().map(|h| h.raw().len()).collect();
+        assert_eq!(lens, [852, 80, 951, 80, 80, 887]);
+        for h in &headers {
+            assert_eq!(h.aux_pow.is_some(), h.version & AUX_POW_VERSION_BIT != 0);
+        }
+        let reencoded: Vec<u8> = headers.iter().flat_map(|h| h.raw().to_vec()).collect();
+        assert_eq!(reencoded, served);
+    }
+
+    #[test]
+    fn real_std80_chain_tips_do_not_carry_the_auxpow_flag() {
+        let mut coins = 0;
+        for line in STD80_TIPS.lines() {
+            let mut parts = line.split_whitespace();
+            let (coin, _height, hex) = (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap());
+            let served = fixture(hex);
+            assert_eq!(served.len(), 80, "{coin}");
+            let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+            assert_eq!(header.version & AUX_POW_VERSION_BIT, 0, "{coin}");
+            assert!(header.aux_pow.is_none(), "{coin}");
+            assert_eq!(&header.raw()[..], &served[..], "{coin}");
+            coins += 1;
+        }
+        assert_eq!(coins, 9);
+    }
+
+    #[test]
+    fn std80_header_with_the_flag_bit_set_falls_back_to_std80() {
+        // A BIP9-style chain may signal deployment bit 8; the proof then fails to parse and the
+        // exact-80-byte fallback of R37.5.6 applies.
+        let served = standard_header(0x2000_0100, H256::default(), 1_700_000_000, 5);
+        let header = BlockHeader::from_served_bytes(&served, CoinVariant::Standard).unwrap();
+        assert!(header.aux_pow.is_none());
+        assert_eq!(&header.raw()[..], &served[..]);
+        let list: Vec<u8> = served.iter().chain(served.iter()).copied().collect();
+        assert_eq!(
+            BlockHeader::list_from_served_bytes(&list, 2, CoinVariant::Standard)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

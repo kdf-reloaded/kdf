@@ -94,7 +94,10 @@ Use the role files under `.github/agents/` exactly as intended:
 - `kdf-spec-reader.agent.md` is the dirty-side specification author. It is the
   only implementation-analysis role allowed to inspect the forbidden corpus.
   It writes clean-channel behavioral/interface requirements into the relevant
-  CRD chapter and never edits implementation code.
+  CRD chapter and never edits implementation code. It may also update facts
+  and step premises in `docs/plans/*.md` under the same clean-channel
+  discipline — never a plan's `**Status:**` line — as its own "Plan documents"
+  section bounds.
 - `kdf-dirty-gate.agent.md` compares a candidate chapter with the corpus and
   returns only the sanitized verdict CRD chapter 01 R39 bounds: a leak
   report, a scope attestation every verdict must carry, and optionally a

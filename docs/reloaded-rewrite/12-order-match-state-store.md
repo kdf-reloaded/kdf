@@ -274,6 +274,12 @@ one period of latency between TTL expiry and routed cancellation.
   cancellation cache; this chapter handles the seller-side (own-order)
   store. The two substrates do not share a data structure but operate
   on the same `uuid` identifier space.
+- [Chapter 59](59-legacy-ordermatch-negotiation.md) (legacy order-match
+  negotiation loop) — the loop that walks this store to answer a taker
+  request (ch. 59 R59.4.3) and that prunes a stale in-flight match from
+  a stored order to release its reserved volume (ch. 59 R59.4.4). Both
+  operate on orders this chapter owns; ch. 59 binds when and why, this
+  chapter binds the store and its TTL.
 
 ## 12.13 Baseline Verifications
 

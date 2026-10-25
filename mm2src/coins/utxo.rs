@@ -91,7 +91,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use utxo_builder::UtxoConfBuilder;
+use utxo_builder::{UnrecognisedEnumPolicy, UtxoConfBuilder};
 use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
@@ -2286,7 +2286,9 @@ pub fn address_by_conf_and_pubkey_str(
         check_utxo_maturity: None,
         path_to_address: None,
     };
-    let conf_builder = UtxoConfBuilder::new(conf, &params, coin);
+    let conf_builder = UtxoConfBuilder::new(conf, &params, coin)
+        // Only the address fields are read here, never the signing algorithm.
+        .with_unrecognised_enum_policy(UnrecognisedEnumPolicy::NotUsed);
     let utxo_conf = try_s!(conf_builder.build());
     let pubkey_bytes = try_s!(hex::decode(pubkey));
     let hash = dhash160(&pubkey_bytes);
