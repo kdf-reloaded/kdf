@@ -3840,3 +3840,107 @@ fn order_placement_rejects_a_wallet_only_coin() {
         assert!(err.ends_with(&expected), "{err}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ch.57 T11 -- the field report, end to end (R57.7A.1, R57.7A.4)
+//
+// A real eight-decimal ERC-20 cannot be built from this crate's lib tests without live endpoints, so
+// `TestCoin::min_trading_vol` is mocked to the value R57.7A.1 yields for eight decimals (10^-8). The EVM
+// value itself is pinned by `t10_evm_min_trading_vol_is_one_smallest_unit` in the `coins` crate. The
+// preview and `min_trading_vol_v2` parts of T11 live in `lp_swap/taker_swap.rs` (`t11_*`), next to the
+// private items they exercise.
+// ---------------------------------------------------------------------------
+
+mod t11_field_report {
+    use super::*;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
+
+    fn one_smallest_unit_8() -> MmNumber { MmNumber::from(BigRational::new(1.into(), 100_000_000.into())) }
+
+    fn field_report_volume() -> MmNumber { MmNumber::from("0.00072437") }
+
+    fn half_smallest_unit_8() -> MmNumber { MmNumber::from(BigRational::new(1.into(), 200_000_000.into())) }
+
+    fn mock_floor() { TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(one_smallest_unit_8())); }
+
+    fn coins() -> (MmCoinEnum, MmCoinEnum) {
+        (
+            MmCoinEnum::Test(TestCoin::new("WBTC8")),
+            MmCoinEnum::Test(TestCoin::new("REL")),
+        )
+    }
+
+    #[test]
+    fn taker_order_builder() {
+        mock_floor();
+        let (base, rel) = coins();
+        let build = |base_amount: MmNumber, rel_amount: MmNumber| {
+            TakerOrderBuilder::new(&base, &rel)
+                .with_base_amount(base_amount)
+                .with_rel_amount(rel_amount)
+                .with_sender_pubkey(nonzero_pubkey())
+                .with_conf_settings(default_conf_settings())
+                .build()
+        };
+
+        if let Err(e) = build(field_report_volume(), field_report_volume()) {
+            panic!("the field-report volume must be accepted: {}", e);
+        }
+
+        match build(half_smallest_unit_8(), MmNumber::from(1)) {
+            Err(TakerOrderBuildError::BaseAmountTooLow { actual, threshold }) => {
+                assert_eq!(actual, half_smallest_unit_8());
+                assert_eq!(threshold, one_smallest_unit_8());
+            },
+            Err(e) => panic!("expected BaseAmountTooLow, got {}", e),
+            Ok(_) => panic!("expected BaseAmountTooLow, got an order"),
+        }
+    }
+
+    #[test]
+    fn maker_order_builder() {
+        mock_floor();
+        let (base, rel) = coins();
+        let build = |volume: MmNumber| {
+            MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(volume)
+                .with_price(1.into())
+                .with_conf_settings(default_conf_settings())
+                .build()
+        };
+
+        let order = match build(field_report_volume()) {
+            Ok(order) => order,
+            Err(e) => panic!("the field-report volume must be accepted: {}", e),
+        };
+        assert_eq!(order.min_base_vol, one_smallest_unit_8());
+
+        match build(half_smallest_unit_8()) {
+            Err(MakerOrderBuildError::MaxBaseVolTooLow { actual, threshold }) => {
+                assert_eq!(actual, half_smallest_unit_8());
+                assert_eq!(threshold, one_smallest_unit_8());
+            },
+            Err(e) => panic!("expected MaxBaseVolTooLow, got {}", e),
+            Ok(_) => panic!("expected MaxBaseVolTooLow, got an order"),
+        }
+    }
+
+    #[test]
+    fn legacy_min_trading_vol_reports_the_floor() {
+        mock_floor();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new("WBTC8")))).unwrap();
+
+        let legacy = block_on(crate::mm2::rpc::lp_commands_legacy::min_trading_vol(
+            ctx,
+            json!({"coin": "WBTC8"}),
+        ))
+        .unwrap();
+        let legacy: Json = json::from_slice(legacy.body()).unwrap();
+        assert_eq!(legacy["result"]["coin"], "WBTC8");
+        assert_eq!(legacy["result"]["min_trading_vol"], "0.00000001");
+        assert_eq!(legacy["result"]["min_trading_vol_fraction"]["numer"], "1");
+        assert_eq!(legacy["result"]["min_trading_vol_fraction"]["denom"], "100000000");
+    }
+}
