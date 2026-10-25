@@ -17,7 +17,7 @@ use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
 
 /// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
-const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\"";
+const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\", \"fork_id_rxd\"";
 
 /// The top-level `MM2.json` compatibility switch that selects what a coin-configuration key holding an
 /// unrecognised enumeration member does: `false` (the default) fails the activation, the boolean `true` warns
@@ -453,6 +453,10 @@ mod tests {
 
     fn rxd_conf() -> Json { json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}) }
 
+    /// A coin entry whose `signature_version` is genuinely unrecognised (the Radiant value used to play this
+    /// role before the fourth accepted value existed).
+    fn unknown_value_conf() -> Json { json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_xyz"}) }
+
     #[test]
     fn policy_follows_the_mm2_json_switch_and_only_the_boolean_true_turns_it_on() {
         use mm2_core::mm_ctx::MmCtxBuilder;
@@ -471,19 +475,19 @@ mod tests {
     #[test]
     fn the_default_policy_is_fail() {
         // `build` without `with_unrecognised_enum_policy` is what a caller that forgets the call gets.
-        assert!(build("RXD", rxd_conf()).is_err());
+        assert!(build("RXD", unknown_value_conf()).is_err());
         assert_eq!(UnrecognisedEnumPolicy::default(), UnrecognisedEnumPolicy::Fail);
     }
 
     #[test]
     fn unrecognised_signature_version_warns_once_and_falls_back_when_the_switch_selects_it() {
-        let (conf, warnings) = warnings_of("RXD", rxd_conf(), UnrecognisedEnumPolicy::WarnAndFallBack);
-        // RXD's `fork_id` is non-zero, so the absent-key default is `ForkId`.
+        let (conf, warnings) = warnings_of("RXD", unknown_value_conf(), UnrecognisedEnumPolicy::WarnAndFallBack);
+        // The entry's `fork_id` is non-zero, so the absent-key default is `ForkId`.
         assert_eq!(conf.signature_version, SignatureVersion::ForkId);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         let w = &warnings[0];
         assert!(w.contains("signature_version"), "the key must be named: {w}");
-        assert!(w.contains("fork_id_rxd"), "the value must be named: {w}");
+        assert!(w.contains("fork_id_xyz"), "the value must be named: {w}");
         assert!(w.contains(COIN_CONF_UNRECOGNISED_ENUM_FALLS_BACK_KEY), "{w}");
 
         // The fallback is the absent-key default, not a fixed value.
@@ -498,7 +502,7 @@ mod tests {
 
     #[test]
     fn not_used_policy_falls_back_without_a_warning() {
-        let (conf, warnings) = warnings_of("RXD", rxd_conf(), UnrecognisedEnumPolicy::NotUsed);
+        let (conf, warnings) = warnings_of("RXD", unknown_value_conf(), UnrecognisedEnumPolicy::NotUsed);
         assert_eq!(conf.signature_version, SignatureVersion::ForkId);
         assert!(warnings.is_empty());
     }
@@ -570,14 +574,11 @@ mod tests {
 
     #[test]
     fn unrecognised_signature_version_fails_the_build() {
-        let err = build(
-            "RXD",
-            json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}),
-        )
-        .err()
-        .expect("an unrecognised signature_version must not fall back to a default");
+        let err = build("RXD", unknown_value_conf())
+            .err()
+            .expect("an unrecognised signature_version must not fall back to a default");
         let msg = err.to_string();
-        assert!(msg.contains("fork_id_rxd"), "the offending value must be named: {msg}");
+        assert!(msg.contains("fork_id_xyz"), "the offending value must be named: {msg}");
         assert!(msg.contains("witness_v0"), "the accepted set must be listed: {msg}");
 
         // A present value of the wrong JSON type is equally unrecognised.
@@ -591,10 +592,61 @@ mod tests {
             ("base", SignatureVersion::Base),
             ("witness_v0", SignatureVersion::WitnessV0),
             ("fork_id", SignatureVersion::ForkId),
+            ("fork_id_rxd", SignatureVersion::ForkIdRxd),
         ] {
             let conf = build("XYZ", json!({"coin": "XYZ", "signature_version": name})).unwrap();
             assert_eq!(conf.signature_version, expected);
         }
+    }
+
+    /// CRD ch.58 T1: the fourth value resolves to the Radiant dialect under every switch setting, with
+    /// no warning; the other three strings resolve to their own versions; unknown values follow R58.2.2.
+    /// The unknown-value cases use the fall-back setting because the default setting (#54) fails
+    /// activation for them instead of resolving.
+    #[test]
+    fn t1_signature_version_resolution_for_all_four_strings_and_unknown_values() {
+        for policy in [
+            UnrecognisedEnumPolicy::Fail,
+            UnrecognisedEnumPolicy::WarnAndFallBack,
+            UnrecognisedEnumPolicy::NotUsed,
+        ] {
+            let (conf, warnings) = warnings_of("RXD", rxd_conf(), policy);
+            assert_eq!(conf.signature_version, SignatureVersion::ForkIdRxd, "{policy:?}");
+            assert!(warnings.is_empty(), "{policy:?}: {warnings:?}");
+        }
+        for (name, expected) in [
+            ("base", SignatureVersion::Base),
+            ("witness_v0", SignatureVersion::WitnessV0),
+            ("fork_id", SignatureVersion::ForkId),
+            ("fork_id_rxd", SignatureVersion::ForkIdRxd),
+        ] {
+            let conf = build_with(
+                "XYZ",
+                json!({"coin": "XYZ", "signature_version": name}),
+                UnrecognisedEnumPolicy::WarnAndFallBack,
+            )
+            .unwrap();
+            assert_eq!(conf.signature_version, expected, "{name}");
+        }
+        let fb = UnrecognisedEnumPolicy::WarnAndFallBack;
+        let conf = build_with(
+            "XYZ",
+            json!({"coin": "XYZ", "fork_id": "0x40", "signature_version": "nope"}),
+            fb,
+        )
+        .unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
+        let conf = build_with("XYZ", json!({"coin": "XYZ", "signature_version": "nope"}), fb).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build_with(
+            "XYZ",
+            json!({"coin": "XYZ", "fork_id": "0x0", "signature_version": "nope"}),
+            fb,
+        )
+        .unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::Base);
+        let conf = build_with("BCH", json!({"coin": "BCH", "signature_version": "nope"}), fb).unwrap();
+        assert_eq!(conf.signature_version, SignatureVersion::ForkId);
     }
 
     #[test]
