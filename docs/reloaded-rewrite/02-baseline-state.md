@@ -6,8 +6,11 @@ The chapter binds the pinned baseline anchor every other chapter
 in the document set refers to: the commit identifier, the
 inherited workspace shape, the toolchain pin, the configuration
 surface, the request-and-response surface, the build-target set,
-the license posture, and the explicit non-claims that scope what
-this chapter is and is not authoritative on.
+the license posture, the explicit non-claims that scope what
+this chapter is and is not authoritative on, and the
+reference-state table that gives every later state of the
+historical record the document set names its one bound
+identifier.
 
 ## 2.1 Executive Summary
 
@@ -45,8 +48,10 @@ toolchain pin; R4–R5 anchor the workspace-member registry and the
 patched-dependency registry; R6–R8 anchor the configuration
 surface, the request-and-response surface, and the build-target
 surface; R9 anchors the license posture; R10–R12 bound the chapter's
-explicit non-claims. The chapter's substrate is the anchor itself,
-not a delta from it.
+explicit non-claims; R13 anchors the reference-state table of
+§2.15A. The chapter's substrate is the anchor itself, not a delta
+from it; the table of §2.15A is the one place the chapter looks
+past the anchor, and it records locators only.
 
 ## 2.2 Subsystem Shape
 
@@ -386,6 +391,100 @@ chapters that bind the substrate of a chapter-bound version-two
 swap protocol do so on their own terms (chapters 13 / 15 / 16 /
 17).
 
+## 2.15A Bound Reference States
+
+Chapter 01 R11 and §1.7 keep post-anchor commit identifiers and
+branch states out of chapter prose, so until 2026-10-25 a chapter
+could name a state of the historical record only by a published
+release designation. Branch tips, pull-request merge states and
+tags whose names do not say what they point at were unnameable;
+two clearance records had to leave visible gaps for exactly that
+reason, and one earlier pass attested a release it had not read,
+because the tree it had checked out was a near-twin of the tag.
+This section supplies the one place such identifiers live. It is
+numbered §2.15A because §2.16–§2.20 were already bound and cited
+from other chapters when it was added; the pattern is chapter 01
+§1.4A's.
+
+**R13.** *Bound reference-state table.* Every name the document set
+uses for a state of the historical record — the baseline anchor of
+R1, a release tag, a branch tip as of a date, a pull-request merge
+commit, or a specially named state — MUST have a row in the table
+below, and the row MUST give the name, the kind of state, the full
+commit identifier, and the date. The table is the single place in
+the document set at which a post-anchor commit identifier or a
+branch state may appear (chapter 01 R11, carve-out class
+*reference-state table entry*; chapter 01 §1.7 as amended
+2026-10-25). Chapter prose, provenance footers, scoped records,
+clearance statements and scope attestations name a state by its
+row name only. The following discipline binds the table:
+
+- *Name discipline.* A release-tag name labels only that tag's
+  commit and MUST NOT be reused for any other commit. A branch
+  state gets its own row named `<branch> (as of YYYY-MM-DD)`. A pull
+  request gets a row for its merge commit named `PR #N (merged
+  YYYY-MM-DD)`; its pre-merge revisions are not tabled. A tag whose
+  name embeds an abbreviation of some other commit is recorded as a
+  *special name*, with the discrepancy noted in its kind column.
+- *Gate duty.* In every pass, the clean-room gate of chapter 01 R37
+  verifies that each name the candidate uses has a row, and that
+  the row's commit identifier is the state the gate actually
+  compared against. A name with no row is a finding; a row whose
+  identifier is not what was compared is a finding.
+- *Author duty.* The dirty-side specification author of chapter 01
+  R37 adds a row whenever it reads a state not yet tabled, and lists
+  the identifiers it read in its report. Rows are added as states
+  are read; the table is not a catalogue of the historical record.
+- *Who edits.* The specification author MAY add rows, because the
+  table sits in a chapter of the document set; the table is
+  gateable like any other chapter text. Commit identifiers, tag
+  names and dates are reference metadata of a public repository,
+  not expression; they carry no R8–R10 content, and R10 of this
+  chapter is not engaged, because a row describes no code, comment
+  or document.
+- *Verification.* A row is entered only after its identifier and
+  date have been confirmed by read-only inspection of the historical
+  record's reference metadata (V4).
+
+The historical record is the public repository the project source
+tree descends from; it is unmaintained but reachable, under its
+current owner's name and, by redirect, under its former owner's
+name. The local clone's tag set was verified complete against the
+live remote on 2026-10-24 (255 tags).
+
+| Name | Kind | Full commit identifier | Date |
+| --- | --- | --- | --- |
+| baseline anchor (R1) | the pre-anchor baseline commit | `c1d46c0c1592faa0860f704008b2b2381bc3840f` | 2022-06-03 |
+| `v2.0.0-beta` | release tag (lightweight) | `b0fd99e8406e67ea06435dd028991caa5f522b5c` | 2023-12-18 |
+| `mm2-af57160` | release tag (special name) | `af571608c34f38d82e3c421f9bd61c5265db0cf8` | 2024-02-21 (released 2024-06-26) |
+| `v2.1.0-beta` | release tag | `35e92394928825c337f246f8e19fbfab1f65c4a8` | 2024-08-01 |
+| `v2.2.0-beta` | release tag | `bb749a99344fb61e92410cb64b035dba1de35779` | 2024-11-22 |
+| `v2.3.0-beta` | release tag (annotated; tag object `4b8702af207f6d045558e44044ada8731d0d1277`) | `8206c6ef61ee5c0f697fab5fcfd7256e3ebe13ac` | 2024-12-19 |
+| `v2.4.0-beta` | release tag | `c800ea03f12dab33d2dc04a1d858ee6da111203f` | 2025-05-02 |
+| `v2.5.0-beta` | release tag | `fbab8ec85d65f3bb014d894eabd98717f97ec29a` | 2025-07-04 |
+| `v2.5.1-beta` | release tag | `a9fbf6096257b802e0aac4d936dcc5d2f0c28461` | 2025-07-28 |
+| `v2.5.2-beta` | release tag | `a295579b8b29815f5aa2d8a999c992bbbec754a8` | 2025-10-21 |
+| `v2.5.2-bebdc9a` | release tag (special name: the embedded abbreviation is of a *different* commit, `bebdc9a17d201d63e09513e5da8ef201be17c24c`, not of the tagged one) | `7f60b3435f6eda64640a6c560bd56c5abc329a92` | 2025-11-01 |
+| `v2.6.0-beta` | release tag | `475cdb49bc343a8fefdc2caaa1635d5ec426990b` | 2025-11-30 |
+| `v3.0.0-beta` | release tag (lightweight; a merge commit joining `main` with the `staging (as of 2026-03-27)` state) | `d56a7bc5028f10b9c1bb8370bb2ee16444796a23` | 2026-04-01 |
+| `dev (as of 2026-03-27)` | branch tip | `e686ef3500585f01c9f0e89c8c01bc036c42253c` | 2026-03-27 |
+| `staging (as of 2026-03-27)` | branch tip | `1f984dd119d360a0523719909705b6df58fc8187` | 2026-03-27 |
+| `main (as of 2026-10-07)` | branch tip (two commits after `v3.0.0-beta`: a read-me notice that the repository is unmaintained, and the merge of the pull request that added it) | `9b3fd7026e9e5ad4c8bd2cba5a5499cecba8d957` | 2026-10-07 |
+| `PR #1971 (merged 2023-10-03)` | pull-request merge | `3c078b6a2aed2e4f9e534907e77deca466df091f` | 2023-10-03 |
+| `PR #2563 (merged 2025-08-04)` | pull-request merge | `c93adea548d4a80f5a66a2007001f2c73aa08760` | 2025-08-04 |
+| `PR #2572 (merged 2025-08-05)` | pull-request merge | `6172ba8d1df0541dd319d4193cad1cb26df50eee` | 2025-08-05 |
+| `PR #2564 (merged 2025-08-12)` | pull-request merge | `32b9e2d7b9dd92cd8b0d59fb43759dd5ffe850d0` | 2025-08-12 |
+| `PR #2583 (merged 2025-08-12)` | pull-request merge | `1d96f9afe05180c31178fd66ed0d4d6c98ac8f45` | 2025-08-12 |
+| `PR #2692 (merged 2025-11-25)` | pull-request merge | `82bcc7a5877075adf32c9d293f6725f53cdb2419` | 2025-11-25 |
+| `PR #2566 (merged 2026-01-12)` | pull-request merge | `f86c911a6399c28e6d812b2086e3aac0f4e8ffa5` | 2026-01-12 |
+| `PR #2713 (merged 2026-02-23)` | pull-request merge (squash) | `02a8a3ce69b6ce9a945acf40216b6e24008f0868` | 2026-02-23 |
+| `PR #2710 (merged 2026-03-06)` | pull-request merge | `8309b0bdbb5acf8fc8f5965f12cec4b4640e46a6` | 2026-03-06 |
+| `PR #2715 (merged 2026-03-06)` | pull-request merge (changelog bump) | `b9a8627e46feb702229f645cf78fc3ccbda8d194` | 2026-03-06 |
+
+The `v1.0.x-beta` and `v1.1.0` release tags are not yet tabled;
+their identifiers have not been collected. Rows are added as states
+are read, under the author duty above.
+
 ## 2.16 Tests
 
 This chapter binds an anchor; it has no test surface of its own.
@@ -417,6 +516,18 @@ R4 MUST all match.
 R9 MUST be confirmed to carry the chapter-bound files and the
 chapter-bound license-statement text at the anchor.
 
+**V4.** Every row of the reference-state table of R13 MUST be
+confirmed, by read-only inspection of the historical record's
+reference metadata, to name a commit that exists on that record and
+carries the row's date; a tag row MUST be confirmed to name the
+commit the tag resolves to, with an annotated tag's own object
+identifier recorded in the kind column and not in the commit
+column; a branch-tip row MUST be confirmed to name the commit the
+branch pointed at on the row's date; a pull-request row MUST be
+confirmed to name the merge commit, not a pre-merge revision. The
+inspection reads names, identifiers and dates only, and no content
+of any post-anchor commit.
+
 ## 2.19 External References
 
 - The GNU General Public License version 2 of June 1991 (Free
@@ -442,11 +553,25 @@ chapter-bound license-statement text at the anchor.
   chapter-bound anchor read-me, the chapter-bound anchor root
   manifest, the chapter-bound license-materials directory of R9 —
   all consulted directly at the chapter-bound anchor commit per
-  R1.
+  R1. For §2.15A and V4: the reference metadata of the historical
+  record — tag names, branch names, commit identifiers and commit
+  dates — read by read-only inspection of a clone's references and
+  verified complete against the live remote on 2026-10-24; chapter
+  01 §1.5 and §1.7 as amended 2026-10-25, which carve the table out
+  of the identifier-hygiene constraint.
 - *Permitted-input classes used:* the baseline itself
-  (chapter 01 R1).
+  (chapter 01 R1); for the table of §2.15A, public facts about a
+  publicly reachable repository of the kind chapter 01 R6 admits
+  (names, identifiers and dates only).
 - *Sibling-allowlist consultations:* the chapter-bound Komodo
   Platform sibling-repository asset-list citation of §2.19; the
   chapter-bound sibling-allowlist clone of the public backtrace
   repository cited by R5.
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* not consulted. The table of §2.15A records
+  reference metadata of the historical record — names, commit
+  identifiers and dates — which chapter 01 §1.7 as amended
+  2026-10-25 treats as locators that disclose nothing non-public
+  and carry no expression; no code, comment, documentation, commit
+  message or request-discussion thread of any post-anchor commit
+  entered this chapter, so no R8–R10 input was taken and R38
+  required no clearance.

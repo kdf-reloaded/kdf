@@ -31,6 +31,15 @@ withdrawal request, such as memo, broadcast, protocol-channel, or expiry
 controls. The task endpoint shall not add a second withdrawal-specific request
 shape.
 
+> **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
+> single enumeration shared by every coin family, tagged by a `type` member.
+> Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
+> that follows, and the envelope type the resolved form implies are bound by
+> [Chapter 57](57-evm-fee-inputs.md) §57.7, which also records that reloaded
+> accepts only the legacy EVM form today and that the enumeration is missing
+> the Cosmos-family form entirely. This chapter binds the request's shape and
+> the task lifecycle around it, not the per-family fee semantics.
+
 R49.2. When `from` is present, it shall be an HD-address selector in exactly one
 of these public JSON wire forms:
 
