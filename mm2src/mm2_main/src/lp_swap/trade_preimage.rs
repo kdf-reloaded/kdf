@@ -1,6 +1,6 @@
 use super::check_balance::CheckBalanceError;
 use super::{maker_swap_trade_preimage, taker_swap_trade_preimage, MakerTradePreimage, TakerTradePreimage};
-use crate::mm2::lp_ordermatch::{MakerOrderBuildError, TakerAction, TakerOrderBuildError};
+use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, TakerAction, TakerOrderBuildError};
 use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, TradeFee, TradePreimageError};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::HttpStatusCode;
@@ -305,6 +305,23 @@ impl From<CheckBalanceError> for TradePreimageRpcError {
             },
             CheckBalanceError::Transport(transport) => TradePreimageRpcError::Transport(transport),
             CheckBalanceError::InternalError(internal) => TradePreimageRpcError::InternalError(internal),
+        }
+    }
+}
+
+impl From<SpendSafetyError> for TradePreimageRpcError {
+    fn from(e: SpendSafetyError) -> Self {
+        match e {
+            SpendSafetyError::VolumeTooLow {
+                coin,
+                volume,
+                threshold,
+            } => TradePreimageRpcError::VolumeTooLow {
+                coin,
+                volume,
+                threshold,
+            },
+            e @ SpendSafetyError::EstimateUnavailable { .. } => TradePreimageRpcError::Transport(e.to_string()),
         }
     }
 }

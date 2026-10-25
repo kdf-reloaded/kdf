@@ -3967,3 +3967,283 @@ mod t11_field_report {
         assert_eq!(legacy["result"]["min_trading_vol_fraction"]["denom"], "100000000");
     }
 }
+
+/// CRD ch.60 T60.6: the pre-trade spend-safety check (R60.6.7). The coin-side safe amounts are pinned in the
+/// `coins` crate (a dynamic rate of 20,000 with dust 1,000 gives 0.0001092; the Sia fixed miner fee plus one
+/// hasting); here `TestCoin` reports them, so the checks of the order paths run without any network.
+#[cfg(not(target_arch = "wasm32"))]
+mod t60_6_pre_trade_spend_check_tests {
+    use super::*;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum, SpendSafeAmountError};
+    use common::mm_number::BigRational;
+    use mm2_err_handle::prelude::MmError;
+
+    fn units_8(units: i64) -> MmNumber { MmNumber::from(BigRational::new(units.into(), 100_000_000.into())) }
+
+    /// Safe amounts by ticker: `DYN` is the dynamic-fee coin of T60.6 (a), `SIA` the Sia coin of (b), `KMD` the
+    /// fixed-fee coin of (c), `PLAIN` a coin that is not covered. All of them have the floor 0.0001 except `SIA`.
+    fn safe_amount_of(ticker: &str) -> Option<MmNumber> {
+        match ticker {
+            "DYN" => Some(units_8(10_920)),
+            "KMD" => Some(units_8(1_496)),
+            // The Sia safe amount is its fixed miner fee plus one hasting: 0.0200..01 here is stood in by 0.02.
+            "SIA" => Some(MmNumber::from("0.02000000000000000000000001")),
+            _ => None,
+        }
+    }
+
+    fn mock_coins(estimate_fails: bool) {
+        TestCoin::min_trading_vol.mock_safe(|coin| {
+            let floor = if coin.ticker() == "SIA" {
+                MmNumber::from("0.000000000000000000000001")
+            } else {
+                units_8(10_000)
+            };
+            MockResult::Return(floor)
+        });
+        TestCoin::spend_safe_amount.mock_safe(move |coin| {
+            let ticker = coin.ticker().to_owned();
+            MockResult::Return(Box::pin(async move {
+                if estimate_fails && ticker == "DYN" {
+                    return MmError::err(SpendSafeAmountError::EstimateUnavailable("no estimate".to_owned()));
+                }
+                Ok(safe_amount_of(&ticker))
+            }))
+        });
+    }
+
+    fn ctx_with(conf: Json, tickers: &[&str]) -> MmArc {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in tickers {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        ctx
+    }
+
+    fn pair(base: &str, rel: &str) -> (MmCoinEnum, MmCoinEnum) {
+        (
+            MmCoinEnum::Test(TestCoin::new(base)),
+            MmCoinEnum::Test(TestCoin::new(rel)),
+        )
+    }
+
+    fn check(
+        ctx: &MmArc,
+        base: &str,
+        rel: &str,
+        min_volume: &'static str,
+        price: &'static str,
+    ) -> Result<(), SpendSafetyError> {
+        let (base, rel) = pair(base, rel);
+        block_on(check_pre_trade_spend_safety(
+            ctx,
+            &base,
+            &rel,
+            Some(MmNumber::from(min_volume)),
+            &MmNumber::from(price),
+        ))
+    }
+
+    fn assert_too_low(result: Result<(), SpendSafetyError>, expected_coin: &str, expected_threshold: &'static str) {
+        match result {
+            Err(SpendSafetyError::VolumeTooLow { coin, threshold, .. }) => {
+                assert_eq!(coin, expected_coin);
+                assert_eq!(MmNumber::from(threshold), MmNumber::from(expected_threshold));
+            },
+            other => panic!("expected the volume-too-low refusal, got {:?}", other),
+        }
+    }
+
+    /// (a): the dynamic-fee coin with S = 0.0001092 refuses a minimum volume of 0.0001 and accepts 0.00011.
+    #[test]
+    fn t60_6_a_dynamic_fee_coin_minimum_volume_is_checked_against_the_safe_amount() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &[]);
+        assert_too_low(check(&ctx, "DYN", "KMD", "0.0001", "1"), "DYN", "0.0001092");
+        assert!(check(&ctx, "DYN", "KMD", "0.00011", "1").is_ok());
+        // The rel leg is the minimum volume times the price of the rel coin.
+        assert_too_low(check(&ctx, "KMD", "DYN", "0.0001", "1"), "DYN", "0.0001092");
+        assert!(check(&ctx, "KMD", "DYN", "0.00011", "1").is_ok());
+        assert_too_low(check(&ctx, "KMD", "DYN", "0.0002", "0.5"), "DYN", "0.0001092");
+        assert!(check(&ctx, "KMD", "DYN", "0.0002", "0.6").is_ok());
+    }
+
+    /// An order with no operator-set minimum volume is refused at its default, never raised.
+    #[test]
+    fn t60_6_a_default_minimum_volume_is_refused_not_raised() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &[]);
+        let (base, rel) = pair("DYN", "KMD");
+        let result = block_on(check_pre_trade_spend_safety(
+            &ctx,
+            &base,
+            &rel,
+            None,
+            &MmNumber::from("1"),
+        ));
+        assert_too_low(result, "DYN", "0.0001092");
+    }
+
+    /// (b): a Sia leg at the floor is refused with the miner fee plus one hasting as the threshold.
+    #[test]
+    fn t60_6_b_sia_leg_equal_to_the_miner_fee_is_refused() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &[]);
+        assert_too_low(
+            check(&ctx, "SIA", "KMD", "0.02", "100"),
+            "SIA",
+            "0.02000000000000000000000001",
+        );
+        assert!(check(&ctx, "SIA", "KMD", "0.03", "100").is_ok());
+    }
+
+    /// (c): KMD at its floor of 0.0001 (S = 496 + 1,000 base units) is accepted; so is a coin that is not covered.
+    #[test]
+    fn t60_6_c_kmd_at_its_floor_and_uncovered_coins_are_accepted() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &[]);
+        assert!(check(&ctx, "KMD", "PLAIN", "0.0001", "1").is_ok());
+        assert!(check(&ctx, "PLAIN", "PLAIN2", "0.0001", "1").is_ok());
+    }
+
+    /// A dynamic-fee estimate failure refuses with a typed error.
+    #[test]
+    fn t60_6_estimate_failure_is_a_typed_refusal() {
+        mock_coins(true);
+        let ctx = ctx_with(json!({}), &[]);
+        match check(&ctx, "DYN", "KMD", "1", "1") {
+            Err(SpendSafetyError::EstimateUnavailable { coin, .. }) => assert_eq!(coin, "DYN"),
+            other => panic!("expected the estimate-unavailable refusal, got {:?}", other),
+        }
+    }
+
+    /// (e): with `pre_trade_spend_check` false the order of (a) is accepted; only an explicit false switches it off.
+    #[test]
+    fn t60_6_e_switch_false_disables_the_check() {
+        mock_coins(false);
+        for (conf, enabled) in [
+            (json!({}), true),
+            (json!({ "pre_trade_spend_check": true }), true),
+            (json!({ "pre_trade_spend_check": null }), true),
+            (json!({ "pre_trade_spend_check": "false" }), true),
+            (json!({ "pre_trade_spend_check": false }), false),
+        ] {
+            let ctx = ctx_with(conf.clone(), &[]);
+            assert_eq!(pre_trade_spend_check_enabled(&ctx), enabled, "{conf}");
+            assert_eq!(check(&ctx, "DYN", "KMD", "0.0001", "1").is_ok(), !enabled, "{conf}");
+        }
+    }
+
+    /// (a) through the `setprice` path: refused with the typed volume-too-low text, and the operator-set minimum
+    /// volume of an order is what is checked, whether or not one was given.
+    #[test]
+    fn t60_6_setprice_is_refused_before_anything_else_happens() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &["DYN", "KMD"]);
+        for body in [
+            json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "min_volume": "0.0001"}),
+            json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"}),
+        ] {
+            let req: SetPriceReq = json::from_value(body).unwrap();
+            let err = match block_on(create_maker_order(&ctx, req)) {
+                Err(e) => e,
+                Ok(_) => panic!("setprice must be refused"),
+            };
+            assert!(
+                err.contains("The volume 0.0001 of the DYN coin is too low, required at least 0.0001092"),
+                "{err}"
+            );
+        }
+    }
+
+    /// `buy` and `sell` reach the same check through `lp_auto_buy`.
+    #[test]
+    fn t60_6_buy_is_refused() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &["DYN", "KMD"]);
+        let (base, rel) = pair("DYN", "KMD");
+        let input: AutoBuyInput = json::from_value(json!({
+            "base": "DYN", "rel": "KMD", "price": "1", "volume": "1", "method": "buy", "min_volume": "0.0001"
+        }))
+        .unwrap();
+        let err = match block_on(lp_auto_buy(&ctx, &base, &rel, input)) {
+            Err(e) => e,
+            Ok(_) => panic!("buy must be refused"),
+        };
+        assert!(
+            err.contains("The volume 0.0001 of the DYN coin is too low, required at least 0.0001092"),
+            "{err}"
+        );
+    }
+
+    /// `update_maker_order` checks the order as updated.
+    #[test]
+    fn t60_6_update_maker_order_is_refused() {
+        mock_coins(false);
+        let ctx = ctx_with(json!({}), &["DYN", "KMD"]);
+        let (base, rel) = pair("DYN", "KMD");
+        let order = MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(1.into())
+            .with_min_base_vol(Some(units_8(11_000)))
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+        let req = MakerOrderUpdateReq {
+            uuid: order.uuid,
+            new_price: None,
+            max: None,
+            volume_delta: None,
+            min_volume: Some(units_8(10_000)),
+            base_confs: None,
+            base_nota: None,
+            rel_confs: None,
+            rel_nota: None,
+        };
+        let err = match block_on(update_maker_order(&ctx, req)) {
+            Err(e) => e,
+            Ok(_) => panic!("the update must be refused"),
+        };
+        assert!(
+            err.contains("The volume 0.0001 of the DYN coin is too low, required at least 0.0001092"),
+            "{err}"
+        );
+    }
+
+    /// (f): an order or request received from a peer is handled exactly as without the rule: matching never
+    /// consults the safe amount, so a request below it is matched at the order's own minimum volume.
+    #[test]
+    fn t60_6_f_incoming_requests_are_unaffected() {
+        TestCoin::spend_safe_amount.mock_safe(|_| panic!("the safe amount must not be consulted when matching"));
+        let maker = MakerOrderBuilder::new(&pair("DYN", "KMD").0, &pair("DYN", "KMD").1)
+            .with_max_base_vol(1.into())
+            .with_min_base_vol(Some(units_8(10_000)))
+            .with_price(1.into())
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .build_unchecked();
+        let request = TakerRequest {
+            base: "DYN".into(),
+            rel: "KMD".into(),
+            uuid: Uuid::new_v4(),
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: units_8(10_000),
+            rel_amount: units_8(10_000),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        };
+        assert_eq!(
+            maker.match_with_request(&request),
+            OrderMatchResult::Matched((units_8(10_000), units_8(10_000)))
+        );
+    }
+}

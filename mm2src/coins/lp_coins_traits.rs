@@ -567,6 +567,11 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
     /// Transaction history background sync status
     fn history_sync_status(&self) -> HistorySyncState;
 
+    /// CRD ch.60 R60.6.7 items 1 and 2: the smallest HTLC value whose spend or refund leaves a valid output,
+    /// for a coin whose HTLC spend fee is paid out of the HTLC value. `Ok(None)` means the coin is not covered
+    /// by the pre-trade spend-safety check, which is the default.
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> { Ok(None) }
+
     /// Get fee to be paid per 1 swap transaction
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send>;
 

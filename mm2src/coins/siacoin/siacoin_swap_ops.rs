@@ -191,9 +191,16 @@ impl SiaCoin {
         let miner_fee = Currency::DEFAULT_FEE;
         let htlc_utxo_amount = htlc_utxo.output.siacoin_output.value;
 
+        let output_amount = htlc_value_after_miner_fee(htlc_utxo_amount, miner_fee).ok_or(
+            MakerSpendsTakerPaymentError::HtlcBelowMinerFee {
+                htlc_value: htlc_utxo_amount,
+                miner_fee,
+            },
+        )?;
+
         let tx = V2TransactionBuilder::new()
             .miner_fee(miner_fee)
-            .add_siacoin_output((maker_public_key.address(), htlc_utxo_amount - miner_fee).into())
+            .add_siacoin_output((maker_public_key.address(), output_amount).into())
             .add_siacoin_input(htlc_utxo.output, input_spend_policy)
             .satisfy_atomic_swap_success(my_keypair, secret, 0u32)?
             .build();
@@ -235,9 +242,16 @@ impl SiaCoin {
         let miner_fee = Currency::DEFAULT_FEE;
         let htlc_utxo_amount = htlc_utxo.output.siacoin_output.value;
 
+        let output_amount = htlc_value_after_miner_fee(htlc_utxo_amount, miner_fee).ok_or(
+            TakerSpendsMakerPaymentError::HtlcBelowMinerFee {
+                htlc_value: htlc_utxo_amount,
+                miner_fee,
+            },
+        )?;
+
         let tx = V2TransactionBuilder::new()
             .miner_fee(miner_fee)
-            .add_siacoin_output((taker_public_key.address(), htlc_utxo_amount - miner_fee).into())
+            .add_siacoin_output((taker_public_key.address(), output_amount).into())
             .add_siacoin_input_with_basis(htlc_utxo, input_spend_policy)
             .satisfy_atomic_swap_success(my_keypair, secret, 0u32)?
             .build();
@@ -361,9 +375,15 @@ impl SiaCoin {
         let miner_fee = Currency::DEFAULT_FEE;
         let htlc_utxo_amount = htlc_utxo.output.siacoin_output.value;
 
+        let output_amount =
+            htlc_value_after_miner_fee(htlc_utxo_amount, miner_fee).ok_or(SendRefundHltcError::HtlcBelowMinerFee {
+                htlc_value: htlc_utxo_amount,
+                miner_fee,
+            })?;
+
         let tx = V2TransactionBuilder::new()
             .miner_fee(miner_fee)
-            .add_siacoin_output((my_keypair.public().address(), htlc_utxo_amount - miner_fee).into())
+            .add_siacoin_output((my_keypair.public().address(), output_amount).into())
             .add_siacoin_input_with_basis(htlc_utxo, input_spend_policy)
             .satisfy_atomic_swap_refund(my_keypair, 0u32)?
             .build();
@@ -1356,5 +1376,42 @@ mod validate_htlc_payment_tests {
             check_htlc_payment_output(&tx, &mine.public(), &theirs.public(), TIME_LOCK, &secret_hash, AMOUNT),
             Err(SiaValidateHtlcPaymentError::InvalidOutput { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod htlc_miner_fee_refusal_tests {
+    //! CRD ch.20 R-S11 and ch.60 R60.6.4 (T60.5), R60.6.7 item 2 (T60.6 (b)): the spend and refund builders
+    //! subtract the fixed miner fee through `htlc_value_after_miner_fee`, which refuses a value not above
+    //! the fee; the Sia safe amount is that fee plus one hasting.
+
+    use super::*;
+
+    #[test]
+    fn an_htlc_equal_to_or_below_the_miner_fee_is_refused() {
+        let fee = Currency::DEFAULT_FEE;
+        assert_eq!(htlc_value_after_miner_fee(fee, fee), None);
+        assert_eq!(htlc_value_after_miner_fee(Currency(fee.0 - 1), fee), None);
+        assert_eq!(htlc_value_after_miner_fee(Currency(0), fee), None);
+    }
+
+    #[test]
+    fn an_htlc_above_the_miner_fee_leaves_the_difference() {
+        let fee = Currency::DEFAULT_FEE;
+        assert_eq!(htlc_value_after_miner_fee(Currency(fee.0 + 1), fee), Some(Currency(1)));
+        assert_eq!(
+            htlc_value_after_miner_fee(Currency(fee.0 + 500), fee),
+            Some(Currency(500))
+        );
+    }
+
+    #[test]
+    fn the_safe_amount_is_the_miner_fee_plus_one_hasting() {
+        let expected = hastings_to_siacoin(Currency(Currency::DEFAULT_FEE.0 + 1));
+        assert_eq!(htlc_safe_amount(), expected);
+        // The safe amount is exactly the smallest HTLC value that survives the fee deduction.
+        let safe = Currency(Currency::DEFAULT_FEE.0 + 1);
+        assert!(htlc_value_after_miner_fee(safe, Currency::DEFAULT_FEE).is_some());
+        assert!(htlc_value_after_miner_fee(Currency(safe.0 - 1), Currency::DEFAULT_FEE).is_none());
     }
 }

@@ -187,7 +187,8 @@ pub async fn z_p2sh_spend(
         .transparent_bundle()
         .and_then(|bundle| bundle.vout.first())
         .map(TxOut::value)
-        .and_then(|value| value - fee)
+        // CRD ch.60 R60.6.4: a spend whose fee is not smaller than the HTLC value is refused.
+        .and_then(|value| if value > fee { value - fee } else { None })
         .or_mm_err(|| ZP2SHSpendError::InvalidPaymentTx("output 0 cannot cover the swap spend fee".to_owned()))?;
     tx_builder
         .add_sapling_output(None, coin.z_fields.my_z_addr.clone(), payment_value, MemoBytes::empty())

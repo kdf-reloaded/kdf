@@ -236,6 +236,8 @@ pub enum SendRefundHltcError {
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[refund-hltc] broadcast failed: {0}")]
     BroadcastTx(#[from] BroadcastTransactionError),
+    #[error("[refund-hltc] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend")]
+    HtlcBelowMinerFee { htlc_value: Currency, miner_fee: Currency },
 }
 
 /// Errors raised while the taker spends the maker's payment.
@@ -259,6 +261,10 @@ pub enum TakerSpendsMakerPaymentError {
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[taker-spends-maker] broadcast failed: {0}")]
     BroadcastTx(#[from] BroadcastTransactionError),
+    #[error(
+        "[taker-spends-maker] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend"
+    )]
+    HtlcBelowMinerFee { htlc_value: Currency, miner_fee: Currency },
 }
 
 /// Errors raised while the maker spends the taker's payment.
@@ -282,6 +288,10 @@ pub enum MakerSpendsTakerPaymentError {
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[maker-spends-taker] broadcast failed: {0}")]
     BroadcastTx(#[from] BroadcastTransactionError),
+    #[error(
+        "[maker-spends-taker] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend"
+    )]
+    HtlcBelowMinerFee { htlc_value: Currency, miner_fee: Currency },
 }
 
 // ---------- Validation ----------

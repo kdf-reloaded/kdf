@@ -1,6 +1,7 @@
 // siacoin_mm_coin — MmCoin and WatcherOps trait implementations.
 
 use super::*;
+use crate::SpendSafeAmountError;
 use crate::{WatcherValidatePaymentInput, WatcherValidateTakerFeeInput};
 
 // ── WatcherOps (CRD ch.20 §20.10 D7) ──────────────────────────────────
@@ -118,9 +119,13 @@ impl SiaCoin {
         let miner_fee = Currency::DEFAULT_FEE;
         let htlc_utxo_amount = htlc_utxo.output.siacoin_output.value;
 
+        let output_amount = htlc_value_after_miner_fee(htlc_utxo_amount, miner_fee).ok_or_else(|| {
+            format!("HTLC value {htlc_utxo_amount} is not larger than the miner fee {miner_fee}, refusing to refund")
+        })?;
+
         let tx = V2TransactionBuilder::new()
             .miner_fee(miner_fee)
-            .add_siacoin_output((refund_public_key.address(), htlc_utxo_amount - miner_fee).into())
+            .add_siacoin_output((refund_public_key.address(), output_amount).into())
             .add_siacoin_input_with_basis(htlc_utxo, input_spend_policy)
             .satisfy_atomic_swap_refund(my_keypair, 0u32)
             .map_err(|e| e.to_string())?
@@ -454,6 +459,11 @@ impl MmCoin for SiaCoin {
             amount: MmNumber::from("0.00001"),
             paid_from_trading_vol: false,
         })
+    }
+
+    /// CRD ch.60 R60.6.7 item 2: the fixed HTLC miner fee plus one hasting.
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
+        Ok(Some(htlc_safe_amount().into()))
     }
 
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {

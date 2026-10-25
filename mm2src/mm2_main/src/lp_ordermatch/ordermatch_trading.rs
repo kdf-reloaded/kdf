@@ -1505,6 +1505,8 @@ pub async fn lp_auto_buy(
         Some("sell") => TakerAction::Sell,
         _ => return ERR!("Auto buy must be called only from buy/sell RPC methods"),
     };
+    // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
+    try_s!(check_pre_trade_spend_safety(ctx, base_coin, rel_coin, input.min_volume.clone(), &input.price).await);
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
     let mut my_taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     let our_public_id = try_s!(ctx.public_id());
@@ -1799,6 +1801,8 @@ pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOr
     if rel_coin.wallet_only(ctx) {
         return ERR!("Rel coin {} is wallet only", req.rel);
     }
+    // CRD ch.60 R60.6.7 item 3: the smallest trade the order can produce must be spendable on both legs.
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, req.min_volume.clone(), &req.price).await);
 
     #[cfg(feature = "ibc-routing-for-swaps")]
     {
@@ -1983,6 +1987,14 @@ pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result
         ));
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
+
+    // CRD ch.60 R60.6.7 item 3: the order as updated must still be spendable on both legs. Its minimum
+    // volume is the requested one, else the one it already carries.
+    let min_volume_after_update = req
+        .min_volume
+        .clone()
+        .or_else(|| Some(order_before_update.min_base_vol.clone()));
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {

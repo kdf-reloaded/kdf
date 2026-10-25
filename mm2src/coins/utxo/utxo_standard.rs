@@ -14,6 +14,7 @@ use crate::rpc_command::init_scan_for_new_addresses::{self, InitScanAddressesRpc
                                                       ScanAddressesResponse};
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawTaskHandle};
 use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilder};
+use crate::SpendSafeAmountError;
 use crate::{CanRefundHtlc, CoinBalance, CoinWithDerivationMethod, DexFee, GetWithdrawSenderAddress,
             NegotiateSwapContractAddrErr, PrivKeyBuildPolicy, RawTransactionFut, SignRawTransactionRequest,
             SignatureResult, SwapOps, TradePreimageValue, TransactionFut, ValidateAddressResult, ValidateFeeArgs,
@@ -599,6 +600,10 @@ impl MmCoin for UtxoStandardCoin {
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
         utxo_common::get_sender_trade_fee(self, value, stage).await
+    }
+
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
+        utxo_common::spend_safe_amount(self).await
     }
 
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {

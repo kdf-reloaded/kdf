@@ -90,6 +90,19 @@ pub(crate) fn hastings_to_siacoin(hastings: Currency) -> BigDecimal {
     hastings_bd / divisor
 }
 
+/// CRD ch.20 R-S11, ch.60 R60.6.4: the value of the single output of an HTLC spend or refund, that is the HTLC
+/// value minus the fixed miner fee. `None` when the fee is not smaller than the HTLC value; such a spend is
+/// refused before anything is built or broadcast.
+pub(crate) fn htlc_value_after_miner_fee(htlc_value: Currency, miner_fee: Currency) -> Option<Currency> {
+    if miner_fee >= htlc_value {
+        return None;
+    }
+    Some(htlc_value - miner_fee)
+}
+
+/// CRD ch.60 R60.6.7 item 2: the Sia safe amount, the fixed HTLC miner fee plus one hasting.
+pub(crate) fn htlc_safe_amount() -> BigDecimal { hastings_to_siacoin(Currency::DEFAULT_FEE + Currency::from(1u64)) }
+
 /// Convert "coin" representation to hastings amount
 pub(crate) fn siacoin_to_hastings(siacoin: BigDecimal) -> Result<Currency, SiacoinToHastingsError> {
     let multiplier: BigDecimal = "1000000000000000000000000".parse().expect("valid decimal");
