@@ -55,6 +55,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **RIC (Riecoin) and MEWC (Meowcoin) swaps could not complete the HTLC spend.** Their Electrum
+  servers serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native
+  blocks at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected,
+  and with it the median-time-past the spend queries before it signs. A new per-coin key,
+  `protocol.reloaded_header_layout`, beside `type` in the coin's entry, selects the layout:
+  `"riecoin"` (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW
+  flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
+  median-time-past is then taken from each parsed header's time, and the full served bytes are what
+  is kept. An unrecognized value fails the coin's activation; with the key absent nothing changes.
+  The registry maintainer adds the key to the `RIC` and `MEWC` entries (`"riecoin"` and
+  `"kawpow_auxpow_mixed"`); other implementations ignore it. The header-sync (SPV) and header-store
+  paths still read standard headers. Detail: PR #TBD; CRD ch.37 §37.5.9.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
