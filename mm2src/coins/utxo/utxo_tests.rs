@@ -12,7 +12,8 @@ use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClien
                                VerboseBlock};
 use crate::utxo::tx_cache::dummy_tx_cache::DummyVerboseCache;
 use crate::utxo::tx_cache::UtxoVerboseCacheOps;
-use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps};
+use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps, UtxoConfBuilder, UtxoConfError,
+                                UtxoConfResult};
 use crate::utxo::utxo_common::calc_interest_of_tx;
 use crate::utxo::utxo_common::{address_from_pubkey, get_htlc_key_pair_v2, my_public_key,
                                trade_preimage_sender_address, UtxoTxBuilder};
@@ -183,6 +184,9 @@ fn utxo_coin_fields_for_test(
             estimate_fee_blocks: 1,
             trezor_coin: None,
             enable_spv_proof: false,
+            header_layout: None,
+            header_layout_fallback_families: vec!["BTC".to_owned()],
+            header_layout_fallback_logged: Default::default(),
         },
         decimals: TEST_COIN_DECIMALS,
         dust_amount: UTXO_DUST_AMOUNT,
@@ -6231,4 +6235,335 @@ fn ch15_r16_r17_funding_amount_uses_total_spend_amount_not_fee_amount() {
         !src.contains("&args.dex_fee.fee_amount().to_decimal()"),
         "the funding-amount formula must not use fee_amount() alone (it silently omits the burn leg)"
     );
+}
+
+// ---- protocol.header_layout (CRD ch.37 R37.5.9) -------------------------------------
+
+fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
+    let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+    let conf = json!({ "coin": "RIC", "protocol": protocol });
+    UtxoConfBuilder::new(&conf, &params, "RIC").build()
+}
+
+#[test]
+fn header_layout_absent_has_no_effect() {
+    let conf = conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
+    assert_eq!(conf.header_layout, None);
+    // No key: the per-coin default of the call site governs, exactly as before.
+    assert_eq!(
+        utxo_common::header_variant(&conf, CoinVariant::Standard),
+        CoinVariant::Standard
+    );
+    assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), CoinVariant::Qtum);
+}
+
+#[test]
+fn header_layout_values_are_read_beside_type_and_win_over_the_default() {
+    for (value, expected) in [
+        ("riecoin", CoinVariant::Riecoin),
+        ("kawpow_auxpow_mixed", CoinVariant::KawpowAuxpowMixed),
+    ] {
+        let conf =
+            conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": value })).unwrap();
+        assert_eq!(conf.header_layout, Some(expected));
+        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Standard), expected);
+        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), expected);
+    }
+}
+
+#[test]
+fn header_layout_unknown_value_fails_the_coin_build_naming_the_ticker() {
+    for bad in [
+        json!("foo"),
+        json!("Riecoin"),
+        json!("RIECOIN"),
+        json!(""),
+        json!(112),
+        json!(null),
+    ] {
+        let err = conf_with_header_layout(json!({ "type": "UTXO", "header_layout": bad }))
+            .expect_err("an unrecognized value must not fall back to any layout");
+        let text = err.to_string();
+        assert!(text.contains("RIC"), "{text}");
+        assert!(text.contains("header_layout"), "{text}");
+        assert!(matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayout { .. }));
+    }
+}
+
+#[test]
+fn header_layout_does_not_change_how_the_protocol_object_parses() {
+    let with = json!({ "type": "UTXO", "header_layout": "riecoin" });
+    let without = json!({ "type": "UTXO" });
+    let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
+    assert_eq!(parse(with), parse(without));
+}
+
+/// The RIC tip list served by a public Electrum server, taken through the configured key to the
+/// median: the layout of the coin entry plus the key, the list read, the median of parsed times.
+#[test]
+fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
+    let conf =
+        conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" })).unwrap();
+    let hex = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    let served = hex::decode(hex.trim()).unwrap();
+    let variant = utxo_common::header_variant(&conf, CoinVariant::Standard);
+    let headers = chain::BlockHeader::list_from_served_bytes(&served, 11, variant).unwrap();
+    let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
+    assert_eq!(common::median(times.as_mut_slice()), Some(1_792_892_599));
+    // Without the key the same list is rejected: the pre-fix behavior.
+    assert!(chain::BlockHeader::list_from_served_bytes(&served, 11, CoinVariant::Standard).is_err());
+}
+
+// ---- node switch header_layout_fallback_families (CRD ch.37 R37.5.9e) -------------------------
+
+mod header_layout_fallback_tests {
+    use super::*;
+    use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError, HeaderLayoutFallback};
+    use crate::utxo::utxo_builder::header_layout_fallback_families;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use std::sync::atomic::Ordering;
+
+    const RIC_LIST: &str = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    const RIC_LONE: &str = include_str!("../../kdf_chain/src/test_data/ric_2658955_lone_v20000000.hex");
+    const MEWC_MIXED: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124756_x11_9native_2auxpow.hex");
+    const MEWC_TAIL: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124727_x3_80_80_120.hex");
+    const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+    const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
+    const MEWC_LONE_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_lone_native.hex");
+
+    fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
+
+    fn ctx_with(conf: Json) -> mm2_core::mm_ctx::MmArc { MmCtxBuilder::new().with_conf(conf).into_mm_arc() }
+
+    /// A conf built the way the activation builders build it: the node switch from `MM2.json`.
+    fn conf(mm2_json: Json, protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
+        let families = header_layout_fallback_families(&ctx_with(mm2_json))?;
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let coin_conf = json!({ "coin": "RIC", "protocol": protocol });
+        UtxoConfBuilder::new(&coin_conf, &params, "RIC")
+            .with_header_layout_fallback_families(families)
+            .build()
+    }
+
+    fn list_times(
+        conf: &UtxoCoinConf,
+        bytes: &[u8],
+        count: usize,
+    ) -> Result<u32, FallbackReadError<serialization::Error>> {
+        let variant = utxo_common::header_variant(conf, CoinVariant::Standard);
+        let fallback = HeaderLayoutFallback::for_conf(conf);
+        let headers = read_with_fallback(variant, fallback.as_ref(), |layout| {
+            chain::BlockHeader::list_from_served_bytes(bytes, count, layout)
+        })?;
+        let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
+        Ok(common::median(times.as_mut_slice()).unwrap())
+    }
+
+    fn keyed_median(layout: CoinVariant, bytes: &[u8], count: usize) -> u32 {
+        let mut times: Vec<u32> = chain::BlockHeader::list_from_served_bytes(bytes, count, layout)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.time)
+            .collect();
+        common::median(times.as_mut_slice()).unwrap()
+    }
+
+    #[test]
+    fn switch_defaults_to_btc_and_accepts_only_distinct_chain_variant_names() {
+        assert_eq!(header_layout_fallback_families(&ctx_with(json!({}))).unwrap(), vec![
+            "BTC"
+        ]);
+        for (value, expected) in [
+            (json!([]), vec![]),
+            (json!(["BTC"]), vec!["BTC"]),
+            (json!(["BTC", "PPC"]), vec!["BTC", "PPC"]),
+        ] {
+            let got = header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": value })))
+                .unwrap();
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn switch_of_the_wrong_shape_is_a_configuration_error() {
+        for bad in [
+            json!("BTC"),
+            json!(true),
+            json!(1),
+            json!(null),
+            json!({}),
+            json!(["BTC", 1]),
+            json!(["btc"]),
+            json!(["FOO"]),
+            json!(["BTC", "BTC"]),
+        ] {
+            let ctx = ctx_with(json!({ "header_layout_fallback_families": bad.clone() }));
+            let err = header_layout_fallback_families(&ctx).expect_err("a malformed switch must not default");
+            let text = err.to_string();
+            assert!(text.contains("header_layout_fallback_families"), "{text}");
+            assert!(text.contains(&bad.to_string()), "{text}");
+            assert!(
+                matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayoutFallbackFamilies(_)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn ric_and_mewc_lists_parse_without_the_key_under_the_default_switch() {
+        let conf = conf(json!({}), json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
+        assert_eq!(conf.header_layout, None);
+        let ric = served(RIC_LIST);
+        assert_eq!(list_times(&conf, &ric, 11).unwrap(), 1_792_892_599);
+        assert_eq!(
+            list_times(&conf, &ric, 11).unwrap(),
+            keyed_median(CoinVariant::Riecoin, &ric, 11)
+        );
+        for (hex, count) in [(MEWC_MIXED, 11), (MEWC_TAIL, 3), (MEWC_ALL_NATIVE, 11)] {
+            let bytes = served(hex);
+            assert_eq!(
+                list_times(&conf, &bytes, count).unwrap(),
+                keyed_median(CoinVariant::KawpowAuxpowMixed, &bytes, count),
+                "{count}"
+            );
+        }
+        assert!(conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn lone_headers_use_the_same_cascade() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let fallback = HeaderLayoutFallback::for_conf(&conf);
+        for hex in [RIC_LONE, MEWC_LONE_NATIVE] {
+            let bytes = served(hex);
+            assert!(chain::BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).is_err());
+            let header = read_with_fallback(CoinVariant::Standard, fallback.as_ref(), |layout| {
+                chain::BlockHeader::from_served_bytes(&bytes, layout)
+            })
+            .unwrap();
+            assert_eq!(header.time, u32::from_le_bytes(bytes[68..72].try_into().unwrap()));
+        }
+    }
+
+    #[test]
+    fn empty_switch_rejects_the_same_lists() {
+        let conf = conf(
+            json!({ "header_layout_fallback_families": [] }),
+            json!({ "type": "UTXO" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_err());
+        assert!(list_times(&conf, &served(MEWC_MIXED), 11).is_err());
+        assert!(list_times(&conf, &served(MEWC_ALL_NATIVE), 11).is_err());
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_family_outside_the_set_is_not_probed() {
+        let conf = conf(
+            json!({ "header_layout_fallback_families": ["RVN"] }),
+            json!({ "type": "UTXO" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_err());
+    }
+
+    #[test]
+    fn a_genuine_80_byte_list_is_never_fallback_parsed() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let bytes = served(MEWC_ALL_AUXPOW);
+        assert_eq!(bytes.len(), 6 * 80);
+        // Count how often the cascade runs a non-standard layout.
+        let probes = std::cell::Cell::new(0);
+        let fallback = HeaderLayoutFallback::for_conf(&conf);
+        let headers = read_with_fallback(CoinVariant::Standard, fallback.as_ref(), |layout| {
+            if layout != CoinVariant::Standard {
+                probes.set(probes.get() + 1);
+            }
+            chain::BlockHeader::list_from_served_bytes(&bytes, 6, layout)
+        })
+        .unwrap();
+        assert_eq!(headers.len(), 6);
+        assert_eq!(
+            probes.get(),
+            0,
+            "the standard read succeeded, so no other layout may be tried"
+        );
+        assert!(
+            !conf.header_layout_fallback_logged.load(Ordering::Relaxed),
+            "no info line"
+        );
+    }
+
+    #[test]
+    fn a_pinned_layout_never_consults_the_fallback() {
+        let conf = conf(
+            json!({}),
+            json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        // The pinned layout governs: the RIC list parses, a MEWC list does not, and nothing is logged.
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_ok());
+        assert!(list_times(&conf, &served(MEWC_MIXED), 11).is_err());
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_list_no_layout_fits_propagates_the_original_rejection() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let mut bytes = served(RIC_LIST);
+        bytes.push(0);
+        let original = chain::BlockHeader::list_from_served_bytes(&bytes, 11, CoinVariant::Standard).unwrap_err();
+        let err = list_times(&conf, &bytes, 11).unwrap_err();
+        assert!(matches!(&err, FallbackReadError::Rejected(e) if format!("{e:?}") == format!("{original:?}")));
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    /// Five headers, 560 bytes: read as 5 x 112 (Riecoin) and as 4 x 120 + 1 x 80 (mixed). The bytes
+    /// are built so both layouts consume exactly: zero upper time halves at every 112-byte boundary,
+    /// AuxPoW flag clear in the first four versions and set in the fifth.
+    #[test]
+    fn a_five_header_list_that_two_layouts_consume_is_ambiguous() {
+        let mut bytes = vec![0u8; 560];
+        bytes[481] = 0x01; // version of the 5th mixed header at 480: bit 8 set
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Riecoin).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::KawpowAuxpowMixed).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Standard).is_err());
+        match list_times(&conf, &bytes, 5) {
+            Err(FallbackReadError::Ambiguous(reason)) => {
+                assert!(
+                    reason.contains("riecoin") && reason.contains("kawpow_auxpow_mixed"),
+                    "{reason}"
+                );
+            },
+            other => panic!("expected an ambiguity, got {other:?}"),
+        }
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+        // Pinned, the same bytes parse.
+        let pinned = self::conf(
+            json!({}),
+            json!({ "type": "UTXO", "header_layout": "kawpow_auxpow_mixed" }),
+        )
+        .unwrap();
+        assert!(list_times(&pinned, &bytes, 5).is_ok());
+    }
+
+    #[test]
+    fn length_collision_arithmetic_for_eleven_headers() {
+        const COUNT: usize = 11;
+        let standard = COUNT * 80;
+        let riecoin = COUNT * 112;
+        assert_eq!((standard, riecoin), (880, 1232));
+        for natives in 0..=COUNT {
+            // A mixed list of `natives` 120-byte headers and the rest 80-byte ones.
+            let mixed = standard + 40 * natives;
+            assert_ne!(mixed, riecoin, "k = {natives}");
+        }
+        // 1232 would need 8.8 native headers, so the Riecoin probe can never swallow a mixed list.
+        assert_eq!((riecoin - standard) % 40, 32);
+    }
 }

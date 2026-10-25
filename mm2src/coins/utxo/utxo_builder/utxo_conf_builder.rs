@@ -13,8 +13,10 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use script::SignatureVersion;
 use serde_json::{self as json, Value as Json};
+use serialization::CoinVariant;
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 /// The `signature_version` values the `SignatureVersion` enum deserializes; keep in step with it.
 const ACCEPTED_SIGNATURE_VERSIONS: &str = "\"base\", \"witness_v0\", \"fork_id\", \"fork_id_rxd\"";
@@ -97,6 +99,61 @@ pub enum UtxoConfError {
     InvalidAddressFormat(String),
     InvalidSpvConf(String),
     InvalidDecimals(String),
+    #[display(
+        fmt = "{}: unrecognized 'protocol.header_layout' value {}; expected \"riecoin\" or \"kawpow_auxpow_mixed\"",
+        ticker,
+        value
+    )]
+    InvalidHeaderLayout {
+        ticker: String,
+        value: String,
+    },
+    #[display(
+        fmt = "'{}' in MM2.json must be an array of distinct chain_variant names (BTC, QTUM, LBC, PPC, RICK, MORTY, RVN, PIVX), got {}",
+        HEADER_LAYOUT_FALLBACK_FAMILIES_KEY,
+        _0
+    )]
+    InvalidHeaderLayoutFallbackFamilies(String),
+}
+
+/// The `MM2.json` key of the node switch that names the coin families whose header reads may fall back
+/// to a structural layout probe (CRD ch.37 R37.5.9e).
+pub const HEADER_LAYOUT_FALLBACK_FAMILIES_KEY: &str = "header_layout_fallback_families";
+
+/// The families the fallback applies to when `MM2.json` does not carry the key.
+const HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT: &[&str] = &["BTC"];
+
+/// The `chain_variant` spellings (CRD ch.37 R37.5.1) a family in the switch may take.
+const HEADER_LAYOUT_FAMILY_SPELLINGS: [&str; 8] = ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"];
+
+/// Reads the node switch `header_layout_fallback_families` (CRD ch.37 R37.5.9e): an array whose every
+/// element is one of the eight `chain_variant` spellings, without duplicates; default `["BTC"]` when
+/// the key is absent. Anything else (a non-array, a non-string element, an unknown or lowercase
+/// spelling, a duplicate) is a configuration error, so a typo cannot quietly change which coins are
+/// probed. `[]` is valid and turns the fallback off.
+pub fn header_layout_fallback_families(ctx: &MmArc) -> UtxoConfResult<Vec<String>> {
+    let Some(value) = ctx.conf.get(HEADER_LAYOUT_FALLBACK_FAMILIES_KEY) else {
+        return Ok(HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect());
+    };
+    let invalid = || UtxoConfError::InvalidHeaderLayoutFallbackFamilies(value.to_string());
+    let Json::Array(items) = value else {
+        return MmError::err(invalid());
+    };
+    let mut families: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let family = item
+            .as_str()
+            .filter(|f| HEADER_LAYOUT_FAMILY_SPELLINGS.contains(f))
+            .or_mm_err(invalid)?;
+        if families.iter().any(|f| f == family) {
+            return MmError::err(invalid());
+        }
+        families.push(family.to_owned());
+    }
+    Ok(families)
 }
 
 impl From<Bip32Error> for UtxoConfError {
@@ -107,6 +164,8 @@ pub struct UtxoConfBuilder<'a> {
     conf: &'a Json,
     ticker: &'a str,
     params: &'a UtxoActivationParams,
+    /// The node switch `header_layout_fallback_families`, resolved by the caller from `ctx.conf`.
+    header_layout_fallback_families: Vec<String>,
     unrecognised_enum_policy: UnrecognisedEnumPolicy,
 }
 
@@ -116,8 +175,18 @@ impl<'a> UtxoConfBuilder<'a> {
             conf,
             ticker,
             params,
+            header_layout_fallback_families: HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
+                .iter()
+                .map(|f| (*f).to_owned())
+                .collect(),
             unrecognised_enum_policy: UnrecognisedEnumPolicy::default(),
         }
+    }
+
+    /// Sets the node-level `header_layout_fallback_families` policy (see [`header_layout_fallback_families`]).
+    pub fn with_header_layout_fallback_families(mut self, families: Vec<String>) -> Self {
+        self.header_layout_fallback_families = families;
+        self
     }
 
     /// Selects what an unrecognised enumeration member in the coin configuration does; see
@@ -177,6 +246,7 @@ impl<'a> UtxoConfBuilder<'a> {
         let estimate_fee_blocks = self.estimate_fee_blocks();
         let trezor_coin = self.trezor_coin();
         let enable_spv_proof = self.enable_spv_proof();
+        let header_layout = self.header_layout()?;
 
         let conf = UtxoCoinConf {
             ticker: self.ticker.to_owned(),
@@ -209,6 +279,9 @@ impl<'a> UtxoConfBuilder<'a> {
             estimate_fee_blocks,
             trezor_coin,
             enable_spv_proof,
+            header_layout,
+            header_layout_fallback_families: self.header_layout_fallback_families.clone(),
+            header_layout_fallback_logged: Arc::new(AtomicBool::new(false)),
         };
         Ok((conf, warnings))
     }
@@ -407,6 +480,29 @@ impl<'a> UtxoConfBuilder<'a> {
     }
 
     fn enable_spv_proof(&self) -> bool { self.conf["enable_spv_proof"].as_bool().unwrap_or(false) }
+
+    /// Reads the Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9): from the
+    /// raw `protocol` object beside `type`, as a plain case-sensitive string, outside the typed
+    /// protocol descriptor. Absent means no effect; any present value that is not one of the closed
+    /// value set (including a non-string) fails the coin build and falls back to nothing.
+    ///
+    /// Precedence (R37.5.9a): the layout read here governs the coin's header reads over whatever
+    /// the version-inferred default selects. `chain_variant` is not read by this build yet
+    /// (ch.37 §37.5.8, D1 open), so there is nothing to override today; the precedence clause
+    /// becomes operative when D1 lands and `chain_variant` is read and validated beside this key.
+    fn header_layout(&self) -> UtxoConfResult<Option<CoinVariant>> {
+        let Some(value) = self.conf["protocol"].get("header_layout") else {
+            return Ok(None);
+        };
+        value
+            .as_str()
+            .and_then(CoinVariant::from_header_layout)
+            .map(Some)
+            .or_mm_err(|| UtxoConfError::InvalidHeaderLayout {
+                ticker: self.ticker.to_owned(),
+                value: value.to_string(),
+            })
+    }
 }
 
 #[cfg(test)]

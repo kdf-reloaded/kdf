@@ -118,6 +118,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   channels, or 1 msat. Orders and trade previews involving Lightning, Solana or SPL, which cannot
   trade yet, are refused with an error naming the coin; `trade_preimage` returns the new typed error
   `TradingNotSupported` (HTTP 400). Detail: PR #66; CRD ch.60 R60.6.5, ch.41 R41.11A.
+- **RIC (Riecoin) and MEWC (Meowcoin) swaps could not complete the HTLC spend.** Their Electrum
+  servers serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native
+  blocks at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected,
+  and with it the median-time-past the spend queries before it signs. A new per-coin key,
+  `protocol.header_layout`, beside `type` in the coin's entry, selects the layout:
+  `"riecoin"` (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW
+  flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
+  median-time-past is then taken from each parsed header's time, and the full served bytes are what
+  is kept. An unrecognized value fails the coin's activation. A coin with no key is read as before
+  and, only when the standard read fails, retried as Riecoin and as the mixed layout (the one exact fit wins, one `info` line per coin naming the layout and suggesting the key); the new
+  `MM2.json` switch `header_layout_fallback_families` (array of distinct `chain_variant` names,
+  default `["BTC"]`; `[]` = reference behavior; anything else refuses the launch) names the
+  families that may do so. A list that both alternatives consume exactly is rejected as ambiguous,
+  naming both layouts, until the coin is pinned with `header_layout`.
+  RIC and MEWC swaps therefore complete with the shared coin registry untouched; the registry
+  maintainer may still add the key (`"riecoin"`, `"kawpow_auxpow_mixed"`) to pin the layout, and
+  other implementations ignore it. The header-sync (SPV) and header-store paths still read standard
+  headers. Detail: PR #62; CRD ch.37 §37.5.9.
 - **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
   gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
   chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
