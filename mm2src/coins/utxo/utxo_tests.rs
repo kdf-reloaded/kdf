@@ -30,6 +30,7 @@ use crypto::{privkey::key_pair_from_seed, Bip44Chain, RpcDerivationPath};
 use futures::future::join_all;
 use futures::TryFutureExt;
 use mm2_core::mm_ctx::MmCtxBuilder;
+use mm2_number::MmNumber;
 use mocktopus::mocking::*;
 use rpc::v1::types::H256 as H256Json;
 use serialization::{deserialize, CoinVariant};
@@ -210,6 +211,53 @@ fn utxo_coin_for_test(
     is_segwit_coin: bool,
 ) -> UtxoStandardCoin {
     utxo_coin_from_fields(utxo_coin_fields_for_test(rpc_client, force_seed, is_segwit_coin))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn floor_test_coin(ticker: &str, fee: TxFee, dust: u64, decimals: u8) -> UtxoStandardCoin {
+    let client = native_client_for_test();
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    fields.tx_fee = fee;
+    fields.dust_amount = dust;
+    fields.decimals = decimals;
+    utxo_coin_from_fields(fields)
+}
+
+/// T60.1: exact minimum trading volume values, ticker-independent (R38.6.6e, R38.6.6f).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_trading_vol_values() {
+    let dynamic = || TxFee::Dynamic(EstimateFeeMethod::Standard);
+    let cases: Vec<(&str, TxFee, u64, &str)> = vec![
+        ("KMD", TxFee::FixedPerKb(1000), 1000, "0.0001"),
+        ("LTC", TxFee::FixedPerKb(1000), 5460, "0.000546"),
+        ("DOGE", TxFee::FixedPerKb(1_000_000), 1_000_000, "0.1"),
+        ("RVN", TxFee::FixedPerKb(1_000_000), 1000, "0.0496"),
+        ("ZEC", TxFee::FixedPerKb(100_000), 1000, "0.00496"),
+        ("ZEC", TxFee::FixedPerKb(70_000), 1000, "0.003472"),
+        ("QTUM", TxFee::FixedPerKb(400_000), 72_800, "0.01984"),
+        ("BTC", dynamic(), 1000, "0.0001"),
+        ("BTC-segwit", dynamic(), 1000, "0.0001"),
+        ("ARRR", TxFee::FixedPerKb(1000), 1000, "0.0001"),
+        ("SYNTH-A", TxFee::FixedPerKb(1_001), 1000, "0.0001"),
+        ("SYNTH-B", TxFee::FixedPerKb(30_001), 1000, "0.001488"),
+        ("SYNTH-C", dynamic(), 5460, "0.000546"),
+    ];
+    for (ticker, fee, dust, expected) in cases {
+        let coin = floor_test_coin(ticker, fee, dust, 8);
+        assert_eq!(coin.min_trading_vol(), MmNumber::from(expected), "{ticker}");
+    }
+}
+
+/// T60.2: the UTXO minimum transaction amount equals the dust.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_tx_amount_equals_dust() {
+    let kmd = floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8);
+    assert_eq!(kmd.min_tx_amount(), BigDecimal::from_str("0.00001").unwrap());
+    let ltc = floor_test_coin("LTC", TxFee::FixedPerKb(1000), 5460, 8);
+    assert_eq!(ltc.min_tx_amount(), BigDecimal::from_str("0.0000546").unwrap());
 }
 
 #[cfg(not(target_arch = "wasm32"))]

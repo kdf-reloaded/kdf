@@ -2,7 +2,6 @@
 
 use super::*;
 
-const MIN_BTC_TRADING_VOL: &str = "0.00777";
 const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
 
 /// Requests balance of the given `address`.
@@ -354,27 +353,23 @@ pub fn min_tx_amount(coin: &UtxoCoinFields) -> BigDecimal {
 }
 
 pub fn min_trading_vol(coin: &UtxoCoinFields) -> MmNumber {
-    if coin.conf.ticker == "BTC" {
-        return MmNumber::from(MIN_BTC_TRADING_VOL);
-    }
-
-    let min_vol_sat = non_btc_min_trading_vol_sat(coin.dust_amount, &coin.tx_fee);
+    let min_vol_sat = utxo_min_trading_vol_sat(coin.dust_amount, &coin.tx_fee);
     big_decimal_from_sat_unsigned(min_vol_sat, coin.decimals).into()
 }
 
-fn non_btc_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
+/// The minimum trading volume in base units: `max(10 * dust, 10 * F)`, where `F` is zero for a
+/// dynamic-fee coin and `floor(fee_per_kb * 496 / 1000)` for a fixed-fee coin. The only rounding is the
+/// truncation inside `F`.
+fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
     let dust_based = dust_amount.saturating_mul(10);
 
     let fee_based = match tx_fee {
         TxFee::Dynamic(_) => 0,
-        // Fixed-fee policy uses a representative tx size (~496 bytes) and
-        // rounds up to avoid underestimating required trading volume.
         TxFee::FixedPerKb(fee_per_kb) => {
-            let fee_for_repr_tx = fee_per_kb
-                .saturating_mul(FIXED_FEE_MIN_VOL_TX_SIZE_BYTES)
-                .saturating_add(KILO_BYTE - 1)
-                / KILO_BYTE;
-            fee_for_repr_tx.saturating_mul(10)
+            // The product cannot overflow `u128`; the result is saturated when it exceeds `u64`.
+            let fee_for_repr_tx =
+                u128::from(*fee_per_kb) * u128::from(FIXED_FEE_MIN_VOL_TX_SIZE_BYTES) / u128::from(KILO_BYTE);
+            u64::try_from(fee_for_repr_tx).unwrap_or(u64::MAX).saturating_mul(10)
         },
     };
 
@@ -686,20 +681,48 @@ mod tests {
     }
 
     #[test]
-    fn non_btc_min_trading_vol_dynamic_is_dust_based() {
-        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::Dynamic(EstimateFeeMethod::Standard));
+    fn utxo_min_trading_vol_dynamic_is_dust_based() {
+        let min_sat = utxo_min_trading_vol_sat(1000, &TxFee::Dynamic(EstimateFeeMethod::Standard));
         assert_eq!(min_sat, 10_000);
+        // T60.1: dynamic fee, dust 5,460 gives 0.000546 at eight decimals.
+        let min_sat = utxo_min_trading_vol_sat(5460, &TxFee::Dynamic(EstimateFeeMethod::Standard));
+        assert_eq!(min_sat, 54_600);
     }
 
     #[test]
-    fn non_btc_min_trading_vol_fixed_uses_max_of_dust_and_fee_based() {
-        // fee_per_kb=1000 -> ceil(1000*496/1000)=496, then *10=4960 < dust-based 10000
-        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1000));
+    fn utxo_min_trading_vol_fixed_uses_max_of_dust_and_fee_based() {
+        // fee_per_kb=1000 -> floor(1000*496/1000)=496, then *10=4960 < dust-based 10000
+        let min_sat = utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1000));
         assert_eq!(min_sat, 10_000);
 
-        // fee_per_kb=5000 -> ceil(5000*496/1000)=2480, then *10=24800 > dust-based 10000
-        let min_sat = non_btc_min_trading_vol_sat(1000, &TxFee::FixedPerKb(5000));
+        // fee_per_kb=5000 -> floor(5000*496/1000)=2480, then *10=24800 > dust-based 10000
+        let min_sat = utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(5000));
         assert_eq!(min_sat, 24_800);
+    }
+
+    #[test]
+    fn utxo_min_trading_vol_fee_term_is_truncated() {
+        // T60.1 synthetic: txfee 30,001 -> floor(14,880.496) = 14,880, V = 148,800 (0.001488), not 148,810.
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(30_001)), 148_800);
+        // txfee 1,001 -> floor(496.496) = 496; dust 1,000 dominates: V = 10,000 (0.0001).
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1_001)), 10_000);
+        // Worked coins (T60.1).
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1000)), 10_000); // KMD
+        assert_eq!(utxo_min_trading_vol_sat(5460, &TxFee::FixedPerKb(1000)), 54_600); // LTC
+        assert_eq!(
+            utxo_min_trading_vol_sat(1_000_000, &TxFee::FixedPerKb(1_000_000)),
+            10_000_000
+        ); // DOGE
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(1_000_000)), 4_960_000); // RVN
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(100_000)), 496_000); // ZEC
+        assert_eq!(utxo_min_trading_vol_sat(1000, &TxFee::FixedPerKb(70_000)), 347_200); // ZEC 70k
+        assert_eq!(utxo_min_trading_vol_sat(72_800, &TxFee::FixedPerKb(400_000)), 1_984_000); // QTUM
+        assert_eq!(
+            utxo_min_trading_vol_sat(1000, &TxFee::Dynamic(EstimateFeeMethod::Standard)),
+            10_000
+        ); // BTC
+           // No overflow.
+        assert_eq!(utxo_min_trading_vol_sat(0, &TxFee::FixedPerKb(u64::MAX)), u64::MAX);
     }
 
     #[test]
