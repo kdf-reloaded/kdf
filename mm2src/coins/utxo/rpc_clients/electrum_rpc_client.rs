@@ -1,4 +1,5 @@
 use super::*;
+use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError};
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -924,6 +925,16 @@ impl UtxoRpcClientOps for ElectrumClient {
         count: NonZeroU64,
         coin_variant: CoinVariant,
     ) -> UtxoRpcFut<u32> {
+        self.get_median_time_past_with_fallback(starting_block, count, coin_variant, None)
+    }
+
+    fn get_median_time_past_with_fallback(
+        &self,
+        starting_block: u64,
+        count: NonZeroU64,
+        coin_variant: CoinVariant,
+        fallback: Option<HeaderLayoutFallback>,
+    ) -> UtxoRpcFut<u32> {
         let from = if starting_block <= count.get() {
             0
         } else {
@@ -932,13 +943,19 @@ impl UtxoRpcClientOps for ElectrumClient {
         Box::new(
             self.blockchain_block_headers(from, count)
                 .map_to_mm_fut(UtxoRpcError::from)
-                .and_then(|res| {
+                .and_then(move |res| {
                     if res.count == 0 {
                         return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
                     }
                     let count =
                         usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
-                    let headers = BlockHeader::list_from_served_bytes(&res.hex.0, count, coin_variant)?;
+                    let headers = read_with_fallback(coin_variant, fallback.as_ref(), |layout| {
+                        BlockHeader::list_from_served_bytes(&res.hex.0, count, layout)
+                    })
+                    .map_err(|e| match e {
+                        FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
+                        FallbackReadError::Ambiguous(reason) => MmError::new(UtxoRpcError::InvalidResponse(reason)),
+                    })?;
                     let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
                     // can unwrap because count is non zero
                     Ok(median(timestamps.as_mut_slice()).unwrap())

@@ -475,6 +475,12 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     info!("Version: {} DT {}", MM_VERSION, MM_DATETIME);
 
     validate_netid_range(&ctx.conf)?;
+    coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
+        MmInitError::ErrorDeserializingConfig {
+            field: "header_layout_fallback_families".to_owned(),
+            error: e.to_string(),
+        }
+    })?;
 
     // Validate netid against compiled network configurations ("deny except config exists").
     let netid = ctx.netid();

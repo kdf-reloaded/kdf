@@ -1923,6 +1923,22 @@ broadcast for reusing a nullifier.
 > Sapling parameter files and say so and return where they are absent. The
 > broadcast-rejection, restart, mined-and-scanned and two-concurrent-send cases remain
 > unwritten.
+>
+> **Update (2026-10-25).** The remaining cases are covered. A harness drives a real Light-mode
+> shielded coin over a real wallet database with a scripted backend, so the send path itself is
+> exercised: the record is written only once the backend has accepted the bytes, and a rejected
+> broadcast records nothing, leaves the balance unchanged and lets an immediate retry reuse the note; a
+> second send is refused the committed note and ends in the typed bounded-wait failure, while a
+> withdrawal names the cause; a restart (a new coin over the same wallet database) keeps the
+> exclusion and, as D39.8.0e records, loses only the explanation; scanning the containing block
+> makes the change spendable and the spent note permanently absent with the balance counted exactly
+> once; a never-mined transaction releases its note once the scanned tip passes its expiry height and
+> not a block earlier; two concurrent sends over two notes select disjoint notes and both broadcast;
+> and a send that is waiting re-selects as soon as a concurrent scan frees the change. The only
+> production change made for this is that the send path's wait budget and polling periods are now a
+> field installed with the former values, pinned by a test, so the bounded wait can be driven in
+> milliseconds. The tests need the Sapling parameter files and say so and return where they are
+> absent. Native mode is not covered, by design: it needs no wallet-side exclusion.
 
 #### Deferred Work
 
@@ -1979,6 +1995,9 @@ Until this is closed the in-flight exclusion rests on the single predicate test
 plus the type checker, which is weaker coverage than a funds-moving path in this
 project is expected to carry; the shortfall is in test coverage only and does not
 describe a known defect in the implemented behaviour.
+
+*As built (2026-10-25).* The harness exists and every case T39.8.0h names is covered for the
+Light-mode send path (see the coverage update under T39.8.0h); this item is closed.
 
 ### 39.8.1 Envelope, method string & platform gate
 
