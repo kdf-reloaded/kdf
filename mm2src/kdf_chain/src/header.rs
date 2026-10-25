@@ -26,6 +26,9 @@ const PROG_POW_SWITCH_TIME: u32 = 1_635_228_000;
 const QTUM_BLOCK_HEADER_VERSION: u32 = 536_870_912;
 /// Ravencoin KAWPOW.
 const KAWPOW_VERSION: u32 = 805_306_368;
+/// AuxPoW flag (bit 8 of the block version) as the `KawpowAuxpowMixed` layout reads it (CRD ch.37
+/// R37.5.9b): the per-header discriminator between std-80 (set) and the 120-byte KawPoW form (clear).
+const MIXED_LAYOUT_AUXPOW_FLAG: u32 = 0x0000_0100;
 /// Verus uses bit 16 of the version field to flag verus-blocks.
 const VERUS_VERSION_BIT: u32 = 0x0001_0000;
 
@@ -167,6 +170,9 @@ pub struct BlockHeader {
     pub n_height: Option<u32>,
     pub n_nonce_u64: Option<u64>,
     pub mix_hash: Option<H256>,
+    /// Riecoin: the time field is a 64-bit integer on the wire (`time` still holds the value, which
+    /// is checked to fit 32 bits when read). Set only by the `Riecoin` layout (CRD ch.37 R37.5.9).
+    pub wide_time: bool,
 }
 
 impl BlockHeader {
@@ -202,6 +208,21 @@ impl BlockHeader {
     /// Returns the codec error of the inferred parse when neither reading
     /// consumes `bytes` exactly.
     pub fn from_served_bytes(bytes: &[u8], coin_variant: CoinVariant) -> Result<Self, serialization::Error> {
+        // The layouts a coin selects by configuration (R37.5.9) are read by their own readers. Of
+        // them only the mixed layout infers anything per header, and only that one has the
+        // exactly-80-byte fallback; the Riecoin layout has a single fixed length.
+        match coin_variant {
+            CoinVariant::Riecoin => return read_all(bytes, coin_variant, BlockHeader::read_riecoin),
+            CoinVariant::KawpowAuxpowMixed => {
+                return match read_all(bytes, coin_variant, |reader| BlockHeader::read_mixed(reader, true)) {
+                    Err(_) if bytes.len() == MIN_RAW_HEADER_SIZE => {
+                        read_all(bytes, CoinVariant::Standard, BlockHeader::read_standard)
+                    },
+                    parsed => parsed,
+                };
+            },
+            CoinVariant::Standard | CoinVariant::Qtum => (),
+        }
         let layout_inferred = !coin_variant.is_qtum();
         match read_all(bytes, coin_variant, |reader| reader.read()) {
             Err(_) if layout_inferred && bytes.len() == MIN_RAW_HEADER_SIZE => {
@@ -229,6 +250,30 @@ impl BlockHeader {
         count: usize,
         coin_variant: CoinVariant,
     ) -> Result<Vec<Self>, serialization::Error> {
+        match coin_variant {
+            CoinVariant::Riecoin => {
+                return read_all(bytes, coin_variant, |reader| {
+                    (0..count).map(|_| BlockHeader::read_riecoin(reader)).collect()
+                });
+            },
+            CoinVariant::KawpowAuxpowMixed => {
+                // Each header's layout, and so its length, comes from its own version field, so the
+                // list is read at its true boundaries. A merged-mined header is exactly 80 bytes
+                // here (the servers strip the proof, R37.5.9b).
+                let mixed = read_all(bytes, coin_variant, |reader| {
+                    (0..count).map(|_| BlockHeader::read_mixed(reader, false)).collect()
+                });
+                return match mixed {
+                    Err(_) if count.checked_mul(MIN_RAW_HEADER_SIZE) == Some(bytes.len()) => {
+                        read_all(bytes, CoinVariant::Standard, |reader| {
+                            (0..count).map(|_| BlockHeader::read_standard(reader)).collect()
+                        })
+                    },
+                    parsed => parsed,
+                };
+            },
+            CoinVariant::Standard | CoinVariant::Qtum => (),
+        }
         let layout_inferred = !coin_variant.is_qtum();
         match read_all(bytes, coin_variant, |reader| {
             (0..count).map(|_| reader.read()).collect()
@@ -244,14 +289,42 @@ impl BlockHeader {
 
     /// Reads the standard 80-byte layout, whatever the version value says.
     fn read_standard<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
-        Ok(BlockHeader {
-            version: reader.read()?,
-            previous_header_hash: reader.read()?,
-            merkle_root_hash: reader.read()?,
+        let version = reader.read()?;
+        Self::read_standard_after_version(reader, version)
+    }
+
+    /// The rest of the standard 80-byte layout, after its version field was read.
+    fn read_standard_after_version<T: io::Read>(
+        reader: &mut Reader<T>,
+        version: u32,
+    ) -> Result<Self, serialization::Error> {
+        Ok(Self::plain(
+            version,
+            reader.read()?,
+            reader.read()?,
+            reader.read()?,
+            BlockHeaderBits::Compact(reader.read()?),
+            BlockHeaderNonce::U32(reader.read()?),
+        ))
+    }
+
+    /// A header with the six base fields and no extension.
+    fn plain(
+        version: u32,
+        previous_header_hash: H256,
+        merkle_root_hash: H256,
+        time: u32,
+        bits: BlockHeaderBits,
+        nonce: BlockHeaderNonce,
+    ) -> Self {
+        BlockHeader {
+            version,
+            previous_header_hash,
+            merkle_root_hash,
             hash_final_sapling_root: None,
-            time: reader.read()?,
-            bits: BlockHeaderBits::Compact(reader.read()?),
-            nonce: BlockHeaderNonce::U32(reader.read()?),
+            time,
+            bits,
+            nonce,
             solution: None,
             aux_pow: None,
             prog_pow: None,
@@ -264,8 +337,72 @@ impl BlockHeader {
             n_height: None,
             n_nonce_u64: None,
             mix_hash: None,
-        })
+            wide_time: false,
+        }
     }
+
+    /// Reads the 112-byte Riecoin layout: version, previous hash, Merkle root, 64-bit time, bits,
+    /// 256-bit nonce (CRD ch.37 R37.5.9). A time above the 32-bit range is an error, never
+    /// truncated (R37.5.9c).
+    fn read_riecoin<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
+        let version = reader.read()?;
+        let previous_header_hash = reader.read()?;
+        let merkle_root_hash = reader.read()?;
+        let time: u64 = reader.read()?;
+        let time = u32::try_from(time)
+            .map_err(|_| serialization::Error::Custom(format!("header time {time} is above the 32-bit range")))?;
+        let bits = BlockHeaderBits::Compact(reader.read()?);
+        let nonce = BlockHeaderNonce::H256(reader.read()?);
+        let mut header = Self::plain(version, previous_header_hash, merkle_root_hash, time, bits, nonce);
+        header.wide_time = true;
+        Ok(header)
+    }
+
+    /// Reads one header of the mixed KawPoW/merged-mined layout, choosing by the header's own
+    /// version field (CRD ch.37 R37.5.9b): AuxPoW flag bit 8 set -> the standard 80 bytes; clear ->
+    /// the 120-byte KawPoW layout (height, 64-bit nonce and mix hash after the bits), whatever the
+    /// other version bits. With `allow_proof` (a lone header) a merged-mined header's AuxPoW proof
+    /// follows its 80 bytes when the server did not strip it; in a list it never does.
+    fn read_mixed<T: io::Read>(reader: &mut Reader<T>, allow_proof: bool) -> Result<Self, serialization::Error> {
+        let version: u32 = reader.read()?;
+        if version & MIXED_LAYOUT_AUXPOW_FLAG != 0 {
+            let mut header = Self::read_standard_after_version(reader, version)?;
+            if allow_proof && !reader.is_finished() {
+                header.aux_pow = Some(read_aux_pow(reader)?);
+            }
+            return Ok(header);
+        }
+        // Native header: the trailer carries the nonce, so there is no 32-bit nonce slot.
+        let previous_header_hash = reader.read()?;
+        let merkle_root_hash = reader.read()?;
+        let time = reader.read()?;
+        let bits = BlockHeaderBits::Compact(reader.read()?);
+        let mut header = Self::plain(
+            version,
+            previous_header_hash,
+            merkle_root_hash,
+            time,
+            bits,
+            BlockHeaderNonce::U32(0),
+        );
+        header.n_height = Some(reader.read()?);
+        header.n_nonce_u64 = Some(reader.read()?);
+        header.mix_hash = Some(reader.read()?);
+        Ok(header)
+    }
+}
+
+/// Reads an AuxPoW proof: parent coinbase, parent hash, the two merkle branches and the parent
+/// header, which is std-80 by definition (CRD ch.37 §37.5.4). Same layout the `Deserializable`
+/// impl reads for the version-inferred AuxPoW arm.
+fn read_aux_pow<T: io::Read>(reader: &mut Reader<T>) -> Result<AuxPow, serialization::Error> {
+    Ok(AuxPow {
+        coinbase_tx: deserialize_tx(reader, TxType::StandardWithWitness)?,
+        parent_block_hash: reader.read()?,
+        coinbase_branch: reader.read()?,
+        blockchain_branch: reader.read()?,
+        parent_block_header: Box::new(BlockHeader::read_standard(reader)?),
+    })
 }
 
 /// Runs `read` over `bytes` and requires that it consumed every byte.
@@ -281,6 +418,8 @@ where
         Err(serialization::Error::UnreadData)
     }
 }
+
+#[cfg(test)] mod layout_tests;
 
 impl From<&'static str> for BlockHeader {
     fn from(s: &'static str) -> Self {
@@ -302,7 +441,11 @@ impl Serializable for BlockHeader {
         if let Some(h) = &self.hash_final_sapling_root {
             s.append(h);
         }
-        s.append(&self.time);
+        if self.wide_time {
+            s.append(&u64::from(self.time));
+        } else {
+            s.append(&self.time);
+        }
         s.append(&self.bits);
         // KAWPOW and ProgPoW emit the nonce in their dedicated trailers. Decide
         // on the trailer actually carried, not on the version value: a
@@ -457,6 +600,7 @@ impl Deserializable for BlockHeader {
             n_height,
             n_nonce_u64,
             mix_hash,
+            wide_time: false,
         })
     }
 }

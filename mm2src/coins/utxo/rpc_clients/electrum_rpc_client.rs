@@ -932,7 +932,7 @@ impl UtxoRpcClientOps for ElectrumClient {
         Box::new(
             self.blockchain_block_headers(from, count)
                 .map_to_mm_fut(UtxoRpcError::from)
-                .and_then(|res| {
+                .and_then(move |res| {
                     if res.count == 0 {
                         return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
                     }

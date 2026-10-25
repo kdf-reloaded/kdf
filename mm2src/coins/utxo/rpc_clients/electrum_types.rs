@@ -76,6 +76,7 @@ impl ElectrumBlockHeaderV12 {
             n_height: None,
             n_nonce_u64: None,
             mix_hash: None,
+            wide_time: false,
         }
     }
 
