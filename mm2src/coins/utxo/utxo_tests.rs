@@ -5,6 +5,7 @@ use crate::hd_wallet_storage::{HDWalletMockStorage, HDWalletStorageInternalOps};
 use crate::rpc_command::account_balance::{AccountBalanceParams, AccountBalanceRpcOps, HDAccountBalanceResponse};
 use crate::rpc_command::init_scan_for_new_addresses::{InitScanAddressesRpcOps, ScanAddressesParams,
                                                       ScanAddressesResponse};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin, QtumDelegationOps, QtumDelegationRequest};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl,
                                GetAddressInfoRes, ListSinceBlockRes, ListTransactionsItem, NativeClient,
@@ -185,6 +186,8 @@ pub(crate) fn utxo_coin_fields_for_test(
             trezor_coin: None,
             enable_spv_proof: false,
             header_layout: None,
+            chain_variant: None,
+            protocol_header_reader: CoinVariant::Standard,
             header_layout_fallback_families: vec!["BTC".to_owned()],
             header_layout_fallback_logged: Default::default(),
         },
@@ -204,7 +207,7 @@ pub(crate) fn utxo_coin_fields_for_test(
     }
 }
 
-fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
+pub(crate) fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
     let arc: UtxoArc = coin.into();
     arc.into()
 }
@@ -6431,12 +6434,8 @@ fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
 fn header_layout_absent_has_no_effect() {
     let conf = conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
     assert_eq!(conf.header_layout, None);
-    // No key: the per-coin default of the call site governs, exactly as before.
-    assert_eq!(
-        utxo_common::header_variant(&conf, CoinVariant::Standard),
-        CoinVariant::Standard
-    );
-    assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), CoinVariant::Qtum);
+    // No header_layout key: the family's reader governs, here "BTC" (the standard reader).
+    assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), CoinVariant::Standard);
 }
 
 #[test]
@@ -6448,8 +6447,7 @@ fn header_layout_values_are_read_beside_type_and_win_over_the_default() {
         let conf =
             conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": value })).unwrap();
         assert_eq!(conf.header_layout, Some(expected));
-        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Standard), expected);
-        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), expected);
+        assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), expected);
     }
 }
 
@@ -6488,7 +6486,7 @@ fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
         conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" })).unwrap();
     let hex = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
     let served = hex::decode(hex.trim()).unwrap();
-    let variant = utxo_common::header_variant(&conf, CoinVariant::Standard);
+    let variant = HeaderReadPolicy::for_conf(&conf).layout();
     let headers = chain::BlockHeader::list_from_served_bytes(&served, 11, variant).unwrap();
     let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
     assert_eq!(common::median(times.as_mut_slice()), Some(1_792_892_599));
@@ -6500,6 +6498,7 @@ fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
 
 mod header_layout_fallback_tests {
     use super::*;
+    use crate::utxo::header_layout_fallback::HeaderReadPolicy;
     use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError, HeaderLayoutFallback};
     use crate::utxo::utxo_builder::header_layout_fallback_families;
     use mm2_core::mm_ctx::MmCtxBuilder;
@@ -6532,11 +6531,7 @@ mod header_layout_fallback_tests {
         bytes: &[u8],
         count: usize,
     ) -> Result<u32, FallbackReadError<serialization::Error>> {
-        let variant = utxo_common::header_variant(conf, CoinVariant::Standard);
-        let fallback = HeaderLayoutFallback::for_conf(conf);
-        let headers = read_with_fallback(variant, fallback.as_ref(), |layout| {
-            chain::BlockHeader::list_from_served_bytes(bytes, count, layout)
-        })?;
+        let headers = HeaderReadPolicy::for_conf(conf).read_list(bytes, count)?;
         let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
         Ok(common::median(times.as_mut_slice()).unwrap())
     }
@@ -6747,5 +6742,735 @@ mod header_layout_fallback_tests {
         }
         // 1232 would need 8.8 native headers, so the Riecoin probe can never swallow a mixed list.
         assert_eq!((riecoin - standard) % 40, 32);
+    }
+}
+
+// ---- the layout on every header read path (CRD ch.37 R37.5.1a, R37.5.9a, R37.5.9e) ---------------
+
+/// Plumbing coverage: each production read path is driven with a Riecoin and a mixed Meowcoin
+/// header (list), from a pinned coin, from an unpinned coin under the default switch, from an
+/// unpinned coin with the switch off, from a pinned coin whose layout does not fit and with a plain
+/// standard-80 header. The Electrum fetches are mocked, so nothing touches the network.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod header_read_path_tests {
+    use super::*;
+    use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+    use crate::utxo::rpc_clients::ElectrumBlockHeadersRes;
+    use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, BlockHeaderStorageOps};
+    use crate::utxo::utxo_common::{block_header_from_storage_or_rpc, valid_block_header_from_storage,
+                                   verify_anchor_header};
+    use crate::utxo::utxo_sql_block_header_storage::SqliteBlockHeadersStorage;
+    use crate::utxo::{SPVBlockHeader, SPVConf};
+    use rpc::v1::types::Bytes as BytesJson;
+    use std::sync::atomic::Ordering;
+
+    const RIC_LIST: &str = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    const RIC_LONE: &str = include_str!("../../kdf_chain/src/test_data/ric_2658955_lone_v20000000.hex");
+    const MEWC_MIXED: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124756_x11_9native_2auxpow.hex");
+    const MEWC_LONE_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_lone_native.hex");
+    const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
+    const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+
+    const TICKER: &str = "PLUMB";
+
+    fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
+
+    fn time_at(bytes: &[u8], start: usize) -> u32 {
+        u32::from_le_bytes(bytes[start + 68..start + 72].try_into().unwrap())
+    }
+
+    /// One served chain section: a lone header and a list, both in the layout `layout`.
+    pub(crate) struct Fixture {
+        pub(crate) layout: CoinVariant,
+        pub(crate) lone: Vec<u8>,
+        pub(crate) list: Vec<u8>,
+        pub(crate) count: usize,
+    }
+
+    impl Fixture {
+        pub(crate) fn riecoin() -> Self {
+            Fixture {
+                layout: CoinVariant::Riecoin,
+                lone: served(RIC_LONE),
+                list: served(RIC_LIST),
+                count: 11,
+            }
+        }
+
+        pub(crate) fn mewc() -> Self {
+            Fixture {
+                layout: CoinVariant::KawpowAuxpowMixed,
+                lone: served(MEWC_LONE_NATIVE),
+                list: served(MEWC_MIXED),
+                count: 11,
+            }
+        }
+
+        /// Eleven Qtum proof-of-stake headers (246 bytes each): the standard 80 bytes, the state and UTXO
+        /// roots, the stake outpoint and a 65-byte compact-size-prefixed block signature. Built from the
+        /// layout of `kdf_chain`'s Qtum reader (no real Qtum list is in the tree); the version value is the
+        /// one Qtum shares with plain BIP9-signalling chains, so only the Qtum reader consumes the bytes.
+        pub(crate) fn qtum() -> Self {
+            let headers: Vec<Vec<u8>> = (0..11u32)
+                .map(|i| {
+                    let mut h = Vec::with_capacity(246);
+                    h.extend_from_slice(&0x2000_0000u32.to_le_bytes());
+                    h.extend_from_slice(&[i as u8 + 1; 32]); // previous hash
+                    h.extend_from_slice(&[0x5a; 32]); // merkle root
+                    h.extend_from_slice(&(1_700_000_000 + 60 * i).to_le_bytes());
+                    h.extend_from_slice(&0x1b00_ffffu32.to_le_bytes());
+                    h.extend_from_slice(&i.to_le_bytes()); // nonce
+                    h.extend_from_slice(&[0x66; 32]); // hash_state_root
+                    h.extend_from_slice(&[0x77; 32]); // hash_utxo_root
+                    h.extend_from_slice(&[0x88; 36]); // prevout_stake
+                    h.push(65); // compact-size length of the block signature
+                    h.extend_from_slice(&[0x99; 65]);
+                    h
+                })
+                .collect();
+            Fixture {
+                layout: CoinVariant::Qtum,
+                lone: headers[0].clone(),
+                list: headers.concat(),
+                count: 11,
+            }
+        }
+
+        /// Eleven 120-byte KawPoW headers: the real native Meowcoin headers of `MEWC_ALL_NATIVE`
+        /// (height 2124580 and the ten before it) with the version field rewritten to the KawPoW
+        /// signalling value 0x30000000 that the version-signalled reader and `"RVN"` key on. The bodies
+        /// (previous hash, Merkle root, time, bits, height, 64-bit nonce, mix hash) are the chain's own.
+        pub(crate) fn kawpow() -> Self {
+            let mut list = served(MEWC_ALL_NATIVE);
+            assert_eq!(list.len(), 11 * 120);
+            for header in list.chunks_mut(120) {
+                header[..4].copy_from_slice(&0x3000_0000u32.to_le_bytes());
+            }
+            Fixture {
+                layout: CoinVariant::Standard,
+                lone: list[..120].to_vec(),
+                count: 11,
+                list,
+            }
+        }
+
+        pub(crate) fn standard() -> Self {
+            let list = served(MEWC_ALL_AUXPOW);
+            Fixture {
+                layout: CoinVariant::Standard,
+                lone: list[..80].to_vec(),
+                count: 6,
+                list,
+            }
+        }
+
+        pub(crate) fn lone_time(&self) -> u64 { time_at(&self.lone, 0) as u64 }
+
+        pub(crate) fn list_time(&self) -> u64 { time_at(&self.list, 0) as u64 }
+
+        /// The median the median-time-past path derives from the whole list, stated from the parse
+        /// under the fixture's true layout.
+        pub(crate) fn median(&self) -> u64 {
+            let mut times: Vec<u32> = chain::BlockHeader::list_from_served_bytes(&self.list, self.count, self.layout)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.time)
+                .collect();
+            common::median(times.as_mut_slice()).unwrap() as u64
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Setup {
+        /// `protocol.header_layout` set.
+        Pinned(CoinVariant),
+        /// No key, the default node switch.
+        Default,
+        /// No key, `header_layout_fallback_families: []`.
+        Off,
+    }
+
+    /// A coin on a mocked Electrum client with a SQLite header store, both holding the policy of the
+    /// setup, exactly as the activation builders derive it from the conf.
+    pub(crate) fn coin(setup: Setup) -> UtxoStandardCoin {
+        coin_with(|fields| match setup {
+            Setup::Pinned(layout) => fields.conf.header_layout = Some(layout),
+            Setup::Default => (),
+            Setup::Off => fields.conf.header_layout_fallback_families = vec![],
+        })
+    }
+
+    /// As [`coin`], with the conf built by `UtxoConfBuilder` from a coin JSON whose `protocol` object is
+    /// `protocol`, under the node switch `families` (`None` is the default switch). The test proves the
+    /// builder reads the keys; nothing pokes a conf field.
+    pub(crate) fn coin_from_protocol(protocol: Json, families: Option<&[&str]>) -> UtxoStandardCoin {
+        let conf = conf_from_protocol(protocol, families).unwrap();
+        coin_with(|fields| fields.conf = conf)
+    }
+
+    pub(crate) fn conf_from_protocol(protocol: Json, families: Option<&[&str]>) -> UtxoConfResult<UtxoCoinConf> {
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let coin_conf = json!({ "coin": TICKER, "protocol": protocol });
+        let mut builder = UtxoConfBuilder::new(&coin_conf, &params, TICKER);
+        if let Some(families) = families {
+            builder = builder.with_header_layout_fallback_families(families.iter().map(|f| (*f).to_owned()).collect());
+        }
+        builder.build()
+    }
+
+    fn coin_with(configure: impl FnOnce(&mut UtxoCoinFields)) -> UtxoStandardCoin {
+        let client = ElectrumClient(Arc::new(ElectrumClientImpl::new(TICKER.into(), Default::default())));
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        fields.conf.ticker = TICKER.into();
+        configure(&mut fields);
+        let policy = HeaderReadPolicy::for_conf(&fields.conf);
+        let storage = BlockHeaderStorage {
+            inner: Box::new(SqliteBlockHeadersStorage::in_memory_with_policy(policy)),
+            conf: SPVConf {
+                starting_block_header: SPVBlockHeader {
+                    height: 0,
+                    hash: "00".repeat(32),
+                    time: 0,
+                    bits: 0,
+                },
+                max_stored_block_headers: None,
+                validation_params: None,
+            },
+        };
+        block_on(storage.init(TICKER)).unwrap();
+        fields.block_headers_storage = Some(storage);
+        utxo_coin_from_fields(fields)
+    }
+
+    pub(crate) fn policy_of(coin: &UtxoStandardCoin) -> HeaderReadPolicy {
+        HeaderReadPolicy::for_conf(&coin.as_ref().conf)
+    }
+
+    pub(crate) fn logged(coin: &UtxoStandardCoin) -> bool {
+        coin.as_ref().conf.header_layout_fallback_logged.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn electrum(coin: &UtxoStandardCoin) -> ElectrumClient {
+        match &coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Electrum(client) => client.clone(),
+            _ => unreachable!("the test coin is Electrum-served"),
+        }
+    }
+
+    /// Makes `blockchain.block.header` serve `bytes` and `blockchain.block.headers` serve `list`.
+    pub(crate) fn serve(lone: &[u8], list: &[u8], count: u64) {
+        let lone = lone.to_vec();
+        ElectrumClient::blockchain_block_header
+            .mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(BytesJson::from(lone.clone())))));
+        let list = list.to_vec();
+        ElectrumClient::blockchain_block_headers.mock_safe(move |_, _, _| {
+            let res: ElectrumBlockHeadersRes =
+                json::from_value(json!({ "count": count, "hex": hex::encode(&list), "max": 2016 })).unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(res)))
+        });
+    }
+
+    /// Drives one read path through the five situations. `read` returns a value the path derives from
+    /// the served bytes; `expected` states it independently of the parser.
+    pub(crate) fn run_matrix(
+        read: impl Fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>,
+        expected: impl Fn(&Fixture) -> u64,
+    ) {
+        let (ric, mewc, std80) = (Fixture::riecoin(), Fixture::mewc(), Fixture::standard());
+
+        // (a) a pinned coin reads its layout and never logs a fallback.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Pinned(fx.layout));
+            assert_eq!(read(&coin, fx), Ok(expected(fx)), "pinned {:?}", fx.layout);
+            assert!(!logged(&coin), "a pinned coin must not be fallback-parsed");
+        }
+        // (b) no key, default switch: the fallback reads both, and logs once per coin.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Default);
+            assert_eq!(read(&coin, fx), Ok(expected(fx)), "fallback {:?}", fx.layout);
+            assert!(logged(&coin));
+        }
+        // (c) no key, switch off: rejected as before and nothing is logged.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Off);
+            assert!(read(&coin, fx).is_err(), "switch off {:?}", fx.layout);
+            assert!(!logged(&coin));
+        }
+        // (d) a pinned coin whose layout does not fit is rejected without the fallback.
+        for (pinned, fx) in [(CoinVariant::Riecoin, &mewc), (CoinVariant::KawpowAuxpowMixed, &ric)] {
+            let coin = coin(Setup::Pinned(pinned));
+            assert!(
+                read(&coin, fx).is_err(),
+                "pinned {pinned:?} must reject {:?}",
+                fx.layout
+            );
+            assert!(!logged(&coin), "a pinned coin must not consult the fallback");
+        }
+        // (e) a plain standard-80 header is read by the standard layout and never fallback-parsed.
+        for setup in [Setup::Default, Setup::Off] {
+            let coin = coin(setup);
+            assert_eq!(read(&coin, &std80), Ok(expected(&std80)));
+            assert!(!logged(&coin));
+        }
+    }
+
+    fn describe<E: std::fmt::Debug>(e: E) -> String { format!("{e:?}") }
+
+    pub(crate) type PathFn = fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>;
+
+    fn path_retrieve_last_headers(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let limit = NonZeroU64::new(fx.count as u64).unwrap();
+        let (registry, headers) = electrum(coin)
+            .retrieve_last_headers(limit, 5000, policy_of(coin))
+            .wait()
+            .map_err(describe)?;
+        let from = 5000 - fx.count as u64;
+        assert_eq!(headers.len(), fx.count);
+        assert_eq!(registry.len(), fx.count);
+        assert_eq!(registry[&from].raw().len(), headers[0].raw().len());
+        let reencoded: Vec<u8> = headers.iter().flat_map(|h| h.raw().to_vec()).collect();
+        assert_eq!(reencoded, fx.list, "the registry keeps the served bytes");
+        Ok(registry[&from].time as u64)
+    }
+
+    fn path_get_block_timestamp(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(coin)),
+        )
+        .map_err(describe)
+    }
+
+    fn path_valid_block_header_from_storage(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let client = electrum(coin);
+        let header = block_on(valid_block_header_from_storage(coin, 5000, storage, &client)).map_err(describe)?;
+        assert_eq!(header.raw().len(), fx.lone.len());
+        Ok(header.time as u64)
+    }
+
+    fn path_direct_fetch(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let client = electrum(coin);
+        block_on(block_header_from_storage_or_rpc(coin, 5000, &None, &client))
+            .map(|header| header.time as u64)
+            .map_err(describe)
+    }
+
+    fn path_verify_anchor_header(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        // The anchor states what the true layout parses the served header to.
+        let truth = chain::BlockHeader::from_served_bytes(&fx.lone, fx.layout).unwrap();
+        let bits = match truth.bits {
+            chain::BlockHeaderBits::Compact(compact) => u32::from(compact),
+            chain::BlockHeaderBits::U32(bits) => bits,
+        };
+        let anchor = SPVBlockHeader {
+            height: 77,
+            hash: truth.hash().reversed().to_string(),
+            time: truth.time,
+            bits,
+        };
+        let client = electrum(coin);
+        match block_on(verify_anchor_header(&client, &anchor, &policy_of(coin))) {
+            Ok(true) => Ok(fx.lone_time()),
+            other => Err(format!("{other:?}")),
+        }
+    }
+
+    /// The median-time-past path, through the coin's own `get_current_mtp`.
+    fn path_median(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        ElectrumClient::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(5000u64))));
+        block_on(coin.get_current_mtp()).map(u64::from).map_err(describe)
+    }
+
+    /// Stores the fixture's headers in the coin's store (which holds the coin's policy) and reads
+    /// them back through the store's two decode paths.
+    fn path_store(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        // The headers are stored the way the sync loop stores them: `header.raw()` of the parse
+        // under the true layout of the chain.
+        let headers = chain::BlockHeader::list_from_served_bytes(&fx.list, fx.count, fx.layout).unwrap();
+        let registry: HashMap<u64, chain::BlockHeader> =
+            headers.iter().cloned().zip(100u64..).map(|(h, n)| (n, h)).collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).map_err(describe)?;
+        for (height, expected) in (100u64..).zip(&headers) {
+            let read = block_on(storage.get_block_header(TICKER, height))
+                .map_err(describe)?
+                .expect("stored");
+            assert_eq!(
+                read.raw(),
+                expected.raw(),
+                "the store re-reads the served bytes at {height}"
+            );
+        }
+        // The scan-based lookup decodes every stored row.
+        let found = block_on(storage.get_block_height_by_hash(TICKER, headers[0].hash())).map_err(describe)?;
+        assert_eq!(found, Some(100));
+        Ok(headers[0].time as u64)
+    }
+
+    /// Every threaded read path of the coin layer that a test can drive here, with the value each
+    /// derives from the served bytes (the WalletConnect genesis read is driven from its own module).
+    pub(crate) fn paths() -> Vec<(&'static str, PathFn, fn(&Fixture) -> u64)> {
+        vec![
+            ("retrieve_last_headers", path_retrieve_last_headers, |fx| fx.list_time()),
+            ("get_block_timestamp", path_get_block_timestamp, |fx| fx.lone_time()),
+            (
+                "valid_block_header_from_storage",
+                path_valid_block_header_from_storage,
+                |fx| fx.lone_time(),
+            ),
+            ("block_header_from_storage_or_rpc", path_direct_fetch, |fx| {
+                fx.lone_time()
+            }),
+            ("verify_anchor_header", path_verify_anchor_header, |fx| fx.lone_time()),
+            ("median", path_median, |fx| fx.median()),
+            ("sqlite_store", path_store, |fx| fx.list_time()),
+        ]
+    }
+
+    #[test]
+    fn retrieve_last_headers_reads_the_list_under_the_policy() {
+        run_matrix(path_retrieve_last_headers, |fx| fx.list_time());
+    }
+
+    #[test]
+    fn retrieve_last_headers_rejects_a_count_mismatch() {
+        for setup in [Setup::Pinned(CoinVariant::Riecoin), Setup::Default] {
+            let coin = coin(setup);
+            let fx = Fixture::riecoin();
+            let limit = NonZeroU64::new(11).unwrap();
+            for wrong in [10u64, 12] {
+                serve(&fx.lone, &fx.list, wrong);
+                assert!(electrum(&coin)
+                    .retrieve_last_headers(limit, 5000, policy_of(&coin))
+                    .wait()
+                    .is_err());
+            }
+            // The correct count is read.
+            serve(&fx.lone, &fx.list, 11);
+            assert!(electrum(&coin)
+                .retrieve_last_headers(limit, 5000, policy_of(&coin))
+                .wait()
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn get_block_timestamp_reads_the_header_under_the_policy() {
+        run_matrix(path_get_block_timestamp, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn the_standard_get_block_timestamp_is_unchanged() {
+        let coin = coin(Setup::Pinned(CoinVariant::Riecoin));
+        let (ric, std80) = (Fixture::riecoin(), Fixture::standard());
+        serve(&ric.lone, &ric.list, 11);
+        assert!(block_on(coin.as_ref().rpc_client.get_block_timestamp(77)).is_err());
+        serve(&std80.lone, &std80.list, 6);
+        assert_eq!(
+            block_on(coin.as_ref().rpc_client.get_block_timestamp(77)).unwrap(),
+            std80.lone_time()
+        );
+    }
+
+    #[test]
+    fn valid_block_header_from_storage_reads_the_single_header_under_the_policy() {
+        run_matrix(path_valid_block_header_from_storage, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn block_header_from_storage_or_rpc_reads_the_direct_fetch_under_the_policy() {
+        run_matrix(path_direct_fetch, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn verify_anchor_header_reads_the_anchor_under_the_policy() {
+        run_matrix(path_verify_anchor_header, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn the_median_path_reads_the_list_under_the_policy() { run_matrix(path_median, |fx| fx.median()); }
+
+    #[test]
+    fn the_sqlite_store_rereads_stored_headers_under_the_policy() { run_matrix(path_store, |fx| fx.list_time()); }
+
+    #[test]
+    fn the_store_keeps_112_120_and_80_byte_headers() {
+        let coin = coin(Setup::Default);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        let mixed =
+            chain::BlockHeader::list_from_served_bytes(&Fixture::mewc().list, 11, CoinVariant::KawpowAuxpowMixed)
+                .unwrap();
+        let native = mixed.iter().find(|h| h.raw().len() == 120).unwrap().clone();
+        let merged = mixed.iter().find(|h| h.raw().len() == 80).unwrap().clone();
+        assert_eq!(ric.raw().len(), 112);
+        let registry: HashMap<u64, chain::BlockHeader> = [(1, ric.clone()), (2, native.clone()), (3, merged.clone())]
+            .into_iter()
+            .collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+        for (height, header) in [(1, ric), (2, native), (3, merged)] {
+            let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+            assert_eq!(read.raw(), header.raw());
+        }
+        assert!(logged(&coin), "the 112- and 120-byte rows were read by the fallback");
+    }
+
+    // ---- protocol.chain_variant read at activation (CRD ch.37 R37.5.1, R37.5.9a, R37.5.9e) ----------
+
+    fn utxo(chain_variant: Json) -> Json { json!({ "type": "UTXO", "chain_variant": chain_variant }) }
+
+    fn read_ok(name: &str, coin: &UtxoStandardCoin, fx: &Fixture, read: PathFn, expected: fn(&Fixture) -> u64) {
+        assert_eq!(read(coin, fx), Ok(expected(fx)), "{name}: {:?}", fx.layout);
+    }
+
+    fn read_err(name: &str, coin: &UtxoStandardCoin, fx: &Fixture, read: PathFn) -> String {
+        read(coin, fx).expect_err(&format!("{name}: {:?} must be rejected", fx.layout))
+    }
+
+    /// The hazard: the registry pins `RIC` and `MEWC` to `"BTC"`, with no `header_layout` key. Once the
+    /// value is really read, the standard read of their headers fails and only the R37.5.9e fallback
+    /// rescues them, on every path, because `"BTC"` is in the default switch.
+    #[test]
+    fn btc_chain_variant_rescues_ric_and_mewc_on_every_path_under_the_default_switch() {
+        for (name, read, expected) in paths() {
+            for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                let coin = coin_from_protocol(utxo(json!("BTC")), None);
+                read_ok(name, &coin, &fx, read, expected);
+                assert!(logged(&coin), "{name}: the fallback logs once for the coin");
+            }
+        }
+    }
+
+    #[test]
+    fn btc_chain_variant_is_rejected_with_the_switch_off_or_without_btc() {
+        for families in [&[][..], &["PPC"][..]] {
+            for (name, read, _) in paths() {
+                for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                    let coin = coin_from_protocol(utxo(json!("BTC")), Some(families));
+                    read_err(name, &coin, &fx, read);
+                    assert!(!logged(&coin), "{name}: nothing is fallback-parsed under {families:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_switch_membership_uses_the_coins_real_family() {
+        // (chain_variant, switch, the fallback exists)
+        let cases: [(Option<&str>, Option<&[&str]>, bool); 12] = [
+            (None, None, true),
+            (None, Some(&[]), false),
+            (None, Some(&["PPC"]), false), // an absent key counts as "BTC"
+            (Some("BTC"), None, true),
+            (Some("BTC"), Some(&["PPC"]), false),
+            (Some("BTC"), Some(&["BTC", "PPC"]), true),
+            (Some("PPC"), None, false),
+            (Some("PPC"), Some(&["PPC"]), true),
+            (Some("PPC"), Some(&["BTC", "PPC"]), true),
+            (Some("QTUM"), None, false),
+            (Some("QTUM"), Some(&["QTUM"]), true),
+            (Some("RVN"), None, false),
+        ];
+        for (variant, families, expected) in cases {
+            let protocol = match variant {
+                Some(v) => utxo(json!(v)),
+                None => json!({ "type": "UTXO" }),
+            };
+            let conf = conf_from_protocol(protocol, families).unwrap();
+            assert_eq!(
+                crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_some(),
+                expected,
+                "{variant:?} under {families:?}"
+            );
+        }
+        // The Qtum protocol-type reader is a reader choice, not a family: an unkeyed QTUM-type coin is "BTC".
+        let conf = conf_from_protocol(json!({ "type": "QTUM" }), None).unwrap();
+        assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_some());
+        let conf = conf_from_protocol(json!({ "type": "QTUM" }), Some(&["PPC"])).unwrap();
+        assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_none());
+    }
+
+    #[test]
+    fn a_non_btc_family_in_the_switch_falls_back_and_logs_once_per_coin() {
+        let fx = Fixture::riecoin();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("PPC")), Some(&["PPC"]));
+            assert!(!logged(&coin));
+            read_ok(name, &coin, &fx, read, expected);
+            assert!(logged(&coin), "{name}: the log fired for the fallback");
+        }
+        // A second activation is a new coin and logs again; the PPC coin outside the default switch does not.
+        let other = coin_from_protocol(utxo(json!("PPC")), None);
+        read_err("retrieve_last_headers", &other, &fx, path_retrieve_last_headers);
+        assert!(!logged(&other));
+    }
+
+    #[test]
+    fn qtum_chain_variant_reads_qtum_headers_on_every_path_and_never_falls_back() {
+        let qtum = Fixture::qtum();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("QTUM")), None);
+            read_ok(name, &coin, &qtum, read, expected);
+            assert!(!logged(&coin));
+            // outside the default switch, so a Riecoin list is rejected, never rescued.
+            for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                read_err(name, &coin, &fx, read);
+                assert!(!logged(&coin), "{name}: a QTUM-pinned coin never falls back");
+            }
+            // a standard coin does not read the Qtum layout
+            let standard = coin_from_protocol(utxo(json!("BTC")), None);
+            read_err(name, &standard, &qtum, read);
+        }
+    }
+
+    #[test]
+    fn rvn_chain_variant_reads_the_120_byte_kawpow_form_on_every_path() {
+        let kawpow = Fixture::kawpow();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("RVN")), None);
+            read_ok(name, &coin, &kawpow, read, expected);
+            assert!(!logged(&coin), "{name}: the version-signalled read, not the fallback");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_chain_variant_fails_the_coin_build_naming_the_ticker_and_value() {
+        for bad in [
+            json!("FOO"),
+            json!("btc"),
+            json!("Btc"),
+            json!(""),
+            json!(7),
+            json!(null),
+            json!(["BTC"]),
+        ] {
+            let err = conf_from_protocol(utxo(bad.clone()), None).expect_err("no fallback to the default family");
+            let text = err.to_string();
+            assert!(text.contains(TICKER), "{text}");
+            assert!(text.contains("chain_variant"), "{text}");
+            assert!(text.contains(&bad.to_string()), "{text}");
+        }
+        // Read and validated even when header_layout pins the layout (R37.5.9a).
+        let err = conf_from_protocol(
+            json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": "FOO" }),
+            None,
+        )
+        .expect_err("the key does not excuse an invalid chain_variant");
+        assert!(err.to_string().contains("chain_variant"));
+        // The eight spellings are accepted verbatim.
+        for ok in ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"] {
+            conf_from_protocol(utxo(json!(ok)), None).unwrap();
+        }
+    }
+
+    #[test]
+    fn chain_variant_does_not_change_how_the_protocol_object_parses() {
+        let with = utxo(json!("QTUM"));
+        let without = json!({ "type": "UTXO" });
+        let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
+        assert_eq!(parse(with), parse(without));
+    }
+
+    #[test]
+    fn an_absent_key_behaves_as_before_on_every_path() {
+        let (std80, qtum) = (Fixture::standard(), Fixture::qtum());
+        for (name, read, expected) in paths() {
+            // Standard coin: standard headers read, Qtum headers rejected, RIC rescued by the fallback.
+            let coin = coin_from_protocol(json!({ "type": "UTXO" }), None);
+            read_ok(name, &coin, &std80, read, expected);
+            read_err(name, &coin, &qtum, read);
+            let rescued = coin_from_protocol(json!({ "type": "UTXO" }), None);
+            read_ok(name, &rescued, &Fixture::riecoin(), read, expected);
+            // QTUM and QRC20 protocol types keep reading Qtum headers (documented divergence of the
+            // maintainer) on every path, the median path included.
+            for protocol in [
+                json!({ "type": "QTUM" }),
+                json!({ "type": "QRC20", "protocol_data": { "platform": "QTUM", "contract_address": "0x00" } }),
+            ] {
+                let coin = coin_from_protocol(protocol, None);
+                read_ok(name, &coin, &qtum, read, expected);
+                assert!(!logged(&coin));
+            }
+        }
+    }
+
+    #[test]
+    fn header_layout_wins_over_a_conflicting_chain_variant_and_the_fallback_is_never_consulted() {
+        for conflicting in ["QTUM", "BTC", "PPC", "LBC", "PIVX"] {
+            for (name, read, expected) in paths() {
+                let protocol = json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": conflicting });
+                let coin = coin_from_protocol(protocol.clone(), Some(&["BTC", "QTUM", "PPC", "LBC", "PIVX"]));
+                read_ok(name, &coin, &Fixture::riecoin(), read, expected);
+                // the key's layout does not fit: rejected whole, with no fallback even in the switch.
+                read_err(name, &coin, &Fixture::mewc(), read);
+                read_err(name, &coin, &Fixture::qtum(), read);
+                assert!(!logged(&coin), "{name}/{conflicting}: a pinned coin never falls back");
+            }
+        }
+    }
+
+    #[test]
+    fn lbc_and_pivx_refuse_every_header_read_with_a_typed_error() {
+        for variant in ["LBC", "PIVX"] {
+            for (name, read, _) in paths() {
+                // a plain standard-80 header and the other layouts are all refused, never silently read
+                for fx in [Fixture::standard(), Fixture::riecoin(), Fixture::qtum()] {
+                    let coin = coin_from_protocol(utxo(json!(variant)), None);
+                    let err = read_err(name, &coin, &fx, read);
+                    assert!(
+                        err.contains("not implemented") && err.contains(variant),
+                        "{name}/{variant}: {err}"
+                    );
+                    assert!(!logged(&coin));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ppc_rick_and_morty_read_standard_80_exactly_like_an_absent_key() {
+        // Plan step H4 (exclusivity, the thresholded rules, the Equihash reading of RICK/MORTY and
+        // PPC's version-4 suppression) is not implemented: these three resolve to the standard reader.
+        let std80 = Fixture::standard();
+        for variant in ["PPC", "RICK", "MORTY"] {
+            for (name, read, expected) in paths() {
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                read_ok(name, &coin, &std80, read, expected);
+                let absent = coin_from_protocol(json!({ "type": "UTXO" }), None);
+                read_ok(name, &absent, &std80, read, expected);
+                read_err(name, &coin, &Fixture::qtum(), read);
+            }
+        }
+    }
+
+    #[test]
+    fn a_keyless_btc_coin_rereads_stored_112_and_120_byte_headers_through_the_conf() {
+        let coin = coin_from_protocol(utxo(json!("BTC")), None);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        let native =
+            chain::BlockHeader::from_served_bytes(&Fixture::mewc().lone, CoinVariant::KawpowAuxpowMixed).unwrap();
+        assert_eq!((ric.raw().len(), native.raw().len()), (112, 120));
+        let registry: HashMap<u64, chain::BlockHeader> = [(1, ric.clone()), (2, native.clone())].into_iter().collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+        for (height, header) in [(1, ric), (2, native)] {
+            let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+            assert_eq!(read.raw(), header.raw());
+        }
+        assert!(logged(&coin));
+        // With the switch off the same rows are unreadable.
+        let off = coin_from_protocol(utxo(json!("BTC")), Some(&[]));
+        let storage = off.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        block_on(storage.add_block_headers_to_storage(TICKER, [(1u64, ric)].into_iter().collect())).unwrap();
+        assert!(block_on(storage.get_block_header(TICKER, 1)).is_err());
     }
 }

@@ -41,6 +41,7 @@ KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). 
 > **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
 
 - The `kdf` binary is provided for evaluation, testing, and review.
+- Some functionality is missing or limited in this release; see the *Known limitations* list in the [`CHANGELOG`](CHANGELOG.md#known-limitations).
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
 - Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc). Release **binaries** ship with a GPG-signed `SHA256SUMS` manifest; see [`docs/RELEASE.md`](docs/RELEASE.md) and [`SECURITY.md`](SECURITY.md).
 

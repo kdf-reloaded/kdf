@@ -25,6 +25,7 @@
 
 use std::str::FromStr;
 
+use bigdecimal::BigDecimal;
 use mm2_err_handle::mm_error::MmError;
 use rpc::v1::types::Bytes as BytesJson;
 
@@ -33,8 +34,8 @@ use common::now_ms;
 use crate::siacoin::{hastings_to_siacoin, siacoin_to_hastings, Address, ApiClientHelpers, Currency, SiaApiClient,
                      SiaCoin, SiaFeeDetails, SiaFeePolicy, SiaKeypair as Keypair, SiacoinElement, SiacoinOutput,
                      SpendPolicy, TxpoolFeeRequest, V2Transaction, V2TransactionBuilder};
-use crate::{Json, MarketCoinOps, PrivKeyPolicy, TransactionDetails, TransactionType, WithdrawError, WithdrawRequest,
-            WithdrawResult};
+use crate::{Json, MarketCoinOps, PrivKeyPolicy, TransactionDetails, TransactionType, WithdrawError, WithdrawFee,
+            WithdrawRequest, WithdrawResult};
 
 /// Serialized size, in bytes, of a transaction shaped like the one
 /// `inputs`/`with_change` describe: a single output to `to`, the given
@@ -75,10 +76,137 @@ fn fee_for_weight(fee_per_byte: Currency, weight: u64) -> Currency {
     Currency(fee_per_byte.0.saturating_mul(weight as u128))
 }
 
-/// Result of [`SiaWithdrawBuilder::plan_inputs`]: the inputs we will
+/// A miner-fee rate, either walletd's per-byte estimate or the operator's
+/// per-kilobyte override from the request's `fee` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeeRate {
+    /// walletd's current hastings-per-byte rate (`GET /api/txpool/fee`).
+    PerByte(Currency),
+    /// Operator override, in hastings per kilobyte (1000 bytes).
+    PerKbyte(u128),
+}
+
+impl FeeRate {
+    /// The miner fee for a transaction of the given serialized `weight`
+    /// (bytes). The walletd path keeps [`fee_for_weight`]'s semantics
+    /// unchanged; the override computes `ceil(hastings_per_kb * weight / 1000)`
+    /// and reports an overflow as a typed error instead of wrapping.
+    #[allow(clippy::result_large_err)]
+    fn fee_for_weight(self, ticker: &str, weight: u64) -> Result<Currency, MmError<WithdrawError>> {
+        match self {
+            FeeRate::PerByte(rate) => Ok(fee_for_weight(rate, weight)),
+            FeeRate::PerKbyte(per_kb) => {
+                let product = per_kb.checked_mul(weight as u128).ok_or_else(|| {
+                    MmError::new(WithdrawError::InvalidFeePolicy(format!(
+                        "The {ticker} fee of {per_kb} hastings per kilobyte overflows for a transaction of {weight} bytes"
+                    )))
+                })?;
+                Ok(Currency(product / 1000 + u128::from(product % 1000 != 0)))
+            },
+        }
+    }
+
+    /// The per-byte rate reported in `fee_details.policy`. For an override this
+    /// is the exact ceiling of `hastings_per_kb / 1000`; it can exceed the rate
+    /// actually applied, so `fee_details.total_amount` is the authoritative fee.
+    fn reported_per_byte(self) -> Currency {
+        match self {
+            FeeRate::PerByte(rate) => rate,
+            FeeRate::PerKbyte(per_kb) => Currency(per_kb / 1000 + u128::from(per_kb % 1000 != 0)),
+        }
+    }
+}
+
+/// Where the fee rate comes from, decided from the request alone (no network).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeeSource {
+    /// No `fee` in the request: use walletd's estimate.
+    WalletdEstimate,
+    /// A validated operator override; walletd's rate is not needed.
+    Custom(FeeRate),
+}
+
+impl FeeSource {
+    /// The rate when it is known without asking walletd, `None` when walletd's
+    /// estimate must be fetched first.
+    fn rate_without_network(self) -> Option<FeeRate> {
+        match self {
+            FeeSource::WalletdEstimate => None,
+            FeeSource::Custom(rate) => Some(rate),
+        }
+    }
+}
+
+/// Validate the request's `fee` for Siacoin (ch.20 R-W3).
+///
+/// Only `UtxoPerKbyte { amount }` is accepted, with `amount` in SC per kilobyte;
+/// it replaces walletd's `/api/txpool/fee` rate. There is deliberately NO floor:
+/// any positive rate is accepted, including one below walletd's estimate. Whether
+/// walletd or the Sia network accepts such a transaction is untested and will be
+/// checked in a live run. Every other variant is rejected rather than ignored.
+#[allow(clippy::result_large_err)]
+fn resolve_fee_source(ticker: &str, fee: Option<&WithdrawFee>) -> Result<FeeSource, MmError<WithdrawError>> {
+    let invalid = |msg: String| MmError::new(WithdrawError::InvalidFeePolicy(msg));
+    let amount = match fee {
+        None => return Ok(FeeSource::WalletdEstimate),
+        Some(WithdrawFee::UtxoPerKbyte { amount }) => amount,
+        Some(other) => {
+            return Err(invalid(format!(
+                "Expected 'UtxoPerKbyte' fee type for {ticker}, found {other:?}"
+            )))
+        },
+    };
+    if amount <= &BigDecimal::from(0) {
+        return Err(invalid(format!(
+            "The {ticker} fee must be a positive amount of SC per kilobyte, found {amount}"
+        )));
+    }
+    let hastings = siacoin_to_hastings(amount.clone()).map_err(|e| {
+        invalid(format!(
+            "The {ticker} fee of {amount} SC per kilobyte is not representable: {e}"
+        ))
+    })?;
+    // `siacoin_to_hastings` truncates; require an exact conversion. This also
+    // rejects a rate that would truncate to 0 hastings per kilobyte.
+    if hastings_to_siacoin(hastings) != *amount {
+        return Err(invalid(format!(
+            "The {ticker} fee of {amount} SC per kilobyte is not a whole number of hastings"
+        )));
+    }
+    Ok(FeeSource::Custom(FeeRate::PerKbyte(hastings.0)))
+}
+
+/// Pure fee decision: request `fee` + walletd's rate (if fetched) + serialized
+/// `weight` -> miner fee in hastings. Needs no network.
+#[allow(clippy::result_large_err)]
+#[cfg_attr(not(test), allow(dead_code))]
+fn compute_fee(
+    ticker: &str,
+    fee: Option<&WithdrawFee>,
+    walletd_rate: Option<Currency>,
+    weight: u64,
+) -> Result<Currency, MmError<WithdrawError>> {
+    let source = resolve_fee_source(ticker, fee)?;
+    let rate = match (source.rate_without_network(), walletd_rate) {
+        (Some(rate), _) => rate,
+        (None, Some(rate)) => FeeRate::PerByte(rate),
+        (None, None) => {
+            return Err(MmError::new(WithdrawError::InternalError(
+                "walletd's fee rate is required when the request carries no fee".to_string(),
+            )))
+        },
+    };
+    rate.fee_for_weight(ticker, weight)
+}
+
+/// `a + b` that saturates instead of overflowing.
+fn saturating_add(a: Currency, b: Currency) -> Currency { Currency(a.0.saturating_add(b.0)) }
+
+/// Result of [`plan_inputs`]: the inputs we will
 /// spend plus the derived split into recipient amount, change, total
 /// input value, and the size-aware fee that was used to plan them (all
 /// in hastings).
+#[derive(Debug)]
 struct InputPlan {
     /// UTXOs that will be consumed as inputs.
     inputs: Vec<SiacoinElement>,
@@ -90,6 +218,110 @@ struct InputPlan {
     input_sum: Currency,
     /// Miner fee, computed from the planned transaction's serialized size.
     fee: Currency,
+}
+
+/// What the pure planners need from the builder.
+struct PlanEnv<'a> {
+    ticker: &'a str,
+    from_address: &'a Address,
+    key_pair: &'a Keypair,
+    to: &'a Address,
+}
+
+/// Largest-first coin-selection: keep adding sorted UTXOs until their
+/// sum covers `recipient_amount` plus the size-aware fee of the
+/// transaction they would produce (a change output back to
+/// `env.from_address` is assumed present for sizing purposes; if the
+/// final leftover turns out to be exactly zero, `plan_inputs` simply
+/// omits the change output and the fee is paid as computed here).
+///
+/// Returns the chosen inputs together with the fee that was used to
+/// select them.
+///
+/// # Errors
+/// - [`WithdrawError::NotSufficientBalance`] when the *total* of the
+///   provided outputs is below what's needed (caller has already
+///   converted `recipient_amount` to hastings).
+#[allow(clippy::result_large_err)]
+fn pick_inputs_largest_first(
+    env: &PlanEnv<'_>,
+    mut candidates: Vec<SiacoinElement>,
+    recipient_amount: Currency,
+    fee_rate: FeeRate,
+) -> Result<(Vec<SiacoinElement>, Currency), MmError<WithdrawError>> {
+    candidates.sort_by(|a, b| b.siacoin_output.value.0.cmp(&a.siacoin_output.value.0));
+
+    let mut chosen = Vec::new();
+    let mut running_sum: u128 = 0;
+    for output in candidates {
+        running_sum = running_sum.saturating_add(*output.siacoin_output.value);
+        chosen.push(output);
+
+        let weight = probe_weight(&chosen, env.to, env.from_address, env.key_pair, true);
+        let fee = fee_rate.fee_for_weight(env.ticker, weight)?;
+        let target = saturating_add(recipient_amount, fee).0;
+        if running_sum >= target {
+            return Ok((chosen, fee));
+        }
+    }
+
+    let weight = probe_weight(&chosen, env.to, env.from_address, env.key_pair, true);
+    let fee = fee_rate.fee_for_weight(env.ticker, weight)?;
+    let target = saturating_add(recipient_amount, fee);
+    Err(MmError::new(WithdrawError::NotSufficientBalance {
+        coin: env.ticker.to_string(),
+        available: hastings_to_siacoin(running_sum.into()),
+        required: hastings_to_siacoin(target),
+    }))
+}
+
+/// Decide which UTXOs to spend and how to split the proceeds
+/// between the recipient, the miner fee, and change. `fee_rate` is either
+/// walletd's hastings-per-byte rate or the operator's per-kilobyte override;
+/// the actual fee is derived from it and the planned transaction's
+/// serialized size.
+#[allow(clippy::result_large_err)]
+fn plan_inputs(
+    env: &PlanEnv<'_>,
+    max: bool,
+    amount: &BigDecimal,
+    available: Vec<SiacoinElement>,
+    fee_rate: FeeRate,
+) -> Result<InputPlan, MmError<WithdrawError>> {
+    if max {
+        // `max` mode: drain every available UTXO, leaving only the fee behind.
+        let input_sum: Currency = available.iter().map(|o| o.siacoin_output.value).sum();
+        let weight = probe_weight(&available, env.to, env.from_address, env.key_pair, false);
+        let fee = fee_rate.fee_for_weight(env.ticker, weight)?;
+        if input_sum <= fee {
+            return Err(MmError::new(WithdrawError::NotSufficientBalance {
+                coin: env.ticker.to_string(),
+                available: hastings_to_siacoin(input_sum),
+                required: hastings_to_siacoin(fee),
+            }));
+        }
+        return Ok(InputPlan {
+            recipient_amount: input_sum - fee,
+            inputs: available,
+            change_amount: Currency::ZERO,
+            input_sum,
+            fee,
+        });
+    }
+
+    // Specific-amount mode: take only what's needed plus fee, return change.
+    let recipient_amount =
+        siacoin_to_hastings(amount.clone()).map_err(|e| WithdrawError::InternalError(e.to_string()))?;
+    let (inputs, fee) = pick_inputs_largest_first(env, available, recipient_amount, fee_rate)?;
+    let input_sum: Currency = inputs.iter().map(|o| o.siacoin_output.value).sum();
+    let target = saturating_add(recipient_amount, fee);
+    Ok(InputPlan {
+        inputs,
+        recipient_amount,
+        change_amount: input_sum - target,
+        input_sum,
+        fee,
+    })
 }
 
 /// Assembles, signs, and returns a Sia withdraw transaction.
@@ -127,113 +359,25 @@ impl<'a> SiaWithdrawBuilder<'a> {
         })
     }
 
-    /// Largest-first coin-selection: keep adding sorted UTXOs until their
-    /// sum covers `recipient_amount` plus the size-aware fee of the
-    /// transaction they would produce (a change output back to
-    /// `self.from_address` is assumed present for sizing purposes; if the
-    /// final leftover turns out to be exactly zero, `plan_inputs` simply
-    /// omits the change output and the fee is paid as computed here).
-    ///
-    /// Returns the chosen inputs together with the fee that was used to
-    /// select them.
-    ///
-    /// # Errors
-    /// - [`WithdrawError::NotSufficientBalance`] when the *total* of the
-    ///   provided outputs is below what's needed (caller has already
-    ///   converted `recipient_amount` to hastings).
-    #[allow(clippy::result_large_err)]
-    fn pick_inputs_largest_first(
-        &self,
-        mut candidates: Vec<SiacoinElement>,
-        recipient_amount: Currency,
-        fee_per_byte: Currency,
-        to: &Address,
-    ) -> Result<(Vec<SiacoinElement>, Currency), MmError<WithdrawError>> {
-        candidates.sort_by(|a, b| b.siacoin_output.value.0.cmp(&a.siacoin_output.value.0));
-
-        let mut chosen = Vec::new();
-        let mut running_sum: u128 = 0;
-        for output in candidates {
-            running_sum = running_sum.saturating_add(*output.siacoin_output.value);
-            chosen.push(output);
-
-            let weight = probe_weight(&chosen, to, &self.from_address, self.key_pair, true);
-            let fee = fee_for_weight(fee_per_byte, weight);
-            let target: u128 = (recipient_amount + fee).into();
-            if running_sum >= target {
-                return Ok((chosen, fee));
-            }
-        }
-
-        let weight = probe_weight(&chosen, to, &self.from_address, self.key_pair, true);
-        let fee = fee_for_weight(fee_per_byte, weight);
-        let target = recipient_amount + fee;
-        Err(MmError::new(WithdrawError::NotSufficientBalance {
-            coin: self.coin.ticker().to_string(),
-            available: hastings_to_siacoin(running_sum.into()),
-            required: hastings_to_siacoin(target),
-        }))
-    }
-
-    /// Decide which UTXOs to spend and how to split the proceeds
-    /// between the recipient, the miner fee, and change. `fee_per_byte`
-    /// is walletd's current hastings-per-byte rate; the actual fee is
-    /// derived from it and the planned transaction's serialized size.
-    #[allow(clippy::result_large_err)]
-    fn plan_inputs(
-        &self,
-        available: Vec<SiacoinElement>,
-        fee_per_byte: Currency,
-        to: &Address,
-    ) -> Result<InputPlan, MmError<WithdrawError>> {
-        if self.req.max {
-            // `max` mode: drain every available UTXO, leaving only the fee behind.
-            let input_sum: Currency = available.iter().map(|o| o.siacoin_output.value).sum();
-            let weight = probe_weight(&available, to, &self.from_address, self.key_pair, false);
-            let fee = fee_for_weight(fee_per_byte, weight);
-            if input_sum <= fee {
-                return Err(MmError::new(WithdrawError::NotSufficientBalance {
-                    coin: self.coin.ticker().to_string(),
-                    available: hastings_to_siacoin(input_sum),
-                    required: hastings_to_siacoin(fee),
-                }));
-            }
-            return Ok(InputPlan {
-                recipient_amount: input_sum - fee,
-                inputs: available,
-                change_amount: Currency::ZERO,
-                input_sum,
-                fee,
-            });
-        }
-
-        // Specific-amount mode: take only what's needed plus fee, return change.
-        let recipient_amount =
-            siacoin_to_hastings(self.req.amount.clone()).map_err(|e| WithdrawError::InternalError(e.to_string()))?;
-        let (inputs, fee) = self.pick_inputs_largest_first(available, recipient_amount, fee_per_byte, to)?;
-        let input_sum: Currency = inputs.iter().map(|o| o.siacoin_output.value).sum();
-        let target = recipient_amount + fee;
-        Ok(InputPlan {
-            inputs,
-            recipient_amount,
-            change_amount: input_sum - target,
-            input_sum,
-            fee,
-        })
-    }
-
     /// Fetch UTXOs, plan the spend, build, sign, and return the transaction.
     pub async fn build(self) -> WithdrawResult {
         let to = Address::from_str(&self.req.to).map_err(|e| WithdrawError::InvalidAddress(e.to_string()))?;
 
-        // walletd's current hastings-per-byte rate; see `GET /api/txpool/fee`.
-        let fee_per_byte = self
-            .coin
-            .client
-            .dispatcher(TxpoolFeeRequest)
-            .await
-            .map_err(|e| WithdrawError::Transport(e.to_string()))?
-            .0;
+        // Validate the request's fee before any network call; a custom fee
+        // does not need walletd's rate.
+        let fee_source = resolve_fee_source(self.coin.ticker(), self.req.fee.as_ref())?;
+        let fee_rate = match fee_source.rate_without_network() {
+            Some(rate) => rate,
+            // walletd's current hastings-per-byte rate; see `GET /api/txpool/fee`.
+            None => FeeRate::PerByte(
+                self.coin
+                    .client
+                    .dispatcher(TxpoolFeeRequest)
+                    .await
+                    .map_err(|e| WithdrawError::Transport(e.to_string()))?
+                    .0,
+            ),
+        };
 
         let unspent = self
             .coin
@@ -243,7 +387,14 @@ impl<'a> SiaWithdrawBuilder<'a> {
             .map_err(|e| WithdrawError::Transport(e.to_string()))?;
         let basis = unspent.basis;
 
-        let plan = self.plan_inputs(unspent.outputs, fee_per_byte, &to)?;
+        let ticker = self.coin.ticker().to_string();
+        let env = PlanEnv {
+            ticker: &ticker,
+            from_address: &self.from_address,
+            key_pair: self.key_pair,
+            to: &to,
+        };
+        let plan = plan_inputs(&env, self.req.max, &self.req.amount, unspent.outputs, fee_rate)?;
 
         let mut tx = V2TransactionBuilder::new()
             .update_basis(basis)
@@ -285,7 +436,7 @@ impl<'a> SiaWithdrawBuilder<'a> {
             fee_details: Some(
                 SiaFeeDetails {
                     coin: self.coin.ticker().to_string(),
-                    policy: SiaFeePolicy::HastingsPerByte(fee_per_byte),
+                    policy: SiaFeePolicy::HastingsPerByte(fee_rate.reported_per_byte()),
                     total_amount: fee_sc,
                 }
                 .into(),
@@ -477,5 +628,259 @@ mod tests {
         let txid = V2TransactionBuilder::new().build().txid();
 
         assert_eq!(hex::encode(txid.0), txid.to_string());
+    }
+
+    // ---- operator fee override (ch.20 R-W3) ----
+
+    use std::str::FromStr as _;
+
+    const TICKER: &str = "SC";
+
+    fn per_kb(amount: &str) -> WithdrawFee {
+        WithdrawFee::UtxoPerKbyte {
+            amount: BigDecimal::from_str(amount).expect("decimal"),
+        }
+    }
+
+    fn env<'a>(to: &'a Address, kp: &'a Keypair) -> PlanEnv<'a> {
+        PlanEnv {
+            ticker: TICKER,
+            from_address: to,
+            key_pair: kp,
+            to,
+        }
+    }
+
+    fn id(n: u8) -> String { format!("{n:02x}").repeat(32) }
+
+    fn bd(s: &str) -> BigDecimal { BigDecimal::from_str(s).expect("decimal") }
+
+    fn expect_invalid_policy(err: MmError<WithdrawError>) -> String {
+        match err.into_inner() {
+            WithdrawError::InvalidFeePolicy(msg) => msg,
+            other => panic!("expected InvalidFeePolicy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wallet_fee_json_deserializes() {
+        let fee: WithdrawFee =
+            serde_json::from_str(r#"{"type":"UtxoPerKbyte","amount":"0.001"}"#).expect("wallet fee object");
+        assert_eq!(fee, per_kb("0.001"));
+    }
+
+    #[test]
+    fn withdraw_request_json_with_and_without_fee() {
+        let with: WithdrawRequest = serde_json::from_value(json!({
+            "coin": "SC", "to": ADDR, "amount": "1.5",
+            "fee": { "type": "UtxoPerKbyte", "amount": "0.001" }
+        }))
+        .expect("request with fee");
+        assert_eq!(with.fee, Some(per_kb("0.001")));
+        assert!(!with.max);
+
+        let without: WithdrawRequest =
+            serde_json::from_value(json!({ "coin": "SC", "to": ADDR, "amount": "1.5" })).expect("request without fee");
+        assert_eq!(without.fee, None);
+    }
+
+    #[test]
+    fn per_kbyte_fee_rounds_up() {
+        // 1 SC/kB = 1e24 hastings/kB; 1000 bytes divides evenly.
+        let fee = per_kb("1");
+        assert_eq!(
+            compute_fee(TICKER, Some(&fee), None, 1000).unwrap(),
+            Currency(1_000_000_000_000_000_000_000_000)
+        );
+        // 1 hasting/kB (1e-24 SC) at 1500 bytes: 1500/1000 = 1.5 -> 2.
+        let tiny = per_kb("0.000000000000000000000001");
+        assert_eq!(compute_fee(TICKER, Some(&tiny), None, 1500).unwrap(), Currency(2));
+        assert_eq!(compute_fee(TICKER, Some(&tiny), None, 1000).unwrap(), Currency(1));
+        assert_eq!(compute_fee(TICKER, Some(&tiny), None, 1001).unwrap(), Currency(2));
+    }
+
+    #[test]
+    fn absent_fee_uses_walletd_rate_exactly_as_before() {
+        for weight in [0u64, 1, 999, 1234] {
+            assert_eq!(
+                compute_fee(TICKER, None, Some(Currency(7)), weight).unwrap(),
+                fee_for_weight(Currency(7), weight)
+            );
+        }
+        // No walletd rate and no custom fee is an error, not a zero fee.
+        assert!(compute_fee(TICKER, None, None, 100).is_err());
+    }
+
+    #[test]
+    fn custom_fee_ignores_walletd_rate_and_has_no_floor() {
+        // A custom rate far below walletd's is accepted and applied.
+        let fee = per_kb("0.000000000000000000000001");
+        let with_high = compute_fee(TICKER, Some(&fee), Some(Currency(1_000_000)), 2000).unwrap();
+        let without = compute_fee(TICKER, Some(&fee), None, 2000).unwrap();
+        assert_eq!(with_high, Currency(2));
+        assert_eq!(without, Currency(2));
+    }
+
+    #[test]
+    fn custom_fee_needs_no_network_but_absent_fee_does() {
+        let src = resolve_fee_source(TICKER, Some(&per_kb("0.001"))).unwrap();
+        assert!(src.rate_without_network().is_some());
+        let src = resolve_fee_source(TICKER, None).unwrap();
+        assert_eq!(src, FeeSource::WalletdEstimate);
+        assert!(src.rate_without_network().is_none());
+    }
+
+    #[test]
+    fn invalid_amounts_are_rejected() {
+        for bad in ["0", "-0.001", "-1"] {
+            let msg = expect_invalid_policy(resolve_fee_source(TICKER, Some(&per_kb(bad))).unwrap_err());
+            assert!(msg.contains("SC") && msg.contains("positive"), "{msg}");
+        }
+        // More than 24 decimals cannot be an exact number of hastings.
+        let msg = expect_invalid_policy(
+            resolve_fee_source(TICKER, Some(&per_kb("0.0000000000000000000000015"))).unwrap_err(),
+        );
+        assert!(msg.contains("whole number of hastings"), "{msg}");
+        // Below one hasting per kB.
+        expect_invalid_policy(resolve_fee_source(TICKER, Some(&per_kb("0.000000000000000000000000001"))).unwrap_err());
+        // Does not fit in u128 hastings.
+        expect_invalid_policy(
+            resolve_fee_source(TICKER, Some(&per_kb("1000000000000000000000000000000000000000"))).unwrap_err(),
+        );
+    }
+
+    #[test]
+    fn other_fee_variants_are_rejected_naming_the_accepted_type() {
+        let others = [
+            WithdrawFee::UtxoFixed { amount: bd("0.1") },
+            WithdrawFee::EthGas {
+                gas_price: bd("1"),
+                gas: 21000,
+            },
+            WithdrawFee::Qrc20Gas {
+                gas_limit: 1,
+                gas_price: 1,
+            },
+        ];
+        for fee in &others {
+            let msg = expect_invalid_policy(resolve_fee_source(TICKER, Some(fee)).unwrap_err());
+            assert!(
+                msg.starts_with("Expected 'UtxoPerKbyte' fee type for SC, found "),
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rate_times_weight_overflow_is_a_typed_error() {
+        let err = FeeRate::PerKbyte(u128::MAX).fee_for_weight(TICKER, 2).unwrap_err();
+        assert!(expect_invalid_policy(err).contains("overflows"));
+    }
+
+    #[test]
+    fn reported_rate_is_ceiling_of_per_kb_over_1000() {
+        assert_eq!(FeeRate::PerKbyte(1000).reported_per_byte(), Currency(1));
+        assert_eq!(FeeRate::PerKbyte(1001).reported_per_byte(), Currency(2));
+        assert_eq!(FeeRate::PerKbyte(1).reported_per_byte(), Currency(1));
+        assert_eq!(FeeRate::PerByte(Currency(5)).reported_per_byte(), Currency(5));
+    }
+
+    /// Four equal UTXOs; a rate that makes the fee exceed one UTXO forces more
+    /// inputs, and the fee is recomputed from the larger probe weight.
+    #[test]
+    fn custom_rate_changes_selection_and_fee_like_the_estimate_path() {
+        let kp = test_keypair();
+        let to = test_address();
+        let e = env(&to, &kp);
+        let utxos = |v: u128| (1..=4u8).map(|n| siacoin_element(&id(n), v)).collect::<Vec<_>>();
+
+        let w1 = probe_weight(&utxos(1)[..1], &to, &to, &kp, true);
+        let w2 = probe_weight(&utxos(1)[..2], &to, &to, &kp, true);
+        assert!(w2 > w1);
+
+        // 1 hasting/byte equivalent: 1000 hastings/kB.
+        let rate = FeeRate::PerKbyte(1000);
+        let value = 1_000_000u128;
+        let amount_h = value - w1 as u128 + 1; // one UTXO is short by 1 hasting
+        let amount = hastings_to_siacoin(Currency(amount_h));
+        let plan = plan_inputs(&e, false, &amount, utxos(value), rate).unwrap();
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(plan.fee, Currency(w2 as u128));
+        assert_eq!(plan.input_sum, Currency(2 * value));
+        assert_eq!(plan.change_amount, Currency(2 * value - amount_h - w2 as u128));
+
+        // Same inputs with the equivalent walletd per-byte rate: identical plan.
+        let est = plan_inputs(&e, false, &amount, utxos(value), FeeRate::PerByte(Currency(1))).unwrap();
+        assert_eq!(est.inputs.len(), plan.inputs.len());
+        assert_eq!(est.fee, plan.fee);
+        assert_eq!(est.change_amount, plan.change_amount);
+
+        // A lower custom rate keeps the single input.
+        let low = plan_inputs(&e, false, &amount, utxos(value), FeeRate::PerKbyte(1)).unwrap();
+        assert_eq!(low.inputs.len(), 1);
+    }
+
+    #[test]
+    fn max_mode_uses_no_change_weight_and_checks_value() {
+        let kp = test_keypair();
+        let to = test_address();
+        let e = env(&to, &kp);
+        let utxos = vec![siacoin_element(&id(1), 10_000), siacoin_element(&id(2), 10_000)];
+        let w = probe_weight(&utxos, &to, &to, &kp, false);
+        let rate = FeeRate::PerKbyte(2000); // 2 per byte
+        let plan = plan_inputs(&e, true, &BigDecimal::from(0), utxos.clone(), rate).unwrap();
+        assert_eq!(plan.fee, Currency(2 * w as u128));
+        assert_eq!(plan.recipient_amount, Currency(20_000 - 2 * w as u128));
+        assert_eq!(plan.change_amount, Currency::ZERO);
+
+        // Fee >= input sum: not enough.
+        let err = plan_inputs(
+            &e,
+            true,
+            &BigDecimal::from(0),
+            utxos,
+            FeeRate::PerKbyte(u128::from(1_000_000u32)),
+        )
+        .unwrap_err();
+        assert!(matches!(err.into_inner(), WithdrawError::NotSufficientBalance { .. }));
+    }
+
+    #[test]
+    fn insufficient_balance_requires_amount_plus_custom_fee() {
+        let kp = test_keypair();
+        let to = test_address();
+        let e = env(&to, &kp);
+        let utxos = vec![siacoin_element(&id(1), 1_000)];
+        let w = probe_weight(&utxos, &to, &to, &kp, true);
+        let rate = FeeRate::PerKbyte(1000);
+        let amount = hastings_to_siacoin(Currency(900));
+        match plan_inputs(&e, false, &amount, utxos, rate).unwrap_err().into_inner() {
+            WithdrawError::NotSufficientBalance {
+                coin,
+                available,
+                required,
+            } => {
+                assert_eq!(coin, "SC");
+                assert_eq!(available, hastings_to_siacoin(Currency(1_000)));
+                assert_eq!(required, hastings_to_siacoin(Currency(900 + w as u128)));
+            },
+            other => panic!("expected NotSufficientBalance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absent_fee_plan_matches_walletd_rate_plan() {
+        let kp = test_keypair();
+        let to = test_address();
+        let e = env(&to, &kp);
+        let utxos = vec![siacoin_element(&id(1), 5_000_000), siacoin_element(&id(2), 7_000_000)];
+        let source = resolve_fee_source(TICKER, None).unwrap();
+        assert_eq!(source.rate_without_network(), None);
+        let amount = hastings_to_siacoin(Currency(6_000_000));
+        let plan = plan_inputs(&e, false, &amount, utxos.clone(), FeeRate::PerByte(Currency(3))).unwrap();
+        // Hand-computed with the pre-existing primitives.
+        let chosen_weight = probe_weight(&[utxos[1].clone()], &to, &to, &kp, true);
+        assert_eq!(plan.inputs.len(), 1);
+        assert_eq!(plan.fee, fee_for_weight(Currency(3), chosen_weight));
     }
 }

@@ -1,6 +1,7 @@
 // utxo_common_spv — SPV proof validation, block header management
 
 use super::*;
+use crate::utxo::header_layout_fallback::{not_implemented_reason, FallbackReadError, HeaderReadPolicy};
 
 /// Cadence, in seconds, between header-sync ticks of `block_header_utxo_loop`.
 const BLOCK_HEADER_SYNC_CHECK_EVERY: f64 = 60.;
@@ -148,12 +149,19 @@ where
     {
         None => {
             let bytes = client.blockchain_block_header(height).compat().await?;
-            let header = BlockHeader::from_served_bytes(&bytes.0, CoinVariant::Standard)?;
+            let policy = HeaderReadPolicy::for_conf(&coin.as_ref().conf);
+            let header = policy.read_header(&bytes.0).map_err(|e| match e {
+                FallbackReadError::Rejected(e) => GetBlockHeaderError::SerializationError(e),
+                FallbackReadError::Ambiguous(reason) => GetBlockHeaderError::InvalidResponse(reason),
+                FallbackReadError::NotImplemented(family) => {
+                    GetBlockHeaderError::InvalidResponse(not_implemented_reason(family))
+                },
+            })?;
             let conf = &storage.conf;
             let blocks_limit = NonZeroU64::new(crate::utxo::DIFFICULTY_RETARGET_INTERVAL)
                 .expect("difficulty-retarget interval is non-zero");
             let (headers_registry, headers) = client
-                .retrieve_last_headers(blocks_limit, height)
+                .retrieve_last_headers(blocks_limit, height, policy)
                 .compat()
                 .await
                 .mm_err(Into::into)?;
@@ -189,9 +197,17 @@ where
 {
     match storage {
         Some(ref storage) => valid_block_header_from_storage(&coin, height, storage, client).await,
-        None => Ok(deserialize(
-            client.blockchain_block_header(height).compat().await?.as_slice(),
-        )?),
+        None => {
+            let bytes = client.blockchain_block_header(height).compat().await?;
+            let policy = HeaderReadPolicy::for_conf(&coin.as_ref().conf);
+            policy.read_header(&bytes.0).map_to_mm(|e| match e {
+                FallbackReadError::Rejected(e) => GetBlockHeaderError::SerializationError(e),
+                FallbackReadError::Ambiguous(reason) => GetBlockHeaderError::InvalidResponse(reason),
+                FallbackReadError::NotImplemented(family) => {
+                    GetBlockHeaderError::InvalidResponse(not_implemented_reason(family))
+                },
+            })
+        },
     }
 }
 
@@ -223,7 +239,7 @@ pub async fn block_header_utxo_loop<T: UtxoCommonOps>(weak: UtxoWeak, constructo
         // Verify the configured trusted anchor against the coin's RPC at sync start (R37.1.3).
         if let UtxoRpcClientEnum::Electrum(client) = &coin.as_ref().rpc_client {
             let anchor = &storage.conf.starting_block_header;
-            match verify_anchor_header(client, anchor).await {
+            match verify_anchor_header(client, anchor, &HeaderReadPolicy::for_conf(&coin.as_ref().conf)).await {
                 Ok(true) => {},
                 Ok(false) => {
                     error!(
@@ -261,8 +277,12 @@ pub async fn block_header_utxo_loop<T: UtxoCommonOps>(weak: UtxoWeak, constructo
             UtxoRpcClientEnum::LightWalletD(_) => break,
             UtxoRpcClientEnum::Electrum(client) => client,
         };
+        let policy = HeaderReadPolicy::for_conf(&coin.as_ref().conf);
         let (block_registry, block_headers) = ok_or_continue_after_sleep!(
-            client.retrieve_last_headers(blocks_limit, height).compat().await,
+            client
+                .retrieve_last_headers(blocks_limit, height, policy.clone())
+                .compat()
+                .await,
             check_every
         );
         // In trusted-RPC mode (no `validation_params`) headers are stored without validation.
@@ -292,7 +312,7 @@ pub async fn block_header_utxo_loop<T: UtxoCommonOps>(weak: UtxoWeak, constructo
             ReorgOutcome::ForkAt(_) => {},
             ReorgOutcome::NeedMoreHistory => {
                 ok_or_continue_after_sleep!(
-                    walk_back_reorg(storage, client, &conf, ticker, height).await,
+                    walk_back_reorg(storage, client, &conf, ticker, height, &policy).await,
                     check_every
                 );
             },
@@ -340,13 +360,19 @@ fn block_header_bits(header: &BlockHeader) -> u32 {
 
 /// Fetches the header at the configured anchor height from the coin's RPC and checks that its
 /// hash, compact bits, and timestamp match the configured `starting_block_header` (R37.1.3).
-async fn verify_anchor_header(client: &ElectrumClient, anchor: &crate::utxo::SPVBlockHeader) -> Result<bool, String> {
+pub(crate) async fn verify_anchor_header(
+    client: &ElectrumClient,
+    anchor: &crate::utxo::SPVBlockHeader,
+    policy: &HeaderReadPolicy,
+) -> Result<bool, String> {
     let bytes = client
         .blockchain_block_header(anchor.height)
         .compat()
         .await
         .map_err(|e| e.to_string())?;
-    let header = BlockHeader::from_served_bytes(&bytes.0, CoinVariant::Standard).map_err(|e| format!("{:?}", e))?;
+    let header = policy
+        .read_header(&bytes.0)
+        .map_err(|e| e.reason(|e| format!("{:?}", e)))?;
     // The configured hash is in the displayed (big-endian) hex form; reverse it for comparison.
     let configured_hash = anchor
         .hash
@@ -455,6 +481,7 @@ async fn walk_back_reorg(
     conf: &crate::utxo::SPVConf,
     ticker: &str,
     from_height: u64,
+    policy: &HeaderReadPolicy,
 ) -> Result<(), String> {
     let anchor_height = conf.starting_block_header.height;
     let limit =
@@ -462,7 +489,7 @@ async fn walk_back_reorg(
     let mut top = from_height;
     while top > anchor_height {
         let (registry, headers) = client
-            .retrieve_last_headers(limit, top)
+            .retrieve_last_headers(limit, top, policy.clone())
             .compat()
             .await
             .map_err(|e| e.to_string())?;

@@ -435,8 +435,31 @@ and a change output back to the source address.
 **R-W3.** Set the miner fee from a size-aware estimate: a probe
 transaction's real serialized weight times walletd's current
 hastings-per-byte rate, recomputed as each candidate input is
-added (§20.10 D6, closed). The request does not carry a
-fee-override value for this path.
+added (§20.10 D6, closed). The request's `fee` field is optional.
+Absent, the fee is that estimate. Present, it shall be the
+`UtxoPerKbyte` shape the shared withdraw request already defines,
+`{"type":"UtxoPerKbyte","amount":"<n>"}`, with `amount` in SC **per
+kilobyte** (1000 bytes) -- the value and unit the Komodo wallet's
+custom-fee box already sends for SC. It replaces walletd's
+hastings-per-byte rate and is applied to the same probe weight,
+recomputed as each candidate input is added, so
+`fee = ceil(hastings_per_kilobyte × weight / 1000)`. Any positive
+`amount` that is a whole number of hastings per kilobyte is
+accepted; there is **no floor** at walletd's estimate, and whether
+walletd or the Sia network accepts a transaction whose fee is below
+that estimate is untested. A zero, negative, fractional-hasting or
+unrepresentable `amount`, or a rate × weight that overflows, is
+rejected with the invalid-fee-policy error; so is any other `fee`
+type (for example `UtxoFixed` or `EthGas`), the error naming the
+accepted type. An invalid `fee` is rejected before any request to
+walletd for its rate, and a valid one does not need that rate. The
+response shape is unchanged; `fee_details.total_amount` is the
+authoritative fee (R-W4), and `fee_details.policy` reports the
+per-byte rate, rounded up when the override is not a multiple of
+1000 hastings. *Reloaded-original:* the deployed reference uses a
+fixed fee for SC and ignores the request's `fee` field; accepting it
+is additive, and rejecting the other types ends a silent no-op the
+reference has (`docs/GLEEC_COMPATIBILITY.md`).
 
 **R-W4.** Sign the transaction with the active keypair and return
 the serialised transaction together with fee/amount details
@@ -672,6 +695,21 @@ method reads that field, and an empty one is not a transaction.
 > same coin and the same transaction.
 
 ### 20.9.5 Verification
+
+**T-W6.** Withdraw SC with `fee` absent and with
+`{"type":"UtxoPerKbyte","amount":"<n>"}`. Absent: the fee is
+walletd's rate × the transaction weight, as before. Present: the
+fee is `ceil(n in hastings × weight / 1000)`, recomputed per input
+(a rate high enough to need one more input selects it), the same in
+`max` mode with the no-change weight, and `NotSufficientBalance`
+reports a `required` that includes it. A rate below walletd's
+estimate is accepted. The same request through `task::withdraw::init`
+behaves identically (R-W3, R-W5).
+
+**T-W7.** Withdraw SC with a zero, negative or fractional-hasting
+`amount`, and with each other fee type: every call fails with the
+invalid-fee-policy error (naming `UtxoPerKbyte` for a wrong type)
+and walletd is not asked for its fee rate (R-W3).
 
 **T-W1.** Complete an SC withdrawal and inspect the returned
 transaction-details object. It carries a non-empty `tx_hex` and a

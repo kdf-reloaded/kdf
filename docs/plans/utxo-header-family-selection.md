@@ -220,6 +220,25 @@ The type becomes `Clone + Copy + PartialEq`. The fallback in
 
 ### H2 — Read the key at activation
 
+**Done (2026-10-25, PR #74).** `UtxoConfBuilder` reads `protocol.chain_variant`
+beside `header_layout` (exact, case-sensitive, eight values; unknown or non-string
+fails the coin build naming ticker and value, even when `header_layout` is
+present) into `UtxoCoinConf::chain_variant`. One layout per coin is resolved by
+`HeaderReadPolicy::for_conf`: key, else `chain_variant`'s reader, else Qtum for a
+`QTUM`/`QRC20` protocol type, else standard. Not as the text below planned: there
+is no `header_family` field and no new `CoinVariant` values; the family name (used
+for the `header_layout_fallback_families` membership, an absent key counting as
+`"BTC"`) is derived, and "key present" stays observable through the existing
+`header_layout` field. `"QTUM"` selects the Qtum reader; `"BTC"`, `"RVN"`,
+`"PPC"`, `"RICK"` and `"MORTY"` select the default reader (their exclusivity and
+thresholded rules are H4); `"LBC"` and `"PIVX"` have no reader yet and refuse
+every header read as "not implemented" until H4. Open decisions 2, 3 and 5 are
+settled by this (reject, store holds the policy, Qtum fallback kept). Consequence of keeping the
+fallback: a `QTUM`/`QRC20` coin with no `chain_variant` key is family `"BTC"` for the switch, so a
+failed Qtum read of its headers is retried as Riecoin and as the mixed layout under the default
+switch. That is harmless: 246-byte Qtum headers never consume exactly as 112, 120 or 80 bytes, and
+the ambiguity rule guards the remaining cases.
+
 `UtxoConfBuilder` reads `conf["protocol"]["chain_variant"]` from the raw coin
 JSON. This leaves the serde shape of `CoinProtocol` unchanged, so nothing that
 serializes it changes — and it matches the reference, which reads the key as a
@@ -256,6 +275,19 @@ conf through the same builder, so check both.
   unpinned one of the same family.
 
 ### H3 — Carry the family everywhere
+
+**Done (2026-10-25, PR #74), for every path the Electrum backend has.** A cloneable
+`HeaderReadPolicy` (layout, optional fallback) is built once per coin and reaches:
+`retrieve_last_headers`, the sync loop and reorg walk, `get_block_timestamp`
+(policy-taking variant; the old method is the standard-layout wrapper), the SPV
+single-header read, the anchor check, the direct fetch of a confirmed transaction's
+header, both header stores (each holds the policy; rows are re-read through it,
+fallback included), the WalletConnect genesis read and the median
+(`get_current_mtp` lost its constant argument). Not threaded, deliberately: the Lightning
+platform's `get_block_header` (`ln_platform.rs`), the one unthreaded path. It has no coin
+configuration in reach, the Lightning platform is Bitcoin (standard 80-byte headers) and the
+Lightning plans are parked, so it stays on the standard read; revisit it only if a Lightning
+coin ever needs another layout. The native-daemon and lightwalletd backends parse no headers.
 
 Replace every `CoinVariant::Standard` literal from H1's list with the coin's
 `header_family`:
@@ -627,14 +659,14 @@ corresponding D paragraph when it lands.
 
 1. **AuxPoW stores on upgrade:** clear them and re-sync (recommended), or
    migrate the stored rows.
-2. **Unknown `chain_variant` values:** reject activation, as ch.37 requires,
+2. **(Decided 2026-10-25: reject.)** **Unknown `chain_variant` values:** reject activation, as ch.37 requires,
    or only warn for one release to protect hand-written configurations.
-3. **Where the store's family lives:** in `BlockHeaderStorage` (recommended)
+3. **(Decided 2026-10-25: in the store.)** **Where the store's family lives:** in `BlockHeaderStorage` (recommended)
    or per call.
 4. **KawPoW without the key:** keep version-only detection behind an explicit
    compatibility switch for a release, or remove it outright. Removing it is
    simpler and the registry does not need it.
-5. **Protocol-type `Qtum` fallback for an absent key:** the reference maps an
+5. **(Decided 2026-10-25: kept.)** **Protocol-type `Qtum` fallback for an absent key:** the reference maps an
    absent key to the default for every protocol type (ch.37 §37.5.1). Keeping
    today's QTUM/QRC20 fallback is a Reloaded leniency that no registry entry
    needs; dropping it is exact parity. If kept, it is a divergence and falls
