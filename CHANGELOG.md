@@ -57,6 +57,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **The `sia-rust` pin now requires `web-sys >= 0.3.70`**, which reqwest 0.12's wasm backend needs;
   our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
   `wasm32` has a floor to raise. Detail: PR #38.
+- **Lockfile bumps clear three RustSec advisories:** `tokio` 1.52.0 to 1.54.1 (RUSTSEC-2026-0386,
+  `AsyncFd::new` I/O safety), `rustls-webpki` 0.103.15 to 0.103.16 (RUSTSEC-2026-0382, distrusted
+  intermediates) and `webpki-roots` 1.0.8 to 1.0.11 (RUSTSEC-2026-0381, emSign intermediates). The
+  bundled trust store drops four roots (Atos TrustedRoot 2011, emSign Root CA - C1, emSign ECC Root
+  CA - C3 and G3) and adds four (SECOM TLS RSA and ECC Root CA 2024, Telia EC and RSA TLS Root CA
+  v3); connections to servers chained only to a dropped root stop verifying. A fourth advisory,
+  RUSTSEC-2026-0387 (`crypto-bigint` 0.5.5 timing variability, reached through `k256`/`ecdsa` 0.16),
+  cannot be fixed by a lockfile update; it is accepted in `deny.toml` until the RustCrypto EC stack
+  moves to `crypto-bigint` 0.7. Detail: PR #68.
 
 ### Removed
 
