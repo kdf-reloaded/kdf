@@ -378,6 +378,8 @@ fn utxo_min_trading_vol_sat(dust_amount: u64, tx_fee: &TxFee) -> u64 {
                 u128::from(*fee_per_kb) * u128::from(FIXED_FEE_MIN_VOL_TX_SIZE_BYTES) / u128::from(KILO_BYTE);
             u64::try_from(fee_for_repr_tx).unwrap_or(u64::MAX).saturating_mul(10)
         },
+        // CRD ch.38 R38.6.6e: `F = r` for the whole-kilobyte policy (the representative size is under 1 kB).
+        TxFee::FixedPerStartedKb(fee_per_kb) => fee_per_kb.saturating_mul(10),
     };
 
     std::cmp::max(dust_based, fee_based)
@@ -730,6 +732,19 @@ mod tests {
         ); // BTC
            // No overflow.
         assert_eq!(utxo_min_trading_vol_sat(0, &TxFee::FixedPerKb(u64::MAX)), u64::MAX);
+        // whole-kilobyte policy: F = r (CRD ch.38 R38.6.6e)
+        assert_eq!(
+            utxo_min_trading_vol_sat(100_000_000, &TxFee::FixedPerStartedKb(100_000_000)),
+            1_000_000_000
+        ); // DINGO
+        assert_eq!(
+            utxo_min_trading_vol_sat(1000, &TxFee::FixedPerStartedKb(300_000)),
+            3_000_000
+        );
+        assert_eq!(
+            utxo_min_trading_vol_sat(0, &TxFee::FixedPerStartedKb(u64::MAX)),
+            u64::MAX
+        );
     }
 
     #[test]

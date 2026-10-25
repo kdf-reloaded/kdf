@@ -607,7 +607,7 @@ fn test_generate_transaction() {
 
     let outputs = vec![TransactionOutput {
         script_pubkey: vec![].into(),
-        value: 98001,
+        value: 98900,
     }];
 
     let builder = UtxoTxBuilder::new(&coin)
@@ -618,8 +618,9 @@ fn test_generate_transaction() {
     // so no extra outputs should appear in generated transaction
     assert_eq!(generated.0.outputs.len(), 1);
 
-    assert_eq!(generated.1.fee_amount, 1000);
-    assert_eq!(generated.1.unused_change, Some(999));
+    // plain fixed 1,000 per kB charges the transaction's own 186 bytes, not a whole kilobyte (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 186);
+    assert_eq!(generated.1.unused_change, Some(914));
     assert_eq!(generated.1.received_by_me, 0);
     assert_eq!(generated.1.spent_by_me, 100000);
 
@@ -643,11 +644,11 @@ fn test_generate_transaction() {
     let generated = block_on(builder.build()).unwrap();
     assert_eq!(generated.0.outputs.len(), 1);
 
-    assert_eq!(generated.1.fee_amount, 1000);
+    assert_eq!(generated.1.fee_amount, 211);
     assert_eq!(generated.1.unused_change, None);
-    assert_eq!(generated.1.received_by_me, 99000);
+    assert_eq!(generated.1.received_by_me, 99789);
     assert_eq!(generated.1.spent_by_me, 100000);
-    assert_eq!(generated.0.outputs[0].value, 99000);
+    assert_eq!(generated.0.outputs[0].value, 99789);
 
     let unspents = vec![UnspentInfo {
         value: 100000,
@@ -1215,7 +1216,7 @@ fn test_withdraw_kmd_rewards_impl(
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some("KMD".into()),
-        amount: "0.00001".parse().unwrap(),
+        amount: "0.00000245".parse().unwrap(),
     });
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     assert_eq!(tx_details.fee_details, Some(expected_fee));
@@ -1483,7 +1484,7 @@ fn test_withdraw_doc_rewards_none() {
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some(TEST_COIN_NAME.into()),
-        amount: "0.00001".parse().unwrap(),
+        amount: "0.00000245".parse().unwrap(),
     });
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     assert_eq!(tx_details.fee_details, Some(expected_fee));
@@ -1697,12 +1698,14 @@ fn test_generate_transaction_relay_fee_is_used_when_dynamic_fee_is_lower() {
         .with_fee(ActualTxFee::Dynamic(100));
 
     let generated = block_on(builder.build()).unwrap();
-    assert_eq!(generated.0.outputs.len(), 1);
+    // payment and change outputs
+    assert_eq!(generated.0.outputs.len(), 2);
 
-    // generated transaction fee must be equal to relay fee if calculated dynamic fee is lower than relay
-    assert_eq!(generated.1.fee_amount, 100000000);
+    // the fee is the proportional relay fee (relay rate 1.0 per kB, 220 bytes with the change output)
+    // because the calculated dynamic fee is lower (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 22000000);
     assert_eq!(generated.1.unused_change, None);
-    assert_eq!(generated.1.received_by_me, 0);
+    assert_eq!(generated.1.received_by_me, 78000000);
     assert_eq!(generated.1.spent_by_me, 1000000000);
     assert!(unsafe { GET_RELAY_FEE_CALLED });
 }
@@ -1741,15 +1744,51 @@ fn test_generate_transaction_relay_fee_is_used_when_dynamic_fee_is_lower_and_ded
 
     let generated = block_on(tx_builder.build()).unwrap();
     assert_eq!(generated.0.outputs.len(), 1);
-    // `output (= 10.0) - fee_amount (= 1.0)`
-    assert_eq!(generated.0.outputs[0].value, 900000000);
+    // `output (= 10.0) - fee_amount (= 0.186)`
+    assert_eq!(generated.0.outputs[0].value, 981400000);
 
-    // generated transaction fee must be equal to relay fee if calculated dynamic fee is lower than relay
-    assert_eq!(generated.1.fee_amount, 100000000);
+    // the fee is the proportional relay fee (relay rate 1.0 per kB, 186 bytes) because the calculated
+    // dynamic fee is lower (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 18600000);
     assert_eq!(generated.1.unused_change, None);
     assert_eq!(generated.1.received_by_me, 0);
     assert_eq!(generated.1.spent_by_me, 1000000000);
     assert!(unsafe { GET_RELAY_FEE_CALLED });
+}
+
+/// CRD ch.38 R38.6.6b: the forced minimum relay fee is proportional to the transaction size, so a
+/// 226-byte transaction with a relay rate of 1,000 per kB pays 226, not a whole kilobyte.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_forced_relay_fee_is_proportional_r38_6_6b() {
+    NativeClient::get_relay_fee
+        .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok("0.00001".parse().unwrap()))));
+    let client = UtxoRpcClientEnum::Native(NativeClient(Arc::new(NativeClientImpl::default())));
+    let mut coin = utxo_coin_fields_for_test(client, None, false);
+    coin.conf.ticker = "LTC".to_owned();
+    coin.conf.force_min_relay_fee = true;
+    let coin = utxo_coin_from_fields(coin);
+    let unspents = vec![UnspentInfo {
+        value: 100_000,
+        outpoint: OutPoint::default(),
+        height: Default::default(),
+    }];
+    // one input and a 40-byte output script make a 226-byte transaction without a change output
+    let outputs = vec![TransactionOutput {
+        script_pubkey: vec![0x51; 40].into(),
+        value: 99_000,
+    }];
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_available_inputs(unspents)
+        .add_outputs(outputs)
+        .with_fee(ActualTxFee::FixedPerKb(100));
+    let (tx, data) = block_on(builder.build()).unwrap();
+    assert_eq!(
+        utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)),
+        226
+    );
+    assert_eq!(data.fee_amount, 226);
+    assert_eq!(data.unused_change, Some(774));
 }
 
 #[test]
@@ -3092,6 +3131,168 @@ fn test_get_sender_trade_fee_dynamic_tx_fee() {
     assert_eq!(fee1, fee3);
 }
 
+/// Sender trade-fee preview (a swap payment of `amount` coins) for a fixed-fee policy, from `count` unspents of
+/// `unspent_value` base units each.
+#[cfg(not(target_arch = "wasm32"))]
+fn fixed_policy_preview_fee_sat(policy: ActualTxFee, count: u64, unspent_value: u64, amount: &str) -> u64 {
+    UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+    UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, _| {
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        let unspents = (0..count)
+            .map(|index| UnspentInfo {
+                outpoint: OutPoint {
+                    hash: 1.into(),
+                    index: index as u32,
+                },
+                value: unspent_value,
+                height: Default::default(),
+            })
+            .collect();
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let mut coin_fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    coin_fields.tx_fee = match policy {
+        ActualTxFee::Dynamic(_) => TxFee::Dynamic(EstimateFeeMethod::Standard),
+        ActualTxFee::FixedPerKb(rate) => TxFee::FixedPerKb(rate),
+        ActualTxFee::FixedPerStartedKb(rate) => TxFee::FixedPerStartedKb(rate),
+    };
+    let coin = utxo_coin_from_fields(coin_fields);
+    let fee = futures::executor::block_on(coin.get_sender_trade_fee(
+        TradePreimageValue::Exact(BigDecimal::from_str(amount).unwrap()),
+        FeeApproxStage::WithoutApprox,
+    ))
+    .expect("!get_sender_trade_fee");
+    sat_from_big_decimal(&fee.amount.to_decimal(), TEST_COIN_DECIMALS).unwrap()
+}
+
+/// CRD ch.38 R38.6.6b: the fee of a transaction of s = 226, 1000 and 1001 bytes under each fixed policy.
+#[test]
+fn test_actual_tx_fee_arithmetic_r38_6_6b() {
+    let plain = ActualTxFee::FixedPerKb(1000);
+    assert_eq!([226, 1000, 1001].map(|s| plain.fee_for_size(s)), [226, 1000, 1001]);
+    let whole_kb = ActualTxFee::FixedPerStartedKb(1000);
+    assert_eq!([226, 1000, 1001].map(|s| whole_kb.fee_for_size(s)), [1000, 1000, 2000]);
+    // Plain fixed truncates and the dynamic rate keeps its proportional rule.
+    assert_eq!(ActualTxFee::FixedPerKb(1001).fee_for_size(999), 999);
+    assert_eq!(ActualTxFee::Dynamic(20_000).fee_for_size(496), 9_920);
+    // A zero-size transaction costs nothing under either rule; large products saturate.
+    assert_eq!(whole_kb.fee_for_size(0), 0);
+    assert_eq!(ActualTxFee::FixedPerKb(u64::MAX).fee_for_size(u64::MAX), u64::MAX);
+    assert_eq!(ActualTxFee::FixedPerStartedKb(u64::MAX).fee_for_size(2000), u64::MAX);
+    // The 34-byte change output increase.
+    assert_eq!(plain.change_output_increase(226), 34);
+    assert_eq!(whole_kb.change_output_increase(226), 0);
+    assert_eq!(whole_kb.change_output_increase(966), 0);
+    assert_eq!(whole_kb.change_output_increase(967), 1000);
+    assert_eq!(whole_kb.change_output_increase(1000), 1000);
+    assert_eq!(whole_kb.change_output_increase(1001), 0);
+}
+
+/// CRD ch.38 R38.6.6b: the builder charges the fee of the final transaction (change output included) under
+/// each fixed policy, and a plain fixed coin no longer pays for a whole kilobyte.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_tx_builder_fixed_policies_r38_6_6b() {
+    let coin = floor_test_coin("LTC", TxFee::FixedPerKb(1000), 1000, 8);
+    let build = |policy: ActualTxFee| {
+        let unspents = vec![UnspentInfo {
+            value: 10_000_000,
+            outpoint: OutPoint::default(),
+            height: None,
+        }];
+        let outputs = vec![TransactionOutput {
+            value: 100_000,
+            script_pubkey: vec![0x51; 25].into(),
+        }];
+        let (tx, data) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .add_available_inputs(unspents)
+                .add_outputs(outputs)
+                .with_fee(policy)
+                .build(),
+        )
+        .unwrap();
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        (data.fee_amount, size)
+    };
+    let (plain_fee, size) = build(ActualTxFee::FixedPerKb(1000));
+    assert_eq!(
+        plain_fee, size,
+        "plain fixed 1,000 charges one base unit per byte of the final transaction"
+    );
+    assert!(size < 1000);
+    let (whole_kb_fee, whole_kb_size) = build(ActualTxFee::FixedPerStartedKb(1000));
+    assert_eq!((whole_kb_fee, whole_kb_size), (1000, size));
+}
+
+/// CRD ch.38 R38.6.6b: the trade-fee preview allows for one change output under each policy's own rule.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_sender_trade_fee_preview_fixed_policies_r38_6_6b() {
+    // (unspents of 0.1 coin each, payment amount, plain fixed 1,000, whole-kilobyte 1,000)
+    let cases = [
+        // One input: 240 bytes plus the 34-byte change allowance, far below one kilobyte.
+        (1u64, "0.099", 274, 1000),
+        // Five inputs: 866 bytes with the change allowance, still one started kilobyte.
+        (5, "0.499", 866, 1000),
+        // Six inputs: 980 bytes without the change output, 1,014 with it. The allowance crosses into a
+        // further started kilobyte, so the whole-kilobyte policy adds one more rate.
+        (6, "0.599", 1014, 2000),
+    ];
+    for (count, amount, plain_expected, whole_kb_expected) in cases {
+        let plain = fixed_policy_preview_fee_sat(ActualTxFee::FixedPerKb(1000), count, 10_000_000, amount);
+        let whole_kb = fixed_policy_preview_fee_sat(ActualTxFee::FixedPerStartedKb(1000), count, 10_000_000, amount);
+        assert_eq!(plain, plain_expected, "plain fixed, {count} inputs");
+        assert_eq!(whole_kb, whole_kb_expected, "whole-kilobyte fixed, {count} inputs");
+    }
+}
+
+/// CRD ch.60 T60.1 whole-kilobyte cases (R38.6.6e): F = r, not floor(0.496 r).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_trading_vol_whole_kb_values() {
+    // DINGO: whole-kilobyte 100,000,000, dust 100,000,000: max(10 * dust, 10 * r) = 10 coins.
+    let dingo = floor_test_coin("DINGO", TxFee::FixedPerStartedKb(100_000_000), 100_000_000, 8);
+    assert_eq!(dingo.min_trading_vol(), MmNumber::from("10"));
+    // whole-kilobyte 300,000 with dust 1,000: 10 * 300,000 = 3,000,000 base units = 0.03.
+    let coin = floor_test_coin("SYNTH-W", TxFee::FixedPerStartedKb(300_000), 1000, 8);
+    assert_eq!(coin.min_trading_vol(), MmNumber::from("0.03"));
+    // The same rate as plain fixed keeps the truncated 0.496 share.
+    let plain = floor_test_coin("SYNTH-P", TxFee::FixedPerKb(300_000), 1000, 8);
+    assert_eq!(plain.min_trading_vol(), MmNumber::from("0.01488"));
+}
+
+/// CRD ch.38 R38.6.6c: the legacy HTLC spend and refund estimate is R38.6.6b over 496 bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_htlc_spend_fee_r38_6_6c() {
+    assert_eq!(utxo_common::DEFAULT_SWAP_TX_SPEND_SIZE, 496);
+    let size = utxo_common::DEFAULT_SWAP_TX_SPEND_SIZE;
+    let cases = [
+        // KMD, plain fixed 1,000.
+        (ActualTxFee::FixedPerKb(1000), 496),
+        // Whole-kilobyte r.
+        (ActualTxFee::FixedPerStartedKb(1_000), 1_000),
+        (ActualTxFee::FixedPerStartedKb(100_000_000), 100_000_000),
+        // Dynamic e = 20,000: floor(0.496 * e), no volatility increase.
+        (ActualTxFee::Dynamic(20_000), 9_920),
+    ];
+    for (policy, expected) in cases {
+        UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+        let coin = floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8);
+        let legacy = block_on(utxo_common::get_htlc_spend_fee(&coin, size)).unwrap();
+        assert_eq!(legacy, expected, "legacy estimate under {policy:?}");
+        // CRD ch.16 R14A: the version-two estimate is the same figure, r for the whole-kilobyte policy.
+        let v2 = block_on(utxo_common::get_v2_swap_spend_fee(
+            &coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(v2, expected, "version-two estimate under {policy:?}");
+    }
+}
+
 #[test]
 fn test_validate_fee_wrong_sender() {
     let rpc_client = electrum_client_for_test(&[
@@ -3258,7 +3459,7 @@ fn firo_lelantus_tx_details() {
 
 #[test]
 fn test_generate_tx_doge_fee() {
-    // A tx below 1kb is always 0,01 doge fee per kb.
+    // DOGE is plain fixed 1,000,000 per kB with a forced minimum relay fee; both are proportional (R38.6.6b).
     let config = json!({
         "coin": "DOGE",
         "name": "dogecoin",
@@ -3289,63 +3490,35 @@ fn test_generate_tx_doge_fee() {
     ))
     .unwrap();
 
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![TransactionOutput {
-        value: 100000000,
-        script_pubkey: vec![0; 26].into(),
-    }];
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 1000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        40
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 2000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        60
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 3000000;
-    assert_eq!(expected_fee, data.fee_amount);
+    // CRD ch.38 R38.6.6b: the fee is proportional to the size of the final transaction, never below the
+    // forced minimum relay fee: max(floor(txfee * size / 1000), floor(relay_rate * size / 1000)).
+    let relay_rate_sat = {
+        let relay = block_on(doge.as_ref().rpc_client.get_relay_fee().compat()).unwrap();
+        sat_from_big_decimal(&relay, doge.as_ref().decimals).unwrap()
+    };
+    for outputs_count in [1usize, 40, 60] {
+        let unspents = vec![UnspentInfo {
+            outpoint: Default::default(),
+            value: 1000000000000,
+            height: None,
+        }];
+        let outputs = vec![
+            TransactionOutput {
+                value: 100000000,
+                script_pubkey: vec![0; 26].into(),
+            };
+            outputs_count
+        ];
+        let builder = UtxoTxBuilder::new(&doge)
+            .add_available_inputs(unspents)
+            .add_outputs(outputs);
+        let (tx, data) = block_on(builder.build()).unwrap();
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        let expected_fee = ActualTxFee::FixedPerKb(1000000)
+            .fee_for_size(size)
+            .max(ActualTxFee::Dynamic(relay_rate_sat).fee_for_size(size));
+        assert_eq!(expected_fee, data.fee_amount, "{outputs_count} outputs, {size} bytes");
+    }
 }
 
 #[test]
@@ -6186,10 +6359,8 @@ mod swap_v2_pre_burn_tests {
     /// units per kB gives S = 496, not 1,000 (the legacy `get_htlc_spend_fee`
     /// rounds a 496-byte spend up to a whole kilobyte) and not the legacy
     /// 305-byte reference size's figure. A dynamic rate gives the same
-    /// proportional formula. The whole-kB-rounding "fixed-fee coin" branch
-    /// (chapter 38 R38.6.6) has no reachable coin-config flag in this
-    /// codebase yet (see `get_v2_swap_spend_fee`'s doc comment) and is not
-    /// covered here.
+    /// proportional formula, and the whole-kilobyte fixed policy
+    /// (chapter 38 R38.6.6a) gives its rate `r`.
     #[test]
     fn t9_v2_spend_fee_estimate_is_proportional_not_rounded_up() {
         // Fixed-rate: the standard test fixture is FixedPerKb(1000).
@@ -6212,6 +6383,17 @@ mod swap_v2_pre_burn_tests {
         ))
         .unwrap();
         assert_eq!(s_dynamic, (2_000 * 496) / 1000);
+
+        // Whole-kilobyte fixed: the rate itself.
+        UtxoStandardCoin::get_tx_fee
+            .mock_safe(|_| MockResult::Return(Box::pin(futures::future::ok(ActualTxFee::FixedPerStartedKb(7_000)))));
+        let whole_kb_coin = doc_coin();
+        let s_whole_kb = block_on(utxo_common::get_v2_swap_spend_fee(
+            &whole_kb_coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(s_whole_kb, 7_000);
     }
 }
 

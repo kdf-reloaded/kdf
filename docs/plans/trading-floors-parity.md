@@ -65,4 +65,8 @@
   with the untradable-pair refusal (R60.6.5) are implemented. Solana and SPL
   are refused the same way, because their fee functions are unimplemented.
   The vendored LDK fork gained one local patch (plan `lightning-ldk-upgrade`).
-- 2, 3: not started.
+- 2: UTXO fee policy implemented on `fix/utxo-fee-policy` (PR #72). An
+  explicit `UtxoFixed` withdraw fee keeps its per-started-kilobyte meaning,
+  since no chapter covers it. Swaplab live tests are pending a dedicated
+  swaplab session.
+- 3: not started.

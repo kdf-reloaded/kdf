@@ -686,16 +686,16 @@ this value for every family that can swap.
   0.0001 fails a floor-sized legacy spend above roughly 19 sat/vB) is
   answered by the local pre-trade check of ch. 60 R60.6.7 (maintainer
   decision 2026-10-25), which ships with this fix.
-- [ ] **Whole-kilobyte fixed-fee option and proportional plain fixed fees
-  (ch. 38 R38.6.6a–c, R38.6.6i item 3).** Reloaded ignores `dingo_fee`.
+- [x] **Whole-kilobyte fixed-fee option and proportional plain fixed fees
+  (ch. 38 R38.6.6a–c, R38.6.6i item 3).** Implemented in PR #72. Reloaded ignores `dingo_fee`.
   It rounds every fixed-fee coin's transaction size up to a whole
   kilobyte, so it overpays: a 226-byte KMD transaction costs 1,000 base
   units instead of 226. For the six entries that carry the option, its
   version-two spend fee is proportional where the reference charges one
   kilobyte, so a version-two swap whose taker coin is one of them fails
   the exact preimage check against a reference peer (ch. 16 R17).
-- [ ] **Legacy HTLC spend estimate (ch. 38 R38.6.6c, R38.6.6i item 4;
-  ch. 60 finding F4).** Reloaded estimates over 305 bytes with whole-kB
+- [x] **Legacy HTLC spend estimate (ch. 38 R38.6.6c, R38.6.6i item 4;
+  ch. 60 finding F4).** Implemented in PR #72. Reloaded estimates over 305 bytes with whole-kB
   rounding; the reference uses 496 bytes under the R38.6.6b rule. The
   peer never validates this figure; the cost is overpayment.
 - [ ] **Unchecked spend arithmetic (ch. 60 R60.6.4, finding F3).**

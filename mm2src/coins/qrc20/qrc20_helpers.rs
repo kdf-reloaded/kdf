@@ -157,9 +157,7 @@ impl Qrc20Coin {
     /// `gas_fee` should be calculated by: gas_limit * gas_price * (count of contract calls),
     /// or should be sum of gas fee of all contract calls.
     pub async fn get_qrc20_tx_fee(&self, gas_fee: u64) -> Result<u64, String> {
-        match try_s!(self.get_tx_fee().await) {
-            ActualTxFee::Dynamic(amount) | ActualTxFee::FixedPerKb(amount) => Ok(amount + gas_fee),
-        }
+        Ok(try_s!(self.get_tx_fee().await).rate_per_kb() + gas_fee)
     }
 
     /// Generate and send a transaction with the specified UTXO outputs.

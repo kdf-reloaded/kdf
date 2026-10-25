@@ -631,7 +631,7 @@ fn test_zombie_order_after_balance_reduce_and_mm_restart() {
     });
     let mm_seed = MarketMakerIt::start(seed_conf, "pass".to_string(), None).unwrap();
 
-    let (_ctx, _, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
+    let (_ctx, maker_coin, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
     let mut conf = json! ({
         "gui": "nogui",
         "netid": 9000,
@@ -684,7 +684,11 @@ fn test_zombie_order_after_balance_reduce_and_mm_restart() {
     .unwrap();
     assert!(send_raw.0.is_success(), "!send_raw: {}", send_raw.1);
 
-    let new_expected_vol: BigDecimal = "499.99998".parse().unwrap();
+    // CRD ch.38 R38.6.6b: the withdraw fee and the fee of the swap payment are proportional to the sizes of
+    // their transactions.
+    let withdraw_fee: BigDecimal = withdraw["fee_details"]["amount"].as_str().unwrap().parse().unwrap();
+    let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&maker_coin);
+    let new_expected_vol: BigDecimal = BigDecimal::from(500) - withdraw_fee - fee_for_rate(payment_tx_size, 1000);
 
     thread::sleep(Duration::from_secs(12));
 

@@ -4,69 +4,38 @@ use super::*;
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
 
-pub const DEFAULT_SWAP_TX_SPEND_SIZE: u64 = 305;
+/// CRD ch.38 R38.6.6c / ch.15 R40: the reference size of an HTLC spend or refund transaction, in bytes.
+pub const DEFAULT_SWAP_TX_SPEND_SIZE: u64 = 496;
 
 pub const DEFAULT_SWAP_VOUT: usize = 0;
 
-/// CRD ch.15 R40 / ch.16 R14A: the reference spend size for the version-two
-/// funding-spend (ch.15 R21/R22) and taker-payment-spend (ch.16 R14/R17) fee
-/// estimate. Distinct from the legacy [`DEFAULT_SWAP_TX_SPEND_SIZE`], which
-/// stays 305 and governs unrelated, pre-existing V1/V2 maker-payment spend
-/// paths this batch does not touch.
-pub const V2_SWAP_SPEND_TX_SIZE: u64 = 496;
+/// CRD ch.15 R40 / ch.16 R14A: the reference spend size for the version-two funding-spend and
+/// taker-payment-spend fee estimate. It is the same figure as the legacy spend size.
+pub const V2_SWAP_SPEND_TX_SIZE: u64 = DEFAULT_SWAP_TX_SPEND_SIZE;
 
-/// returns the fee required to be paid for HTLC spend transaction
+/// CRD ch.38 R38.6.6b-c: the fee required to be paid for an HTLC spend transaction of `tx_size` bytes.
+/// Plain fixed and dynamic rates are proportional and truncated, the whole-kilobyte fixed policy is its
+/// rate per started kilobyte. A dynamic rate carries no volatility increase on a spend the node builds
+/// itself. If the coin forces the node's minimum relay fee, the estimate is at least
+/// `floor(relay_rate * tx_size / 1000)`.
 pub async fn get_htlc_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> UtxoRpcResult<u64> {
     let coin_fee = coin.get_tx_fee().await?;
-    let mut fee = match coin_fee {
-        // atomic swap payment spend transaction is slightly more than 300 bytes in average as of now
-        ActualTxFee::Dynamic(fee_per_kb) => (fee_per_kb * tx_size) / KILO_BYTE,
-        // return satoshis here as swap spend transaction size is always less than 1 kb
-        ActualTxFee::FixedPerKb(satoshis) => {
-            let tx_size_kb = if tx_size % KILO_BYTE == 0 {
-                tx_size / KILO_BYTE
-            } else {
-                tx_size / KILO_BYTE + 1
-            };
-            satoshis * tx_size_kb
-        },
-    };
-    if coin.as_ref().conf.force_min_relay_fee {
-        let relay_fee = coin.as_ref().rpc_client.get_relay_fee().compat().await?;
-        let relay_fee_sat = sat_from_big_decimal(&relay_fee, coin.as_ref().decimals).mm_err(Into::into)?;
-        if fee < relay_fee_sat {
-            fee = relay_fee_sat;
-        }
-    }
-    Ok(fee)
-}
-
-/// CRD ch.16 R14A: the version-two funding-spend / taker-payment-spend
-/// spend-fee estimate `S`. Proportional to `tx_size` (496 bytes, R40) and
-/// truncated -- NOT rounded up to a whole kilobyte the way the legacy
-/// [`get_htlc_spend_fee`]'s `FixedPerKb` arm is. R14A's "whole-kB-rounding
-/// fixed-fee option" (chapter 38 R38.6.6) names a distinct per-coin config
-/// flag that does not exist in this codebase yet (§38.6 lists it as
-/// not-yet-ported); that branch is therefore unreachable and is not
-/// implemented here. If the coin forces the node's minimum relay fee, the
-/// estimate is raised to at least the same proportional share of the relay
-/// rate.
-pub async fn get_v2_swap_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> UtxoRpcResult<u64> {
-    let coin_fee = coin.get_tx_fee().await?;
-    let rate = match coin_fee {
-        ActualTxFee::Dynamic(fee_per_kb) => fee_per_kb,
-        ActualTxFee::FixedPerKb(fee_per_kb) => fee_per_kb,
-    };
-    let mut fee = (rate * tx_size) / KILO_BYTE;
+    let mut fee = coin_fee.fee_for_size(tx_size);
     if coin.as_ref().conf.force_min_relay_fee {
         let relay_fee = coin.as_ref().rpc_client.get_relay_fee().compat().await?;
         let relay_rate = sat_from_big_decimal(&relay_fee, coin.as_ref().decimals).mm_err(Into::into)?;
-        let relay_component = (relay_rate * tx_size) / KILO_BYTE;
+        let relay_component = ActualTxFee::Dynamic(relay_rate).fee_for_size(tx_size);
         if fee < relay_component {
             fee = relay_component;
         }
     }
     Ok(fee)
+}
+
+/// CRD ch.16 R14A: the version-two funding-spend / taker-payment-spend spend-fee estimate `S`.
+/// It is the R38.6.6c estimate over [`V2_SWAP_SPEND_TX_SIZE`] bytes, exactly as the legacy spends use it.
+pub async fn get_v2_swap_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> UtxoRpcResult<u64> {
+    get_htlc_spend_fee(coin, tx_size).await
 }
 
 /// Constructs and broadcasts the taker DEX fee transaction.

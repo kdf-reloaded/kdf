@@ -42,6 +42,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Fixed-fee UTXO coins now pay their `txfee` per kilobyte proportionally, as the reference does.**
+  Every coin with a nonzero `txfee`, or none, used to pay the whole per-kilobyte fee for every
+  started kilobyte, so a 226-byte KMD transaction cost 1,000 base units instead of 226. Withdrawals,
+  swap payments and the DEX fee transaction now pay `floor(txfee × size / 1000)`, and a coin that
+  forces the node's minimum relay fee pays that rate proportionally as well. A segwit transaction's
+  size is its virtual size rounded up, as nodes count it, so a fee at the relay minimum is never one
+  unit short. Swap spends and refunds
+  are estimated over 496 bytes instead of 305 bytes rounded up to a whole kilobyte: a KMD spend costs
+  496. An explicit `UtxoFixed` withdraw fee keeps its meaning. Detail: PR #72; CRD ch.38
+  R38.6.6b–c.
+- **The coins-file option `dingo_fee` is now honoured.** With `dingo_fee: true` and a positive
+  `txfee`, a coin pays `txfee` for every started kilobyte. DINGO, DEV, NYC, SHIC, TRMP and XVG carry
+  it. Their version-two swap spend fee is now one `txfee`, matching a reference peer that validates
+  it exactly; before, such a swap failed that peer's check. Their minimum trading volume uses the
+  same fee. Detail: PR #72; CRD ch.38 R38.6.6a, ch.60 R60.6.2.
 - **The README now explains why the project exists.** Upstream's license added conditions on the
   trading-fee code, its default network since v3.0 charges a 2% fee, and v3.0 refuses to start on
   network 8762; KDF Reloaded keeps both networks usable. See also

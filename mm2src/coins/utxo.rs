@@ -288,8 +288,12 @@ pub struct AdditionalTxData {
 pub enum TxFee {
     /// Tell the coin that it should request the fee from daemon RPC and calculate it relying on tx size
     Dynamic(EstimateFeeMethod),
-    /// Tell the coin that it has fixed tx fee per kb.
+    /// Tell the coin that it has fixed tx fee per kb (CRD ch.38 R38.6.6a "plain fixed"):
+    /// the fee is proportional to the transaction size and truncated.
     FixedPerKb(u64),
+    /// CRD ch.38 R38.6.6a "whole-kilobyte fixed" (`dingo_fee: true` with a positive `txfee`):
+    /// the fee is the rate for every started kilobyte of the transaction.
+    FixedPerStartedKb(u64),
 }
 
 /// The actual "runtime" fee that is received from RPC in case of dynamic calculation
@@ -297,9 +301,43 @@ pub enum TxFee {
 pub enum ActualTxFee {
     /// fee amount per Kbyte received from coin RPC
     Dynamic(u64),
-    /// Use specified amount per each 1 kb of transaction and also per each output less than amount.
-    /// Used by DOGE, but more coins might support it too.
+    /// Use the specified amount per 1 kb of transaction, proportionally and truncated
+    /// (CRD ch.38 R38.6.6b "plain fixed"). There is no per-output surcharge.
     FixedPerKb(u64),
+    /// Use the specified amount per each started 1 kb of transaction (CRD ch.38 R38.6.6b
+    /// "whole-kilobyte fixed"). There is no per-output surcharge.
+    FixedPerStartedKb(u64),
+}
+
+impl ActualTxFee {
+    /// The fee rate in base units per kilobyte.
+    pub fn rate_per_kb(&self) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) | ActualTxFee::FixedPerStartedKb(rate) => *rate,
+        }
+    }
+
+    /// CRD ch.38 R38.6.6b: the fee for a transaction of `size` bytes (virtual size where the coin has
+    /// segregated witness), before any forced minimum relay fee.
+    /// - dynamic and plain fixed: `floor(rate * size / 1000)`;
+    /// - whole-kilobyte fixed: `rate * ceil(size / 1000)`.
+    /// Products saturate at `u64::MAX` instead of wrapping.
+    pub fn fee_for_size(&self, size: u64) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => {
+                let fee = u128::from(*rate) * u128::from(size) / u128::from(KILO_BYTE);
+                u64::try_from(fee).unwrap_or(u64::MAX)
+            },
+            ActualTxFee::FixedPerStartedKb(rate) => rate.saturating_mul(size.div_ceil(KILO_BYTE)),
+        }
+    }
+
+    /// CRD ch.38 R38.6.6b: the increase of the fee that a change output of `P2PKH_OUTPUT_LEN` bytes
+    /// causes on a transaction of `size` bytes (without the change output) under the fixed policies.
+    pub fn change_output_increase(&self, size: u64) -> u64 {
+        self.fee_for_size(size.saturating_add(P2PKH_OUTPUT_LEN))
+            .saturating_sub(self.fee_for_size(size))
+    }
 }
 
 /// Fee policy applied on transaction creation
