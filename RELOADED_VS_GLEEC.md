@@ -101,6 +101,22 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   what the node sends, never which transactions it can read. See CRD ch.35
   D35.7 and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
 
+- **Switch: header-layout fallback for RIC and MEWC.** The shared coin registry
+  keeps `"chain_variant": "BTC"` on `RIC` (Riecoin) and `MEWC` (Meowcoin), whose
+  Electrum servers serve 112-byte and mixed 120/80-byte headers. GLEEC KDF reads
+  them as consecutive 80-byte records, so the median-time-past it takes before an
+  HTLC spend is a wrong value. Reloaded, for a coin with no `protocol.header_layout`
+  key, first reads the standard layout and only when that fails exact consumption
+  retries the Riecoin layout and then the mixed KawPoW/AuxPoW layout, accepting
+  the first that consumes the bytes exactly; it logs once per coin which layout
+  it chose and suggests pinning it with `header_layout`. A coin that carries the
+  key never falls back, and a read the standard layout accepts never does either.
+  The node-level `MM2.json` key `header_layout_fallback_families` (an array of
+  strings, default `["BTC"]`) names the families that may fall back; `[]` restores
+  the reference behavior. Nothing a counterparty observes changes, so the
+  divergence is the default; the shared registry needs no change. See CRD ch.37
+  R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+
 ### Behavioural divergences without a compatibility switch
 
 These are divergences from GLEEC KDF that are **not** operator-configurable in this release (no compat switch yet). They are logged here and in [`CHANGELOG.md`](CHANGELOG.md) per the convention; a per-feature switch may be added in a later release.

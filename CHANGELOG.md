@@ -63,10 +63,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `"riecoin"` (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW
   flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
   median-time-past is then taken from each parsed header's time, and the full served bytes are what
-  is kept. An unrecognized value fails the coin's activation; with the key absent nothing changes.
-  The registry maintainer adds the key to the `RIC` and `MEWC` entries (`"riecoin"` and
-  `"kawpow_auxpow_mixed"`); other implementations ignore it. The header-sync (SPV) and header-store
-  paths still read standard headers. Detail: PR #62; CRD ch.37 §37.5.9.
+  is kept. An unrecognized value fails the coin's activation. A coin with no key is read as before
+  and, only when the standard read fails, retried as Riecoin and then as the mixed layout (first
+  exact fit wins, one `info` line per coin naming the layout and suggesting the key); the new
+  `MM2.json` switch `header_layout_fallback_families` (array of strings, default `["BTC"]`; `[]` =
+  reference behavior; a wrong type is a configuration error) names the families that may do so.
+  RIC and MEWC swaps therefore complete with the shared coin registry untouched; the registry
+  maintainer may still add the key (`"riecoin"`, `"kawpow_auxpow_mixed"`) to pin the layout, and
+  other implementations ignore it. The header-sync (SPV) and header-store paths still read standard
+  headers. Detail: PR #62; CRD ch.37 §37.5.9.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
