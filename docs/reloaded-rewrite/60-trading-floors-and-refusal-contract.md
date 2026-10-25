@@ -138,7 +138,8 @@ value given; no peer can observe them through a swap.
 > missing. Q1, E1 and T1 match. L1 matches, and Lightning pairs are refused
 > while Lightning trading is unsupported. P1 keeps its values, and Solana
 > and SPL pairs are refused the same way (R60.6.5). The cleared table above
-> is unchanged.
+> is unchanged. After PR #TBD, U1 matches as well, including the
+> whole-kilobyte option (R60.6.2).
 
 ## 60.4 Consumption contract
 
