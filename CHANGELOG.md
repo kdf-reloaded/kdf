@@ -73,6 +73,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
+  eligibility check floored its "wait this long" answer at one hour, so a refund that became
+  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
+  nothing signed changes and no funds were at risk. Detail: PR #60; CRD ch.37 §37.6 finding.
 - **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
   signing with a different algorithm, unless the new node-level boolean
   `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
