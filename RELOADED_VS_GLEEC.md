@@ -287,19 +287,19 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   or `QRC20` and the coin's entry carries no `protocol.chain_variant` key,
   Reloaded selects the Qtum header family (the proof-of-stake header with its
   state root, UTXO root, stake prevout and block signature) from the protocol
-  type, for the median-time-past read. The reference maps an absent key to
+  type, on every header read path. The reference maps an absent key to
   the default 80-byte family for every protocol type and selects Qtum only
   from `"chain_variant": "QTUM"`. The shipped coin registry sets
   `"chain_variant": "QTUM"` on every QTUM and QRC20 entry, so no deployed
   coin depends on the fallback; it only helps a hand-written entry that omits
   the key, which on the reference would read Qtum headers as 80-byte records.
   No switch exists; recorded here as a divergence (maintainer decision,
-  2026-10-25). Whether the fallback is kept once `chain_variant` is read is
-  open decision 5 of
-  [`docs/plans/utxo-header-family-selection.md`](docs/plans/utxo-header-family-selection.md).
+  2026-10-25). The fallback is kept now that `chain_variant` is read (decided
+  2026-10-25; open decision 5 of
+  [`docs/plans/utxo-header-family-selection.md`](docs/plans/utxo-header-family-selection.md)).
   Contract: [CRD ch.37 §37.5.1](docs/reloaded-rewrite/37-utxo-spv-and-block-header-validation.md)
   (the key-absent row and the port note under §37.5.8). Code:
-  `coins/utxo/qtum.rs`, `coins/qrc20/qrc20_helpers.rs` (`get_current_mtp`).
+  `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
 
 ### Removed / disabled in KDF Reloaded
 

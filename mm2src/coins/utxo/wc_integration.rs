@@ -20,6 +20,7 @@
 //! `eip155` method); this module emits `signMessage`
 //! ([`WcRequestMethods::UtxoPersonalSign`]).
 
+use super::header_layout_fallback::HeaderReadPolicy;
 use super::rpc_clients::UtxoRpcClientEnum;
 use super::utxo_common;
 use super::utxo_standard::UtxoStandardCoin;
@@ -279,8 +280,13 @@ impl UtxoStandardCoin {
                     .compat()
                     .await
                     .map_err(|e| WalletConnectError::Relay(format!("genesis header query failed: {e:?}")))?;
-                let header = BlockHeader::from_served_bytes(&header_bytes.0, CoinVariant::Standard)
-                    .map_err(|e| WalletConnectError::InvalidResponse(format!("genesis header decode failed: {e:?}")))?;
+                let policy = HeaderReadPolicy::for_conf(&self.as_ref().conf);
+                let header = policy.read_header(&header_bytes.0).map_err(|e| {
+                    WalletConnectError::InvalidResponse(format!(
+                        "genesis header decode failed: {}",
+                        e.reason(|e| format!("{e:?}"))
+                    ))
+                })?;
                 // `hash()` is internal order; reverse it for conventional display.
                 Ok(header.hash().reversed())
             },
@@ -596,5 +602,56 @@ mod tests {
             parse_send_transfer_result(&malformed),
             Err(WalletConnectError::InvalidResponse(_))
         ));
+    }
+
+    // The genesis lookup reads the served genesis header under the coin's header-read policy
+    // (CRD ch.37 R37.5.1a): pinned layout, structural fallback, switch off, misfit, standard-80.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn genesis_lookup_reads_the_header_under_the_policy() {
+        use crate::utxo::utxo_tests::header_read_path_tests::{run_matrix, serve};
+        run_matrix(
+            |coin_under_test, fx| {
+                serve(&fx.lone, &fx.list, fx.count as u64);
+                let hash = common::block_on(coin_under_test.wc_genesis_display_hash()).map_err(|e| format!("{e:?}"))?;
+                let truth = BlockHeader::from_served_bytes(&fx.lone, fx.layout).unwrap();
+                assert_eq!(hash, truth.hash().reversed());
+                Ok(fx.lone_time())
+            },
+            |fx| fx.lone_time(),
+        );
+    }
+
+    // The genesis lookup under a `chain_variant` read from the coin JSON (CRD ch.37 R37.5.1, R37.5.9e):
+    // the registry's `"BTC"` RIC/MEWC entries are rescued by the fallback, a QTUM-pinned coin reads
+    // Qtum and never falls back, and LBC/PIVX refuse the read.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn genesis_lookup_follows_the_chain_variant_of_the_conf() {
+        use crate::utxo::utxo_tests::header_read_path_tests::{coin_from_protocol, serve, Fixture};
+        let genesis = |protocol: Value, families: Option<&[&str]>, fx: &Fixture| {
+            serve(&fx.lone, &fx.list, fx.count as u64);
+            let coin = coin_from_protocol(protocol, families);
+            let hash = common::block_on(coin.wc_genesis_display_hash()).map_err(|e| format!("{e:?}"))?;
+            let truth = BlockHeader::from_served_bytes(&fx.lone, fx.layout).unwrap();
+            assert_eq!(hash, truth.hash().reversed());
+            Ok::<(), String>(())
+        };
+        let utxo = |variant: &str| json!({ "type": "UTXO", "chain_variant": variant });
+        for fx in [Fixture::riecoin(), Fixture::mewc()] {
+            genesis(utxo("BTC"), None, &fx).unwrap();
+            genesis(utxo("BTC"), Some(&[]), &fx).unwrap_err();
+            genesis(utxo("BTC"), Some(&["PPC"]), &fx).unwrap_err();
+            genesis(utxo("QTUM"), None, &fx).unwrap_err();
+        }
+        genesis(utxo("QTUM"), None, &Fixture::qtum()).unwrap();
+        genesis(utxo("RVN"), None, &Fixture::kawpow()).unwrap();
+        for variant in ["LBC", "PIVX"] {
+            let err = genesis(utxo(variant), None, &Fixture::standard()).unwrap_err();
+            assert!(err.contains("not implemented") && err.contains(variant), "{err}");
+        }
+        // header_layout wins over a conflicting chain_variant.
+        let pinned = json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": "QTUM" });
+        genesis(pinned, None, &Fixture::riecoin()).unwrap();
     }
 }

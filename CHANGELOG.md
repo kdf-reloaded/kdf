@@ -36,6 +36,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A UTXO coin's header layout now reaches every header read, and `protocol.chain_variant` is honored for
+  the first time.** The key is read from the coin's entry (eight values; an unrecognized one fails the
+  coin's activation naming the ticker and value), and the coin's layout (`header_layout`, else
+  `chain_variant`, else the Qtum reader for a `QTUM`/`QRC20` protocol type) is used by header sync, the
+  reorg walk, block timestamps, SPV, the stored-header re-reads and the WalletConnect genesis lookup, not
+  only the median-time-past. The structural fallback for `RIC` and `MEWC` now applies on all of those paths
+  too. A coin configured `"LBC"` or `"PIVX"` still activates but every header read of it now fails with a
+  "not implemented" error, where before it read the headers as standard 80-byte ones and mostly failed;
+  the other families still read the standard layout (CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e). Detail: PR #74.
+
 - **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
   `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
   left a formatting-only diff in every worktree. The file is git-ignored and `prost-build` runs with

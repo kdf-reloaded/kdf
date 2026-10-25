@@ -1,3 +1,4 @@
+use crate::utxo::header_layout_fallback::ChainVariant;
 use crate::utxo::rpc_clients::EstimateFeeMode;
 use crate::utxo::{parse_hex_encoded_u32, UtxoCoinConf, DEFAULT_DYNAMIC_FEE_VOLATILITY_PERCENT, KMD_MTP_BLOCK_COUNT,
                   MATURE_CONFIRMATIONS_DEFAULT};
@@ -109,11 +110,22 @@ pub enum UtxoConfError {
         value: String,
     },
     #[display(
-        fmt = "'{}' in MM2.json must be an array of distinct chain_variant names (BTC, QTUM, LBC, PPC, RICK, MORTY, RVN, PIVX), got {}",
+        fmt = "'{}' in MM2.json must be an array of distinct chain_variant names ({}), got {}",
         HEADER_LAYOUT_FALLBACK_FAMILIES_KEY,
+        "ChainVariant::names()",
         _0
     )]
     InvalidHeaderLayoutFallbackFamilies(String),
+    #[display(
+        fmt = "{}: unrecognized 'protocol.chain_variant' value {}; expected one of {}",
+        ticker,
+        value,
+        "ChainVariant::names()"
+    )]
+    InvalidChainVariant {
+        ticker: String,
+        value: String,
+    },
 }
 
 /// The `MM2.json` key of the node switch that names the coin families whose header reads may fall back
@@ -124,8 +136,6 @@ pub const HEADER_LAYOUT_FALLBACK_FAMILIES_KEY: &str = "header_layout_fallback_fa
 const HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT: &[&str] = &["BTC"];
 
 /// The `chain_variant` spellings (CRD ch.37 R37.5.1) a family in the switch may take.
-const HEADER_LAYOUT_FAMILY_SPELLINGS: [&str; 8] = ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"];
-
 /// Reads the node switch `header_layout_fallback_families` (CRD ch.37 R37.5.9e): an array whose every
 /// element is one of the eight `chain_variant` spellings, without duplicates; default `["BTC"]` when
 /// the key is absent. Anything else (a non-array, a non-string element, an unknown or lowercase
@@ -146,7 +156,7 @@ pub fn header_layout_fallback_families(ctx: &MmArc) -> UtxoConfResult<Vec<String
     for item in items {
         let family = item
             .as_str()
-            .filter(|f| HEADER_LAYOUT_FAMILY_SPELLINGS.contains(f))
+            .filter(|f| ChainVariant::from_name(f).is_some())
             .or_mm_err(invalid)?;
         if families.iter().any(|f| f == family) {
             return MmError::err(invalid());
@@ -247,6 +257,8 @@ impl<'a> UtxoConfBuilder<'a> {
         let trezor_coin = self.trezor_coin();
         let enable_spv_proof = self.enable_spv_proof();
         let header_layout = self.header_layout()?;
+        let chain_variant = self.chain_variant()?;
+        let protocol_header_reader = self.protocol_header_reader();
 
         let conf = UtxoCoinConf {
             ticker: self.ticker.to_owned(),
@@ -280,6 +292,8 @@ impl<'a> UtxoConfBuilder<'a> {
             trezor_coin,
             enable_spv_proof,
             header_layout,
+            chain_variant,
+            protocol_header_reader,
             header_layout_fallback_families: self.header_layout_fallback_families.clone(),
             header_layout_fallback_logged: Arc::new(AtomicBool::new(false)),
         };
@@ -486,10 +500,8 @@ impl<'a> UtxoConfBuilder<'a> {
     /// protocol descriptor. Absent means no effect; any present value that is not one of the closed
     /// value set (including a non-string) fails the coin build and falls back to nothing.
     ///
-    /// Precedence (R37.5.9a): the layout read here governs the coin's header reads over whatever
-    /// the version-inferred default selects. `chain_variant` is not read by this build yet
-    /// (ch.37 §37.5.8, D1 open), so there is nothing to override today; the precedence clause
-    /// becomes operative when D1 lands and `chain_variant` is read and validated beside this key.
+    /// Precedence (R37.5.9a): the layout read here governs the coin's header reads over the family
+    /// `chain_variant` pins; `chain_variant` is still read and validated beside it.
     fn header_layout(&self) -> UtxoConfResult<Option<CoinVariant>> {
         let Some(value) = self.conf["protocol"].get("header_layout") else {
             return Ok(None);
@@ -502,6 +514,34 @@ impl<'a> UtxoConfBuilder<'a> {
                 ticker: self.ticker.to_owned(),
                 value: value.to_string(),
             })
+    }
+
+    /// Reads `protocol.chain_variant` (CRD ch.37 R37.5.1): from the raw `protocol` object beside
+    /// `type`, as a plain string compared exactly and case-sensitively against the eight spellings,
+    /// outside the typed protocol descriptor. Absent means no key; any present value that is not one
+    /// of the eight (including a non-string) fails the coin build.
+    fn chain_variant(&self) -> UtxoConfResult<Option<ChainVariant>> {
+        let Some(value) = self.conf["protocol"].get("chain_variant") else {
+            return Ok(None);
+        };
+        value
+            .as_str()
+            .and_then(ChainVariant::from_name)
+            .map(Some)
+            .or_mm_err(|| UtxoConfError::InvalidChainVariant {
+                ticker: self.ticker.to_owned(),
+                value: value.to_string(),
+            })
+    }
+
+    /// The reader of a coin with neither header key: Qtum for the QTUM and QRC20 protocol types,
+    /// standard otherwise. A documented divergence from R37.5.1, which maps an absent key to the
+    /// default family for every protocol type; the maintainer keeps it.
+    fn protocol_header_reader(&self) -> CoinVariant {
+        match self.conf["protocol"]["type"].as_str() {
+            Some("QTUM") | Some("QRC20") => CoinVariant::Qtum,
+            _ => CoinVariant::Standard,
+        }
     }
 }
 

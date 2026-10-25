@@ -1049,15 +1049,34 @@ collision of R37.5.4a.
 
 As built:
 
-- The reader knows two variants of the dictated kind, the default and Qtum,
-  plus the two Reloaded-only layouts of §37.5.9 (below). The Qtum variant is
-  chosen by the coin's protocol type in code, and only for the Qtum and
-  QRC20 median-time-past read. The `chain_variant` key of R37.5.1 is not
-  read: a coin file that sets it is accepted and the value has no effect.
-- Every other header read uses the default variant, for Qtum coins as well:
-  single-header Electrum reads, header lists for the sync loop, the anchor
-  check of R37.1.3, re-reads from both header stores, and the genesis-hash
-  lookup. This falls short of R37.5.1a.
+- **`chain_variant` is read (2026-10-25, §37.9 D1 steps 1 and 3).** From the
+  coin's raw `protocol` object, beside `type` and `header_layout`, as a plain
+  string matched exactly and case-sensitively against the eight values of
+  R37.5.1; a non-string or unrecognized value fails the coin build with an
+  error naming the ticker and the value, even when `header_layout` is present
+  (R37.5.9a). The serde shape of the protocol descriptor is unchanged. The
+  coin resolves to ONE reader, used on every path: the `header_layout` key's
+  layout; else the `chain_variant` family's reader; else the Qtum reader for a
+  `QTUM` or `QRC20` protocol type (a documented divergence without a switch,
+  now applied on every path and not only the median); else the default. As
+  built, `"QTUM"` selects the Qtum reader and `"BTC"`, `"RVN"`, `"PPC"`,
+  `"RICK"` and `"MORTY"` select today's default reader, so version-signalled
+  recognition (R37.5.4) still applies to them and the exclusivity of R37.5.3,
+  PPC's suppression of the Equihash reading of version-4 headers and the
+  RICK/MORTY rule for every version are **not** implemented (§37.9 D1 steps
+  2 and 4). `"LBC"` and `"PIVX"` have no reader: such a coin activates, and
+  every header read of it, on every path below, fails with a typed "header
+  layout not implemented for `chain_variant`" error instead of reading
+  standard headers.
+- The resolved reader reaches every read path of R37.5.1a that the Electrum
+  backend has (§37.9 D1 step 3): the median-time-past list, header-list
+  reads of the sync loop and the reorg walk, single-header reads (block
+  timestamp, the SPV fetch, the direct fetch of a confirmed transaction's
+  header, and the anchor check of R37.1.3), re-reads from both header stores
+  (each store holds its coin's policy), and the genesis-hash lookup of the
+  WalletConnect integration. Native-daemon and lightwalletd backends parse no
+  headers. Not covered: the Lightning platform's block-header read, which takes
+  no coin configuration and still reads standard headers.
 - Under the default variant, the AuxPoW layout is recognised by the bit-8 rule
   of R37.5.2 and R37.5.4, per header; it was once matched against two exact
   version values, which this implementation no longer does. The Equihash-style
@@ -1072,25 +1091,27 @@ As built:
   configuration, as a plain string, beside `type`, exactly where R37.5.9
   places it. It has the two values of R37.5.9's table, `"riecoin"` and
   `"kawpow_auxpow_mixed"`; an unknown value fails the coin build with an
-  error naming the ticker; an absent key has no effect. The layout it
-  selects governs the **median-time-past path only**: the sync loop's
-  header-list reads, the single-header Electrum reads (including the block
-  timestamp read), the SPV fetch and anchor check, and both header stores'
-  re-reads do not yet use the layout and still read standard headers, so
-  R37.5.9a is met for the median and not yet for every read path. Because
-  `chain_variant` is still not read, R37.5.9a's precedence over it is
-  vacuous until §37.9 D1 lands. The Riecoin and mixed KawPoW/merged-mined
-  readers of R37.5.9b are implemented and re-encode to the served bytes
-  (R37.5.9c); for an entry without the key, `RIC` and `MEWC` header lists
-  are still rejected whole, as the table of §37.9 D3 records. The remaining
-  threading is the plan's own work under `docs/plans/`.
-- The structural fallback and its switch of R37.5.9e are **not yet
-  implemented** (pending; the follow-up on PR #62): with no key, `RIC` and
-  `MEWC` lists are rejected whole whatever the switch would say, and
-  `header_layout_fallback_families` in `MM2.json` is not read. The key's
-  as-built name on PR #62 is the earlier `reloaded_header_layout`; the
-  rename to `header_layout` (§37.5.9 provenance note) lands with that
-  follow-up, before any release carries the old name.
+  error naming the ticker; an absent key has no effect. Since the threading
+  of 2026-10-25 the layout it selects governs **every** read path listed
+  above (R37.5.9a), and takes precedence over a conflicting `chain_variant`
+  (tested against `QTUM`, `BTC`, `PPC`, `LBC` and `PIVX`). The Riecoin and
+  mixed KawPoW/merged-mined readers of R37.5.9b re-encode to the served bytes
+  (R37.5.9c).
+- The structural fallback and its switch of R37.5.9e **are implemented**:
+  `header_layout_fallback_families` in `MM2.json` is read at launch, and for a
+  coin without the key whose family is in the set, a standard read that fails
+  exact consumption is retried as Riecoin and then as the mixed layout, on
+  every path above including re-reads of stored headers (a stored 112- or
+  120-byte header of a keyless coin re-reads through it). The family used for
+  membership is the coin's `chain_variant` value, an absent key counting as
+  `"BTC"` (the Qtum protocol-type reader is a reader choice, not a family
+  name; a `QTUM` or `QRC20` protocol-type coin with no key is therefore family
+  `"BTC"` for the switch, so a failed Qtum read of its headers is retried as
+  Riecoin and as the mixed layout, which cannot consume Qtum's 246-byte headers
+  exactly, and the ambiguity rule guards the remaining cases). With
+  `chain_variant` `"BTC"` and no key, the registry's `RIC` and
+  `MEWC` entries therefore parse on every path under the default switch and
+  are rejected under `[]`.
 
 Implemented (part of R37.5.6 and part of R37.5.7):
 
@@ -1384,8 +1405,10 @@ rule is the registry-free path.
   so that an operator can pin the coin with `header_layout` for
   determinism; later fallback parses of the same coin in the same
   activation are not logged again, and not at a higher level.
-- **Family before and after D1.** Until `chain_variant` is read (§37.9 D1
-  open), every coin without a `header_layout` key is in the standard
+- **Family before and after D1.** *(As built since 2026-10-25, `chain_variant` is
+  read and the family is its value, an absent key counting as `"BTC"`; the
+  text below keeps the earlier reading for history.)* Until `chain_variant`
+  is read (§37.9 D1 open), every coin without a `header_layout` key is in the standard
   family, which for this rule's membership test is the `"BTC"` family — so
   the default set covers **every** coin today. When D1 lands, the family is
   the coin's `chain_variant` value, an absent key counting as `"BTC"`
@@ -1813,7 +1836,16 @@ steps:
    first; structural fallback only after a failed exact-consumption read
    and only for a family in the set of `header_layout_fallback_families`.
 
-It is deferred because it changes the coin-activation configuration surface
+*Progress (2026-10-25).* Step 1 is done and step 3 is done for every path the
+Electrum backend has (§37.5.8 lists them and the one exception, the Lightning
+platform's block-header read). Step 2 is partial: `"QTUM"` and the
+default-reader families are mapped, and `"LBC"` and `"PIVX"` resolve and
+then refuse every header read as not implemented, because their readers do
+not exist. Steps 4a and 4b are **not** done: `"BTC"` still reads
+version-signalled families, and version-only KawPoW recognition under the
+default family stands.
+
+It was deferred because it changes the coin-activation configuration surface
 and every header read path at once, and it touches both storage backends.
 The length guard of §37.5.8 removes the observed failure without any of
 that.
@@ -1842,7 +1874,8 @@ Until this is closed:
 
 - A standard chain whose blocks carry the colliding version value works
   through that guard.
-- A Qtum coin's single-header and stored-header reads use the default family.
+- *(Closed 2026-10-25: a Qtum coin's single-header, header-list and stored-header
+  reads use the Qtum reader on every path.)*
 - The R37.5.5 families no longer wait on
   anything: the chain-variant pass of 2026-10-24 pinned the PIVX version thresholds, kept
   the version key for the KawPoW trailer and confirmed the Firo rule, so

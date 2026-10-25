@@ -1,3 +1,4 @@
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::ElectrumBlockHeader;
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorageError, BlockHeaderStorageOps};
 use async_trait::async_trait;
@@ -10,7 +11,6 @@ use db_common::{sqlite::rusqlite::Error as SqlError,
                 sqlite::CHECK_TABLE_EXISTS_SQL};
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use serialization::CoinVariant;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -98,7 +98,7 @@ fn block_header_bits_u32(header: &BlockHeader) -> u32 {
 }
 
 #[derive(Clone, Debug)]
-pub struct SqliteBlockHeadersStorage(pub Arc<Mutex<Connection>>);
+pub struct SqliteBlockHeadersStorage(pub Arc<Mutex<Connection>>, pub HeaderReadPolicy);
 
 fn query_single_row<T, P, F>(
     conn: &Connection,
@@ -223,10 +223,10 @@ impl SqliteBlockHeadersStorage {
                         reason: e.to_string(),
                     })
                 })?;
-                let header = BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).map_err(|e| {
+                let header = selfi.1.read_header(&bytes).map_err(|e| {
                     MmError::new(BlockHeaderStorageError::DecodeError {
                         ticker: ticker.clone(),
-                        reason: e.to_string(),
+                        reason: e.reason(|e| e.to_string()),
                     })
                 })?;
                 headers.push((height.max(0) as u64, header));
@@ -306,12 +306,13 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
                 ticker: for_coin.to_string(),
                 reason: e.to_string(),
             })?;
-            let header = BlockHeader::from_served_bytes(&header_bytes, CoinVariant::Standard).map_err(|e| {
-                BlockHeaderStorageError::DecodeError {
+            let header = self
+                .1
+                .read_header(&header_bytes)
+                .map_err(|e| BlockHeaderStorageError::DecodeError {
                     ticker: for_coin.to_string(),
-                    reason: e.to_string(),
-                }
-            })?;
+                    reason: e.reason(|e| e.to_string()),
+                })?;
             return Ok(Some(header));
         }
         Ok(None)
@@ -424,8 +425,10 @@ impl BlockHeaderStorageOps for SqliteBlockHeadersStorage {
 
 #[cfg(test)]
 impl SqliteBlockHeadersStorage {
-    pub fn in_memory() -> Self {
-        SqliteBlockHeadersStorage(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())))
+    pub fn in_memory() -> Self { Self::in_memory_with_policy(HeaderReadPolicy::standard()) }
+
+    pub fn in_memory_with_policy(policy: HeaderReadPolicy) -> Self {
+        SqliteBlockHeadersStorage(Arc::new(Mutex::new(Connection::open_in_memory().unwrap())), policy)
     }
 
     fn is_table_empty(&self, table_name: &str) -> bool {
