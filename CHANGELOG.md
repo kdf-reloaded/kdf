@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
+  wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
+  Any positive fee is accepted, including one below the estimate; whether the network relays such a
+  transaction is untested. Any other fee type sent for Siacoin is now rejected with an
+  invalid-fee-policy error instead of being silently ignored. More in
+  [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md).
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
   window applies.** It names the start height and window size, notes that earlier funds will not be
   visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
