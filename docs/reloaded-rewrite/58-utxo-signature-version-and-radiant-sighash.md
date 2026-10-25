@@ -28,6 +28,14 @@ signatures the Radiant network rejects. This chapter binds the full
 value set, the algorithm each value selects, and the Radiant preimage in
 full.
 
+**Status on 2026-10-25.** The three changes of R58.5.2 are implemented
+(§58.5 as-built statement; pending PR). R58.5.1 is closed, D1 and D4 are
+closed, and D3 is partly corroborated on chain by T3's second vector.
+The same day the chapter's description of the reference walk was
+corrected against Radiant-Core: R58.3.3 now states Radiant-Core's
+**fatal** walk, carries an as-built divergence note for the tolerant walk
+the implementation shipped, and defers the fix to D5.
+
 **The route question, answered.** Radiant-Core is public, and the sighash
 it defines is a shape the project MUST produce to inter-operate with the
 Radiant network, so it is a permitted clean input (chapter 01 R4, with
@@ -110,6 +118,11 @@ this way; the defect is the missing fourth value, not the fallback.
 > warning is not. *(Trigger: a rule the surrounding code plainly
 > violates — a funds-path value resolved by a silent fallback — apparent
 > while establishing R58.2.2.)*
+
+*Status (2026-10-25, clean-side record).* The decision this finding asks
+for was taken and implemented by PR #54, in the safer form: activation
+fails by default, and the silent fallback stated above is reachable
+behind a node switch. The record is D1.
 
 **R58.2.3** *The fork-id gate.* For the two fork-id values, the dialect
 is reached only when the sighash type presented for the input has the
@@ -234,13 +247,14 @@ type:
 **R58.3.3** *The references digest and reference extraction.* Field 4 of
 each summary is the double-SHA256 of the concatenated 36-byte reference
 values pushed by that output's script-public-key, **de-duplicated and
-ordered ascending by their 36 bytes compared as unsigned bytes**. When
-the script pushes no reference, the digest field is 32 **zero** bytes
-(not the double-SHA256 of the empty string), and the count field of
-R58.3.2 is zero.
+ordered ascending by their 36 bytes compared as unsigned bytes**
+(Radiant-Core holds them in an ordered set, so duplicates collapse and
+iteration is ascending). When the script pushes no reference, the digest
+field is 32 **zero** bytes (not the double-SHA256 of the empty string),
+and the count field of R58.3.2 is zero.
 
 A reference is extracted by walking the script-public-key from its first
-byte and advancing past each opcode's operand:
+byte, decoding each opcode and advancing past its operand:
 
 | Opcode byte | Operand | Contributes a reference |
 | --- | --- | --- |
@@ -251,17 +265,86 @@ byte and advancing past each opcode's operand:
 | `0xd0` (`OP_PUSHINPUTREF`) | exactly 36 bytes | **yes** |
 | `0xd8` (`OP_PUSHINPUTREFSINGLETON`) | exactly 36 bytes | **yes** |
 | `0xd1` (`OP_REQUIREINPUTREF`) | exactly 36 bytes | no — skipped |
-| `0xd2` (`OP_DISALLOWPUSHINPUTREF`) | exactly 36 bytes | no — skipped |
+| `0xd2` (`OP_DISALLOWPUSHINPUTREF`) | exactly 36 bytes | no — skipped, but see fatal case 2 |
 | `0xd3` (`OP_DISALLOWPUSHINPUTREFSIBLING`) | exactly 36 bytes | no — skipped |
+| `0xbd` (`OP_STATESEPARATOR`) | none | no — but see fatal cases 3 and 4 |
+| `0x6a` (`OP_RETURN`) | none | no — but see fatal case 4 |
 | any other byte | none | no |
 
-Walking stops — leaving the references collected so far in place, without
-error — as soon as an operand would run past the end of the script. The
-walk is deliberately tolerant: a malformed or truncated script
-contributes whatever it contributed before the truncation and does not
-fail the signing. Length arithmetic shall be overflow-checked, because
-the 4-byte push length is attacker-controlled and a 32-bit target would
-otherwise wrap.
+**The walk is fatal, not tolerant** *(corrected 2026-10-25 against
+Radiant-Core, which governs here per the authority statement above; the
+rule as first written bound a tolerant walk and was the defect of record
+under chapter 01 R24).* Radiant-Core's walk aborts the summary
+computation — and with it the signature hash, so that the signature check
+fails and the transaction does not verify on chain — when any of the
+following holds for an output in scope:
+
+1. an opcode's operand would run past the end of the script, or an opcode
+   cannot otherwise be decoded (a truncated push length; a reference
+   opcode with fewer than 36 bytes behind it);
+2. a reference named by `OP_DISALLOWPUSHINPUTREF` in that script is also
+   pushed by `OP_PUSHINPUTREF` or `OP_PUSHINPUTREFSINGLETON` in the same
+   script;
+3. the script contains more than one `OP_STATESEPARATOR`;
+4. an `OP_RETURN` precedes an `OP_STATESEPARATOR` in the script.
+
+No digest exists for such a transaction: no signature over it can verify,
+whatever preimage a signer computed. A conforming implementation
+therefore SHALL fail the signature-hash computation with an error in
+these four cases rather than produce a digest (D5 records that the
+present implementation does not yet do so). Length arithmetic shall be
+overflow-checked, because the 4-byte push length is attacker-controlled
+and a 32-bit target would otherwise wrap.
+
+> **Verification record (2026-10-25, permitted R3 input).** The four
+> fatal cases were read on 2026-10-25 from Radiant-Core's public source:
+> the script library's reference-collecting walk returns failure on an
+> undecodable opcode, on a non-empty intersection between the disallowed
+> and the pushed reference sets, on a second state separator and on a
+> data-carrier opcode preceding the separator; the transaction
+> primitive's per-output summary writer turns that failure into a thrown
+> error rather than a digest; and the script interpreter's evaluator
+> catches every such error as a script failure. The same reading confirms
+> the summary layout of R58.3.2 (value, script digest, 4-byte count,
+> references digest), the ordered-set collection, that singleton
+> references join the same set as plain ones, and the 32-zero-byte digest
+> for a reference-free output. File classes are named, not line
+> positions; the repository is the one §58.9 cites.
+
+> **Note (informative) — version-3 transaction identifiers.** The same
+> reading shows that Radiant-Core derives the identifier of a transaction
+> whose version field is `3` from a dedicated preimage that embeds this
+> same output-summaries digest, rather than from the double-SHA256 of the
+> serialization. The shipped Radiant entry carries no transaction-version
+> override (R58.2.6), so every transaction this project constructs keeps
+> the double-SHA256 identifier R58.2.4 states, and R58.2.4 is unaffected
+> for them. Whether a counterparty-constructed version-3 transaction can
+> reach this project's transaction-identifier paths is a question for D2
+> (Radiant beyond signing), not for this chapter's signing contract.
+
+> **As-built divergence (2026-10-25).** The implementation's walk
+> (`extract_push_refs`, in the dialect routine of the signing substrate;
+> §58.5 as-built statement) is **tolerant**, as this rule read before the
+> correction: it stops at an operand that would run past the end of the
+> script and keeps the references collected so far, it does not check
+> pushed references against disallowed ones, and it does not count state
+> separators or look at `OP_RETURN`. The impact is bounded:
+>
+> - For every transaction this project constructs the two walks agree
+>   exactly: P2PKH, P2SH and data-carrier outputs (R58.3.5) are
+>   well-formed and contain no reference opcode and no state separator,
+>   so the digest is identical.
+> - For a well-formed reference-bearing script the two walks collect the
+>   same set; T3's second vector shows this on chain.
+> - For a caller-supplied script through the raw-transaction signing RPC
+>   ([Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.5.1,
+>   R38.5.4) that trips one of the four fatal cases, the implementation
+>   yields a signature over a transaction the Radiant network rejects
+>   anyway — never a wrong-but-valid signature, because a transaction
+>   with such an output has no verifiable digest at all.
+>
+> Making the signature-hash computation fallible is outside the three
+> changes of R58.5.2 and is deferred as **D5**.
 
 **R58.3.4** *Degenerate input indices.* When the index of the input being
 signed is not a valid input index, or when the base type is **single**
@@ -525,14 +608,55 @@ It requires **no** new transaction-hash algorithm (R58.2.4), no
 `chain_variant` work, no address-format work, no fee-policy work, and no
 change to any other signature version's behaviour.
 
+*Status (2026-10-25).* **R58.5.1 is closed** — the fourth value is in the
+enumeration and resolves to the Radiant dialect. **R58.5.2 is
+implemented** (pending PR, stacked on PR #54, which waits on PR #57); the
+as-built statement below records what landed. The cleared text of
+R58.5.1 and R58.5.2 above is unchanged.
+
+### §58.5 as-built statement (2026-10-25, clean-side record)
+
+*This statement describes this project's own implementation and
+contains no forbidden-class material; it is not part of the cleared
+Spec Reader text above and does not alter it.*
+
+All three changes of R58.5.2 live in the signing substrate,
+`mm2src/kdf_script/src/sign.rs`:
+
+1. **The fourth value.** `SignatureVersion::ForkIdRxd`, deserializing
+   from the string `fork_id_rxd` (R58.2.1). The coin-configuration
+   builder's accepted-values list — the one PR #54's
+   `InvalidSignatureVersion` error names — now carries four values.
+2. **The dialect.** The routine `sighash_fork_id_rxd`, routed only when
+   the sighash type presented for the input has the fork-id bit `0x40`
+   set, with fall-through to the legacy (`base`) algorithm otherwise
+   (R58.2.3); the one-then-zeros sentinel of R58.3.4 for degenerate
+   indices; the supporting `hash_output_summaries` and
+   `append_output_summary` for the 76-byte summaries of R58.3.2; and the
+   reference walk `extract_push_refs` for R58.3.3 — tolerant and
+   overflow-checked, collecting `0xd0` and `0xd8` and skipping
+   `0xd1`–`0xd3` as 36-byte operands, holding references in an ordered
+   set (de-duplicated, ascending), and yielding 32 zero bytes for a
+   reference-free output. The walk's tolerance is the divergence from
+   Radiant-Core that R58.3.3's as-built note records and D5 defers.
+3. **Strict encoding.** `is_defined` masks `0x40 | 0x80` for the new
+   value, and `from_u32` recognizes the fork-id bit for it (R58.2.3).
+
+[Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.5.4 holds as
+built: every signing site, the raw-transaction signing RPC included,
+receives the resolved version. No address, fee, Electrum or swap change
+accompanies the three items (R58.2.6, R58.4A.1).
+
 ## 58.6 Tests
 
-> *No reference or network dimension (informative).* No test below
-> carries a reference-designation or a netid case. That is an omission
-> recorded as deferred work in D4, not a finding that the dimension is
-> irrelevant: `AGENTS.md` §3 requires a Reference × Network matrix for a
-> change affecting signature-hash modes and signed preimages, and that
-> matrix is owed once the question D4 names has been answered.
+> *Reference and network dimension (closed 2026-10-25 with D4).* The
+> `AGENTS.md` §3 matrix for this contract is the one R58.4A.5 states, and
+> the implemented tests carry it as their expectations:
+>
+> | Dimension | Cases |
+> | --- | --- |
+> | Reference | `v2.6.0-beta`: no Radiant dialect — the fourth value falls back to the Bitcoin-Cash dialect and Radiant is unusable; `v3.0.0-beta`: the dialect of §58.3. This project follows the newer designation, the only one with which a Radiant swap can complete. |
+> | Network | netid `8762` = netid `6133`: nothing in the two keys' resolution or in the signing substrate reads the network identifier; satisfied by the stated equivalence. |
 
 **T1.** *Configuration resolution.* A coin entry with
 `"signature_version": "fork_id_rxd"` resolves to the Radiant dialect; one
@@ -543,12 +667,24 @@ unrecognised string and a zero or absent `fork_id`, and a ticker other
 than `BCH`, resolves to the base algorithm. Each case MUST assert the
 resolved version, not merely that activation succeeded.
 
+*As built (2026-10-25).* The two unrecognized-string cases run with the
+node switch `coin_conf_unrecognised_enum_falls_back` set, because under
+the default an unrecognized value fails activation (PR #54; D1): the
+silent fallback this test describes is the switched-on behavior, and
+the default behavior is covered by PR #54's own conf-builder tests.
+
 **T2.** *Fork-id gate and strict encoding.* Under the Radiant value, a
 sighash type with bit `0x40` set routes to the Radiant dialect and one
 without it routes to the base algorithm (R58.2.3). The strict-encoding
 check accepts `0x41`, `0x43`, `0x81` and `0xC2` under the Radiant value
 and rejects a value whose low five bits are not one of the three defined
 base types.
+
+*As built (2026-10-25).* Accepted: `0x41`, `0x43`, `0x81`, `0xC2`.
+Rejected: `0x00`, `0x04`, `0x5F`, `0x141`, `0x1C2`, `0xFFFFFFC2`, `0x40`,
+`0x80`, `0xC0` — a zero base type, an undefined base type, stray low
+bits, set bits above the fork-id and anyone-can-pay bits, and the flag
+bits alone with no base type.
 
 **T3.** *Radiant mainnet vector (the parity guard).* Take a Radiant
 **mainnet** transaction, recompute the digest for one of its
@@ -580,12 +716,37 @@ of the reference's own vector, so that the implementer can choose an
 equivalent — preferably different — public-chain transaction and know
 what it does and does not corroborate.
 
+*As built (2026-10-25): two vectors.* Both are Radiant mainnet
+transactions fetched on 2026-10-25 from a Radiant Electrum server listed
+in the shipped coins registry (chapter 01 R6), with the spent outputs'
+script code and value, and embedded as bytes in deterministic unit
+tests:
+
+| Vector | Transaction | What it covers |
+| --- | --- | --- |
+| 1 | `10fa6331635fadede304b279cc3f823a65f54a2f592e9c157d7fea6229232521` (block 475700) | two P2PKH inputs; no reference-bearing output — the zero-reference form of R58.3.2–R58.3.3 |
+| 2 | `e9da468db4109e5bc3d99edeb82b73d6547642906f37612675095e1b22b9a0fc` (block 475790) | output 0 pushes two distinct references in non-ascending script order and embeds reference-opcode bytes inside `OP_PUSHDATA1` payloads; output 1 pushes one reference; input 1 is the P2PKH input tested — the reference-bearing form |
+
+For each tested input, the transaction's own DER signature verifies
+**only** against the digest with field 8 inserted before the outputs
+digest: with field 8 appended after the lock time it fails (T4), and
+with field 8 omitted — the plain Bitcoin-Cash preimage — it fails. For
+vector 2 the signature verifies only with the references **sorted
+ascending**; with the references in script order it fails. R58.3.3's
+ordering rule, the exclusion of reference-opcode bytes embedded in push
+operands, and the collection of plain and singleton references into one
+set are thereby corroborated on chain, not only against Radiant-Core.
+What remains synthetic is recorded in D3.
+
 **T4.** *Field-8 position.* Assert that the digest of T3 changes if field
 8 of R58.3.1 is appended after the lock time instead of inserted before
 the outputs digest. A test that only checks "the digest equals this
 constant" does not catch an implementation that computes the right
 summary digest and places it wrongly, because the constant would simply
 have been recorded from the wrong implementation.
+
+*As built (2026-10-25).* Asserted on both T3 vectors, by signature
+verification rather than digest constants, as the T3 record states.
 
 **T5.** *Zero-reference summary.* For an output whose script pushes no
 Radiant reference, the summary of R58.3.2 carries a reference count of
@@ -603,6 +764,16 @@ and the embedded ones (R58.3.3). A truncated script whose last operand
 runs past the end yields the references collected before the truncation
 and no error.
 
+*As built (2026-10-25).* Implemented as written. Its de-duplication case
+and its skipped-opcode cases (`0xd1`–`0xd3`) are the two parts of
+R58.3.3 that remain corroborated against Radiant-Core only (D3); the
+non-ascending order and the embedded-opcode-bytes cases are additionally
+corroborated on chain by T3's second vector. The truncation clause
+asserts the **as-built tolerant** behavior that R58.3.3's divergence
+note records, not Radiant-Core's rule; when D5 is done, that clause
+inverts to assert an error for a truncated script, and this test gains
+the other three fatal cases of R58.3.3.
+
 **T7.** *Degenerate indices.* An out-of-range input index, and a
 base-type-single signature whose input index exceeds the output count,
 both yield the one-then-zeros sentinel of R58.3.4 under both fork-id
@@ -612,10 +783,27 @@ values.
 identifier is its double-SHA256; the single-SHA256 selection remains
 reachable only for Groestlcoin (R58.2.4).
 
+*As built (2026-10-25).* Confirmed: the identifiers of both T3 vectors
+are the double-SHA256 of their serialization, and the Radiant value
+leaves the per-coin final-hashing selection untouched. (The version-3
+identifier Radiant-Core defines, noted informatively under R58.3.3, is
+not reachable for a transaction this project constructs.)
+
 ## 58.7 Deferred Work
 
-**D1.** *Unrecognised-value warning.* The activation warning proposed in
-the finding under R58.2.2 is not bound as a requirement, because it is an
+**D1.** *Unrecognised-value warning.* **Closed 2026-10-25 — answered by
+PR #54.** The decision went the safer way the finding under R58.2.2
+anticipated: a present but unrecognized `signature_version` **fails
+activation** by default, naming the value, the accepted set and the
+switch; the reference's silent fallback (R58.2.2) is restored by the
+top-level node switch `coin_conf_unrecognised_enum_falls_back` (default
+`false`), with one warning per activation when it is set. The switch is
+documented as a deliberate divergence under `docs/COMPAT_SWITCHES.md`.
+The decision was taken for this key; the other coin-configuration
+enumerations the switch is named for are not wired to it, and adopting
+them is a separate decision outside this chapter. *(Original text,
+retained for the record.)* The activation warning proposed in the
+finding under R58.2.2 is not bound as a requirement, because it is an
 improvement over parity rather than parity itself and the maintainer may
 prefer to fail activation instead (which would need a compatibility
 switch). Either decision should be taken once for all coin-configuration
@@ -636,18 +824,35 @@ what the reference lineage *reports* about Radiant on the legacy swap
 path, and why that report — reported, not verified by this project —
 does not close this item.
 
-**D3.** *Reference-bearing outputs.* R58.4.2 leaves the non-zero-
-reference form corroborated only by Radiant-Core and not by an on-chain
-vector. If a Radiant mainnet transaction spending a reference-bearing
-output becomes available, add it as a second vector under T3; until then
-the project's own transactions never reach the path (R58.3.5).
+**D3.** *Reference-bearing outputs.* **Partly corroborated on chain,
+2026-10-25; open for two details.** R58.4.2 left the non-zero-reference
+form corroborated only by Radiant-Core. T3's second vector — a mainnet
+transaction whose outputs push two and one references respectively, in
+non-ascending script order and with reference-opcode bytes embedded in
+push operands — now corroborates on chain: the inserted field 8 for a
+reference-bearing transaction, the **ascending-order** rule of R58.3.3
+(script order fails to verify), the exclusion of embedded opcode bytes,
+and the collection of plain and singleton references into one set. Still
+corroborated **only against Radiant-Core**, and tested synthetically
+(T6): the de-duplication of a reference pushed twice, and the skipping of
+`0xd1`–`0xd3`. The item stays open for those two until a Radiant mainnet
+transaction exercising them is found; the project's own transactions
+never reach either (R58.3.5). *(Original text.)* If a Radiant mainnet
+transaction spending a reference-bearing output becomes available, add
+it as a second vector under T3; until then the project's own
+transactions never reach the path (R58.3.5).
 
 *Added 2026-10-24 (pointer only; substance in §58.4A, cleared by the KDF
 Dirty Gate on 2026-10-24 in a second pass — §58.10).* R58.4A.2 records
 where a vector for this form can come from: only from a transaction the
 Radiant network accepted, never from Radiant-Core's test suite.
 
-**D4.** *The two-reference question, recorded as open.* This chapter
+**D4.** *The two-reference question.* **Closed 2026-10-25.** R58.4A.5
+answered the question (one inter-designation difference, no netid
+dimension) and the matrix has been carried into §58.6's opening note as
+the implemented tests' expectations, which is the bookkeeping the final
+paragraph of this item said remained. The item's text is retained below
+for the record. *(Original text, as recorded open.)* This chapter
 binds its configuration contract (§58.2), its change scope (R58.5.2) and
 its tests (§58.6) with no reference-designation and no netid dimension
 anywhere. R58.2.1's accepted value set and R58.2.2's silent fallback are
@@ -695,6 +900,25 @@ of this item is bookkeeping, not an open question — carrying that
 finding into §58.6 when R58.5.2 is implemented — and the item closes
 together with D1 at that point.
 
+**D5.** *Fail early on the four fatal cases of R58.3.3 (make the walk
+fatal).* **Open; owner §58.3; not a beta item.** The implementation's
+reference walk is tolerant where Radiant-Core's is fatal (R58.3.3,
+as-built divergence note). The follow-up is to make the Radiant dialect's
+signature-hash computation fallible and to return a typed error — never a
+digest — when an output script in scope has an undecodable opcode or a
+truncated operand, a disallowed reference that is also pushed, more than
+one state separator, or a data-carrier opcode preceding a state
+separator; and to invert T6's truncation clause and add the other three
+cases to it. The reason this is deferred rather than fixed with R58.5.2:
+it changes the signing substrate's error surface (today the dialect
+routines are infallible and the signing sites assume as much), which is a
+fourth change outside R58.5.2's three, and its only reachable effect is
+to replace "signs a transaction the network rejects" with "refuses to
+sign it" for a caller-supplied script through the raw-transaction
+signing RPC. No funds-safety consequence hinges on it — the tolerant walk
+can never produce a signature that the network accepts over a different
+preimage — so it does not gate the beta.
+
 ## 58.8 Baseline Verifications
 
 **V1.** *Three signature versions at baseline.*
@@ -735,7 +959,17 @@ together with D1 at that point.
   Radiant project documentation (`https://radiantblockchain.org`): the
   authority for §58.3 — the inserted output-summaries field, the summary
   layout, the reference opcodes and their 36-byte operands, and the
-  reference-set de-duplication and ordering.
+  reference-set de-duplication and ordering. The file classes read for
+  the 2026-10-25 correction of R58.3.3: the script library (the
+  reference-collecting walk and the opcode table), the transaction
+  primitive header (the per-output summary writer and the
+  output-summaries digest, also used by the version-3 identifier
+  preimage), and the script interpreter (the signature-hash preimage and
+  the evaluator's error handling).
+- Two Radiant mainnet transactions (T3 vectors 1 and 2, identified in
+  §58.6), fetched on 2026-10-25 from a Radiant Electrum server listed in
+  the shipped coins registry: public-network observations under
+  chapter 01 R6.
 - The public third-party coins-configuration file: the Radiant entry's
   `signature_version` and `fork_id` values, the absence of any other
   Radiant-specific key, and the deployed value sets of
