@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
+  `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
+  left a formatting-only diff in every worktree. The file is git-ignored and `prost-build` runs with
+  its `format` feature, producing the same text the repository used to carry. No runtime change.
+  Detail: PR #TBD.
 - **The initial swap gas-fee policy no longer depends on how the coin was activated, and a coin's
   `max_eth_tx_type` now caps the transaction type it will sign.** The legacy `enable` / `electrum`
   route resolves the policy the way the other routes do — the `swap_gas_fee_policy` request field,
