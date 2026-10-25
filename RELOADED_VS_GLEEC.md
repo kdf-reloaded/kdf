@@ -371,9 +371,10 @@ R46.2.4, ch.55 R55.4.6):
   value. With the switch on, Reloaded still logs one warning per activation
   naming the key, the value and the default it fell back to, which GLEEC KDF
   does not. Today only a UTXO coin's `signature_version` (accepted values
-  `base`, `witness_v0`, `fork_id`) reads it; a coin carrying any other value,
-  such as RXD's shipped `fork_id_rxd`, cannot activate under the default and
-  would sign with a sighash algorithm the network rejects if the switch is on.
+  `base`, `witness_v0`, `fork_id`, `fork_id_rxd`) reads it; a coin carrying
+  any other value cannot activate under the default and would sign with a
+  sighash algorithm the network rejects if the switch is on. RXD's shipped
+  `fork_id_rxd` is recognised and activates under either setting.
   Only the boolean `true` turns it on. A malformed or non-string `fork_id` is
   not an enumeration member and fails under either setting. No wire format and
   no other node is affected. **Compatibility:** for behaviour matching GLEEC KDF,
