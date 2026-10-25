@@ -66,7 +66,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   is kept. An unrecognized value fails the coin's activation; with the key absent nothing changes.
   The registry maintainer adds the key to the `RIC` and `MEWC` entries (`"riecoin"` and
   `"kawpow_auxpow_mixed"`); other implementations ignore it. The header-sync (SPV) and header-store
-  paths still read standard headers. Detail: PR #TBD; CRD ch.37 §37.5.9.
+  paths still read standard headers. Detail: PR #62; CRD ch.37 §37.5.9.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
