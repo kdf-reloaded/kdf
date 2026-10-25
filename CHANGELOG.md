@@ -36,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **The README now explains why the project exists.** Upstream's license added conditions on the
+  trading-fee code, its default network since v3.0 charges a 2% fee, and v3.0 refuses to start on
+  network 8762; KDF Reloaded keeps both networks usable. See also
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md),
+  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) and [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
+  Detail: PR #57.
 - **A UTXO coin's header layout now reaches every header read, and `protocol.chain_variant` is honored for
   the first time.** The key is read from the coin's entry (eight values; an unrecognized one fails the
   coin's activation naming the ticker and value), and the coin's layout (`header_layout`, else
@@ -255,11 +261,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
 - [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — the
-  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50).
+  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50). The test harness for the locked-notes check landed
+  (PR #71); the only open item is two daemon instances sharing one wallet.
 - [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — the reorg-wedge fix
-  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42).
+  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42);
+  endpoints that have stopped following the chain are now excluded (PR #51); and activation warns
+  when the default recent scan window applies (PR #61).
 - [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — the rustls, webpki, ring
-  and tungstenite rows cleared, and the advisory ledger is green (PRs #37–#40, #42, #44).
+  and tungstenite rows cleared, and the advisory ledger is green with one dated acceptance, the
+  `crypto-bigint` timing advisory RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68).
 - [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — superseded: the fork
   bump it proposed gave way to a `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 (PR #40).
 - [`secp256k1-migration`](docs/plans/secp256k1-migration.md) — its last follow-up closed: the real
@@ -267,17 +277,21 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`clippy-ci-gate`](docs/plans/clippy-ci-gate.md) — the gate shipped; the vendor-filter follow-up
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
-  EVM tests ported to a scripted local node (PR #30).
+  EVM tests ported to a scripted local node (PR #30); tests against a local `geth` node now run in
+  CI (PR #53).
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
   two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
-- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
-  discharged most of its chain-rule confirmation step, leaving three of the four open items and
-  two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — Riecoin and
+  Meowcoin swaps now complete: a per-coin `header_layout` key and a fallback switch landed (PRs
+  #62, #67), and the layout reaches every header read (PR #74). The AuxPoW coins also left the set
   whose median-time-past errors (PR #55).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
   ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
   pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
   `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
+- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — its substance shipped: the
+  minimum trading volume now matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins
+  (PR #66).
 
 ### Known limitations
 
