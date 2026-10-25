@@ -398,7 +398,7 @@ floor is a maintainer decision (chapter 60 D60.2).
 > **Clean-side correction (2026-10-25).** The miner fee above was first
 > given as 0.02 SC, the figure in the `sia-rust` constant's own comment.
 > The constant is 2 × 10^19 hastings, which is 0.00002 SC. The text now
-> says so. **As built in PR #TBD:** the legacy refund and the version-two
+> says so. **As built in PR #73:** the legacy refund and the version-two
 > spends and refund refuse a value not above the fee with an orderly error.
 
 > **Binding scope (R36).** This section binds swap *behaviour*

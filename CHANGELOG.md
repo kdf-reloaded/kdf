@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   miner fee plus one hasting. The refusal is the usual volume-too-low error, with that amount as the
   threshold. Example: BTC at 0.0001 when the fee is high. The minimum volume an order advertises does
   not change, and peers see nothing new. Set the `MM2.json` boolean `pre_trade_spend_check` to `false`
-  to restore GLEEC KDF behaviour, with no check. Detail: PR #TBD; CRD ch.60 R60.6.7.
+  to restore GLEEC KDF behaviour, with no check. Detail: PR #73; CRD ch.60 R60.6.7.
 
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
   window applies.** It names the start height and window size, notes that earlier funds will not be
@@ -126,7 +126,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value
   wrapped and the coin daemon rejected the transaction. They now fail with an error and broadcast
   nothing. The same holds for the ZHTLC transparent spend and for Sia, where the fixed miner fee is
-  0.00002 SC. The version-two funding spend now also requires the fee plus dust. Detail: PR #TBD;
+  0.00002 SC. The version-two funding spend now also requires the fee plus dust. Detail: PR #73;
   CRD ch.60 R60.6.4.
 
 - **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum

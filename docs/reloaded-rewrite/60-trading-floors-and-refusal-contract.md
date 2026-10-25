@@ -457,7 +457,7 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    > accepts these orders, and the swap then fails in the coin layer.
 
 > **As-built note (2026-10-25, clean-side record).** R60.6.4 and R60.6.7
-> are implemented in PR #TBD, together with T60.5 and T60.6. The UTXO
+> are implemented in PR #73, together with T60.5 and T60.6. The UTXO
 > legacy and version-two spends and refunds, the ZHTLC transparent spend
 > and the Sia spends and refund refuse a value not above the fee without
 > broadcasting. The version-two funding spend requires fee plus dust. The

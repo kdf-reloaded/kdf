@@ -698,7 +698,7 @@ this value for every family that can swap.
   ch. 60 finding F4).** Implemented in PR #72. Reloaded estimates over 305 bytes with whole-kB
   rounding; the reference uses 496 bytes under the R38.6.6b rule. The
   peer never validates this figure; the cost is overpayment.
-- [x] **Unchecked spend arithmetic (ch. 60 R60.6.4, finding F3).** Implemented in PR #TBD.
+- [x] **Unchecked spend arithmetic (ch. 60 R60.6.4, finding F3).** Implemented in PR #73.
   Reloaded's legacy spend and refund builders, and its version-two
   maker-payment spend and refund builder, subtract the fee without
   checking it. A fee that reaches the HTLC value then wraps and the
@@ -708,7 +708,7 @@ this value for every family that can swap.
   are placeholders that end the request abnormally. Required: the
   reference value, or an orderly refusal while Lightning trading is
   unsupported.
-- [x] **Sia spend below the fixed miner fee (ch. 20 R-S11, finding F2).** Implemented in PR #TBD, with the pre-trade check of ch. 60 R60.6.7.
+- [x] **Sia spend below the fixed miner fee (ch. 20 R-S11, finding F2).** Implemented in PR #73, with the pre-trade check of ch. 60 R60.6.7.
   In both trees and in reloaded, the Sia floors are one hasting while every
   HTLC spend or refund deducts 0.00002 SC. Required in reloaded: an orderly
   refusal. The Sia floor stays at parity; the pre-trade check of ch. 60
