@@ -11,7 +11,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
 use super::{derive_htlc_pubkeys, select_secret_hash_algo, validate_wire_pubkey};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{untradable_coin_ticker, MakerOrderBuilder, OrderConfirmationsSettings};
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MakerOrderBuilder,
+                                OrderConfirmationsSettings};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
 use coins::{CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions, TradeFee,
@@ -2191,6 +2192,11 @@ pub async fn maker_swap_trade_preimage(
     if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
         return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
     }
+    // CRD ch.60 R60.6.7 item 3: the preview applies the pre-trade spend-safety check of an order with the
+    // default minimum volume, as the order the preview describes would carry.
+    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, None, &req.price)
+        .await
+        .map_to_mm(TradePreimageRpcError::from)?;
     let base_coin_ticker = base_coin.ticker();
     let rel_coin_ticker = rel_coin.ticker();
     let volume = if req.max {

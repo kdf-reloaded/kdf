@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
+  `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
+  or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
+  miner fee plus one hasting. The refusal is the usual volume-too-low error, with that amount as the
+  threshold. Example: BTC at 0.0001 when the fee is high. The minimum volume an order advertises does
+  not change, and peers see nothing new. Set the `MM2.json` boolean `pre_trade_spend_check` to `false`
+  to restore GLEEC KDF behaviour, with no check. Detail: PR #73; CRD ch.60 R60.6.7.
+
 - **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
   wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
   Any positive fee is accepted, including one below the estimate; whether the network relays such a
@@ -136,6 +144,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   configuration). Detail: PR #64.
 
 ### Fixed
+
+- **A swap spend or refund whose fee would exceed the payment is now refused instead of broadcast
+  as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value
+  wrapped and the coin daemon rejected the transaction. They now fail with an error and broadcast
+  nothing. The same holds for the ZHTLC transparent spend and for Sia, where the fixed miner fee is
+  0.00002 SC. The version-two funding spend now also requires the fee plus dust. Detail: PR #73;
+  CRD ch.60 R60.6.4.
 
 - **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum
   trading volume was 10^-(decimals / 3) with integer division, so every 8-decimal token refused a

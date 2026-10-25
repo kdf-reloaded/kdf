@@ -383,7 +383,7 @@ Dirty Gate with chapter 60 on 2026-10-25).** Sia's minimum trading volume and
 minimum transaction amount are both one hasting (10^-24 SC) in both
 reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree) and in
 reloaded. Every Sia HTLC spend and refund deducts a fixed miner fee of
-0.02 SC from the HTLC value in both trees, so a Sia payment of 0.02 SC or
+0.00002 SC from the HTLC value in both trees, so a Sia payment of 0.00002 SC or
 less, which every order builder accepts, can be neither spent nor
 refunded; the module MUST refuse such a spend or refund with an orderly
 error rather than build it ([Chapter 60](60-trading-floors-and-refusal-contract.md)
@@ -394,6 +394,12 @@ floor is a maintainer decision (chapter 60 D60.2).
 > the Sia floors at parity and chose chapter 60's local pre-trade check
 > (R60.6.7), which refuses an order of this node's own whose Sia leg does
 > not exceed the miner fee; chapter 60 D60.2 records the decision.
+>
+> **Clean-side correction (2026-10-25).** The miner fee above was first
+> given as 0.02 SC, the figure in the `sia-rust` constant's own comment.
+> The constant is 2 × 10^19 hastings, which is 0.00002 SC. The text now
+> says so. **As built in PR #73:** the legacy refund and the version-two
+> spends and refund refuse a value not above the fee with an orderly error.
 
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method

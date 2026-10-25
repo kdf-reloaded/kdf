@@ -69,4 +69,7 @@
   explicit `UtxoFixed` withdraw fee keeps its per-started-kilobyte meaning,
   since no chapter covers it. Swaplab live tests are pending a dedicated
   swaplab session.
-- 3: not started.
+- 3: spend safety implemented on `fix/spend-safety` (PR #73), stacked on PR
+  #72: R60.6.4 and R60.6.7 with the switch `pre_trade_spend_check`. The Sia
+  miner fee turned out to be 0.00002 SC, not 0.02 SC as the chapter first
+  said; the chapter is corrected.

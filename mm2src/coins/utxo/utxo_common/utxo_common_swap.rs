@@ -1,6 +1,7 @@
 // utxo_common_swap — HTLC/swap operations, payment scripts, validation
 
 use super::*;
+use crate::SpendSafeAmountError;
 use kdf_crypto::ripemd160;
 use primitives::hash::H160;
 
@@ -30,6 +31,34 @@ pub async fn get_htlc_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> Utx
         }
     }
     Ok(fee)
+}
+
+/// CRD ch.60 R60.6.4, ch.38 R38.6.6c: the value of the single output of an HTLC spend or refund, that is
+/// the HTLC value minus the spend `fee`. A spend whose fee is not smaller than the HTLC value is refused
+/// with an orderly error, before anything is built or broadcast.
+fn htlc_spend_output_value(htlc_value: u64, fee: u64) -> Result<u64, TransactionErr> {
+    if fee >= htlc_value {
+        return TX_PLAIN_ERR!(
+            "HTLC spend fee {} is not smaller than the HTLC value {}, refusing to spend",
+            fee,
+            htlc_value
+        );
+    }
+    Ok(htlc_value - fee)
+}
+
+/// CRD ch.60 R60.6.7 item 2: the safe amount of a UTXO-family coin, that is the R38.6.6c HTLC spend-fee estimate
+/// under the coin's fee policy at the moment of the call plus the coin's dust (R38.6.6d).
+pub async fn spend_safe_amount<T: UtxoCommonOps>(coin: &T) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
+    let fee = get_htlc_spend_fee(coin, DEFAULT_SWAP_TX_SPEND_SIZE)
+        .await
+        .mm_err(|e| SpendSafeAmountError::EstimateUnavailable(e.to_string()))?;
+    let safe_amount = fee
+        .checked_add(coin.as_ref().dust_amount)
+        .or_mm_err(|| SpendSafeAmountError::EstimateUnavailable(format!("spend fee {fee} plus dust overflows")))?;
+    Ok(Some(
+        big_decimal_from_sat_unsigned(safe_amount, coin.as_ref().decimals).into(),
+    ))
 }
 
 /// CRD ch.16 R14A: the version-two funding-spend / taker-payment-spend spend-fee estimate `S`.
@@ -247,7 +276,7 @@ pub fn send_maker_spends_taker_payment<T: UtxoCommonOps>(
         let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
-            value: prev_tx.outputs[0].value - fee,
+            value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
             script_pubkey,
         };
 
@@ -319,7 +348,7 @@ pub fn send_taker_spends_maker_payment<T: UtxoCommonOps>(
         let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
-            value: prev_tx.outputs[0].value - fee,
+            value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
             script_pubkey,
         };
 
@@ -389,7 +418,7 @@ pub fn send_taker_refunds_payment<T: UtxoCommonOps>(
         let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
-            value: prev_tx.outputs[0].value - fee,
+            value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
             script_pubkey,
         };
 
@@ -458,7 +487,7 @@ pub fn send_maker_refunds_payment<T: UtxoCommonOps>(
         let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
         let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
         let output = TransactionOutput {
-            value: prev_tx.outputs[0].value - fee,
+            value: htlc_spend_output_value(prev_tx.outputs[0].value, fee)?,
             script_pubkey,
         };
 
@@ -1578,7 +1607,7 @@ where
 
 /// Common spend-path machinery shared by §15.4.3 / §15.4.4 / §15.4.5: build a
 /// P2SH spending tx with the supplied `script_data` selector and broadcast it.
-async fn build_and_broadcast_maker_v2_spend<T>(
+pub(crate) async fn build_and_broadcast_maker_v2_spend<T>(
     coin: &T,
     prev_tx_bytes: &[u8],
     redeem: Script,
@@ -1610,7 +1639,7 @@ where
     let fee = try_tx_s!(coin.get_htlc_spend_fee(DEFAULT_SWAP_TX_SPEND_SIZE).await);
     let script_pubkey = output_script(&my_address, ScriptType::P2PKH).to_bytes();
     let output = TransactionOutput {
-        value: prev_tx.outputs[DEFAULT_SWAP_VOUT].value - fee,
+        value: htlc_spend_output_value(prev_tx.outputs[DEFAULT_SWAP_VOUT].value, fee)?,
         script_pubkey,
     };
 
@@ -2007,7 +2036,11 @@ pub(crate) fn build_funding_spend_preimage_tx(
         .outputs
         .get(DEFAULT_SWAP_VOUT)
         .ok_or_else(|| TxGenError::PrevTxIsNotValid("funding tx has no output 0".to_string()))?;
-    if funding_output.value <= fee {
+    // CRD ch.15 R21 step 2, ch.60 R60.6.4: the funding value must be at least the spend fee plus the coin's dust.
+    let min_funding_value = fee
+        .checked_add(fields.dust_amount)
+        .ok_or(TxGenError::PrevOutputTooLow)?;
+    if funding_output.value < min_funding_value {
         return Err(TxGenError::PrevOutputTooLow);
     }
     let output = TransactionOutput {

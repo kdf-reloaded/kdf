@@ -6745,6 +6745,208 @@ mod header_layout_fallback_tests {
     }
 }
 
+/// CRD ch.60 T60.5, R60.6.4 and finding F3: every UTXO HTLC spend and refund builder refuses, without building
+/// or broadcasting, when the spend fee is not smaller than the HTLC value.
+#[cfg(not(target_arch = "wasm32"))]
+mod spend_refusal_tests {
+    use super::*;
+    use crate::utxo::utxo_common::{build_and_broadcast_maker_v2_spend, build_funding_spend_preimage_tx,
+                                   DEFAULT_SWAP_TX_SPEND_SIZE};
+    use crate::{SwapOps, TransactionErr};
+    use serialization::serialize;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    const SPEND_FEE: u64 = 496;
+    const REFUSAL: &str = "is not smaller than the HTLC value";
+
+    fn payment_tx_bytes(value: u64) -> Vec<u8> {
+        let mut tx = UtxoTx::default();
+        tx.outputs.push(TransactionOutput {
+            value,
+            script_pubkey: vec![0xa9; 23].into(),
+        });
+        serialize(&tx).take()
+    }
+
+    /// A KMD-like coin whose fixed policy makes the R38.6.6c spend fee 496, with `p2sh_spending_tx` mocked to
+    /// record that a spend was built and to fail, so that no test touches the network.
+    fn coin_with_spend_probe() -> (UtxoStandardCoin, Arc<AtomicBool>) {
+        UtxoStandardCoin::get_tx_fee
+            .mock_safe(|_| MockResult::Return(Box::pin(futures::future::ok(ActualTxFee::FixedPerKb(1000)))));
+        let built = Arc::new(AtomicBool::new(false));
+        let built_in_mock = built.clone();
+        UtxoStandardCoin::p2sh_spending_tx.mock_safe(move |_, _, _, _, _, _, _, _| {
+            built_in_mock.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::pin(futures::future::err(
+                "mocked: the spend would be built".to_owned(),
+            )))
+        });
+        (floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8), built)
+    }
+
+    fn assert_refused(result: Result<TransactionEnum, TransactionErr>, built: &AtomicBool, what: &str) {
+        match result {
+            Err(TransactionErr::Plain(msg)) => assert!(msg.contains(REFUSAL), "{what}: unexpected refusal: {msg}"),
+            other => panic!("{what}: expected an orderly refusal, got {other:?}"),
+        }
+        assert!(
+            !built.load(Ordering::SeqCst),
+            "{what}: a refused spend must not be built"
+        );
+    }
+
+    fn assert_reaches_builder(result: Result<TransactionEnum, TransactionErr>, built: &AtomicBool, what: &str) {
+        match result {
+            Err(TransactionErr::Plain(msg)) => assert!(!msg.contains(REFUSAL), "{what}: refused: {msg}"),
+            other => panic!("{what}: expected the mocked builder failure, got {other:?}"),
+        }
+        assert!(
+            built.load(Ordering::SeqCst),
+            "{what}: a spend above the fee must be built"
+        );
+    }
+
+    #[test]
+    fn t60_5_legacy_spends_and_refunds_refuse_a_value_not_above_the_fee() {
+        assert_eq!(DEFAULT_SWAP_TX_SPEND_SIZE, 496);
+        let other_pub = key_pair_from_seed("t60.5 counterparty").unwrap().public().to_vec();
+        let privkey = key_pair_from_seed("t60.5 mine").unwrap().private().secret.to_vec();
+        let secret = [7u8; 32];
+        let secret_hash = [8u8; 20];
+
+        type Spend = fn(&UtxoStandardCoin, &[u8], &[u8], &[u8], &[u8], &[u8]) -> crate::TransactionFut;
+        let cases: [(&str, Spend); 4] = [
+            ("taker spends maker payment", |c, tx, pubkey, secret, _hash, key| {
+                c.send_taker_spends_maker_payment(tx, 100, pubkey, secret, key, &None)
+            }),
+            ("maker spends taker payment", |c, tx, pubkey, secret, _hash, key| {
+                c.send_maker_spends_taker_payment(tx, 100, pubkey, secret, key, &None)
+            }),
+            ("taker refunds payment", |c, tx, pubkey, _secret, hash, key| {
+                c.send_taker_refunds_payment(tx, 100, pubkey, hash, key, &None)
+            }),
+            ("maker refunds payment", |c, tx, pubkey, _secret, hash, key| {
+                c.send_maker_refunds_payment(tx, 100, pubkey, hash, key, &None)
+            }),
+        ];
+        for (what, spend) in cases {
+            for value in [SPEND_FEE - 1, SPEND_FEE] {
+                let (coin, built) = coin_with_spend_probe();
+                let result = spend(
+                    &coin,
+                    &payment_tx_bytes(value),
+                    &other_pub,
+                    &secret,
+                    &secret_hash,
+                    &privkey,
+                )
+                .wait();
+                assert_refused(result, &built, &format!("{what} at {value}"));
+            }
+            let (coin, built) = coin_with_spend_probe();
+            let result = spend(
+                &coin,
+                &payment_tx_bytes(SPEND_FEE + 1),
+                &other_pub,
+                &secret,
+                &secret_hash,
+                &privkey,
+            )
+            .wait();
+            assert_reaches_builder(result, &built, &format!("{what} at {}", SPEND_FEE + 1));
+        }
+    }
+
+    /// T60.6 (a), (c) and R60.6.7 item 6: the UTXO safe amount is the R38.6.6c spend-fee estimate at the moment of
+    /// the call plus the dust; an unavailable estimate is a typed error, not a placeholder.
+    #[test]
+    fn t60_6_utxo_safe_amount_is_the_spend_fee_plus_dust() {
+        use crate::{MmCoin, SpendSafeAmountError};
+        let cases = [
+            // (a) dynamic rate 20,000, dust 1,000: 9,920 + 1,000.
+            (ActualTxFee::Dynamic(20_000), 1_000, "0.0001092"),
+            // (c) KMD, plain fixed 1,000: 496 + 1,000.
+            (ActualTxFee::FixedPerKb(1_000), 1_000, "0.00001496"),
+            (ActualTxFee::FixedPerStartedKb(1_000), 1_000, "0.00002"),
+        ];
+        for (policy, dust, expected) in cases {
+            UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+            let coin = floor_test_coin("KMD", TxFee::FixedPerKb(1000), dust, 8);
+            let safe = block_on(coin.spend_safe_amount()).unwrap();
+            assert_eq!(safe, Some(MmNumber::from(expected)), "{policy:?}");
+        }
+
+        UtxoStandardCoin::get_tx_fee.mock_safe(|_| {
+            MockResult::Return(Box::pin(futures::future::err(
+                UtxoRpcError::Internal("no estimate".to_owned()).into(),
+            )))
+        });
+        let coin = floor_test_coin("BTC", TxFee::Dynamic(EstimateFeeMethod::Standard), 1000, 8);
+        assert!(matches!(
+            block_on(coin.spend_safe_amount()).map_err(|e| e.into_inner()),
+            Err(SpendSafeAmountError::EstimateUnavailable(_))
+        ));
+    }
+
+    /// The version-two maker-payment spend and refund builders share one helper.
+    #[test]
+    fn t60_5_v2_maker_payment_spend_refuses_a_value_not_above_the_fee() {
+        let kp = key_pair_from_seed("t60.5 v2").unwrap();
+        for value in [SPEND_FEE - 1, SPEND_FEE] {
+            let (coin, built) = coin_with_spend_probe();
+            let result = block_on(build_and_broadcast_maker_v2_spend(
+                &coin,
+                &payment_tx_bytes(value),
+                Script::new(Bytes::new()),
+                Script::new(Bytes::new()),
+                0,
+                0,
+                &kp,
+            ))
+            .map(TransactionEnum::from);
+            assert_refused(result, &built, &format!("v2 maker payment spend at {value}"));
+        }
+        let (coin, built) = coin_with_spend_probe();
+        let result = block_on(build_and_broadcast_maker_v2_spend(
+            &coin,
+            &payment_tx_bytes(SPEND_FEE + 1),
+            Script::new(Bytes::new()),
+            Script::new(Bytes::new()),
+            0,
+            0,
+            &kp,
+        ))
+        .map(TransactionEnum::from);
+        assert_reaches_builder(result, &built, "v2 maker payment spend above the fee");
+    }
+
+    /// CRD ch.15 R21 step 2: the funding value shall be at least the spend fee plus the coin's dust.
+    #[test]
+    fn t60_5_v2_funding_spend_requires_fee_plus_dust() {
+        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        let dust = fields.dust_amount;
+        assert_eq!(dust, 1000);
+        let redeem = Script::new(Bytes::new());
+        let funding_with = |value: u64| {
+            let mut tx = UtxoTx::default();
+            tx.outputs.push(TransactionOutput {
+                value,
+                script_pubkey: vec![0xaa; 23].into(),
+            });
+            tx
+        };
+        let at_minimum = SPEND_FEE + dust;
+        assert!(matches!(
+            build_funding_spend_preimage_tx(&fields, &funding_with(at_minimum - 1), &redeem, SPEND_FEE),
+            Err(crate::TxGenError::PrevOutputTooLow)
+        ));
+        let signer = build_funding_spend_preimage_tx(&fields, &funding_with(at_minimum), &redeem, SPEND_FEE)
+            .expect("fee plus dust is enough");
+        assert_eq!(signer.outputs[0].value, dust);
+    }
+}
+
 // ---- the layout on every header read path (CRD ch.37 R37.5.1a, R37.5.9a, R37.5.9e) ---------------
 
 /// Plumbing coverage: each production read path is driven with a Riecoin and a mixed Meowcoin

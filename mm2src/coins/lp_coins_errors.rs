@@ -73,6 +73,14 @@ pub enum UnexpectedDerivationMethod {
     #[display(fmt = "HD wallet is unavailable")]
     HDWalletUnavailable,
 }
+/// CRD ch.60 R60.6.7 item 6: the safe amount of a coin could not be computed because a dynamic-fee estimate
+/// was unavailable. No placeholder estimate is substituted.
+#[derive(Debug, Display)]
+pub enum SpendSafeAmountError {
+    #[display(fmt = "The HTLC spend fee estimate is unavailable: {}", _0)]
+    EstimateUnavailable(String),
+}
+
 #[derive(Debug, Display)]
 pub enum TradePreimageError {
     #[display(

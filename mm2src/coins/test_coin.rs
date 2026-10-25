@@ -1,5 +1,6 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, RawTransactionFut, RawTransactionRequest, SwapOps,
             TradeFee, TransactionEnum, TransactionFut};
+use crate::SpendSafeAmountError;
 use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, SignatureResult,
             TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
             ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult, WatcherOps, WithdrawFut,
@@ -267,6 +268,8 @@ impl MmCoin for TestCoin {
     ) -> TradePreimageResult<TradeFee> {
         unimplemented!()
     }
+
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> { Ok(None) }
 
     fn get_receiver_trade_fee(&self, stage: FeeApproxStage) -> TradePreimageFut<TradeFee> { unimplemented!() }
 

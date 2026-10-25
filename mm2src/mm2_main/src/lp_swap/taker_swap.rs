@@ -11,8 +11,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
 use super::{derive_htlc_pubkeys, validate_wire_field_len, validate_wire_pubkey};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{untradable_coin_ticker, MatchBy, OrderConfirmationsSettings, TakerAction,
-                                TakerOrderBuilder};
+use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MatchBy,
+                                OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
@@ -2291,6 +2291,12 @@ pub async fn taker_swap_trade_preimage(
         });
     }
 
+    // CRD ch.60 R60.6.7 item 3: the preview applies the pre-trade spend-safety check of an order with the
+    // default minimum volume, as the order the preview describes would carry.
+    check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, None, &req.price)
+        .await
+        .map_to_mm(TradePreimageRpcError::from)?;
+
     let base_amount = req.volume.clone();
     let rel_amount = &req.price * &req.volume;
 
@@ -3503,5 +3509,64 @@ mod ch57_min_trading_vol_tests {
         let max_vol = max_taker_vol_from_available(net_cfg, available.clone(), "WBTC8", "REL", &MmNumber::from(0))
             .unwrap_or_else(|_| panic!("max taker volume must be computable"));
         assert_eq!(max_vol, available / (MmNumber::from(1) + rate));
+    }
+}
+
+/// CRD ch.60 T60.6 (d): both `trade_preimage` previews report the pre-trade spend-safety refusal with the same
+/// threshold as the order paths. `TestCoin` reports the safe amount, so no network is needed; the check runs
+/// before any balance or fee lookup.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod t60_6_trade_preimage_tests {
+    use super::*;
+    use crate::mm2::lp_swap::maker_swap::maker_swap_trade_preimage;
+    use crate::mm2::lp_swap::trade_preimage::{TradePreimageRequest, TradePreimageRpcError};
+    use coins::{MarketCoinOps, MmCoin, SpendSafeAmountError, TestCoin};
+    use common::block_on;
+    use common::mm_number::BigRational;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use mocktopus::mocking::*;
+
+    fn units_8(units: i64) -> MmNumber { MmNumber::from(BigRational::new(units.into(), 100_000_000.into())) }
+
+    /// `DYN` is the dynamic-fee coin of T60.6 (a) with S = 0.0001092; `KMD` is covered with S = 0.00001496.
+    fn mock_coins() {
+        TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+        TestCoin::spend_safe_amount.mock_safe(|coin| {
+            let safe: Option<MmNumber> = match coin.ticker() {
+                "DYN" => Some(units_8(10_920)),
+                "KMD" => Some(units_8(1_496)),
+                _ => None,
+            };
+            MockResult::Return(Box::pin(async move { Ok::<_, MmError<SpendSafeAmountError>>(safe) }))
+        });
+    }
+
+    #[test]
+    fn t60_6_d_both_previews_report_the_same_refusal() {
+        mock_coins();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        for method in ["setprice", "sell", "buy"] {
+            let base = MmCoinEnum::Test(TestCoin::new("DYN"));
+            let rel = MmCoinEnum::Test(TestCoin::new("KMD"));
+            let req: TradePreimageRequest = json::from_value(json!({
+                "base": "DYN", "rel": "KMD", "swap_method": method, "price": "1", "volume": "1"
+            }))
+            .unwrap();
+            let err = if method == "setprice" {
+                block_on(maker_swap_trade_preimage(&ctx, req, base, rel)).err()
+            } else {
+                block_on(taker_swap_trade_preimage(&ctx, req, base, rel)).err()
+            };
+            match err.map(MmError::into_inner) {
+                Some(TradePreimageRpcError::VolumeTooLow { coin, threshold, .. }) => {
+                    assert_eq!(coin, "DYN", "{method}");
+                    assert_eq!(MmNumber::from(threshold), MmNumber::from("0.0001092"), "{method}");
+                },
+                other => panic!(
+                    "{method}: expected VolumeTooLow, got {:?}",
+                    other.map(|e| e.to_string())
+                ),
+            }
+        }
     }
 }

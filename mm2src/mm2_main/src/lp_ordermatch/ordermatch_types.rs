@@ -176,6 +176,80 @@ fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
 #[cfg(target_arch = "wasm32")]
 fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
 
+/// CRD ch.60 R60.6.7 item 7: the MM2.json boolean `pre_trade_spend_check`, default `true`. Only an explicit
+/// JSON `false` turns the pre-trade spend-safety check off, which is the reference behaviour.
+pub(crate) fn pre_trade_spend_check_enabled(ctx: &MmArc) -> bool {
+    ctx.conf["pre_trade_spend_check"].as_bool() != Some(false)
+}
+
+/// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
+#[derive(Debug, Display)]
+pub(crate) enum SpendSafetyError {
+    /// A covered leg of the smallest trade the order can produce is below the coin's safe amount.
+    #[display(
+        fmt = "The volume {} of the {} coin is too low, required at least {}: a payment of that size could not be spent or refunded",
+        volume,
+        coin,
+        threshold
+    )]
+    VolumeTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The dynamic-fee estimate of a covered coin could not be obtained.
+    #[display(fmt = "Cannot check the {} coin spend safety: {}", coin, error)]
+    EstimateUnavailable { coin: String, error: String },
+}
+
+/// CRD ch.60 R60.6.7 items 2 to 6: the pre-trade spend-safety check of an order of this node's own.
+///
+/// The smallest trade the order can produce is its minimum volume of the base coin and that volume times
+/// `price` of the rel coin; each covered leg shall be at least that coin's safe amount. `min_base_vol` is the
+/// operator-set minimum volume, `None` for the default of R60.4.2 step 3, which is never raised by this check.
+/// An order the order builder refuses anyway (price below the minimum, operator-set minimum below the default)
+/// is left to the builder, whose refusals precede this one.
+pub(crate) async fn check_pre_trade_spend_safety(
+    ctx: &MmArc,
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    min_base_vol: Option<MmNumber>,
+    price: &MmNumber,
+) -> Result<(), SpendSafetyError> {
+    if !pre_trade_spend_check_enabled(ctx) || validate_price(price.clone()).is_err() {
+        return Ok(());
+    }
+    let min_base_vol = match validate_and_get_min_vol(
+        base_coin.min_trading_vol(),
+        rel_coin.min_trading_vol(),
+        min_base_vol,
+        price.clone(),
+    ) {
+        Ok(min_base_vol) => min_base_vol,
+        Err(_) => return Ok(()),
+    };
+    let rel_vol = &min_base_vol * price;
+    for (coin, volume) in [(base_coin, min_base_vol), (rel_coin, rel_vol)] {
+        let safe_amount = coin
+            .spend_safe_amount()
+            .await
+            .map_err(|e| SpendSafetyError::EstimateUnavailable {
+                coin: coin.ticker().to_owned(),
+                error: e.to_string(),
+            })?;
+        if let Some(safe_amount) = safe_amount {
+            if volume < safe_amount {
+                return Err(SpendSafetyError::VolumeTooLow {
+                    coin: coin.ticker().to_owned(),
+                    volume: volume.to_decimal(),
+                    threshold: safe_amount.to_decimal(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub enum TakerOrderBuildError {
     BaseEqualRel,
     /// Base amount too low with threshold
