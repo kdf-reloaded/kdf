@@ -55,6 +55,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum
+  trading volume was 10^-(decimals / 3) with integer division, so every 8-decimal token refused a
+  buy, a sell, a maker order or a trade preview below 0.01 (`The volume 0.00072437 of the
+  WBTC-PLG20 coin less than minimum transaction amount 0.01`), and a maker that set no minimum
+  advertised 0.01 to its peers. It is now one smallest unit of the coin, 10^-decimals, matching the
+  reference; QRC20 tokens get the same fix. `min_trading_vol` reports the new value, and the
+  minimum transaction amount, which the DEX fee and maximum-volume paths use, stays zero. Detail:
+  PR #TBD; CRD ch.57 R57.7A.1, R57.7A.6.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
