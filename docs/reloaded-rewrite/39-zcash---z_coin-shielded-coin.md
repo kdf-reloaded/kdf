@@ -2076,6 +2076,24 @@ needs it most -- restoring a seed whose funds predate the recent window, where
 the discarded rescan is the only thing that would have found them and the
 balance simply stays at zero.
 
+R39.8.0aw When a shielded coin is activated without `sync_params` and the
+shielded scan start is decided by the default recent scan window -- because the
+wallet has no scanned state yet, or because the empty-wallet skip-forward of
+R39.8.0an applied -- the node shall log one warning for that activation. The
+warning names the ticker; states that no `sync_params` were supplied; gives the
+start height and the window size in blocks; states that funds received before
+that height will not be visible; and states that an existing wallet should be
+re-activated with `sync_params` (`{"height": N}`, `{"date": T}` or `"earliest"`)
+preceding its first funds. No warning is logged when `sync_params` were supplied,
+when `skip_sync_params` is set, when an already-scanned wallet resumes, or for the
+periodic post-activation top-up passes. The warning changes no behavior; the
+activation result's `first_sync_block` (R39.8.0h) remains the machine-readable
+signal.
+
+> **Provenance (informative).** R39.8.0aw is clean-room-original hardening written
+> without reference to the upstream implementation; it is not a parity item and
+> needed no Dirty Gate pass.
+
 > **Upstream parity position (informative).** The skip-forward rule above is
 > **unconstrained** by the reference: the reference has no counterpart to it.
 > The reference decides whether to re-resolve the default recent window from
