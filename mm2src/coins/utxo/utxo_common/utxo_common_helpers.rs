@@ -171,10 +171,20 @@ pub fn checked_address_from_str<T: UtxoCommonOps>(coin: &T, address: &str) -> Re
     Ok(addr)
 }
 
+/// The header layout to read for `conf`'s coin: the one its Reloaded-only `reloaded_header_layout`
+/// key selects when present (CRD ch.37 R37.5.9a), else `default`.
+pub(crate) fn header_variant(conf: &UtxoCoinConf, default: CoinVariant) -> CoinVariant {
+    conf.reloaded_header_layout.unwrap_or(default)
+}
+
 pub async fn get_current_mtp(coin: &UtxoCoinFields, coin_variant: CoinVariant) -> UtxoRpcResult<u32> {
     let current_block = coin.rpc_client.get_block_count().compat().await?;
     coin.rpc_client
-        .get_median_time_past(current_block, coin.conf.mtp_block_count, coin_variant)
+        .get_median_time_past(
+            current_block,
+            coin.conf.mtp_block_count,
+            header_variant(&coin.conf, coin_variant),
+        )
         .compat()
         .await
 }

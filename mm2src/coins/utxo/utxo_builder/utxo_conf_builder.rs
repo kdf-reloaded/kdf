@@ -11,6 +11,7 @@ pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, Key
 use mm2_err_handle::prelude::*;
 use script::SignatureVersion;
 use serde_json::{self as json, Value as Json};
+use serialization::CoinVariant;
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
 
@@ -42,6 +43,15 @@ pub enum UtxoConfError {
     InvalidAddressFormat(String),
     InvalidSpvConf(String),
     InvalidDecimals(String),
+    #[display(
+        fmt = "{}: unrecognized 'protocol.reloaded_header_layout' value {}; expected \"riecoin\" or \"kawpow_auxpow_mixed\"",
+        ticker,
+        value
+    )]
+    InvalidReloadedHeaderLayout {
+        ticker: String,
+        value: String,
+    },
 }
 
 impl From<Bip32Error> for UtxoConfError {
@@ -99,6 +109,7 @@ impl<'a> UtxoConfBuilder<'a> {
         let estimate_fee_blocks = self.estimate_fee_blocks();
         let trezor_coin = self.trezor_coin();
         let enable_spv_proof = self.enable_spv_proof();
+        let reloaded_header_layout = self.reloaded_header_layout()?;
 
         Ok(UtxoCoinConf {
             ticker: self.ticker.to_owned(),
@@ -131,6 +142,7 @@ impl<'a> UtxoConfBuilder<'a> {
             estimate_fee_blocks,
             trezor_coin,
             enable_spv_proof,
+            reloaded_header_layout,
         })
     }
 
@@ -289,4 +301,27 @@ impl<'a> UtxoConfBuilder<'a> {
     }
 
     fn enable_spv_proof(&self) -> bool { self.conf["enable_spv_proof"].as_bool().unwrap_or(false) }
+
+    /// Reads the Reloaded-only `protocol.reloaded_header_layout` key (CRD ch.37 R37.5.9): from the
+    /// raw `protocol` object beside `type`, as a plain case-sensitive string, outside the typed
+    /// protocol descriptor. Absent means no effect; any present value that is not one of the closed
+    /// value set (including a non-string) fails the coin build and falls back to nothing.
+    ///
+    /// Precedence (R37.5.9a): the layout read here governs the coin's header reads over whatever
+    /// the version-inferred default selects. `chain_variant` is not read by this build yet
+    /// (ch.37 §37.5.8, D1 open), so there is nothing to override today; the precedence clause
+    /// becomes operative when D1 lands and `chain_variant` is read and validated beside this key.
+    fn reloaded_header_layout(&self) -> UtxoConfResult<Option<CoinVariant>> {
+        let Some(value) = self.conf["protocol"].get("reloaded_header_layout") else {
+            return Ok(None);
+        };
+        value
+            .as_str()
+            .and_then(CoinVariant::from_reloaded_header_layout)
+            .map(Some)
+            .or_mm_err(|| UtxoConfError::InvalidReloadedHeaderLayout {
+                ticker: self.ticker.to_owned(),
+                value: value.to_string(),
+            })
+    }
 }

@@ -76,7 +76,7 @@ use primitives::hash::{H256, H264};
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use script::{Builder, Opcode, Script, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
-use serialization::{serialize, serialize_with_flags, SERIALIZE_TRANSACTION_WITNESS};
+use serialization::{serialize, serialize_with_flags, CoinVariant, SERIALIZE_TRANSACTION_WITNESS};
 use spv_validation::helpers_validation::SPVError;
 use std::array::TryFromSliceError;
 use std::collections::{HashMap, HashSet};
@@ -533,6 +533,9 @@ pub struct UtxoCoinConf {
     pub trezor_coin: Option<TrezorUtxoCoin>,
     /// Used in condition where the coin will validate spv proof or not
     pub enable_spv_proof: bool,
+    /// Header layout selected by the Reloaded-only `protocol.reloaded_header_layout` key (CRD ch.37
+    /// R37.5.9). `None` when the key is absent: header reads are then unchanged.
+    pub reloaded_header_layout: Option<CoinVariant>,
 }
 
 #[derive(Debug)]

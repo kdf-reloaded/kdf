@@ -12,7 +12,8 @@ use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClien
                                VerboseBlock};
 use crate::utxo::tx_cache::dummy_tx_cache::DummyVerboseCache;
 use crate::utxo::tx_cache::UtxoVerboseCacheOps;
-use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps};
+use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps, UtxoConfBuilder, UtxoConfError,
+                                UtxoConfResult};
 use crate::utxo::utxo_common::calc_interest_of_tx;
 use crate::utxo::utxo_common::{address_from_pubkey, get_htlc_key_pair_v2, my_public_key,
                                trade_preimage_sender_address, UtxoTxBuilder};
@@ -182,6 +183,7 @@ fn utxo_coin_fields_for_test(
             estimate_fee_blocks: 1,
             trezor_coin: None,
             enable_spv_proof: false,
+            reloaded_header_layout: None,
         },
         decimals: TEST_COIN_DECIMALS,
         dust_amount: UTXO_DUST_AMOUNT,
@@ -6183,4 +6185,86 @@ fn ch15_r16_r17_funding_amount_uses_total_spend_amount_not_fee_amount() {
         !src.contains("&args.dex_fee.fee_amount().to_decimal()"),
         "the funding-amount formula must not use fee_amount() alone (it silently omits the burn leg)"
     );
+}
+
+// ---- protocol.reloaded_header_layout (CRD ch.37 R37.5.9) -------------------------------------
+
+fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
+    let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+    let conf = json!({ "coin": "RIC", "protocol": protocol });
+    UtxoConfBuilder::new(&conf, &params, "RIC").build()
+}
+
+#[test]
+fn reloaded_header_layout_absent_has_no_effect() {
+    let conf = conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
+    assert_eq!(conf.reloaded_header_layout, None);
+    // No key: the per-coin default of the call site governs, exactly as before.
+    assert_eq!(
+        utxo_common::header_variant(&conf, CoinVariant::Standard),
+        CoinVariant::Standard
+    );
+    assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), CoinVariant::Qtum);
+}
+
+#[test]
+fn reloaded_header_layout_values_are_read_beside_type_and_win_over_the_default() {
+    for (value, expected) in [
+        ("riecoin", CoinVariant::Riecoin),
+        ("kawpow_auxpow_mixed", CoinVariant::KawpowAuxpowMixed),
+    ] {
+        let conf =
+            conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "reloaded_header_layout": value }))
+                .unwrap();
+        assert_eq!(conf.reloaded_header_layout, Some(expected));
+        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Standard), expected);
+        assert_eq!(utxo_common::header_variant(&conf, CoinVariant::Qtum), expected);
+    }
+}
+
+#[test]
+fn reloaded_header_layout_unknown_value_fails_the_coin_build_naming_the_ticker() {
+    for bad in [
+        json!("foo"),
+        json!("Riecoin"),
+        json!("RIECOIN"),
+        json!(""),
+        json!(112),
+        json!(null),
+    ] {
+        let err = conf_with_header_layout(json!({ "type": "UTXO", "reloaded_header_layout": bad }))
+            .expect_err("an unrecognized value must not fall back to any layout");
+        let text = err.to_string();
+        assert!(text.contains("RIC"), "{text}");
+        assert!(text.contains("reloaded_header_layout"), "{text}");
+        assert!(matches!(
+            err.into_inner(),
+            UtxoConfError::InvalidReloadedHeaderLayout { .. }
+        ));
+    }
+}
+
+#[test]
+fn reloaded_header_layout_does_not_change_how_the_protocol_object_parses() {
+    let with = json!({ "type": "UTXO", "reloaded_header_layout": "riecoin" });
+    let without = json!({ "type": "UTXO" });
+    let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
+    assert_eq!(parse(with), parse(without));
+}
+
+/// The RIC tip list served by a public Electrum server, taken through the configured key to the
+/// median: the layout of the coin entry plus the key, the list read, the median of parsed times.
+#[test]
+fn reloaded_header_layout_ric_entry_yields_the_median_of_the_served_list() {
+    let conf =
+        conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "reloaded_header_layout": "riecoin" }))
+            .unwrap();
+    let hex = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    let served = hex::decode(hex.trim()).unwrap();
+    let variant = utxo_common::header_variant(&conf, CoinVariant::Standard);
+    let headers = chain::BlockHeader::list_from_served_bytes(&served, 11, variant).unwrap();
+    let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
+    assert_eq!(common::median(times.as_mut_slice()), Some(1_792_892_599));
+    // Without the key the same list is rejected: the pre-fix behavior.
+    assert!(chain::BlockHeader::list_from_served_bytes(&served, 11, CoinVariant::Standard).is_err());
 }
