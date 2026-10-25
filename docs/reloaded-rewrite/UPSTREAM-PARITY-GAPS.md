@@ -516,6 +516,53 @@ implemented from the cleared chapter.
 
 ---
 
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25)**
+
+CRD reference:
+[`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
+§37.5.1 (the `"BTC"`-value re-examination), §37.6 (*Where the median
+goes*), §37.9 D3 (revised). Reference designations: `v2.6.0-beta` and
+`v3.0.0-beta`, which agree. The revised material **passed the KDF Dirty
+Gate** on 2026-10-25 (PASS, discretionary-expression measure 0.02,
+finding list empty), recorded in ch. 37 §37.10's `"BTC"`-family
+re-examination item; this entry was gated with it as a dependent
+restatement, and both items below may be implemented from the cleared
+chapter. The gap the first item names is in addition observable from
+this repository's own code and from public-network measurement alone.
+
+- [ ] **Three registry coins whose headers no header family of the set lays
+  out (ch. 37 §37.9 D3).** `RIC` (112-byte Riecoin headers) and `MEWC`
+  (interleaved 80-byte merged-mined and 120-byte native headers) are
+  configured `"chain_variant": "BTC"` in the public registry; `XPM`
+  (88–91-byte Primecoin headers) carries no key. Reloaded's header reader
+  requires exact byte consumption, so on an Electrum connection every
+  `RIC` median-time-past list and every `MEWC` list holding a native block
+  is rejected and the **HTLC spend fails** — the spend queries the median
+  before it signs. The reference reads the same lists as consecutive
+  80-byte records to a *random* median, which its spend tolerates (the
+  lock-time is consensus-irrelevant under a final sequence) and only its
+  refund mis-times. Net: the reference completes `RIC`/`MEWC` swaps and
+  delays their refunds; Reloaded fails the swaps. `XPM` is wallet-only
+  and has no swap path. The registry maintainer confirmed on 2026-10-25
+  that `"BTC"` on both entries is deliberate and will stay, so closing
+  this needs Reloaded-only families **and** a selector that takes
+  precedence over `chain_variant` for `"BTC"`-pinned entries; the four
+  options and the one the evidence favours are in ch. 37 §37.9 D3. Parity
+  **gap**; the family work needs no compatibility switch, while the
+  stop-gap option 4 (spend without a median) would.
+- [ ] **Refund-wait bound floored instead of capped (ch. 37 §37.6,
+  code-quality finding).** This repository's UTXO refund-eligibility
+  routine returns a wait of *at least* one hour where the reference, since
+  `v2.0.0-beta`, returns *at most* one hour (the baseline anchor carries
+  the floor). Refunds are delayed by up to an hour per round; no funds at
+  risk, nothing signed changes. One-line fix in both branches; owner is
+  ch. 51's refund timing. The floor in this repository is observable from
+  the tree; the comparison to the reference's cap — and the designation
+  named for it — is corpus-sourced and recorded as such in ch. 37 §37.10
+  (cleared 2026-10-25).
+
+---
+
 ## Audit method (for reproducibility)
 
 1. Extracted the 223 unique upstream wire-method strings from
