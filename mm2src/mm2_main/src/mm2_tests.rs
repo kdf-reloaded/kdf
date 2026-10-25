@@ -1250,7 +1250,8 @@ fn withdraw_and_send(
     coin: &str,
     to: &str,
     enable_res: &HashMap<&'static str, EnableElectrumResponse>,
-    expected_bal_change: &str,
+    spent_besides_fee: &str,
+    fee_paid_in_coin: bool,
     amount: f64,
 ) {
     let withdraw = block_on(mm.rpc(&json! ({
@@ -1272,7 +1273,29 @@ fn withdraw_and_send(
     let tx_details = res.result;
 
     let from = addr_from_enable(enable_res, coin).to_owned();
-    let expected_bal_change = BigDecimal::from_str(expected_bal_change).expect("!BigDecimal::from_str");
+    // The balance change is the value that leaves the wallet plus, when the coin itself pays it, the fee the
+    // response reports. For a txfee-1000 UTXO coin the fee is proportional to the transaction size
+    // (CRD ch.38 R38.6.6b), one base unit per byte, never a whole kilobyte.
+    let spent_besides_fee = BigDecimal::from_str(spent_besides_fee).expect("!BigDecimal::from_str");
+    let fee = if fee_paid_in_coin {
+        let fee: BigDecimal = tx_details.fee_details["amount"]
+            .as_str()
+            .expect("!fee_details.amount")
+            .parse()
+            .expect("!BigDecimal::from_str");
+        let fee_sat = &fee * BigDecimal::from(100_000_000);
+        let tx_size = (tx_details.tx_hex.len() / 2) as u64;
+        assert!(
+            fee_sat >= BigDecimal::from(tx_size) && fee_sat < BigDecimal::from(1000),
+            "fee {} base units for a {} byte transaction",
+            fee_sat,
+            tx_size
+        );
+        fee
+    } else {
+        BigDecimal::from(0)
+    };
+    let expected_bal_change = -(spent_besides_fee + fee);
 
     assert_eq!(tx_details.to, vec![to.to_owned()]);
     assert_eq!(tx_details.my_balance_change, expected_bal_change);
@@ -1382,7 +1405,8 @@ fn test_withdraw_and_send() {
         "MARTY",
         "RJTYiYeJ8eVvJ53n2YbrVmxWNNMVZjDGLh",
         &enable_res,
-        "-0.00101",
+        "0.001",
+        true,
         0.001,
     );
     // geth --dev charges a non-zero base fee, so the ETH sender balance change
@@ -1393,7 +1417,8 @@ fn test_withdraw_and_send() {
         "JST",
         "0x657980d55733B41c0C64c06003864e1aAD917Ca7",
         &enable_res,
-        "-0.001",
+        "0.001",
+        false,
         0.001,
     );
 
@@ -3350,7 +3375,8 @@ fn test_electrum_tx_history() {
         "DOC",
         "RRYmiZSDo3UdHHqj1rLKf8cbJroyv9NxXw",
         &enable_res,
-        "-0.00001",
+        "0",
+        true,
         0.001,
     );
 
