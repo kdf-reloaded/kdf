@@ -300,8 +300,7 @@ lives.
   swap with a Komodo or GLEEC counterparty cannot complete. Spending a swap's locked ARRR is under
   live testing. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
 - **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
-  Atomic swaps of SC are postponed until after the beta; the design is still a draft. A custom
-  withdraw fee for SC is being added. More in the
+  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
   [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
 - **Radiant (RXD), LBRY (LBC) and PIVX are only partly usable.** RXD activates and signs, but swaps
   with it are not established. LBC and PIVX activate, but swaps fail with a clear error until their
