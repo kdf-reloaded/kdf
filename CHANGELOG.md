@@ -91,6 +91,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
+  gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
+  chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
+  and the trade-preimage path applied the floor twice. The increase is now purely proportional.
+  Detail: CRD ch.57 R57.3.2; PR #59.
 - **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
   eligibility check floored its "wait this long" answer at one hour, so a refund that became
   spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
