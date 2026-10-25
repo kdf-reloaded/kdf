@@ -7,7 +7,19 @@
 
 KDF Reloaded is an open-source [atomic-swap](https://en.wikipedia.org/wiki/Atomic_swap) engine for trustless peer-to-peer trading across blockchains, derived from the Komodo DeFi Framework / AtomicDEX-API codebase as it stood under the GPLv2 license.
 
-> **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
+## Why this project exists
+
+The Komodo DeFi Framework was published under the GNU General Public License, version 2. Shortly after the commit this project is anchored to (`c1d46c0`, 2022-06-03), the upstream codebase was relicensed, and the new license added two copyright-holder conditions, identified in it as Condition (e) and Condition (f). Both restrict modification of the code that handles the trading fee: Condition (f) names four locations in it, and Condition (e) covers any code region reachable from a `DEX_FEE`-prefixed identifier, together with the software logic related to it. They are conditions of a license this project never accepted — we continue the codebase from its last unambiguously GPLv2-only commit and incorporate no post-anchor upstream material — so they have no reach into this tree. Our reading of both is recorded in [`docs/reloaded-rewrite/29-license-conditions-e-f.md`](docs/reloaded-rewrite/29-license-conditions-e-f.md).
+
+Upstream's trading fee is a single global value per build, with no per-network input. Through the v2.x releases that value was 1/777 of the trade (~0.129%), or 9/7770 (~0.116%) with KMD on one side of the pair, and netid 8762 — the AtomicDEX network — was the default network. Release v3.0 changed three things at once: netid 6133 became the default network, the fee schedule became 2/100 (2%), or 1/100 (1%) with GLEEC on one side, and netid 8762 was named a retired identifier, which a v3.0 node refuses to start on under any configuration. The practical effect: a v3.0 node left on default settings is on netid 6133 and trades at 2%, and it cannot be pointed at netid 8762 at all.
+
+**KDF Reloaded does not treat netid 8762 as retired.** Both production networks are admitted in one binary, and each network's fee parameters — netid 8762 at 1/777, netid 6133 at 2/100 — are resolved from the active network configuration ([`mm2src/mm2_net_config/`](mm2src/mm2_net_config/)) rather than from one global constant. Upstream has no per-network fee selection; providing it, and keeping both netids admitted side by side, is a deliberate divergence of this project. We keep each network's fee values exactly as they stand, because the rates and the fee receiver keys are wire-format facts that every peer on a network has to agree on — not because a license condition asks us to. The rates are summarized under [Networks](#networks); the complete parameters are in [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
+
+Credit for the original design and the bulk of the pre-anchor code is due to Komodo Platform and the AtomicDEX-API contributors, and for continued development on the parallel branch to GLEEC and the GLEEC KDF contributors. We follow that work and adopt compatible changes where it is legally and technically feasible; see [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+
+Post-anchor upstream material is not an input a contributor here may read, so behavior we need to match is written down as a specification first and implemented from that specification. The resulting chapter set — the Clean-Room Documentation — ships alongside the code; see [`docs/reloaded-rewrite/00-overview.md`](docs/reloaded-rewrite/00-overview.md) and [`docs/reloaded-rewrite/01-clean-room-rules.md`](docs/reloaded-rewrite/01-clean-room-rules.md). The Heritage section below says what each part of the tree is.
+
+**In short, three things put this project here:** license conditions that restrict modification of the trading-fee code; a 2% trading fee on netid 6133, upstream's default network since v3.0; and the retirement of netid 8762, the 1/777 (~0.129%) network, which a v3.0 node refuses to start on. KDF Reloaded does not retire netid 8762: it keeps both networks available on GPLv2 terms, in one binary, each with its own fee policy.
 
 ## Heritage
 
@@ -26,6 +38,8 @@ For the relationship to other downstream projects (notably the GLEEC fork), see 
 
 KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
 
+> **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
+
 - The `kdf` binary is provided for evaluation, testing, and review.
 - Mainnet swaps function on netid `8762` (AtomicDEX network) and netid `6133` (GLEEC network), but you are running unaudited pre-release software.
 - Git commits and release tags are GPG-signed by the maintainer (`Takologi <takologi@proton.me>`, fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82`); the public key is at [`docs/keys/takologi.asc`](docs/keys/takologi.asc). Release **binaries** ship with a GPG-signed `SHA256SUMS` manifest; see [`docs/RELEASE.md`](docs/RELEASE.md) and [`SECURITY.md`](SECURITY.md).
@@ -39,12 +53,12 @@ KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). 
 
 ## Networks
 
-| netid | Network | Status in alpha |
-|------:|---------|-----------------|
-| 8762  | AtomicDEX (default upstream network) | Supported |
-| 6133  | GLEEC                                | Supported |
+| netid | Network | Base trading fee | Discounted rate | Status in alpha |
+|------:|---------|------------------|-----------------|-----------------|
+| 8762  | AtomicDEX | 1/777 of the trade (~0.129%) | 9/7770 (~0.116%) with KMD on one side of the pair | Supported |
+| 6133  | GLEEC DEX | 2/100 of the trade (2%) | 1/100 (1%) with GLEEC on one side of the pair | Supported |
 
-Other netids (including 7777, 8100, 8999, 9000, 9998) are not part of the supported alpha surface. Test-only netids exist in the codebase under the `regtest-netid` Cargo feature, off by default. See [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
+Each network's complete fee parameters — discounts, minimums, burn behavior and fee keys — are documented in [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md), together with the test-only netids that exist in the codebase under the `regtest-netid` Cargo feature, off by default. Other netids, including 7777, 8100, 8999, 9000 and 9998, are not part of the supported alpha surface.
 
 ## Building from source
 

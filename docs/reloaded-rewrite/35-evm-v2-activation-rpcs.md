@@ -855,8 +855,11 @@ The same enum is accepted as the optional `swap_gas_fee_policy` field of
 > `swap_gas_fee_policy` key of its coin-configuration entry, else `Legacy`; a
 > token starts with its platform's policy. The legacy `enable` / `electrum` route
 > resolves the policy the same way (R35.6.7, D35.6). The coins file the
-> project ships sets `"Medium"` for ETH (chain 1), MATIC (137), AVAX (43114),
-> ETH-ARB20 (42161), ETH-BASE (8453) and MOVR (1285), so on those coins, and on
+> project ships sets `"Medium"` for ETH (chain 1), POL (137 — the entry
+> formerly keyed as MATIC), AVAX (43114), ETH-ARB20 (42161), ETH-BASE (8453),
+> XDAI (100) and MOVR (1285), and for nine further platform entries (snapshot
+> of 2026-10-18: FLR, GLEEC, GLEECT, HYPE, MNT, MON, TAO, XDC, XPL) —
+> sixteen in all; so on those coins, and on
 > their tokens, swap transactions are EIP-1559 (type `0x02`) unless the operator
 > overrides the policy at activation or with `set_swap_gas_fee_policy`; a coin
 > without the key, such as BNB, stays untyped. `Legacy` being the default is
@@ -883,6 +886,19 @@ pair at the chosen tier). The mapping from tier to concrete fee values is dictat
 by EIP-1559 fee-history semantics, not by this chapter. Which serialized
 transaction form each policy value produces, and which forms the project must
 read as a consequence, are bound in §35.6A (R35.6A.17, R35.6A.2).
+
+> **Where the policy is actually consulted (cross-reference).**
+> [Chapter 57](57-evm-fee-inputs.md) R57.4.1 binds the consumer side of this
+> rule: every swap-side fee figure — the flat trade fee, the sender-side and
+> receiver-side preimages, and the DEX-fee preimage — must be computed from the
+> fee form this policy resolves to, and ch. 57 records that reloaded currently
+> computes all four from the legacy gas price unconditionally, never consulting
+> the policy. So on the coins the shipped configuration sets to `"Medium"`
+> (named in the note after R35.6.3), the policy is honoured for the swap
+> transactions this chapter's §35.6A covers while the **fee figures quoted for
+> those swaps** are still legacy-priced. That is a parity gap recorded in
+> ch. 57, not a property of this chapter's contract. Withdrawals are separate
+> again: they never consult the policy on either side (ch. 57 R57.7.2).
 
 R35.6.7 **The initial policy does not depend on the activation route.** The
 precedence of R35.6.3 -- activation-request parameter, else the
@@ -1721,6 +1737,18 @@ node-level boolean `max_eth_tx_type_absent_unrestricted`, default `false`, which
 when `true` makes an absent key mean unrestricted. Activation logs the effective
 cap and its source next to the policy. R35.6A.19 holds throughout: nothing here
 narrows what the project reads.
+
+> **Coverage gap on the withdraw path (cross-reference).** "Refused at
+> signing, in the signer, so every typed construction path is covered" holds
+> only for paths that reach the typed signer. The EVM **withdraw** paths do
+> not: they always build the untyped envelope today, so the cap is never
+> tested there — vacuously satisfied rather than enforced.
+> [Chapter 57](57-evm-fee-inputs.md) R57.7.4 binds the cap check onto the
+> withdraw path explicitly, **before** the transaction is built, as part of
+> closing that chapter's R57.7.6; and [Chapter 19](19-nft-module-layout.md)
+> §19.7 records the same for the two non-fungible withdrawals. Nothing in
+> D35.7's resolution changes; the check simply has to be made at a second
+> place once that path can emit a typed transaction.
 
 ## 35.9 Provenance Footer
 

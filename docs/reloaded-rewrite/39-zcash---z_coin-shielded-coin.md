@@ -623,7 +623,8 @@ from hardcoded Zcash-mainnet constants. Concretely:
   native mode the wallet database is anchored at `check_point_block.height`,
   falling back to `sapling_activation_height` when the checkpoint is absent. In
   light mode the anchor is the checkpoint corresponding to the resolved sync
-  start height (a height/date sync parameter, or the earliest/default), floored
+  start height (a height/date sync parameter, the earliest, or the default
+  recent window of R39.8.0av), floored
   at `sapling_activation_height`; the checkpoint's `sapling_tree` seeds the
   wallet's initial commitment-tree state so scanning need not replay from
   Sapling activation.
@@ -746,8 +747,8 @@ is resolved before wallet scanning:
   the Unix timestamp `T`, floored at `sapling_activation_height`;
 - `"earliest"` starts from `sapling_activation_height`;
 - an omitted start point may continue from existing local wallet/cache state
-  when that state exists; otherwise it shall use the implementation's default
-  recent-start policy, floored at `sapling_activation_height`.
+  when that state exists; otherwise it shall use the default recent-start
+  policy of R39.8.0av, floored at `sapling_activation_height`.
 
 R39.8.0h If a caller supplies a start point that differs from existing local
 scan state, activation shall rewind or recreate the compact-block cache and
@@ -797,6 +798,122 @@ start height used.
 > `sync_params` start was supplied, `requested` falls back to the height the
 > shielded scan was actually anchored at (the wallet's seed checkpoint + 1), and
 > then to Sapling activation when the wallet has no stored blocks yet.
+
+> **Dirty-side derivation record (sanitized).** R39.8.0av, the two notes under
+> it and T39.8.0av were authored by the KDF Spec Reader under the chapter-01
+> two-team workflow (§1.4A), from the GLEEC KDF public release designations
+> `v3.0.0-beta` (reference) and `v2.6.0-beta` (legacy cross-check), which agree
+> on every fact bound below. They carry only the resolved start height's
+> external contract, the configuration keys it consumes, and the activation
+> outcomes it produces; no implementation expression was carried across.
+>
+> **Clearance (chapter 01 T1, R40).** That material -- R39.8.0av, the two
+> informative notes under it, and T39.8.0av -- **passed the KDF Dirty Gate** on
+> 2026-10-24: PASS, discretionary-expression measure 0.02, finding list empty,
+> and accordingly no remedy class for any line or for the candidate as a whole.
+> Its clearance is therefore *complete* and not pending, and R40 withholds
+> nothing in it. One limit of that pass belongs here and not only in the
+> footer: the comparison reached material at the `v3.0.0-beta` designation
+> only, so the agreement between the two designations that the record above
+> asserts **is not attested by the clearance** and rests on the derivation
+> record alone. The extent, method and measure of the pass are recorded once,
+> in the *Dirty Gate clearance* item of §39.9, and are not restated here.
+
+R39.8.0av **The default sync start when the caller supplies none.** When
+activation carries no `sync_params` and no prior local shielded state exists,
+the start height shall be derived from a **recent window below the current
+chain tip**, floored at `sapling_activation_height`. In the reference the
+window is a *wall-clock* quantity and not a block count: it is **one day
+before the present moment**, converted to a height by the same block-time
+estimate the reference uses for an explicit `{"date": T}` start -- the coin
+configuration's `avg_blocktime` seconds per block, from which a blocks-per-day
+figure is computed and subtracted from the tip. That estimate never reads a
+block timestamp. Three consequences are bound:
+
+- the window's size in blocks is **per coin**, not global: a 60-second coin
+  gets 1,440 blocks, a 150-second coin 576. For ARRR the reference's default
+  start is therefore `tip - 1440`, i.e. one day of history;
+- a coin configuration carrying no `avg_blocktime` cannot resolve the default
+  at all, and activation fails with `CoinCreationError` (R39.10.11) rather
+  than falling back to Sapling activation or to the configured checkpoint;
+- the elapsed interval is taken in whole days and one further day's blocks are
+  always added, so the smallest window the estimate can produce is one day's
+  blocks even when the start moment lies inside the current day.
+
+In Light mode the resolved height is **not** read from the coin
+configuration's `check_point_block`. The anchor is fetched from the backend:
+the commitment-tree state at the resolved height (§39.11.1) supplies the
+height, hash, time and Sapling tree that seed the wallet (R39.8.0l). The coin
+configuration's checkpoint is the **Native-mode** anchor only, and Native mode
+uses it unconditionally -- Native applies no recent window and never
+re-anchors, so its `first_sync_block` reports the configured checkpoint
+height, or Sapling activation when the entry declares none (§39.10.4).
+
+The default start is **not** derived from an account-birthday field, and no
+coin-configuration key supplies one. The wallet's birthday *is* the resolved
+start: it is written into the wallet database when the account is created and
+is read back afterwards as the wallet's anchor (R39.8.0h's status note, and
+R39.8.0al's rebuild rule, which re-anchors at exactly that height).
+
+> **Upstream divergence (informative) -- the size of the default window.**
+> Reloaded's default window is a single built-in constant of **2,880 blocks**
+> applied to every shielded coin, which at ARRR's 60-second blocks is **two
+> days** -- double the reference's one day, and for any other block time a
+> different interval entirely. The *shape* of the policy is parity: a recent
+> window below the tip, floored at Sapling activation, consulted only when the
+> caller supplies no start and no prior local state exists. The *number* is
+> not traceable to the reference and is Reloaded's own; nothing in the
+> reference expresses the window as a fixed block count. Reloaded also does
+> not consume `avg_blocktime` and so never fails activation for its absence.
+> The observable consequences are confined to the initial scan range and to
+> `first_sync_block.requested`; no wire shape changes. Converging would mean
+> reading `avg_blocktime`, computing one day's blocks per coin, and adopting
+> the activation failure when the key is missing.
+>
+> **The zero-balance outcome is not a Reloaded defect.** A caller that
+> activates a shielded coin with no `sync_params` against a wallet database
+> that has never been scanned gets a recent-window scan in *both*
+> implementations, and funds older than that window are invisible in both --
+> in the reference sooner, because its window is half as long for ARRR. A
+> wallet whose funds predate the window must be activated with an explicit
+> `sync_params` (R39.8.0g); that is the operator remedy for a migrated or
+> restored wallet, and no code change is required to obtain the reference's
+> behaviour.
+
+> **Code-quality finding (informative).** Trigger: a contradiction apparent
+> between two conditions read side by side while establishing R39.8.0av. In
+> the reference, "prior local shielded state exists" is decided from the
+> **compact-block cache** alone -- whether that cache holds any block at all
+> -- and not from the shielded wallet database. A wallet database carrying
+> years of scanned history whose compact-block cache has been cleared (a
+> disk-space cleanup, a cache format migration, an interrupted cache rewind)
+> therefore reads as having no prior state: the default recent window is
+> resolved, the wallet's own earliest scanned block no longer matches it, and
+> the wallet database is truncated and re-anchored at the recent window. The
+> scanned history is destroyed and the reported balance drops to zero with no
+> caller request to rescan and no explicit `sync_params` in play. The two
+> stores have independent lifetimes -- the compact cache is a disposable fetch
+> buffer and the wallet database is the durable record (R39.8.0k) -- so the
+> disposable one must not decide whether the durable one is re-anchored.
+> Proposed fix: decide "prior local state exists" from the wallet database's
+> own earliest scanned block, and treat an empty compact cache as nothing more
+> than a fetch that must resume from the wallet's existing anchor. Reloaded
+> already decides it that way, keying its fetch plan on the wallet's scanned
+> height and anchor rather than on the cache, so this is a finding against the
+> reference and **not** a convergence target: a Coder shall not adopt the
+> cache-keyed test.
+
+T39.8.0av *Default-window shape.* A test shall pin, for a wallet database with
+no scanned block and an activation carrying no `sync_params`: that the resolved
+start equals the tip minus the implementation's default window, that it is
+floored at `sapling_activation_height` when the tip lies within one window of
+Sapling activation, and that `first_sync_block.requested` reports it. A second
+test shall pin that a wallet database **with** scanned blocks and an activation
+carrying no `sync_params` resumes from the wallet's own scanned height and does
+not re-resolve the default window, whatever the state of the compact-block
+cache -- including an empty cache (the finding above). *(Cleared with
+R39.8.0av -- see the clearance statement above that rule and the record in
+§39.9.)*
 
 
 
@@ -1944,6 +2061,20 @@ needs it most -- restoring a seed whose funds predate the recent window, where
 the discarded rescan is the only thing that would have found them and the
 balance simply stays at zero.
 
+> **Upstream parity position (informative).** The skip-forward rule above is
+> **unconstrained** by the reference: the reference has no counterpart to it.
+> The reference decides whether to re-resolve the default recent window from
+> the compact-block cache's contents alone (R39.8.0av's code-quality finding),
+> never from whether the wallet found any note, so it has no
+> "scanned-but-empty" state to skip forward from and draws no distinction
+> between "never scanned" and "scanned and empty". Reloaded's rule is
+> therefore an addition, not a divergence from a stated contract -- and it is
+> the *narrow* form of the same guard: it fires only for a wallet still
+> anchored where it was born, where the reference's cache-keyed test would
+> re-anchor a deliberately re-anchored wallet too. The window that the rule
+> skips forward to is bound by R39.8.0av, where the size of that window is
+> recorded as a Reloaded-specific value.
+
 R39.8.0am Shielded note decryption shall accept both the pre- and post-ZIP-212
 note plaintext versions at every height, for every shielded coin whose network
 accepts both.
@@ -2033,7 +2164,7 @@ The rebuild shall re-anchor the wallet at its **sync start** and never at height
 0. The sync start is the birthday of the wallet's account: the height from which
 the wallet originally began scanning (the coin's checkpoint, the activation's
 `sync_params`, or the default recent window, whichever created the wallet,
-R39.8.0g/h). It is read before anything is replaced. The rebuild shall fetch and
+R39.8.0g/h/av). It is read before anything is replaced. The rebuild shall fetch and
 validate the tree state at the block below the sync start before it touches the
 wallet database, so an unreachable or malformed answer leaves the existing wallet
 as it was; then it shall replace the wallet database with a fresh one holding the
@@ -2481,13 +2612,16 @@ framework errors of §55.2.
 
 > **Upstream divergence (informative) -- start-point resolution.** When no
 > `sync_params` is given and no prior local state exists, the reference starts
-> roughly one day of blocks before the current tip, estimated from the coin
-> config's `avg_blocktime` (a missing `avg_blocktime` then fails activation with
+> one day of blocks before the current tip, computed from the coin config's
+> `avg_blocktime` (a missing `avg_blocktime` then fails activation with
 > `CoinCreationError`). It resolves a `{"date": T}` start by the same
 > block-time estimate rather than by looking up block timestamps. Reloaded
-> resolves dates against the backend's block timestamps (R39.8.0g); the
-> observable difference is limited to the value of
-> `first_sync_block.requested`. Wire shapes are unaffected.
+> resolves dates against the backend's block timestamps (R39.8.0g), and uses a
+> fixed 2,880-block window for the no-`sync_params` default; the observable
+> difference is limited to the initial scan range and to the value of
+> `first_sync_block.requested`. Wire shapes are unaffected. The full contract
+> for the defaulted start, including the parity position on the window size,
+> is bound at R39.8.0av.
 
 > **Code-quality finding (informative).** Trigger: a contradiction visible
 > between the reference's own description of `skip_sync_params` and its
@@ -4115,9 +4249,13 @@ different cause. At least one live endpoint was observed in this state on
   `{"type":"ZHTLC"}` (no `protocol_data`) is rejected at coin-config parse time.
 - Parameter sourcing (R39.6.4, implemented): a ZHTLC coin whose `protocol_data`
   declares non-mainnet HRP/b58 prefixes, `coin_type`, or activation heights
-  produces addresses/keys under those declared values and begins its shielded
-  sync from the declared `check_point_block` (or `sapling_activation_height`
-  when absent), not from hardcoded mainnet constants.
+  produces addresses/keys under those declared values, not from hardcoded
+  mainnet constants. Its shielded sync begins, in **Native** mode, at the
+  declared `check_point_block` (or `sapling_activation_height` when absent);
+  in **Light** mode, at the resolved sync start -- a caller-supplied
+  `sync_params`, or the default recent window of R39.8.0av when none is
+  supplied -- whose anchor is fetched from the backend rather than read from
+  the configured checkpoint (R39.6.4 §3, R39.8.0g).
 - R39.6.4 is implemented, including HD-derived shielded key-policy support
   (the transparent UTXO side remains iguana-derived, which is outside R39.6.4 §2).
 - Shielded history activation: a Light-mode ARRR activation initializes both the
@@ -4256,17 +4394,142 @@ different cause. At least one live endpoint was observed in this state on
   field names, and error discriminants this chapter distills.
 - *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* consulted, under the chapter-01 two-team clean-room
-  workflow, for §39.8.0.4, §39.8.0.7, §39.10 and §39.11 -- and, for §39.10,
+  workflow, for §39.8.0.4, §39.8.0.7, §39.10, §39.11 and R39.8.0av (with the
+  parity-position note under R39.8.0an and the sharpened start-point
+  divergence note in §39.10.6 that follow from it) -- and, for §39.10,
   the matching wording updates of §39.0, R39.2.1, R39.3.1 and R39.3.2 --
-  each as that subsection's own derivation record states; §39.10 at the GLEEC
-  KDF release tags `v3.0.0-beta` (reference) and `v2.6.0-beta` (legacy
-  cross-check). Only externally observable behavior and dictated interfaces
-  were distilled; no implementation expression was carried across. Each
-  consulted subsection is subject to KDF Dirty Gate clearance, as its
-  derivation record states; §39.10 and §39.11 have passed it. Every other
+  each as that subsection's own derivation record states; §39.10 and
+  R39.8.0av at the GLEEC KDF release designations `v3.0.0-beta` (reference)
+  and `v2.6.0-beta` (legacy cross-check). Only externally observable behavior
+  and dictated interfaces were distilled; no implementation expression was
+  carried across. Each consulted subsection is subject to KDF Dirty Gate
+  clearance, as its derivation record states; §39.10, §39.11, and R39.8.0av
+  together with the material that follows from it have passed it -- the last
+  of those as the clearance item below records, which also records the one
+  element of that pass's attestation that is a gap. Every other
   section of this chapter rests on the permitted inputs listed above with no
   corpus read. R39.11.7a(j) and T39.11.k, and the logging sentence added to
   R39.11.7a(i), are original to this design (like R39.11.7a(h)'s branch admission
   they have no counterpart in the reference): they derive from no forbidden-class
   input, only from the lightwalletd gRPC contract, public-network observation of
   the endpoints (2026-10-23) and this repository's code.
+- *Dirty Gate clearance (chapter 01 T1, R40, R43) for R39.8.0av:* the
+  forbidden-class-sourced material this item covers is exactly what the
+  derivation record above R39.8.0av names -- that rule, the two informative
+  notes under it, and T39.8.0av -- together with what follows from it
+  elsewhere in the chapter: the parity-position note under R39.8.0an, the
+  sharpened start-point divergence note in §39.10.6, and the cross-references
+  to R39.8.0av in §39.6.4's parameter-sourcing entry, R39.8.0g, R39.8.0al and
+  the §39.11 status list. All of it was authored by the KDF Spec Reader under
+  the two-team procedure of chapter 01 §1.4A and **passed the KDF Dirty Gate**
+  on 2026-10-24: PASS, discretionary-expression measure 0.02, finding list
+  empty, and accordingly no remedy class for any line or for the candidate as a
+  whole. That was the first gate pass on this material; no earlier verdict for
+  it exists or was relayed. The clearance is therefore **complete and not
+  pending**, and R40 withholds nothing in it. This item is written on the clean
+  side from the verdict, which reached the clean side as relayed text rather
+  than as a gate-written file; that is record-keeping and adds no chapter
+  content.
+
+  **Only the named material was gated.** The rest of this chapter was not
+  re-examined in this pass, so the earlier clearances of §39.10 and §39.11 are
+  neither reopened nor widened by it and keep their own scopes, and the pending
+  records of §39.8.0.4 and §39.8.0.7 are untouched.
+
+  *Which parts carry an inline pointer to this item, and why those.* R39.8.0av
+  carries the clearance statement at the point the material appears (R40), and
+  T39.8.0av carries a one-line pointer back to it. Those two are the numbered,
+  rule-bearing and test-bearing text an implementer codes from, and both sit
+  among R- and T-numbers that have stood in this chapter through earlier
+  revisions -- exactly the case in which long-settled requirement and
+  newly-cleared requirement are easy to confuse. Nothing else carries a
+  pointer, and that is a scope judgment rather than an oversight. The two
+  informative notes under R39.8.0av are labelled informative in their own first
+  line, bind nothing, and sit between the clearance statement and the test, so
+  a reader reaching either has already passed the notice. The parity-position
+  note under R39.8.0an and the sharpened divergence note in §39.10.6 are
+  likewise informative and each hands back to R39.8.0av by name, where the
+  notice is; a notice at the second would also sit beneath §39.10's own earlier
+  clearance statement, where it could be read as widening that pass, which this
+  one does not. The remaining touches -- the cross-references in §39.6.4,
+  R39.8.0g, R39.8.0al and the §39.11 status list -- carry no requirement of
+  their own and only name the rule that does. §39.9 is where the record lives
+  and carries none.
+
+  The three elements of the R39 scope attestation, carried forward here in
+  corpus-free terms as chapter 01 T1 requires. One of the three is incomplete,
+  and it is recorded as a gap rather than completed from elsewhere:
+
+  - *Extent.* The forbidden-class material corresponding to the subject matter
+    this chapter names in its own terms: the shielded-coin activation path's
+    resolution of a sync start height -- the defaulted start when the caller
+    supplies none, the block-time-based conversion of a start instant to a
+    height that the same path shares with its non-shielded sibling builder, the
+    Light-mode and Native-mode anchor acquisition, and the initialization of
+    the shielded wallet store and of the compact-block fetch buffer, including
+    the condition that decides whether a prior local state is taken to exist.
+    Quantity examined: **four files** read in substance, together with
+    token-level searches across that subsystem's file set, of the order of a
+    dozen files. Reference designation: the publicly published release
+    designation `v3.0.0-beta`. **The record is no more precise than that
+    designation** -- no post-anchor commit identifier, no branch state and no
+    location within the compared material is given (chapter 01 R11 and the
+    reference-version limit of §1.7).
+
+    **The gap in this element, left visible rather than completed.** The
+    derivation record above R39.8.0av establishes its facts at two designations
+    and asserts that they agree. This clearance reached material at one of them
+    only: no material at the `v2.6.0-beta` designation was available to the
+    pass, so **the asserted agreement between the two designations is not
+    attested here**. The element is incomplete rather than approximated, and
+    chapter 01 T1 is satisfied by saying so -- a completed clearance statement
+    carries the three elements **or** states that an element is not recorded.
+    Nothing in this clearance supports the legacy-cross-check half of the
+    derivation record: that half rests on the Spec Reader's record alone, and
+    this item neither confirms nor contradicts it. Whether either designation
+    is a publicly published release designation of the kind R11's carve-out
+    admits is a separate question, checkable on the clean side against public
+    release records, and is not answered here.
+
+  - *Method.* **Combined.** Reading, together with a mechanical token
+    comparison. The candidate's extent was fixed by a line-level comparison of
+    this chapter against the branch tip, so that only added and modified lines
+    were judged and the surrounding chapter was excluded; every backtick-quoted
+    token on an added line was then extracted mechanically and searched for on
+    the reference side, and each match was put through the forced-versus-free
+    test individually. No aggregate match-density judgment was used or
+    admitted. **This repository's own clean-room gate tooling under `tools/`
+    was not applicable and was not run:** the added material embeds no code
+    block, and that tool's test is defined over source-file bodies and does not
+    map onto prose, so the instrument had no operand. The absence is stated so
+    that it is visible rather than implied.
+
+  - *Measure.* **0.02** on the discretionary-expression basis -- the same
+    figure the leak report carries, not a second one. Excluded from the
+    measured set as dictated: every token on an added line that matches the
+    reference side is a coin-configuration key, an activation request or status
+    field, or a public error discriminant. **Judgment standard read against:**
+    a measure at or near zero passes only if, in addition, no added line falls
+    into any leak category; one item of genuine discretionary expression fails
+    a candidate however much legitimately dictated content surrounds it. The
+    figure stands above zero only because two of the added statements sit
+    nearest the behavior-versus-expression boundary -- the arithmetic rule for
+    the size of the window, and the single condition identified as the cause of
+    the code-quality finding. Both were judged behavior: each is externally
+    observable in the resolved start height, in the reported start field, or in
+    a reported balance, and neither carries a body, an ordering transcription,
+    a private name, or a message literal. With the finding list empty, no added
+    line was classified into any leak category at all -- no private identifier
+    outside the dictated set, no body or control-flow transcription, no error or
+    log literal, no internal module tree, and no internal test identifier.
+
+  *A note on the informative finding under R39.8.0av.* The verdict's separately
+  labelled non-leak section observes, about this document set's own text, that
+  the marking the finding carries -- that it is a finding against the reference,
+  **not** a convergence target, and that a Coder shall not adopt the behavior it
+  describes -- is load-bearing for the clean-room wall rather than editorial: a
+  finding against the reference that omitted it would read as a specification to
+  implement. That marking is accordingly preserved as written, and any future
+  rewording of the finding must carry it forward. The parity-position note under
+  R39.8.0an depends on the same finding and inherits the same marking, so it is
+  re-checked whenever the finding is touched.

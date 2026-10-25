@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::eth::{addr_from_raw_pubkey, checksum_address};
 use crate::tendermint::account_id_from_pubkey_hex;
-use crate::utxo::utxo_builder::UtxoConfBuilder;
+use crate::utxo::utxo_builder::{UnrecognisedEnumPolicy, UtxoConfBuilder};
 use crate::utxo::{Address as UtxoAddress, AddressHashEnum, KeyPair as UtxoKeyPair, Private as UtxoPrivate,
                   UtxoActivationParams};
 use crate::{coin_conf, lp_coinfind, CoinProtocol, MarketCoinOps};
@@ -499,13 +499,14 @@ fn derive_utxo(
             reason: e.to_string(),
         }
     })?;
-    let utxo_conf =
-        UtxoConfBuilder::new(conf, &params, ticker)
-            .build()
-            .mm_err(|e| GetPrivateKeysError::KeyDerivationFailed {
-                ticker: ticker.to_owned(),
-                reason: e.to_string(),
-            })?;
+    let utxo_conf = UtxoConfBuilder::new(conf, &params, ticker)
+        // Only the address fields are read here, never the signing algorithm.
+        .with_unrecognised_enum_policy(UnrecognisedEnumPolicy::NotUsed)
+        .build()
+        .mm_err(|e| GetPrivateKeysError::KeyDerivationFailed {
+            ticker: ticker.to_owned(),
+            reason: e.to_string(),
+        })?;
 
     let private = UtxoPrivate {
         prefix: utxo_conf.wif_prefix,
