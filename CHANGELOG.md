@@ -64,10 +64,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
   median-time-past is then taken from each parsed header's time, and the full served bytes are what
   is kept. An unrecognized value fails the coin's activation. A coin with no key is read as before
-  and, only when the standard read fails, retried as Riecoin and then as the mixed layout (first
-  exact fit wins, one `info` line per coin naming the layout and suggesting the key); the new
-  `MM2.json` switch `header_layout_fallback_families` (array of strings, default `["BTC"]`; `[]` =
-  reference behavior; a wrong type is a configuration error) names the families that may do so.
+  and, only when the standard read fails, retried as Riecoin and as the mixed layout (the one exact fit wins, one `info` line per coin naming the layout and suggesting the key); the new
+  `MM2.json` switch `header_layout_fallback_families` (array of distinct `chain_variant` names,
+  default `["BTC"]`; `[]` = reference behavior; anything else refuses the launch) names the
+  families that may do so. A list that both alternatives consume exactly is rejected as ambiguous,
+  naming both layouts, until the coin is pinned with `header_layout`.
   RIC and MEWC swaps therefore complete with the shared coin registry untouched; the registry
   maintainer may still add the key (`"riecoin"`, `"kawpow_auxpow_mixed"`) to pin the layout, and
   other implementations ignore it. The header-sync (SPV) and header-store paths still read standard

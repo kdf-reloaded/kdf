@@ -107,12 +107,14 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   them as consecutive 80-byte records, so the median-time-past it takes before an
   HTLC spend is a wrong value. Reloaded, for a coin with no `protocol.header_layout`
   key, first reads the standard layout and only when that fails exact consumption
-  retries the Riecoin layout and then the mixed KawPoW/AuxPoW layout, accepting
-  the first that consumes the bytes exactly; it logs once per coin which layout
+  retries the Riecoin layout and the mixed KawPoW/AuxPoW layout, accepting the
+  one that consumes the bytes exactly (a list both consume is rejected as
+  ambiguous until the coin is pinned); it logs once per coin which layout
   it chose and suggests pinning it with `header_layout`. A coin that carries the
   key never falls back, and a read the standard layout accepts never does either.
   The node-level `MM2.json` key `header_layout_fallback_families` (an array of
-  strings, default `["BTC"]`) names the families that may fall back; `[]` restores
+  distinct `chain_variant` names, default `["BTC"]`; anything else refuses the
+  launch) names the families that may fall back; `[]` restores
   the reference behavior. Nothing a counterparty observes changes, so the
   divergence is the default; the shared registry needs no change. See CRD ch.37
   R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
