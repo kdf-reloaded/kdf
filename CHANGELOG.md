@@ -279,6 +279,29 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
   `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
 
+### Known limitations
+
+What does not work yet, or works only in part, in this release. Each item says where more detail
+lives.
+
+- **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
+  included), both instances can pick the same funds for two different transactions. The network
+  accepts one and rejects the other, and the instance that loses gets no explanation and may try
+  again. KDF guards against this inside a single instance only; shielded coins such as ARRR are the
+  known case. More in [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md).
+- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
+  transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
+  swap with a Komodo or GLEEC counterparty cannot complete. Spending a swap's locked ARRR is under
+  live testing. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+- **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
+  Atomic swaps of SC are postponed until after the beta; the design is still a draft. A custom
+  withdraw fee for SC is being added. More in the
+  [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
+- **Radiant (RXD), LBRY (LBC) and PIVX are only partly usable.** RXD activates and signs, but swaps
+  with it are not established. LBC and PIVX activate, but swaps fail with a clear error until their
+  block headers can be read. The swap watcher, which finishes a swap for you when you are offline,
+  does not work yet (issue #56). More in [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md).
+
 ## [0.3.0-alpha.3] — development milestone, not released
 
 ### Fixed
