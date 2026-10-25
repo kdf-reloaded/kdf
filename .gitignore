@@ -15,13 +15,6 @@ DB/*
 
 .env.client
 .env.seed
-etomic_build/client/DB
-etomic_build/client/stats.log
-etomic_build/client/unparsed.txt
-etomic_build/seed/DB
-etomic_build/seed/stats.log
-etomic_build/seed/unparsed.txt
-iguana/exchanges/manychains
 
 /marketmaker_depends
 /x64
@@ -39,7 +32,6 @@ iguana/exchanges/manychains
 /MM_DATETIME.tmp
 /MM_VERSION
 /target
-/iguana/exchanges/etomicswap/target
 
 # Subcrate artefacts
 /mm2src/common/c_headers

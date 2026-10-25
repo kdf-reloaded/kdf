@@ -615,6 +615,7 @@ one of the following chapter-bound carve-out classes:
 | Chapter-bound substrate identifier       | The identifier is bound by the chapter itself as substrate contract surface (the substrate's chapter is the bounding authority for the identifier's expression). |
 | Legal-position evidentiary citation      | The chapter is a legal-position chapter and the identifier (a baseline file path, a baseline-existing constant name, a present-tree symbol cited as evidence of a position the chapter binds) is quoted as evidence rather than as substrate. The chapter MUST name itself as the legal-position chapter on which the citation depends. |
 | Project-internal source-comment marker   | The identifier is a project-internal mnemonic notation that appears verbatim in the source tree as a comment marker (a deferral-tracking tag, a TODO-style identifier, a workplan-cross-reference token). The chapter MUST cite the source-tree location at which the marker appears and MUST NOT treat the marker itself as substrate. |
+| Reference-state table entry              | The identifier is a commit identifier, a tag name or a branch-state name of the historical record, recorded as a row of the reference-state table of chapter 02 §2.15A. The class admits the identifier in that table and nowhere else in the document set; every other place names the state by its row name. A location within forbidden-class material is not admitted by this class or by any other. Adopted 2026-10-25 by the amendment recorded in §1.7; not retrospective. |
 
 Identifiers that do not satisfy any carve-out class — internal module
 names, internal struct names, internal field names, internal function
@@ -742,12 +743,15 @@ string its own public releases carry — is a public-release fact of the
 kind R6 admits, is what the project's compatibility policy already
 binds as the reference contract, and MAY be named. A post-anchor
 commit identifier, a branch state, or a location within
-forbidden-class material MUST NOT be named: paired with a section
-scope it points at the expression the record exists to keep out, and
-no carve-out class of R11 admits that pairing. Where a record cannot
-be made more precise without such an identifier, it names the public
-release designation or the reference epoch and says that this is as
-precise as the record goes.
+forbidden-class material MUST NOT be named in a record: paired with a
+section scope it points at the expression the record exists to keep
+out, and no carve-out class of R11 admits that pairing. Where a
+record needs to be more precise than a release designation, it names
+a row of the reference-state table of chapter 02 §2.15A by the row's
+name — adding the row if none exists — and the identifier stays in
+the table (the amendment below). Where no row can be given either,
+the record names the public release designation or the reference
+epoch and says that this is as precise as the record goes.
 
 That constraint binds a scoped record written on or after the commit
 that adopts it. R26 permits a tightening to reach backwards but not to
@@ -760,6 +764,37 @@ Such an identifier is a locator and not expression, so its presence
 breaches neither R8–R11 nor that chapter's content standard; what the
 constraint removes is a pointer the record does not need. Bringing
 that one record into line is D5.
+
+*Amendment of 2026-10-25.* The constraint above, and R11 with it,
+are carved out for exactly one place: the reference-state table of
+chapter 02 §2.15A. A post-anchor commit identifier or a branch state
+MAY appear there and nowhere else in the document set, as a row that
+maps a name to the full commit identifier, the kind of state and the
+date; chapter prose, scoped records, clearance statements and scope
+attestations name a state by its row name only. The reasoning is
+recorded so that the carve-out is read as narrowly as it is meant.
+The historical record is a public repository — unmaintained but
+reachable — so a commit identifier taken from it discloses nothing
+that is not already public; and an identifier is a locator, not
+expression, as this section already says of chapter 39's record.
+What the constraint protects against is imprecision and mislabelling
+in records: a release designation stretched over a branch tip that
+merely resembles it, a pull-request state that cannot be named at
+all, a clearance whose extent a reader cannot pin to a tree. The
+table cures that imprecision rather than worsening it, because a row
+fixes what each name means and the gate checks the row against what
+it compared. The carve-out is narrow in two ways: it admits the
+identifier in the table and in no other place, and it admits only a
+row's four columns — a location within forbidden-class material
+remains unnameable everywhere. The amendment is not retrospective:
+records written before 2026-10-25 keep the visible gaps the
+constraint left them with, are not re-gated, and are not defective
+for naming a reference epoch where a row would now be used; a record
+written or revised on or after that date names rows. Under R25–R26
+the amendment permits no chapter the pre-amendment rule forbade:
+every identifier the table may hold is one the pre-amendment rule
+kept out of *prose*, and prose keeps it out still, so the chapter 39
+record of D5 remains out of line until it is revised to name rows.
 
 Either form is satisfied when the chapter's content rests on the
 permitted-input classes of §1.3 — including R3's published
@@ -1152,9 +1187,11 @@ constraint of §1.7 is deferred to that chapter's next revision. The
 identifiers are locators rather than expression, so the chapter's
 content standard under R8–R11 is unaffected and R21 does not attach;
 the revision replaces the pointer with the public release designation
-and the reference epoch, which is all the record needs. The R25
-re-check that accompanied the constraint found no other instance in
-the document set.
+and the reference epoch, which is all the record needs. Since the
+amendment of 2026-10-25 the revision may instead table the states in
+chapter 02 §2.15A and name the rows; either way the identifiers
+leave chapter 39's prose. The R25 re-check that accompanied the
+constraint found no other instance in the document set.
 
 ## 1.15 Baseline Verifications
 
@@ -1206,7 +1243,11 @@ licenses).
   realise, and the manner in which it is run. For the
   R25 re-check behind the §1.7 reference-version constraint and D5:
   the document set's scoped records and derivation records as they
-  stand, read for the reference identifiers they name.
+  stand, read for the reference identifiers they name. For the
+  amendment of 2026-10-25 to R11 and §1.7: chapter 02 §2.15A (the
+  reference-state table the amendment carves out) and the clearance
+  records of the document set as they then stood, read for the gaps
+  the constraint had left visible.
 - *Permitted-input classes used:* the document set as it stands; this
   repository's own instruction, role-definition and clean-room
   tooling files, cited as

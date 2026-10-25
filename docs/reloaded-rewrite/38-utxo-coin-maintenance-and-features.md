@@ -275,6 +275,26 @@ contract). Chapter 37 additionally binds the SPV activation configuration,
 header-store, and confirmation-proof behaviour a UTXO coin may separately
 opt into; this chapter does not restate it.
 
+R38.5.4 The coin's **signature-hash algorithm** is selected by a separate
+coin-configuration contract, bound in
+[chapter 58](58-utxo-signature-version-and-radiant-sighash.md) §58.2: the
+`signature_version` key over a closed set of four values, the `fork_id` key
+that forms the signed sighash byte, and the per-coin final-hashing selection
+that is orthogonal to both. That contract reaches **every** signing site of
+the coin, the `sign_raw_transaction` RPC of R38.5.1 included — which matters
+for R38.5.1 specifically, because that RPC accepts caller-supplied scripts
+and so can reach parts of a signature-hash algorithm the project's own
+transaction construction never does (ch. 58 R58.3.5). `signature_version` and
+`chain_variant` are independent: neither implies the other, and the one coin
+whose dialect reloaded does not yet support needs no `chain_variant` at all
+(ch. 58 R58.2.6).
+
+> **As-built note (2026-10-25).** The dialect the last sentence refers to
+> — Radiant's `fork_id_rxd` — is implemented in PR #65 (stacked on PR #54,
+> pending merge; ch. 58 §58.5 as-built statement). The sentence remains
+> true as a statement of configuration: Radiant still needs no
+> `chain_variant`. The cleared rule text above is unchanged.
+
 ---
 
 ## Part B -- Required, NOT yet in reloaded (T-PORT)
@@ -352,6 +372,9 @@ up), and shall, for fixed-fee coins, derive the minimum trading volume from the
 fixed fee (on the order of max(10x dust, 10x(fee-per-kB x ~496 bytes))) while
 dynamic-fee coins remain dust-based. Acceptance: a fixed-fee coin reports a
 fee-derived `min_trading_vol`; a dynamic-fee coin remains dust-based.
+The EVM and QRC20 counterparts of this policy are bound by
+[Chapter 57](57-evm-fee-inputs.md) §57.7A (cleared there on 2026-10-24 —
+see the second scoped-addition item of its §57.12).
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -521,8 +544,8 @@ R38.8.6 **Tests (two-direction, observable).**
   derivation), and Electrum protocol documentation (public specifications
   for the §38.6/§38.8 port targets); KIP-0001 and the public Komodo daemon
   interest rule, plus the issue #11 KMD mainnet observations (§38.4,
-  §38.10); [Chapter 5](05-hd-wallet-and-key-derivation.md)
-  §5.9A (the software-HD crypto substrate §38.8 consumes); [Chapter 7](07-mnemonic-and-passphrase-management.md)
+  §38.10); [Chapter 5](05-hd-wallet-support.md)
+  §5.9A (the software-HD crypto substrate §38.8 consumes); [Chapter 7](07-wallet-lifecycle-and-key-export.md)
   (a cross-referenced sibling chapter); [Chapter 45](45-startup-configuration-and-environment-tolerance.md)
   (a cross-referenced sibling chapter).
 - *Permitted-input classes used:* baseline/as-built source (the shipped
@@ -534,7 +557,7 @@ R38.8.6 **Tests (two-direction, observable).**
   streaming, fixed-fee policy, FIRO Spark) exist upstream and are
   genuinely absent from reloaded's baseline -- Forbidden corpus, under
   the chapter-01 two-team clean-room workflow; see below.
-- *Sibling-allowlist consultations:* [Chapter 5](05-hd-wallet-and-key-derivation.md)
+- *Sibling-allowlist consultations:* [Chapter 5](05-hd-wallet-support.md)
   §5.9A, [Chapter 37](37-utxo-spv-and-block-header-validation.md) §37.5.
 - *Two-team workflow record:* the Spec Reader role (AGENTS.md §2) was
   used, and the Dirty Gate passed, for the absence-verification and
