@@ -1,6 +1,6 @@
 # Plan: the EVM minimum trading volume
 
-**Status:** planning — **Last reviewed:** 2026-10-24
+**Status:** planning — **Last reviewed:** 2026-10-25
 
 > **Context:** a field report of a refused WBTC-PLG20 buy traced to
 > `min_trading_vol` for EVM coins, which is computed from the coin's decimals by
@@ -8,15 +8,19 @@
 > 0.01 floor, which on a Bitcoin-pegged token is roughly 0.01 BTC as a *minimum
 > trade*. The reporter states the same defect existed in the reference and was
 > fixed there long ago, so the shape of the fix is a Spec Reader question before
-> it is an implementation question. Nothing here has been implemented; no branch
-> exists.
+> it is an implementation question. When this plan was written nothing had been
+> implemented and no branch existed; see the State line for the current
+> position.
 
-**State (2026-10-24): ready for the Coder.** Steps 2 and 3 are done — the Spec
-Reader dispatch produced CRD ch.57 §57.7A (Part D: R57.7A.1–R57.7A.6, T10–T12,
-D7–D8, V4), and it passed the Dirty Gate the same day (PASS, measure 0.01,
-recorded in ch.57 §57.12's second scoped-addition item). The four questions
-below are answered in the chapter; step 4 can proceed from the cleared chapter
-alone.
+**State (2026-10-25): implemented, PR #66, merge after #57.** Steps 2 and 3
+were done on 2026-10-24 — the Spec Reader dispatch produced CRD ch.57 §57.7A
+(Part D: R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4), and it passed the Dirty Gate
+the same day (PASS, measure 0.01, recorded in ch.57 §57.12's second
+scoped-addition item). Step 4 was implemented from the cleared chapter alone on
+branch `fix/evm-min-trading-volume` (PR #66), to be merged after PR #57. The
+one item of "What done looks like" not met is the end-to-end preview of the
+field report's volume on a real eight-decimal coin, recorded below as a
+coverage gap.
 
 ## The defect (verified in this tree, 2026-10-24)
 
@@ -157,10 +161,33 @@ severity.
 2. **Spec Reader dispatch** — **done 2026-10-24.** Output: ch.57 §57.7A.
 3. **Dirty Gate** — **done 2026-10-24.** PASS, measure 0.01, finding list
    empty; recorded in ch.57 §57.12 (second scoped-addition item).
-4. **Implementation via the Coder**, from the gated chapter only: R57.7A.1
-   (and R57.7A.6 for QRC20), with T10–T12 as the tests. D7's one-line price-
-   floor remedy is adjacent and needs no switch either (R57.7A.5), but it is
-   bound by no chapter yet — see Risks.
+4. **Implementation via the Coder** — **done 2026-10-25, PR #66**
+   (`fix/evm-min-trading-volume`, merge after #57), from the gated chapter
+   only. As built:
+   - a new helper `one_smallest_unit(decimals)` in
+     `mm2src/coins/lp_coins_types.rs`, computing `BigDecimal::new(1, decimals)`
+     exactly; the pre-existing satoshi-to-decimal helper was not reused
+     because it overflows above 19 decimals;
+   - `min_trading_vol` in `mm2src/coins/eth/eth_market_ops.rs` and in the
+     QRC20 market-operations file now return that helper's value (R57.7A.1,
+     R57.7A.6); the `decimals / 3` expression is gone from both;
+   - `min_tx_amount` is unchanged at zero (R57.7A.3); no compatibility switch
+     (R57.7A.5).
+   - Tests: **T10** pins the exact value for 18, 8, 6 and 24 decimals, for an
+     EVM coin and a QRC20 token. **T11** covers the taker order builder's
+     `BaseAmountTooLow` and the maker order builder's `MaxBaseVolTooLow`
+     refusals and their mapping to `TradePreimageRpcError::VolumeTooLow`
+     with threshold 10^-8, the maker preview for a volume of zero, and both
+     `min_trading_vol` RPCs. **T12** covers the DEX-fee path not reading the
+     floor.
+   - **Coverage gap, recorded honestly:** the end-to-end maker and taker
+     trade preview for `0.00072437` on a real eight-decimal coin is not
+     driven — the test coin lacks the balance and fee mocks it would need.
+     The maker order-update path uses the same validator as creation but is
+     not separately tested. The `max_taker_vol` half of T12 cannot detect a
+     future read of the floor; only the DEX-fee half is guarded.
+   - D7's one-line price-floor remedy was **left out by maintainer decision**;
+     it is confirmed fully separable — see Risks.
 5. **Compatibility question — answered; no switch.** The premise of this
    step was that question 3 would decide the arm. It does not arise: the
    change is **toward parity** — it replaces a pre-anchor baseline formula
@@ -187,20 +214,29 @@ validation. Chapters 32, 38 and 59 carry one-line pointers to §57.7A.
 
 ## What done looks like
 
+Checked against PR #66 on 2026-10-25; every item is met except the first,
+which is recorded as a coverage gap.
+
 - A buy, a maker order and a trade preview of `0.00072437 WBTC-PLG20` all
-  succeed, or fail for a reason that is not this floor.
+  succeed, or fail for a reason that is not this floor. — **Gap:** not
+  driven end to end in PR #66's tests (the test coin lacks balance and fee
+  mocks); the floor the four requests consult is pinned by T10 and the
+  refusal arithmetic by T11, so the item rests on those plus field use.
 - `min_trading_vol` for an EVM coin and a QRC20 token is exactly
   `10^-decimals` (ch.57 R57.7A.1, R57.7A.6) and the `decimals / 3` expression
   is gone from both market-operations files; `min_tx_amount` stays zero
-  (R57.7A.3).
+  (R57.7A.3). — **Met** (PR #66).
 - The governing CRD chapter binds the rule and answers the four questions
   — done, ch.57 §57.7A, cleared 2026-10-24.
 - No compatibility switch (ch.57 R57.7A.5); a changelog line for the changed
-  `min_trading_vol` responses.
+  `min_trading_vol` responses. — **Met** (PR #66).
 - A regression test pins the floor for an 8-decimal EVM token and fails on
   10^-2, so the baseline value cannot come back unnoticed (ch.57 T10); the
   field report's volume passes end to end (T11); the fee and maximum-volume
-  paths are shown untouched (T12).
+  paths are shown untouched (T12). — **Met** for T10 and for the refusal
+  half of T11; the end-to-end half of T11 is the gap above; T12 guards the
+  DEX-fee path, while its maximum-volume half cannot detect a future read of
+  the floor.
 
 ## Risks
 
@@ -225,9 +261,11 @@ validation. Chapters 32, 38 and 59 carry one-line pointers to §57.7A.
   reference node would place is refused locally, no effect on any peer — and
   a one-line remedy (`price <= 0` instead of `price < 10^-8`) with no switch.
   It is coin-agnostic order validation that no chapter binds yet, so it is
-  not in the Coder's scope from ch.57 alone; decide whether to carry it in
-  the same change under D7 as the record, or wait for an order-match chapter
-  to own it.
+  not in the Coder's scope from ch.57 alone. **Decided 2026-10-25: left out
+  of PR #66 by maintainer decision.** It is confirmed fully separable from
+  the volume floor — a single comparison in `validate_price` (`price <
+  10^-8` → `price <= 0`) — so it can be carried later, when an order-match
+  chapter owns order validation, without reopening this change.
 - **The QRC20 companion.** The QRC20 token layer carries the same formula and
   the same zero `min_tx_amount`, and ch.57 R57.7A.6 binds it alike; the fix is
   incomplete if only the EVM file changes. Ch.57 D8 records that the rule
@@ -243,4 +281,6 @@ validation. Chapters 32, 38 and 59 carry one-line pointers to §57.7A.
    too, and only `min_trading_vol` changes.
 3. **Chapter ownership** — **settled**, ch.57 §57.7A (above).
 4. **Whether to carry the D7 price-floor remedy in the same change** (Risks
-   above) — open; a project-team call, since no chapter binds it.
+   above) — **resolved 2026-10-25: not carried.** Maintainer decision; the
+   remedy is one comparison in `validate_price` and fully separable, and
+   waits for an order-match chapter to own order validation.
