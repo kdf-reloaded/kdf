@@ -60,7 +60,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   held a single Python 2.7 byte-compiled file, `getos.pyc` — the only `.pyc` in the tree — that
   nothing referenced; `etomic_build/` held outdated `curl` wrapper scripts for the legacy RPC that
   launched a binary path and sourced a coins file which no longer exist. The `.gitignore` entries
-  for paths under them were dropped with them; no other document changed. Detail: PR #64.
+  for paths under them were dropped with them; no other document changed. Three dead root scripts
+  went with them: `start_ONE_ANOTHER_trade.sh` (drove a `docker-compose` setup the repository
+  never contained and called scripts from the removed `etomic_build/`), `travis_cmake_linux.sh`
+  and `travis_cmake_mac.sh` (Travis-era CMake installers; the repository has no Travis
+  configuration). Detail: PR #64.
 
 ### Fixed
 
