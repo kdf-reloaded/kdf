@@ -27,9 +27,6 @@ const PROG_POW_SWITCH_TIME: u32 = 1_635_228_000;
 const QTUM_BLOCK_HEADER_VERSION: u32 = 536_870_912;
 /// Ravencoin KAWPOW.
 const KAWPOW_VERSION: u32 = 805_306_368;
-/// AuxPoW flag (bit 8 of the block version) as the `KawpowAuxpowMixed` layout reads it (CRD ch.37
-/// R37.5.9b): the per-header discriminator between std-80 (set) and the 120-byte KawPoW form (clear).
-const MIXED_LAYOUT_AUXPOW_FLAG: u32 = 0x0000_0100;
 /// Verus uses bit 16 of the version field to flag verus-blocks.
 const VERUS_VERSION_BIT: u32 = 0x0001_0000;
 
@@ -366,7 +363,7 @@ impl BlockHeader {
     /// follows its 80 bytes when the server did not strip it; in a list it never does.
     fn read_mixed<T: io::Read>(reader: &mut Reader<T>, allow_proof: bool) -> Result<Self, serialization::Error> {
         let version: u32 = reader.read()?;
-        if version & MIXED_LAYOUT_AUXPOW_FLAG != 0 {
+        if version & AUX_POW_VERSION_BIT != 0 {
             let mut header = Self::read_standard_after_version(reader, version)?;
             if allow_proof && !reader.is_finished() {
                 header.aux_pow = Some(read_aux_pow(reader)?);
@@ -394,8 +391,10 @@ impl BlockHeader {
 }
 
 /// Reads an AuxPoW proof: parent coinbase, parent hash, the two merkle branches and the parent
-/// header, which is std-80 by definition (CRD ch.37 §37.5.4). Same layout the `Deserializable`
-/// impl reads for the version-inferred AuxPoW arm.
+/// header, which is std-80 by definition (CRD ch.37 §37.5.4). The parent coinbase is always a
+/// standard Bitcoin (witness) tx. Reading the parent with the version-inferred layout would let a
+/// hostile server nest AuxPoW headers without limit and overflow the stack. The one reader of the
+/// proof layout, shared by the `Deserializable` impl and `read_mixed`.
 fn read_aux_pow<T: io::Read>(reader: &mut Reader<T>) -> Result<AuxPow, serialization::Error> {
     Ok(AuxPow {
         coinbase_tx: deserialize_tx(reader, TxType::StandardWithWitness)?,
@@ -530,22 +529,8 @@ impl Deserializable for BlockHeader {
         };
 
         let aux_pow = if version & AUX_POW_VERSION_BIT != 0 {
-            // Parent coinbase is always a standard Bitcoin (witness) tx.
-            let coinbase_tx = deserialize_tx(reader, TxType::StandardWithWitness)?;
-            let parent_block_hash = reader.read()?;
-            let coinbase_branch = reader.read()?;
-            let blockchain_branch = reader.read()?;
-            // The parent is a header of the parent chain, std-80 by definition (CRD ch.37 §37.5.4);
-            // reading it with the version-inferred layout would let a hostile server nest AuxPoW
-            // headers without limit and overflow the stack.
-            let parent_block_header = Box::new(BlockHeader::read_standard(reader)?);
-            Some(AuxPow {
-                coinbase_tx,
-                parent_block_hash,
-                coinbase_branch,
-                blockchain_branch,
-                parent_block_header,
-            })
+            // The parent header inside is std-80 by definition (CRD ch.37 §37.5.4); see `read_aux_pow`.
+            Some(read_aux_pow(reader)?)
         } else {
             None
         };
