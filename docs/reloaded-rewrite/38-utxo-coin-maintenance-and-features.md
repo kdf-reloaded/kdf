@@ -289,6 +289,12 @@ transaction construction never does (ch. 58 R58.3.5). `signature_version` and
 whose dialect reloaded does not yet support needs no `chain_variant` at all
 (ch. 58 R58.2.6).
 
+> **As-built note (2026-10-25).** The dialect the last sentence refers to
+> — Radiant's `fork_id_rxd` — is implemented in PR #65 (stacked on PR #54,
+> pending merge; ch. 58 §58.5 as-built statement). The sentence remains
+> true as a statement of configuration: Radiant still needs no
+> `chain_variant`. The cleared rule text above is unchanged.
+
 ---
 
 ## Part B -- Required, NOT yet in reloaded (T-PORT)
