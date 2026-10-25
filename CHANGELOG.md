@@ -53,6 +53,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   our own lockfile resolves well above that, so only an integrator who vendors or re-resolves for
   `wasm32` has a floor to raise. Detail: PR #38.
 
+### Removed
+
+- **The legacy `iguana/` and `etomic_build/` directories are gone.** Both were remnants of the
+  codebase's early days with no build, runtime, CI or documentation dependency. `iguana/tools/`
+  held a single Python 2.7 byte-compiled file, `getos.pyc` — the only `.pyc` in the tree — that
+  nothing referenced; `etomic_build/` held outdated `curl` wrapper scripts for the legacy RPC that
+  launched a binary path and sourced a coins file which no longer exist. The `.gitignore` entries
+  for paths under them were dropped with them; no other document changed. Detail: PR #TBD (fill in
+  once the pull request exists).
+
 ### Fixed
 
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
