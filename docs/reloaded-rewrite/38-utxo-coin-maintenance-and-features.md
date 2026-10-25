@@ -527,7 +527,7 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > `trading-floors-parity`. The cleared rule text above is unchanged.
 >
 > **As-built note (2026-10-25, clean-side record).** Items 3 and 4 are
-> implemented in PR #TBD. `dingo_fee` selects the whole-kilobyte policy,
+> implemented in PR #72. `dingo_fee` selects the whole-kilobyte policy,
 > plain fixed fees are proportional, the forced minimum relay fee is
 > proportional too, and the legacy and version-two HTLC spend estimates use
 > R38.6.6c over 496 bytes. The whole-kilobyte floor term is `r`. An explicit
