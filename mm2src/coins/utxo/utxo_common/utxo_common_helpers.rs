@@ -1,6 +1,7 @@
 // utxo_common_helpers — address utilities, balance queries, config, withdraw
 
 use super::*;
+use crate::utxo::header_layout_fallback::HeaderLayoutFallback;
 
 const MIN_BTC_TRADING_VOL: &str = "0.00777";
 const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
@@ -180,10 +181,11 @@ pub(crate) fn header_variant(conf: &UtxoCoinConf, default: CoinVariant) -> CoinV
 pub async fn get_current_mtp(coin: &UtxoCoinFields, coin_variant: CoinVariant) -> UtxoRpcResult<u32> {
     let current_block = coin.rpc_client.get_block_count().compat().await?;
     coin.rpc_client
-        .get_median_time_past(
+        .get_median_time_past_with_fallback(
             current_block,
             coin.conf.mtp_block_count,
             header_variant(&coin.conf, coin_variant),
+            HeaderLayoutFallback::for_conf(&coin.conf),
         )
         .compat()
         .await

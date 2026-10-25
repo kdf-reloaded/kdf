@@ -26,6 +26,7 @@ mod bchd_grpc;
 #[rustfmt::skip]
 #[path = "utxo/pb.rs"]
 mod bchd_pb;
+pub mod header_layout_fallback;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
@@ -536,6 +537,13 @@ pub struct UtxoCoinConf {
     /// Header layout selected by the Reloaded-only `protocol.header_layout` key (CRD ch.37
     /// R37.5.9). `None` when the key is absent: header reads are then unchanged.
     pub header_layout: Option<CoinVariant>,
+    /// The node switch `header_layout_fallback_families` (`MM2.json`, default `["BTC"]`): the coin
+    /// families whose header-list reads may retry the Riecoin and mixed layouts when the standard
+    /// read fails. Consulted only when `header_layout` is `None` (CRD ch.37 R37.5.9e).
+    pub header_layout_fallback_families: Vec<String>,
+    /// Set once the fallback has picked a layout for this coin, so the suggestion to pin it with
+    /// `header_layout` is logged once per activation.
+    pub header_layout_fallback_logged: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]

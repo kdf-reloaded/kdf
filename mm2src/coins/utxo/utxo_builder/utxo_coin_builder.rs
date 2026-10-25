@@ -4,7 +4,8 @@ use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumRpcRe
                                UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
-use crate::utxo::utxo_builder::utxo_conf_builder::{UtxoConfBuilder, UtxoConfError, UtxoConfResult};
+use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_families, UtxoConfBuilder, UtxoConfError,
+                                                   UtxoConfResult};
 use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, ElectrumProtoVerifier, RecentlySpentOutPoints,
                   SPVConf, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode,
                   DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
@@ -204,6 +205,7 @@ pub trait UtxoCoinWithIguanaPrivKeyBuilder: UtxoFieldsWithIguanaPrivKeyBuilder {
 pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
     async fn build_utxo_fields_with_iguana_priv_key(&self, priv_key: &[u8]) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), self.ticker())
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
             .build()
             .mm_err(Into::into)?;
 
@@ -267,6 +269,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
     ) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let ticker = self.ticker().to_owned();
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), &ticker)
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
             .build()
             .mm_err(Into::into)?;
 
@@ -374,6 +377,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     async fn build_utxo_fields_with_trezor(&self) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let ticker = self.ticker().to_owned();
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), &ticker)
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
             .build()
             .mm_err(Into::into)?;
 

@@ -8,12 +8,14 @@ use derive_more::Display;
 use kdf_crypto::ChecksumType;
 pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, KeyPair, Private, Public, Secret,
                Type as ScriptType};
+use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use script::SignatureVersion;
 use serde_json::{self as json, Value as Json};
 use serialization::CoinVariant;
 use std::num::NonZeroU64;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 pub type UtxoConfResult<T> = Result<T, MmError<UtxoConfError>>;
 
@@ -52,6 +54,38 @@ pub enum UtxoConfError {
         ticker: String,
         value: String,
     },
+    #[display(
+        fmt = "'{}' in MM2.json must be an array of strings, got {}",
+        HEADER_LAYOUT_FALLBACK_FAMILIES_KEY,
+        _0
+    )]
+    InvalidHeaderLayoutFallbackFamilies(String),
+}
+
+/// The `MM2.json` key of the node switch that names the coin families whose header reads may fall back
+/// to a structural layout probe (CRD ch.37 R37.5.9e).
+pub const HEADER_LAYOUT_FALLBACK_FAMILIES_KEY: &str = "header_layout_fallback_families";
+
+/// The families the fallback applies to when `MM2.json` does not carry the key.
+const HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT: &[&str] = &["BTC"];
+
+/// Reads the node switch `header_layout_fallback_families`: an array of strings, default `["BTC"]`
+/// when the key is absent. Any other type (a non-array, or an array holding a non-string) is a
+/// configuration error rather than a silent default, so a typo cannot quietly change which coins
+/// are probed. `[]` turns the fallback off.
+pub fn header_layout_fallback_families(ctx: &MmArc) -> UtxoConfResult<Vec<String>> {
+    match ctx.conf.get(HEADER_LAYOUT_FALLBACK_FAMILIES_KEY) {
+        None => Ok(HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
+            .iter()
+            .map(|f| (*f).to_owned())
+            .collect()),
+        Some(Json::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+            .or_mm_err(|| UtxoConfError::InvalidHeaderLayoutFallbackFamilies(Json::Array(items.clone()).to_string())),
+        Some(other) => MmError::err(UtxoConfError::InvalidHeaderLayoutFallbackFamilies(other.to_string())),
+    }
 }
 
 impl From<Bip32Error> for UtxoConfError {
@@ -62,11 +96,27 @@ pub struct UtxoConfBuilder<'a> {
     conf: &'a Json,
     ticker: &'a str,
     params: &'a UtxoActivationParams,
+    /// The node switch `header_layout_fallback_families`, resolved by the caller from `ctx.conf`.
+    header_layout_fallback_families: Vec<String>,
 }
 
 impl<'a> UtxoConfBuilder<'a> {
     pub fn new(conf: &'a Json, params: &'a UtxoActivationParams, ticker: &'a str) -> Self {
-        UtxoConfBuilder { conf, ticker, params }
+        UtxoConfBuilder {
+            conf,
+            ticker,
+            params,
+            header_layout_fallback_families: HEADER_LAYOUT_FALLBACK_FAMILIES_DEFAULT
+                .iter()
+                .map(|f| (*f).to_owned())
+                .collect(),
+        }
+    }
+
+    /// Sets the node-level `header_layout_fallback_families` policy (see [`header_layout_fallback_families`]).
+    pub fn with_header_layout_fallback_families(mut self, families: Vec<String>) -> Self {
+        self.header_layout_fallback_families = families;
+        self
     }
 
     pub fn build(&self) -> UtxoConfResult<UtxoCoinConf> {
@@ -143,6 +193,8 @@ impl<'a> UtxoConfBuilder<'a> {
             trezor_coin,
             enable_spv_proof,
             header_layout,
+            header_layout_fallback_families: self.header_layout_fallback_families.clone(),
+            header_layout_fallback_logged: Arc::new(AtomicBool::new(false)),
         })
     }
 

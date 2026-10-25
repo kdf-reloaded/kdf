@@ -1,6 +1,7 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_macros))]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+use crate::utxo::header_layout_fallback::HeaderLayoutFallback;
 use crate::utxo::{output_script, sat_from_big_decimal};
 use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 use async_trait::async_trait;
@@ -411,6 +412,19 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
         count: NonZeroU64,
         coin_variant: CoinVariant,
     ) -> UtxoRpcFut<u32>;
+
+    /// As [`UtxoRpcClient::get_median_time_past`], and when `fallback` is present and the standard
+    /// read of the served header list fails, retries the structural fallback cascade (CRD ch.37
+    /// R37.5.9e). Clients that read no header list ignore `fallback`.
+    fn get_median_time_past_with_fallback(
+        &self,
+        starting_block: u64,
+        count: NonZeroU64,
+        coin_variant: CoinVariant,
+        _fallback: Option<HeaderLayoutFallback>,
+    ) -> UtxoRpcFut<u32> {
+        self.get_median_time_past(starting_block, count, coin_variant)
+    }
 
     /// Returns block time in seconds since epoch (Jan 1 1970 GMT).
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>>;

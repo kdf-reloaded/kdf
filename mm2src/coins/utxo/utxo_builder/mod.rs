@@ -6,4 +6,4 @@ pub use utxo_arc_builder::{MergeUtxoArcOps, UtxoArcBuilder};
 pub use utxo_coin_builder::{UtxoCoinBuildError, UtxoCoinBuildResult, UtxoCoinBuilder, UtxoCoinBuilderCommonOps,
                             UtxoCoinWithIguanaPrivKeyBuilder, UtxoFieldsWithGlobalHDBuilder,
                             UtxoFieldsWithHardwareWalletBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
-pub use utxo_conf_builder::{UtxoConfBuilder, UtxoConfError, UtxoConfResult};
+pub use utxo_conf_builder::{header_layout_fallback_families, UtxoConfBuilder, UtxoConfError, UtxoConfResult};
