@@ -395,7 +395,7 @@ current fee policy applied to a reference spend size of 496 bytes
 - *fixed per-kB rate `r`:* `floor(r × 496 / 1000)`, proportional
   and not rounded up to a whole kilobyte;
 - *fixed per-kB rate with whole-kB rounding (the chapter-38
-  R38.6.6 fixed-fee option):* `r` (one kilobyte);
+  R38.6.6a `dingo_fee` option):* `r` (one kilobyte);
 - *dynamic rate `r`:* `floor(r × 496 / 1000)`, with no volatility
   increase at this stage;
 - in all cases, if the coin forces the node's minimum relay fee,

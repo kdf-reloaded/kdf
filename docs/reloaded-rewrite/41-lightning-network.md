@@ -595,6 +595,27 @@ exists today).
 D41.2 *Closed (2026-10-11).* The reloaded-only `enable_lightning` and
 `init_lightning` methods stay routed as documented extensions (R41.2.2).
 
+## 41.11A Trading floors (Spec Reader 2026-10-25; cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+R41.11A.1 In both reference designations (`v2.6.0-beta` and `v3.0.0-beta`
+agree) a Lightning coin's minimum transaction amount is the largest, over
+the node's open channels, of the counterparty's minimum outbound HTLC
+amount in millisatoshi — one millisatoshi for a channel that states none,
+and one millisatoshi when there are no channels — expressed in the coin's
+configured decimals; its minimum trading volume equals that amount. It is
+the only family whose floors depend on node state (channels) rather than
+configuration alone ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.2.2, row L1).
+
+R41.11A.2 Reloaded implements neither accessor: both are placeholders
+that end the request abnormally, so `min_trading_vol` for an active
+Lightning coin, and any order or trade preview naming one, gets no orderly
+response (chapter 60 finding F5). Required: report R41.11A.1's value, or,
+while Lightning trading is unsupported, refuse the order or preview with
+an error (chapter 60 R60.6.5). This contradicts this chapter's "as-built"
+status line for these two accessors only; the activation and channel
+surfaces it documents are unaffected.
+
 ## 41.12 Baseline Verifications
 
 V41.1 The GPLv2 baseline routes the one-shot `enable_lightning` and parses the
@@ -624,7 +645,12 @@ list records the resulting deviations.
 - *Sibling-allowlist consultations:* [Chapter 36](36-tendermint-v2-activation-rpcs.md),
   [Chapter 48](48-platform-coin-task-activation.md),
   [Chapter 55](55-coin-activation-wire-contract.md).
-- *Forbidden corpus:* consulted, under the chapter-01 two-team clean-room
+- *Forbidden corpus:* (addition of 2026-10-25, §41.11A, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12:
+  also consulted at the same two tags, only to establish R41.11A.1's
+  channel-derived floor; no discretionary expression reproduced.)
+  Otherwise consulted, under the chapter-01 two-team clean-room
   workflow, at the GLEEC KDF tags `v3.0.0-beta` (reference) and `v2.6.0-beta`
   (legacy comparison), for the node-activation contract of §41.2 only --
   specifically the routed method set of R41.2.1, the activation-parameter

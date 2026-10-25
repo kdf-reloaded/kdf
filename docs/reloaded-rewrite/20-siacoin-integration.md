@@ -378,6 +378,23 @@ does not yet perform the R72 selection for Sia; until it does,
 this module's own correct 32-byte-only parsing cannot by itself
 make a Sia-involved legacy swap complete.
 
+**R-S11 (trading floors; Spec Reader 2026-10-25, cleared by the
+Dirty Gate with chapter 60 on 2026-10-25).** Sia's minimum trading volume and
+minimum transaction amount are both one hasting (10^-24 SC) in both
+reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree) and in
+reloaded. Every Sia HTLC spend and refund deducts a fixed miner fee of
+0.02 SC from the HTLC value in both trees, so a Sia payment of 0.02 SC or
+less, which every order builder accepts, can be neither spent nor
+refunded; the module MUST refuse such a spend or refund with an orderly
+error rather than build it ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+row S1, R60.5.6 row 8, finding F2). Whether reloaded also raises its Sia
+floor is a maintainer decision (chapter 60 D60.2).
+
+> **Resolution (2026-10-25, clean-room-original).** The maintainer kept
+> the Sia floors at parity and chose chapter 60's local pre-trade check
+> (R60.6.7), which refuses an order of this node's own whose Sia leg does
+> not exceed the miner fee; chapter 60 D60.2 records the decision.
+
 > **Binding scope (R36).** This section binds swap *behaviour*
 > and references the public trait surface only. No per-method
 > table keyed to private helpers, no method bodies, and no
@@ -921,7 +938,15 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   extends for this coin); Chapter 53 (the record-identity and
   transaction-type rules R53.5.2 / R53.5.10 that §20.9.2
   R-W9 / R-W10 reconcile the withdraw path with).
-- *Forbidden corpus:* consulted **only** to recover the
+- *Forbidden corpus:* (addition of 2026-10-25, R-S11, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12; the Sia spend construction was
+  checked by token inspection only: also consulted under the chapter-01
+  two-team procedure, at `v2.6.0-beta` and `v3.0.0-beta`, only to
+  establish the one-hasting floors and that every HTLC spend and refund
+  deducts the shared crate's fixed miner fee; no discretionary expression
+  reproduced.) Otherwise
+  consulted **only** to recover the
   externally-dictated public method strings of §20.4, the
   dictated derivation/coin-type and protocol/units facts of
   §20.4.1 and §20.5, the dictated spend-policy HTLC contract of

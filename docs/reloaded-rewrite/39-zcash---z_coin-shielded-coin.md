@@ -250,6 +250,21 @@ transparent surface and read the coin's transaction bytes through the shared UTX
 parser; which backend answers them is §39.11.1, and the parser split and
 version-coverage requirement are §39.11.4.
 
+R39.5.2 *Trading floors.* A shielded coin's minimum trading volume and
+minimum transaction amount are the UTXO values of
+[Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.6d–e, computed
+from the coin entry's transparent `txfee`, `dingo_fee` and `dust` fields,
+in both reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree).
+The published ARRR entry declares neither `txfee` nor `dust`, so it takes
+the fixed default of 1,000 base units per kilobyte and the default dust of
+1,000 base units: minimum trading volume 0.0001 ARRR, minimum transaction
+amount 0.00001 ARRR. The fee a shielded HTLC spend deducts is a fixed
+1,000 base units in both trees, so a payment at the floor is always
+spendable. Reloaded matches. The cross-family consumption and refusal
+contract is [Chapter 60](60-trading-floors-and-refusal-contract.md)
+(row Z1). *(Spec Reader addition 2026-10-25; cleared by the Dirty Gate
+with chapter 60 on 2026-10-25.)*
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -2060,6 +2075,24 @@ basis discards the rescan silently, and the case it damages is the one that
 needs it most -- restoring a seed whose funds predate the recent window, where
 the discarded rescan is the only thing that would have found them and the
 balance simply stays at zero.
+
+R39.8.0aw When a shielded coin is activated without `sync_params` and the
+shielded scan start is decided by the default recent scan window -- because the
+wallet has no scanned state yet, or because the empty-wallet skip-forward of
+R39.8.0an applied -- the node shall log one warning for that activation. The
+warning names the ticker; states that no `sync_params` were supplied; gives the
+start height and the window size in blocks; states that funds received before
+that height will not be visible; and states that an existing wallet should be
+re-activated with `sync_params` (`{"height": N}`, `{"date": T}` or `"earliest"`)
+preceding its first funds. No warning is logged when `sync_params` were supplied,
+when `skip_sync_params` is set, when an already-scanned wallet resumes, or for the
+periodic post-activation top-up passes. The warning changes no behavior; the
+activation result's `first_sync_block` (R39.8.0h) remains the machine-readable
+signal.
+
+> **Provenance (informative).** R39.8.0aw is clean-room-original hardening written
+> without reference to the upstream implementation; it is not a parity item and
+> needed no Dirty Gate pass.
 
 > **Upstream parity position (informative).** The skip-forward rule above is
 > **unconstrained** by the reference: the reference has no counterpart to it.
@@ -4393,7 +4426,14 @@ different cause. At least one live endpoint was observed in this state on
   wire-and-API-bound reuse (R29/R31) for the dictated method strings, JSON
   field names, and error discriminants this chapter distills.
 - *Sibling-allowlist consultations:* none.
-- *Forbidden corpus:* consulted, under the chapter-01 two-team clean-room
+- *Forbidden corpus:* (addition of 2026-10-25, R39.5.2, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12; the shielded spend
+  construction was checked by token inspection only:
+  also consulted, at `v2.6.0-beta` and `v3.0.0-beta`, only to establish
+  that a shielded coin's floors follow the UTXO rule and that a shielded
+  HTLC spend deducts a fixed 1,000 base units; no discretionary
+  expression reproduced.) Otherwise consulted, under the chapter-01 two-team clean-room
   workflow, for §39.8.0.4, §39.8.0.7, §39.10, §39.11 and R39.8.0av (with the
   parity-position note under R39.8.0an and the sharpened start-point
   divergence note in §39.10.6 that follow from it) -- and, for §39.10,

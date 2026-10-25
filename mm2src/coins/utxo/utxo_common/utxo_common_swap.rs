@@ -1369,25 +1369,39 @@ pub fn dex_fee_script(uuid: [u8; 16], time_lock: u32, watcher_pub: &Public, send
         .into_script()
 }
 
+/// Upper bound, in seconds, on the wait returned by [`can_refund_htlc`]: a caller sleeps at most this
+/// long before it re-checks, never longer than the real remaining wait.
+const MAX_REFUND_WAIT_SECS: u64 = 3600;
+
+/// Caps the remaining wait at [`MAX_REFUND_WAIT_SECS`].
+fn capped_refund_wait(remaining_secs: u64) -> CanRefundHtlc {
+    CanRefundHtlc::HaveToWait(remaining_secs.min(MAX_REFUND_WAIT_SECS))
+}
+
+/// Decides refund eligibility from the wall clock `now` (seconds), the HTLC `locktime`, and a lazily
+/// obtained `(p2sh_locktime, mtp)` pair consulted only once the wall-clock lock-time has passed.
+fn refund_eligibility(now: u64, locktime: u64, p2sh_locktime_and_mtp: Option<(u32, u32)>) -> CanRefundHtlc {
+    if now < locktime {
+        return capped_refund_wait(locktime - now + 1);
+    }
+    match p2sh_locktime_and_mtp {
+        Some((p2sh_locktime, mtp)) if p2sh_locktime >= mtp => capped_refund_wait((p2sh_locktime - mtp + 1) as u64),
+        _ => CanRefundHtlc::CanRefundNow,
+    }
+}
+
 pub async fn can_refund_htlc<T>(coin: &T, locktime: u64) -> Result<CanRefundHtlc, MmError<UtxoRpcError>>
 where
     T: UtxoCommonOps,
 {
     let now = now_ms() / 1000;
     if now < locktime {
-        let to_wait = locktime - now + 1;
-        return Ok(CanRefundHtlc::HaveToWait(to_wait.max(3600)));
+        return Ok(refund_eligibility(now, locktime, None));
     }
 
     let mtp = coin.get_current_mtp().await?;
-    let locktime = coin.p2sh_tx_locktime(locktime as u32).await?;
-
-    if locktime < mtp {
-        Ok(CanRefundHtlc::CanRefundNow)
-    } else {
-        let to_wait = (locktime - mtp + 1) as u64;
-        Ok(CanRefundHtlc::HaveToWait(to_wait.max(3600)))
-    }
+    let p2sh_locktime = coin.p2sh_tx_locktime(locktime as u32).await?;
+    Ok(refund_eligibility(now, locktime, Some((p2sh_locktime, mtp))))
 }
 
 pub async fn p2sh_tx_locktime<T>(coin: &T, ticker: &str, htlc_locktime: u32) -> Result<u32, MmError<UtxoRpcError>>
@@ -2937,4 +2951,43 @@ fn test_extract_secret_finds_the_secret_against_a_32_byte_secret_hash() {
 
     let extracted = extract_secret(secret_hash_32.as_slice(), &tx_hex).unwrap();
     assert_eq!(extracted, expected_secret);
+}
+
+#[cfg(test)]
+mod refund_wait_tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    #[test]
+    fn wall_clock_wait_below_cap_is_not_floored() {
+        // 5 minutes remaining (+1 s margin) must be returned as is, not raised to an hour.
+        let r = refund_eligibility(NOW, NOW + 300, None);
+        assert!(matches!(r, CanRefundHtlc::HaveToWait(301)));
+    }
+
+    #[test]
+    fn wall_clock_wait_above_cap_is_capped_at_one_hour() {
+        let r = refund_eligibility(NOW, NOW + 3 * 3600, None);
+        assert!(matches!(r, CanRefundHtlc::HaveToWait(3600)));
+    }
+
+    #[test]
+    fn mtp_wait_below_cap_is_not_floored() {
+        // Wall clock is past the lock-time but the median is 5 minutes short of the P2SH lock-time.
+        let r = refund_eligibility(NOW, NOW - 10, Some((1_000_300, 1_000_000)));
+        assert!(matches!(r, CanRefundHtlc::HaveToWait(301)));
+    }
+
+    #[test]
+    fn mtp_wait_above_cap_is_capped_at_one_hour() {
+        let r = refund_eligibility(NOW, NOW - 10, Some((1_000_000 + 3 * 3600, 1_000_000)));
+        assert!(matches!(r, CanRefundHtlc::HaveToWait(3600)));
+    }
+
+    #[test]
+    fn past_lock_time_is_refundable() {
+        let r = refund_eligibility(NOW, NOW - 10, Some((999_999, 1_000_000)));
+        assert!(matches!(r, CanRefundHtlc::CanRefundNow));
+    }
 }

@@ -687,7 +687,10 @@ order-match chapters ([Chapter 11](11-order-match-cancellation.md),
 [Chapter 12](12-order-match-state-store.md),
 [Chapter 59](59-legacy-ordermatch-negotiation.md)) bind coin-agnostic
 behaviour, and the consumption contract they would carry is unchanged by
-this section; only the value an EVM coin feeds into it changes.
+this section; only the value an EVM coin feeds into it changes. *(Pointer,
+2026-10-25: that cross-family consumption contract, and the per-family
+value table, are now bound in
+[Chapter 60](60-trading-floors-and-refusal-contract.md).)*
 
 *The problem this section answers.* A field report describes a refused
 purchase of roughly seven ten-thousandths of a unit of a Bitcoin-pegged
@@ -751,6 +754,20 @@ designation of §57.1; it is restated here so that an implementer can tell
 which observable refusals R57.7A.1 changes. It is bound by whichever
 order-match chapter comes to own order validation, not by this one.
 
+> **Amendment to R57.7A.5 (2026-10-25, Spec Reader; gated by the KDF
+> Dirty Gate in five passes on 2026-10-25, PASS — see the third
+> scoped-addition item of §57.12).** R57.7A.5 below gained two sentences, from "That
+> same advertised minimum" to "no disagreement arises". They complete,
+> and do not reverse, the rule as cleared on 2026-10-24: the floor is still
+> applied only to orders the node itself creates and is still invisible to
+> a peer except through the advertised `min_volume`, but the advertised
+> minimum also governs which peer requests the maker answers, and the
+> separate minimum transaction amount is a value both peers compute. PR
+> #66's implementation of R57.7A.1–R57.7A.6 is unaffected: nothing it
+> changed and nothing it left alone contradicts the added sentences. The
+> cross-family form of this rule, and every refusal and failure point, is
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) §60.5.
+
 > **As-built note (2026-10-25, PR #66) — the `min_trading_vol` response
 > fields.** The fourth row binds the value, not the field names, which
 > this chapter does not pin. As built, the legacy `min_trading_vol` method
@@ -768,7 +785,17 @@ is non-negative and its price and maximum volume are positive
 nonetheless visible to other nodes in one place: when a maker sets no
 minimum volume, the default of R57.7A.4 travels on the wire as the order
 record's `min_volume` field (Chapter 32 R-W1) and is shown to every peer
-in orderbook and best-orders responses. Two consequences follow:
+in orderbook and best-orders responses. That same advertised minimum is
+what the maker then applies to a peer's *request*: a taker request whose
+matched base volume is below the maker order's minimum volume receives no
+reserved message and no refusal of any kind
+([Chapter 60](60-trading-floors-and-refusal-contract.md) R60.5.2), so a
+peer that respects the advertised minimum is never refused on volume. The
+minimum *transaction* amount of R57.7A.3, by contrast, is a value two
+peers must agree on, because each computes the DEX fee floor from its own
+figure for the taker coin (Chapter 60 R60.5.4); for EVM and QRC20 coins it
+is zero on both sides, so no disagreement arises. Two consequences
+follow:
 
 - a reloaded node carrying the baseline formula advertises a minimum
   roughly a million times the reference's on an eight-decimal token
@@ -1001,6 +1028,12 @@ restates — belongs to whichever order-match chapter comes to own order
 validation. Until then this entry is the record. *(Cleared with §57.7A —
 see the clearance statement at its head and the second scoped-addition
 item in §57.12.)*
+
+> **Pointer (2026-10-25; cleared with chapter 60 on 2026-10-25).**
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.4.2 now
+> binds the default-and-refusal arithmetic for every coin family,
+> including the strictly-positive price rule as its step 4; this entry
+> remains the tracking record for the one-line fix itself.
 
 **D8.** *Placement of the QRC20 rule, and whether a per-coin override is
 ever wanted.* R57.7A.6 binds the QRC20 token layer from an EVM chapter
@@ -1356,6 +1389,74 @@ pre-anchor baseline code.*
     finding, both verified as pre-anchor baseline behavior (R1); and the
     one-smallest-unit value and the "any positive price" rule, which are
     numerical behavior observable through public RPC responses.
+- *Third scoped addition — the R57.7A.5 amendment and the chapter-60
+  pointers (2026-10-25).* The two sentences added to R57.7A.5, the
+  amendment note above it, and the two chapter-60 pointers (in the
+  "Why this section is in this chapter" paragraph and beneath D7) were
+  authored by the KDF Spec Reader under the two-team procedure at the
+  designations of §57.1. Corpus-sourced: that a maker answers no taker
+  request below its order's minimum volume, and that each peer computes
+  the DEX fee floor from its own minimum-transaction-amount figure.
+  The addition was gated by the KDF Dirty Gate as part of the chapter-60
+  candidate in **five passes on 2026-10-25** (pass 4 covered only the
+  changes made after pass 3, none of them in this addition; of the
+  changes pass 5 reviewed, the only one here renamed a baseline
+  reference in this item's method to the chapter 02 row name), each
+  returning PASS,
+  discretionary-expression measure 0.02, finding list empty, and
+  accordingly no remedy class for any line or for the candidate as a
+  whole. The 2026-10-24 clearance of the rest of Part D is unaffected.
+  The clearance of this addition covers the extent below, subject to
+  stated gaps (a)–(c); gap (d) is closed. The full attestation is kept in
+  [Chapter 60](60-trading-floors-and-refusal-contract.md) §60.12. The
+  scope attestation, in corpus-free terms:
+  - *Extent.* Pass 1: the trading-floor subsystem as chapter 60
+    describes it, including the maker's test of an incoming taker
+    request, which is the ground of the added R57.7A.5 sentences,
+    compared in full at `v3.0.0-beta` and cross-checked at `v2.6.0-beta`
+    for the floor rule and the configuration classification, with four
+    public issue-tracker items read. Pass 2: the first-appearance
+    history of the UTXO material and all clearance-record text (chapter
+    60 §60.12); nothing in this addition depends on it.
+  - *Stated gaps.* (a) No later unreleased v3 state was compared in any
+    pass. (b) The per-family legacy taker-fee validation and the
+    version-two funding check, on which the "both peers must agree"
+    sentence rests, were checked by token inspection only, not side by
+    side, although pass 3's mechanical sweep covered them too. (c) The
+    `v2.0.0-beta` first designation of §57.1 was not compared in any
+    pass; it rests on this chapter's own earlier clearance (the second
+    scoped-addition item above). (d) That only one rule-text line changed
+    after pass 1 — closed by pass 3.
+  - *Method.* Side-by-side reading; a mechanical token search (in pass 2
+    also a count across the designations compared); a per-token
+    forced-versus-free test of every code-formatted token against the
+    compared material, the baseline anchor (R1) and this repository. No gate
+    script was run (no code blocks).
+  - *Measure.* **0.02** in each pass, on the discretionary-expression
+    basis of chapter 01 R39 and R35, dictated and pinned content
+    excluded, read against the standard that any single free
+    discretionary match, transcribed body or control flow, or
+    discretionary message or comment wording fails the candidate; none
+    was found.
+  - *Pass 3 (final sweep, 2026-10-25).* PASS, measure 0.02, finding list
+    empty, standard unchanged. The whole current candidate — all of
+    chapter 60 and every added line of the companion diff, this addition
+    included — was compared with the comments, string literals and prose
+    documentation of the compared material by a word six-gram overlap
+    test, which found no overlap, and a five-gram near-match check, which
+    left only non-discretionary residue. Every code-formatted token
+    passed the forced-versus-free test, and the added non-record lines
+    were re-read against the pass-1 reading. The pass confirmed that the
+    only rule-text change after pass 1 was in chapter 60 §60.1, so this
+    addition is unchanged since pass 1.
+  - *Pass 5 (2026-10-25; reference-state names).* PASS, leak measure
+    0.02, no findings. The leak check covered that pass's changed lines,
+    one of them in this item. The chapter 02 R13 check covered the whole
+    chapter-60 candidate, this addition included, and found zero
+    findings: every state name has a row, and every state compared in
+    passes 1–4 matches its row's identifier. Method, extent and gaps are
+    recorded in [Chapter 60](60-trading-floors-and-refusal-contract.md)
+    §60.12; gaps (a)–(c) stand.
 - *Dirty Gate clearance (chapter 01 T1, R40, R43).* The whole of this
   chapter's forbidden-class-sourced material as it stood on 2026-10-24 — the
   *Forbidden corpus* item above, less the two scoped additions that follow

@@ -306,6 +306,16 @@ maker *recomputed* (not the values as received), the taker's two
 per-coin public keys, the taker's optional per-coin swap-contract
 addresses, and the taker's secret hash.
 
+> **Pointer (informative; Spec Reader 2026-10-25, cleared by the Dirty
+> Gate with chapter 60 on 2026-10-25).** None of R13's checks concerns volume. A trade too small
+> for the fees it will deduct is not refused at negotiation; it fails at
+> R17 (a funding value that does not match exactly, or that cannot cover
+> the funding-spend fee plus dust) or at a later spend.
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) R60.5.4–R60.5.6
+> binds each point and what each party observes, including the exact
+> funding match that makes the taker coin's minimum transaction amount a
+> value both peers must agree on.
+
 **R14.** *Clock-skew bound.* The 60-second bound of R13 check 4 MUST be
 exactly 60 seconds and MUST be the same value the legacy machines use
 (chapter 51 R12). It is three times the peer-to-peer layer's per-peer
@@ -1724,7 +1734,13 @@ divergence rather than resolving it.
   inter-operate with); R7 (independent work).
 - *Sibling-allowlist consultations:* none beyond the cross-chapter
   references listed in *Inputs*.
-- *Forbidden corpus:* consulted, under the chapter-01 two-team
+- *Forbidden corpus:* (addition of 2026-10-25: the informative pointer
+  after R13 restates chapter 60's corpus-sourced finding that the
+  version-two machines have no volume-based abort; cleared by the Dirty
+  Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md) on
+  2026-10-25, attestation in its §60.12, where the version-two funding
+  check is recorded as token-inspected only.)
+  Otherwise consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the version-two swap state
   machines only — specifically the state and event vocabularies and
   resume maps of R22 and R36, the transition conditions of R12–R21 and

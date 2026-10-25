@@ -1,6 +1,6 @@
 # Plan: Lightning activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-18
+**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-25
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings the Lightning task activation
@@ -37,3 +37,12 @@ References are to CRD ch. 41 (Dirty-Gate-passed).
 
 1, then 2 and 3 together (they touch the same start-up sequence), then 4 with
 D41.1 if hardware Lightning is ever in scope.
+
+## Trading floors (added 2026-10-25)
+
+Reloaded's two Lightning floor functions crash the request today (CRD ch. 60
+finding F5). Plan `trading-floors-parity` fixes that before beta, in widened
+PR #66: both report the reference value (ch. 41 §41.11A, ch. 60 row L1), and
+the order builders refuse Lightning pairs until Lightning trading exists
+(R60.6.5). When this plan's trading work starts, lift that refusal and keep the
+values.

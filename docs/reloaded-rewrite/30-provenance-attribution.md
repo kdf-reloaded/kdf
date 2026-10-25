@@ -113,6 +113,7 @@ and a one-sentence capsule of what the chapter documents.
 | 57 | [EVM Fee Inputs: Legacy Gas-Price Resolution, Per-Coin Gas Limits, and the Withdraw Fee Form](57-evm-fee-inputs.md) | legacy gas-price resolution, the proportional-increase arithmetic, per-coin `gas_limit` / `gas_limit_v2` / `gas_price_adjust` configuration blocks, the withdraw fee form and envelope-type derivation | How an EVM transaction's gas price and gas limit are resolved: the two-source maximum, the no-absolute-floor increase arithmetic, the per-coin override blocks and their defaults, and the withdraw fee object that decides the signed envelope type. |
 | 58 | [UTXO `signature_version` Contract and the Radiant Sighash](58-utxo-signature-version-and-radiant-sighash.md) | the `signature_version` / `fork_id` configuration contract, per-value sighash selection, the Radiant fork-id preimage | The closed set of signature-version values a UTXO coin configuration may name, the algorithm each selects, and the Radiant dialect in full — a BIP-143 preimage with one inserted per-output summary digest. |
 | 59 | [Legacy Order-Match Negotiation Loop and Dead-Order Defences](59-legacy-ordermatch-negotiation.md) | the four-message V1 negotiation exchange, taker-side reservation selection, negotiation timeouts, the peer penalty, keep-alive liveness | The legacy negotiation loop: collect-then-choose taker selection, at-most-once maker reservation, the two timeout arms, the one-hour penalty on a counterparty whose negotiation fails, and liveness kept on the receiver's own clock. |
+| 60 | [Per-Coin Trading Floors: Minimum Trading Volume, Minimum Transaction Amount, and Where They Refuse or Fail a Trade](60-trading-floors-and-refusal-contract.md) | per-family `min_trading_vol` / `min_tx_amount` values, order-builder default-and-refusal arithmetic, the maker's volume test on requests, the DEX-fee floor both peers compute, coin-layer spend refusals | The two per-coin trading floors for every family, where the order-match and swap layers consume them, and every point at which a floor, a dust limit or a deducted fee makes a peer refuse a trade or a started swap fail. |
 
 ## 30.4 Aggregated Input Register
 
@@ -266,9 +267,9 @@ subject, the citation is marked *(ref)*.
 | file-IO substrate (native-only)                                        | 26                                                  |
 | application-root substrate                                             | 07, 08, 09, 10, 11, 12, 13, 14, 17, 29              |
 | node-init substrate                                                    | 06, 29                                              |
-| order-matching substrate                                               | 11, 12, 13 *(ref)*, 59                              |
+| order-matching substrate                                               | 11, 12, 13 *(ref)*, 59, 60                          |
 | orderbook Patricia-trie + orderbook sync substrate                     | 32, 59 *(ref)*                                      |
-| atomic-swap substrate                                                  | 08, 09, 13, 15, 16, 17, 29, 33, 51, 52, 59          |
+| atomic-swap substrate                                                  | 08, 09, 13, 15, 16, 17, 29, 33, 51, 52, 59, 60      |
 | wallet-lifecycle substrate                                             | 07                                                  |
 | RPC-dispatcher substrate                                               | 10 *(ref)*, 27 *(ref)*                              |
 | browser-wallet-bridge substrate                                        | 05 *(ref)*, 26                                      |
@@ -300,7 +301,7 @@ preserved-for-history substrate retained for git-archaeology continuity
 ## 30.6 Document-Set Composition (binding rules)
 
 **R1.** *Per-chapter self-containment.* Each substantive chapter (03
-through 28, 31 through 33, and 35 through 59) MUST
+through 28, 31 through 33, and 35 through 60) MUST
 satisfy the project's chapter-shape rules (Chapter 01 §6): executive
 summary, subsystem shape, the binding-rule sections appropriate to the
 chapter's substrate, tests / deferred work / external references /

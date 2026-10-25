@@ -527,7 +527,10 @@ price validator and fully separable, and remains open.
   taker orders and trade previews and is advertised as the default
   `min_volume` of its maker orders; it is never applied to a peer's order, so
   the defect is one-sided against reloaded's users and closing it is a parity
-  **fix** with no compatibility switch (ch. 57 R57.7A.5). The EVM minimum
+  **fix** with no compatibility switch (ch. 57 R57.7A.5). *(2026-10-25,
+  cleared by the Dirty Gate with ch. 60: the maker also leaves unanswered any request below that
+  advertised minimum. The cross-family form of the rule is in ch. 60
+  R60.5.2 and #14. This does not change the conclusion.)* The EVM minimum
   *transaction* amount is zero in both trees and stays zero (R57.7A.3).
 - [ ] **Maker price floor (ch. 57 D7, finding under R57.7A.6).** Reloaded
   refuses a maker price below 10^-8; the reference accepts any positive
@@ -536,7 +539,7 @@ price validator and fully separable, and remains open.
 
 ---
 
-## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25; implementation landed in PR #62 for the median-time-past path, header sync and stores pending)**
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25 in two legs; the key landed in PR #62 for the median-time-past path; the registry-free structural fallback R37.5.9e, the key rename and the header-sync/store threading pending on the PR #62 follow-up)**
 
 CRD reference:
 [`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
@@ -569,35 +572,62 @@ this repository's own code and from public-network measurement alone.
   precedence over `chain_variant` for `"BTC"`-pinned entries; the four
   options and the one the evidence favours are in ch. 37 §37.9 D3. Parity
   **gap**; the family work needs no compatibility switch, while the
-  stop-gap option 4 (spend without a median) would.
+  stop-gap option 4 (spend without a median) would. *(The structural
+  fallback later bound as the registry-free leg, below, is switch-governed
+  — a deliberate divergence with its `[]` opt-back — so the sentence before
+  this one holds for the key leg only.)*
 
-  **Resolution path (2026-10-25, maintainer decision; clean-room-original,
-  no gate).** Bound in ch. 37 §37.5.9 (R37.5.9–R37.5.9d): a Reloaded-only
-  coin-configuration key, `protocol.reloaded_header_layout` (name and value
-  spellings proposed, pending the maintainer's veto), which the reference
-  ignores (ch. 45 R45.3.7) and which takes precedence over `chain_variant`
-  for the coin it is set on — D3 option 2 with option 3's per-header
-  structural recognition as its mechanism; option 4 rejected. Values:
-  `"riecoin"` (112 bytes, fixed) for `RIC`; `"kawpow_auxpow_mixed"` (per
-  header: AuxPoW flag clear → 120-byte KawPoW, set → std-80) for `MEWC`.
-  Both entries keep their registry `"BTC"`, so the shared coins file serves
-  both implementations. Median-time-past is computed from each parsed
-  header's timestamp; stored bytes and identity are the full served bytes
-  (R37.5.9c). No compatibility switch: nothing a counterparty observes
-  changes (R37.5.9d). Implementation is step H4a of
-  `docs/plans/utxo-header-family-selection.md`, placed ahead of the
-  remaining D1 family work as the **beta blocker**. **Implementation
-  landed in PR #62 (median-time-past path):** the key is read into the coin
-  configuration, the Riecoin and mixed readers are in the tree, and the
-  median-time-past the HTLC spend and refund query is computed from the
-  key's layout, so the spend no longer fails for an entry carrying the key.
-  The header-sync (SPV), single-header timestamp and header-store reads do
-  not yet use the layout (ch. 37 §37.5.8), so this item **stays open until
-  header sync and the stores follow** and the ch. 37 §37.8 R37.5.9 criteria
-  pass on every read path. `XPM` is out
-  of scope (wallet-only). The ch. 37 material is clean-room-original and
-  carries its own provenance note and §37.10 item; nothing here is gated or
-  awaiting a gate.
+  **Resolution path (2026-10-25, maintainer decisions; clean-room-original,
+  no gate).** Bound in ch. 37 §37.5.9 (R37.5.9–R37.5.9e) in **two legs**.
+  *Leg 1, the key as local override:* a Reloaded-only coin-configuration
+  key, `protocol.header_layout` (renamed 2026-10-25 from the proposed
+  `reloaded_header_layout`: the key is **not expected in the shared public
+  registry** — its maintainer will not add a Reloaded-specific key to a
+  shared file — so it is a local-override feature for an operator's own
+  coins file and its name is unbranded), which the reference ignores
+  (ch. 45 R45.3.7) and which takes precedence over `chain_variant` for the
+  coin it is set on — D3 option 2 with option 3's per-header structural
+  recognition as its mechanism; option 4 rejected. Values: `"riecoin"`
+  (112 bytes, fixed) for `RIC`; `"kawpow_auxpow_mixed"` (per header: AuxPoW
+  flag clear → 120-byte KawPoW, set → std-80) for `MEWC`. *Leg 2, the
+  registry-free path (R37.5.9e):* a **structural fallback** under the
+  standard family — for a coin without the key whose family is in the
+  node-level `MM2.json` array `header_layout_fallback_families` (default
+  `["BTC"]`, which until ch. 37 §37.9 D1 lands is every coin), a header
+  list or lone header the standard read does not consume exactly is re-read
+  under the Riecoin layout, then the mixed layout, and accepted only on
+  exact consumption; ambiguous lists are rejected; one `info` line per coin
+  per activation names the layout chosen so the operator can pin the coin
+  with the key; a malformed switch value refuses the launch. This is what
+  makes the registry's `RIC` and `MEWC` entries swap **with no change to
+  the shared registry**. Both entries keep their registry `"BTC"`, so the
+  shared coins file serves both implementations. Median-time-past is
+  computed from each parsed header's timestamp; stored bytes and identity
+  are the full served bytes (R37.5.9c). Compatibility: the key needs no
+  switch (R37.5.9d: nothing a counterparty observes changes); the fallback
+  is a deliberate divergence from the reference (which has no fallback and
+  misparses to a random median silently), Reloaded side by default under
+  `docs/COMPAT_SWITCHES.md`'s default-side rule, arm 2, with the
+  reference's selection reachable by `[]`, and takes a
+  `docs/GLEEC_COMPATIBILITY.md` row and a `RELOADED_VS_GLEEC.md` entry on
+  the code branch. Implementation is steps H4a (key) and H4b (fallback and
+  switch) of `docs/plans/utxo-header-family-selection.md`, placed ahead of
+  the remaining D1 family work as the **beta blocker**. **Implementation
+  landed in PR #62 (median-time-past path, key leg):** the key is read into
+  the coin configuration (under its earlier name), the Riecoin and mixed
+  readers are in the tree, and the median-time-past the HTLC spend and
+  refund query is computed from the key's layout, so the spend no longer
+  fails for an entry carrying the key. **Pending on the PR #62 follow-up:**
+  the structural fallback and its switch (which is what fixes the two
+  coins for a node running the shared registry as it stands), the rename
+  to `header_layout`, and the threading of the layout to the header-sync
+  (SPV), single-header timestamp and header-store reads (ch. 37 §37.5.8).
+  This item **stays open until the fallback lands and header sync and the
+  stores follow**, and the ch. 37 §37.8 R37.5.9 and R37.5.9e criteria pass
+  on every read path. `XPM` is out of scope (wallet-only; no fallback
+  step). The ch. 37 material is clean-room-original and carries its own
+  provenance note and §37.10 item; nothing here is gated or awaiting a
+  gate.
 - [ ] **Refund-wait bound floored instead of capped (ch. 37 §37.6,
   code-quality finding).** This repository's UTXO refund-eligibility
   routine returns a wait of *at least* one hour where the reference, since
@@ -608,6 +638,85 @@ this repository's own code and from public-network measurement alone.
   the tree; the comparison to the reference's cap — and the designation
   named for it — is corpus-sourced and recorded as such in ch. 37 §37.10
   (cleared 2026-10-25).
+
+---
+
+## #14 — Trading floors and fixed-fee arithmetic outside the EVM family — **OPEN (chapters gated in five passes 2026-10-25, PASS)**
+
+CRD reference:
+[`60-trading-floors-and-refusal-contract.md`](./60-trading-floors-and-refusal-contract.md)
+(new; §60.3 per-family table, §60.5 refusal and failure map, §60.6
+requirements, findings F1–F6) and
+[`38-utxo-coin-maintenance-and-features.md`](./38-utxo-coin-maintenance-and-features.md)
+§38.6.6 (rewritten: R38.6.6a–i), with pointers in ch. 18 §18.5.2, ch. 20
+R-S11, ch. 21 §21.11A, ch. 39 R39.5.2, ch. 40 §40.6A, ch. 41 §41.11A, and
+an amendment to ch. 57 R57.7A.5. Reference designations: `v2.6.0-beta` and
+`v3.0.0-beta`, which agree on every item. The material was gated by the
+KDF Dirty Gate in five passes on 2026-10-25 (each PASS,
+discretionary-expression measure 0.02, finding list empty; pass 5 also
+found every state name tabled in ch. 02 §2.15A with matching
+identifiers), recorded
+with its scope attestation and stated gaps in ch. 60 §60.12, ch. 38
+§38.9's fee-policy item and ch. 57 §57.12's third scoped-addition item.
+The items below may be implemented from the cleared chapters, subject
+to the stated gaps of those records: (a) no later unreleased v3 state is
+covered; (b) the four areas named there were checked by token
+inspection, with pass 3's mechanical sweep, not side by side; (c) the
+`v2.0.0-beta` designation rests on ch. 57's earlier clearance. The one
+sentence of ch. 38 R38.6.6e reworded after pass 3 at the gate's request
+was cleared by pass 4.
+
+*Is the floor a wire parameter?* Partly. No node refuses a swap at
+negotiation for its size, in either protocol. The minimum trading volume
+reaches a peer only as the maker's advertised `min_volume`, and a maker
+sends nothing in reply to a request below it (ch. 60 R60.5.1–R60.5.3).
+The minimum *transaction* amount is a true wire parameter. Each peer
+floors the DEX fee with its own figure for the taker coin. The maker then
+checks the fee against its own figure. In the legacy protocol a UTXO fee
+must be at least that figure, while SLP, Tendermint and Sia fees must
+match it exactly. In version two a UTXO taker's funding must match
+exactly (ch. 60 R60.5.4). Reloaded matches the reference on
+this value for every family that can swap.
+
+- [ ] **UTXO floor (ch. 38 R38.6.6i items 1–2).** Reloaded still fixes the
+  exact ticker `BTC` at 0.00777 (BTC-segwit is already 0.0001, the
+  reference value for both), and rounds the fee term up where the
+  reference truncates. The rounding difference affects no entry of the
+  public coins file today. Local policy; no switch. Finding F1 (BTC at
+  0.0001 fails a floor-sized legacy spend above roughly 19 sat/vB) is
+  answered by the local pre-trade check of ch. 60 R60.6.7 (maintainer
+  decision 2026-10-25), which ships with this fix.
+- [ ] **Whole-kilobyte fixed-fee option and proportional plain fixed fees
+  (ch. 38 R38.6.6a–c, R38.6.6i item 3).** Reloaded ignores `dingo_fee`.
+  It rounds every fixed-fee coin's transaction size up to a whole
+  kilobyte, so it overpays: a 226-byte KMD transaction costs 1,000 base
+  units instead of 226. For the six entries that carry the option, its
+  version-two spend fee is proportional where the reference charges one
+  kilobyte, so a version-two swap whose taker coin is one of them fails
+  the exact preimage check against a reference peer (ch. 16 R17).
+- [ ] **Legacy HTLC spend estimate (ch. 38 R38.6.6c, R38.6.6i item 4;
+  ch. 60 finding F4).** Reloaded estimates over 305 bytes with whole-kB
+  rounding; the reference uses 496 bytes under the R38.6.6b rule. The
+  peer never validates this figure; the cost is overpayment.
+- [ ] **Unchecked spend arithmetic (ch. 60 R60.6.4, finding F3).**
+  Reloaded's legacy spend and refund builders, and its version-two
+  maker-payment spend and refund builder, subtract the fee without
+  checking it. A fee that reaches the HTLC value then wraps and the
+  daemon rejects the broadcast. The version-two funding-spend builder
+  checks the fee but not the dust. Required: refuse cleanly.
+- [ ] **Lightning floors (ch. 41 R41.11A.2, finding F5).** Both accessors
+  are placeholders that end the request abnormally. Required: the
+  reference value, or an orderly refusal while Lightning trading is
+  unsupported.
+- [ ] **Sia spend below the fixed miner fee (ch. 20 R-S11, finding F2).**
+  In both trees and in reloaded, the Sia floors are one hasting while every
+  HTLC spend or refund deducts 0.02 SC. Required in reloaded: an orderly
+  refusal. The Sia floor stays at parity; the pre-trade check of ch. 60
+  R60.6.7 keeps such a payment from being created (maintainer decision
+  2026-10-25, ch. 60 D60.2).
+- Informative, no action: TRON shares the EVM accessor, so PR #66 (#12)
+  fixes its value too (ch. 21 §21.11A). Solana has no parity target,
+  because neither tree can trade it (ch. 40 §40.6A, finding F6).
 
 ---
 

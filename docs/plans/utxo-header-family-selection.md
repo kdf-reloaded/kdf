@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** in progress (proposed 2026-09-23; moved from parked on 2026-10-25 because it carries the beta blocker H4a, which PR #62 landed in part; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-25
+**Status:** in progress (proposed 2026-09-23; moved from parked on 2026-10-25 because it carries the beta blocker H4a, which PR #62 landed in part; the same day the key was renamed `header_layout` and step H4b — the switch-governed structural fallback that serves the shared registry's entries with no registry change — was added, pending on the PR #62 follow-up; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-25
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -37,8 +37,10 @@
 >    reference's complete — a **swap-breaking** gap, not a safer failure.
 >    XPM is wallet-only (registry `wallet_only: true`) and outside swap
 >    scope. **D3 is resolved (2026-10-25, ch.37 §37.5.9):** RIC and MEWC
->    leave the set with step H4a below, which reads the Reloaded-only key
->    that chapter binds; XPM stays in it (wallet-only, no value yet).
+>    leave the set with steps H4a and H4b below — the Reloaded-only key
+>    `header_layout` as a local override, and the switch-governed
+>    structural fallback of R37.5.9e that reads the registry entries as
+>    they stand; XPM stays in it (wallet-only, no value, no fallback step).
 
 ## How the four items connect
 
@@ -53,17 +55,24 @@ different case: no value of the reference's set lays out their headers
 (Riecoin, Primecoin and Meowcoin layouts, ch.37 §37.5.2), so D1 leaves them
 failing and they waited on ch.37 §37.9 D3, which needed a family the
 reference does not have and a decision on how a coin selects it. That
-decision is made (2026-10-25, ch.37 §37.5.9): a Reloaded-only key,
-`protocol.reloaded_header_layout`, that the reference ignores and that takes
-precedence over `chain_variant`, with per-header layout recognition as its
-mechanism — step H4a below. Because the failure reaches the HTLC spend
-(ch.37 §37.6 note), H4a is the step that restores RIC and MEWC swaps; it is
-the beta blocker, and it ranks above item 2 (identity hashes), which blocks
-SPV readiness but no swap, and above the rest of H4, which blocks no swap
-either.
+decision is made (2026-10-25, ch.37 §37.5.9) and has two legs: a
+Reloaded-only key, `protocol.header_layout`, that the reference ignores and
+that takes precedence over `chain_variant`, with per-header layout
+recognition as its mechanism — step H4a below — as a **local override**
+(the key is not expected in the shared registry); and a **structural
+fallback** under the standard family, governed by the node-level switch
+`header_layout_fallback_families` (default `["BTC"]`), that reads the
+registry's `RIC` and `MEWC` entries as they stand, with no key and no
+registry change — step H4b below (ch.37 R37.5.9e). Because the failure
+reaches the HTLC spend (ch.37 §37.6 note), H4a and H4b are the steps that
+restore RIC and MEWC swaps — H4b for the shared registry, H4a for an
+operator's pinned local entry; together they are the beta blocker, and they
+rank above item 2 (identity hashes), which blocks SPV readiness but no
+swap, and above the rest of H4, which blocks no swap either.
 
 So the order is: add the family and thread it (item 1) → the Reloaded-only
-layout key and its two layouts (H4a, which restores RIC and MEWC swaps) →
+layout key and its two layouts (H4a) and the switch-governed structural
+fallback (H4b), which together restore RIC and MEWC swaps →
 parse the missing families (H4, which closes item 4 for LBRY, PIVX and
 RUNES) → switch identity and storage to served bytes (item 2). Item 3 no
 longer comes first: what is left
@@ -147,10 +156,13 @@ for any step.
 Every header read of a UTXO coin parses with the family its configuration
 names (ch.37 R37.5.1, R37.5.1a). Explicit families are exclusive (R37.5.3).
 KawPoW is read only for `"RVN"` coins (R37.5.4). LBRY, PIVX, Peercoin and
-RICK/MORTY headers parse (R37.5.2). RIC and MEWC headers parse under the
-Reloaded-only key `reloaded_header_layout`, which takes precedence over
-their `"BTC"` value, and their median-time-past is the true one
-(R37.5.9–R37.5.9d). Identity and storage come from the served
+RICK/MORTY headers parse (R37.5.2). RIC and MEWC headers parse — as the
+shared registry serves them, with no key — by the structural fallback of
+R37.5.9e under the default switch, and, when an operator pins them locally
+with the Reloaded-only key `header_layout`, by that key, which takes
+precedence over their `"BTC"` value; either way their median-time-past is
+the true one (R37.5.9–R37.5.9e). With `header_layout_fallback_families: []`
+the fallback is off and such lists are rejected as today. Identity and storage come from the served
 bytes (R37.5.7), and header lists are checked for linkage where the family's
 hash allows it (R37.5.6). None of this may change behaviour for a coin whose
 configuration carries no `chain_variant` and whose headers already parse today,
@@ -229,12 +241,19 @@ Store the result as `UtxoCoinConf::header_family`. ZHTLC and BCH build their
 conf through the same builder, so check both.
 
 - **Explicit work left by H4a (PR #62):** the builder already reads
-  `conf["protocol"]["reloaded_header_layout"]` into
-  `UtxoCoinConf::reloaded_header_layout: Option<CoinVariant>` and fails the
-  coin build on an unknown value, naming the ticker. H2 reads `chain_variant`
-  beside it and resolves the two into the single per-coin value H4a
-  requires — the key's layout when present, else the `chain_variant` family,
-  else `Default` (R37.5.9a) — so that H3 threads one field, not two.
+  `conf["protocol"]["header_layout"]` (built in PR #62 under the earlier
+  name `reloaded_header_layout`; the field `UtxoCoinConf::header_layout:
+  Option<CoinVariant>` is renamed with the key on the follow-up) and fails
+  the coin build on an unknown value, naming the ticker. H2 reads
+  `chain_variant` beside it and resolves the two into the single per-coin
+  value H4a requires — the key's layout when present, else the
+  `chain_variant` family, else `Default` (R37.5.9a) — so that H3 threads one
+  field, not two. The fallback of H4b is **not** a value of that field: it
+  is read-time behavior keyed on whether the resolved family is in the
+  switch's set and on whether the key was present, so H2 must also keep
+  "key present" observable to the reader (for instance as the resolved
+  value carrying its origin), or H4b cannot tell a pinned coin from an
+  unpinned one of the same family.
 
 ### H3 — Carry the family everywhere
 
@@ -251,7 +270,7 @@ Replace every `CoinVariant::Standard` literal from H1's list with the coin's
 - **WalletConnect genesis lookup:** reads the coin conf.
 - **Explicit work left by H4a (PR #62):** that PR routes the resolved layout
   into `get_median_time_past` only (`header_variant` in
-  `utxo_common_helpers.rs`). For a coin carrying `reloaded_header_layout`,
+  `utxo_common_helpers.rs`). For a coin carrying `header_layout`,
   the header-sync fetch and anchor check (SPV, `utxo_common_spv.rs`),
   `retrieve_last_headers`, `get_block_timestamp` and both header stores'
   decode paths still read standard headers. H3 threads the resolved value to
@@ -260,7 +279,7 @@ Replace every `CoinVariant::Standard` literal from H1's list with the coin's
 
 This step changes no parse result for existing configurations, because every
 coin still resolves to `Default` or `Qtum` until H4 — except a coin carrying
-`reloaded_header_layout`, whose sync, SPV, store and single-header reads
+`header_layout`, whose sync, SPV, store and single-header reads
 switch from a rejected (or std-80) read to the key's layout. Its test is
 plumbing coverage: each path is exercised with a non-default family.
 
@@ -291,15 +310,18 @@ Once LBRY, PIVX and RUNES parse, item 4's regression is gone for them. The
 strict list check itself stays; it is required by R37.5.6. RIC, XPM and MEWC
 stay in the failing set after this step: no family of the set lays out their
 headers, so their lists are rejected whole and median-time-past errors until
-H4a lands (ch.37 §37.9 D3, decided 2026-10-25; open decision 6). That error is not the better
+H4a and H4b land (ch.37 §37.9 D3, decided 2026-10-25; open decision 6). That error is not the better
 outcome it was once called here: it reaches our HTLC spend, which queries the
 median before it signs, so our spend fails too (ch.37 §37.6 note, §37.9 D3).
 The reference's random median is tolerated by *its* spend — the spending
 transaction's final sequence makes consensus ignore the lock-time — and not
 by its refund, which is mis-timed and delayed by up to an hour per round.
 Reloaded is stricter and, until D3, less usable on these two coins. D3 is
-decided (2026-10-25, ch.37 §37.5.9): H4a below implements it, and because it
-is the beta blocker it lands ahead of this step.
+decided (2026-10-25, ch.37 §37.5.9): H4a and H4b below implement it, and
+because they are the beta blocker they land ahead of this step. H4b also
+fixes the shape of this step's `Btc` exclusivity: *standard first;
+structural fallback only after a failed exact-consumption read and only for
+a family in the switch's set* (ch.37 R37.5.9e, §37.9 D1 step 4b).
 
 R37.5.5 no longer waits on anything (ch.37 §37.9 D1, closing bullet): the
 PIVX thresholds are pinned, the KawPoW trailer keeps the version key and the
@@ -311,7 +333,8 @@ within-family choice exactly as it does to a default-family one.
 ### H4a — Reloaded-only header-layout key (ch.37 §37.5.9; item 4 for RIC and MEWC; **beta blocker**)
 
 **Partly done (2026-10-25, PR #62).** Landed: the key, read in
-`UtxoConfBuilder` beside `type` into `UtxoCoinConf::reloaded_header_layout`
+`UtxoConfBuilder` beside `type` into `UtxoCoinConf::header_layout` (as
+built, still under the earlier name `reloaded_header_layout`)
 (an unknown value fails the coin build naming the ticker; the absent key has
 no effect); the Riecoin reader (112 bytes, 64-bit time, a time above the
 32-bit range is a parse error) and the mixed KawPoW/merged-mined list reader
@@ -323,24 +346,27 @@ public-server fixtures for `RIC` and `MEWC`; `CHANGELOG.md` and the
 sync, SPV, both header stores and `get_block_timestamp` — moved into H2 and
 H3 above as explicit work, because it is the same threading those steps do
 for `chain_variant`; and H5's linkage skip for the Riecoin and native
-KawPoW forms (below). The key name is under maintainer review.
+KawPoW forms (below); and the rename of the key and its field to
+`header_layout`, settled 2026-10-25 (decision 6).
 
 Decided 2026-10-25 (open decision 6): ch.37 §37.9 D3 is resolved by a
-Reloaded-only coin-configuration key, `protocol.reloaded_header_layout`,
+Reloaded-only coin-configuration key, `protocol.header_layout`,
 that the reference ignores (ch.45 R45.3.7) and that takes precedence over
-`chain_variant` for the coin it is set on (R37.5.9a). Its two initial values
+`chain_variant` for the coin it is set on (R37.5.9a) — the local-override
+leg; the registry-free leg is H4b. Its two initial values
 select the Riecoin layout (`"riecoin"`: 112 bytes, fixed) and the mixed
 KawPoW/merged-mined layout (`"kawpow_auxpow_mixed"`: per header, AuxPoW flag
 bit 8 clear → 120-byte KawPoW, set → std-80). The rules are
 clean-room-original (ch.37 §37.5.9 provenance note) and need no gate. The
-key name and the value spellings are pending the maintainer's veto, so the
-Coder keeps each in exactly one place. What the Coder builds:
+key name is settled as `header_layout` (unbranded: the key is a local
+override, not expected in the shared registry) and the value spellings
+stand; the Coder keeps each in exactly one place. What the Coder builds:
 
 - **Type (H1):** two more values of the family type, one per layout. The
   resolved value is one per-coin field: the key's layout when the key is
   present, else the `chain_variant` family, else `Default` (R37.5.9a). No
   second field, so every H3 call site stays as H3 left it.
-- **Config (H2):** read `conf["protocol"]["reloaded_header_layout"]` beside
+- **Config (H2):** read `conf["protocol"]["header_layout"]` beside
   `chain_variant`, as a plain string, exact and case-sensitive; an unknown
   value is the same activation error class as an unknown `chain_variant`;
   absent means no effect. `chain_variant` is still read and validated when
@@ -379,15 +405,84 @@ Coder keeps each in exactly one place. What the Coder builds:
   `docs/COMPAT_SWITCHES.md` entry (R37.5.9d: nothing a counterparty observes
   changes, and no value reproduces the reference's random median); PR #62
   did add an informational `docs/GLEEC_COMPATIBILITY.md` row of the
-  "none -- no switch exists" kind. Once the maintainer has
-  approved the name, tell the registry maintainer the key and the two
-  entries it goes on.
+  "none -- no switch exists" kind; with H4b that row becomes the
+  switch's row. The registry maintainer is **not** asked to carry the
+  key: the shared entries are served by H4b, and the key is documented
+  as a local override for an operator's own coins file.
 
 Dependencies: H1–H3 (the type must be copyable and threaded so that the
 key's layout reaches every read path). Not H4: the KawPoW and AuxPoW
 parsers H4a reuses are already in the tree, and the LBRY, PIVX and RICK
 rules are independent. Being the beta blocker, H4a lands ahead of H4; the
 two may share one PR if H4 is ready at the same time.
+
+### H4b — Structural fallback under the standard family, governed by a switch (ch.37 R37.5.9e; item 4 for RIC and MEWC as the registry serves them; **beta blocker**)
+
+**Pending (decided 2026-10-25; the follow-up on PR #62).** This is the leg
+that makes the registry's `RIC` and `MEWC` entries swap **with no change to
+the shared registry** and no local coins file. Clean-room-original (ch.37
+§37.5.9 provenance note), no gate. It is a deliberate divergence from the
+reference, so it ships with its switch and both documentation entries under
+`docs/COMPAT_SWITCHES.md`. What the Coder builds, from ch.37 R37.5.9e:
+
+- **Switch:** the top-level `MM2.json` key `header_layout_fallback_families`,
+  an array of `chain_variant` value strings; absent → `["BTC"]`; `[]` → the
+  fallback is off for every coin. Read once at startup beside the other
+  node-level switches (`max_eth_tx_type_absent_unrestricted`,
+  `coin_conf_unrecognised_enum_falls_back`). A value that is not an array,
+  an array with a non-string element, a duplicate, or a string outside the
+  eight accepted spellings **refuses the launch** with a clean
+  configuration error naming the key and the value, never a panic (ch.45
+  R45.7.1 / T45.4) — stricter, deliberately, than the boolean switches'
+  "any other value leaves the default".
+- **Reader (kdf_chain) and call sites:** on every read path of H3, for a
+  coin that carries no `header_layout` key and whose resolved family is in
+  the set, when the standard read (including R37.5.6's `count × 80` and
+  lone-80-byte std-80 re-reads) fails exact consumption, try the Riecoin
+  layout, then the mixed KawPoW/merged-mined layout, in that order, each
+  accepted only on exact consumption. If more than one alternative consumes
+  a **list** exactly, reject it as ambiguous, naming both layouts. If none
+  does, reject as today. Never try an alternative when the standard read
+  succeeded; never for a coin with the key (the key's layout governs and
+  misses are rejected); never for a family outside the set. Until H2 lands,
+  every coin without the key is the `"BTC"` family for this test.
+- **Logging:** one `info` line per coin per activation on the first
+  fallback parse, naming the coin and the layout chosen, so the operator can
+  pin the coin with `header_layout`; no repeat and no higher level.
+- **Median, storage, identity:** unchanged from H4a (R37.5.9c): parsed
+  timestamps, served bytes stored, linkage skip for the two forms whose
+  identity hash is unspecified.
+- **Fixtures and tests** (ch.37 §37.8, the R37.5.9e criteria one to one):
+  the pinned `RIC` 11 × 112 list and the pinned `MEWC` interleaved window
+  and 80 + 80 + 120 tip shape parse **with no key** under the default switch
+  and yield the true median; with `[]` they are rejected as before and no
+  line is logged; the std-80 eleven-header list at `0x30000000`, a std-80
+  list with bit 8 set and a genuine Bitcoin list are never fallback-parsed
+  (identical result under `["BTC"]` and `[]`, no line); the `info` line
+  fires once per coin per activation; with `header_layout` present a list
+  the key's layout does not read is rejected without consulting the
+  fallback; a 560-byte five-header list of four native and one merged-mined
+  header is rejected as ambiguous under no key and parses under the key;
+  each malformed switch value refuses the launch, and `[]`, `["BTC"]` and
+  `["BTC", "PPC"]` start the daemon.
+- **Why the lengths cannot collide for the median window** (keep as a test
+  comment): 11 × 80 = 880, 11 × 112 = 1232, mixed = 880 + 40k for k = 0..11;
+  1232 − 880 = 352 is not a multiple of 40. In general 112n = 80n + 40k only
+  when 4n = 5k, hence the ambiguity rule for other counts.
+- **Docs in the same change:** ch.37 §37.5.8 as-built list and the §37.9 D3
+  implementation note (fallback landed); `docs/COMPAT_SWITCHES.md`'s two
+  locations — the per-setting Compatibility note (ch.37 R37.5.9e carries
+  it) and the `docs/GLEEC_COMPATIBILITY.md` row for
+  `header_layout_fallback_families` (GLEEC-compatible selection: `[]`;
+  default `["BTC"]`; not acknowledgement-gated), replacing PR #62's
+  informational row; `RELOADED_VS_GLEEC.md`; `CHANGELOG.md` *Fixed* (RIC and
+  MEWC swap from the shared registry) and *Added* (the switch). The rename
+  of the key and its field to `header_layout` rides on the same change.
+
+Dependencies: H4a (the two layout readers and the key). Not H2/H3: before
+`chain_variant` is read every coin is the `"BTC"` family, so the fallback is
+reachable on the median-time-past path as soon as it exists, and H3's
+threading extends it to the other read paths exactly as it extends the key.
 
 ### H5 — Served-byte identity and linkage (item 2)
 
@@ -402,8 +497,9 @@ two may share one PR if H4 is ready at the same time.
   is a double-SHA256. Skip it for KawPoW, Firo and Verus: no chain-defined
   identity hash is available for them, so R37.5.7's own escape applies
   (ch.37 §37.5.7a). Still owed from H4a (PR #62): skip it likewise for the
-  Riecoin and native KawPoW forms the `reloaded_header_layout` key selects;
-  the 80-byte merged-mined form hashes as std-80 (R37.5.9c).
+  Riecoin and native KawPoW forms the `header_layout` key — or the fallback
+  of H4b — selects; the 80-byte merged-mined form hashes as std-80
+  (R37.5.9c).
 - **Migration:** rows written so far hold re-encoded bytes. Since
   `47ede628c`, those equal the served bytes for every family except AuxPoW,
   where the difference is the hash scope, not the bytes. Recommendation: no
@@ -429,8 +525,9 @@ two may share one PR if H4 is ready at the same time.
 | H1 + H2 type and config | — | small | 1 |
 | H3 threading | H1, H2 | medium (≈10 call sites, both stores) | 2 |
 | H4a Reloaded-only layout key (D3) | H3 — not H4: the KawPoW and AuxPoW parsers it reuses are in the tree | medium (key read, two layouts, per-header list read, public-server fixtures) | **PR #62** (key, both readers, median-time-past path) — the remaining threading moved into H2/H3, the linkage skip into H5 |
+| H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | **pending**: the follow-up on PR #62 |
 | H4 family rules | H3 | medium | 4 |
-| H5 identity, storage, linkage | H4, H4a | medium, touches persisted data | 5 |
+| H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | 5 |
 
 H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
 §37.5.8 and §37.9 in the same commit as its code, and closes the
@@ -470,10 +567,12 @@ corresponding D paragraph when it lands.
   2026-10-25): Riecoin `version (4) + prev (32) + merkle (32) + time (8,
   64-bit) + bits (4) + nonce (32, 256-bit)` = 112 bytes, under `"BTC"`;
   Primecoin std-80 plus a length-prefixed big-number multiplier, 88–91
-  bytes, no key. **Resolution (2026-10-25):** H4a, from ch.37 §37.5.9 —
-  `MEWC` under `reloaded_header_layout: "kawpow_auxpow_mixed"` and `RIC`
-  under `"riecoin"`, both keeping their registry `"BTC"`; `XPM` gets no
-  value (wallet-only).
+  bytes, no key. **Resolution (2026-10-25):** H4a and H4b, from ch.37
+  §37.5.9 — as the registry serves them, `MEWC` and `RIC` are read by the
+  structural fallback of R37.5.9e under the default switch (H4b); pinned
+  locally, `MEWC` under `header_layout: "kawpow_auxpow_mixed"` and `RIC`
+  under `"riecoin"` (H4a); both keep their registry `"BTC"`; `XPM` gets no
+  value and no fallback step (wallet-only).
 - **Refund-wait floor vs cap (ch.37 §37.6 code-quality finding, cleared
   2026-10-25):** our UTXO refund-eligibility routine *floors* the wait it
   returns at one hour where the reference *caps* it, so a refund is delayed
@@ -507,11 +606,17 @@ corresponding D paragraph when it lands.
 - **D3 chains:** a 112-byte Riecoin list under `Btc`, and an interleaved
   80/120-byte Meowcoin list under `Btc` or `Default`, are each rejected whole
   and surface as an error, never as a median (ch.37 §37.8) — **without the
-  key**. With the key (H4a) the same lists, `"BTC"` still present, parse at
-  their true boundaries and yield the true median; an unknown value fails
-  activation; the absent key leaves the rejection in place; a 120-byte and a
-  112-byte header's stored bytes equal their served bytes; a per-header
-  mismatch list is rejected (ch.37 §37.8, the R37.5.9 criteria).
+  key and with `header_layout_fallback_families: []`**. With the key (H4a)
+  the same lists, `"BTC"` still present, parse at their true boundaries and
+  yield the true median; an unknown value fails activation; the absent key
+  under `[]` leaves the rejection in place; a 120-byte and a 112-byte
+  header's stored bytes equal their served bytes; a per-header mismatch
+  list is rejected (ch.37 §37.8, the R37.5.9 criteria). With no key and the
+  default switch (H4b) the same lists parse by fallback with one `info`
+  line per coin per activation; genuine 80-byte lists are never
+  fallback-parsed; a key present means no fallback; the 560-byte ambiguous
+  list is rejected; malformed switch values refuse the launch (ch.37 §37.8,
+  the R37.5.9e criteria).
 - **Stores:** a served-bytes round-trip on SQLite, and on IndexedDB through
   the existing wasm test harness. `get_block_height_by_hash` works for an
   AuxPoW header.
@@ -536,10 +641,18 @@ corresponding D paragraph when it lands.
    under `docs/COMPAT_SWITCHES.md`.
 6. **How a D3 chain selects its family** (ch.37 §37.9 D3 — `RIC`, `XPM`,
    `MEWC`) — **decided 2026-10-25 (maintainer): option (b), with (c) as
-   its mechanism**, bound in ch.37 §37.5.9 (R37.5.9–R37.5.9d) and
-   implemented by H4a. Key name `protocol.reloaded_header_layout` and the
-   values `"riecoin"` / `"kawpow_auxpow_mixed"` are proposed and pending the
-   maintainer's veto; option (d) is rejected as a wire-visible stop-gap.
+   its mechanism**, bound in ch.37 §37.5.9 (R37.5.9–R37.5.9e) and
+   implemented by H4a and H4b. **Updated 2026-10-25 (maintainer):** the
+   key is renamed `protocol.header_layout` — it is a local-override
+   feature, not expected in the shared registry, so its name is unbranded —
+   and (c) is additionally bound as a **switch-governed structural
+   fallback** under the standard family (R37.5.9e, step H4b): the node
+   switch `header_layout_fallback_families`, default `["BTC"]`, `[]` for the
+   reference's selection. The values `"riecoin"` / `"kawpow_auxpow_mixed"`
+   stand. The fallback is what serves the shared registry's `RIC` and `MEWC`
+   entries with no registry change; the key serves an operator's pinned
+   local entry and a layout the fallback does not know. Option (d) is
+   rejected as a wire-visible stop-gap.
    The record below stands as history: the four options the chapter
    records, none chosen there at the time.
    **Precedence constraint** (ch.37 §37.9 D3, 2026-10-25): the registry
@@ -630,9 +743,12 @@ accordingly.
 - CRD ch.37 §37.5 (R37.5.1–R37.5.7), R37.5.2a, §37.5.7a, §37.5.7b, §37.5.8,
   §37.9 D1–D3, and the chain-variant pass and `"BTC"`-family
   re-examination pass clearance items of §37.10.
-- CRD ch.37 §37.5.9 (R37.5.9–R37.5.9d): the Reloaded-only header-layout
-  key that resolves D3 — clean-room-original, no gate (its provenance note
-  and the matching §37.10 item).
+- CRD ch.37 §37.5.9 (R37.5.9–R37.5.9e): the Reloaded-only header-layout
+  key `header_layout` and the switch-governed structural fallback
+  (`header_layout_fallback_families`) that resolve D3 — clean-room-original,
+  no gate (its provenance note and the matching §37.10 item).
+- `docs/COMPAT_SWITCHES.md` (the default-side rule) and
+  `docs/GLEEC_COMPATIBILITY.md`, for the H4b switch's documentation.
 - Commit `47ede628c` (the collision fix) and its tests in
   `mm2src/kdf_chain/src/header.rs`.
 - Branch `fix/auxpow-bit8-recognition` (PR #55) and its tests in the same file
