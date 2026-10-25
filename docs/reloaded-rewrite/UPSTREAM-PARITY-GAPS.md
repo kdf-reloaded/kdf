@@ -488,7 +488,7 @@ R6a / R10a.
 
 ---
 
-## #12 — EVM/QRC20 minimum trading volume: baseline formula, and the maker price floor — **OPEN (chapter cleared 2026-10-24)**
+## #12 — EVM/QRC20 minimum trading volume: baseline formula, and the maker price floor — **OPEN (chapter cleared 2026-10-24; first item implemented in PR #66, pending merge)**
 
 CRD reference: [`57-evm-fee-inputs.md`](./57-evm-fee-inputs.md) §57.7A
 (Part D), R57.7A.1–R57.7A.6, T10–T12, D7–D8, V4. Reference designations:
@@ -497,6 +497,17 @@ section **passed the KDF Dirty Gate** on 2026-10-24 (PASS,
 discretionary-expression measure 0.01, finding list empty), recorded in
 ch. 57 §57.12's second scoped-addition item; both items below may be
 implemented from the cleared chapter.
+
+*Status (2026-10-25).* The first item is **implemented in PR #66**
+(`fix/evm-min-trading-volume`, to be merged after PR #57): a shared
+`one_smallest_unit(decimals)` helper feeds both the EVM and the QRC20
+`min_trading_vol`; `min_tx_amount` stays zero; no switch. Tests follow
+T10–T12, with one recorded coverage gap (the end-to-end preview of the
+field report's volume on a real eight-decimal coin is not driven — see
+`docs/plans/evm-min-trading-volume.md`). The checkbox stays open until the
+PR is merged. The second item (D7, the maker price floor) was deliberately
+**left out** of PR #66 by maintainer decision; it is one comparison in the
+price validator and fully separable, and remains open.
 
 - [ ] **EVM and QRC20 minimum trading volume (ch. 57 R57.7A.1, R57.7A.6).**
   Reloaded derives it as ten to the power of minus `decimals / 3` with integer
