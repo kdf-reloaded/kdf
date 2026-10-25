@@ -1,3 +1,4 @@
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::ElectrumBlockHeader;
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorageError, BlockHeaderStorageOps};
 use crate::CoinsContext;
@@ -9,7 +10,6 @@ use mm2_db::indexed_db::{DbIdentifier, DbInstance, DbLocked, DbTransactionError,
                          WeakDb};
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
-use serialization::CoinVariant;
 use std::collections::HashMap;
 
 const DB_NAME: &str = "block_headers_storage";
@@ -82,10 +82,11 @@ impl DbInstance for BlockHeaderStorageDb {
 #[derive(Debug)]
 pub struct IndexedDBBlockHeadersStorage {
     db: WeakDb<BlockHeaderStorageDb>,
+    policy: HeaderReadPolicy,
 }
 
 impl IndexedDBBlockHeadersStorage {
-    pub fn new(ctx: &MmArc) -> Result<Self, MmError<BlockHeaderStorageError>> {
+    pub fn new(ctx: &MmArc, policy: HeaderReadPolicy) -> Result<Self, MmError<BlockHeaderStorageError>> {
         let coins_ctx =
             CoinsContext::from_ctx(ctx).map_to_mm(|reason| BlockHeaderStorageError::InitializationError {
                 ticker: DB_NAME.to_owned(),
@@ -93,6 +94,7 @@ impl IndexedDBBlockHeadersStorage {
             })?;
         Ok(IndexedDBBlockHeadersStorage {
             db: SharedDb::downgrade(&coins_ctx.block_headers_storage_db),
+            policy,
         })
     }
 
@@ -125,7 +127,7 @@ impl IndexedDBBlockHeadersStorage {
         let rows = table.get_items(TICKER_INDEX, for_coin).await.map_mm_err()?;
         let mut headers = Vec::with_capacity(rows.len());
         for (_item_id, row) in rows {
-            headers.push((row.block_height, decode_header(for_coin, &row.hex)?));
+            headers.push((row.block_height, decode_header(&self.policy, for_coin, &row.hex)?));
         }
         Ok(headers)
     }
@@ -223,7 +225,7 @@ impl BlockHeaderStorageOps for IndexedDBBlockHeadersStorage {
         height: u64,
     ) -> Result<Option<BlockHeader>, MmError<BlockHeaderStorageError>> {
         match self.get_block_header_raw(for_coin, height).await? {
-            Some(hex) => Ok(Some(decode_header(for_coin, &hex)?)),
+            Some(hex) => Ok(Some(decode_header(&self.policy, for_coin, &hex)?)),
             None => Ok(None),
         }
     }
@@ -328,15 +330,21 @@ impl BlockHeaderStorageOps for IndexedDBBlockHeadersStorage {
     }
 }
 
-fn decode_header(for_coin: &str, hex: &str) -> Result<BlockHeader, MmError<BlockHeaderStorageError>> {
+fn decode_header(
+    policy: &HeaderReadPolicy,
+    for_coin: &str,
+    hex: &str,
+) -> Result<BlockHeader, MmError<BlockHeaderStorageError>> {
     let bytes = hex::decode(hex).map_to_mm(|e| BlockHeaderStorageError::DecodeError {
         ticker: for_coin.to_owned(),
         reason: e.to_string(),
     })?;
-    BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).map_to_mm(|e| BlockHeaderStorageError::DecodeError {
-        ticker: for_coin.to_owned(),
-        reason: e.to_string(),
-    })
+    policy
+        .read_header(&bytes)
+        .map_to_mm(|e| BlockHeaderStorageError::DecodeError {
+            ticker: for_coin.to_owned(),
+            reason: e.reason(|e| e.to_string()),
+        })
 }
 
 /// Returns the compact difficulty bits of a header as a plain `u32`.

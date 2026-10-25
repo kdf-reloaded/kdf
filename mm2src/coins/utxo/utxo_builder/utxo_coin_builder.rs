@@ -1,5 +1,6 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumRpcRequest, EstimateFeeMethod,
                                UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -29,6 +30,7 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
 use serde_json::{self as json, Value as Json};
+use serialization::CoinVariant;
 use std::sync::{Arc, Mutex, Weak};
 
 async fn add_next_electrum_server(
@@ -240,7 +242,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -352,7 +354,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -420,7 +422,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -489,7 +491,7 @@ pub trait UtxoCoinBuilderCommonOps {
     fn ticker(&self) -> &str;
 
     #[inline]
-    fn block_headers_storage(&self) -> UtxoCoinBuildResult<Option<BlockHeaderStorage>> {
+    fn block_headers_storage(&self, policy: HeaderReadPolicy) -> UtxoCoinBuildResult<Option<BlockHeaderStorage>> {
         let conf: Option<SPVConf> = json::from_value(self.conf()["spv_conf"].clone())
             .map_to_mm(|e| UtxoConfError::InvalidSpvConf(e.to_string()))
             .mm_err(Into::into)?;
@@ -499,7 +501,7 @@ pub trait UtxoCoinBuilderCommonOps {
                 conf.validate()
                     .map_to_mm(UtxoConfError::InvalidSpvConf)
                     .mm_err(Into::into)?;
-                Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), conf))
+                Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), conf, policy))
             },
         }
     }

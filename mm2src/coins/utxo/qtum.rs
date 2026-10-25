@@ -399,9 +399,7 @@ impl UtxoCommonOps for QtumCoin {
         utxo_common::checked_address_from_str(self, address)
     }
 
-    async fn get_current_mtp(&self) -> UtxoRpcResult<u32> {
-        utxo_common::get_current_mtp(&self.utxo_arc, CoinVariant::Qtum).await
-    }
+    async fn get_current_mtp(&self) -> UtxoRpcResult<u32> { utxo_common::get_current_mtp(&self.utxo_arc).await }
 
     fn is_unspent_mature(&self, output: &RpcTransaction) -> bool { self.is_qtum_unspent_mature(output) }
 

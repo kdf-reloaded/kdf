@@ -62,6 +62,7 @@ use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use futures01::Future;
+use header_layout_fallback::ChainVariant;
 pub use kdf_crypto::{dhash160, sha256, ChecksumType};
 use keys::bytes::Bytes;
 pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, KeyPair, Private, Public, Secret,
@@ -537,6 +538,12 @@ pub struct UtxoCoinConf {
     /// Header layout selected by the Reloaded-only `protocol.header_layout` key (CRD ch.37
     /// R37.5.9). `None` when the key is absent: header reads are then unchanged.
     pub header_layout: Option<CoinVariant>,
+    /// The `protocol.chain_variant` key (CRD ch.37 R37.5.1), read and validated at activation even
+    /// when `header_layout` is present. `None` when the key is absent.
+    pub chain_variant: Option<ChainVariant>,
+    /// The reader of a coin that carries neither key: Qtum for the QTUM and QRC20 protocol types (a
+    /// documented divergence from R37.5.1 that the maintainer keeps), standard otherwise.
+    pub protocol_header_reader: CoinVariant,
     /// The node switch `header_layout_fallback_families` (`MM2.json`, default `["BTC"]`): the coin
     /// families whose header-list reads may retry the Riecoin and mixed layouts when the standard
     /// read fails. Consulted only when `header_layout` is `None` (CRD ch.37 R37.5.9e).
