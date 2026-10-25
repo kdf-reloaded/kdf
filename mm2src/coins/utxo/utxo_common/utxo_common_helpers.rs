@@ -1,6 +1,7 @@
 // utxo_common_helpers — address utilities, balance queries, config, withdraw
 
 use super::*;
+use crate::utxo::header_layout_fallback::HeaderLayoutFallback;
 
 const MIN_BTC_TRADING_VOL: &str = "0.00777";
 const FIXED_FEE_MIN_VOL_TX_SIZE_BYTES: u64 = 496;
@@ -171,10 +172,21 @@ pub fn checked_address_from_str<T: UtxoCommonOps>(coin: &T, address: &str) -> Re
     Ok(addr)
 }
 
+/// The header layout to read for `conf`'s coin: the one its Reloaded-only `header_layout`
+/// key selects when present (CRD ch.37 R37.5.9a), else `default`.
+pub(crate) fn header_variant(conf: &UtxoCoinConf, default: CoinVariant) -> CoinVariant {
+    conf.header_layout.unwrap_or(default)
+}
+
 pub async fn get_current_mtp(coin: &UtxoCoinFields, coin_variant: CoinVariant) -> UtxoRpcResult<u32> {
     let current_block = coin.rpc_client.get_block_count().compat().await?;
     coin.rpc_client
-        .get_median_time_past(current_block, coin.conf.mtp_block_count, coin_variant)
+        .get_median_time_past_with_fallback(
+            current_block,
+            coin.conf.mtp_block_count,
+            header_variant(&coin.conf, coin_variant),
+            HeaderLayoutFallback::for_conf(&coin.conf),
+        )
         .compat()
         .await
 }

@@ -68,14 +68,32 @@ pub trait Deserializable {
 /// `Transaction` and `BlockHeader` deserializers reach for Qtum-specific
 /// fields when the input came from a Qtum chain. New variants are added
 /// as Phase B reaches additional coins.
-#[derive(Debug)]
+///
+/// `Riecoin` and `KawpowAuxpowMixed` are the two header layouts a coin selects through the
+/// Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9); they are never
+/// inferred from a version value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoinVariant {
     Standard,
     Qtum,
+    /// 112-byte Riecoin header: 64-bit time, 256-bit nonce.
+    Riecoin,
+    /// Per-header choice by the AuxPoW flag: set -> std-80, clear -> 120-byte KawPoW.
+    KawpowAuxpowMixed,
 }
 
 impl CoinVariant {
     pub fn is_qtum(&self) -> bool { matches!(self, CoinVariant::Qtum) }
+
+    /// The layout a `header_layout` coin-configuration value names, or `None` for an
+    /// unrecognized value. The one place the key's value spellings are defined.
+    pub fn from_header_layout(value: &str) -> Option<Self> {
+        match value {
+            "riecoin" => Some(CoinVariant::Riecoin),
+            "kawpow_auxpow_mixed" => Some(CoinVariant::KawpowAuxpowMixed),
+            _ => None,
+        }
+    }
 }
 
 /// Stateful reader over an arbitrary `io::Read`. Keeps a one-byte
