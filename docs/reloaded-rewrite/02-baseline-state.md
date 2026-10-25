@@ -445,6 +445,12 @@ row name only. The following discipline binds the table:
 - *Verification.* A row is entered only after its identifier and
   date have been confirmed by read-only inspection of the historical
   record's reference metadata (V4).
+- *Short forms.* The short forms *the baseline* and *the anchor*, used
+  throughout the document set, refer to the row *baseline anchor
+  (R1)*; R13 does not require them to be rewritten.
+- *Dates.* Every date in the table is a UTC date: the commit's date
+  for the baseline anchor, a release tag or a branch tip, and the merge
+  date for a pull-request merge.
 
 The historical record is the public repository the project source
 tree descends from; it is unmaintained but reachable, under its
@@ -455,6 +461,16 @@ live remote on 2026-10-24 (255 tags).
 | Name | Kind | Full commit identifier | Date |
 | --- | --- | --- | --- |
 | baseline anchor (R1) | the pre-anchor baseline commit | `c1d46c0c1592faa0860f704008b2b2381bc3840f` | 2022-06-03 |
+| `v1.0.1172` | release tag (lightweight; older lineage, predates the baseline anchor) | `b3acd14ed0e50a062d5ef1fd7514d1fc4630ab5a` | 2019-02-20 |
+| `v1.1.0` | release tag (lightweight; older lineage, predates the baseline anchor) | `41170748db961f23aa8a10fffc3de09a2bd81aa9` | 2021-08-23 |
+| `v1.0.0-beta` | release tag (lightweight; same commit as `v1.0.1-beta`) | `6bb79b3d81d1a6a3a4e2cf858e000440d6543140` | 2023-03-27 |
+| `v1.0.1-beta` | release tag (lightweight; same commit as `v1.0.0-beta`) | `6bb79b3d81d1a6a3a4e2cf858e000440d6543140` | 2023-03-27 |
+| `v1.0.2-beta` | release tag (lightweight) | `fa745617dfe44a532dac9a4898ea5769202831ec` | 2023-04-11 |
+| `v1.0.3-beta` | release tag (lightweight) | `46535e882896e10aa16f3d6364007ba2a8c0cc3d` | 2023-04-28 |
+| `v1.0.4-beta` | release tag (lightweight) | `371595d6c0d322e677669544aa37ec6304140fe8` | 2023-05-22 |
+| `v1.0.5-beta` | release tag (lightweight) | `1d8bebd150785123168e770b33e87fac236f0949` | 2023-06-08 |
+| `v1.0.6-beta` | release tag (lightweight) | `ef896149506899fd76f983bb82d9b210699c7707` | 2023-07-24 |
+| `v1.0.7-beta` | release tag (lightweight) | `79f620559a635704959d3e88067f7ffe5ee30f1f` | 2023-09-08 |
 | `v2.0.0-beta` | release tag (lightweight) | `b0fd99e8406e67ea06435dd028991caa5f522b5c` | 2023-12-18 |
 | `mm2-af57160` | release tag (special name) | `af571608c34f38d82e3c421f9bd61c5265db0cf8` | 2024-02-21 (released 2024-06-26) |
 | `v2.1.0-beta` | release tag | `35e92394928825c337f246f8e19fbfab1f65c4a8` | 2024-08-01 |
@@ -469,8 +485,13 @@ live remote on 2026-10-24 (255 tags).
 | `v3.0.0-beta` | release tag (lightweight; a merge commit joining `main` with the `staging (as of 2026-03-27)` state) | `d56a7bc5028f10b9c1bb8370bb2ee16444796a23` | 2026-04-01 |
 | `dev (as of 2026-03-27)` | branch tip | `e686ef3500585f01c9f0e89c8c01bc036c42253c` | 2026-03-27 |
 | `staging (as of 2026-03-27)` | branch tip | `1f984dd119d360a0523719909705b6df58fc8187` | 2026-03-27 |
+| `feat/tron-swap-support (as of 2026-04-23)` | branch tip | `df3a2ded4dbef38a6c9f2528b921b85da623b367` | 2026-04-23 |
 | `main (as of 2026-10-07)` | branch tip (two commits after `v3.0.0-beta`: a read-me notice that the repository is unmaintained, and the merge of the pull request that added it) | `9b3fd7026e9e5ad4c8bd2cba5a5499cecba8d957` | 2026-10-07 |
+| `PR #1457 (merged 2022-09-26)` | pull-request merge (squash) | `67ede86106635709eff485070ae015a2d5ce43b6` | 2022-09-26 |
 | `PR #1971 (merged 2023-10-03)` | pull-request merge | `3c078b6a2aed2e4f9e534907e77deca466df091f` | 2023-10-03 |
+| `PR #2112 (merged 2025-03-24)` | pull-request merge (squash) | `5b2f045d27e3ececcd5f3447910de257c7df3d3f` | 2025-03-24 |
+| `PR #2483 (merged 2025-06-13)` | pull-request merge (squash) | `585e8b5aa359397c90785b529edfac3f473091b5` | 2025-06-13 |
+| `PR #2454 (merged 2025-07-30)` | pull-request merge (squash) | `a19e442b8fd9814ae50aba318df2a42e30512d5f` | 2025-07-30 |
 | `PR #2563 (merged 2025-08-04)` | pull-request merge | `c93adea548d4a80f5a66a2007001f2c73aa08760` | 2025-08-04 |
 | `PR #2572 (merged 2025-08-05)` | pull-request merge | `6172ba8d1df0541dd319d4193cad1cb26df50eee` | 2025-08-05 |
 | `PR #2564 (merged 2025-08-12)` | pull-request merge | `32b9e2d7b9dd92cd8b0d59fb43759dd5ffe850d0` | 2025-08-12 |
@@ -481,9 +502,11 @@ live remote on 2026-10-24 (255 tags).
 | `PR #2710 (merged 2026-03-06)` | pull-request merge | `8309b0bdbb5acf8fc8f5965f12cec4b4640e46a6` | 2026-03-06 |
 | `PR #2715 (merged 2026-03-06)` | pull-request merge (changelog bump) | `b9a8627e46feb702229f645cf78fc3ccbda8d194` | 2026-03-06 |
 
-The `v1.0.x-beta` and `v1.1.0` release tags are not yet tabled;
-their identifiers have not been collected. Rows are added as states
-are read, under the author duty above.
+The `v1.0.0-beta` to `v1.0.7-beta`, `v1.1.0` and `v1.0.1172` rows were
+added on 2026-10-25 under the author duty above. The other `v1.0.N`
+release tags of the older lineage are not tabled; their identifiers
+have not been collected. Rows are added as states are read, under the
+author duty above.
 
 ## 2.16 Tests
 

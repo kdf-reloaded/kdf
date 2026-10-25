@@ -346,6 +346,17 @@ treatment of a V2 path for Tendermint is out of scope here.
 > because it is untested production behavior change outside this
 > chapter's documentation-accuracy scope.
 
+### 18.5.2 Trading floors (Spec Reader 2026-10-25; cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+A Tendermint platform coin's, and a Tendermint token's, minimum trading
+volume and minimum transaction amount are both one base unit of that
+coin or token — `10^-decimals` of its own configured decimals — in both
+reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree), and in
+reloaded. The HTLC claim fee is paid by the claiming account, not
+deducted from the HTLC amount, so no fee deduction makes a floor-sized
+Tendermint payment unspendable. Consumption and refusal points:
+[Chapter 60](60-trading-floors-and-refusal-contract.md) (row C1).
+
 ---
 
 ## 18.6 Multi-denom and CW20-style token support
@@ -567,4 +578,12 @@ The chapter relies on one baseline-state claim:
   (`ibc.applications.transfer.v1.MsgTransfer`); the Iris-mod HTLC
   proto repository at `https://github.com/irismod/htlc`; BIP-173
   bech32; the CometBFT ABCI-Query and JSON-RPC specifications.
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* not consulted, except for §18.5.2 (added
+  2026-10-25): under the chapter-01 two-team procedure, at the
+  designations `v2.6.0-beta` and `v3.0.0-beta`, only to establish that
+  both report one base unit as a Tendermint coin's and token's minimum
+  trading volume and minimum transaction amount. No discretionary
+  expression was reproduced. §18.5.2 passed the KDF Dirty Gate on
+  2026-10-25 with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  (PASS, measure 0.02, no findings; scope attestation recorded in
+  chapter 60 §60.12).
