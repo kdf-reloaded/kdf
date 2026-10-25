@@ -1,14 +1,26 @@
 # Plan: Radiant signature-hash support
 
-**Status:** planning — **Last reviewed:** 2026-10-24
+**Status:** planning — **Last reviewed:** 2026-10-25
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
-> `signature_version` names a signing dialect this build does not implement.
-> The unsafe half of that is already closed — the coin no longer signs
-> something invalid — so what is left is the feature itself: implement the
-> dialect CRD ch.58 binds in full. The chapter is written, gated and cleared,
-> so this plan is about test vectors and scope, not about discovering a
-> contract.
+> `signature_version` names a signing dialect this build did not implement.
+> The unsafe half of that was closed first — the coin no longer signs
+> something invalid (PR #54) — and the feature itself is now **implemented,
+> pending PR** stacked on #54, which waits on #57: the dialect CRD ch.58
+> binds, with two mainnet vectors behind it. What is left is landing the
+> stack, the compatibility bookkeeping of step 6, and one follow-up the
+> implementation surfaced (ch.58 D5, not a beta item).
+
+## Where it stands (2026-10-25)
+
+| Item | State |
+|---|---|
+| PR #54 (guard + switch) | open; waits on #57 |
+| Steps 2–4 (vectors, implementation, tests T1–T8) | **done** — pending PR on branch `feat/rxd-signature-version`, stacked on #54 |
+| Step 5 (close the records) | ch.58: R58.5.1 closed, R58.5.2 implemented, D1 and D4 closed, D3 partly corroborated — done 2026-10-25 |
+| Step 6 (compatibility bookkeeping) | **open** — to be done in the implementation PR (see step 6) |
+| R58.3.3 correction against Radiant-Core | **done** in ch.58 on 2026-10-25 (see "The R58.3.3 correction" below) |
+| Fail-early follow-up (ch.58 D5) | **open**, owner ch.58 §58.3, not a beta item |
 
 ## Current state
 
@@ -45,8 +57,9 @@ description for the reasoning and the eleven conf-builder tests behind it, and
 read `docs/reloaded-rewrite/58-utxo-signature-version-and-radiant-sighash.md`
 for the contract rather than this plan's summary of it.
 
-**The chapter is ready for the Coder.** Every forbidden-class-sourced part of
-ch.58 is cleared: §58.2 (the configuration contract), §58.4 (the
+**The chapter was ready for the Coder, and the Coder has delivered: implemented,
+pending PR stacked on #54, which waits on #57.** Every forbidden-class-sourced
+part of ch.58 is cleared: §58.2 (the configuration contract), §58.4 (the
 reference-against-Radiant comparison) and §58.5 (the implementation status)
 were authored by the KDF Spec Reader under the chapter-01 §1.4A two-team
 procedure and **passed the KDF Dirty Gate on 2026-10-24** with an empty
@@ -83,6 +96,46 @@ three values), and no newer release existed on 2026-10-24. A `v2.6.0-beta`
 node cannot produce a valid Radiant signature and so cannot be a Radiant swap
 counterparty at all (R58.4A.5).
 
+**What was built (2026-10-25).** All three changes of R58.5.2, in
+`mm2src/kdf_script/src/sign.rs`: the fourth enumeration value
+(`SignatureVersion::ForkIdRxd`, serde `fork_id_rxd`; the conf builder's
+accepted-values list now names four values); the dialect routine
+`sighash_fork_id_rxd`, routed only when the fork-id bit `0x40` is set and
+falling through to the legacy algorithm otherwise, with the R58.3.4 sentinel,
+the summary helpers `hash_output_summaries` / `append_output_summary`, and the
+tolerant, overflow-checked reference walk `extract_push_refs` (collects
+`0xd0`/`0xd8`, skips `0xd1`–`0xd3` as 36-byte operands, ordered set, 32 zero
+bytes for a reference-free output); and the strict-encoding extension
+(`is_defined` masks `0x40|0x80` for the new value, `from_u32` recognizes the
+fork-id bit for it). Ch.38 R38.5.4 holds — every signing site,
+`sign_raw_transaction` included, gets the resolved version. No address, fee,
+Electrum or swap change. The full statement is ch.58 §58.5 "as-built
+statement".
+
+## The R58.3.3 correction (2026-10-25)
+
+Verifying the implementation against Radiant-Core's public source turned up a
+defect in the chapter, not in the dialect: R58.3.3 as written bound a
+**tolerant** reference walk (a malformed or truncated output script
+contributes what it contributed so far and never fails the signing), and that
+is what was implemented. Radiant-Core's walk is **fatal** — it rejects an
+undecodable or truncated output script, a reference named by
+`OP_DISALLOWPUSHINPUTREF` that is also pushed, more than one
+`OP_STATESEPARATOR`, and an `OP_RETURN` preceding a state separator; such a
+transaction has no digest and fails verification on chain. §58.3 takes its
+authority from Radiant-Core, so the chapter was the defect of record (ch.01
+R24) and R58.3.3 has been rewritten to state Radiant-Core's rule, with a
+verification record naming the Radiant-Core file classes read.
+
+The impact of the as-built tolerance is nil for anything this project
+constructs (P2PKH, P2SH and OP_RETURN outputs only, R58.3.5) and bounded for a
+caller-supplied script via `sign_raw_transaction`: the implementation signs a
+transaction the network rejects anyway — never a wrong-but-valid signature.
+Making the hash fallible is a fourth change outside R58.5.2 and is deferred as
+**ch.58 D5** (fail early on the four cases; owner §58.3; not a beta item). The
+as-built divergence note under R58.3.3 and the T6 note record which test
+clause inverts when D5 is done.
+
 ## The gating practical requirement: test vectors
 
 Ch.58 **T3** is the only test in the chapter that proves agreement with both
@@ -97,9 +150,30 @@ implementation without T3 is an implementation nobody can show to be correct.
 
 T5–T8 (zero-reference summary, reference extraction and de-duplication,
 degenerate indices, transaction-hash algorithm unchanged) are writable from the
-chapter. **D3** notes that no on-chain vector corroborates the
-reference-bearing-output form; if a Radiant mainnet transaction spending one
-becomes available, add it as a second vector under T3.
+chapter. **D3** noted that no on-chain vector corroborated the
+reference-bearing-output form; one was found (below).
+
+**Vectors sourced (2026-10-25).** Two Radiant mainnet transactions, fetched
+from a Radiant Electrum server listed in the shipped coins registry (ch.01 R6)
+and embedded as bytes in deterministic unit tests:
+
+| Vector | Transaction | Covers |
+|---|---|---|
+| 1 | `10fa6331635fadede304b279cc3f823a65f54a2f592e9c157d7fea6229232521`, block 475700 | two P2PKH inputs, no reference-bearing output — the zero-reference form |
+| 2 | `e9da468db4109e5bc3d99edeb82b73d6547642906f37612675095e1b22b9a0fc`, block 475790 | output 0 pushes two distinct references in non-ascending script order plus reference-opcode bytes embedded inside `OP_PUSHDATA1` payloads; output 1 pushes one; input 1 is the P2PKH input tested — the reference-bearing form D3 wanted |
+
+Each input's own DER signature verifies **only** with the summary digest
+inserted before the outputs digest; appended after the lock time it fails
+(T4); omitted — the plain Bitcoin-Cash preimage — it fails. For vector 2,
+**sorted** references verify and script-order references fail, so D3's
+ascending-order rule and the singleton/plain collection into one set are now
+corroborated on chain. Still synthetic only (T6): de-duplication of a
+reference pushed twice, and the skipped opcodes `0xd1`–`0xd3`; D3 stays open
+for those two. T8 is confirmed on both vectors (identifier = double-SHA256).
+T1's unrecognized-string cases run under PR #54's fall-back switch, because
+under the default an unknown value fails activation. T2 accepts `0x41`,
+`0x43`, `0x81`, `0xC2` and rejects `0x00`, `0x04`, `0x5F`, `0x141`, `0x1C2`,
+`0xFFFFFFC2`, `0x40`, `0x80`, `0xC0`.
 
 ## The visible-balance trade-off (already recorded against PR #54)
 
@@ -117,10 +191,14 @@ the switch exists, and that support is planned rather than withdrawn.
 
 ## Steps
 
+*State as of 2026-10-25: step 1 open (PR #54 waits on #57); steps 2–4 done,
+pending PR stacked on #54; step 5 done in ch.58; step 6 open; steps 7–8 added
+this day.*
+
 1. **Land PR #54** (or confirm it landed). Everything below assumes the guard
    and the switch are in place; without them the coin signs invalid
-   transactions instead of refusing.
-2. **Source the T3 vector.** A Radiant mainnet transaction with a
+   transactions instead of refusing. *Open — #54 waits on #57.*
+2. **Source the T3 vector.** *Done 2026-10-25 — two vectors, see above.* A Radiant mainnet transaction with a
    pay-to-public-key-hash input, plus that input's previous script code and
    previous output value, recorded with its source. Verify by hand, once, that
    the transaction's own signature verifies against the digest computed under
@@ -136,17 +214,21 @@ the switch exists, and that support is planned rather than withdrawn.
    reference-bearing form (**D3**) can likewise come only from a public-chain
    artifact, and none is known; D3 stays open on that basis alone.
 3. **Implementation via the Coder**, from ch.58 — the three changes of R58.5.2
-   and nothing else. The Coder implements the algorithm against Radiant-Core
+   and nothing else. *Done 2026-10-25, pending PR.* The Coder implements the algorithm against Radiant-Core
    per R58.4.3. Scope is confirmed, not merely asserted: the cleared R58.4A.1
    finds nothing in the reference change beyond R58.5.2's three items, and no
    Radiant `chain_variant` value is recognized at any released designation,
    so there is no fourth item to discover.
-4. **Tests T1–T8** of §58.6, with T3 and T4 built on the step-2 vector. T4 in
+4. **Tests T1–T8** of §58.6, with T3 and T4 built on the step-2 vector. *Done
+   2026-10-25, pending PR; as-built notes under each test in ch.58 §58.6.* T4 in
    particular must assert the digest *changes* when field 8 is appended after
    the lock time instead of inserted before the outputs digest — a
    constant-equality test would not catch a correctly computed, wrongly placed
    summary digest.
-5. **Close the records.** Mark R58.5.1 closed in ch.58 §58.5 and answer **D1**
+5. **Close the records.** *Done 2026-10-25 in ch.58: R58.5.1 closed, R58.5.2
+   implemented (pending PR), D1 closed (answered by PR #54), D4 closed (matrix
+   carried into §58.6), D3 partly corroborated and kept open for the two
+   synthetic-only details.* Mark R58.5.1 closed in ch.58 §58.5 and answer **D1**
    (the unrecognized-value warning, which PR #54 settled in practice by failing
    activation behind a switch). **D4's question is answered** in the cleared
    §58.4A: R58.4A.5 finds exactly one inter-designation difference on this
@@ -162,7 +244,19 @@ the switch exists, and that support is planned rather than withdrawn.
    compatibility switch and no `docs/COMPAT_SWITCHES.md` entry of its own.
    PR #54's switch keeps its entry in `docs/GLEEC_COMPATIBILITY.md` and
    `RELOADED_VS_GLEEC.md`; check whether its wording needs amending once RXD
-   is no longer the coin it refuses.
+   is no longer the coin it refuses. *Open — belongs in the implementation
+   PR.* Also stale once it lands: `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md`
+   #9 (marked OPEN) and ch.38 R38.5.4's clause "the one coin whose dialect
+   reloaded does not yet support".
+7. **R58.3.3 correction.** *Done 2026-10-25 in ch.58* — see "The R58.3.3
+   correction" above. Nothing in the implementation changes for it; the
+   chapter now records the as-built tolerance as a divergence.
+8. **Fail-early follow-up (ch.58 D5).** *Open; owner ch.58 §58.3; not a beta
+   item.* Make the Radiant dialect's signature-hash computation fallible on the
+   four fatal cases of R58.3.3, returning a typed error instead of a digest;
+   invert T6's truncation clause and add the other three cases. Separate PR
+   after the implementation lands; it changes the signing substrate's error
+   surface and so is deliberately not folded into R58.5.2's three changes.
 
 ## Reference pointer for a KDF Spec Reader dispatch (dispatched 2026-10-24)
 
@@ -193,14 +287,16 @@ counterparty, or to verify rather than report what the lineage says about
 
 - A coins file carrying `"signature_version": "fork_id_rxd"` activates with no
   switch set, and resolves to the Radiant dialect — asserted on the resolved
-  version, not merely on activation succeeding (T1).
+  version, not merely on activation succeeding (T1). *Done in the pending PR.*
 - An RXD withdrawal built and signed by this node is accepted by the Radiant
-  network.
+  network. *Not yet exercised against the live network; the two mainnet
+  vectors are the evidence so far.*
 - T3 passes as a deterministic unit test with embedded mainnet bytes, and T4
-  fails if field 8 moves.
-- Ch.58 R58.5.1 is closed and D1 is answered in the chapter.
+  fails if field 8 moves. *Done — two vectors.*
+- Ch.58 R58.5.1 is closed and D1 is answered in the chapter. *Done
+  2026-10-25.*
 - The beta release notes explain the activation refusal, the switch, and that
-  it is now gone for RXD.
+  it is now gone for RXD. *Open — with step 6.*
 
 ## Out of scope
 
@@ -222,11 +318,17 @@ counterparty, or to verify rather than report what the lineage says about
 
 ## Risks
 
-- **A single vector proves one shape.** T3 on a pay-to-public-key-hash input
-  with sighash `0x41` does not exercise `SIGHASH_ANYONECANPAY`,
-  `SIGHASH_NONE`, `SIGHASH_SINGLE` or a reference-bearing output. The digest
-  collapse rules and R58.3.4's sentinel are tested against the chapter only
-  (D3). Treat an unverified shape as unverified in the release notes.
+- **Two vectors prove two shapes.** T3's vectors are P2PKH inputs with
+  sighash `0x41`, one spending from a transaction without and one with
+  reference-bearing outputs. They do not exercise `SIGHASH_ANYONECANPAY`,
+  `SIGHASH_NONE` or `SIGHASH_SINGLE`; the digest collapse rules, R58.3.4's
+  sentinel, reference de-duplication and the skipped opcodes `0xd1`–`0xd3`
+  are tested against the chapter and Radiant-Core only (D3). Treat an
+  unverified shape as unverified in the release notes.
+- **The walk is tolerant where Radiant-Core's is fatal** (ch.58 R58.3.3
+  as-built note, D5). Bounded: no project-constructed output can trip it, and
+  for a caller-supplied script it yields a signature on a transaction the
+  network rejects anyway. Not a funds-safety risk; a diagnostics one.
 - **Enabling activation re-exposes the trade-off in reverse.** If the dialect
   is implemented but subtly wrong, the coin activates, shows a balance and
   fails at broadcast — exactly the state PR #54 removed. T3 is what keeps that
