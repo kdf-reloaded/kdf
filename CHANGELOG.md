@@ -55,6 +55,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
+  eligibility check floored its "wait this long" answer at one hour, so a refund that became
+  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
+  nothing signed changes and no funds were at risk. Detail: PR #TBD; CRD ch.37 §37.6 finding.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
