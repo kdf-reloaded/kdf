@@ -60,6 +60,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
+  signing with a different algorithm, unless the new node-level boolean
+  `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
+  `witness_v0` and `fork_id`; any other value (for example RXD's shipped `fork_id_rxd`) used to be
+  silently replaced by the coin's default, so its transactions were signed wrongly and rejected by
+  the network. This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
+  activation now reports the offending value and the accepted set; with the switch set to `true` the
+  coin activates with the default, as under GLEEC KDF, and the node logs one warning per activation
+  naming the key and value. A coin with no `signature_version` is unchanged. The switch is named for
+  coin-configuration enumerations in general; `signature_version` is its only reader so far.
+  Detail: PR #54.
+- **A malformed or non-string `fork_id` in a UTXO coin's configuration now fails the activation
+  instead of crashing the node or taking the default.** A string such as `"0xZZ"` used to panic; a
+  number such as `64` was silently replaced by the coin's default. An absent `fork_id` is unchanged,
+  and the new switch does not apply: a malformed value is not an unrecognised enumeration member.
+  Detail: PR #54.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
