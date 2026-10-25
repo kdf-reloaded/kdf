@@ -2007,6 +2007,7 @@ mod tests {
             is_funding_locked: true,
             is_usable: true,
             is_public: true,
+            outbound_htlc_minimum_msat: None,
         }
     }
 
@@ -7555,6 +7556,7 @@ mod benches {
             is_funding_locked: true,
             is_usable: true,
             is_public: true,
+            outbound_htlc_minimum_msat: None,
         }
     }
 

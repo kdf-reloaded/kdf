@@ -3736,6 +3736,29 @@ fn test_maker_order_build_error_display() {
 }
 
 // ---------------------------------------------------------------------------
+// Pairs that cannot trade (CRD ch.60 R60.2.3, R60.6.5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_trading_not_supported_errors() {
+    let e = TakerOrderBuildError::TradingNotSupported {
+        coin: "tBTC-lightning".into(),
+    };
+    assert_eq!(e.to_string(), "Trading is not supported for coin tBTC-lightning");
+    let e = MakerOrderBuildError::TradingNotSupported {
+        coin: "tBTC-lightning".into(),
+    };
+    assert_eq!(e.to_string(), "Trading is not supported for coin tBTC-lightning");
+}
+
+#[test]
+fn test_ordinary_pair_is_tradable() {
+    let a = MmCoinEnum::Test(TestCoin::new("RICK"));
+    let b = MmCoinEnum::Test(TestCoin::new("MORTY"));
+    assert_eq!(untradable_coin_ticker(&a, &b), None);
+}
+
+// ---------------------------------------------------------------------------
 // TakerRequest — serde roundtrip
 // ---------------------------------------------------------------------------
 

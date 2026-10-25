@@ -11,7 +11,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
 use super::{derive_htlc_pubkeys, validate_wire_field_len, validate_wire_pubkey};
 use crate::mm2::lp_network::subscribe_to_topic;
-use crate::mm2::lp_ordermatch::{MatchBy, OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
+use crate::mm2::lp_ordermatch::{untradable_coin_ticker, MatchBy, OrderConfirmationsSettings, TakerAction,
+                                TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
@@ -2269,6 +2270,9 @@ pub async fn taker_swap_trade_preimage(
     base_coin: MmCoinEnum,
     rel_coin: MmCoinEnum,
 ) -> TradePreimageRpcResult<TakerTradePreimage> {
+    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
+        return MmError::err(TradePreimageRpcError::TradingNotSupported { coin });
+    }
     let action = req
         .swap_method
         .to_taker_action()

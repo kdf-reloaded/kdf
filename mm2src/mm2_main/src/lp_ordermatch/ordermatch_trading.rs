@@ -1360,6 +1360,9 @@ pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
     let base_coin = try_s!(lp_coinfind(&ctx, &input.base).await);
     let base_coin: MmCoinEnum = try_s!(base_coin.ok_or("Base coin is not found or inactive"));
+    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
+        return ERR!("Trading is not supported for coin {}", coin);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -1392,6 +1395,9 @@ pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let base_coin = try_s!(base_coin.ok_or("Base coin is not found or inactive"));
     let rel_coin = try_s!(lp_coinfind(&ctx, &input.rel).await);
     let rel_coin = try_s!(rel_coin.ok_or("Rel coin is not found or inactive"));
+    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
+        return ERR!("Trading is not supported for coin {}", coin);
+    }
     if base_coin.wallet_only(&ctx) {
         return ERR!("Base coin {} is wallet only", input.base);
     }
@@ -1784,6 +1790,9 @@ pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOr
         None => return ERR!("Rel coin {} is not found", req.rel),
     };
 
+    if let Some(coin) = untradable_coin_ticker(&base_coin, &rel_coin) {
+        return ERR!("Trading is not supported for coin {}", coin);
+    }
     if base_coin.wallet_only(ctx) {
         return ERR!("Base coin {} is wallet only", req.base);
     }

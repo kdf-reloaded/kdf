@@ -225,6 +225,8 @@ pub enum TradePreimageRpcError {
     CoinIsWalletOnly { coin: String },
     #[display(fmt = "Rel coin can not be same as base")]
     BaseEqualRel,
+    #[display(fmt = "Trading is not supported for coin {}", coin)]
+    TradingNotSupported { coin: String },
     #[display(fmt = "Incorrect use of the '{}' parameter: {}", param, reason)]
     InvalidParam { param: String, reason: String },
     #[display(fmt = "Price {} is too low, required at least {}", price, threshold)]
@@ -244,6 +246,7 @@ impl HttpStatusCode for TradePreimageRpcError {
             | TradePreimageRpcError::NoSuchCoin { .. }
             | TradePreimageRpcError::CoinIsWalletOnly { .. }
             | TradePreimageRpcError::BaseEqualRel
+            | TradePreimageRpcError::TradingNotSupported { .. }
             | TradePreimageRpcError::InvalidParam { .. }
             | TradePreimageRpcError::PriceTooLow { .. } => StatusCode::BAD_REQUEST,
             TradePreimageRpcError::Transport(_) | TradePreimageRpcError::InternalError(_) => {
@@ -330,6 +333,7 @@ impl TradePreimageRpcError {
     ) -> TradePreimageRpcError {
         match maker_order_err {
             MakerOrderBuildError::BaseEqualRel => TradePreimageRpcError::BaseEqualRel,
+            MakerOrderBuildError::TradingNotSupported { coin } => TradePreimageRpcError::TradingNotSupported { coin },
             MakerOrderBuildError::MaxBaseVolTooLow { actual, threshold } => TradePreimageRpcError::VolumeTooLow {
                 coin: base.to_owned(),
                 volume: actual.to_decimal(),
@@ -360,6 +364,7 @@ impl TradePreimageRpcError {
     ) -> TradePreimageRpcError {
         match taker_order_err {
             TakerOrderBuildError::BaseEqualRel => TradePreimageRpcError::BaseEqualRel,
+            TakerOrderBuildError::TradingNotSupported { coin } => TradePreimageRpcError::TradingNotSupported { coin },
             TakerOrderBuildError::BaseAmountTooLow { actual, threshold } => TradePreimageRpcError::VolumeTooLow {
                 coin: base.to_owned(),
                 volume: actual.to_decimal(),
@@ -446,5 +451,31 @@ impl From<TotalTradeFee> for TotalTradeFeeResponse {
             amount: orig.amount.into(),
             required_balance: orig.required_balance.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trading_not_supported_maps_to_a_typed_bad_request() {
+        let rpc = TradePreimageRpcError::from_maker_order_build_error(
+            MakerOrderBuildError::TradingNotSupported {
+                coin: "tBTC-lightning".into(),
+            },
+            "A",
+            "B",
+        );
+        assert!(matches!(&rpc, TradePreimageRpcError::TradingNotSupported { coin } if coin == "tBTC-lightning"));
+        assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
+
+        let rpc = TradePreimageRpcError::from_taker_order_build_error(
+            TakerOrderBuildError::TradingNotSupported { coin: "SOL".into() },
+            "A",
+            "B",
+        );
+        assert!(matches!(&rpc, TradePreimageRpcError::TradingNotSupported { coin } if coin == "SOL"));
+        assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
     }
 }

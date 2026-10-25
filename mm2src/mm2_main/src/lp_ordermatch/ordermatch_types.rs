@@ -154,6 +154,28 @@ pub struct TakerOrderBuilder<'a> {
     pub(crate) swap_version: SwapVersion,
 }
 
+/// Returns the ticker of the first coin of the pair that cannot trade: a Lightning coin, until
+/// Lightning trading is supported, or a Solana coin or SPL token, whose swap, fee and trade-preimage
+/// operations are unimplemented (CRD ch.60 R60.2.3, R60.6.5). Order creation and the trade preimage
+/// refuse such a pair with an error before any of those operations is reached.
+pub(crate) fn untradable_coin_ticker(base: &MmCoinEnum, rel: &MmCoinEnum) -> Option<String> {
+    [base, rel]
+        .into_iter()
+        .find(|coin| is_untradable_coin(coin))
+        .map(|coin| coin.ticker().to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
+    matches!(
+        coin,
+        MmCoinEnum::LightningCoin(_) | MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
+
 pub enum TakerOrderBuildError {
     BaseEqualRel,
     /// Base amount too low with threshold
@@ -178,6 +200,10 @@ pub enum TakerOrderBuildError {
     },
     SenderPubkeyIsZero,
     ConfsSettingsNotSet,
+    /// The pair involves a coin that cannot trade (Lightning, until Lightning trading exists).
+    TradingNotSupported {
+        coin: String,
+    },
 }
 
 impl fmt::Display for TakerOrderBuildError {
@@ -210,6 +236,9 @@ impl fmt::Display for TakerOrderBuildError {
             ),
             TakerOrderBuildError::SenderPubkeyIsZero => write!(f, "Sender pubkey can not be zero"),
             TakerOrderBuildError::ConfsSettingsNotSet => write!(f, "Confirmation settings must be set"),
+            TakerOrderBuildError::TradingNotSupported { coin } => {
+                write!(f, "Trading is not supported for coin {}", coin)
+            },
         }
     }
 }
@@ -297,6 +326,10 @@ impl<'a> TakerOrderBuilder<'a> {
 
     /// Validate fields and build
     pub fn build(self) -> Result<TakerOrder, TakerOrderBuildError> {
+        if let Some(coin) = untradable_coin_ticker(self.base_coin, self.rel_coin) {
+            return Err(TakerOrderBuildError::TradingNotSupported { coin });
+        }
+
         let min_base_amount = self.base_coin.min_trading_vol();
         let min_rel_amount = self.rel_coin.min_trading_vol();
 
@@ -624,6 +657,10 @@ pub enum MakerOrderBuildError {
         min: MmNumber,
         max: MmNumber,
     },
+    /// The pair involves a coin that cannot trade (Lightning, until Lightning trading exists).
+    TradingNotSupported {
+        coin: String,
+    },
 }
 
 impl fmt::Display for MakerOrderBuildError {
@@ -661,6 +698,9 @@ impl fmt::Display for MakerOrderBuildError {
                 max.to_decimal(),
                 min.to_decimal()
             ),
+            MakerOrderBuildError::TradingNotSupported { coin } => {
+                write!(f, "Trading is not supported for coin {}", coin)
+            },
         }
     }
 }
@@ -793,6 +833,10 @@ impl<'a> MakerOrderBuilder<'a> {
 
     /// Build MakerOrder
     pub fn build(self) -> Result<MakerOrder, MakerOrderBuildError> {
+        if let Some(coin) = untradable_coin_ticker(self.base_coin, self.rel_coin) {
+            return Err(MakerOrderBuildError::TradingNotSupported { coin });
+        }
+
         if self.base_coin.ticker() == self.rel_coin.ticker() {
             return Err(MakerOrderBuildError::BaseEqualRel);
         }

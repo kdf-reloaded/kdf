@@ -1427,6 +1427,10 @@ pub struct ChannelDetails {
     pub is_usable: bool,
     /// True if this channel is (or will be) publicly-announced.
     pub is_public: bool,
+    // KDF Reloaded local patch to the vendored LDK, for CRD ch.41 R41.11A.1; drop on an LDK upgrade if upstream exposes the counterparty minimum.
+    /// The smallest HTLC amount, in millisatoshi, the counterparty accepts on this channel, or
+    /// `None` until it has been received from the counterparty.
+    pub outbound_htlc_minimum_msat: Option<u64>,
 }
 
 impl ChannelDetails {
@@ -2226,6 +2230,11 @@ where
                     is_funding_locked: channel.is_usable(),
                     is_usable: channel.is_live(),
                     is_public: channel.should_announce(),
+                    outbound_htlc_minimum_msat: if channel.have_received_message() {
+                        Some(channel.get_counterparty_htlc_minimum_msat())
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -8179,6 +8188,8 @@ impl_writeable_tlv_based!(ChannelDetails, {
     (28, is_funding_locked, required),
     (30, is_usable, required),
     (32, is_public, required),
+    // KDF Reloaded local patch to the vendored LDK, for CRD ch.41 R41.11A.1; drop on an LDK upgrade if upstream exposes the counterparty minimum.
+    (65537, outbound_htlc_minimum_msat, option),
 });
 
 impl_writeable_tlv_based!(PhantomRouteHints, {
