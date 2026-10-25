@@ -516,7 +516,7 @@ implemented from the cleared chapter.
 
 ---
 
-## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25)**
+## #13 — UTXO header families: `RIC` and `MEWC` swaps fail at the HTLC spend where the reference's complete — **OPEN (chapter cleared 2026-10-25; resolution bound 2026-10-25, implementation pending)**
 
 CRD reference:
 [`37-utxo-spv-and-block-header-validation.md`](./37-utxo-spv-and-block-header-validation.md)
@@ -550,6 +550,27 @@ this repository's own code and from public-network measurement alone.
   options and the one the evidence favours are in ch. 37 §37.9 D3. Parity
   **gap**; the family work needs no compatibility switch, while the
   stop-gap option 4 (spend without a median) would.
+
+  **Resolution path (2026-10-25, maintainer decision; clean-room-original,
+  no gate).** Bound in ch. 37 §37.5.9 (R37.5.9–R37.5.9d): a Reloaded-only
+  coin-configuration key, `protocol.reloaded_header_layout` (name and value
+  spellings proposed, pending the maintainer's veto), which the reference
+  ignores (ch. 45 R45.3.7) and which takes precedence over `chain_variant`
+  for the coin it is set on — D3 option 2 with option 3's per-header
+  structural recognition as its mechanism; option 4 rejected. Values:
+  `"riecoin"` (112 bytes, fixed) for `RIC`; `"kawpow_auxpow_mixed"` (per
+  header: AuxPoW flag clear → 120-byte KawPoW, set → std-80) for `MEWC`.
+  Both entries keep their registry `"BTC"`, so the shared coins file serves
+  both implementations. Median-time-past is computed from each parsed
+  header's timestamp; stored bytes and identity are the full served bytes
+  (R37.5.9c). No compatibility switch: nothing a counterparty observes
+  changes (R37.5.9d). Implementation is step H4a of
+  `docs/plans/utxo-header-family-selection.md`, placed ahead of the
+  remaining D1 family work as the **beta blocker**; this item stays open
+  until it lands and the ch. 37 §37.8 R37.5.9 criteria pass. `XPM` is out
+  of scope (wallet-only). The ch. 37 material is clean-room-original and
+  carries its own provenance note and §37.10 item; nothing here is gated or
+  awaiting a gate.
 - [ ] **Refund-wait bound floored instead of capped (ch. 37 §37.6,
   code-quality finding).** This repository's UTXO refund-eligibility
   routine returns a wait of *at least* one hour where the reference, since
