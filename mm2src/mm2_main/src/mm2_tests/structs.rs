@@ -418,6 +418,18 @@ pub struct TradeFeeForTest {
 }
 
 impl TradeFeeForTest {
+    /// Like [`TradeFeeForTest::new`] for an amount that is derived at run time.
+    pub fn from_amount(coin: &str, amount: BigDecimal, paid_from_trading_vol: bool) -> TradeFeeForTest {
+        let amount_mm = MmNumber::from(amount);
+        TradeFeeForTest {
+            coin: coin.into(),
+            amount: amount_mm.to_decimal(),
+            amount_rat: amount_mm.to_ratio(),
+            amount_fraction: amount_mm.to_fraction(),
+            paid_from_trading_vol,
+        }
+    }
+
     pub fn new(coin: &str, amount: &'static str, paid_from_trading_vol: bool) -> TradeFeeForTest {
         let amount_mm = MmNumber::from(amount);
         TradeFeeForTest {
@@ -443,6 +455,21 @@ pub struct TotalTradeFeeForTest {
 }
 
 impl TotalTradeFeeForTest {
+    /// Like [`TotalTradeFeeForTest::new`] for amounts that are derived at run time.
+    pub fn from_amounts(coin: &str, amount: BigDecimal, required_balance: BigDecimal) -> TotalTradeFeeForTest {
+        let amount_mm = MmNumber::from(amount);
+        let required_mm = MmNumber::from(required_balance);
+        TotalTradeFeeForTest {
+            coin: coin.into(),
+            amount: amount_mm.to_decimal(),
+            amount_rat: amount_mm.to_ratio(),
+            amount_fraction: amount_mm.to_fraction(),
+            required_balance: required_mm.to_decimal(),
+            required_balance_rat: required_mm.to_ratio(),
+            required_balance_fraction: required_mm.to_fraction(),
+        }
+    }
+
     pub fn new(coin: &str, amount: &'static str, required_balance: &'static str) -> TotalTradeFeeForTest {
         let amount_mm = MmNumber::from(amount);
         let required_mm = MmNumber::from(required_balance);

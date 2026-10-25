@@ -1,4 +1,5 @@
 use super::*;
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 
 impl BchCoin {
     pub fn slp_prefix(&self) -> &CashAddrPrefix { &self.slp_addr_prefix }
@@ -461,6 +462,10 @@ impl BchCoin {
     }
 
     pub async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {
-        self.as_ref().rpc_client.get_block_timestamp(height).await
+        let policy = HeaderReadPolicy::for_conf(&self.as_ref().conf);
+        self.as_ref()
+            .rpc_client
+            .get_block_timestamp_with_policy(height, &policy)
+            .await
     }
 }

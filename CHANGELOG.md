@@ -16,6 +16,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   not change, and peers see nothing new. Set the `MM2.json` boolean `pre_trade_spend_check` to `false`
   to restore GLEEC KDF behaviour, with no check. Detail: PR #73; CRD ch.60 R60.6.7.
 
+- **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
+  wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
+  Any positive fee is accepted, including one below the estimate; whether the network relays such a
+  transaction is untested. Any other fee type sent for Siacoin is now rejected with an
+  invalid-fee-policy error instead of being silently ignored. More in
+  [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md).
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
   window applies.** It names the start height and window size, notes that earlier funds will not be
   visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
@@ -48,7 +54,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   Every coin with a nonzero `txfee`, or none, used to pay the whole per-kilobyte fee for every
   started kilobyte, so a 226-byte KMD transaction cost 1,000 base units instead of 226. Withdrawals,
   swap payments and the DEX fee transaction now pay `floor(txfee × size / 1000)`, and a coin that
-  forces the node's minimum relay fee pays that rate proportionally as well. Swap spends and refunds
+  forces the node's minimum relay fee pays that rate proportionally as well. A segwit transaction's
+  size is its virtual size rounded up, as nodes count it, so a fee at the relay minimum is never one
+  unit short. Swap spends and refunds
   are estimated over 496 bytes instead of 305 bytes rounded up to a whole kilobyte: a KMD spend costs
   496. An explicit `UtxoFixed` withdraw fee keeps its meaning. Detail: PR #72; CRD ch.38
   R38.6.6b–c.
@@ -57,6 +65,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   it. Their version-two swap spend fee is now one `txfee`, matching a reference peer that validates
   it exactly; before, such a swap failed that peer's check. Their minimum trading volume uses the
   same fee. Detail: PR #72; CRD ch.38 R38.6.6a, ch.60 R60.6.2.
+- **The README now explains why the project exists.** Upstream's license added conditions on the
+  trading-fee code, its default network since v3.0 charges a 2% fee, and v3.0 refuses to start on
+  network 8762; KDF Reloaded keeps both networks usable. See also
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md),
+  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) and [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
+  Detail: PR #57.
+- **A UTXO coin's header layout now reaches every header read, and `protocol.chain_variant` is honored for
+  the first time.** The key is read from the coin's entry (eight values; an unrecognized one fails the
+  coin's activation naming the ticker and value), and the coin's layout (`header_layout`, else
+  `chain_variant`, else the Qtum reader for a `QTUM`/`QRC20` protocol type) is used by header sync, the
+  reorg walk, block timestamps, SPV, the stored-header re-reads and the WalletConnect genesis lookup, not
+  only the median-time-past. The structural fallback for `RIC` and `MEWC` now applies on all of those paths
+  too. A coin configured `"LBC"` or `"PIVX"` still activates but every header read of it now fails with a
+  "not implemented" error, where before it read the headers as standard 80-byte ones and mostly failed;
+  the other families still read the standard layout (CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e). Detail: PR #74.
 
 - **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
   `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
@@ -274,11 +297,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
 - [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — the
-  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50).
+  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50). The test harness for the locked-notes check landed
+  (PR #71); the only open item is two daemon instances sharing one wallet.
 - [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — the reorg-wedge fix
-  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42).
+  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42);
+  endpoints that have stopped following the chain are now excluded (PR #51); and activation warns
+  when the default recent scan window applies (PR #61).
 - [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — the rustls, webpki, ring
-  and tungstenite rows cleared, and the advisory ledger is green (PRs #37–#40, #42, #44).
+  and tungstenite rows cleared, and the advisory ledger is green with one dated acceptance, the
+  `crypto-bigint` timing advisory RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68).
 - [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — superseded: the fork
   bump it proposed gave way to a `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 (PR #40).
 - [`secp256k1-migration`](docs/plans/secp256k1-migration.md) — its last follow-up closed: the real
@@ -286,17 +313,43 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`clippy-ci-gate`](docs/plans/clippy-ci-gate.md) — the gate shipped; the vendor-filter follow-up
   stays open (PR #27).
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
-  EVM tests ported to a scripted local node (PR #30).
+  EVM tests ported to a scripted local node (PR #30); tests against a local `geth` node now run in
+  CI (PR #53).
 - [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
   two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
-- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — a CRD pass
-  discharged most of its chain-rule confirmation step, leaving three of the four open items and
-  two non-blocking spec residuals; the implementation steps no longer wait on that step. The AuxPoW coins also left the set
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — Riecoin and
+  Meowcoin swaps now complete: a per-coin `header_layout` key and a fallback switch landed (PRs
+  #62, #67), and the layout reaches every header read (PR #74). The AuxPoW coins also left the set
   whose median-time-past errors (PR #55).
 - [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
   ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
   pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
   `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
+- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — its substance shipped: the
+  minimum trading volume now matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins
+  (PR #66).
+
+### Known limitations
+
+What does not work yet, or works only in part, in this release. Each item says where more detail
+lives.
+
+- **Do not run two KDF instances on the same seed at the same time.** If you do, for any coin (RIN
+  included), both instances can pick the same funds for two different transactions. The network
+  accepts one and rejects the other, and the instance that loses gets no explanation and may try
+  again. KDF guards against this inside a single instance only; shielded coins such as ARRR are the
+  known case. More in [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md).
+- **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
+  transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
+  swap with a Komodo or GLEEC counterparty cannot complete. Spending a swap's locked ARRR is under
+  live testing. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+- **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
+  Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
+  [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
+- **Radiant (RXD), LBRY (LBC) and PIVX are only partly usable.** RXD activates and signs, but swaps
+  with it are not established. LBC and PIVX activate, but swaps fail with a clear error until their
+  block headers can be read. The swap watcher, which finishes a swap for you when you are offline,
+  does not work yet (issue #56). More in [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

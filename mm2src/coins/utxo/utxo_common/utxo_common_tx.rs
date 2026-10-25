@@ -38,6 +38,10 @@ where
     Box::new(fut.boxed().compat().map(|tx| tx.into()))
 }
 
+/// BIP141 virtual size: `ceil(weight / 4)` where `weight = base_size * 3 + total_size`, in exact integer
+/// arithmetic (CRD ch.38 R38.6.6b uses the virtual size, which the node rounds up).
+fn segwit_virtual_size(base_size: usize, total_size: usize) -> usize { (base_size * 3 + total_size).div_ceil(4) }
+
 pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> usize {
     let transaction_bytes = serialize(tx);
     // 2 bytes are used to indicate the length of signature and pubkey
@@ -50,7 +54,7 @@ pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> 
             let base_size = transaction_bytes.len();
             // 4 additional bytes (2 for the marker and 2 for the flag) and 1 additional byte for every input in the witness for the SIGHASH flag
             let total_size = transaction_bytes.len() + 4 + tx.inputs().len() * (additional_len + 1);
-            ((0.75 * base_size as f64) + (0.25 * total_size as f64)) as usize
+            segwit_virtual_size(base_size, total_size)
         },
         _ => transaction_bytes.len() + tx.inputs().len() * additional_len,
     }
@@ -1421,6 +1425,18 @@ fn test_increase_by_percent() {
     assert_eq!(increase_by_percent(23, 100.), 46);
     assert_eq!(increase_by_percent(100, 2.4), 102);
     assert_eq!(increase_by_percent(100, 2.5), 103);
+}
+
+#[test]
+fn test_segwit_virtual_size_rounds_up() {
+    // weight = 100 * 3 + 111 = 411 (not a multiple of 4): ceil(411 / 4) = 103, the float estimate gave 102
+    assert_eq!(segwit_virtual_size(100, 111), 103);
+    // weight = 100 * 3 + 112 = 412: exact
+    assert_eq!(segwit_virtual_size(100, 112), 103);
+    // weight = 101 * 3 + 101 = 404: exact
+    assert_eq!(segwit_virtual_size(101, 101), 101);
+    // weight = 99 * 3 + 100 = 397: ceil(397 / 4) = 100
+    assert_eq!(segwit_virtual_size(99, 100), 100);
 }
 
 #[test]

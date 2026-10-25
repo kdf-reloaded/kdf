@@ -8,6 +8,21 @@
 > behaviour is at parity with the deployed interoperability reference, so it
 > carries no instability and does not gate a beta.
 
+> **Decision F, 2026-10-25 (maintainer).** Implement before the beta, as the smallest form: accept
+> the existing `UtxoPerKbyte` for SC as **SC per kilobyte**, replacing walletd's rate and recomputed
+> per input like the estimate; no new Sia-specific variant now. This is what the Komodo wallet sends
+> (it posts `UtxoPerKbyte` for SC and labels the box "SC/kb"), so its custom-fee switch works with
+> no wallet change, and the "hide the switch" half of step 6 is unnecessary. There is **no floor** at
+> walletd's estimate: any positive rate is accepted, deliberately; whether walletd or the Sia
+> network accepts a below-estimate transaction is **untested** and will be checked in the live
+> swaplab run. Every other fee type for SC is rejected with the invalid-fee-policy error naming the
+> accepted type (the reference ignores `fee` for SC, so this is a documented divergence row, not a
+> switch). Built in `mm2src/coins/siacoin/sia_withdraw.rs` (pure fee decision and planners, tests
+> include the exact wallet JSON and the absent-fee equivalence); CRD ch.20 R-W3 amended with
+> verification items T-W6 and T-W7. Not done: the explicit Sia fee form (the hastings-per-byte or
+> total variants of the sketch below), until a client needs it. The "Sketch of the work" below is
+> the original sketch and is superseded where it differs.
+
 ## The gap
 
 `WithdrawRequest` carries a `fee` object whose variants are all UTXO-, EVM-,

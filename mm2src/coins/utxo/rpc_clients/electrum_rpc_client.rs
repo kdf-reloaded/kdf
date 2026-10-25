@@ -1,5 +1,5 @@
 use super::*;
-use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError};
+use crate::utxo::header_layout_fallback::{FallbackReadError, HeaderReadPolicy};
 use futures::channel::mpsc as futures_mpsc;
 use script::Script;
 use std::collections::{HashMap, HashSet};
@@ -500,6 +500,21 @@ impl JsonRpcMultiClient for ElectrumClient {
     }
 }
 
+// A separate block so the header fetches can be mocked in tests (`mockable` cannot take the async
+// methods of the block below).
+#[cfg_attr(test, mockable)]
+impl ElectrumClient {
+    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-header
+    pub fn blockchain_block_header(&self, height: u64) -> RpcRes<BytesJson> {
+        rpc_func!(self, "blockchain.block.header", height)
+    }
+
+    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
+    pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
+        rpc_func!(self, "blockchain.block.headers", start_height, count)
+    }
+}
+
 impl ElectrumClient {
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#server-ping
     pub fn server_ping(&self) -> RpcRes<()> { rpc_func!(self, "server.ping") }
@@ -646,20 +661,11 @@ impl ElectrumClient {
         }
     }
 
-    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-header
-    pub fn blockchain_block_header(&self, height: u64) -> RpcRes<BytesJson> {
-        rpc_func!(self, "blockchain.block.header", height)
-    }
-
-    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
-    pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
-        rpc_func!(self, "blockchain.block.headers", start_height, count)
-    }
-
     pub fn retrieve_last_headers(
         &self,
         blocks_limit_to_check: NonZeroU64,
         block_height: u64,
+        policy: HeaderReadPolicy,
     ) -> UtxoRpcFut<(HashMap<u64, BlockHeader>, Vec<BlockHeader>)> {
         let (from, count) = {
             let from = if block_height < blocks_limit_to_check.get() {
@@ -679,11 +685,11 @@ impl ElectrumClient {
                         }
                         let count = usize::try_from(headers.count)
                             .map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
-                        let maybe_block_headers =
-                            BlockHeader::list_from_served_bytes(&headers.hex.0, count, CoinVariant::Standard);
-                        let block_headers = match maybe_block_headers {
+                        let block_headers = match policy.read_list(&headers.hex.0, count) {
                             Ok(headers) => headers,
-                            Err(e) => return MmError::err(UtxoRpcError::InvalidResponse(format!("{:?}", e))),
+                            Err(e) => {
+                                return MmError::err(UtxoRpcError::InvalidResponse(e.reason(|e| format!("{:?}", e))))
+                            },
                         };
                         let mut block_registry: HashMap<u64, BlockHeader> = HashMap::new();
                         let mut starting_height = from;
@@ -925,15 +931,14 @@ impl UtxoRpcClientOps for ElectrumClient {
         count: NonZeroU64,
         coin_variant: CoinVariant,
     ) -> UtxoRpcFut<u32> {
-        self.get_median_time_past_with_fallback(starting_block, count, coin_variant, None)
+        self.get_median_time_past_with_policy(starting_block, count, HeaderReadPolicy::with_layout(coin_variant))
     }
 
-    fn get_median_time_past_with_fallback(
+    fn get_median_time_past_with_policy(
         &self,
         starting_block: u64,
         count: NonZeroU64,
-        coin_variant: CoinVariant,
-        fallback: Option<HeaderLayoutFallback>,
+        policy: HeaderReadPolicy,
     ) -> UtxoRpcFut<u32> {
         let from = if starting_block <= count.get() {
             0
@@ -949,12 +954,9 @@ impl UtxoRpcClientOps for ElectrumClient {
                     }
                     let count =
                         usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
-                    let headers = read_with_fallback(coin_variant, fallback.as_ref(), |layout| {
-                        BlockHeader::list_from_served_bytes(&res.hex.0, count, layout)
-                    })
-                    .map_err(|e| match e {
+                    let headers = policy.read_list(&res.hex.0, count).map_err(|e| match e {
                         FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
-                        FallbackReadError::Ambiguous(reason) => MmError::new(UtxoRpcError::InvalidResponse(reason)),
+                        other => MmError::new(UtxoRpcError::InvalidResponse(other.reason(|e| format!("{:?}", e)))),
                     })?;
                     let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
                     // can unwrap because count is non zero
@@ -964,9 +966,19 @@ impl UtxoRpcClientOps for ElectrumClient {
     }
 
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {
+        self.get_block_timestamp_with_policy(height, &HeaderReadPolicy::standard())
+            .await
+    }
+
+    async fn get_block_timestamp_with_policy(
+        &self,
+        height: u64,
+        policy: &HeaderReadPolicy,
+    ) -> Result<u64, MmError<UtxoRpcError>> {
         let header_bytes = self.blockchain_block_header(height).compat().await?;
-        let header = BlockHeader::from_served_bytes(&header_bytes.0, CoinVariant::Standard)
-            .map_to_mm(|e| UtxoRpcError::InvalidResponse(format!("{:?}", e)))?;
+        let header = policy
+            .read_header(&header_bytes.0)
+            .map_to_mm(|e| UtxoRpcError::InvalidResponse(e.reason(|e| format!("{:?}", e))))?;
         Ok(header.time as u64)
     }
 }
