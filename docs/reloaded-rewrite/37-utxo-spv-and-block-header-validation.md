@@ -282,6 +282,11 @@ closing the ported part takes.
 An unrecognised `chain_variant` string shall reject coin activation with a
 configuration error; it shall not silently fall back to the default.
 
+A coin entry may in addition carry the Reloaded-only key
+`reloaded_header_layout` of §37.5.9, which the reference ignores. When it is
+present it takes precedence over this table for the coin's header layout
+(R37.5.9a); `chain_variant` is still read and validated as above.
+
 Three details of that contract, as the reference implements it at the
 designations named in §37.10 (established by the chain-variant pass of
 2026-10-24 and cleared with it), which an implementer of §37.9 D1 needs:
@@ -534,9 +539,9 @@ time (4) + compact difficulty bits (4) + nonce (4)`, fields in that order.
 | LBRY claim trie | `version (4) + previous hash (32) + Merkle root (32) + claim-trie root (32) + time (4) + bits (4) + nonce (4)` = 112 bytes | Every LBRY header carries the claim-trie root. | Version value exactly `0x20000000` **and** `chain_variant` = `"LBC"`. |
 | PIVX (32-byte field after nonce) | std-80, then one 32-byte field = 112 bytes **or** std-80 alone, by header version | The chain's published header definition: header versions **4, 5 and 6** carry a 32-byte zerocoin accumulator checkpoint after the nonce; version **7 carries nothing** (std-80); versions **8 and above** carry the final Sapling root in the same position; versions 3 and below carry nothing. Observed boundaries on mainnet: version 4 from height 863787 (80 bytes at 863786, 112 from 863787), version 7 from 2153200 (112 bytes at 2153199, 80 from 2153200 through 2700499), version 8 from 2700500 (112 bytes), version 11 and 112 bytes at the tip. | Always read after the nonce when `chain_variant` = `"PIVX"`, whatever the version value — correct for versions 4–6 and 8+, **wrong for version 7 and for 3 and below**. |
 | Peercoin | std-80 (the block signature is outside the header) | Chain family. | `chain_variant` = `"PPC"` only suppresses the Equihash-style reading of version-4 headers. |
-| Riecoin *(added by the chain-variant pass; cleared, §37.10)* | `version (4) + previous hash (32) + Merkle root (32) + time (8, a 64-bit integer) + bits (4) + nonce (32, a 256-bit integer carrying the prime-chain offset)` = 112 bytes; there is no 32-bit nonce | Every Riecoin header (observed from height 1 through the tip on 2026-10-24, with version values 2 and `0x20000000`). *Confirmed against the chain's published header definition on 2026-10-25 (R3): the six fields, in this order and with these widths, are the chain's own; the 32-byte field is the chain's nonce (cleared, §37.10).* | **None.** The reference has no value for this layout; the registry's `"BTC"` entry for `RIC` reads 80 bytes per header (§37.9 D3). |
-| Primecoin *(added by the chain-variant pass; cleared, §37.10)* | std-80, then the prime-chain multiplier as a compact-size-prefixed byte string (observed 7–10 bytes, so 88–91 bytes per header); variable length | Every Primecoin header (observed at height 1000000 and at the tip). *Confirmed against the chain's published header definition on 2026-10-25 (R3): the standard six fields followed by the multiplier, serialized as the chain's big-number type — a length-prefixed little-endian magnitude byte string (cleared, §37.10).* | **None.** The registry's `XPM` entry carries no key; the default reads 80 bytes per header (§37.9 D3). |
-| Meowcoin *(added by the chain-variant pass; cleared, §37.10)* | A native block past the chain's switch time: the KawPoW layout, 120 bytes. A merged-mined block (version flag bit 8 set): std-80 followed by the AuxPoW proof — which the registry's servers serve **stripped to 80 bytes** | The chain's published rule, in this order: the AuxPoW flag selects the nonce-plus-proof form whatever the time; otherwise the time switch selects the KawPoW trailer. The two kinds interleave in the current chain. | **None** that parses the current chain (§37.5.1 note, §37.9 D3). |
+| Riecoin *(added by the chain-variant pass; cleared, §37.10)* | `version (4) + previous hash (32) + Merkle root (32) + time (8, a 64-bit integer) + bits (4) + nonce (32, a 256-bit integer carrying the prime-chain offset)` = 112 bytes; there is no 32-bit nonce | Every Riecoin header (observed from height 1 through the tip on 2026-10-24, with version values 2 and `0x20000000`). *Confirmed against the chain's published header definition on 2026-10-25 (R3): the six fields, in this order and with these widths, are the chain's own; the 32-byte field is the chain's nonce (cleared, §37.10).* | **None.** The reference has no value for this layout; the registry's `"BTC"` entry for `RIC` reads 80 bytes per header (§37.9 D3). Reloaded selects it by `reloaded_header_layout: "riecoin"` (R37.5.9, which takes precedence over the `"BTC"` value). |
+| Primecoin *(added by the chain-variant pass; cleared, §37.10)* | std-80, then the prime-chain multiplier as a compact-size-prefixed byte string (observed 7–10 bytes, so 88–91 bytes per header); variable length | Every Primecoin header (observed at height 1000000 and at the tip). *Confirmed against the chain's published header definition on 2026-10-25 (R3): the standard six fields followed by the multiplier, serialized as the chain's big-number type — a length-prefixed little-endian magnitude byte string (cleared, §37.10).* | **None.** The registry's `XPM` entry carries no key; the default reads 80 bytes per header (§37.9 D3). No `reloaded_header_layout` value yet: the entry is wallet-only and outside swap scope (R37.5.9). |
+| Meowcoin *(added by the chain-variant pass; cleared, §37.10)* | A native block past the chain's switch time: the KawPoW layout, 120 bytes. A merged-mined block (version flag bit 8 set): std-80 followed by the AuxPoW proof — which the registry's servers serve **stripped to 80 bytes** | The chain's published rule, in this order: the AuxPoW flag selects the nonce-plus-proof form whatever the time; otherwise the time switch selects the KawPoW trailer. The two kinds interleave in the current chain. | **None** that parses the current chain (§37.5.1 note, §37.9 D3). Reloaded selects it by `reloaded_header_layout: "kawpow_auxpow_mixed"` with the per-header rule of R37.5.9b. |
 
 R37.5.2a **What an Electrum-protocol server returns.** `blockchain.block.header`
 returns one header as hex (or an object with a `header` field when a
@@ -645,7 +650,11 @@ only as that family's own chain rule reads it. It shall never move the
 header into another family. In particular, under `"BTC"` (and `"PPC"`) every
 header is std-80 **whatever** its version value: the AuxPoW flag bit, a
 version of 4, `0x30000000`, `0x20001000` and `0x00010004` all leave the
-layout at 80 bytes.
+layout at 80 bytes. When the Reloaded-only key of §37.5.9 is present on the
+coin, that key and not `chain_variant` pins the layout (R37.5.9a), so this
+rule governs an entry pinned to `"BTC"` only while the entry carries no
+such key; the key does not weaken the exclusivity for any entry without
+it.
 
 > **Code-quality finding (informative).** Upstream's `"BTC"` value only
 > guards against part of this. It suppresses the AuxPoW, Equihash-style and
@@ -752,8 +761,12 @@ the same way as a version-signalled choice under the default family.
   mainnet this coincides exactly with the chain's published time rule
   (§37.5.2), and no lower bound is needed because pre-MTP headers carry a
   different version value.
-- A chain with no family in the set (§37.9 D3) has no within-family rule
-  here until a family exists for it.
+- A chain with no family in the set takes its layout from the
+  Reloaded-only key of §37.5.9 where a value exists for it — the Riecoin
+  layout (fixed length, no within-layout choice) and the mixed
+  KawPoW/merged-mined layout, whose per-header rule R37.5.9b states. A
+  chain with neither (Primecoin, §37.9 D3) has no within-family rule here
+  until a value exists for it.
 
 ### 37.5.6 Structural-consistency guard against ambiguous version values
 
@@ -1018,7 +1031,10 @@ collision of R37.5.4a.
 > remain Reloaded's own are the exclusivity of R37.5.3 for the
 > non-family-gated layouts, the structural rules of R37.5.5, the linkage
 > rule of R37.5.6, the served-bytes and chain-identity rules of R37.5.7
-> and §37.5.7a, and the parent-header rule of R37.5.2b.
+> and §37.5.7a, the parent-header rule of R37.5.2b — and, since
+> 2026-10-25, the Reloaded-only layout selection of §37.5.9, which has no
+> reference counterpart at all and is clean-room-original (see its
+> provenance note).
 
 As built:
 
@@ -1038,6 +1054,12 @@ As built:
   met: KawPoW is still recognised by its version value for every non-Qtum
   coin. Withdrawing that before the configuration key exists would leave
   KawPoW coins unable to read their headers.
+- The Reloaded-only key `reloaded_header_layout` of §37.5.9 is not read,
+  and the Riecoin and mixed KawPoW/merged-mined layouts it selects are not
+  implemented; `RIC` and `MEWC` header lists are rejected whole, as the
+  table of §37.9 D3 records for a reader without the key. D3 is resolved
+  (2026-10-25); its implementation is the plan's own step under
+  `docs/plans/`.
 
 Implemented (part of R37.5.6 and part of R37.5.7):
 
@@ -1071,6 +1093,182 @@ Implemented (part of R37.5.6 and part of R37.5.7):
   - a 120-byte KawPoW list and single header, to keep the KawPoW path
     covered;
   - rejection of a list with trailing or missing bytes.
+
+### 37.5.9 Reloaded-only header-layout selection (clean-room-original)
+
+> **Provenance (informative).** R37.5.9–R37.5.9d are clean-room-original
+> design, written on the clean side of the wall on 2026-10-25 without
+> reference to the upstream implementation, in the manner of R37.5.6a. No
+> forbidden-class input was taken for them, so the route of chapter 01 R38
+> is not engaged, no Dirty Gate pass is required or pending, and R40
+> withholds nothing here. The reference facts the rules rest on are all
+> already-cleared statements of this chapter, named so that the dependency
+> is checkable: the `"BTC"`-value re-examination sub-note of §37.5.1 (the
+> reference reads a list as consecutive 80-byte records to a random median,
+> and `"BTC"` is the value that keeps that read from failing); the first
+> contract detail under R37.5.1 (the key is read from the raw `protocol`
+> object beside `type`, and the typed descriptor is unaffected by it); the
+> Riecoin and Meowcoin rows of §37.5.2 and the served-shape observations
+> under R37.5.2a; the §37.5.3 finding and its vintage paragraph (what
+> `"BTC"` excludes); the §37.5.6 finding (the reference checks no list
+> end); the *Where the median goes* note under R37.6.2 (the spend's
+> lock-time is consensus-irrelevant under a final sequence, the refund's is
+> not); and §37.9 D3 with its two constraints. Outside this chapter they
+> rest on [chapter 45](45-startup-configuration-and-environment-tolerance.md)
+> R45.3.7 (an unrecognized key in a coin entry, including one inside a
+> recognized nested object, is tolerated by the reference), on the
+> published header definitions of Riecoin and Meowcoin (R3, as already
+> recorded in §37.5.2), on this project's own public-network measurements
+> of 2026-10-25 (R6, §37.5.1) and on this repository's own header reader.
+> The key, its name and value set, the precedence rule, the per-header rule
+> and the acceptance criteria are this project's own design, chosen by the
+> maintainer on 2026-10-25 as the resolution of §37.9 D3 (option 2, with
+> option 3's structural recognition as its mechanism). The key name and the
+> value spellings are **proposed and remain the maintainer's to veto**
+> until the first implementation lands: they are user-facing, and the
+> public registry's maintainer is the other party who will write them.
+
+R37.5.9 **The key and its values.** A UTXO coin's `protocol` object may carry
+the Reloaded-only key **`reloaded_header_layout`**, a sibling of `type` and
+of `chain_variant` (`conf.protocol.reloaded_header_layout`). It names a
+header *layout* that the closed `chain_variant` value set of R37.5.1 cannot
+name, and it exists so that a registry entry the reference needs to keep as
+it is can nonetheless be read correctly by this project. The key shall be
+read exactly where and how `chain_variant` is read (the first contract
+detail under R37.5.1): from the coin's raw `protocol` object as a plain
+string, compared exactly and case-sensitively, not part of the typed
+protocol descriptor [chapter 55](55-coin-activation-wire-contract.md) binds
+and without effect on how that descriptor parses. Its value set is closed
+and is, initially:
+
+| `reloaded_header_layout` value | Layout it selects (§37.5.2) | Per-header rule (R37.5.9b) |
+|---|---|---|
+| *(key absent)* | No effect: the layout is the family `chain_variant` pins, or the default (R37.5.1, R37.5.4). | — |
+| `"riecoin"` | The Riecoin layout: `version (4) + previous hash (32) + Merkle root (32) + time (8, a 64-bit integer) + bits (4) + nonce (32, a 256-bit integer)` = 112 bytes, every header (confirmed against the chain's published definition, §37.5.2). | None: fixed length. |
+| `"kawpow_auxpow_mixed"` | The mixed KawPoW/merged-mined layout of a chain that carries the KawPoW trailer on every native block and the AuxPoW form on every merged-mined one (the Meowcoin row of §37.5.2). | By the header's own version value: AuxPoW flag bit 8 clear → the 120-byte KawPoW layout; bit 8 set → std-80, the form the observed servers serve for merged-mined blocks (R37.5.2a). |
+
+An unrecognized value shall reject coin activation with a configuration
+error of the same class as an unrecognized `chain_variant` (R37.5.1: the
+coin-build failure class of chapter 55, carrying the ticker and a textual
+reason); it shall not fall back to `chain_variant`, to the default or to
+any layout. An absent key has no effect. The set holds only layouts that no
+`chain_variant` value pins, so a layout the dictated set already names is
+selected by `chain_variant` and is not duplicated here; the Primecoin
+layout of §37.5.2 has no value yet, because its only registry entry is
+wallet-only (§37.9 D3), and may receive one by a revision of this table.
+The spellings are lowercase deliberately: they name layouts, not chains,
+and they are told apart at a glance from the dictated uppercase
+`chain_variant` set in a registry entry that carries both.
+
+> **Compatibility:** GLEEC KDF (and the upstream reference) has no
+> equivalent key and ignores this one (chapter 45 R45.3.7), so a shared
+> registry entry carrying it stays valid for both implementations. No
+> value of the key reproduces the reference's behavior on these coins —
+> a random median-time-past (§37.5.1) — and nothing a counterparty
+> observes depends on the key (R37.5.9d), so this is not a divergence in
+> the sense of `docs/COMPAT_SWITCHES.md`'s rule and needs no opt-back and
+> no row in `docs/GLEEC_COMPATIBILITY.md`.
+
+R37.5.9a **Precedence over `chain_variant`.** When the key is present it
+governs the header layout of that coin on every read path R37.5.1a names —
+single-header reads, header-list reads, the starting-header check, re-reads
+of stored headers and the median-time-past list — on native and WASM alike.
+`chain_variant` is still read and validated for the coin (an unrecognized
+value still rejects activation, R37.5.1), but the family it pins does not
+apply to the layout while the key is present. In particular, the
+exclusivity of R37.5.3 is a statement about what `chain_variant` does when
+it governs; this rule decides when it governs. A registry entry pinned to
+`"BTC"` that also carries the key therefore parses by the key's layout, and
+that is the case the key exists for: the shared registry keeps `"BTC"` on
+`RIC` and `MEWC` (§37.5.1 re-examination, §37.9 D3) and the reference needs
+it there. The key never widens `chain_variant`: an entry without the key is
+read exactly as R37.5.1–R37.5.6 bind.
+
+R37.5.9b **Per-header layout recognition and the list read.** For a layout
+whose per-header length varies (`"kawpow_auxpow_mixed"`), the reader shall
+determine each header's layout, and so its length, from that header's own
+version field — the first four bytes at the position where the header
+begins — before consuming the header, so that a list of mixed lengths is
+read at its true header boundaries rather than at a fixed stride. The rule
+for the mixed layout is the chain's own, AuxPoW-first (the Meowcoin row of
+§37.5.2): a header whose version value has the AuxPoW flag bit 8 set is a
+merged-mined header and is read as std-80; a header whose version value has
+the flag clear is a native header and is read with the 120-byte KawPoW
+layout, whatever the remaining bits of its version value (the native
+version value has changed over the chain's history, §37.5.1, so no exact
+value is keyed on). The per-header choice is a within-layout choice, and
+the structural guard of R37.5.6 applies to it exactly as to the KawPoW
+trailer under `"RVN"`: a list shall yield exactly `count` headers ending
+exactly at the end of the served bytes, or be rejected whole with nothing
+from it stored or used; the std-80 re-read of a list that is exactly
+`count × 80` bytes applies; a lone header that the per-header rule does not
+consume exactly is re-read as std-80 when it is exactly 80 bytes and is
+otherwise malformed. Two limits are bound rather than left implicit:
+
+- in a **list**, a merged-mined header is read as exactly 80 bytes. The
+  servers observed strip the AuxPoW proof (R37.5.2a, §37.5.1), and a proof
+  cannot be told apart from the start of the next header without
+  backtracking; a server that serves full proofs in a list therefore makes
+  the list fail exact consumption and be rejected — a loud failure to be
+  revisited by observation (R6) if it is ever seen, never a misread;
+- a **single** merged-mined header served longer than 80 bytes is read as
+  std-80 followed by the AuxPoW proof of §37.5.2, exact consumption
+  deciding, as under the default family.
+
+For a layout of fixed length (`"riecoin"`) there is no per-header choice:
+every header is that length, the within-family half of the guard does not
+apply (R37.5.6 extension), and a header or list of any other length is
+malformed under that layout.
+
+R37.5.9c **Median-time-past, stored bytes and identity.** The median-time-past
+of R37.6.2 for a coin read under this subsection shall be computed from the
+**parsed timestamp field** of each header the list read of R37.5.9b yields
+— never by slicing a fixed offset out of the served bytes, even though the
+time field happens to sit at bytes 68–72 in all three layouts (§37.5.1
+re-examination). For the Riecoin layout the parsed 64-bit time is used; a
+value above the 32-bit range the standard header's time field spans shall
+be a typed parse error, never truncated. The bytes the header store keeps
+(§37.3) and the header's identity hash follow R37.5.7 unchanged: they are
+derived from the **full served bytes** of the header — 112 bytes for a
+Riecoin header, 120 for a native KawPoW-form header, 80 for a stripped
+merged-mined one — and nothing about the key permits trimming a header to
+80 bytes for storage, hashing or re-encoding. Until the served-bytes rule
+of R37.5.7 is implemented (§37.9 D2), the re-encoding of a header parsed
+under this subsection shall reproduce its served bytes exactly, so that
+what the store keeps equals what was served. The identity hash of a
+stripped merged-mined header is the double-SHA256 of its 80 bytes (the
+AuxPoW rule of R37.5.7); the chain-defined identity hashes of the Riecoin
+and native KawPoW forms are not specified by this chapter, so R37.5.7's own
+escape applies to them and the linkage checks of R37.5.6 and R37.7.2 skip
+those headers until a chain-defined hash is specified. §37.9 D2 is
+unchanged by this rule.
+
+R37.5.9d **Scope: a Reloaded improvement with no peer-observable change.**
+This subsection restores the HTLC spend and refund paths of `RIC` and
+`MEWC` on Electrum connections (§37.6 note: the spend queries the median
+before it signs, and under R37.5.6 the query errored) without changing
+anything a counterparty sees on the wire. The spend's lock-time is formed
+from a correct median instead of the spend being aborted; the reference's
+own value for that field is a random draw that consensus ignores under the
+spend's final sequence, so no peer validates or expects any particular
+value there. The refund's lock-time becomes the correct one where the
+reference's is random and merely delayed. No RPC shape, no wire message,
+no signed preimage and no persisted schema changes. By the second arm of
+the default-side rule of `docs/COMPAT_SWITCHES.md` the Reloaded behavior
+is the default, and no opt-back is offered because none is meaningful (the
+Compatibility note under R37.5.9). Divergence record, in the style of this
+section's other divergence notes: the reference completes these swaps by
+tolerating a wrong median and mis-times their refunds; this project
+completes them by reading the headers correctly. `XPM` is outside this
+subsection's scope (wallet-only; no swap path) and keeps its §37.5.2 row
+and its §37.9 D3 record.
+
+> **Interop note.** The key is this project's own and binds no third party:
+> a coin file that omits it is read by R37.5.1–R37.5.6 alone, and a coin
+> file that carries it is read identically by the reference, which ignores
+> it. The byte layouts the values select are dictated by their chains
+> (§37.5.2). This subsection binds the selection contract and the
+> per-header rule; it binds no parser structure.
 
 ## 37.6 Use in swap confirmation & current MTP
 
@@ -1302,6 +1500,45 @@ reported rather than an unbounded walk-back.
     the D3 families, once chosen, shall add that the same lists parse and
     yield the true median under the selector D3 settles on (pass of
     2026-10-25; cleared — see that pass's clearance item of §37.10).*
+    *D3 is resolved (2026-10-25): the selector is the Reloaded-only key of
+    §37.5.9, and the criteria that follow are the acceptance the previous
+    sentence called for (R37.5.9–R37.5.9d; clean-room-original, see the
+    provenance note of §37.5.9).*
+  - Under `"chain_variant": "BTC"` **and** `"reloaded_header_layout":
+    "riecoin"` — the registry's `RIC` entry plus the key — an
+    eleven-header `blockchain.block.headers` list of 112-byte Riecoin
+    headers (the live-measured shape of §37.5.1: 11 × 112) parses to
+    eleven headers, and the median-time-past equals the median of their
+    parsed timestamps; a lone 112-byte header parses, re-encodes
+    byte-identically and is stored as 112 bytes (R37.5.9, R37.5.9a,
+    R37.5.9c). The same list under `"BTC"` alone is rejected (the bullet
+    above): the key wins over `"BTC"`.
+  - Under `"BTC"` **and** `"kawpow_auxpow_mixed"` — the registry's `MEWC`
+    entry plus the key — a list of nine 120-byte native headers (flag bit 8
+    clear) and two 80-byte merged-mined headers (bit 8 set) in the chain's
+    own interleaving (the live-measured tip window of §37.5.1), and the
+    three-header tip shape 80 + 80 + 120 (§37.5.1), each parse to `count`
+    headers at their true boundaries and yield the median of the parsed
+    timestamps; a uniform 80-byte merged-mined list and a uniform 120-byte
+    native list parse as well (R37.5.9a, R37.5.9b). A 120-byte native
+    header is stored as 120 bytes and round-trips through the store
+    unchanged: its stored bytes equal its served bytes (R37.5.9c).
+  - Under `"kawpow_auxpow_mixed"`, a list in which a header's bytes do not
+    match the layout its own version field selects — a flag-clear header
+    followed by only 80 bytes, or a flag-set header followed by a 120-byte
+    body — fails exact consumption and is rejected whole; the `count × 80`
+    std-80 re-read of R37.5.6 applies to a list that is exactly that long
+    and to no other (R37.5.9b, R37.5.6).
+  - An unrecognized value (`"reloaded_header_layout": "foo"`) fails
+    activation with the configuration-error class of R37.5.1, naming the
+    coin; the coin is not activated with `chain_variant`'s family or the
+    default instead. An unrecognized `chain_variant` beside a valid key
+    fails activation too (R37.5.9, R37.5.9a).
+  - With the key absent every criterion of this section holds unchanged,
+    including the rejection of the 112-byte and interleaved lists above
+    (current behavior); with the key present, a `protocol` object that
+    parses as a given protocol type without it parses as the same type
+    with it (R37.5.9).
 - `get_current_mtp` returns a plausible median-time-past for an SPV-enabled coin
   (R37.6.2).
 - A swap-relevant payment on an Electrum-connected coin with `enable_spv_proof`
@@ -1401,7 +1638,8 @@ of those values crosses the wire, so the divergence is confined to the
 local header store and the local linkage checks and needs no
 compatibility switch — only the storage decision named above.
 
-**D3.** *Chains the reference's value set cannot describe.* *(Added by the
+**D3 — resolved 2026-10-25; see the closing block of this item.** *Chains
+the reference's value set cannot describe.* *(Added by the
 chain-variant pass of 2026-10-24 and cleared with it — see the clearance
 item of §37.10.)* Three registry entries were found, by direct observation
 of their configured servers (§37.5.1, §37.5.2a), to carry headers that no
@@ -1505,6 +1743,37 @@ registry's maintainer on 2026-10-25 and is answered: intentional, kept,
 and correct for the reference. It is no longer to be reported as a
 mis-description; the mis-description is the chapter's own earlier
 reading of its consequence, corrected above.
+
+**Resolution (2026-10-25; clean-room-original, no gate — see the
+provenance note of §37.5.9).** D3 is **resolved** by the maintainer's
+decision of 2026-10-25, bound as §37.5.9 (R37.5.9–R37.5.9d): **option 2**
+— a separate Reloaded-only key beside `chain_variant`,
+`protocol.reloaded_header_layout`, which the reference ignores (chapter 45
+R45.3.7) and which takes precedence over `chain_variant` for the coin it is
+set on — with **option 3's** structural reading as its *mechanism*:
+per-header layout recognition from the header's own version field, so that
+the Meowcoin mixed list parses at its true boundaries. Both constraints
+above are met: the registry keeps `"BTC"` on `RIC` and `MEWC` and both
+entries parse by the key's layout (R37.5.9a), and the key is not a
+`chain_variant` value, so one registry entry serves both implementations.
+Option 1 is rejected as a coin-file fork for two coins; option 3 alone is
+rejected because it cannot override a `"BTC"`-pinned entry (R37.5.3) and
+cannot read the mixed list without the per-header decision it now supplies
+under the key; **option 4 is rejected**: it is wire-visible (the spend's
+lock-time field), it substitutes a value in a funds-moving path for data
+the call site could not obtain, and it leaves the refund path broken. `XPM`
+is wallet-only and out of scope: the Primecoin layout keeps its §37.5.2 row
+and receives no value for now. The text, table and options above are kept
+as the record of how the decision was reached; the table's right-hand
+column describes the reader **without** the key, which stays true for an
+entry that does not carry it. What remains of D3 is implementation, not
+decision: the plan under `docs/plans/` carries it as its own step (ahead
+of the remaining D1 family work, because it is the beta blocker), and
+§37.5.8 records the key as not yet read. **D1 and D2 are unchanged** by
+the resolution: D1 still ports the reference's selector, and D2's
+served-bytes identity applies to the new layouts as R37.5.9c states. The
+key name and the value spellings are proposed pending the maintainer's
+veto (§37.5.9 provenance note).
 
 ## 37.10 Provenance Footer
 
@@ -2131,3 +2400,41 @@ reading of its consequence, corrected above.
     not expression. Dictated-interop and public-surface tokens, listed
     above, were excluded from the measured set before the judgment was
     made, per token under the forced-versus-free test.
+- *Clean-room-original addition — the D3 resolution of 2026-10-25
+  (§37.5.9 with R37.5.9–R37.5.9d and its provenance, Compatibility and
+  interop notes; the pointers to it added under R37.5.1, in the Riecoin,
+  Primecoin and Meowcoin rows of §37.5.2, under R37.5.3, in the last
+  bullet of R37.5.5 and in §37.5.8's port note and as-built list; the
+  criteria added to §37.8; the heading and resolution block of §37.9 D3;
+  and this item).* This material was written on the clean side of the
+  wall, by a context that had not seen the forbidden corpus, without
+  reference to the upstream implementation and without taking
+  forbidden-class input, in the manner of R37.5.6a. Chapter 01 R38's
+  route is therefore not engaged for it, no Dirty Gate verdict exists or
+  is pending for it, and R40 withholds nothing: it is a requirement by
+  construction, not a candidate. Its inputs, all of the permitted classes:
+  the already-cleared statements of this chapter that its provenance note
+  names (the §37.5.1 re-examination sub-note, the first contract detail
+  under R37.5.1, the Riecoin and Meowcoin rows of §37.5.2 and the
+  observations under R37.5.2a, the §37.5.3 finding and its vintage
+  paragraph, the §37.5.6 finding, the *Where the median goes* note under
+  R37.6.2, and §37.9 D3 with its two constraints), each resting on the
+  clearance records above and none re-derived here; chapter 45 R45.3.7
+  (cleared in that chapter on 2026-10-24); R3, the published header
+  definitions of Riecoin and Meowcoin as already recorded under §37.5.2;
+  R4, the public coin registry's `RIC`, `MEWC` and `XPM` entries; R6, this
+  project's own public-network measurements of 2026-10-25 already recorded
+  in §37.5.1; this repository's own header reader (its two served-bytes
+  entry points and the width of its time field); the registry
+  maintainer's statement of 2026-10-25 as the item above admits it (R4);
+  and the decision of this project's maintainer of 2026-10-25 selecting
+  option 2 of D3 with option 3 as its mechanism, which is project
+  direction and not an input class. The key name, its value spellings,
+  the precedence rule, the per-header rule and the acceptance criteria are
+  this project's own design. **No forbidden-class input was taken, and the
+  *Forbidden corpus* item above is unchanged by this addition.** Inline
+  pointer: the provenance note at the head of §37.5.9 carries the same
+  statement where the material appears, so that an implementer entering
+  there does not infer from the absence of a clearance pointer that one is
+  pending; the resolution block of §37.9 D3 and the §37.8 criteria point
+  to that note.
