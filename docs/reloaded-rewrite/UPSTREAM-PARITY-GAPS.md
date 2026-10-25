@@ -414,11 +414,19 @@ non-fungible flavours.
 
 ---
 
-## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **OPEN**
+## #9 — UTXO: `signature_version` value `fork_id_rxd` unsupported (Radiant) — **OPEN (implemented in PR #65, pending merge)**
 
 CRD reference:
 [`58-utxo-signature-version-and-radiant-sighash.md`](./58-utxo-signature-version-and-radiant-sighash.md).
 Reference designation: `v3.0.0-beta` (the dialect is not in `v2.6.0-beta`).
+
+*Status (2026-10-25).* The first two items below are **implemented in
+PR #65** (`feat/rxd-signature-version`, stacked on PR #54; merge order
+#57 → #54 → #65) from the cleared chapter and public Radiant-Core alone;
+ch. 58 §58.5 carries the as-built statement. The checkboxes stay open
+until the PR is merged. The third item — trading fitness (ch. 58 D2) — is
+**separately still open** and is not touched by PR #65: Radiant is not to
+be called tradable on the strength of the signing work.
 
 - [ ] The shipped coins configuration gives the Radiant entry
   `"signature_version": "fork_id_rxd"` with `"fork_id": "0x40"`. Reloaded's
