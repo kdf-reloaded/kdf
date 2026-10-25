@@ -211,6 +211,16 @@ D3. **Cross-instance attribution.** The guard distinguishes
   12 binds a distinct store -- the node's own live maker
   orders -- and is not the orderbook substrate this
   mitigation extends.
+- The negotiation loop that consumes the orderbook this
+  mitigation protects, and the separate liveness eviction
+  that removes a silent peer's rows entirely --
+  [Chapter 59](59-legacy-ordermatch-negotiation.md). The
+  two mechanisms are independent and must not be
+  conflated: this chapter's cache suppresses a *late
+  create* for a *cancelled* order within a fixed window,
+  whereas ch. 59 §59.6 drops *all* rows of a peer that
+  stopped advertising. An order whose maker went silent
+  without cancelling is ch. 59's case, not this one.
 
 ## 11.10 Baseline Verifications
 
