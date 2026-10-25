@@ -134,6 +134,8 @@ macro_rules! try_ztx_s {
 
 mod z_coin_ops;
 #[cfg(not(target_arch = "wasm32"))] mod z_ironwood;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod z_note_lock_tests;
 #[cfg(not(target_arch = "wasm32"))] mod z_swap_ops;
 #[cfg(target_arch = "wasm32")] mod z_swap_ops_wasm;
 #[cfg(not(target_arch = "wasm32"))] mod z_tx_read;
@@ -689,6 +691,24 @@ pub(crate) struct InFlightSpend {
     pub(crate) expiry_height: u32,
 }
 
+/// How `send_outputs` paces its waits. The field exists for test control: production installs the
+/// historical values (the literals `send_outputs` used before this field existed: a 300 s in-flight
+/// wait retried every 10 s, and a 4000 s confirmation wait polled every 10 s), through
+/// [`SendPacing::default`], and tests shorten them so the bounded in-flight wait (R39.8.0at) can be
+/// exercised in milliseconds.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SendPacing {
+    /// Budget for a send that is short only because in-flight spends are unscanned, in seconds.
+    pub(crate) in_flight_wait_secs: u64,
+    /// Gap between re-selection attempts inside that budget, in seconds.
+    pub(crate) in_flight_retry_secs: f64,
+    /// How long a broadcast transaction is awaited for its first confirmation, in seconds.
+    pub(crate) confirmation_wait_secs: u64,
+    /// Gap between confirmation checks, in seconds.
+    pub(crate) confirmation_check_secs: u64,
+}
+
 pub struct ZCoinFields {
     mode: ZcoinMode,
     dex_fee_addr: PaymentAddress,
@@ -714,6 +734,9 @@ pub struct ZCoinFields {
     /// is empty, so a shortfall simply fails fast.
     #[cfg(not(target_arch = "wasm32"))]
     in_flight_spends: Mutex<HashMap<[u8; 32], InFlightSpend>>,
+    /// The waits `send_outputs` makes; see [`SendPacing`].
+    #[cfg(not(target_arch = "wasm32"))]
+    send_pacing: SendPacing,
     /// Message from the most recent shielded sync failure, cleared by the next
     /// successful scan. Without it a failed scan is reported as a scan still in
     /// progress, because both leave `wallet_db_scan_complete` false (R39.8.0au).
@@ -2286,6 +2309,8 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             z_unspent_mutex: AsyncMutex::new(()),
             #[cfg(not(target_arch = "wasm32"))]
             in_flight_spends: Mutex::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            send_pacing: SendPacing::default(),
             #[cfg(not(target_arch = "wasm32"))]
             shielded_sync_error: Mutex::new(None),
             sapling_state_synced: AtomicBool::new(false),

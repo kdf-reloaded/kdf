@@ -1,7 +1,30 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-**Status:** in progress (swap and `withdraw` paths shipped; remaining T39.8.0h cases and two-process detection open) — **Last reviewed:** 2026-10-19
+**Status:** in progress (swap and `withdraw` paths shipped; T39.8.0h covered by the harness 2026-10-25; open: two-daemon detection, F3) — **Last reviewed:** 2026-10-25
 
+> **T39.8.0h harness built, 2026-10-25.** A test harness now drives a real Light-mode `ZCoin` over
+> a real shielded wallet database in a temporary directory, with the lightwalletd backend replaced by
+> the scripted transport the lightwalletd tests already had (`mm2src/coins/z_coin/z_note_lock_tests.rs`).
+> A "broadcast" is whatever the script answers, a "scan" is a compact block built from the real
+> transaction and fed to the real scanner, a "restart" is a new coin over the same database directory
+> with an empty in-memory in-flight map, and expiry is reached by advancing the scanned tip, since the
+> release is height-driven. Every T39.8.0h case named below is now covered on the send path: the record
+> is written only after the backend accepts; a rejected broadcast records nothing, leaves the balance
+> unchanged and the retry reuses the note; a second send is refused the committed note and ends in the
+> typed bounded-wait failure while `withdraw` names the cause; the exclusion survives a restart and the
+> explanation does not (R39.8.0as with D39.8.0e, both pinned); scanning the containing block frees the
+> change and retires the spent note with no double count; a never-mined transaction releases its note
+> at expiry and not a block earlier; two concurrent sends over two notes select disjoint notes and both
+> broadcast; a waiting send re-selects when a concurrent scan lands. The one production change is a
+> `SendPacing` field on the coin, installed by the builder with the former literals (300 s in-flight
+> wait retried every 10 s, 4000 s confirmation wait polled every 10 s) and pinned by a test, so the
+> bounded wait can be exercised in milliseconds; production behavior is unchanged. Still open:
+> detection of two daemons on one seed with separate wallet databases, and F3. The tests make real
+> Sapling proofs and need the parameter files; they say so and return where those are absent. The
+> proofs are deliberate, not an oversight: the failure this plan exists for is a note selected twice,
+> and only a real selection, a real spend and a real scan can show it, so the roughly three minutes
+> they add to the shielded test job are the price of the coverage. Do not replace them with mocks.
+>
 > **Shortfall named, 2026-10-21.** A withdrawal short only because its notes are committed to a
 > recorded, unconfirmed transaction now fails with `BalanceLockedByUnconfirmedTransaction`
 > (HTTP 400; coin, available, required, committed) instead of a bare `NotSufficientBalance`
@@ -31,7 +54,8 @@
 > lightwalletd-only, so there is no Native-mode path to cover.
 >
 > **Still to do for `done`:** the T39.8.0h cases for a rejected broadcast, a restart, the
-> mined-and-scanned transition and two concurrent sends (CRD ch.39 D39.8.0f); detection of two
+> mined-and-scanned transition and two concurrent sends (CRD ch.39 D39.8.0f) -- *since covered, see
+> above*; detection of two
 > daemons on one seed with separate wallet databases (this fix does not make that safe; a
 > possible cheap detection is noticing a nullifier on chain that this wallet did not create);
 > F3 (post-broadcast sync trigger, latency only). Deferred, not planned: showing built-but-unsent

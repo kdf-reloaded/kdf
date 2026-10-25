@@ -12,6 +12,28 @@ const IN_FLIGHT_SPEND_WAIT_SECS: u64 = 300;
 #[cfg(not(target_arch = "wasm32"))]
 const IN_FLIGHT_SPEND_RETRY_SECS: f64 = 10.;
 
+/// How long `send_outputs` waits for its own broadcast to reach one confirmation, in seconds.
+#[cfg(not(target_arch = "wasm32"))]
+const CONFIRMATION_WAIT_SECS: u64 = 4000;
+
+/// Gap between confirmation checks while waiting, in seconds.
+#[cfg(not(target_arch = "wasm32"))]
+const CONFIRMATION_CHECK_SECS: u64 = 10;
+
+/// The production pacing of `send_outputs`: exactly the values it used before the pacing became a
+/// field, which is what [`ZCoinBuilder`] installs.
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for SendPacing {
+    fn default() -> Self {
+        SendPacing {
+            in_flight_wait_secs: IN_FLIGHT_SPEND_WAIT_SECS,
+            in_flight_retry_secs: IN_FLIGHT_SPEND_RETRY_SECS,
+            confirmation_wait_secs: CONFIRMATION_WAIT_SECS,
+            confirmation_check_secs: CONFIRMATION_CHECK_SECS,
+        }
+    }
+}
+
 impl ZCoin {
     #[inline(always)]
     #[cfg(not(target_arch = "wasm32"))]
@@ -618,7 +640,8 @@ impl ZCoin {
     ) -> Result<ZTransaction, MmError<SendOutputsErr>> {
         self.prepare_shielded_build().await.mm_err(SendOutputsErr::from)?;
 
-        let deadline = now_ms() / 1000 + IN_FLIGHT_SPEND_WAIT_SECS;
+        let pacing = self.z_fields.send_pacing;
+        let deadline = now_ms() / 1000 + pacing.in_flight_wait_secs;
         let tx = loop {
             // Selection, construction, broadcast and recording are one critical
             // section. Selecting outside it would let a second send choose the same
@@ -655,12 +678,12 @@ impl ZCoin {
                 Some(tx) => break tx,
                 None => {
                     if now_ms() / 1000 >= deadline {
-                        return MmError::err(SendOutputsErr::InFlightSpendWaitTimeout(IN_FLIGHT_SPEND_WAIT_SECS));
+                        return MmError::err(SendOutputsErr::InFlightSpendWaitTimeout(pacing.in_flight_wait_secs));
                     }
                     // Deliberately outside the section: the shortfall clears only when
                     // the scanner advances, and it cannot advance while we hold the
                     // section (R39.8.0at).
-                    Timer::sleep(IN_FLIGHT_SPEND_RETRY_SECS).await;
+                    Timer::sleep(pacing.in_flight_retry_secs).await;
                 },
             }
         };
@@ -672,8 +695,8 @@ impl ZCoin {
                 1,
                 false,
                 // Seconds, as `wait_for_confirmations` compares it against `now_ms() / 1000`.
-                now_ms() / 1000 + 4000,
-                10,
+                now_ms() / 1000 + pacing.confirmation_wait_secs,
+                pacing.confirmation_check_secs,
             )
             .compat()
             .await

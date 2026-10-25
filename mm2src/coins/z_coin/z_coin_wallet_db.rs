@@ -2877,7 +2877,7 @@ fn split_group_concat(value: String) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use db_common::sqlite::rusqlite::params;
     use rand::{rngs::StdRng, SeedableRng};
@@ -2892,7 +2892,7 @@ mod tests {
 
     static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    fn test_db_dir(label: &str) -> PathBuf {
+    pub(crate) fn test_db_dir(label: &str) -> PathBuf {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let db_dir = std::env::temp_dir().join(format!(
             "kdf-zcoin-{}-{}-{}-{}",
@@ -2934,7 +2934,7 @@ mod tests {
         .unwrap()
     }
 
-    fn test_params_with_zip212() -> ZcoinConsensusParams {
+    pub(crate) fn test_params_with_zip212() -> ZcoinConsensusParams {
         serde_json::from_value(serde_json::json!({
             "overwinter_activation_height": 1,
             "sapling_activation_height": 2,
@@ -2969,14 +2969,14 @@ mod tests {
         ZCoinShieldedHistory::open_or_create("ARRR", db_dir, test_params(), &extfvk, Some(&check_point)).unwrap()
     }
 
-    fn empty_sapling_tree_bytes() -> Vec<u8> {
+    pub(crate) fn empty_sapling_tree_bytes() -> Vec<u8> {
         let tree = sapling::CommitmentTree::empty();
         let mut bytes = Vec::new();
         zcash_primitives::merkle_tree::write_commitment_tree(&tree, &mut bytes).unwrap();
         bytes
     }
 
-    fn empty_compact_block(height: u64, hash_byte: u8, prev_hash_byte: u8) -> zcash_compact::CompactBlock {
+    pub(crate) fn empty_compact_block(height: u64, hash_byte: u8, prev_hash_byte: u8) -> zcash_compact::CompactBlock {
         zcash_compact::CompactBlock {
             height,
             hash: vec![hash_byte; 32],
@@ -2992,49 +2992,78 @@ mod tests {
         }
     }
 
-    fn compact_block_with_received_note(
+    pub(crate) fn compact_block_with_received_note(
         height: u64,
         hash_byte: u8,
         prev_hash_byte: u8,
         extfvk: &ExtendedFullViewingKey,
         value: u64,
     ) -> zcash_compact::CompactBlock {
-        let note = Note::from_parts(
-            extfvk.default_address().1,
-            NoteValue::from_raw(value),
-            Rseed::AfterZip212([42; 32]),
-        );
+        compact_block_with_received_notes(height, hash_byte, prev_hash_byte, extfvk, &[(value, 68, 42)])
+    }
+
+    /// A block holding one transaction per `(value, txid byte, rseed byte)` entry, each paying one
+    /// note to the wallet. Distinct txid and rseed bytes make the notes distinct, so a wallet can
+    /// hold several (the lone-note form above is the `(value, 68, 42)` case).
+    pub(crate) fn compact_block_with_received_notes(
+        height: u64,
+        hash_byte: u8,
+        prev_hash_byte: u8,
+        extfvk: &ExtendedFullViewingKey,
+        notes: &[(u64, u8, u8)],
+    ) -> zcash_compact::CompactBlock {
         let mut rng = StdRng::from_seed([7; 32]);
-        let encryptor = sapling_note_encryption(
-            Some(extfvk.fvk.ovk),
-            note.clone(),
-            MemoBytes::empty().into_bytes(),
-            &mut rng,
-        );
-        let ciphertext = encryptor.encrypt_note_plaintext();
-        let output = zcash_compact::CompactSaplingOutput {
-            cmu: note.cmu().to_bytes().to_vec(),
-            ephemeral_key: SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
-            ciphertext: ciphertext[..52].to_vec(),
-        };
-        let transaction = zcash_compact::CompactTx {
-            index: 1,
-            txid: vec![68; 32],
-            outputs: vec![output],
-            ..Default::default()
-        };
+        let vtx = notes
+            .iter()
+            .enumerate()
+            .map(|(index, (value, txid_byte, rseed_byte))| {
+                let note = Note::from_parts(
+                    extfvk.default_address().1,
+                    NoteValue::from_raw(*value),
+                    Rseed::AfterZip212([*rseed_byte; 32]),
+                );
+                let encryptor = sapling_note_encryption(
+                    Some(extfvk.fvk.ovk),
+                    note.clone(),
+                    MemoBytes::empty().into_bytes(),
+                    &mut rng,
+                );
+                let ciphertext = encryptor.encrypt_note_plaintext();
+                let output = zcash_compact::CompactSaplingOutput {
+                    cmu: note.cmu().to_bytes().to_vec(),
+                    ephemeral_key: SaplingDomain::epk_bytes(encryptor.epk()).0.to_vec(),
+                    ciphertext: ciphertext[..52].to_vec(),
+                };
+                zcash_compact::CompactTx {
+                    index: index as u64 + 1,
+                    txid: vec![*txid_byte; 32],
+                    outputs: vec![output],
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
         zcash_compact::CompactBlock {
             height,
             hash: vec![hash_byte; 32],
             prev_hash: vec![prev_hash_byte; 32],
             time: u32::try_from(height).unwrap(),
             header: Vec::new(),
-            vtx: vec![transaction],
+            vtx,
             chain_metadata: Some(zcash_compact::ChainMetadata {
-                sapling_commitment_tree_size: 1,
+                sapling_commitment_tree_size: notes.len() as u32,
                 orchard_commitment_tree_size: 0,
                 ironwood_commitment_tree_size: 0,
             }),
+        }
+    }
+
+    impl ZCoinShieldedHistory {
+        /// Test access to the compact-block cache insert, which is private to this module.
+        pub(crate) fn insert_compact_blocks_for_test(
+            &self,
+            blocks: &[zcash_compact::CompactBlock],
+        ) -> Result<(), String> {
+            self.insert_compact_blocks(blocks)
         }
     }
 
