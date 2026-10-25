@@ -55,6 +55,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
+  gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
+  chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
+  and the trade-preimage path applied the floor twice. The increase is now purely proportional.
+  Detail: CRD ch.57 R57.3.2; PR #TBD.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle

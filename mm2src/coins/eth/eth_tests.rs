@@ -866,21 +866,40 @@ fn direct_withdraw_evm_single_key_explicit_from_is_structured_sender_error() {
 }
 
 #[test]
-fn test_add_ten_pct_one_gwei() {
-    let num = wei_from_big_decimal(&"0.1".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"1.1".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
+fn test_increase_by_percent_no_gwei_floor() {
+    // Sub-gigawei base: purely proportional, no +1 gwei jump (CRD ch.57 R57.3.2).
+    let num = wei_from_big_decimal(&"0.033".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"0.03729".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
 
-    let num = wei_from_big_decimal(&"9.9".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"10.9".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
+    let num = wei_from_big_decimal(&"0.005".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"0.00565".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
+
+    // At and above the old floor threshold the result is unchanged.
+    let num = wei_from_big_decimal(&"100".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"113".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
 
     let num = wei_from_big_decimal(&"30.1".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"33.11".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
+    let expected = wei_from_big_decimal(&"34.013".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
+
+    // Zero and sub-100-wei bases get a zero increment.
+    assert_eq!(U256::zero(), increase_by_percent(U256::zero(), 13));
+    assert_eq!(U256::from(99), increase_by_percent(U256::from(99), 13));
+    assert_eq!(U256::from(113), increase_by_percent(U256::from(100), 13));
+}
+
+#[test]
+fn test_trade_preimage_stage_is_single_proportional_increase() {
+    let num = wei_from_big_decimal(&"0.033".parse().unwrap(), 9).unwrap();
+    // 33_000_000 wei at 7%: 330_000 * 7 = 2_310_000, no gigawei added.
+    assert_eq!(
+        num + U256::from(2_310_000u64),
+        increase_gas_price_by_stage(num, &FeeApproxStage::TradePreimage)
+    );
+    assert_eq!(num, increase_gas_price_by_stage(num, &FeeApproxStage::WithoutApprox));
 }
 
 #[test]
