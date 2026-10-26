@@ -184,7 +184,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   is now shown as unspendable from the moment the send is broadcast, also after a restart, and
   moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
   The change of a send made by another instance on the same seed still shows only once mined. Run
-  one instance per seed, as the known limitations already advise. Detail: CRD ch.39 R39.8.0ag1.
+  one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39 R39.8.0ag1.
 - **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
   input points past the end of the previous transaction's outputs, a BCH transaction with no
   outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
