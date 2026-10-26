@@ -742,7 +742,7 @@ R38.6.3.
 
 ---
 
-## #17 — Orderbook: legacy `orderbook` fails, legacy `best_orders` drops, on a shielded-coin order — **IMPLEMENTED in PR #TBD (one legacy-versus-v2 difference remains, last item)**
+## #17 — Orderbook: legacy `orderbook` fails, legacy `best_orders` drops, on a shielded-coin order — **IMPLEMENTED in PR #88 (one legacy-versus-v2 difference remains, last item)**
 
 CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
 §32.8 R-F6b, R-F6c, R-F6d, R-F6e, T-F6.1–T-F6.4;
