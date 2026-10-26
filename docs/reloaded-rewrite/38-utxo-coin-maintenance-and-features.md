@@ -564,9 +564,27 @@ transaction hash itself, never by comparing the hash bytes with the text of
 its hexadecimal form.
 
 > **Provenance of R38.5A.9 and R38.5A.10 (2026-10-26).** Clean-room original.
-> R38.5A.9 was written from a behavioral description only; per the Spec Reader
-> on 2026-10-26, the behavior matches the reference at both reference states.
-> R38.5A.10 states what Reloaded's collector was written to do.
+> R38.5A.9 was written from a behavioral description only. Part of it matches
+> the reference at both reference states: the per-transaction error for an
+> out-of-range previous-output index, the log, skip and continue of the legacy
+> collector, and the error for a BCH transaction with no outputs. The rest of
+> R38.5A.9 is a Reloaded requirement: the error in the KMD reward
+> accumulation, the error for an SLP genesis with an empty decimals field, and
+> skip and continue in the mmrpc-2.0 BCH and SLP collector. R38.5A.10 states
+> what Reloaded's collector was written to do. The reference also matches the
+> row by the hash value and gives it the listed height and block time.
+>
+> **Dirty Gate (2026-10-26, post-hoc).** PASS, score 0.01 (threshold 0.10),
+> compared by reading against both reference rows (`v2.6.0-beta` and
+> `v3.0.0-beta`) over the UTXO transaction-history subsystem. No reference
+> expression crossed. The gate confirmed reference parity for the
+> out-of-range-index error and the log-skip-continue behavior of the legacy
+> collector, the BCH no-outputs error, and R38.5A.10's hash-value matching
+> with height and block time. It did not confirm reference parity for the
+> KMD-reward-accumulation error clause, the empty-decimals SLP genesis clause,
+> or skip-and-continue in the mmrpc-2.0 (BCH/SLP) collector; those are
+> Reloaded requirements, and the parity statement above is limited to the
+> confirmed items.
 >
 > **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded read
 > the previous transaction's output at the input's index without a bounds
