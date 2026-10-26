@@ -2137,6 +2137,16 @@ after R35.1.11, and the per-node bound of the nonce reads in R35.1.12 step 1.
 The `docs/GLEEC_COMPATIBILITY.md` row for R35.1.14 / R35.1.15 is added with
 the implementing change.
 
+**D35.9** *(Open -- to be evaluated; maintainer decision, 2026-10-26.)* *A bound
+on the nonce-increase wait.* Step 3 of R35.1.12 has no upper bound, in Reloaded
+as in both reference rows (see the code-quality finding there). To be
+evaluated: an upper bound on the wait, the distinct failure it surfaces, how
+each swap step that can reach it handles that failure without losing track of
+a transaction that is mined after all, and the scope of the lock held while
+waiting. Any bound is a Reloaded divergence, not peer-visible. Nothing is
+implemented; the evaluation belongs to the swap and transaction-path hardening
+plan (`docs/plans/swap-transaction-path-hardening.md`).
+
 ## 35.9 Provenance Footer
 
 - *Inputs:* the published Komodo DeFi Framework API reference (the
