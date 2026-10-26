@@ -2089,6 +2089,18 @@ pub enum OrderbookAddress {
     Shielded,
 }
 
+impl OrderbookAddress {
+    /// Renders the outcome for the legacy (envelope-less) RPC generation, where `address` is a plain
+    /// string: the transparent address itself, or the fixed placeholder `Shielded`
+    /// (CRD ch.32 R-F6d, R-F6e). Display only.
+    pub(crate) fn into_legacy_string(self) -> String {
+        match self {
+            OrderbookAddress::Transparent(addr) => addr,
+            OrderbookAddress::Shielded => "Shielded".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Display)]
 pub(crate) enum OrderbookAddrErr {
     AddrFromPubkeyError(String),

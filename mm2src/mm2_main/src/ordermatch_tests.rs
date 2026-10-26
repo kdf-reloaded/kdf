@@ -4247,3 +4247,201 @@ mod t60_6_pre_trade_spend_check_tests {
         );
     }
 }
+
+use super::orderbook_rpc::OrderbookReq;
+
+// ---- Legacy `orderbook` address rendering (CRD ch.32 R-F6c..R-F6e, T-F6.1..T-F6.4; ch.39 R39.5.3) ----
+
+const ZHTLC_COIN_CONF: &str = r#"{"coin":"ZOMBIE","asset":"ZOMBIE","mm2":1,"protocol":{"type":"ZHTLC","protocol_data":{"consensus_params":{"overwinter_activation_height":0,"sapling_activation_height":1,"blossom_activation_height":null,"heartwood_activation_height":null,"canopy_activation_height":null,"coin_type":133,"hrp_sapling_extended_spending_key":"secret-extended-key-main","hrp_sapling_extended_full_viewing_key":"zxviews","hrp_sapling_payment_address":"zs","b58_pubkey_address_prefix":[28,184],"b58_script_address_prefix":[28,189]},"z_derivation_path":"m/32'/133'"}}}"#;
+
+pub(super) fn legacy_rendering_test_coins() -> Json {
+    json::json!([
+        json::from_str::<Json>(ZHTLC_COIN_CONF).unwrap(),
+        {"coin":"DOC","asset":"DOC","pubtype":60,"p2shtype":85,"wiftype":188,"txfee":1000,"mm2":1,"protocol":{"type":"UTXO"}},
+        {"coin":"MARTY","asset":"MARTY","pubtype":60,"p2shtype":85,"wiftype":188,"txfee":1000,"mm2":1,"protocol":{"type":"UTXO"}},
+        {"coin":"SOL","asset":"SOL","mm2":1,"protocol":{"type":"SOLANA"}},
+        {"coin":"IRIS","asset":"IRIS","mm2":1,"protocol":{"type":"TENDERMINT","protocol_data":{
+            "decimals":6,"denom":"uiris","account_prefix":"iaa","chain_id":"irishub-1"}}},
+    ])
+}
+
+/// A context carrying the coins of [`legacy_rendering_test_coins`] whose orderbooks for the
+/// given pairs are marked as already requested, so the RPC handlers read the in-memory book
+/// without any P2P round trip.
+pub(super) fn ctx_for_legacy_rendering_tests(pairs: &[(&str, &str)]) -> (MmArc, String, [u8; 32]) {
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json::json!({ "coins": legacy_rendering_test_coins() }))
+        .into_mm_arc();
+    ctx.init_metrics().unwrap();
+    ctx.secp256k1_key_pair
+        .pin(key_pair_from_seed("passphrase").unwrap())
+        .unwrap();
+    let secret = *ctx.secp256k1_key_pair().private().secret;
+    let pubkey = hex::encode(&**ctx.secp256k1_key_pair().public());
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    {
+        let mut subs = ordermatch_ctx.orderbook_subscriptions.write();
+        for (a, b) in pairs {
+            subs.insert(orderbook_topic_from_base_rel(a, b), OrderbookRequestingState::Requested);
+            subs.insert(orderbook_topic_from_base_rel(b, a), OrderbookRequestingState::Requested);
+        }
+    }
+    (ctx, pubkey, secret)
+}
+
+fn legacy_orderbook(ctx: &MmArc, base: &str, rel: &str) -> Json {
+    let response = block_on(orderbook_rpc(ctx.clone(), json::json!({ "base": base, "rel": rel })))
+        .expect("legacy orderbook must succeed");
+    json::from_slice(response.body()).unwrap()
+}
+
+fn v2_orderbook(ctx: &MmArc, base: &str, rel: &str) -> Json {
+    let req: OrderbookReq = json::from_value(json::json!({ "base": base, "rel": rel })).unwrap();
+    let response = block_on(orderbook_rpc_v2(ctx.clone(), req)).expect("mmrpc 2.0 orderbook must succeed");
+    json::to_value(response).unwrap()
+}
+
+fn addresses(side: &Json) -> Vec<Json> { side.as_array().unwrap().iter().map(|e| e["address"].clone()).collect() }
+
+/// T-F6.1: a shielded-coin order does not fail the legacy `orderbook`; it is an ask / a bid with
+/// the address `Shielded`, and mmrpc 2.0 shows `{"address_type":"Shielded"}`.
+#[test]
+fn test_legacy_orderbook_shielded_coin_order_t_f6_1() {
+    let (ctx, pubkey, secret) = ctx_for_legacy_rendering_tests(&[("ZOMBIE", "DOC")]);
+    for order in make_random_orders(pubkey, &secret, "ZOMBIE".into(), "DOC".into(), 1) {
+        insert_or_update_order(&ctx, order);
+    }
+    flush_trie(&ctx);
+
+    // The shielded coin as base: the order is an ask.
+    let legacy = legacy_orderbook(&ctx, "ZOMBIE", "DOC");
+    assert_eq!(legacy["numasks"], 1);
+    assert_eq!(legacy["numbids"], 0);
+    assert_eq!(addresses(&legacy["asks"]), vec![json::json!("Shielded")]);
+    let v2 = v2_orderbook(&ctx, "ZOMBIE", "DOC");
+    assert_eq!(v2["num_asks"], 1);
+    assert_eq!(addresses(&v2["asks"]), vec![json::json!({"address_type": "Shielded"})]);
+
+    // The shielded coin as rel: the same order is a bid.
+    let legacy = legacy_orderbook(&ctx, "DOC", "ZOMBIE");
+    assert_eq!(legacy["numasks"], 0);
+    assert_eq!(legacy["numbids"], 1);
+    assert_eq!(addresses(&legacy["bids"]), vec![json::json!("Shielded")]);
+    let v2 = v2_orderbook(&ctx, "DOC", "ZOMBIE");
+    assert_eq!(v2["num_bids"], 1);
+    assert_eq!(addresses(&v2["bids"]), vec![json::json!({"address_type": "Shielded"})]);
+}
+
+/// T-F6.2: a UTXO order has the transparent string in the legacy `address` and the same string in
+/// the mmrpc 2.0 `address_data`; the two generations agree on the outcome.
+#[test]
+fn test_legacy_orderbook_utxo_order_address_agrees_with_v2_t_f6_2() {
+    let (ctx, pubkey, secret) = ctx_for_legacy_rendering_tests(&[("DOC", "MARTY")]);
+    for order in make_random_orders(pubkey, &secret, "DOC".into(), "MARTY".into(), 1) {
+        insert_or_update_order(&ctx, order);
+    }
+    flush_trie(&ctx);
+
+    for (base, rel, side) in [("DOC", "MARTY", "asks"), ("MARTY", "DOC", "bids")] {
+        let legacy = addresses(&legacy_orderbook(&ctx, base, rel)[side]);
+        let v2 = addresses(&v2_orderbook(&ctx, base, rel)[side]);
+        assert_eq!(legacy.len(), 1);
+        let legacy_addr = legacy[0].as_str().expect("legacy address is a plain string");
+        assert_ne!(legacy_addr, "Shielded");
+        assert!(legacy_addr.starts_with('R'), "unexpected address {legacy_addr}");
+        assert_eq!(v2, vec![
+            json::json!({"address_type": "Transparent", "address_data": legacy_addr})
+        ]);
+    }
+}
+
+/// T-F6.3: an order that cannot be resolved is omitted and the rest of the response is served.
+/// Two flavours: a coin family with no derivation at all (Solana), and one order of a
+/// derivable family whose pubkey does not resolve, next to a good one on the same side.
+#[test]
+fn test_legacy_orderbook_unresolvable_order_is_omitted_t_f6_3() {
+    let (ctx, pubkey, secret) = ctx_for_legacy_rendering_tests(&[("SOL", "DOC"), ("DOC", "MARTY")]);
+
+    // Solana pair: the Solana-listed side is empty, the UTXO-listed side is served.
+    for order in make_random_orders(pubkey.clone(), &secret, "SOL".into(), "DOC".into(), 1) {
+        insert_or_update_order(&ctx, order);
+    }
+    for order in make_random_orders(pubkey.clone(), &secret, "DOC".into(), "SOL".into(), 1) {
+        insert_or_update_order(&ctx, order);
+    }
+    // Same side: one resolvable and one unresolvable (malformed pubkey) order.
+    let good = make_random_orders(pubkey.clone(), &secret, "DOC".into(), "MARTY".into(), 1).remove(0);
+    let good_uuid = good.uuid;
+    insert_or_update_order(&ctx, good);
+    let mut bad = make_random_orders(pubkey, &secret, "DOC".into(), "MARTY".into(), 1).remove(0);
+    bad.pubkey = "not-a-pubkey".to_owned();
+    insert_or_update_order(&ctx, bad);
+    flush_trie(&ctx);
+
+    let legacy = legacy_orderbook(&ctx, "SOL", "DOC");
+    assert_eq!(legacy["numasks"], 0);
+    assert_eq!(legacy["numbids"], 1);
+    let v2 = v2_orderbook(&ctx, "SOL", "DOC");
+    assert_eq!(v2["num_asks"], 0);
+    assert_eq!(v2["num_bids"], 1);
+
+    let legacy = legacy_orderbook(&ctx, "DOC", "MARTY");
+    let v2 = v2_orderbook(&ctx, "DOC", "MARTY");
+    assert_eq!(legacy["numasks"], 1);
+    assert_eq!(legacy["asks"][0]["uuid"], good_uuid.to_string());
+    assert_eq!(v2["num_asks"], 1);
+    assert_eq!(v2["asks"][0]["uuid"], good_uuid.to_string());
+}
+
+/// Reloaded-only regression (not reference behavior): the old legacy resolver refused the
+/// Tendermint family, so the legacy `orderbook` failed for such a pair. It now renders the
+/// bech32 account address, as the mmrpc 2.0 path does.
+#[test]
+fn test_legacy_orderbook_tendermint_order_reloaded_only_regression() {
+    let (ctx, pubkey, secret) = ctx_for_legacy_rendering_tests(&[("IRIS", "DOC")]);
+    for order in make_random_orders(pubkey, &secret, "IRIS".into(), "DOC".into(), 1) {
+        insert_or_update_order(&ctx, order);
+    }
+    flush_trie(&ctx);
+
+    let legacy = addresses(&legacy_orderbook(&ctx, "IRIS", "DOC")["asks"]);
+    let v2 = addresses(&v2_orderbook(&ctx, "IRIS", "DOC")["asks"]);
+    assert_eq!(legacy.len(), 1);
+    let legacy_addr = legacy[0].as_str().unwrap();
+    assert!(legacy_addr.starts_with("iaa"), "unexpected address {legacy_addr}");
+    assert_eq!(v2, vec![
+        json::json!({"address_type": "Transparent", "address_data": legacy_addr})
+    ]);
+}
+
+/// R-F6e: the legacy rendering of the shielded outcome (also reached by Sia and Lightning) is the
+/// fixed string `Shielded`; a transparent outcome renders as its own string.
+#[test]
+fn test_orderbook_address_legacy_string_rendering() {
+    assert_eq!(OrderbookAddress::Shielded.into_legacy_string(), "Shielded");
+    assert_eq!(
+        OrderbookAddress::Transparent("RAddr".to_owned()).into_legacy_string(),
+        "RAddr"
+    );
+
+    let (ctx, pubkey, _secret) = make_ctx_for_tests();
+    let sia_conf = json::json!({ "protocol": { "type": "SIA" } });
+    let sia = orderbook_address(&ctx, "SC", &sia_conf, &pubkey, UtxoAddressFormat::Standard).unwrap();
+    assert_eq!(sia.into_legacy_string(), "Shielded");
+
+    let fee_and_confs = json::json!({"default_fee_per_kb": 1000, "n_blocks": 1});
+    let lightning_conf = json::json!({"protocol": {"type": "LIGHTNING", "protocol_data": {
+        "platform": "BTC",
+        "network": "mainnet",
+        "confirmations": {"background": fee_and_confs, "normal": fee_and_confs, "high_priority": fee_and_confs},
+    }}});
+    let lightning = orderbook_address(
+        &ctx,
+        "BTC-lightning",
+        &lightning_conf,
+        &pubkey,
+        UtxoAddressFormat::Standard,
+    )
+    .unwrap();
+    assert_eq!(lightning.into_legacy_string(), "Shielded");
+}
