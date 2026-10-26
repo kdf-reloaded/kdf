@@ -451,9 +451,10 @@ hastings-per-byte rate and is applied to the same probe weight,
 recomputed as each candidate input is added, so
 `fee = ceil(hastings_per_kilobyte × weight / 1000)`. Any positive
 `amount` that is a whole number of hastings per kilobyte is
-accepted; there is **no floor** at walletd's estimate, and whether
-walletd or the Sia network accepts a transaction whose fee is below
-that estimate is untested. A zero, negative, fractional-hasting or
+accepted; there is **no floor** at walletd's estimate, and a fee one tenth of
+that estimate was accepted by walletd and mined within about ten minutes
+on an uncongested transaction pool (checked live 2026-10-26; a full pool is
+untested). A zero, negative, fractional-hasting or
 unrepresentable `amount`, or a rate × weight that overflows, is
 rejected with the invalid-fee-policy error; so is any other `fee`
 type (for example `UtxoFixed` or `EthGas`), the error naming the

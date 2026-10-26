@@ -77,8 +77,9 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   or `EthGas`) is now rejected with the invalid-fee-policy error instead of
   being ignored. No compat switch: a client that sent such a value to GLEEC KDF
   for SC and relied on it being ignored must stop sending it. A fee below
-  walletd's estimate is accepted; whether the network relays such a
-  transaction is untested. Code: `coins/siacoin/sia_withdraw.rs`.
+  walletd's estimate is accepted; a fee one tenth of the estimate was mined
+  within about ten minutes on an uncongested transaction pool (checked live
+  2026-10-26; a full pool is untested). Code: `coins/siacoin/sia_withdraw.rs`.
 
 - Reloaded-specific Z-coin shielded database names isolate the upgraded stable
   `librustzcash` schema from GLEEC KDF's legacy schema. See
