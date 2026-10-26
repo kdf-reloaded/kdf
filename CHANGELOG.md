@@ -150,6 +150,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
+  ignored and every listed server was connected; with `max_connected: 1` only one server is connected
+  now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
+  refused with the usual error answer, as on the newer activation methods. This also applies to BCH
+  and QRC20 activated through `electrum`. More in ch.55 R55.4.3 and ch.38 R38.6.4.
+
 - **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
   Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal
   error, and the older `best_orders` silently left the order out. The order now appears with the

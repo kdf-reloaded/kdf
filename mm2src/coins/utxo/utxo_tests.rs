@@ -8153,3 +8153,211 @@ pub(crate) mod header_read_path_tests {
         assert!(block_on(storage.get_block_header(TICKER, 1)).is_err());
     }
 }
+
+/// The legacy `electrum` method honors `min_connected` and `max_connected` (CRD ch. 55 R55.4.3, ch. 38 R38.6.4).
+#[cfg(not(target_arch = "wasm32"))]
+mod legacy_electrum_connection_settings {
+    use super::*;
+    use crate::lp_coininit;
+    use crate::qrc20::Qrc20ActivationParams;
+    use crate::utxo::bch::BchActivationRequest;
+    use crypto::CryptoCtx;
+    use std::net::TcpListener;
+
+    const SERVERS: [&str; 2] = ["127.0.0.1:1", "127.0.0.1:2"];
+
+    fn request(extra: Json) -> Json {
+        let mut req = json!({
+            "method": "electrum",
+            "coin": "RCK",
+            "servers": SERVERS.iter().map(|url| json!({ "url": url })).collect::<Vec<_>>(),
+        });
+        req.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        req
+    }
+
+    fn settings(params: &UtxoActivationParams) -> (usize, Option<usize>, Option<usize>) {
+        match &params.mode {
+            UtxoRpcMode::Electrum {
+                servers,
+                min_connected,
+                max_connected,
+            } => (servers.len(), *min_connected, *max_connected),
+            UtxoRpcMode::Native => panic!("Electrum mode expected"),
+        }
+    }
+
+    #[test]
+    fn max_connected_reaches_the_params() {
+        let params = UtxoActivationParams::from_legacy_req(&request(json!({ "max_connected": 1 }))).unwrap();
+        assert_eq!(settings(&params), (2, None, Some(1)));
+
+        let params =
+            UtxoActivationParams::from_legacy_req(&request(json!({ "min_connected": 2, "max_connected": 2 }))).unwrap();
+        assert_eq!(settings(&params), (2, Some(2), Some(2)));
+    }
+
+    #[test]
+    fn absent_or_null_values_keep_the_defaults() {
+        for extra in [json!({}), json!({ "min_connected": null, "max_connected": null })] {
+            let params = UtxoActivationParams::from_legacy_req(&request(extra)).unwrap();
+            assert_eq!(settings(&params), (2, None, None));
+        }
+    }
+
+    #[test]
+    fn unusable_values_are_refused() {
+        let cases = [
+            (json!({ "min_connected": 0 }), "'min_connected' must be at least 1"),
+            (json!({ "max_connected": 0 }), "'max_connected' must be at least 1"),
+            (
+                json!({ "min_connected": 2, "max_connected": 1 }),
+                "'min_connected' must not exceed 'max_connected'",
+            ),
+        ];
+        for (extra, reason) in cases {
+            let error = UtxoActivationParams::from_legacy_req(&request(extra)).unwrap_err();
+            assert_eq!(
+                error.get_inner().to_string(),
+                format!("Unusable Electrum connection settings: {}", reason)
+            );
+        }
+
+        let mut empty = request(json!({}));
+        empty["servers"] = json!([]);
+        let error = UtxoActivationParams::from_legacy_req(&empty).unwrap_err();
+        assert_eq!(
+            error.get_inner().to_string(),
+            "Unusable Electrum connection settings: no server is configured"
+        );
+
+        for (key, value) in [
+            ("min_connected", json!("1")),
+            ("max_connected", json!("1")),
+            ("max_connected", json!(-1)),
+            ("max_connected", json!(1.5)),
+            ("min_connected", json!(true)),
+        ] {
+            let error = UtxoActivationParams::from_legacy_req(&request(json!({ key: value }))).unwrap_err();
+            assert!(
+                matches!(
+                    error.get_inner(),
+                    UtxoFromLegacyReqErr::InvalidMinConnected(_) | UtxoFromLegacyReqErr::InvalidMaxConnected(_)
+                ),
+                "{key}: {error}"
+            );
+        }
+    }
+
+    /// The legacy `enable` method (native daemon) has no Electrum settings and ignores both keys.
+    #[test]
+    fn enable_ignores_the_keys() {
+        let params = UtxoActivationParams::from_legacy_req(
+            &json!({ "method": "enable", "coin": "RCK", "min_connected": 0, "max_connected": "x" }),
+        )
+        .unwrap();
+        assert!(matches!(params.mode, UtxoRpcMode::Native));
+    }
+
+    #[test]
+    fn bch_and_qrc20_inherit_the_values() {
+        let bch = BchActivationRequest::from_legacy_req(&request(json!({
+            "max_connected": 1,
+            "bchd_urls": [],
+            "allow_slp_unsafe_conf": true,
+        })))
+        .unwrap();
+        assert_eq!(settings(&bch.utxo_params), (2, None, Some(1)));
+
+        let error = BchActivationRequest::from_legacy_req(&request(json!({
+            "max_connected": 0,
+            "bchd_urls": [],
+        })))
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Unusable Electrum connection settings: 'max_connected' must be at least 1"));
+
+        let qrc20 = Qrc20ActivationParams::from_legacy_req(&request(json!({
+            "max_connected": 1,
+            "swap_contract_address": "0x2f754733acd6d753731c00fee32cb484551cc15d",
+        })))
+        .unwrap();
+        assert_eq!(settings(&qrc20.utxo_params), (2, None, Some(1)));
+    }
+
+    /// The error the legacy `electrum` method answers (HTTP 500 with `{"error": string}`, R55.1.10) is the
+    /// string `lp_coininit` returns; no connection is attempted before the settings are refused.
+    #[test]
+    fn lp_coininit_refuses_unusable_values_before_connecting() {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "coins": [{ "coin": "RCK", "mm2": 1, "protocol": { "type": "UTXO" } }] }))
+            .into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy electrum settings test").unwrap();
+        let error = block_on(lp_coininit(
+            &ctx,
+            "RCK",
+            &request(json!({ "min_connected": 2, "max_connected": 1 })),
+        ))
+        .err()
+        .expect("the request must be refused");
+        assert!(
+            error.contains("Unusable Electrum connection settings: 'min_connected' must not exceed 'max_connected'"),
+            "{error}"
+        );
+        let error = block_on(lp_coininit(&ctx, "RCK", &request(json!({ "max_connected": "one" }))))
+            .err()
+            .expect("the request must be refused");
+        assert!(
+            error.contains("Invalid 'max_connected': invalid type: string \"one\", expected usize"),
+            "{error}"
+        );
+    }
+
+    /// Two loopback servers, `max_connected: 1`: the client builder plans and opens a single connection.
+    /// With the default maximum it opens one per server.
+    #[test]
+    fn the_client_builder_honors_max_connected() {
+        let listeners: Vec<_> = (0..2).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+        let servers: Vec<_> = listeners
+            .iter()
+            .map(|listener| json!({ "url": listener.local_addr().unwrap().to_string() }))
+            .collect();
+
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let build = |extra: Json| {
+            let mut req = request(extra);
+            req["servers"] = json!(servers);
+            let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+            let builder = UtxoArcBuilder::new(
+                &ctx,
+                TEST_COIN_NAME,
+                &Json::Null,
+                &params,
+                PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::default()),
+                UtxoStandardCoin::from,
+            );
+            let args = ElectrumBuilderArgs {
+                spawn_ping: false,
+                negotiate_version: false,
+                collect_metrics: false,
+            };
+            let (servers, min_connected, max_connected) = match params.mode.clone() {
+                UtxoRpcMode::Electrum {
+                    servers,
+                    min_connected,
+                    max_connected,
+                } => (servers, min_connected, max_connected),
+                UtxoRpcMode::Native => unreachable!(),
+            };
+            block_on(builder.electrum_client(args, servers, min_connected, max_connected)).unwrap()
+        };
+
+        let limited = build(json!({ "max_connected": 1 }));
+        assert_eq!(block_on(limited.count_connections()), 1);
+        assert_eq!(block_on(limited.count_connected()), 1);
+
+        let unlimited = build(json!({}));
+        assert_eq!(block_on(unlimited.count_connections()), 2);
+    }
+}
