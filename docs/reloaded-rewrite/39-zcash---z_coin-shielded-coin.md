@@ -265,6 +265,18 @@ contract is [Chapter 60](60-trading-floors-and-refusal-contract.md)
 (row Z1). *(Spec Reader addition 2026-10-25; cleared by the Dirty Gate
 with chapter 60 on 2026-10-25.)*
 
+R39.5.3 *Orderbook display of a shielded coin's orders.* An order whose
+coin is a shielded (`ZHTLC`-protocol) coin has no transparent address to
+show in the `orderbook` and `best_orders` responses: the entry's
+`address` is rendered as the shielded outcome bound by
+[Chapter 32](32-orderbook-p2p-and-trie.md) R-F6b -- the
+`{"address_type":"Shielded"}` object on mmrpc 2.0 and the fixed string
+`Shielded` on the legacy generation (ch. 32 R-F6d, R-F6e) -- and the
+order MUST appear in both generations of both methods; a shielded-coin
+order never makes an orderbook response fail or go missing. *(Spec
+Reader addition 2026-10-26; cross-reference only, the binding rules and
+their clearance record live in chapter 32.)*
+
 ---
 
 ## Part B -- Required ports (T-PORT)
