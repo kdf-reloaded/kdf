@@ -1,6 +1,22 @@
 use super::*;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 
+fn no_outputs_message(tx_hash: &H256Json) -> String { format!("transaction {:02x} has no outputs", tx_hash) }
+
+/// The decimals of an SLP token. A genesis script is read from chain data, so its decimals field
+/// can be empty; such a transaction is malformed, not a reason to panic (CRD ch.38 R38.5A.9).
+pub(super) fn slp_decimals<E: TxHistoryStorageError>(
+    decimals: &[u8],
+    token_id: &H256,
+) -> Result<u8, MmError<GetTxDetailsError<E>>> {
+    decimals.first().copied().ok_or_else(|| {
+        MmError::new(GetTxDetailsError::MalformedTransaction(format!(
+            "SLP token {:?} genesis has no decimals",
+            token_id
+        )))
+    })
+}
+
 impl BchCoin {
     pub fn slp_prefix(&self) -> &CashAddrPrefix { &self.slp_addr_prefix }
 
@@ -248,7 +264,13 @@ impl BchCoin {
         let bch_tx_details = self
             .bch_tx_details(tx_hash, &tx, block_height_and_time, storage)
             .await?;
-        let maybe_op_return: Script = tx.outputs[0].script_pubkey.clone().into();
+        let maybe_op_return: Script = tx
+            .outputs
+            .first()
+            .ok_or_else(|| MmError::new(GetTxDetailsError::MalformedTransaction(no_outputs_message(tx_hash))))?
+            .script_pubkey
+            .clone()
+            .into();
         if !(maybe_op_return.is_pay_to_public_key_hash()
             || maybe_op_return.is_pay_to_public_key()
             || maybe_op_return.is_pay_to_script_hash())
@@ -277,6 +299,10 @@ impl BchCoin {
         height_and_time: Option<BlockHeightAndTime>,
         storage: &T,
     ) -> Result<TransactionDetails, MmError<GetTxDetailsError<T::Error>>> {
+        if tx.outputs.is_empty() {
+            return MmError::err(GetTxDetailsError::MalformedTransaction(no_outputs_message(tx_hash)));
+        }
+
         let my_address = self.as_ref().derivation_method.iguana_or_err().mm_err(Into::into)?;
         let my_addresses = [my_address.clone()];
         let mut tx_builder = TxDetailsBuilder::new(self.ticker().to_owned(), tx, height_and_time, my_addresses);
@@ -307,11 +333,18 @@ impl BchCoin {
 
         let mut total_input = 0;
         for input in &tx.inputs {
-            let index = input.previous_output.index;
-            let prev_tx = self
-                .tx_from_storage_or_rpc(&input.previous_output.hash.reversed().into(), storage)
-                .await?;
-            let prev_script = prev_tx.outputs[index as usize].script_pubkey.clone().into();
+            let prev_tx_hash: H256Json = input.previous_output.hash.reversed().into();
+            let prev_tx = self.tx_from_storage_or_rpc(&prev_tx_hash, storage).await?;
+            let prev_output = utxo_common::prev_output_at(&prev_tx, &prev_tx_hash, input.previous_output.index)
+                .map_to_mm(|e| {
+                    GetTxDetailsError::MalformedTransaction(format!(
+                        "{} tx {:02x} spends a missing output: {}",
+                        self.ticker(),
+                        tx_hash,
+                        e
+                    ))
+                })?;
+            let prev_script = prev_output.script_pubkey.clone().into();
             let addresses = self
                 .addresses_from_script(&prev_script)
                 .map_to_mm(GetTxDetailsError::AddressesFromScriptError)?;
@@ -324,7 +357,7 @@ impl BchCoin {
                 return MmError::err(GetTxDetailsError::AddressesFromScriptError(msg));
             }
 
-            let prev_value = prev_tx.outputs[index as usize].value;
+            let prev_value = prev_output.value;
             total_input += prev_value;
             let amount = big_decimal_from_sat_unsigned(prev_value, self.decimals());
             for address in addresses {
@@ -347,7 +380,17 @@ impl BchCoin {
         storage: &T,
     ) -> Result<SlpGenesisParams, MmError<GetTxDetailsError<T::Error>>> {
         let token_genesis_tx = self.tx_from_storage_or_rpc(&token_id.into(), storage).await?;
-        let maybe_genesis_script: Script = token_genesis_tx.outputs[0].script_pubkey.clone().into();
+        let maybe_genesis_script: Script = token_genesis_tx
+            .outputs
+            .first()
+            .ok_or_else(|| {
+                MmError::new(GetTxDetailsError::MalformedTransaction(no_outputs_message(
+                    &token_genesis_tx.hash().reversed().into(),
+                )))
+            })?
+            .script_pubkey
+            .clone()
+            .into();
         let slp_details = parse_slp_script(&maybe_genesis_script).mm_err(Into::into)?;
         match slp_details.transaction {
             SlpTransaction::Genesis(params) => Ok(params),
@@ -364,10 +407,11 @@ impl BchCoin {
         let slp_amounts = match slp_tx {
             SlpTransaction::Send { token_id, amounts } => {
                 let genesis_params = self.get_slp_genesis_params(token_id, storage).await?;
+                let decimals = slp_decimals(&genesis_params.decimals, &token_id)?;
                 EitherIter::Left(
                     amounts
                         .into_iter()
-                        .map(move |amount| big_decimal_from_sat_unsigned(amount, genesis_params.decimals[0])),
+                        .map(move |amount| big_decimal_from_sat_unsigned(amount, decimals)),
                 )
             },
             SlpTransaction::Mint {
@@ -376,14 +420,19 @@ impl BchCoin {
                 ..
             } => {
                 let slp_genesis_params = self.get_slp_genesis_params(token_id, storage).await?;
+                let decimals = slp_decimals(&slp_genesis_params.decimals, &token_id)?;
                 EitherIter::Right(std::iter::once(big_decimal_from_sat_unsigned(
                     additional_token_quantity,
-                    slp_genesis_params.decimals[0],
+                    decimals,
                 )))
             },
-            SlpTransaction::Genesis(genesis_params) => EitherIter::Right(std::iter::once(
-                big_decimal_from_sat_unsigned(genesis_params.initial_token_mint_quantity, genesis_params.decimals[0]),
-            )),
+            SlpTransaction::Genesis(genesis_params) => {
+                let decimals = slp_decimals(&genesis_params.decimals, &utxo_tx.hash().reversed())?;
+                EitherIter::Right(std::iter::once(big_decimal_from_sat_unsigned(
+                    genesis_params.initial_token_mint_quantity,
+                    decimals,
+                )))
+            },
         };
 
         let mut result = HashMap::new();
@@ -444,7 +493,12 @@ impl BchCoin {
             let prev_tx = self
                 .tx_from_storage_or_rpc(&input.previous_output.hash.reversed().into(), storage)
                 .await?;
-            if let Ok(slp_tx_details) = parse_slp_script(&prev_tx.outputs[0].script_pubkey) {
+            let prev_op_return = prev_tx.outputs.first().ok_or_else(|| {
+                MmError::new(GetTxDetailsError::MalformedTransaction(no_outputs_message(
+                    &prev_tx.hash().reversed().into(),
+                )))
+            })?;
+            if let Ok(slp_tx_details) = parse_slp_script(&prev_op_return.script_pubkey) {
                 let mut prev_slp_transferred = self
                     .slp_transferred_amounts(&prev_tx, slp_tx_details.transaction, storage)
                     .await?;

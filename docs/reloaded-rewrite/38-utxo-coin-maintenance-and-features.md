@@ -540,6 +540,42 @@ whole.
 > hash with the listing's `blockheight`, or with 0 when the daemon reports
 > none, so the existing re-fetch supplies the real height.
 
+R38.5A.9 **A malformed transaction does not stop the history.** When the
+history collector builds the details of one transaction, two inputs it cannot
+interpret shall yield an error for that transaction only:
+
+- an input whose previous-output index is beyond the end of the previous
+  transaction's output list, both when the input's spent value and address are
+  read and when the KMD reward of the input is accumulated;
+- for BCH and SLP, a transaction that has no outputs, and an SLP token genesis
+  whose decimals field is empty.
+
+The collector logs the error, skips that transaction, and continues with the
+remaining ones. It never panics, and it never stops the history task for the
+coin. The skipped transaction is not written to the history; it is tried
+again on a later pass.
+
+R38.5A.10 **An unconfirmed row of the BCH and SLP history matures.** When the
+mmrpc-2.0 history collector of a BCH coin or SLP token finds a stored
+unconfirmed row whose transaction hash the backend now lists with a positive
+height, it shall give the row that height and the block's time, as R38.5A.5
+does for the legacy file. The stored row and the listing are matched by the
+transaction hash itself, never by comparing the hash bytes with the text of
+its hexadecimal form.
+
+> **Provenance of R38.5A.9 and R38.5A.10 (2026-10-26).** Clean-room original.
+> R38.5A.9 was written from a behavioral description only; per the Spec Reader
+> on 2026-10-26, the behavior matches the reference at both reference states.
+> R38.5A.10 states what Reloaded's collector was written to do.
+>
+> **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded read
+> the previous transaction's output at the input's index without a bounds
+> check in the details builder and in the KMD reward accumulation, so one
+> malformed transaction ended the history task with a panic. Its BCH and SLP
+> collector compared a listed hash's 32 bytes with the 64-character
+> hexadecimal text of the stored row's hash. Those never match, so an
+> unconfirmed BCH or SLP row kept height 0 after its block was mined.
+
 T38.5A.1 *Deterministic legacy order.* A test shall seed a legacy history with
 at least two unconfirmed rows and two rows at one confirmed height, written in
 two different insertion orders, and assert that both writes produce the same
@@ -577,6 +613,17 @@ T38.5A.6 *QRC20 rows.* A test over a QRC20 fixture transaction carrying two
 transfer events shall assert two rows with distinct `internal_id` values that
 share the leading transaction-hash bytes, adjacent in the served order with the
 lower output/event index first, and a single history write for the pass.
+
+T38.5A.7 *Malformed transaction.* A test shall build the history details of a
+transaction with an input whose previous-output index is past the previous
+transaction's outputs, and of a BCH transaction with no outputs, and assert a
+per-transaction error, not a panic. The KMD reward accumulation shall get the
+same out-of-range input and return an error. Where the loop can be driven, the
+remaining transactions of the pass shall still be stored.
+
+T38.5A.8 *BCH and SLP maturation.* A test shall store an unconfirmed BCH row
+and present a listing that reports its hash at a positive height, and assert
+that the stored row takes that height.
 
 ---
 

@@ -455,6 +455,27 @@ where
     RequestTxHistoryResult::Ok(tx_ids)
 }
 
+/// The output of `prev_tx` that an input with the previous-output `index` spends. A malformed
+/// transaction can name an index past the end of the output list; that is an error for the one
+/// transaction, never a panic (CRD ch.38 R38.5A.9).
+pub(crate) fn prev_output_at<'a>(
+    prev_tx: &'a UtxoTx,
+    prev_tx_hash: &H256Json,
+    index: u32,
+) -> Result<&'a TransactionOutput, String> {
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| prev_tx.outputs.get(i))
+        .ok_or_else(|| {
+            format!(
+                "output {} of transaction {:02x} does not exist, it has {} outputs",
+                index,
+                prev_tx_hash,
+                prev_tx.outputs.len()
+            )
+        })
+}
+
 pub async fn tx_details_by_hash<T: UtxoCommonOps>(
     coin: &T,
     hash: &[u8],
@@ -516,14 +537,11 @@ pub async fn tx_details_by_hash<T: UtxoCommonOps>(
         let prev_tx = &mut prev_tx.tx;
         prev_tx.tx_hash_algo = coin.as_ref().tx_hash_algo;
 
-        let prev_tx_value = prev_tx.outputs[input.previous_output.index as usize].value;
+        let prev_output = try_s!(prev_output_at(prev_tx, &prev_tx_hash, input.previous_output.index)
+            .map_err(|e| ERRL!("Transaction {:02x} spends a missing output: {}", hash, e)));
+        let prev_tx_value = prev_output.value;
         input_amount += prev_tx_value;
-        let from: Vec<Address> = try_s!(coin.addresses_from_script(
-            &prev_tx.outputs[input.previous_output.index as usize]
-                .script_pubkey
-                .clone()
-                .into()
-        ));
+        let from: Vec<Address> = try_s!(coin.addresses_from_script(&prev_output.script_pubkey.clone().into()));
         if from.contains(my_address) {
             spent_by_me += prev_tx_value;
         }
@@ -716,7 +734,15 @@ pub async fn calc_interest_of_tx<T: UtxoCommonOps>(
             .get_mut_verbose_transaction_from_map_or_rpc(prev_tx_hash, input_transactions)
             .await?;
 
-        let prev_tx_value = prev_tx.tx.outputs[input.previous_output.index as usize].value;
+        let prev_tx_value = prev_output_at(&prev_tx.tx, &prev_tx_hash, input.previous_output.index)
+            .map_err(|e| {
+                UtxoRpcError::InvalidResponse(format!(
+                    "Transaction {:?} spends a missing output: {}",
+                    tx.hash().reversed(),
+                    e
+                ))
+            })?
+            .value;
         let prev_tx_locktime = prev_tx.tx.lock_time as u64;
         let this_tx_locktime = tx.lock_time as u64;
         if let Ok(interest) = kmd_interest(prev_tx.height, prev_tx_value, prev_tx_locktime, this_tx_locktime) {

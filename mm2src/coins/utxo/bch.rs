@@ -154,6 +154,14 @@ pub enum GetTxDetailsError<E: TxHistoryStorageError> {
     ToSlpAddressError(String),
     InvalidSlpTransaction(H256),
     AddressDerivationError(UnexpectedDerivationMethod),
+    /// The transaction cannot be interpreted (no outputs, or an input spending an output that does
+    /// not exist). The history collector skips this one transaction and goes on (CRD ch.38 R38.5A.9).
+    MalformedTransaction(String),
+}
+
+impl<E: TxHistoryStorageError> GetTxDetailsError<E> {
+    /// Whether the error is about the transaction itself, so that retrying at once cannot help.
+    pub(crate) fn is_malformed_transaction(&self) -> bool { matches!(self, GetTxDetailsError::MalformedTransaction(_)) }
 }
 
 impl<E: TxHistoryStorageError> From<UtxoRpcError> for GetTxDetailsError<E> {
@@ -902,6 +910,24 @@ pub fn bch_coin_for_test() -> BchCoin {
     .unwrap()
 }
 
+/// A BCH coin over an unconnected native client: it does not touch the network, so tests that read
+/// transactions only from the storage cache stay deterministic.
+#[cfg(test)]
+pub(crate) fn bch_coin_without_network_for_test() -> BchCoin {
+    use super::rpc_clients::NativeClientImpl;
+    use super::utxo_tests::utxo_coin_fields_for_test;
+
+    let client = UtxoRpcClientEnum::Native(NativeClient(Arc::new(NativeClientImpl::default())));
+    let mut fields = utxo_coin_fields_for_test(client, None, false);
+    fields.conf.ticker = "BCH".to_owned();
+    BchCoin {
+        utxo_arc: UtxoArc::new(fields),
+        slp_addr_prefix: CashAddrPrefix::SlpTest,
+        bchd_urls: vec![],
+        slp_tokens_infos: Arc::new(Mutex::new(HashMap::new())),
+    }
+}
+
 #[cfg(test)]
 mod bch_tests {
     use super::*;
@@ -1006,6 +1032,128 @@ mod bch_tests {
         assert_eq!(expected_tx_type, slp_tx_details.transaction_type);
 
         assert_eq!(coin.ticker(), slp_tx_details.coin);
+    }
+
+    /// A transaction that spends `index` of the transaction `prev_tx_hash` (internal byte order) and
+    /// has `outputs` outputs. It always has an input, so that it also deserializes unambiguously
+    /// when it has no outputs.
+    fn tx_spending(prev_tx_hash: H256, index: u32, outputs: usize) -> UtxoTx {
+        use chain::{OutPoint, TransactionInput, TransactionOutput};
+
+        let mut tx = UtxoTx::default();
+        tx.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: prev_tx_hash,
+                index,
+            },
+            script_sig: vec![].into(),
+            sequence: 0,
+            script_witness: vec![],
+        });
+        for _ in 0..outputs {
+            tx.outputs.push(TransactionOutput {
+                value: 1,
+                script_pubkey: vec![0x6a].into(),
+            });
+        }
+        tx
+    }
+
+    fn cache_tx(storage: &impl TxHistoryStorage, coin: &BchCoin, tx: &UtxoTx) -> H256Json {
+        let hash: H256Json = tx.hash().reversed().into();
+        let key = BytesJson::new(hash.0.to_vec());
+        let bytes = BytesJson::new(serialization::serialize(tx).take());
+        block_on(storage.add_tx_to_cache(coin.ticker(), &key, &bytes)).unwrap();
+        hash
+    }
+
+    fn assert_malformed<T: std::fmt::Debug, E: TxHistoryStorageError>(
+        result: Result<T, MmError<GetTxDetailsError<E>>>,
+        expected_in_message: &str,
+    ) {
+        match result.unwrap_err().into_inner() {
+            GetTxDetailsError::MalformedTransaction(msg) => {
+                assert!(msg.contains(expected_in_message), "unexpected message: {}", msg)
+            },
+            other => panic!("expected MalformedTransaction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bch_tx_details_without_outputs_is_an_error() {
+        let coin = bch_coin_without_network_for_test();
+        let storage = init_storage_for(coin.ticker());
+
+        let no_outputs = tx_spending(H256::from([7; 32]), 0, 0);
+        assert!(no_outputs.outputs.is_empty());
+        let hash = cache_tx(&storage, &coin, &no_outputs);
+
+        // The details builder itself.
+        assert_malformed(
+            block_on(coin.bch_tx_details(&hash, &no_outputs, None, &storage)),
+            "has no outputs",
+        );
+        // The history entry point, with the transaction read back from the cache.
+        assert_malformed(
+            block_on(coin.transaction_details_with_token_transfers(&hash, None, &storage)),
+            "has no outputs",
+        );
+    }
+
+    #[test]
+    fn bch_tx_details_prev_output_index_out_of_range_is_an_error() {
+        let coin = bch_coin_without_network_for_test();
+        let storage = init_storage_for(coin.ticker());
+
+        let prev_tx = tx_spending(H256::from([8; 32]), 0, 1);
+        let prev_hash = cache_tx(&storage, &coin, &prev_tx);
+        // Output 3 of a transaction that has only one output.
+        let spending = tx_spending(prev_tx.hash(), 3, 1);
+        let hash = cache_tx(&storage, &coin, &spending);
+        assert_eq!(prev_hash, prev_tx.hash().reversed().into());
+
+        assert_malformed(
+            block_on(coin.bch_tx_details(&hash, &spending, None, &storage)),
+            "output 3 of transaction",
+        );
+        assert_malformed(
+            block_on(coin.transaction_details_with_token_transfers(&hash, None, &storage)),
+            "output 3 of transaction",
+        );
+    }
+
+    #[test]
+    fn slp_tx_details_with_a_genesis_without_outputs_is_an_error() {
+        let coin = bch_coin_without_network_for_test();
+        let storage = init_storage_for(coin.ticker());
+
+        let genesis = tx_spending(H256::from([9; 32]), 0, 0);
+        cache_tx(&storage, &coin, &genesis);
+        let slp_tx = SlpTransaction::Send {
+            token_id: genesis.hash().reversed(),
+            amounts: vec![1],
+        };
+        let spending = tx_spending(H256::from([10; 32]), 0, 2);
+
+        assert_malformed(
+            block_on(coin.slp_tx_details(&spending, slp_tx, None, None, &storage)),
+            "has no outputs",
+        );
+    }
+
+    #[test]
+    fn slp_genesis_without_decimals_is_an_error() {
+        use super::bch_coin_ops::slp_decimals;
+
+        let token_id = H256::from([11; 32]);
+        assert_malformed(
+            slp_decimals::<<SqliteTxHistoryStorage as TxHistoryStorage>::Error>(&[], &token_id),
+            "no decimals",
+        );
+        assert_eq!(
+            slp_decimals::<<SqliteTxHistoryStorage as TxHistoryStorage>::Error>(&[4], &token_id).unwrap(),
+            4
+        );
     }
 
     #[test]
