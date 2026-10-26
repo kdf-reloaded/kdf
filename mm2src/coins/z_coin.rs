@@ -107,7 +107,7 @@ use z_coin_sapling_cache::{SaplingBlockState, SaplingStateCacheOps, ZCoinSapling
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod z_coin_wallet_db;
 #[cfg(not(target_arch = "wasm32"))]
-use z_coin_wallet_db::ZCoinShieldedHistory;
+use z_coin_wallet_db::{unmined_value, UnminedNote, ZCoinShieldedHistory};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod z_lightwalletd;
 #[cfg(not(target_arch = "wasm32"))]
@@ -2138,14 +2138,36 @@ impl ZCoin {
         *self.z_fields.pending_receipts.lock().unwrap() = rebuilt;
     }
 
-    /// Total value of currently-pending wallet-owned mempool outputs, in
-    /// zatoshi. Reported only as non-spendable balance (R39.8.0ag).
-    pub(crate) fn pending_receipts_total(&self) -> u64 {
-        self.z_fields
-            .pending_receipts
-            .lock()
-            .map(|set| set.values().copied().fold(0u64, |acc, v| acc.saturating_add(v)))
-            .unwrap_or(0)
+    /// The non-spendable balance, in zatoshi: the pending wallet-owned mempool outputs
+    /// (R39.8.0ag) plus the value of `unmined_notes`, the wallet's own unmined outputs the wallet
+    /// database holds (R39.8.0ag1). A pending receipt for an output that is also one of
+    /// `unmined_notes` is not added again, so one output is counted once.
+    ///
+    /// The pending view is advisory and degrades to zero rather than failing the balance
+    /// (R39.8.0ai): if its lock is poisoned the pending part is 0, while the unmined notes, which
+    /// come from the wallet database, are still counted. An arithmetic overflow is an error.
+    pub(crate) fn unspendable_total(&self, unmined_notes: &[UnminedNote]) -> Result<u64, String> {
+        let pending_only = match self.z_fields.pending_receipts.lock() {
+            Ok(pending) => pending
+                .iter()
+                .filter(|((txid, output_index), _)| {
+                    !unmined_notes
+                        .iter()
+                        .any(|note| note.txid == *txid && note.output_index == *output_index)
+                })
+                .try_fold(0u64, |total, (_, value)| total.checked_add(*value))
+                .ok_or_else(|| "Pending shielded receipts overflow".to_owned())?,
+            Err(e) => {
+                log::warn!(
+                    "ZCoin pending receipts for {}: lock poisoned ({e}), reporting the pending amount as zero",
+                    self.ticker()
+                );
+                0
+            },
+        };
+        unmined_value(unmined_notes)?
+            .checked_add(pending_only)
+            .ok_or_else(|| "Shielded non-spendable balance overflow".to_owned())
     }
 }
 
@@ -2469,18 +2491,22 @@ impl MarketCoinOps for ZCoin {
                             coin.ticker()
                         );
                     }
-                    let balance_sat = coin
+                    let scanned = coin
                         .shielded_history()
-                        .balance(coin.z_fields.consensus_params.clone())
+                        .scanned_balance(coin.z_fields.consensus_params.clone())
                         .map_err(|e| MmError::new(crate::BalanceError::Internal(e)))?;
-                    // Pending mempool receipts are reported here and only here
-                    // (R39.8.0ag): `my_spendable_balance` reads the spendable
-                    // field, so an unmined note can never size a trade or fund
-                    // a swap. Native mode reaches the same result by counting
+                    // Pending mempool receipts (R39.8.0ag) and the unmined notes of
+                    // this wallet's own sends, the change included (R39.8.0ag1), are
+                    // reported here and only here: `my_spendable_balance` reads the
+                    // spendable field, so an unmined note can never size a trade or
+                    // fund a swap. Native mode reaches the same result by counting
                     // its own zero-confirmation notes as unspendable.
+                    let unspendable_sat = coin
+                        .unspendable_total(&scanned.unmined_notes)
+                        .map_err(|e| MmError::new(crate::BalanceError::Internal(e)))?;
                     return Ok(CoinBalance {
-                        spendable: big_decimal_from_sat_unsigned(balance_sat, coin.decimals()),
-                        unspendable: big_decimal_from_sat_unsigned(coin.pending_receipts_total(), coin.decimals()),
+                        spendable: big_decimal_from_sat_unsigned(scanned.spendable, coin.decimals()),
+                        unspendable: big_decimal_from_sat_unsigned(unspendable_sat, coin.decimals()),
                     });
                 }
                 let unspents = coin.my_z_unspents_ordered().await.mm_err(Into::into)?;

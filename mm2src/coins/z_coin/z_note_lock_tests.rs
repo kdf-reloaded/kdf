@@ -278,6 +278,22 @@ impl LightCoinFixture {
 
     fn wallet_balance(&self) -> u64 { self.history().balance(self.params.clone()).unwrap() }
 
+    /// The balance as `my_balance` answers it, in zatoshi: (spendable, unspendable).
+    async fn reported_balance(&self) -> (BigDecimal, BigDecimal) {
+        let balance = self.coin.my_balance().compat().await.unwrap();
+        (balance.spendable, balance.unspendable)
+    }
+
+    /// Reports a mempool receipt for output `output_index` of the transaction `txid`, as the poll does.
+    fn insert_pending_receipt(&self, txid: [u8; 32], output_index: u32, value: u64) {
+        self.coin
+            .z_fields
+            .pending_receipts
+            .lock()
+            .unwrap()
+            .insert((txid, output_index), value);
+    }
+
     /// The first history page as `z_coin_tx_history` serves it, at the tip the backend reports.
     fn history_page(&self, include_unmined_sends: bool) -> ZCoinTxHistoryPage {
         self.history()
@@ -926,9 +942,22 @@ async fn recorded_change_is_not_spendable_before_scan() {
     };
     let tx = fixture.send(SEND_AMOUNT).await.unwrap();
     let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    // The builder shuffles the order of the outputs, so the change is at either index of the two.
+    let outputs = tx
+        .sapling_bundle()
+        .expect("a shielded transaction")
+        .shielded_outputs()
+        .len();
+    let recorded = fixture.received_notes_of(&tx);
+    assert_eq!(recorded.len(), 1, "only the change is recorded");
+    let (change_index, change_value, has_nullifier, has_position) = recorded[0];
+    assert!(
+        (change_index as usize) < outputs,
+        "the change index {change_index} is an output of the transaction"
+    );
     assert_eq!(
-        fixture.received_notes_of(&tx),
-        vec![(1, change as i64, false, false)],
+        (change_value, has_nullifier, has_position),
+        (change as i64, false, false),
         "the change is recorded, without a nullifier or a position in the tree"
     );
 
@@ -952,8 +981,8 @@ async fn recorded_change_is_not_spendable_before_scan() {
 }
 
 /// The change is one amount, never two: the wallet's scanned-notes figure leaves the recorded change
-/// out, so the pending-receipt amount that reports it is not added to a second copy of it
-/// (R39.8.0ag, R39.8.0ah, R39.8.9i (d)).
+/// out, and the balance reports it once as non-spendable, whether or not a pending receipt for the
+/// same output is also present (R39.8.0ag1, R39.8.0ah, R39.8.9i (d)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn recorded_change_is_not_double_counted_in_balance() {
     let Some(mut fixture) = LightCoinFixture::new() else {
@@ -968,28 +997,151 @@ async fn recorded_change_is_not_double_counted_in_balance() {
     assert_eq!(fixture.raw_summary_total(), change);
     assert_eq!(fixture.wallet_balance(), 0);
 
-    // The change reaches the caller once, as the pending receipt the mempool poll reports.
+    // The change reaches the caller once, as non-spendable balance read from the wallet database;
+    // a pending receipt for the same output does not add to it.
+    // Changed from the former zero: the change is no longer left to a pending receipt (R39.8.0ag1).
+    assert_eq!(fixture.reported_balance().await, (BigDecimal::from(0), sat(change)));
     let output_index = fixture.received_notes_of(&tx)[0].0;
-    fixture
-        .coin
-        .z_fields
-        .pending_receipts
-        .lock()
-        .unwrap()
-        .insert((*tx.txid().as_ref(), output_index), change);
-    let balance = fixture.coin.my_balance().compat().await.unwrap();
-    assert_eq!(balance.spendable, BigDecimal::from(0));
-    assert_eq!(balance.unspendable, sat(change));
+    fixture.insert_pending_receipt(*tx.txid().as_ref(), output_index, change);
+    assert_eq!(fixture.reported_balance().await, (BigDecimal::from(0), sat(change)));
 
-    // After the scan it is a scanned note and no longer pending.
+    // After the scan it is a scanned note and no longer unspendable.
     fixture.scan_block_containing(&tx, 12);
     fixture.coin.z_fields.pending_receipts.lock().unwrap().clear();
     assert_eq!(fixture.wallet_balance(), change);
-    let balance = fixture.coin.my_balance().compat().await.unwrap();
+    assert_eq!(fixture.reported_balance().await, (sat(change), BigDecimal::from(0)));
+}
+
+/// R39.8.0ag1: right after the broadcast, with the pending set empty (the mempool poll can never
+/// decrypt a change that goes to the internal address), the change is reported as non-spendable
+/// balance. The spent note and the change are both out of the spendable figure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmined_send_change_is_unspendable_right_after_broadcast() {
+    let Some(fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    assert_eq!(fixture.reported_balance().await, (sat(NOTE_VALUE), BigDecimal::from(0)));
+    let _tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+
+    assert!(fixture.coin.z_fields.pending_receipts.lock().unwrap().is_empty());
+    assert_eq!(fixture.reported_balance().await, (BigDecimal::from(0), sat(change)));
+}
+
+/// R39.8.0ag1: a pending receipt for the output that the wallet database already records does not
+/// add to it, while a pending receipt for a different output does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmined_send_change_is_not_counted_twice_with_a_pending_receipt() {
+    let Some(fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    let txid = *tx.txid().as_ref();
+    let output_index = fixture.received_notes_of(&tx)[0].0;
+
+    fixture.insert_pending_receipt(txid, output_index, change);
     assert_eq!(
-        (balance.spendable, balance.unspendable),
-        (sat(change), BigDecimal::from(0))
+        fixture.reported_balance().await,
+        (BigDecimal::from(0), sat(change)),
+        "the same transaction output is one amount"
     );
+
+    // A different output of the same transaction (the builder shuffles the two outputs, so the
+    // other one is whichever index the change does not have) and an output of another transaction
+    // are other amounts.
+    let outputs = tx
+        .sapling_bundle()
+        .expect("a shielded transaction")
+        .shielded_outputs()
+        .len();
+    assert_eq!(outputs, 2, "the payment and the change");
+    let other_index = (0..outputs as u32).find(|index| *index != output_index).unwrap();
+    fixture.insert_pending_receipt(txid, other_index, 7_000);
+    fixture.insert_pending_receipt([0x5a; 32], output_index, 3_000);
+    assert_eq!(
+        fixture.reported_balance().await,
+        (BigDecimal::from(0), sat(change + 7_000 + 3_000))
+    );
+}
+
+/// R39.8.0ag1: once the block that mines the send is scanned, the change is spendable and no longer
+/// non-spendable: no gap and no double counting across the transition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmined_send_change_moves_to_spendable_after_scan() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    assert_eq!(fixture.reported_balance().await, (BigDecimal::from(0), sat(change)));
+
+    fixture.scan_block_containing(&tx, 12);
+    assert_eq!(fixture.reported_balance().await, (sat(change), BigDecimal::from(0)));
+}
+
+/// R39.8.0ag1 with R39.8.0ar: a send that expires unmined leaves the balance; the note it spent is
+/// spendable again and the change is in neither figure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmined_send_change_leaves_the_balance_on_expiry() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    let expiry: u32 = tx.expiry_height().into();
+
+    fixture.advance_empty_blocks_to(expiry - 1);
+    assert_eq!(
+        fixture.reported_balance().await,
+        (BigDecimal::from(0), sat(change)),
+        "still unspendable while it can be mined"
+    );
+
+    fixture.advance_empty_blocks_to(expiry);
+    assert_eq!(
+        fixture.reported_balance().await,
+        (sat(NOTE_VALUE), BigDecimal::from(0)),
+        "the spent note is back; the change is in neither figure"
+    );
+}
+
+/// R39.8.0ai: the pending view is advisory. A poisoned pending-receipts lock makes its part zero and
+/// does not fail the balance; the recorded change, which comes from the wallet database, is still
+/// reported (R39.8.0ag1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unspendable_total_degrades_pending_part_on_poisoned_lock() {
+    let Some(fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let _tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    fixture.insert_pending_receipt([0x5a; 32], 0, 3_000);
+
+    let coin = fixture.coin.clone();
+    let poisoner = std::thread::spawn(move || {
+        let _guard = coin.z_fields.pending_receipts.lock().unwrap();
+        panic!("poison the pending receipts lock");
+    });
+    assert!(poisoner.join().is_err());
+    assert!(fixture.coin.z_fields.pending_receipts.is_poisoned());
+
+    assert_eq!(fixture.reported_balance().await, (BigDecimal::from(0), sat(change)));
+}
+
+/// R39.8.0ag1: the value comes from the wallet database, so a restart between the broadcast and the
+/// scan does not lose it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unmined_send_change_survives_restart() {
+    let Some(fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let _tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+
+    let restarted = fixture.reopen();
+    assert!(restarted.coin.z_fields.pending_receipts.lock().unwrap().is_empty());
+    assert_eq!(restarted.reported_balance().await, (BigDecimal::from(0), sat(change)));
 }
 
 /// An unmined send that expires leaves nothing behind: its row is no longer served and its change is
@@ -1009,6 +1161,11 @@ async fn an_expired_unmined_send_leaves_no_row_and_no_change_in_the_balance() {
         "still served while it can be mined"
     );
     assert_eq!(fixture.wallet_balance(), 0);
+    // Added: the change is non-spendable balance while the send can still be mined (R39.8.0ag1).
+    assert_eq!(
+        fixture.reported_balance().await,
+        (BigDecimal::from(0), sat(NOTE_VALUE - SEND_AMOUNT - FEE_SAT))
+    );
 
     fixture.advance_empty_blocks_to(expiry);
     let page = fixture.history_page(true);
@@ -1019,4 +1176,6 @@ async fn an_expired_unmined_send_leaves_no_row_and_no_change_in_the_balance() {
         NOTE_VALUE,
         "the spent note is back, the change is gone"
     );
+    // Added: the expired change is in neither figure (R39.8.0ag1, R39.8.0ar).
+    assert_eq!(fixture.reported_balance().await, (sat(NOTE_VALUE), BigDecimal::from(0)));
 }

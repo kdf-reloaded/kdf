@@ -1068,7 +1068,9 @@ switch `shielded_history_unmined_sends` at its default, an own shielded send is
 listed in the transaction history from broadcast on, first and with its final
 amounts (R39.8.9i, decided in D39.8.0h). That row is display only; it makes
 nothing spendable, and with the switch set to `false` the history again reflects
-scanned results alone.
+scanned results alone. Likewise, the change of an own unmined send is reported as
+non-spendable balance straight from the wallet database (R39.8.0ag1). It becomes
+spendable only when the scan reaches its block.
 
 > **Status update (reloaded, 2026-08-09).** Light mode satisfies the spendable
 > half of this requirement: its balance is read from the scanned wallet database,
@@ -1627,6 +1629,31 @@ Pending receipts shall likewise not appear in `z_coin_tx_history`, which remains
 derived from wallet-database scan state (R39.8.9). R39.8.0q continues to govern:
 observing a receipt never makes it spendable; only a wallet-database scan does.
 
+R39.8.0ag1 **The change of an own unmined send is non-spendable balance.** When
+this node broadcasts a shielded transaction and records it in the wallet
+database (§39.8.0.7), the value of every wallet-owned output of that
+transaction, its change included, shall be reported in the `unspendable` field
+of the balance from the moment of the record. It stays there until the block
+that mines the transaction is scanned, when it moves to the spendable balance.
+If the transaction expires unmined (R39.8.0ar), it leaves the balance. It is
+counted once. A pending receipt (R39.8.0af) for the same transaction output
+does not add to it, so the two sources never sum for one output. R39.8.0ag's
+limits apply unchanged: this value never enters the spendable balance, any
+tradable volume, or note selection. The wallet database is the source, so the
+value is shown at once after the broadcast, without waiting for a mempool
+poll, and survives a restart.
+
+> **Provenance and reason (2026-10-26).** Clean-room original. The mempool poll
+> of R39.8.0ai trial-decrypts with the external incoming viewing key. A wallet's
+> own change goes to its internal (change) address, which that key cannot
+> decrypt, so an own send's change was never a pending receipt: right after a
+> send, `unspendable` read 0 and the change appeared only once mined (observed
+> live 2026-10-26). The reference reports the change of its own unmined sends
+> as non-spendable balance (Spec Reader, 2026-10-26), so this rule restores the
+> observable behavior. Change of a send made by another instance on the same
+> seed is not covered, because it is not in this node's wallet database. That
+> case is deferred with the two-daemon item of the in-flight note-locking plan.
+
 R39.8.0ah A pending shielded receipt shall be invalidated — removed from the
 pending set and no longer added to the non-spendable balance — as soon as any of
 the following holds:
@@ -2003,9 +2030,10 @@ D39.8.0g A built but unsubmitted withdrawal is invisible to the user. The histor
 (`z_coin_tx_history`) is derived from the scanned chain (R39.8.0q, §39.8.0.6), so a
 transaction that has been built and not broadcast appears nowhere. One that was
 broadcast appears at once as the first history row, with its final amounts (R39.8.9i,
-decided in D39.8.0h), and its change also counts as a pending receipt; with the switch
-`shielded_history_unmined_sends` set to `false` it appears only as that pending
-receipt until it is mined, as in the reference. Showing built-but-unsent
+decided in D39.8.0h), and its change counts as non-spendable balance until mined
+(R39.8.0ag1). With the switch `shielded_history_unmined_sends` set to `false` it is not
+a history row until mined, as in the reference, and its change is still shown as
+non-spendable balance. Showing built-but-unsent
 transactions is a user-experience gap, deliberately out of scope here: it would need
 a record of unbroadcast builds, which is exactly the state R39.8.0ap declines to
 create.
