@@ -1382,6 +1382,92 @@ fn test_calc_interest_of_tx_agrees_with_kmd_interest_post_fork() {
     assert_eq!(history_reward, direct_reward);
 }
 
+/// A transaction whose only input spends output 5 of a transaction that has a single output, and
+/// the history map that already holds that previous transaction (CRD ch.38 R38.5A.9, T38.5A.7).
+fn spend_of_a_missing_output() -> (UtxoTx, HistoryUtxoTxMap) {
+    let mut prev_tx = UtxoTx::default();
+    prev_tx.outputs.push(TransactionOutput {
+        value: 1_000,
+        script_pubkey: vec![0xaa; 23].into(),
+    });
+    let prev_tx_hash = prev_tx.hash();
+
+    let mut input_transactions = HistoryUtxoTxMap::default();
+    input_transactions.insert(prev_tx_hash.reversed().into(), HistoryUtxoTx {
+        tx: prev_tx,
+        height: Some(100),
+    });
+
+    let mut spending_tx = UtxoTx::default();
+    spending_tx.inputs.push(TransactionInput {
+        previous_output: OutPoint {
+            hash: prev_tx_hash,
+            index: 5,
+        },
+        script_sig: vec![].into(),
+        sequence: 0,
+        script_witness: vec![],
+    });
+    (spending_tx, input_transactions)
+}
+
+#[test]
+fn tx_details_prev_output_index_out_of_range_is_an_error() {
+    let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
+    let spending_hex = BytesJson::from(serialization::serialize(&spending_tx).take());
+    NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+        let verbose = RpcTransaction {
+            hex: spending_hex.clone(),
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            hash: None,
+            size: Default::default(),
+            vsize: Default::default(),
+            version: 1,
+            locktime: 0,
+            vin: vec![],
+            vout: vec![],
+            blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            confirmations: 1,
+            rawconfirmations: None,
+            time: 1,
+            blocktime: 1,
+            height: Some(101),
+        };
+        MockResult::Return(Box::new(futures01::future::ok(verbose)))
+    });
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+        UtxoRpcClientEnum::Native(client),
+        None,
+        false,
+    ));
+
+    let hash = spending_tx.hash().reversed().to_vec();
+    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions)).unwrap_err();
+    assert!(
+        err.contains("output 5 of transaction") && err.contains("it has 1 outputs"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn kmd_rewards_prev_output_index_out_of_range_is_an_error() {
+    let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
+
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let err = block_on(calc_interest_of_tx(&coin, &spending_tx, &mut input_transactions)).unwrap_err();
+    match err.into_inner() {
+        UtxoRpcError::InvalidResponse(msg) => {
+            assert!(msg.contains("output 5 of transaction"), "unexpected error: {}", msg)
+        },
+        other => panic!("expected InvalidResponse, got {:?}", other),
+    }
+}
+
 /// CRD ch.38 R38.4.3 "surface agreement": `kmd_rewards_info`'s
 /// `accrued_rewards` MUST equal the same R38.4.1 value for the same UTXO and
 /// reference time.

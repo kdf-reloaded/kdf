@@ -15,6 +15,7 @@ use futures::compat::Future01CompatExt;
 use mm2_core::mm_ctx::MmArc;
 use mm2_metrics::MetricsArc;
 use rpc::v1::types::H256 as H256Json;
+use std::str::FromStr;
 
 struct BchAndSlpHistoryCtx<Storage: TxHistoryStorage> {
     coin: BchCoin,
@@ -190,6 +191,18 @@ impl<T: TxHistoryStorage> State for WaitForHistoryUpdateTrigger<T> {
     }
 }
 
+/// The height at which the backend listing reports the stored row `tx_hash`, or `None` when the
+/// listing does not contain it. The row and the listing are matched by the transaction hash: the
+/// stored text is the displayed (explorer) form, which `H256Json` parses and prints byte for byte,
+/// the same order the listing uses (CRD ch.38 R38.5A.10). Errors if the stored text is not a hash.
+fn listed_height(all_tx_ids_with_height: &[(H256Json, u64)], tx_hash: &str) -> Result<Option<u64>, String> {
+    let tx_hash = H256Json::from_str(tx_hash).map_err(|e| e.to_string())?;
+    Ok(all_tx_ids_with_height
+        .iter()
+        .find(|(hash, _)| *hash == tx_hash)
+        .map(|(_, height)| *height))
+}
+
 // States have to be generic over storage type because BchAndSlpHistoryCtx is generic over it
 struct UpdatingUnconfirmedTxes<T> {
     phantom: std::marker::PhantomData<T>,
@@ -216,18 +229,26 @@ impl<T: TxHistoryStorage> State for UpdatingUnconfirmedTxes<T> {
         match ctx.storage.get_unconfirmed_txes_from_history(ctx.coin.ticker()).await {
             Ok(unconfirmed) => {
                 for mut tx in unconfirmed {
-                    let found = self
-                        .all_tx_ids_with_height
-                        .iter()
-                        .find(|(hash, _)| hash.0.as_slice() == tx.tx_hash.as_bytes());
+                    let found = match listed_height(&self.all_tx_ids_with_height, &tx.tx_hash) {
+                        Ok(found) => found,
+                        Err(e) => {
+                            error!(
+                                "Skipping the stored {} row with invalid tx_hash '{}': {}",
+                                ctx.coin.ticker(),
+                                tx.tx_hash,
+                                e
+                            );
+                            continue;
+                        },
+                    };
                     match found {
-                        Some((_, height)) => {
-                            if *height > 0 {
-                                match ctx.coin.get_block_timestamp(*height).await {
+                        Some(height) => {
+                            if height > 0 {
+                                match ctx.coin.get_block_timestamp(height).await {
                                     Ok(time) => tx.timestamp = time,
                                     Err(_) => return Self::change_state(OnIoErrorCooldown::new()),
                                 };
-                                tx.block_height = *height;
+                                tx.block_height = height;
                                 if let Err(e) = ctx.storage.update_tx_in_history(ctx.coin.ticker(), &tx).await {
                                     return Self::change_state(Stopped::storage_error(e));
                                 }
@@ -310,6 +331,11 @@ impl<T: TxHistoryStorage> State for FetchingTransactionsData<T> {
                         ctx.coin.ticker(),
                         tx_hash
                     );
+                    if e.get_inner().is_malformed_transaction() {
+                        // The transaction itself cannot be interpreted: skip it and store the rest of the
+                        // pass. It is not written, so a later pass tries it again (CRD ch.38 R38.5A.9).
+                        continue;
+                    }
                     return Self::change_state(OnIoErrorCooldown::new());
                 },
             };
@@ -413,4 +439,146 @@ pub async fn bch_and_slp_history_loop(
     };
     let state_machine: StateMachine<_, ()> = StateMachine::from_ctx(ctx);
     state_machine.run(Init::new()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utxo::UtxoTx;
+    use chain::{OutPoint, TransactionInput, TransactionOutput};
+    use rpc::v1::types::ToTxHash;
+
+    // A BCH transaction id as an explorer shows it.
+    const DISPLAYED_TXID: &str = "a8dcc3c6776e93e7bd21fb81551e853447c55e2d8ac141b418583bc8095ce390";
+
+    #[test]
+    fn bch_unconfirmed_row_matches_listed_hash() {
+        // The listing carries the id in the displayed order, as the Electrum client parses it.
+        let listed: H256Json = serde_json::from_value(json!(DISPLAYED_TXID)).unwrap();
+        // This id is not its own reverse, so a byte-order mix-up cannot pass.
+        assert_ne!(listed, listed.reversed());
+
+        let other = listed.reversed();
+        let listing = vec![(other, 7), (listed, 1_234)];
+
+        // The stored row holds the displayed text of the id.
+        assert_eq!(listed_height(&listing, DISPLAYED_TXID), Ok(Some(1_234)));
+        // The reversed id is a different transaction: it is found at its own height, not at the
+        // height of the first.
+        assert_eq!(listed_height(&listing, &format!("{:02x}", other)), Ok(Some(7)));
+        // A stored hash that the listing does not contain.
+        let unlisted = "00".repeat(31) + "01";
+        assert_eq!(listed_height(&listing, &unlisted), Ok(None));
+        // An unconfirmed entry in the listing is reported with its height 0.
+        assert_eq!(listed_height(&[(listed, 0)], DISPLAYED_TXID), Ok(Some(0)));
+    }
+
+    #[test]
+    fn bch_unconfirmed_row_matches_hash_of_a_real_transaction() {
+        let mut tx = UtxoTx::default();
+        tx.inputs.push(TransactionInput {
+            previous_output: OutPoint {
+                hash: [3; 32].into(),
+                index: 1,
+            },
+            script_sig: vec![].into(),
+            sequence: 0,
+            script_witness: vec![],
+        });
+        tx.outputs.push(TransactionOutput {
+            value: 546,
+            script_pubkey: vec![0x6a].into(),
+        });
+        // The details builder stores the displayed (reversed) hash, the listing keys the same hash
+        // the same way (`prev_tx_hash` in the details builders).
+        let stored = tx.hash().reversed().to_vec().to_tx_hash();
+        let listed: H256Json = tx.hash().reversed().into();
+        let raw_order: H256Json = tx.hash().into();
+        assert_ne!(listed, raw_order);
+
+        assert_eq!(listed_height(&[(listed, 42)], &stored), Ok(Some(42)));
+        assert_eq!(listed_height(&[(raw_order, 42)], &stored), Ok(None));
+    }
+
+    #[test]
+    fn bch_unconfirmed_row_with_an_invalid_hash_is_an_error() {
+        let listing = vec![(H256Json::default(), 1)];
+        assert!(listed_height(&listing, "not a hash").is_err());
+        assert!(listed_height(&listing, "abcd").is_err());
+        assert!(listed_height(&listing, "").is_err());
+    }
+
+    /// CRD ch.38 R38.5A.9, T38.5A.7: a transaction without outputs is skipped and the rest of the
+    /// pass is stored; the skipped transaction is not written.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn malformed_transaction_does_not_stop_the_rest_of_the_pass() {
+        use crate::sql_tx_history_storage::SqliteTxHistoryStorage;
+        use crate::utxo::bch::bch_coin_without_network_for_test;
+        use crate::utxo::{output_script, ScriptType};
+        use common::block_on;
+        use mm2_core::mm_ctx::MmCtxBuilder;
+        use rpc::v1::types::Bytes as BytesJson;
+
+        fn spending(prev_tx_hash: keys::hash::H256, index: u32, output: Option<(u64, BytesJson)>) -> UtxoTx {
+            let mut tx = UtxoTx::default();
+            tx.inputs.push(TransactionInput {
+                previous_output: OutPoint {
+                    hash: prev_tx_hash,
+                    index,
+                },
+                script_sig: vec![].into(),
+                sequence: 0,
+                script_witness: vec![],
+            });
+            if let Some((value, script_pubkey)) = output {
+                tx.outputs.push(TransactionOutput {
+                    value,
+                    script_pubkey: script_pubkey.0.into(),
+                });
+            }
+            tx
+        }
+
+        let coin = bch_coin_without_network_for_test();
+        let ticker = coin.ticker().to_owned();
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(&ticker)).unwrap();
+
+        let my_address = coin.as_ref().derivation_method.iguana_or_err().unwrap();
+        let my_script = BytesJson::new(output_script(my_address, ScriptType::P2PKH).to_bytes().take());
+
+        let cache = |tx: &UtxoTx| -> H256Json {
+            let hash: H256Json = tx.hash().reversed().into();
+            let key = BytesJson::new(hash.0.to_vec());
+            let bytes = BytesJson::new(serialization::serialize(tx).take());
+            block_on(storage.add_tx_to_cache(&ticker, &key, &bytes)).unwrap();
+            hash
+        };
+
+        // The funding transaction pays my address; the valid transaction spends it.
+        let funding = spending([3; 32].into(), 0, Some((1_000, my_script)));
+        cache(&funding);
+        let valid = spending(funding.hash(), 0, Some((500, BytesJson::new(vec![0x6a]))));
+        let valid_hash = cache(&valid);
+        // The malformed transaction has no outputs. It comes first in the pass.
+        let malformed = spending([4; 32].into(), 0, None);
+        let malformed_hash = cache(&malformed);
+
+        let mm_ctx = MmCtxBuilder::default().into_mm_arc();
+        let mut ctx = BchAndSlpHistoryCtx {
+            coin,
+            metrics: mm_ctx.metrics.clone(),
+            mm_ctx,
+            storage,
+            current_balance: BigDecimal::from(0),
+        };
+        let state = FetchingTransactionsData::<SqliteTxHistoryStorage>::new(vec![(malformed_hash, 0), (valid_hash, 0)]);
+        let _next = block_on(Box::new(state).on_changed(&mut ctx));
+
+        let has =
+            |hash: H256Json| block_on(ctx.storage.history_has_tx_hash(&ticker, &format!("{:02x}", hash))).unwrap();
+        assert!(has(valid_hash), "the rest of the pass is stored");
+        assert!(!has(malformed_hash), "the malformed transaction is not written");
+    }
 }

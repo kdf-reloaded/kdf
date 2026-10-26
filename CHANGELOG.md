@@ -167,6 +167,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   mined; a send that expires unmined disappears. Transactions of one block keep a fixed order.
   GLEEC KDF lists the send only once it is mined; set the `MM2.json` boolean
   `shielded_history_unmined_sends` to `false` for that behavior. Detail: PR #81; CRD ch.39 §39.8.5.1.
+- **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
+  input points past the end of the previous transaction's outputs, a BCH transaction with no
+  outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
+  Such a transaction is now logged and skipped, and the rest of the history keeps updating.
+  Detail: CRD ch.38 R38.5A.9.
+- **Unconfirmed BCH and SLP transactions in the history now get their block height once mined.**
+  The history compared the hash in two different forms that never matched, so a BCH or SLP
+  transaction first seen unconfirmed stayed unconfirmed in the history. Detail: CRD ch.38
+  R38.5A.10.
 
 - **A swap spend or refund whose fee would exceed the payment is now refused instead of broadcast
   as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value
