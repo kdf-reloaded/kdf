@@ -730,6 +730,16 @@ reference order for EVM is not established yet: a Spec Reader question comes
 before any change. Low priority: the desktop wallet does not read EVM history
 from KDF (it uses an explorer proxy), so it is not affected.
 
+## #16 — UTXO: P2PK spending exists in Electrum mode only — **OPEN (not verified live, low priority)**
+
+P2PK inputs can be spent when the coin runs in Electrum mode. In Native mode
+(a coin daemon behind the node) Reloaded has no P2PK path, whereas the reference
+carries the previous output script on every unspent from both backends. A P2PK
+output held by a Native-mode wallet is therefore probably not spendable. This
+has not been tried on a live node. More in
+[`38-utxo-coin-maintenance-and-features.md`](./38-utxo-coin-maintenance-and-features.md)
+R38.6.3.
+
 ---
 
 ## Audit method (for reproducibility)
