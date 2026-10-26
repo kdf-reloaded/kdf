@@ -150,6 +150,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #TBD; CRD ch.59 R59.6.5.
+
 - **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
   Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal
   error, and the older `best_orders` silently left the order out. The order now appears with the
