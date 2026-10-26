@@ -231,8 +231,8 @@ for the `header_layout_fallback_families` membership, an absent key counting as
 `"BTC"`) is derived, and "key present" stays observable through the existing
 `header_layout` field. `"QTUM"` selects the Qtum reader; `"BTC"`, `"RVN"`,
 `"PPC"`, `"RICK"` and `"MORTY"` select the default reader (their exclusivity and
-thresholded rules are H4); `"LBC"` and `"PIVX"` have no reader yet and refuse
-every header read as "not implemented" until H4. Open decisions 2, 3 and 5 are
+thresholded rules are H4); `"LBC"` and `"PIVX"` had no reader here and refused
+every header read as "not implemented"; the readers followed (H4 note below). Open decisions 2, 3 and 5 are
 settled by this (reject, store holds the policy, Qtum fallback kept). Consequence of keeping the
 fallback: a `QTUM`/`QRC20` coin with no `chain_variant` key is family `"BTC"` for the switch, so a
 failed Qtum read of its headers is retried as Riecoin and as the mixed layout under the default
@@ -316,6 +316,20 @@ switch from a rejected (or std-80) read to the key's layout. Its test is
 plumbing coverage: each path is exercised with a non-default family.
 
 ### H4 — Family rules (closes item 4 for LBRY, PIVX and RUNES)
+
+**Partly done (2026-10-26, PR #82): the LBRY and PIVX readers.** Triggered by a live
+PIVX swap that failed at the HTLC spend, after the taker had paid, with the "not implemented"
+error of H2. `kdf_chain` gains dedicated `Lbc` (112 bytes in every header) and `Pivx` (80 bytes,
+plus 32 after the nonce for versions 4 to 6 and 8 and above) readers behind the existing
+`CoinVariant` and `HeaderReadPolicy` plumbing; the refusal is gone; all seven header read paths
+and the WalletConnect genesis read serve both. The identity hash is a double-SHA256 of the
+served bytes for every family and every PIVX version, matching the reference (ch.37 R37.5.7);
+the chain's own pre-version-4 Quark hash is not used for identity. Verified on real headers
+fetched from public Electrum servers for every PIVX era including the three version boundaries,
+and on real LBC and Runebase lists (Runebase, a `"QTUM"` coin, already parsed with the Qtum
+reader). RUNES needed no new reader. **Still open in H4:** `Btc`/`Ppc` exclusivity, the
+RICK/MORTY rule for every version, the Peercoin family's rule, and withdrawing version-only
+KawPoW detection under the default family (4a).
 
 Implement R37.5.2–R37.5.5 in the header deserializer:
 

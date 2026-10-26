@@ -71,7 +71,8 @@ pub trait Deserializable {
 ///
 /// `Riecoin` and `KawpowAuxpowMixed` are the two header layouts a coin selects through the
 /// Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9); they are never
-/// inferred from a version value.
+/// inferred from a version value. `Lbc` and `Pivx` are the readers of the `"LBC"` and `"PIVX"`
+/// values of `chain_variant` (R37.5.2, R37.5.5); no `header_layout` value names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoinVariant {
     Standard,
@@ -80,6 +81,10 @@ pub enum CoinVariant {
     Riecoin,
     /// Per-header choice by the AuxPoW flag: set -> std-80, clear -> 120-byte KawPoW.
     KawpowAuxpowMixed,
+    /// 112-byte LBRY header: claim-trie root after the Merkle root, in every header.
+    Lbc,
+    /// PIVX: std-80, plus a 32-byte field after the nonce for header versions 4-6 and 8 and above.
+    Pivx,
 }
 
 impl CoinVariant {

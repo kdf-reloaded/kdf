@@ -1,7 +1,7 @@
 // utxo_common_spv — SPV proof validation, block header management
 
 use super::*;
-use crate::utxo::header_layout_fallback::{not_implemented_reason, FallbackReadError, HeaderReadPolicy};
+use crate::utxo::header_layout_fallback::{FallbackReadError, HeaderReadPolicy};
 
 /// Cadence, in seconds, between header-sync ticks of `block_header_utxo_loop`.
 const BLOCK_HEADER_SYNC_CHECK_EVERY: f64 = 60.;
@@ -153,9 +153,6 @@ where
             let header = policy.read_header(&bytes.0).map_err(|e| match e {
                 FallbackReadError::Rejected(e) => GetBlockHeaderError::SerializationError(e),
                 FallbackReadError::Ambiguous(reason) => GetBlockHeaderError::InvalidResponse(reason),
-                FallbackReadError::NotImplemented(family) => {
-                    GetBlockHeaderError::InvalidResponse(not_implemented_reason(family))
-                },
             })?;
             let conf = &storage.conf;
             let blocks_limit = NonZeroU64::new(crate::utxo::DIFFICULTY_RETARGET_INTERVAL)
@@ -203,9 +200,6 @@ where
             policy.read_header(&bytes.0).map_to_mm(|e| match e {
                 FallbackReadError::Rejected(e) => GetBlockHeaderError::SerializationError(e),
                 FallbackReadError::Ambiguous(reason) => GetBlockHeaderError::InvalidResponse(reason),
-                FallbackReadError::NotImplemented(family) => {
-                    GetBlockHeaderError::InvalidResponse(not_implemented_reason(family))
-                },
             })
         },
     }

@@ -414,7 +414,7 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
     ) -> UtxoRpcFut<u32>;
 
     /// As [`UtxoRpcClient::get_median_time_past`], reading the served header list under `policy`
-    /// (the coin's one layout, its refusal state and the structural fallback, CRD ch.37 R37.5.1a /
+    /// (the coin's one layout and the structural fallback, CRD ch.37 R37.5.1a /
     /// R37.5.9e). Clients that read no header list use only the layout of `policy`.
     fn get_median_time_past_with_policy(
         &self,

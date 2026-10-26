@@ -78,9 +78,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `chain_variant`, else the Qtum reader for a `QTUM`/`QRC20` protocol type) is used by header sync, the
   reorg walk, block timestamps, SPV, the stored-header re-reads and the WalletConnect genesis lookup, not
   only the median-time-past. The structural fallback for `RIC` and `MEWC` now applies on all of those paths
-  too. A coin configured `"LBC"` or `"PIVX"` still activates but every header read of it now fails with a
-  "not implemented" error, where before it read the headers as standard 80-byte ones and mostly failed;
-  the other families still read the standard layout (CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e). Detail: PR #74.
+  too. The families without a dedicated reader still read the standard layout (CRD ch.37 R37.5.1,
+  R37.5.1a, R37.5.9e). Detail: PR #74.
 
 - **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
   `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
@@ -146,6 +145,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **PIVX and LBRY (LBC) swaps can now complete.** Their block headers are now read correctly. Before,
+  a PIVX swap failed at the final step, after the taker had already paid, because the headers it needs
+  to set the spend's time lock could not be read; LBC had the same gap. PIVX headers carry an extra field
+  only in some chain versions (the headers are 80 or 112 bytes depending on the version), and LBC
+  headers always carry one (112 bytes); both are now read exactly, as stored and as served. A PIVX
+  header of version 7 is no longer misread. Detail: PR #82; CRD ch.37 R37.5.5.
 - **After a restart, the transaction history of UTXO coins no longer lists every earlier
   transaction twice.** Each restart re-read the stored history under a wrong key, fetched every
   transaction again as if it were new, and stored it a second time beside the old copy, so RIN,
@@ -373,10 +378,10 @@ lives.
 - **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
   Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
   [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
-- **Radiant (RXD), LBRY (LBC) and PIVX are only partly usable.** RXD activates and signs, but swaps
-  with it are not established. LBC and PIVX activate, but swaps fail with a clear error until their
-  block headers can be read. The swap watcher, which finishes a swap for you when you are offline,
-  does not work yet (issue #56). More in [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md).
+- **Radiant (RXD) is only partly usable, and the swap watcher does not work yet.** RXD activates and
+  signs, but swaps with it are not established. The swap watcher, which finishes a swap for you when
+  you are offline, does not work yet (issue #56). More in
+  [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

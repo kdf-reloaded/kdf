@@ -77,6 +77,8 @@ impl ElectrumBlockHeaderV12 {
             n_nonce_u64: None,
             mix_hash: None,
             wide_time: false,
+            claim_trie_root: None,
+            pivx_trailer: None,
         }
     }
 
