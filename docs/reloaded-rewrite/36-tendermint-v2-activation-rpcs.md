@@ -39,6 +39,18 @@ reloaded; it does not introduce a new coin.
 > docs state nowhere -- this chapter binds what the reference implementation of
 > §36.0.1 does, by maintainer decision.
 
+> **Availability in the beta (maintainer decision 2026-10-26).** The
+> activation surface of this chapter is unaffected: Tendermint platform coins
+> and tokens activate, report balances and `withdraw` as bound here. Tendermint
+> swap support is not finished, so for the coming beta every activated
+> Tendermint coin and token is wallet-only: while the build constant
+> `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`,
+> `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is
+> wallet only" answer and an order with a Tendermint coin saved by an
+> earlier version is cancelled at startup; a swap that
+> has already started still completes or is recovered. Swaps are planned to
+> return in a later release ([Chapter 18](18-tendermint-ibc-htlc.md)).
+
 ---
 
 ## 36.0 Executive summary
@@ -399,7 +411,8 @@ specified in ch. 18. Activation establishes the platform coin, its RPC client,
 the active address, and the set of enabled tokens; the swap, IBC-transfer, and
 HTLC behaviours those activated coins then participate in are bound by ch. 18 and
 the swap-v2 chapters. This chapter binds only the *activation* request/response
-contract.
+contract. In this beta the activated coins take part in no new swap (see the
+availability note at the top of this chapter).
 
 ---
 

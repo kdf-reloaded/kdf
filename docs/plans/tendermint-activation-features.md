@@ -10,6 +10,18 @@
 > were deferred by maintainer decision on 2026-10-11 and belong to a separate
 > branch.
 
+> **Beta availability (2026-10-26).** By maintainer decision Tendermint coins
+> and tokens are wallet-only in the coming beta: while
+> `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, activation,
+> balances and `withdraw` work, while `setprice`, `buy`, `sell` and
+> `start_swap` refuse the coin and an order with a Tendermint coin saved
+> by an earlier version is cancelled at startup; a
+> swap already in progress still completes or is recovered (CRD ch. 18 and
+> ch. 36 availability notes). Swaps are planned to return in a later release.
+> Until a dedicated Tendermint swap plan exists, turning swaps back on (setting
+> the constant to `true` and retiring its refusal tests) is recorded here; its
+> place in the order below is the maintainer's call.
+
 ## Interim behavior on `fix/activation-api-parity`
 
 Reloaded used to accept any `activation_params` and ignore it, so a request for
@@ -133,6 +145,6 @@ compatibility switch and takes no default-side weighing under
 
 **The gate must cover tokens as well as the platform coin.**
 `TendermintToken::get_htlc_key_pair` delegates straight to the platform coin
-(`mm2src/coins/tendermint/tendermint_token.rs:330`), so every IBC/CW20-style
+(`mm2src/coins/tendermint/tendermint_token.rs:331`), so every IBC/CW20-style
 token on a key-less platform coin inherits the hazard unchanged. A fix or a
 regression test written only against the platform coin would miss them.

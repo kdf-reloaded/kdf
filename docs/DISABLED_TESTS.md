@@ -96,6 +96,19 @@ Re-enable path: fresh electrum URLs + a network-gated CI job. Flaky by nature.
 - `test_spam_doc` (`coins/utxo/utxo_tests.rs`) — manual repro, not an assertion.
   **Delete candidate.**
 
+## Group 6 — Family switched off for the beta (re-enable when the family returns)
+
+- `test_solana_and_spl_balance_enable_spl_v2`, `test_sign_verify_message_solana`,
+  `test_sign_verify_message_spl` (`mm2_main/src/docker_tests/solana_tests.rs`) —
+  they activate Solana through `enable_solana_with_tokens` / `enable_spl`, which
+  refuse while `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`
+  (Solana is postponed for the current beta). Effort to re-enable: flip the
+  constant to `true` and remove the three `#[ignore]` attributes; they need the
+  Solana docker node (`solana_supplied_node`). Lost coverage while off:
+  Solana/SPL activation, balances and message signing against a live node.
+  The refusal itself is covered by offline tests in `rpc/dispatcher/dispatcher.rs`
+  and `lp_commands_legacy.rs`.
+
 > Note: `coins/eth/abi_golden_tests.rs` mentions `#[ignore]` only in a doc
 > comment (pending an ethabi 17 upgrade); those golden tests are **active**, not
 > disabled.

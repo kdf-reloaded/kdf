@@ -8,6 +8,19 @@
 > surface, and the V1 atomic-swap trait shape, against a platform
 > coin and CW20-style token model that the baseline did not provide.
 
+> **Availability in the beta (maintainer decision 2026-10-26).**
+> Tendermint swap support is not finished, so for the coming beta every
+> Tendermint platform coin and token is wallet-only: while the build
+> constant `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is
+> `false`, activation, balances, addresses and `withdraw` work, while
+> `setprice`, `buy`, `sell` and `start_swap` refuse the coin with the
+> usual "… is wallet only" answer, Tendermint coins decline to match, and an
+> order with a Tendermint coin saved by an earlier version is cancelled
+> at startup. A swap that has already started still completes or is
+> recovered. Swaps are postponed, not dropped: they are planned to
+> return in a later release, and the swap rules of this chapter
+> (§18.3, §18.5) stay the target for that return.
+
 ---
 
 ## 18.0 Executive Summary
@@ -198,10 +211,17 @@ Refund:  *no broadcast required* — the chain auto-refunds on the block in whic
 The auto-refund is the most important divergence from the UTXO and
 EVM HTLC families: there is no `MsgRefundHTLC` message; the funds
 return to the sender automatically once the timelock elapses. The
-project's V1 swap surface, which expects every coin to be able to
-broadcast a refund transaction, is satisfied here by returning a
-sentinel from the refund-method family that the swap state machine
+project's V1 swap surface expects every coin to be able to
+broadcast a refund transaction; for this family the refund-method
+family is to answer with an outcome the swap state machine
 recognises as "no refund tx is needed; the chain will auto-refund".
+
+> **Reloaded status (informative).** Both refund methods answer an
+> error whose text is "Tendermint HTLCs auto-refund on chain; no
+> broadcast required.". The swap state machine does not yet recognise
+> that answer as a distinct outcome; teaching it to is part of the
+> Tendermint swap work planned for a later release (see the
+> availability note at the top of this chapter).
 
 ### 18.3.2 Wire types
 
@@ -281,7 +301,7 @@ methods; the table below lists the eleven that carry behavioural
 intent for this chapter (the remaining five — the two refund
 methods, the swap-contract-address negotiator, the HTLC key-pair
 accessor, and the platform-coin pubkey helper — are either
-auto-refund sentinels or thin delegations to chain-wide
+auto-refund answers or thin delegations to chain-wide
 configuration):
 
 | Method                                  | Behaviour                                                                            |
@@ -294,17 +314,18 @@ configuration):
 | `validate_fee`                         | Decodes the fee tx, asserts denoms and recipients per `DexFee`.                      |
 | `validate_maker_payment`               | Validates the on-chain HTLC for the payment denom against negotiated parameters.    |
 | `validate_taker_payment`               | Validates the on-chain HTLC for the payment denom against negotiated parameters.    |
-| `check_if_my_payment_sent`             | ABCI-query HTLC state by id.                                                         |
+| `check_if_my_payment_sent`             | Searches the coin's own create-HTLC transactions (`tx_search` on `create_htlc.sender`, newest first) and returns the one whose hash lock equals the swap's secret hash. |
 | `search_for_swap_tx_spend_my/other`    | Cosmos-tx-search for a claim-HTLC referencing the HTLC id.                           |
 | `extract_secret`                       | Decode a claim-HTLC from a spend tx and return the `secret` field.                  |
 
-The two refund-method entries return a sentinel that the swap
-state machine recognises as "no refund tx is needed; the chain
-will auto-refund" (§18.3.1). The swap-contract-address negotiator
-returns `None` (Tendermint HTLC does not use a separate
-swap-contract address) and the HTLC key-pair accessor returns
-`None` (the HTLC key pair is the coin's primary signing key, so
-there is no separate pair to surface).
+The two refund-method entries answer the auto-refund error of
+§18.3.1, which the swap state machine does not yet recognise as a
+distinct outcome (see the Reloaded status note there). The
+swap-contract-address negotiator returns `None` (Tendermint HTLC
+does not use a separate swap-contract address) and the HTLC
+key-pair accessor returns the coin's activated key pair (the HTLC
+key pair is the coin's primary signing key; a token returns its
+platform coin's pair).
 
 ### 18.5.1 Pre-burn (`DexFee::WithBurn`) is supported
 
@@ -573,7 +594,10 @@ The chapter relies on one baseline-state claim:
   descriptor and per-coin burn-policy substrate consumed by
   §18.5.1); the present-day working tree, re-verified for this
   revision against `mm2src/coins/tendermint/tendermint_swap_ops.rs`
-  for the `DexFee` match arms bound in §18.5.1; Cosmos SDK proto
+  for the `DexFee` match arms bound in §18.5.1, and on 2026-10-26
+  against the same file, `tendermint_token.rs` and the swap state
+  machine for the refund answers, `check_if_my_payment_sent` and the
+  HTLC key-pair accessor (§18.3.1, §18.5); Cosmos SDK proto
   definitions for `Coin`, `MsgSend`, `MsgMultiSend`; ICS-20
   (`ibc.applications.transfer.v1.MsgTransfer`); the Iris-mod HTLC
   proto repository at `https://github.com/irismod/htlc`; BIP-173

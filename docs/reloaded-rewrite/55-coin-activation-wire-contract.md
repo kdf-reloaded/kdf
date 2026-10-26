@@ -93,7 +93,7 @@ The chapter is organised in three layers:
 | Tendermint platform / token | `enable_tendermint_with_assets`, `task::enable_tendermint::*`, `enable_tendermint_token` | platform-with-tokens, token | [Chapter 36](36-tendermint-v2-activation-rpcs.md), [Chapter 48](48-platform-coin-task-activation.md) |
 | Z-coin | `task::enable_z_coin::*` | standalone-coin task family | [Chapter 39](39-zcash---z_coin-shielded-coin.md) |
 | Sia | `task::enable_sia::*` | standalone-coin task family | [Chapter 46](46-sia-v2-activation-rpcs.md) |
-| Solana | Solana platform / token methods | platform-with-tokens, token | [Chapter 40](40-solana-coin.md) |
+| Solana | Solana platform / token methods (`enable_solana_with_tokens`, `enable_spl`; switched off in this beta, see §55.3 and [Chapter 40](40-solana-coin.md)) | platform-with-tokens, token | [Chapter 40](40-solana-coin.md) |
 | Lightning | `task::enable_lightning::*` | layer-2 task | [Chapter 41](41-lightning-network.md) |
 | MetaMask connection | `task::connect_metamask::*` | init task | [Chapter 47](47-metamask-integration.md) |
 
@@ -452,6 +452,8 @@ gives the status the discriminant would carry if it were mmrpc-level.
 | `task::enable_z_coin` | block-height or balance query after sync fails (the height comes from the admitted light-wallet endpoints; Electrum is not used for a shielded coin, and `electrum_servers` is accepted and ignored, R39.11.5) | `Transport` | string | 500 | status | Ch. 39 |
 | `task::enable_sia` | wallet daemon unreachable at build | `CoinCreationError` | object `{ticker, error}` | 400 | status | [Ch. 46](46-sia-v2-activation-rpcs.md) |
 | `task::enable_sia` | block-height or balance query after build | `Transport` | string | 500 | status | Ch. 46 |
+| Solana platform activation | in this beta, every request, before any node is contacted (`SOLANA_ACTIVATION_AVAILABLE` is `false`; `error` is "Solana support is not available in this build") | `PlatformCoinCreationError` | object `{ticker, error}` | 500 | mmrpc | [Ch. 40](40-solana-coin.md) |
+| Solana token activation | in this beta, every request, before any node is contacted (same switch and text) | `Internal` | string | 500 | mmrpc | Ch. 40 |
 | Solana platform activation | block-height or balance read | `PlatformCoinCreationError` | object `{ticker, error}` | 500 | mmrpc | [Ch. 40](40-solana-coin.md) |
 | Solana platform activation | inline token initialisation finds no healthy node | `Transport` | string | 502 | mmrpc | Ch. 40 |
 | Solana token activation | no healthy node, or a node error reading the token or its balance | `Transport` | string | 500 | mmrpc | Ch. 40 |
@@ -492,7 +494,9 @@ other row the public reference is silent and the reference release decides.
 > `light_wallet_d_servers` list is mandatory, `electrum_servers` is accepted and
 > ignored, and the backend failures are `LightwalletdUnreachable` (`Transport`)
 > and `LightwalletdExcluded` (`CoinCreationError`). Remaining deviation: the
-> Solana platform reports `Internal` (Chapter 40, deferred).
+> Solana platform reports `Internal` (Chapter 40, deferred); in this beta
+> Solana is switched off and every Solana request ends at the refusal rows
+> above instead.
 
 ---
 
@@ -606,7 +610,12 @@ balance read. Coins whose protocol requires an mmrpc 2.0 activation are
 rejected on this path: Tendermint and Tendermint tokens, Z-coin, NFT,
 Lightning, Solana and Solana tokens. TRX and TRC20, which the reference also
 rejects here, are activated by Reloaded on this path as a documented extension
-(D55.5).
+(D55.5); in this beta that extension is suspended and both are rejected too
+(D55.5). While a family is switched off for the beta, the rejection's `error`
+text is "TRON support is not available in this build" (TRX, TRC20; build
+constant `TRON_ACTIVATION_AVAILABLE`) or "Solana support is not available in
+this build" (Solana, Solana tokens; `SOLANA_ACTIVATION_AVAILABLE`), and nothing
+is registered.
 
 **R55.4.8** *Sia on the legacy path.* A coin whose configured protocol is the
 Sia protocol is activated synchronously by the legacy path, with the request
@@ -637,7 +646,8 @@ one-shot activation of the same ticker (R55.5.7).
 > the 20-second bound on `electrum`'s balance read, deregistration on a failed
 > read in both methods (R55.4.6) with the `legacy_enable_keeps_coin_on_balance_failure`
 > switch, cleanup limited to the coin the call registered (R55.4.9), and Sia
-> activation (R55.4.8). TRX and TRC20 stay accepted (D55.5). Remaining: the
+> activation (R55.4.8). TRX and TRC20 are accepted when TRON is switched on;
+> in this beta they are refused (D55.5). Remaining: the
 > cleanup removes the coin by ticker, because the coin registry has no instance
 > identity, so if another call disabled and re-registered the same ticker while
 > this call's balance read was still pending, that other coin would be removed.
@@ -1314,6 +1324,14 @@ entirely. Reloaded keeps them on the legacy path as a documented extension: a
 client written for the reference never sends such a request, so it is
 unaffected. Adding the mmrpc 2.0 TRON activation the reference uses is future
 work (the RPC wire-parity plan).
+
+> **Suspended for the beta (maintainer decision, 2026-10-26).** TRON support
+> is not finished, so for the coming beta the extension is switched off: while
+> the build constant `TRON_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is
+> `false`, legacy `enable` and `electrum` refuse TRX and TRC20 with "TRON
+> support is not available in this build" (R55.1.10, HTTP 500) and register
+> nothing, so in this beta Reloaded activates TRON on no path. The decision
+> above stands for when TRON returns, planned for the next beta.
 
 **D55.6** *Re-activation of a passive platform coin.* The reference release
 treats a platform coin that was disabled while dependent tokens stayed active

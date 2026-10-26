@@ -48,7 +48,7 @@ KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). 
 ## What it does
 
 - **Atomic swaps** between supported chains via Hash Time Locked Contracts (HTLCs) — no custodian, no proxy tokens, you keep your keys.
-- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos, Zcash (sapling), Lightning Network, and others — see [`mm2src/coins/`](mm2src/coins/).
+- **Multi-protocol coin support**: UTXO chains (Bitcoin family), EVM chains, Tendermint/Cosmos (wallet-only in this beta), Zcash (sapling), Lightning Network, and others — see [`mm2src/coins/`](mm2src/coins/).
 - **Distributed orderbook** propagated over [libp2p](https://libp2p.io/) gossipsub.
 - **JSON-RPC API** consumable from CLI, scripts, or third-party GUIs.
 

@@ -14,7 +14,8 @@ use crate::{BalanceFut, CoinBalance, DexFee, FeeApproxStage, FoundSwapTxSpend, H
             TradePreimageError, TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails,
             TransactionEnum, TransactionErr, TransactionFut, TransactionType, TxFeeDetails,
             UnexpectedDerivationMethod, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
-            VerificationError, VerificationResult, WatcherOps, WithdrawError, WithdrawFut, WithdrawRequest};
+            VerificationError, VerificationResult, WatcherOps, WithdrawError, WithdrawFut, WithdrawRequest,
+            TENDERMINT_SWAPS_AVAILABLE};
 use bigdecimal::BigDecimal;
 use common::mm_number::MmNumber;
 use common::now_ms;
@@ -441,6 +442,13 @@ impl MarketCoinOps for TendermintToken {
 impl MmCoin for TendermintToken {
     fn is_asset_chain(&self) -> bool { false }
 
+    /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
+    /// current beta), whatever the coins-config entry says; otherwise the entry decides. Only order placement
+    /// asks this: a swap that has already started never does.
+    fn wallet_only(&self, ctx: &MmArc) -> bool {
+        !TENDERMINT_SWAPS_AVAILABLE || crate::is_wallet_only_ticker(ctx, self.ticker())
+    }
+
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         // Token withdraw: constructs a MsgSend in the token's denom,
         // but pays fees in the platform coin's denom.
@@ -659,5 +667,8 @@ impl MmCoin for TendermintToken {
 
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
-    fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool { true }
+    /// Declines every new match while [`TENDERMINT_SWAPS_AVAILABLE`] is `false`, so an order saved before the
+    /// switch was turned off, or a peer's request against one, cannot start a new swap. This is asked only when
+    /// an order is matched, never by a swap that is running, being kick-started or recovered.
+    fn is_coin_protocol_supported(&self, info: &Option<Vec<u8>>) -> bool { TENDERMINT_SWAPS_AVAILABLE }
 }
