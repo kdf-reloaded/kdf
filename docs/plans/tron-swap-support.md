@@ -10,6 +10,15 @@
 > the blocker below before anything else -- it is a precondition on the whole
 > branch, not a step that can run in parallel with the rest.
 
+> **Beta availability (2026-10-26).** By maintainer decision TRON (TRX, TRC20)
+> activation is switched off on `dev` for the coming beta: while
+> `TRON_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, every TRON
+> activation route answers "TRON support is not available in this build" (CRD
+> ch.21 availability note, ch.55 D55.5). Statements below about a Tron coin
+> being activated describe `dev` with the constant set to `true`. TRON is
+> planned to return in the next beta; turning activation back on (ch.21 D6)
+> comes before, and is part of, any revival of this branch.
+
 ## BLOCKER: the ch.21 swap chapter never passed the KDF Dirty Gate
 
 > ### Hard precondition on any revival of this branch
@@ -116,7 +125,8 @@ interop layer exist nowhere else.
   where they must go.
 
 40 tests in all. Unlike the GasFree branch, this one **is fully wired and
-reachable**: a Tron coin activated with a swap-contract address becomes
+reachable** once TRON activation is switched on again (see the beta
+availability note above): a Tron coin activated with a swap-contract address becomes
 swap-capable, gated only by `tron_swap_contract()` erroring on a zero address.
 That makes it a new live funds path, and it is the reason this branch must not
 land near a beta: ch.21 T6 is feature-gated testnet work and **no commit message
@@ -258,8 +268,8 @@ In this order. Step 1 is a precondition, not a parallel task.
 2. **Migrate the gate verdict into the chapter text.** Once the chapter passes,
    record the clearance inline, the way recent `dev` chapters do -- see
    [ch.47](../reloaded-rewrite/47-metamask-integration.md) (lines 359 and 877)
-   and [ch.55](../reloaded-rewrite/55-coin-activation-wire-contract.md) (line
-   1387). `79ea5e8fb`'s `0.06` for the R-AD2 addendum currently exists **only in
+   and [ch.55](../reloaded-rewrite/55-coin-activation-wire-contract.md) (§55.16
+   provenance footer). `79ea5e8fb`'s `0.06` for the R-AD2 addendum currently exists **only in
    a commit message**, and a squash merge would destroy it; fold it in at the
    same time.
 3. **Bind the Tron arm of the secret-hash selection** in ch.51 (R71/R72 name

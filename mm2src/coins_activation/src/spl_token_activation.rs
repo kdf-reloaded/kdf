@@ -1,9 +1,11 @@
 use crate::prelude::{TryFromCoinProtocol, TryPlatformCoinFromMmCoinEnum};
-use crate::token::{EnableTokenError, TokenActivationOps, TokenProtocolParams};
+use crate::token::{enable_token, EnableTokenError, EnableTokenRequest, TokenActivationOps, TokenProtocolParams};
 use async_trait::async_trait;
 use coins::solana::spl::{SplProtocolConf, SplTokenCreationError};
-use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, SolanaCoin, SplToken};
+use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, SolanaCoin, SplToken,
+            SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::Future01CompatExt;
+use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +24,21 @@ impl TryPlatformCoinFromMmCoinEnum for SolanaCoin {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct SplActivationRequest {}
+
+/// The `enable_spl` entry point.
+///
+/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` (Solana is postponed for the current beta) the request is
+/// refused with an `Internal` error saying so, and nothing is registered. Otherwise it is the generic token
+/// activation.
+pub async fn enable_spl(
+    ctx: MmArc,
+    req: EnableTokenRequest<SplActivationRequest>,
+) -> Result<SplInitResult, MmError<EnableTokenError>> {
+    if !SOLANA_ACTIVATION_AVAILABLE {
+        return MmError::err(EnableTokenError::Internal(SOLANA_NOT_AVAILABLE.to_owned()));
+    }
+    enable_token::<SplToken>(ctx, req).await
+}
 
 impl TryFromCoinProtocol for SplProtocolConf {
     fn try_from_coin_protocol(proto: CoinProtocol) -> Result<Self, MmError<CoinProtocol>>

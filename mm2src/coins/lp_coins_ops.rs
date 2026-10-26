@@ -15,6 +15,50 @@ pub fn is_wallet_only_ticker(ctx: &MmArc, ticker: &str) -> bool {
     let coin_conf = coin_conf(ctx, ticker);
     coin_conf["wallet_only"].as_bool().unwrap_or(false)
 }
+/// Beta switch: whether TRON (TRX, TRC20) coins can be activated.
+///
+/// TRON support is postponed for the current beta. While this is `false`, every activation route for the
+/// family answers [`TRON_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
+/// tests keep running. Set it to `true` to turn the family back on.
+pub const TRON_ACTIVATION_AVAILABLE: bool = false;
+
+/// Beta switch: whether Solana (SOL, SPL tokens) coins can be activated.
+///
+/// Solana support is postponed for the current beta. While this is `false`, every activation route for the
+/// family answers [`SOLANA_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
+/// tests keep running. Set it to `true` to turn the family back on.
+pub const SOLANA_ACTIVATION_AVAILABLE: bool = false;
+
+/// Beta switch: whether Tendermint (Cosmos-family) coins and their tokens can take part in orders and swaps.
+///
+/// Swaps for the family are postponed for the current beta. While this is `false`, every Tendermint platform
+/// coin and every Tendermint token reports itself as wallet-only: activation, balances, addresses and
+/// `withdraw` work as before, while `setprice`, `buy`, `sell` and the other ways to start a new trade refuse the
+/// coin with the usual wallet-only error, and an order or request that already exists is not matched. A swap
+/// that has already started is not affected (nothing on the swap, kick-start, refund or recovery path asks
+/// whether a coin is wallet-only). The read-only views (`orderbook`, `best_orders`, `trade_preimage`) look at the
+/// coins-config `wallet_only` flag alone and are not changed by this switch. Set it to `true` to give the family
+/// back the behavior its coins-config entry asks for.
+pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
+
+/// The refusal text of every TRON activation route while [`TRON_ACTIVATION_AVAILABLE`] is `false`.
+pub const TRON_NOT_AVAILABLE: &str = "TRON support is not available in this build";
+
+/// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.
+pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this build";
+
+/// The refusal text for a coin protocol whose family is switched off in this build, if it is.
+fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
+    match protocol {
+        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } if !TRON_ACTIVATION_AVAILABLE => Some(TRON_NOT_AVAILABLE),
+        #[cfg(not(target_arch = "wasm32"))]
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } if !SOLANA_ACTIVATION_AVAILABLE => {
+            Some(SOLANA_NOT_AVAILABLE)
+        },
+        _ => None,
+    }
+}
+
 /// Adds a new currency into the list of currencies configured.
 ///
 /// Returns an error if the currency already exists. Initializing the same currency twice is a bad habit
@@ -56,6 +100,10 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         );
     }
     let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(coins_en["protocol"].clone()));
+
+    if let Some(message) = unavailable_protocol_message(&protocol) {
+        return ERR!("{}", message);
+    }
 
     let coin: MmCoinEnum = match &protocol {
         CoinProtocol::UTXO => {
@@ -991,5 +1039,59 @@ mod send_raw_transaction_carrier_tests {
     fn a_non_object_json_carrier_is_rejected() {
         let req = json!({ "coin": "SC", "tx_json": "not an object" });
         assert!(select_raw_tx_carrier(&req).is_err());
+    }
+}
+
+#[cfg(test)]
+mod postponed_family_switch_tests {
+    use super::*;
+
+    /// Flipping a family switch is a deliberate change: this test fails when someone does, and must be updated in
+    /// the same commit that turns the family back on (and removes the refusal tests that go with it).
+    #[test]
+    fn postponed_families_are_switched_off_for_this_beta() {
+        assert!(!TRON_ACTIVATION_AVAILABLE);
+        assert!(!SOLANA_ACTIVATION_AVAILABLE);
+        assert!(!TENDERMINT_SWAPS_AVAILABLE);
+        assert_eq!(TRON_NOT_AVAILABLE, "TRON support is not available in this build");
+        assert_eq!(SOLANA_NOT_AVAILABLE, "Solana support is not available in this build");
+    }
+
+    #[test]
+    fn tron_protocols_are_refused_while_the_switch_is_off() {
+        let trx = CoinProtocol::TRX {
+            network: crate::eth::tron::Network::Mainnet,
+        };
+        let trc20 = CoinProtocol::TRC20 {
+            platform: "TRX".to_owned(),
+            contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
+        };
+        assert_eq!(unavailable_protocol_message(&trx), Some(TRON_NOT_AVAILABLE));
+        assert_eq!(unavailable_protocol_message(&trc20), Some(TRON_NOT_AVAILABLE));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_protocols_are_refused_while_the_switch_is_off() {
+        let spl = CoinProtocol::SPLTOKEN {
+            platform: "SOL".to_owned(),
+            token_contract_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_owned(),
+            decimals: 6,
+        };
+        assert_eq!(
+            unavailable_protocol_message(&CoinProtocol::SOLANA),
+            Some(SOLANA_NOT_AVAILABLE)
+        );
+        assert_eq!(unavailable_protocol_message(&spl), Some(SOLANA_NOT_AVAILABLE));
+    }
+
+    #[test]
+    fn other_protocols_are_not_affected() {
+        assert_eq!(unavailable_protocol_message(&CoinProtocol::UTXO), None);
+        assert_eq!(unavailable_protocol_message(&CoinProtocol::QTUM), None);
+        assert_eq!(
+            unavailable_protocol_message(&CoinProtocol::ETH { chain_id: Some(1) }),
+            None
+        );
     }
 }

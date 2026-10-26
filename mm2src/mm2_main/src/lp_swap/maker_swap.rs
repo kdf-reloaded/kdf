@@ -2345,6 +2345,9 @@ mod maker_swap_tests {
     use mocktopus::mocking::*;
     use serde_json as json;
 
+    /// A finished maker swap whose payment transaction is reported as failed but was actually sent.
+    const MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_lock":1563759539,"my_persistent_pub":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret":"0000000000000000000000000000000000000000000000000000000000000000","started_at":1563743939,"taker":"101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743939211},{"event":{"data":{"taker_payment_locktime":1563751737,"taker_pubkey":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9"},"type":"Negotiated"},"timestamp":1563743979835},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeValidated"},"timestamp":1563744052878},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563763243350}],"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
+
     /// Build a test MmCtx with netid 8762 so that NetConfig lookups succeed.
     fn test_ctx_with_netid(key_pair: KeyPair) -> MmArc {
         MmCtxBuilder::default()
@@ -2375,7 +2378,7 @@ mod maker_swap_tests {
         // the swap ends up with MakerPaymentTransactionFailed error but the transaction is actually
         // sent, need to find it and refund
         // TODO remove TransactionDetails from json
-        let maker_saved_json = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_lock":1563759539,"my_persistent_pub":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret":"0000000000000000000000000000000000000000000000000000000000000000","started_at":1563743939,"taker":"101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743939211},{"event":{"data":{"taker_payment_locktime":1563751737,"taker_pubkey":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9"},"type":"Negotiated"},"timestamp":1563743979835},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeValidated"},"timestamp":1563744052878},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563763243350}],"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
+        let maker_saved_json = MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT;
         let maker_saved_swap: MakerSavedSwap = json::from_str(maker_saved_json).unwrap();
         let key_pair =
             key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
@@ -2409,6 +2412,114 @@ mod maker_swap_tests {
         assert_eq!(expected, actual);
         assert!(unsafe { MY_PAYMENT_SENT_CALLED });
         assert!(unsafe { MAKER_REFUND_CALLED });
+    }
+
+    /// A real Tendermint platform coin or token on `ticker`, registered in `ctx` next to the other coins. Tendermint
+    /// swaps are postponed for this beta (`coins::TENDERMINT_SWAPS_AVAILABLE`), so every such coin reports
+    /// `wallet_only` true; the node it points at refuses connections.
+    fn register_tendermint_for_recovery_test(ctx: &MmArc, ticker: &str) -> MmCoinEnum {
+        use coins::tendermint::{tendermint_coin_from_conf_and_request, TendermintToken};
+        use coins::CoinsContext;
+
+        let platform_conf = json::json!({
+            "coin": "IRIS", "avg_blocktime": 5, "mm2": 1,
+            "protocol": { "type": "TENDERMINT", "protocol_data": {
+                "denom": "uiris", "decimals": 6, "account_prefix": "iaa", "chain_id": "irishub-1" } },
+        });
+        let node = json::from_value(json::json!({ "url": "http://127.0.0.1:1" })).unwrap();
+        let platform = block_on(tendermint_coin_from_conf_and_request(
+            ctx,
+            "IRIS".to_owned(),
+            &platform_conf,
+            vec![node],
+            &*ctx.secp256k1_key_pair().private().secret,
+            false,
+        ))
+        .unwrap_or_else(|e| panic!("cannot build the Tendermint platform: {e}"));
+        let coin: MmCoinEnum = match ticker {
+            "IRIS" => platform.into(),
+            token => TendermintToken::from_protocol(token.to_owned(), platform, 6, "unyan")
+                .unwrap_or_else(|e| panic!("cannot build the Tendermint token: {e}"))
+                .into(),
+        };
+        assert!(coin.wallet_only(ctx), "{ticker} must be wallet-only for this test");
+        block_on(CoinsContext::from_ctx(ctx).unwrap().add_coin(coin.clone())).unwrap();
+        coin
+    }
+
+    /// Funds-safety pin for the Tendermint beta switch: a coin forced wallet-only must not stand in the way of
+    /// recovering a saved swap. This drives the real `recover_funds_of_swap` core (`SavedSwap::recover_funds`:
+    /// coin lookup by ticker, `MakerSwap::load_from_saved`, `MakerSwap::recover_funds`) with a real Tendermint
+    /// platform coin as the taker coin of a saved maker swap. The refund on the other (test) coin completes.
+    #[test]
+    fn recovering_a_saved_swap_is_not_blocked_by_a_wallet_only_tendermint_coin() {
+        use coins::CoinsContext;
+
+        let maker_saved_json =
+            MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT.replace(r#""taker_coin":"ETH""#, r#""taker_coin":"IRIS""#);
+        let maker_saved_swap: MakerSavedSwap = json::from_str(&maker_saved_json).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(Some(eth_tx_for_test().into()))))
+        });
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+
+        block_on(
+            CoinsContext::from_ctx(&ctx)
+                .unwrap()
+                .add_coin(MmCoinEnum::Test(TestCoin::new("KMD"))),
+        )
+        .unwrap();
+        register_tendermint_for_recovery_test(&ctx, "IRIS");
+
+        let recovered = block_on(SavedSwap::Maker(maker_saved_swap).recover_funds(ctx))
+            .unwrap_or_else(|e| panic!("recovery must not be refused: {e}"));
+        assert_eq!(recovered.action, RecoveredSwapAction::RefundedMyPayment);
+        assert_eq!(recovered.coin, "KMD");
+    }
+
+    /// The same funds-safety pin with the wallet-only Tendermint token on the leg that recovery has to act on:
+    /// the saved maker swap's own payment is on the token, so `recover_funds` goes on to ask the token coin whether
+    /// that payment was spent. The (refused) node makes that call fail; what is asserted is that the failure is the
+    /// coin's, from the step after the lookup, not a wallet-only refusal before it.
+    #[test]
+    fn recovery_reaches_the_coin_operations_of_a_wallet_only_tendermint_token() {
+        use coins::CoinsContext;
+
+        let maker_saved_json = MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT
+            .replace(r#""maker_coin":"KMD""#, r#""maker_coin":"IRIS-NYAN""#)
+            .replace(
+                r#"{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577}"#,
+                r#"{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"00"},"type":"MakerPaymentSent"},"timestamp":1563744118577}"#,
+            );
+        assert!(maker_saved_json.contains(r#""type":"MakerPaymentSent""#));
+        let maker_saved_swap: MakerSavedSwap = json::from_str(&maker_saved_json).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        block_on(
+            CoinsContext::from_ctx(&ctx)
+                .unwrap()
+                .add_coin(MmCoinEnum::Test(TestCoin::new("ETH"))),
+        )
+        .unwrap();
+        register_tendermint_for_recovery_test(&ctx, "IRIS-NYAN");
+
+        let err = block_on(SavedSwap::Maker(maker_saved_swap).recover_funds(ctx)).unwrap_err();
+        assert!(err.contains("when trying to find maker payment spend"), "{err}");
+        assert!(!err.to_lowercase().contains("wallet"), "{err}");
     }
 
     #[test]

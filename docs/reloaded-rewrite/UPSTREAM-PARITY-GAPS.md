@@ -272,7 +272,13 @@ The Solana/SPL modules still contain broad unimplemented areas around market
 operations, swap operations, history, raw transaction handling, and fee
 preimage/conversion flows.
 
-- [ ] Decide whether Solana/SPL is in scope for the current release.
+- [x] Decide whether Solana/SPL is in scope for the current release. Decided
+  2026-10-26 (maintainer): switched off for this beta and planned for the next
+  one. While `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is
+  `false`, every Solana activation route (`enable_solana_with_tokens`,
+  `enable_spl`, legacy `enable` / `electrum`) refuses with "Solana support is
+  not available in this build" and registers nothing (ch. 40 availability
+  note, D40.4). The items below apply to the next beta.
 - [ ] **Activation compatibility surface (decided 2026-10-11, deferred).**
   Reloaded's `enable_solana_with_tokens` / `enable_spl` stay the primary
   activation surface. The reference's `experimental::enable_solana_with_assets`
@@ -280,9 +286,9 @@ preimage/conversion flows.
   `SOLANATOKEN` coin-configuration forms (ch. 40 §40.1-§40.3) are not routed or
   parsed yet, Solana is native-only, and the primary surface's wire shapes are
   not yet bound in the CRD. Work package: `docs/plans/solana-support.md`.
-- [ ] If in scope, run a clean-room CRD pass before implementation.
-- [ ] If out of scope, mark the unsupported RPC/swap paths explicitly and return
-  structured errors instead of panics.
+- [ ] For the next beta, run a clean-room CRD pass before implementation.
+- [ ] Before Solana is switched back on, mark the unsupported RPC/swap paths
+  explicitly and return structured errors instead of panics.
 
 ### Lightning Network market/swap/history surface — **TODO**
 
