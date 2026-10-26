@@ -150,7 +150,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   to set the spend's time lock could not be read; LBC had the same gap. PIVX headers carry an extra field
   only in some chain versions (the headers are 80 or 112 bytes depending on the version), and LBC
   headers always carry one (112 bytes); both are now read exactly, as stored and as served. A PIVX
-  header of version 7 is no longer misread. Detail: PR #TBD; CRD ch.37 R37.5.5.
+  header of version 7 is no longer misread. Detail: PR #82; CRD ch.37 R37.5.5.
 
 - **A swap spend or refund whose fee would exceed the payment is now refused instead of broadcast
   as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value

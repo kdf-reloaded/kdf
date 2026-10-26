@@ -317,7 +317,7 @@ plumbing coverage: each path is exercised with a non-default family.
 
 ### H4 — Family rules (closes item 4 for LBRY, PIVX and RUNES)
 
-**Partly done (2026-10-26, PR #TBD): the LBRY and PIVX readers.** Triggered by a live
+**Partly done (2026-10-26, PR #82): the LBRY and PIVX readers.** Triggered by a live
 PIVX swap that failed at the HTLC spend, after the taker had paid, with the "not implemented"
 error of H2. `kdf_chain` gains dedicated `Lbc` (112 bytes in every header) and `Pivx` (80 bytes,
 plus 32 after the nonce for versions 4 to 6 and 8 and above) readers behind the existing
