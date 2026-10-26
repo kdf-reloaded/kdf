@@ -38,8 +38,9 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   (min/max connected + server ordering), UTXO balance event streaming,
   the whole-kilobyte fixed-fee option (`dingo_fee`) with proportional plain
   fixed fees, the fee-derived minimum trading volume, and FIRO Spark
-  verbose-tx support. Exception: the fee-derived floor of §38.6.6 is
-  partly built (its as-built note lists what remains).
+  verbose-tx support. Exceptions: the fee-derived floor of §38.6.6 is
+  partly built (its as-built note lists what remains), and P2PK (R38.6.3) and
+  the Verus-family script label (R38.6.8) are built on dev (see their notes).
 - **§38.8 (T-PORT, required, NOT yet in reloaded):** software (non-hardware)
   global-HD UTXO accounts -- storage availability, account-`0` bootstrap at
   activation, `get_new_address` advance, and gap/scan semantics for BIP-44 and
@@ -584,7 +585,10 @@ lower output/event index first, and a single history write for the pass.
 > **Status of Part B:** required ports. Each item below was checked against the
 > reloaded UTXO tree during step 7; unless an item is marked inline as already
 > as-built, it was found absent and implemented in step 7. (§38.6.6 carries its
-> own as-built note, 2026-10-25: partly built.)
+> own as-built note, 2026-10-25: partly built.) Since then some of these ports
+> have been built on dev; each such rule carries its own as-built note
+> (R38.6.3 and R38.6.8, verified 2026-10-26), and "NOT yet in reloaded" in the
+> headings above describes the state at the time of the audit, not today's tree.
 
 ## 38.6 Required UTXO feature ports
 
@@ -617,6 +621,11 @@ swaps. For P2PK inputs (whose scriptSig carries only the signature, not the
 pubkey), the expected pubkey shall be validated against the signature rather than
 extracted from the scriptSig. Acceptance: a P2PK UTXO contributes to balance and
 can be spent.
+>
+> **Status: as-built on dev (verified 2026-10-26), in part.** P2PK outputs count
+> in the legacy address balance, and P2PK inputs can be spent in Electrum mode.
+> Native (coin daemon) mode has no P2PK path yet; see
+> [`UPSTREAM-PARITY-GAPS.md`](./UPSTREAM-PARITY-GAPS.md) #16.
 
 ### 38.6.4 Electrum connection prioritisation
 R38.6.4 The Electrum client shall support configurable minimum and maximum
@@ -824,6 +833,9 @@ R38.6.8 The project shall parse Verus / VRSC-family verbose transactions whose
 other coins using the same verbose transaction shape. Acceptance: a verbose
 transaction output with `type: "cryptocondition"` deserializes without falling
 back to an error path that skips transaction-history processing.
+>
+> **Status: as-built on dev (verified 2026-10-26).** The verbose-transaction
+> parser reads the `cryptocondition` script label.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 

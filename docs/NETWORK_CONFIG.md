@@ -11,6 +11,12 @@ supported networks.
 
 ## Supported Networks
 
+Both production networks are supported side by side in one binary, and each uses its own
+fee rules. Netid 8762 stays usable in KDF Reloaded: the upstream v3.0 releases name it a
+retired identifier and refuse to start on it, and KDF Reloaded does not. Netid 6133 is the
+GLEEC network, upstream's default since v3.0, with a 2% trading fee (1% with GLEEC on one
+side of the pair). See the README for why the project keeps both.
+
 ### netid 8762 — AtomicDEX (Komodo)
 
 The original AtomicDEX network.
@@ -25,6 +31,10 @@ The original AtomicDEX network.
 | No-fee waiver key | `0369aa10c061cd9e085f4adb7399375ba001b54136145cb748eb4c48657be13153` — a taker whose taker-coin swap public key equals this value pays no DEX fee, on both swap protocols, independently of the burn setting above |
 | Version-two no-fee tickers | `KMD` — a version-two swap with KMD on either side of the pair carries no dex fee |
 | Hardcoded seed nodes | None — provide `"seednodes"` in MM2.json |
+
+**Operator note:** a node on netid 8762 has no default seed nodes. Without `"seednodes"` in
+MM2.json (or `"i_am_seed": true`) it starts but finds no peers (found in swaplab testing,
+2026-10-26). See [Seed Nodes](#seed-nodes).
 
 Swap fee behavior on this network is pinned to the `v2.6.0-beta` compatibility
 reference. Non-KMD takers keep the standard single-output fee transaction. For
