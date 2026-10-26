@@ -27,12 +27,15 @@ introduce a new coin.
 > JSON-RPC, EIP-1559 fee semantics, EIP-55 address checksums, ERC-20 contract ABI
 > calls, CAIP-style chain identification). The chapter also binds the two
 > non-activation EVM coin-layer contracts that the activation surface selects or
-> presupposes: the per-coin swap gas-fee policy (§35.6) and the byte-level
+> presupposes: the multi-node access contract over the `nodes` list (§35.1.F),
+> the per-coin swap gas-fee policy (§35.6) and the byte-level
 > contract for reading a serialized EVM transaction the project did not build
 > (§35.6A), whose dictated interop is EIP-2718 envelope framing, EIP-2930 and
 > EIP-1559 payload layout, EIP-155 replay protection, keccak-256 and secp256k1
 > public-key recovery. The human-readable `error` text, `error_path` and
-> `error_trace` are **not** bound. Private Rust types, helper decomposition, and
+> `error_trace` are **not** bound, except that the two Reloaded-only rules
+> R35.1.14 and R35.1.15 constrain what an `error` text or log line may say
+> about a node. Private Rust types, helper decomposition, and
 > internal module structure are informative and are **not** bound by this
 > chapter.
 
@@ -426,6 +429,289 @@ version for all nodes" (public-docs citation; the message text is not bound).
 > 4. `contract_supports_watchers` is parsed only.
 > 5. Under MetaMask (WASM) chain requests still go to `nodes`, not through the
 >    provider.
+
+---
+
+### 35.1.F Multi-node access contract
+
+> **Clearance (chapter 01 T1, R40).** This section and the material that
+> cites it (the T35.24 -- T35.33 items of §35.8A, D35.8, the acceptance
+> criterion of §35.8 that names §35.1.F, and the cross-reference sentences
+> added to chapters 17, 21 and 57 on the same day) were authored by the KDF
+> Spec Reader on 2026-10-26 from the reference rows `v2.6.0-beta` and
+> `v3.0.0-beta` (chapter 02 §2.15A). **They passed the KDF Dirty Gate on
+> 2026-10-26** before clean-side implementation; nothing needed scrubbing.
+>
+> - *Extent.* The EVM coin layer's multi-node access subsystem at both rows:
+>   the HTTP and WebSocket node transports, the per-request rotation layer,
+>   node setup in both activation routes (v2 `nodes`, legacy `urls`), the
+>   ERC-20 token-metadata reads, the signed-transaction send path with its
+>   nonce gathering and nonce-increase wait, and the RPC error
+>   classification. Quantity: seven source files per row, fourteen file
+>   states in total, plus the difference between the two rows; every
+>   candidate hunk in the four chapters was read in full. Both rows were
+>   confirmed to exist, and every fact bound in R35.1.7 -- R35.1.13 was
+>   confirmed to hold at both.
+> - *Method.* By reading the reference and the candidate, combined with a
+>   mechanical pattern scan of the candidate diff for commit identifiers,
+>   pull-request numbers, corpus path fragments, source-file suffixes and
+>   private-identifier candidates drawn from the reading.
+>   `tools/clean_room_gate.py` was not used: the candidate embeds no fenced
+>   code block.
+> - *Measure.* 0.02 for this chapter and 0.00 for each of the chapter 17,
+>   21 and 57 sentences, all below the 0.10 threshold. No quoted or
+>   near-verbatim reference text, no non-wire-visible identifier, no
+>   control-flow transcription and no reference string literal was found;
+>   the R35.1.15 message form is Reloaded-original.
+
+This section binds how the EVM coin layer uses the `nodes` list of R35.1.1
+(and the `urls` list of the legacy `enable` route, ch. 55 §55.4) **after**
+activation has accepted it: which node a JSON-RPC request goes to, when the
+next node is tried, what the caller sees when every node fails, how long a
+node may hold a request, and what a log line or error text may say about a
+node. It applies to every request the coin layer issues on behalf of the
+platform coin, its ERC-20 tokens and its NFT pseudo-coin under
+`rpc_mode: "Default"`, over both the HTTP and the WebSocket transport; the
+MetaMask provider path (R35.1.4a) has a single provider and is outside it.
+Reloaded's node transport is HTTP-only and rejects `ws://` / `wss://` node
+URLs at activation (deviation 2 in the note closing §35.1.E), so the
+WebSocket parts of the rules below bind Reloaded only if a WebSocket
+transport is added.
+The two reference rows agree on every rule below unless a rule says
+otherwise; the Reloaded-only rules R35.1.14 and R35.1.15 are marked as such.
+The labels (a) -- (e) used below are the five questions settled by the
+2026-10-26 pass: (a) batch responses, (b) execution errors, (c) the scope of
+stickiness, (d) the scope of the cutoff, (e) re-sending a signed transaction.
+
+R35.1.7 **Node order at activation (G, both rows).** The configured node list
+shall be put into a uniformly random order **once**, when the coin is built,
+and that order shall be the starting order of R35.1.9. The order is held only
+in the running coin instance: it is not persisted, and a re-activation of the
+same coin draws a fresh order. A token activated against the platform
+(`erc20_tokens_requests`, `enable_erc20`, `task::enable_erc20`) starts from a
+copy of the platform's list in the platform's then-current order; afterwards
+the token's order evolves on its own under R35.1.9. *Reloaded divergence
+(D35.8 (i)):* a Reloaded token **shares** the platform's live order instead,
+so a node the platform has demoted is demoted for its tokens too; this is
+observable only in which node receives a token's requests.
+
+R35.1.8 **Per-request failover (G, both rows).** For every request other than
+the signed-transaction broadcast of R35.1.12, the nodes shall be tried one at
+a time in the current order, and the request ends with the answer of the
+**first** node that returns a decodable, successful JSON-RPC result. Each of
+the following outcomes is a **node failure** and advances the request to the
+next node:
+
+- the connection cannot be made, or the transport fails while sending or
+  receiving;
+- the per-node cutoff of R35.1.10 elapses;
+- the HTTP status is not a success (2xx) status;
+- the body is not a decodable JSON-RPC response, **or** decodes to a batch
+  envelope where a single response was requested (item (a) of the 2026-10-26
+  question list: the reference never issues batch requests, so a batch
+  response is simply an undecodable answer; per-element semantics of a batch
+  are therefore a *Reloaded choice* if batching is ever introduced, with the
+  constraint that an undecodable batch envelope fails the node as a whole);
+- a success (2xx) status whose body carries a JSON-RPC **error object** --
+  for any method and any error code. This includes an execution revert or a
+  gas-estimation failure (`eth_call`, `eth_estimateGas`; codes `3` and
+  `-32000`) and a transaction-pool rejection (`eth_sendRawTransaction`
+  through the per-request path, R35.1.12 last paragraph). No request kind is
+  exempt, and there is no "deterministic rejection, stop here" short-circuit
+  on this path (item (b), first half).
+
+A request whose first node answers is not retried anywhere else; a subset of
+failing nodes is not an error (R35.1.2 last paragraph).
+
+R35.1.9 **Sticky last-good node (G, both rows).** When a node answers, the
+list shall be **rotated** so that the answering node becomes first: the nodes
+that failed before it in this request move to the tail in their previous
+relative order, and the nodes after it keep their relative order behind it.
+The resulting order is the starting order of the next request on the same
+coin instance, is shared by every caller of that instance, and lives only as
+long as the instance (item (c); see R35.1.7 for tokens and re-activation).
+
+R35.1.10 **Per-node cutoff; no overall deadline (G, both rows).** Each node
+attempt shall be bounded by a **10-second** wall-clock cutoff that covers the
+whole attempt -- connection, request, reading the complete body and decoding
+it. A lower-layer per-request timeout may exist but shall not be longer than
+needed to be subsumed by the cutoff (the reference's lower layer uses 30 s,
+which the 10 s cutoff always pre-empts). There is **no** overall deadline
+beyond the sum of the per-node cutoffs: a request over *N* nodes may take up
+to about *N* × 10 s before R35.1.11 applies (item (d)).
+
+> **Informative (both rows).** The reference lets only one rotation run at a
+> time per coin instance: a second request on the same instance waits until
+> the first has finished its walk through the list. Whether to serialize is a
+> *Reloaded choice*; whichever is chosen, the order of R35.1.9 must remain
+> well defined under concurrent requests. *Reloaded divergence (D35.8 (iii)):*
+> requests on one coin instance run **concurrently**. Each request walks a
+> snapshot of the order and, when a node answers, stores the rotation of that
+> snapshot, the last store winning; the stored order is therefore always a
+> complete permutation of the nodes, and a node reaches the front only by
+> answering. No lock guarding the order is held while a node is being asked.
+
+R35.1.11 **All nodes failed (G, both rows).** When every node fails the caller
+shall receive a single error that is:
+
+- the failure of the **last node whose failure was not a cutoff** -- a
+  transport failure, a non-2xx status, an undecodable body, or a JSON-RPC
+  error object -- even when a later node failed by cutoff; or
+- a generic "nodes unreachable" transport-class error when **every** node
+  failed by cutoff.
+
+A JSON-RPC error object that reaches the caller this way is the responding
+node's error as the node sent it (code, message and any data), rendered by
+the RPC client layer and carrying **no** node URL (the reference's JSON-RPC
+error texts never name the node); the coin layer classes it as an
+invalid-response failure, not a transport failure. So when every node answers
+an `eth_call` with the same revert, the caller sees the **last** node's revert
+code and message (item (b), second half). Transport-class failures (connection,
+non-2xx, undecodable, cutoff) class as `Transport` for the activation rows of
+R35.1.6 and ch. 55 §55.3; how each RPC maps the two classes onto its
+`error_type` set is bound by that RPC's chapter.
+
+> **Reloaded divergence (coin-layer class, maintainer decision 2026-10-26).**
+> Reloaded keeps the two classes apart up to its RPC client layer -- a
+> JSON-RPC error object reaches the caller as the client's error-response
+> kind, a transport-class failure as its transport kind -- but its EVM coin
+> layer then reports both as a transport failure, as it did before this
+> section. The coin-layer distinction is not made because a wait loop of the
+> swap path retries a read only on a transport failure and returns at once on
+> any other, so classing a node's JSON-RPC error differently would turn a
+> retried read into an immediate failure. No RPC's `error_type`, `error_data`
+> shape or HTTP status differs: the `withdraw`, trade-preimage and balance
+> error mappings already report an invalid-response failure as `Transport`.
+
+R35.1.12 **Signed-transaction broadcast (G, both rows).** A transaction the
+coin signs itself (swap payments, spends, refunds, approvals, `withdraw`) is
+**not** broadcast through R35.1.8. Instead:
+
+1. **Nonce.** The pending nonce of the sending address
+   (`eth_getTransactionCount` with the `pending` block tag) is requested from
+   **every** node concurrently. Node failures are logged, not returned. If no
+   node answers, the round is repeated after one second, up to five more
+   times, before the send fails. The highest nonce wins, and the set of nodes
+   that reported it is remembered. *Reloaded (informative):* each node is
+   asked over its own single-node connection bounded at 30 s, the bound of
+   step 2, not the R35.1.10 cutoff; the rule above binds no per-node bound for
+   this step.
+2. **Send.** `eth_sendRawTransaction` is sent **concurrently to every node of
+   that set**, each with the lower-layer per-request timeout (30 s in the
+   reference) and without the R35.1.10 cutoff or the R35.1.9 rotation. The
+   broadcast succeeds as soon as **one** of them accepts; it fails only when
+   all of them fail, with the last failure's text. There is no re-send to a
+   further node after an acceptance, so a node that answers "already known",
+   "nonce too low" or "replacement underpriced" because a sibling node took
+   the transaction first does not fail the broadcast (item (e), first half).
+3. **Wait.** After acceptance the sender polls step 1 every second until the
+   reported pending nonce exceeds the one it used; this wait has no bound in
+   the reference (a `Code-quality finding` is recorded below).
+
+A caller-supplied raw transaction submitted through the `send_raw_transaction`
+RPC is **not** a signed-by-the-coin send: it is broadcast through R35.1.8, so a
+JSON-RPC rejection from the first node leads to a submission to the next node,
+and when every node rejects it the caller sees the last node's rejection
+(item (e), second half).
+
+> **Code-quality finding (informative; source: the reference, both rows).**
+> The nonce-increase wait of step 3 loops without an upper bound while the
+> nodes keep failing or keep reporting the old nonce; a transaction dropped by
+> every pool after acceptance stalls the sending step forever. Proposed fix:
+> bound the wait (for example by the coin's swap-transaction confirmation
+> budget) and surface a distinct timeout failure so the swap state machine can
+> act. Reloaded's own send path has the same shape and is covered by the same
+> proposal.
+
+R35.1.13 **Token-metadata reads (informative; Reloaded choice).** In both
+reference rows the reads of an ERC-20 contract's `symbol` and `decimals`
+(`get_token_info`, and the on-chain decimals read of R35.1.2 phase 5) do not
+use R35.1.8: they pick one node -- the first whose most recent request did
+not fail, else the first that answers a client-version probe within 30 s --
+and issue the contract call to it with no further failover on that call.
+Reloaded may route these reads through R35.1.8 instead, which is a strict
+superset in tolerance and changes no wire shape. *Reloaded divergence
+(D35.8 (iv)):* Reloaded does: both reads go through R35.1.8.
+
+> **Logging and redaction in the reference (informative, both rows).** A
+> per-node failure is logged at debug level naming the request's method; a
+> cutoff is logged the same way. Nothing is redacted: a transport-class error
+> text (cutoff at the lower layer, non-2xx status, undecodable body) carries
+> the node's **full URL**, including any path segment or query string that
+> embeds an API key, and so does the all-failed error of R35.1.11 when it is
+> such a failure. These texts are not bound (binding scope, R36).
+
+R35.1.14 **Host-only node naming (Reloaded; clean-room original; no switch).**
+Every log line and every error text the EVM coin layer emits that names a
+node shall render the node **host-only**: scheme, host and, when present,
+port -- `https://rpc.example.org:8545` -- with the path, query, fragment and
+userinfo stripped. This covers at least: the activation-time node probe and
+its per-node failure logs; the per-node failure and cutoff logs of R35.1.8 and
+R35.1.10; the all-failed error of R35.1.11, which shall list the hosts tried
+and nothing more of their URLs; the nonce and broadcast logs of R35.1.12; and
+any lower-layer error text (HTTP client, TLS, DNS, WebSocket) that is embedded
+in an emitted text -- a full URL arriving from a lower layer shall be replaced
+by its host-only form before the text is logged or returned. The rule is not
+limited to the transport module: an activation log that prints the URL it is
+about to probe is in scope. The naming part of this rule applies to TRON node
+URLs too (ch. 21 §21.9 R-N1); TRON requests do not go through the EVM
+transport, so R35.1.8 -- R35.1.12 do not apply to them. This is a
+deliberate divergence from the reference with **no opt-back switch**: node
+access is not peer-visible and the change only improves operator security, so
+by the second arm of the default-side rule (`docs/COMPAT_SWITCHES.md`) the
+Reloaded form is the default, and an opt-in to print credentials would be an
+opt-in to weaken security, which this repository's contributor rules bar
+(precedent: D35.1). The divergence is to be recorded in
+`docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+The same host-only rendering applies to the URLs of the EVM fee-estimation
+services the coin layer contacts -- the `gas_station_url` of R35.1.1 and the
+URL of the configured gas-API provider -- in every log line and error text
+that names one, including lower-layer texts embedded in them, because such a
+URL carries a provider API key just as a node URL does (Reloaded;
+clean-room original; maintainer decision 2026-10-26; no switch, for the same
+reason). This sentence binds only Reloaded's own texts and states nothing
+about the reference's.
+
+R35.1.15 **Naming the node that answered with a JSON-RPC error (Reloaded;
+clean-room original).** When a node answers a request with a JSON-RPC error
+object (R35.1.8 last bullet), the coin layer shall log one line at **warn**
+level of the form `EVM RPC <host> answered <method> with error <code>:
+<message>`, where `<host>` is the R35.1.14 host-only form, `<method>` the
+JSON-RPC method string, and `<code>` / `<message>` the node's error code and
+message. When a JSON-RPC error object is what reaches the caller under
+R35.1.11, the error message returned to the caller shall end with
+` (node <host>)` naming the node whose error it is, so that a revert reported
+by one of several nodes can be attributed. The appended fragment is part of
+the human-readable message only; it changes no `error_type`, `error_data`
+shape or HTTP status.
+
+> **Reloaded divergence (2026-10-26).** As of this date Reloaded puts the node
+> list into random order once at activation (R35.1.7 -- parity) and probes
+> each node with a client-version request before use (R35.1.6, the documented
+> `Transport` case). Thereafter it diverges from R35.1.8 -- R35.1.11: on every
+> request the nodes are tried in a **fixed** order with no rotation on
+> success; the **first success (2xx) body is accepted even when it carries a
+> JSON-RPC error object**, so a node that reverts or rejects is never failed
+> over; each node attempt is allowed **60 s**; and when every node fails the
+> error text returned to the caller lists every node's **full URL** with its
+> failure, as does the activation probe's per-node log. The signed-transaction
+> send asks every node for the pending nonce as R35.1.12 step 1 does, with the
+> same six rounds when no node answers, but it accepts a round only when
+> every node that answered reports the **same** nonce; while they disagree it
+> logs the two extremes and asks again every second without a bound, so one
+> lagging node holds the send indefinitely instead of the highest nonce
+> winning. It then broadcasts through the same fixed-order path instead of
+> concurrently to the highest-nonce nodes (step 2). These are the gaps the
+> fix for this section closes; the shuffle and the probe are already in
+> place.
+
+> **Code-quality finding (informative; source: this repository, trigger:
+> contradiction between a comment and the code it documents).** The module
+> comment of Reloaded's multi-URL EVM transport states that its error strings
+> never carry RPC URLs, while the all-failed error that module builds embeds
+> every configured URL together with that node's failure text. R35.1.14
+> resolves the contradiction in favor of the comment.
 
 ---
 
@@ -1520,6 +1806,13 @@ decomposition is the implementer's choice.
   refused when it is any other EIP-2718 type, with the identifier, the recovered
   sender and the re-serialized bytes all equal to what the chain reports
   (§35.6A).
+- Node access follows §35.1.F: a node that answers HTTP 200 with a JSON-RPC
+  error object is failed over like a dead node (R35.1.8), the answering node
+  is tried first next time (R35.1.9), no node holds a request longer than 10 s
+  (R35.1.10), the all-failed error is the last non-cutoff failure or a generic
+  unreachable error (R35.1.11), signed transactions are broadcast to the
+  highest-nonce nodes concurrently (R35.1.12), and no emitted text names a
+  node by more than scheme, host and port (R35.1.14, R35.1.15).
 - A swap completes against a peer whose swap gas-fee policy is a non-legacy tier
   (R35.6.3) -- the case that fails outright when only the untyped legacy form can
   be read.
@@ -1578,6 +1871,65 @@ that only checks an internal variant does not satisfy these rules.
   `TokenProtocolParseError` at 400); terminal success shape of R35.3A.5 for a
   single-address platform; terminal `Transport` / `CouldNotFetchBalance` per
   R35.3A.6.
+- **T35.24** *Failover on a JSON-RPC error body (R35.1.8).* Two stub nodes;
+  the first answers HTTP 200 with a JSON-RPC error object (once with code
+  `-32000` and a revert message, once with code `3`), the second answers the
+  same `eth_call` with a result: the call returns the second node's result,
+  the first node's error is logged at warn in the R35.1.15 form, and the
+  second node is first in order for the next request (R35.1.9). Repeat with
+  the first node answering HTTP 502, refusing the connection, and returning an
+  undecodable body and a batch envelope: every variant advances to the second
+  node.
+- **T35.25** *All nodes revert (R35.1.11, item (b)).* Three stub nodes each
+  answer `eth_call` with a JSON-RPC error object carrying distinct messages:
+  the caller's error carries the **third** node's code and message, ends with
+  ` (node <host>)` naming the third node's host-only form, and classes as an
+  invalid-response (not `Transport`) failure. Variant: nodes one and two answer
+  JSON-RPC errors and node three exceeds the cutoff: the caller's error is node
+  **two**'s. Variant: every node exceeds the cutoff: a generic
+  transport-class error that names no node.
+- **T35.26** *Stickiness (R35.1.9).* Nodes A, B, C, D in that order; A and B
+  fail, C answers: the next request goes to C first, then D, then A, then B.
+  A second coin instance (re-activation) does not inherit the order.
+- **T35.27** *Per-node cutoff (R35.1.10, item (d)).* A stub node that accepts
+  the connection and then streams a body slower than the cutoff: the request
+  moves to the next node after 10 s (± scheduler slack) even though the
+  lower-layer timeout has not elapsed; with four such nodes the request fails
+  after about 40 s and not earlier.
+- **T35.28** *Host-only rendering (R35.1.14).* Activate with a node URL
+  carrying userinfo, a path segment and a query string
+  (`https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X`) and make
+  every node fail: the activation probe log, each per-node failure log, the
+  all-failed error returned through the RPC envelope, and any embedded
+  lower-layer text contain `https://rpc.example.org:8545` and contain none of
+  `user`, `secret`, `/v3/APIKEY`, `APIKEY`, `token=X`. Repeat with a URL
+  whose lower layer fails at DNS resolution, and, once a WebSocket transport
+  exists, with a `wss://` URL; until then a `wss://` URL is rejected at
+  activation and the variant asserts that the rejection names none of the
+  URL's userinfo, path or query.
+- **T35.29** *Error message names the node (R35.1.15).* The ` (node <host>)`
+  suffix is present on a JSON-RPC-error outcome of R35.1.11 and absent on a
+  transport-class outcome; `error_type`, `error_data` shape and HTTP status
+  are unchanged by the suffix.
+- **T35.30** *All-failed message lists hosts only (R35.1.11, R35.1.14).* With
+  every node failing by non-2xx status, the single returned error names each
+  node tried in host-only form and no node more than once.
+- **T35.31** *Signed broadcast (R35.1.12, item (e)).* Three stub nodes report
+  pending nonces 5, 7, 7: the signed transaction is sent to nodes two and
+  three only, concurrently; node two answers a JSON-RPC error of the
+  "already known" kind while node three accepts: the send succeeds. Variant:
+  both reject: the send fails with the last rejection. Variant: no node
+  answers the nonce request: six rounds one second apart, then failure.
+- **T35.32** *Caller-supplied raw transaction (R35.1.12 last paragraph, item
+  (e)).* `send_raw_transaction` with node one answering a JSON-RPC rejection
+  and node two accepting: the RPC returns node two's hash; with both
+  rejecting: node two's rejection text, suffixed per R35.1.15.
+- **T35.33** *Batch envelope and token-metadata reads (R35.1.8 item (a),
+  R35.1.13).* A node that answers a single `eth_call` with a batch envelope is
+  failed over; `get_token_info` against a first node that answers the
+  `decimals()` call with a JSON-RPC error and a second node that answers
+  correctly returns the second node's values (binding for Reloaded, which
+  takes the R35.1.13 choice per D35.8 (iv)).
 
 ## 35.8B Foreign-transaction decoding tests (binding)
 
@@ -1750,6 +2102,34 @@ narrows what the project reads.
 > D35.7's resolution changes; the check simply has to be made at a second
 > place once that path can emit a typed transaction.
 
+**D35.8** *(Resolved -- maintainer decision, 2026-10-26.)* *Reloaded choices
+left open by §35.1.F.* Four points the reference rows do not decide, or decide
+in a way Reloaded need not copy, were open, and are resolved as follows. None
+is peer-visible, so none carries a switch.
+
+- (i) **A token shares its platform's live node order** (R35.1.7), instead of
+  starting from a copy.
+- (ii) **A batch fails the node as a whole**: should batching ever be
+  introduced, a batch response in which any element carries a JSON-RPC error
+  object, or which does not decode, is one node failure for the whole batch
+  (R35.1.8, item (a)).
+- (iii) **Requests on one coin instance run concurrently**, with the
+  last-store-wins order of the note after R35.1.10. The maintainer approved
+  this on a written scenario analysis covering racing requests, flapping
+  nodes, lock discipline, connection growth, slow or malicious nodes and the
+  signed broadcast. The analysis found no blocked state and no new attack
+  surface specific to concurrency.
+- (iv) **The token-metadata reads go through the per-request failover**
+  (R35.1.13).
+
+The signed-transaction broadcast of R35.1.12 is implemented as bound there --
+concurrently to every node that reported the highest nonce -- confirmed by the
+same decision. Two Reloaded notes record what the implementation does where
+the reference rows bind nothing or Reloaded departs: the coin-layer class
+after R35.1.11, and the per-node bound of the nonce reads in R35.1.12 step 1.
+The `docs/GLEEC_COMPATIBILITY.md` row for R35.1.14 / R35.1.15 is added with
+the implementing change.
+
 ## 35.9 Provenance Footer
 
 - *Inputs:* the published Komodo DeFi Framework API reference (the
@@ -1844,3 +2224,24 @@ narrows what the project reads.
   those already cleared in the third pass and are not restated with new content.
   The Dirty Gate clearance recorded above covers neither the new paragraph nor
   the resolutions.
+- *Fourth Spec Reader pass (2026-10-26), §35.1.F:* the forbidden corpus was
+  consulted at the reference rows `v2.6.0-beta` and `v3.0.0-beta` (chapter 02
+  §2.15A) solely to establish the observable multi-node access behavior bound
+  in R35.1.7 -- R35.1.13 and recorded in the informative notes of §35.1.F:
+  once-per-activation random order; per-request failover and which outcomes
+  (including a success-status body carrying a JSON-RPC error object) advance
+  to the next node; rotation of the answering node to the front; the 10 s
+  per-node cutoff and the absence of an overall deadline; the single error a
+  caller receives when every node fails; the concurrent highest-nonce
+  broadcast of signed transactions and its unbounded nonce wait; the
+  single-node token-metadata reads; and the unredacted full-URL error texts.
+  The two rows agree on all of them. R35.1.14 and R35.1.15 and the
+  `Reloaded divergence (2026-10-26)` note rest on this repository's own code
+  and on the maintainer's instruction and consulted no corpus. The pass
+  **passed the KDF Dirty Gate on 2026-10-26**; its extent, method and measure
+  are recorded in the clearance statement at the head of §35.1.F. The
+  clean-side edits made after that clearance (the dates, the clearance
+  record, the HTTP-only scope sentence, the TRON naming-only wording, the
+  nonce-agreement fact in the divergence note and the `wss://` condition in
+  T35.28) were written by a context that never read the forbidden corpus and
+  rest on this repository's own code.

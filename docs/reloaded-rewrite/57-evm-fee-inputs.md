@@ -100,7 +100,12 @@ coin shall be resolved by querying the coin's node for both of:
 
 and taking the **maximum** of whichever of the two produced a value. A
 source that errors is dropped with a diagnostic and does not fail the
-resolution. If neither source produced a value, resolution fails with an
+resolution. Each of the two queries is itself issued under the multi-node
+access contract of [Chapter 35](35-evm-v2-activation-rpcs.md) §35.1.F, so
+"the coin's node" above means whichever configured node answers first
+under that contract, and a source counts as errored only after every node
+has failed it (R35.1.11 there). If neither source produced a value,
+resolution fails with an
 internal error. The two queries shall be issued concurrently.
 
 **R57.2.2** *Fee-history request and selection.* The `eth_feeHistory`

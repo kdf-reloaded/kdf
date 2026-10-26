@@ -350,6 +350,12 @@ succeeds MUST be preferred for subsequent traffic so steady-state
 requests stay on a healthy endpoint. The failover ordering policy
 is binding behaviour; the locking/storage realisation is
 discretionary.
+The host-only node-naming rule of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14 applies to Tron node
+URLs in every log line and error text as well. It is a naming rule only:
+Tron requests do not go through the EVM node transport, so the ordering
+policy of this rule, including its stop on a non-retryable rejection, stays
+Tron's own and is not overridden by R35.1.8 there.
 
 **R-N2 (request timeout).** Each node request MUST be bounded by a
 per-request timeout so a stalled node cannot block the pipeline.
