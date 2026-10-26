@@ -13,6 +13,7 @@
 use super::z_coin_errors::{GenTxError, SendOutputsErr};
 use super::z_coin_wallet_db::tests::{compact_block_with_received_notes, empty_compact_block, empty_sapling_tree_bytes,
                                      test_db_dir, test_params_with_zip212};
+use super::z_coin_wallet_db::ZCoinTxHistoryPage;
 use super::z_lightwalletd::tests::{info, test_addressing, FakeTransport, Script as WireScript};
 use super::z_lightwalletd::{EndpointError, FileBranchStore, LightwalletdClient, RawTx};
 use super::*;
@@ -276,6 +277,65 @@ impl LightCoinFixture {
     }
 
     fn wallet_balance(&self) -> u64 { self.history().balance(self.params.clone()).unwrap() }
+
+    /// The first history page as `z_coin_tx_history` serves it, at the tip the backend reports.
+    fn history_page(&self, include_unmined_sends: bool) -> ZCoinTxHistoryPage {
+        self.history()
+            .load_page(
+                "ARRR",
+                "zs-wallet",
+                8,
+                self.tip,
+                &common::PagingOptionsEnum::PageNumber(std::num::NonZeroUsize::new(1).unwrap()),
+                10,
+                include_unmined_sends,
+            )
+            .unwrap()
+    }
+
+    /// The wallet database's received notes of `tx` as (output index, value, has nullifier, has tree position).
+    fn received_notes_of(&self, tx: &ZTransaction) -> Vec<(u32, i64, bool, bool)> {
+        let conn = db_common::sqlite::rusqlite::Connection::open(self.history().wallet_db_path()).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rn.output_index, rn.value, rn.nf IS NOT NULL, rn.commitment_tree_position IS NOT NULL
+                 FROM sapling_received_notes rn
+                 JOIN transactions t ON t.id_tx = rn.transaction_id
+                 WHERE t.txid = ?1 ORDER BY rn.output_index",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map(db_common::sqlite::rusqlite::params![&tx.txid().as_ref()[..]], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// The total the wallet database's own summary reports, which counts the notes of an unmined
+    /// transaction as pending value.
+    fn raw_summary_total(&self) -> u64 {
+        let wallet_db = zcash_client_sqlite::WalletDb::for_path(
+            self.history().wallet_db_path(),
+            self.params.clone(),
+            zcash_client_sqlite::util::SystemClock,
+            rand::rngs::OsRng,
+        )
+        .unwrap();
+        wallet_db
+            .get_wallet_summary(ConfirmationsPolicy::MIN)
+            .unwrap()
+            .map(|summary| {
+                summary
+                    .account_balances()
+                    .values()
+                    .map(|balance| balance.sapling_balance().total().into_u64())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
 
     /// The value of this wallet's notes that the wallet database records `tx` as spending.
     fn recorded_spend(&self, tx: &ZTransaction) -> u64 {
@@ -763,4 +823,199 @@ async fn a_waiting_send_re_selects_when_the_scan_frees_the_change() {
     assert_eq!(nullifiers(&second).len(), 1, "it spent the change note");
     assert_eq!(fixture.recorded_spend(&second), NOTE_VALUE - 100_000_000 - FEE_SAT);
     assert_eq!(fixture.broadcasts(), 2);
+}
+
+/// The row an own send leaves in `z_coin_tx_history`, from broadcast on (CRD ch.39 R39.8.9i, T39.8.9a).
+const SEND_AMOUNT: u64 = 100_000_000;
+
+/// T39.8.9a, default half, over a real send and scan: the unmined row is served first with block
+/// fields 0 and the final amounts; the block that mines it moves the same row (same internal id, same
+/// amounts) to its position, and the scan leaves exactly one received note for the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn load_page_unmined_row_keeps_id_and_amounts_after_mining() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+
+    let unmined_page = fixture.history_page(true);
+    assert_eq!(unmined_page.total, 2, "the receipt of the note and the send");
+    let unmined = unmined_page.transactions[0].clone();
+    assert_eq!(
+        (unmined.block_height, unmined.timestamp, unmined.confirmations),
+        (0, 0, 0)
+    );
+    assert_eq!(unmined.tx_hash, tx.txid().to_string());
+    assert_eq!(fixture.received_notes_of(&tx).len(), 1, "the change is recorded once");
+    // the first row of the page is the receipt of the funding note, now second
+    assert_eq!(unmined_page.transactions[1].block_height, u64::from(NOTES_HEIGHT));
+
+    fixture.scan_block_containing(&tx, 12);
+    assert!(fixture.history().transaction_is_scanned(tx.txid().as_ref()).unwrap());
+    let mined_page = fixture.history_page(true);
+    assert_eq!(mined_page.total, 2, "no second row appears for the mined transaction");
+    let mined = &mined_page.transactions[0];
+    assert_eq!(mined.internal_id, unmined.internal_id);
+    assert_eq!(mined.tx_hash, unmined.tx_hash);
+    assert_eq!(mined.spent_by_me, unmined.spent_by_me);
+    assert_eq!(mined.received_by_me, unmined.received_by_me);
+    assert_eq!(mined.my_balance_change, unmined.my_balance_change);
+    assert_eq!(mined.block_height, 12);
+    assert_ne!(mined.timestamp, 0);
+    assert!(mined.confirmations >= 1);
+    let notes = fixture.received_notes_of(&tx);
+    assert_eq!(
+        notes.len(),
+        1,
+        "the scan wrote the change over the recorded note, not next to it"
+    );
+    assert_eq!(notes[0].1 as u64, change);
+    assert!(
+        notes[0].2 && notes[0].3,
+        "the scanned note has its nullifier and tree position"
+    );
+}
+
+/// T39.8.9d: for a send of `A` with fee `F` from one note of value `V > A + F` the only row ever served
+/// reports `spent = V`, `received = V - A - F` and a change of `-(A + F)`, never `-V`, before and after
+/// mining.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn own_send_amounts_are_net_of_change() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+
+    let check = |page: &ZCoinTxHistoryPage| {
+        let row = &page.transactions[0];
+        assert_eq!(row.tx_hash, tx.txid().to_string());
+        assert_eq!(row.spent_by_me, sat(NOTE_VALUE));
+        assert_eq!(row.received_by_me, sat(NOTE_VALUE - SEND_AMOUNT - FEE_SAT));
+        assert_eq!(row.my_balance_change, -sat(SEND_AMOUNT + FEE_SAT));
+        for served in &page.transactions {
+            assert_ne!(
+                served.my_balance_change,
+                -sat(NOTE_VALUE),
+                "the whole note is never the loss"
+            );
+        }
+    };
+    check(&fixture.history_page(true));
+    // With the switch off the row appears only once the block is scanned, with the same amounts.
+    assert_eq!(
+        fixture.history_page(false).total,
+        1,
+        "only the receipt of the funding note"
+    );
+    fixture.scan_block_containing(&tx, 12);
+    check(&fixture.history_page(true));
+    let parity = fixture.history_page(false);
+    assert_eq!(parity.total, 2);
+    check(&parity);
+}
+
+/// The change a send records at broadcast is not a spendable note until its block is scanned
+/// (R39.8.0q, R39.8.9i (d)): note selection cannot offer it, and it has neither a nullifier nor a
+/// tree position.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_change_is_not_spendable_before_scan() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+    assert_eq!(
+        fixture.received_notes_of(&tx),
+        vec![(1, change as i64, false, false)],
+        "the change is recorded, without a nullifier or a position in the tree"
+    );
+
+    // Neither the spent note nor the recorded change is offered, however small the request.
+    let err = fixture
+        .build(10_000)
+        .await
+        .expect_err("the only unspent value is the unmined change");
+    assert!(
+        matches!(err.get_inner(), GenTxError::BalanceLockedByUnconfirmedTransaction { available, .. } if *available == sat(0)),
+        "nothing is available, so the change was not selectable: {err:?}"
+    );
+
+    // Once the block is scanned the change is a real note and is spent by the next build.
+    fixture.scan_block_containing(&tx, 12);
+    let (next, _) = fixture
+        .build(10_000_000)
+        .await
+        .expect("the scanned change is spendable");
+    assert!(nullifiers(&next).is_disjoint(&nullifiers(&tx)));
+}
+
+/// The change is one amount, never two: the wallet's scanned-notes figure leaves the recorded change
+/// out, so the pending-receipt amount that reports it is not added to a second copy of it
+/// (R39.8.0ag, R39.8.0ah, R39.8.9i (d)).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recorded_change_is_not_double_counted_in_balance() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    assert_eq!(fixture.wallet_balance(), NOTE_VALUE);
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let change = NOTE_VALUE - SEND_AMOUNT - FEE_SAT;
+
+    // The wallet database's own summary does count the recorded change; the scanned-notes figure
+    // must not.
+    assert_eq!(fixture.raw_summary_total(), change);
+    assert_eq!(fixture.wallet_balance(), 0);
+
+    // The change reaches the caller once, as the pending receipt the mempool poll reports.
+    let output_index = fixture.received_notes_of(&tx)[0].0;
+    fixture
+        .coin
+        .z_fields
+        .pending_receipts
+        .lock()
+        .unwrap()
+        .insert((*tx.txid().as_ref(), output_index), change);
+    let balance = fixture.coin.my_balance().compat().await.unwrap();
+    assert_eq!(balance.spendable, BigDecimal::from(0));
+    assert_eq!(balance.unspendable, sat(change));
+
+    // After the scan it is a scanned note and no longer pending.
+    fixture.scan_block_containing(&tx, 12);
+    fixture.coin.z_fields.pending_receipts.lock().unwrap().clear();
+    assert_eq!(fixture.wallet_balance(), change);
+    let balance = fixture.coin.my_balance().compat().await.unwrap();
+    assert_eq!(
+        (balance.spendable, balance.unspendable),
+        (sat(change), BigDecimal::from(0))
+    );
+}
+
+/// An unmined send that expires leaves nothing behind: its row is no longer served and its change is
+/// not in the balance, while the note it spent is spendable again (R39.8.9i (e), R39.8.0ar).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_unmined_send_leaves_no_row_and_no_change_in_the_balance() {
+    let Some(mut fixture) = LightCoinFixture::new() else {
+        return;
+    };
+    let tx = fixture.send(SEND_AMOUNT).await.unwrap();
+    let expiry: u32 = tx.expiry_height().into();
+
+    fixture.advance_empty_blocks_to(expiry - 1);
+    assert_eq!(
+        fixture.history_page(true).total,
+        2,
+        "still served while it can be mined"
+    );
+    assert_eq!(fixture.wallet_balance(), 0);
+
+    fixture.advance_empty_blocks_to(expiry);
+    let page = fixture.history_page(true);
+    assert_eq!(page.total, 1, "only the receipt of the funding note remains");
+    assert_ne!(page.transactions[0].tx_hash, tx.txid().to_string());
+    assert_eq!(
+        fixture.wallet_balance(),
+        NOTE_VALUE,
+        "the spent note is back, the change is gone"
+    );
 }

@@ -49,6 +49,10 @@ pub struct ListTransactionsItem {
     pub blockhash: H256Json,
     #[serde(default)]
     pub blockindex: u64,
+    /// Height of the block that holds the transaction; absent for an unconfirmed transaction and
+    /// for a daemon that does not report it.
+    #[serde(default)]
+    pub blockheight: Option<u64>,
     #[serde(default)]
     pub txid: H256Json,
     pub timereceived: u64,
@@ -57,6 +61,11 @@ pub struct ListTransactionsItem {
 }
 
 impl ListTransactionsItem {
+    /// The block height of the listed transaction, or 0 (the "unconfirmed or unknown" value of
+    /// a history row, which makes the history loop look the real height up) when the daemon
+    /// does not report one.
+    pub fn block_height(&self) -> u64 { self.blockheight.unwrap_or(0) }
+
     /// Checks if the transaction is conflicting.
     /// It means the transaction has conflicts or has negative confirmations.
     pub fn is_conflicting(&self) -> bool { self.confirmations < 0 || !self.walletconflicts.is_empty() }

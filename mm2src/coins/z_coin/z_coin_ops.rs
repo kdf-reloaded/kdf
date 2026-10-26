@@ -1129,18 +1129,51 @@ pub(crate) fn record_sent_in_wallet_db(
         .or_mm_err(|| RecordSentTxErr::ScanRequired)?;
     let fee_amount = Amount::from_u64(fee_sat).map_to_mm(|_| RecordSentTxErr::InvalidFeeAmount(fee_sat))?;
 
-    // No outputs are declared. The only wallet-internal output we create is change, which
-    // cannot be spent until mined regardless, is already surfaced as a pending mempool
-    // receipt, and is recorded for real when the block is scanned. Declaring none keeps
-    // this write to the part that is load-bearing: marking the spent nullifiers, which
-    // `select_spendable_notes` then excludes on its own.
+    // The outputs of this transaction that the wallet itself receives -- the change, and any payment
+    // to its own address -- are declared, so the wallet database holds them as this transaction's
+    // received notes from the moment it is broadcast (R39.8.9i (d)). The history row of the unmined
+    // transaction then carries the same `received_by_me` as the row of the mined one (R39.8.9g),
+    // instead of reporting the whole spent note as the loss.
+    //
+    // Declaring them neither spends nor counts them early. They belong to a transaction without a
+    // mined height, so note selection cannot offer them (it requires a mined note under the anchor),
+    // and `ZCoinShieldedHistory::balance` leaves the notes of an unmined transaction out, which keeps
+    // them in the pending-receipt amount alone (R39.8.0q, R39.8.0af--R39.8.0ah). When the block is
+    // scanned the scanner writes the same (transaction, output index) note again, so there is one
+    // received note per output.
+    let ufvks = wallet_db
+        .get_unified_full_viewing_keys()
+        .map_to_mm(|e| RecordSentTxErr::ShieldedWalletDb(e.to_string()))?;
+    let decrypted =
+        zcash_client_backend::decrypt_transaction(&ZcoinDecryptionParams::new(params.clone()), None, None, tx, &ufvks);
+    let mut own_outputs = Vec::new();
+    for output in decrypted.sapling_outputs() {
+        // `Outgoing` is an output recovered with the outgoing viewing key: a payment to someone else.
+        if !matches!(
+            output.transfer_type(),
+            zcash_client_backend::TransferType::Incoming | zcash_client_backend::TransferType::AccountInternal
+        ) {
+            continue;
+        }
+        own_outputs.push(zcash_client_backend::data_api::SentTransactionOutput::from_parts(
+            output.index(),
+            zcash_client_backend::wallet::Recipient::InternalShielded {
+                receiving_account: *output.account(),
+                external_address: None,
+                note: Box::new(zcash_client_backend::wallet::Note::Sapling(output.note().clone())),
+            },
+            output.note_value(),
+            Some(output.memo().clone()),
+        ));
+    }
+
     wallet_db
         .store_transactions_to_be_sent(&[SentTransaction::new(
             tx,
             time::OffsetDateTime::now_utc(),
             target_height,
             account_id,
-            &[],
+            &own_outputs,
             fee_amount,
             &[],
         )])

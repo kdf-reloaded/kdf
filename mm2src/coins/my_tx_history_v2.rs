@@ -522,6 +522,13 @@ pub struct ZCoinTxHistoryResponse {
     paging_options: PagingOptionsEnum<i64>,
 }
 
+/// CRD ch.39 R39.8.9i (f): the `MM2.json` boolean `shielded_history_unmined_sends`, default `true`.
+/// Only an explicit JSON `false` turns the unmined own sends of `z_coin_tx_history` off.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn shielded_history_unmined_sends_enabled(ctx: &MmArc) -> bool {
+    ctx.conf["shielded_history_unmined_sends"].as_bool() != Some(false)
+}
+
 /// `z_coin_tx_history` handler backed by the initialized shielded wallet database (R39.8).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn z_coin_tx_history_rpc(
@@ -545,6 +552,7 @@ pub async fn z_coin_tx_history_rpc(
                     current_block,
                     &request.paging_options,
                     request.limit,
+                    shielded_history_unmined_sends_enabled(&ctx),
                 )
                 .map_err(|e| MmError::new(MyTxHistoryErrorV2::StorageError(e)))?;
             Ok(ZCoinTxHistoryResponse {
@@ -575,7 +583,25 @@ pub async fn my_tx_history_v2_rpc(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_coin_tx_history_tests {
     use super::*;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
     use std::num::NonZeroUsize;
+
+    /// CRD ch.39 R39.8.9i (f): on unless the JSON value is `false`.
+    #[test]
+    fn shielded_history_unmined_sends_defaults_true_only_json_false_disables() {
+        for (conf, enabled) in [
+            (json!({}), true),
+            (json!({ "shielded_history_unmined_sends": true }), true),
+            (json!({ "shielded_history_unmined_sends": null }), true),
+            (json!({ "shielded_history_unmined_sends": "false" }), true),
+            (json!({ "shielded_history_unmined_sends": 0 }), true),
+            (json!({ "shielded_history_unmined_sends": false }), false),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf.clone()).into_mm_arc();
+            assert_eq!(shielded_history_unmined_sends_enabled(&ctx), enabled, "{conf}");
+        }
+    }
 
     fn tx_details(id: u8, block_height: u64) -> TransactionDetails {
         TransactionDetails {
