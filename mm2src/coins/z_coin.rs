@@ -692,9 +692,9 @@ pub(crate) struct InFlightSpend {
     pub(crate) expiry_height: u32,
 }
 
-/// How `send_outputs` paces its waits. The field exists for test control: production installs the
-/// historical values (the literals `send_outputs` used before this field existed: a 300 s in-flight
-/// wait retried every 10 s, and a 4000 s confirmation wait polled every 10 s), through
+/// How `send_outputs` paces its waits. The field exists for test control: production installs
+/// a 600 s in-flight wait retried every 15 s (aligned with the reference's budget) and a 4000 s
+/// confirmation wait polled every 10 s, through
 /// [`SendPacing::default`], and tests shorten them so the bounded in-flight wait (R39.8.0at) can be
 /// exercised in milliseconds.
 #[cfg(not(target_arch = "wasm32"))]

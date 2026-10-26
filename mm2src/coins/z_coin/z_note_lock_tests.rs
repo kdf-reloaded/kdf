@@ -483,13 +483,14 @@ fn insufficient(err: &GenTxError) -> Option<&BigDecimal> {
 
 fn sat(value: u64) -> BigDecimal { big_decimal_from_sat_unsigned(value, 8) }
 
-/// Guards the pacing production runs with: the values `send_outputs` used before they became a field.
-/// The builder installs `SendPacing::default()`, so a change here is a change to production waits.
+/// Guards the pacing production runs with: the in-flight budget is 600 s with 15 s retries, aligned
+/// with the reference's budget; the confirmation values are unchanged. The builder installs
+/// `SendPacing::default()`, so a change here is a change to production waits.
 #[test]
-fn production_send_pacing_is_the_historical_one() {
+fn production_send_pacing_is_the_reference_budget() {
     let pacing = SendPacing::default();
-    assert_eq!(pacing.in_flight_wait_secs, 300);
-    assert_eq!(pacing.in_flight_retry_secs, 10.);
+    assert_eq!(pacing.in_flight_wait_secs, 600);
+    assert_eq!(pacing.in_flight_retry_secs, 15.);
     assert_eq!(pacing.confirmation_wait_secs, 4000);
     assert_eq!(pacing.confirmation_check_secs, 10);
 }

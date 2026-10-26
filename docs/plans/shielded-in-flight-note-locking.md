@@ -9,6 +9,12 @@
 > latency, not correctness, because the lock is recorded in the wallet database. Nothing here is marked
 > done by this note.
 >
+> **Wait budget aligned with the reference, 2026-10-26.** A send that must wait for an earlier
+> unmined send now waits up to 600 seconds in total with 15-second retries (was 300 and 10), matching
+> the reference's budget. Only the two `SendPacing` defaults and the test that pins them changed; the
+> rule that a send waits only while this process's in-flight total could cover the shortfall is
+> unchanged. Provenance: Spec Reader triage 2026-10-26.
+>
 > **T39.8.0h harness built, 2026-10-25.** A test harness now drives a real Light-mode `ZCoin` over
 > a real shielded wallet database in a temporary directory, with the lightwalletd backend replaced by
 > the scripted transport the lightwalletd tests already had (`mm2src/coins/z_coin/z_note_lock_tests.rs`).

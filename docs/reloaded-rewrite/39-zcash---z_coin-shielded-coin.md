@@ -1840,6 +1840,12 @@ failure rather than blocking indefinitely, and a request that cannot be funded
 even with every note unexcluded shall fail immediately with an
 insufficient-balance error rather than consuming the wait budget.
 
+> **As built (2026-10-26).** The wait budget is 600 seconds in total, with a
+> re-selection attempt every 15 seconds, aligned with the reference's budget
+> (Spec Reader triage 2026-10-26). It was 300 and 10 seconds before. The rule
+> that a send waits only while this process's in-flight total could cover the
+> shortfall is unchanged.
+
 > **Code-quality finding (informative).** The deployed upstream implementation
 > does not satisfy R39.8.0at either: its exclusive section covers construction,
 > broadcast and recording, but the notes are chosen just before that section is
