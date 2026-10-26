@@ -62,11 +62,28 @@ fn eth_coin_for_test_with_netid_and_decimals(
     netid: u16,
     decimals: u8,
 ) -> (MmArc, EthCoin) {
+    let web3 = crate::eth::alloy_compat::build_provider(urls, vec![]).unwrap();
+    let web3_instances = vec![Web3Instance {
+        web3: web3.clone(),
+        is_parity: true,
+    }];
+    eth_coin_for_test_with_providers(coin_type, web3, web3_instances, fallback_swap_contract, netid, decimals)
+}
+
+/// The coin of the tests above over ready-made providers: `web3` is the failover provider every request goes
+/// through, `web3_instances` are the single-node providers of nonce gathering and the signed broadcast.
+pub(super) fn eth_coin_for_test_with_providers(
+    coin_type: EthCoinType,
+    web3: crate::eth::alloy_compat::KdfProvider,
+    web3_instances: Vec<Web3Instance>,
+    fallback_swap_contract: Option<Address>,
+    netid: u16,
+    decimals: u8,
+) -> (MmArc, EthCoin) {
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(urls, vec![]).unwrap();
     let conf = json!({
         "netid": netid,
         "coins":[
@@ -95,10 +112,7 @@ fn eth_coin_for_test_with_netid_and_decimals(
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract,
         ticker,
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
+        web3_instances,
         web3,
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
@@ -2704,21 +2718,20 @@ mod scripted_node_ports {
         block_on(wait_for_log(&ctx, 1.1, |line| line.contains("get_addr_nonce…"))).unwrap();
     }
 
-    /// `get_addr_nonce` asks every configured node and only answers once they agree.
+    /// `get_addr_nonce` asks every configured node and answers with the highest nonce (CRD ch.35 R35.1.12).
     ///
     /// The original (`#[ignore]`d, Ropsten via a hosted project key, a gas station that is gone, and a
     /// real broadcast) only logged the nonce afterwards. What it was after, several URLs of which one
-    /// is dead and the rest agree, is checked here: one node lags and then catches up, one never
-    /// answers, and the result must be the agreed value, not the lagging or the leading one.
+    /// is dead, is checked here: one node lags and one never answers. The lagging node must not hold the
+    /// answer: the highest value wins in the first round.
     #[test]
     fn test_nonce_several_urls() {
         let lagging_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let lag = lagging_calls.clone();
         let behind = spawn(move |method, _| match method {
             "eth_getTransactionCount" => {
-                // First query: still at 4. Later queries: caught up to 5.
-                let n = lag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                json!(if n == 0 { "0x4" } else { "0x5" })
+                lag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                json!("0x4")
             },
             other => panic!("the scripted node does not serve `{}`", other),
         });
@@ -2741,9 +2754,10 @@ mod scripted_node_ports {
         let key = EthKeyPair::from_secret_slice(&hex::decode(TEST_KEY).unwrap()).unwrap();
         let nonce = get_addr_nonce(key.address(), instances).wait().unwrap();
         assert_eq!(nonce, U256::from(5u64));
-        assert!(
-            lagging_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-            "the disagreement between the nodes must have forced a second round"
+        assert_eq!(
+            lagging_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the lagging node is asked once; its disagreement forces no second round"
         );
     }
 }

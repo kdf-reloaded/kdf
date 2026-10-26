@@ -7,6 +7,7 @@ use hyper::body::Bytes;
 use hyper_util::client::legacy::Error as ClientError;
 use mm2_err_handle::prelude::*;
 use std::error::Error as StdError;
+use std::time::Duration;
 
 impl From<Canceled> for SlurpError {
     fn from(_: Canceled) -> Self { SlurpError::Internal("Spawned Slurp future has been canceled".to_owned()) }
@@ -77,6 +78,55 @@ pub async fn slurp_req(request: Request<Vec<u8>>) -> SlurpResult {
     Ok((status, headers, output.to_vec()))
 }
 
+/// Like [`slurp_req`], but the whole exchange (connecting, the request, the response head, the full body) is bounded
+/// by `timeout_s` seconds, and the bound is applied *inside* the future that runs on the shared runtime.
+///
+/// [`slurp_req`] hands the request to a spawned task, so dropping its future (for example when a caller's own
+/// timer wins a race) does not stop the request: a peer that accepts the connection and never answers keeps the
+/// task and the socket forever, and the shared client has no timeout of its own. Here the spawned task ends by
+/// itself when the bound elapses, which drops the request and closes the socket, and the caller gets
+/// [`SlurpError::Timeout`]. The timer is the tokio timer, which is the one that runs on the shared runtime the task
+/// is spawned on.
+pub async fn slurp_req_bounded(request: Request<Vec<u8>>, timeout_s: f64) -> SlurpResult {
+    use futures::future::{select, Either};
+    use hyper::rt::Timer as _;
+    use hyper_util::rt::TokioTimer;
+
+    let uri = request.uri().to_string();
+    let (head, body) = request.into_parts();
+    let request = Request::from_parts(head, Full::new(Bytes::from(body)));
+    let bound = Duration::from_secs_f64(timeout_s.max(0.));
+
+    let exchange_uri = uri.clone();
+    let exchange = async move {
+        let response = HYPER
+            .request(request)
+            .await
+            .map_to_mm(|e: ClientError| SlurpError::from_error(&e, exchange_uri.clone()))?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let output = response
+            .into_body()
+            .collect()
+            .await
+            .map_to_mm(|e: hyper::Error| SlurpError::from_error(&e, exchange_uri))?
+            .to_bytes();
+        Ok((status, headers, output.to_vec()))
+    };
+    let bounded = async move {
+        // The timer is created inside the spawned task, so it is registered with the runtime that polls it.
+        let timer = TokioTimer::new().sleep(bound);
+        match select(Box::pin(exchange), timer).await {
+            Either::Left((result, _)) => result,
+            Either::Right(_) => MmError::err(SlurpError::Timeout {
+                uri,
+                error: format!("no complete response within {timeout_s} s"),
+            }),
+        }
+    };
+    drive03(bounded).await?
+}
+
 /// Executes a GET request, returning the response status, headers and body.
 pub async fn slurp_url(url: &str) -> SlurpResult {
     let req = Request::builder().uri(url).body(Vec::new())?;
@@ -105,7 +155,7 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::native_http::{slurp_post_json, slurp_url};
+    use crate::native_http::{slurp_post_json, slurp_req_bounded, slurp_url};
     use crate::transport::SlurpError;
     use common::block_on;
 
@@ -155,5 +205,62 @@ mod tests {
             },
             other => panic!("unexpected error {other:?}"),
         }
+    }
+
+    /// A peer that accepts the connection and never answers: the bound is applied inside the spawned task, so the
+    /// call returns a timeout within the bound and the task has gone (the peer sees its connection closed) too.
+    #[test]
+    fn test_slurp_req_bounded_ends_the_spawned_request_on_a_silent_peer() {
+        use std::io::Read;
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request); // the request, never answered
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            // Without the spawned task ending, nothing would ever close the socket and this read would time out.
+            stream.read(&mut request).map_err(|e| e.kind())
+        });
+
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/x"))
+            .body(b"{}".to_vec())
+            .unwrap();
+        let started = Instant::now();
+        let err = block_on(slurp_req_bounded(request, 0.5)).unwrap_err();
+        let elapsed = started.elapsed();
+        match err.into_inner() {
+            SlurpError::Timeout { uri, error } => {
+                assert!(uri.contains(&port.to_string()));
+                assert!(error.contains("0.5"), "{error}");
+            },
+            other => panic!("unexpected error {other:?}"),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(400) && elapsed < Duration::from_secs(3),
+            "{elapsed:?}"
+        );
+        assert_eq!(
+            peer.join().unwrap(),
+            Ok(0),
+            "the peer must see EOF once the bound is over"
+        );
+    }
+
+    #[test]
+    fn test_slurp_req_bounded_returns_the_answer_within_the_bound() {
+        let port = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{port}/x"))
+            .body(b"{}".to_vec())
+            .unwrap();
+        let (status, _headers, body) = block_on(slurp_req_bounded(request, 5.)).unwrap();
+        assert_eq!(status.as_u16(), 200);
+        assert_eq!(body, b"ok");
     }
 }

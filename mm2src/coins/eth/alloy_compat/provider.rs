@@ -16,6 +16,8 @@
 //! - [`build_provider`] — convenience constructor that takes the same
 //!   arguments as the legacy `Web3Transport::with_event_handlers` and
 //!   returns a ready-to-use [`KdfProvider`].
+//! - [`build_direct_provider`] — a provider for one node addressed on its own.
+//! - [`provider_with_own_node_order`] — a copy of a provider's node order.
 //!
 //! # Invariants
 //!
@@ -28,7 +30,7 @@
 //!   alloy-internal latency hints, not wire bytes.
 
 use alloy::network::Ethereum;
-use alloy::providers::RootProvider;
+use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 
 use crate::eth::alloy_compat::transport::AlloyTransport;
@@ -41,13 +43,39 @@ use crate::RpcTransportEventHandlerShared;
 pub type KdfProvider = RootProvider<Ethereum>;
 
 /// Build a [`KdfProvider`] from a list of equivalent RPC URLs and a
-/// list of metrics handlers. Mirrors
-/// `Web3Transport::with_event_handlers` followed by `Web3::new`.
+/// list of metrics handlers. The provider fails over between the URLs
+/// (CRD ch.35 §35.1.F).
 pub fn build_provider(
     urls: Vec<String>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
 ) -> Result<KdfProvider, String> {
     let transport = AlloyTransport::with_event_handlers(urls, event_handlers)?;
-    let client = RpcClient::new(transport, false);
-    Ok(RootProvider::new(client))
+    Ok(provider_from_transport(transport))
+}
+
+/// Build a [`KdfProvider`] for one node that is addressed on its own: the multi-node logic (nonce gathering and
+/// the signed-transaction broadcast of CRD ch.35 R35.1.12) lives in the caller, so the request gets the
+/// lower-layer bound instead of the failover cutoff.
+pub fn build_direct_provider(
+    url: String,
+    event_handlers: Vec<RpcTransportEventHandlerShared>,
+) -> Result<KdfProvider, String> {
+    let transport = AlloyTransport::direct(url, event_handlers)?;
+    Ok(provider_from_transport(transport))
+}
+
+/// A provider over the same nodes as `provider` that starts from `provider`'s current node order and keeps its
+/// own order afterwards (CRD ch.35 R35.1.7 / D35.8 (i): a token that starts from a copy). `None` when the
+/// provider is not backed by an [`AlloyTransport`].
+pub fn provider_with_own_node_order(provider: &KdfProvider) -> Option<KdfProvider> {
+    let transport = provider
+        .client()
+        .transport()
+        .as_any()
+        .downcast_ref::<AlloyTransport>()?;
+    Some(provider_from_transport(transport.with_own_order()))
+}
+
+pub(crate) fn provider_from_transport(transport: AlloyTransport) -> KdfProvider {
+    RootProvider::new(RpcClient::new(transport, false))
 }

@@ -5,6 +5,7 @@ use super::*;
 // LP-17: bring alloy `Provider` trait into scope so `RootProvider`'s
 // inherent + trait methods (`client()`, `get_block_number()`, etc.) are
 // callable from the helpers below.
+use crate::eth::node_url::{host_only, scrub_node_url};
 use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
 use crate::{CoinWithDerivationMethod, CryptoCtx, KeyPairPolicy};
 use alloy::providers::Provider as _;
@@ -12,16 +13,40 @@ use crypto::{Bip44DerivationPath, HDPathToCoin};
 
 #[cfg_attr(test, mockable)]
 pub async fn make_gas_station_request(url: &str) -> GasStationResult {
-    let resp = slurp_url(url).await.mm_err(Into::into)?;
+    let resp = slurp_url(url)
+        .await
+        .mm_err(|e| gas_station_error_host_only(GasStationReqErr::from(e), url))?;
     if resp.0 != StatusCode::OK {
         let error = format!("Gas price request failed with status code {}", resp.0);
         return MmError::err(GasStationReqErr::Transport {
-            uri: url.to_owned(),
+            uri: host_only(url),
             error,
         });
     }
     let result: GasStationData = json::from_slice(&resp.2)?;
     Ok(result)
+}
+
+/// Makes a gas-station failure name the station host-only (CRD R35.1.14): the `uri` field and every copy of the
+/// URL embedded in a lower-layer text are replaced by `scheme://host[:port]`.
+pub(crate) fn gas_station_error_host_only(err: GasStationReqErr, url: &str) -> GasStationReqErr {
+    match err {
+        GasStationReqErr::Transport { error, .. } => GasStationReqErr::Transport {
+            uri: host_only(url),
+            error: scrub_node_url(&error, url),
+        },
+        GasStationReqErr::InvalidResponse(error) => GasStationReqErr::InvalidResponse(scrub_node_url(&error, url)),
+        GasStationReqErr::Internal(error) => GasStationReqErr::Internal(scrub_node_url(&error, url)),
+    }
+}
+
+/// The log line for a failed gas-station request; the station is named host-only (CRD R35.1.14).
+pub(crate) fn gas_station_failed_text(error: &dyn fmt::Display, url: &str) -> String {
+    format!(
+        "Error {} on request to gas station url {}",
+        scrub_node_url(&error.to_string(), url),
+        host_only(url)
+    )
 }
 
 #[cfg_attr(test, mockable)]
@@ -1223,11 +1248,9 @@ pub async fn sign_and_send_transaction_impl(
         })
         .await;
     status.status(tags!(), "get_addr_nonce…");
-    let nonce = try_tx_s!(
-        get_addr_nonce(coin.my_address, coin.web3_instances.clone())
-            .compat()
-            .await
-    );
+    let pending =
+        try_tx_s!(pending_nonce_from_nodes(coin.my_address, &coin.web3_instances, NONCE_ROUND_INTERVAL_S).await);
+    let nonce = pending.nonce;
     // CRD R35.6.6 / R35.6A.17: the stored policy decides both the pricing and the serialized form.
     let policy = coin.swap_gas_fee_policy();
     let fee = if policy == SwapGasFeePolicy::Legacy {
@@ -1251,24 +1274,15 @@ pub async fn sign_and_send_transaction_impl(
     let bytes = rlp::encode(&signed).to_vec();
     status.status(tags!(), "send_raw_transaction…");
 
-    // LP-17: alloy `Provider::send_raw_transaction` replaces
-    // `web3.eth().send_raw_transaction`. Wire-level method
-    // (`eth_sendRawTransaction`) and the broadcast bytes are
-    // identical.
-    {
-        use crate::eth::alloy_compat::assert_send_future;
-        let provider = coin.alloy_provider();
-        // Discard the returned `PendingTransactionBuilder`: the
-        // legacy `web3.eth().send_raw_transaction` call only
-        // confirmed broadcast acceptance; inclusion polling happens
-        // separately in the `get_addr_nonce` loop below.
-        try_tx_s!(
-            assert_send_future(async move { provider.send_raw_transaction(&bytes).await.map(|_pending| ()) })
-                .await
-                .map_err(|e| ERRL!("{}", e)),
-            signed
-        );
-    }
+    // CRD ch.35 R35.1.12 step 2: the transaction goes to the nodes that reported the highest pending nonce,
+    // concurrently, instead of through the failover path. Wire-level method (`eth_sendRawTransaction`) and the
+    // broadcast bytes are unchanged.
+    try_tx_s!(
+        broadcast_signed_tx(&pending.nodes, &bytes)
+            .await
+            .map_err(|e| ERRL!("{}", e)),
+        signed
+    );
 
     status.status(tags!(), "get_addr_nonce…");
     loop {
@@ -1414,7 +1428,7 @@ impl EthCoin {
             gas_station_url: self.gas_station_url.clone(),
             gas_station_decimals: self.gas_station_decimals,
             gas_station_policy: self.gas_station_policy.clone(),
-            web3: self.web3.clone(),
+            web3: token_node_provider(&self.web3),
             web3_instances: self.web3_instances.clone(),
             history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
             ctx: self.ctx.clone(),
@@ -3110,7 +3124,7 @@ impl EthCoin {
                     {
                         Ok(from_station) => Some(increase_by_percent(from_station, GAS_PRICE_PERCENT)),
                         Err(e) => {
-                            error!("Error {} on request to gas station url {}", e, url);
+                            error!("{}", gas_station_failed_text(&e, url));
                             None
                         },
                     }
@@ -3579,69 +3593,150 @@ pub fn checksum_address(addr: &str) -> String {
 /// The input must be 0x prefixed hex string
 pub fn is_valid_checksum_addr(addr: &str) -> bool { addr == checksum_address(addr) }
 
-/// Requests the nonce from all available nodes and checks that returned results equal.
-/// Nodes might need some time to sync and there can be other coins that use same nodes in different order.
-/// We need to be sure that nonce is updated on all of them before and after transaction is sent.
+/// Switch for the node order of a token (CRD ch.35 R35.1.7 / D35.8 (i)).
+///
+/// `true`: a token shares its platform's live node order, so a node that answered a platform request is
+/// preferred by the platform's tokens too (the provider clone shares the transport). `false`: a token starts from
+/// a copy of the platform's then-current order and evolves it on its own afterwards.
+const TOKEN_SHARES_PLATFORM_NODE_ORDER: bool = true;
+
+/// The provider a token coin uses, derived from its platform's provider per [`TOKEN_SHARES_PLATFORM_NODE_ORDER`].
+fn token_node_provider(platform: &super::alloy_compat::KdfProvider) -> super::alloy_compat::KdfProvider {
+    if TOKEN_SHARES_PLATFORM_NODE_ORDER {
+        platform.clone()
+    } else {
+        // A provider that is not backed by the failover transport has no order to copy and is shared as is.
+        super::alloy_compat::provider_with_own_node_order(platform).unwrap_or_else(|| platform.clone())
+    }
+}
+
+/// The seconds between two rounds of the pending-nonce request while no node answers (CRD ch.35 R35.1.12).
+const NONCE_ROUND_INTERVAL_S: f64 = 1.;
+
+/// The highest pending nonce the nodes reported and the nodes that reported it (CRD ch.35 R35.1.12 step 1).
+pub(crate) struct PendingNonce {
+    pub(crate) nonce: U256,
+    /// Every node whose answer equalled `nonce`; never empty.
+    pub(crate) nodes: Vec<Web3Instance>,
+}
+
+/// Requests the pending nonce of `addr` from every node concurrently and returns the highest one together with
+/// the nodes that reported it (CRD ch.35 R35.1.12 step 1). A node that fails is logged and ignored. When no
+/// node answers, the round is repeated after `round_interval_s`, up to five more times, before the request
+/// fails. Nodes that lag behind do not hold the request: the highest nonce wins.
+pub(crate) async fn pending_nonce_from_nodes(
+    addr: Address,
+    web3s: &[Web3Instance],
+    round_interval_s: f64,
+) -> Result<PendingNonce, String> {
+    let mut errors: u32 = 0;
+    loop {
+        let futures: Vec<_> = web3s
+            .iter()
+            .map(|w| {
+                let provider = w.web3.clone();
+                let is_parity = w.is_parity;
+                use crate::eth::alloy_compat::assert_send_future;
+                assert_send_future(async move {
+                    // LP-17: alloy raw RPC for parity_nextNonce / eth_getTransactionCount.
+                    if is_parity {
+                        provider
+                            .client()
+                            .request::<_, U256>("parity_nextNonce", (addr,))
+                            .await
+                            .map_err(|e| e.to_string())
+                    } else {
+                        provider
+                            .client()
+                            .request::<_, U256>("eth_getTransactionCount", (addr, BlockNumber::Pending))
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                })
+            })
+            .collect();
+
+        let mut best: Option<PendingNonce> = None;
+        for (web3, answer) in web3s.iter().zip(join_all(futures).await) {
+            match answer {
+                Ok(n) => match best.as_mut() {
+                    Some(b) if n == b.nonce => b.nodes.push(web3.clone()),
+                    Some(b) if n < b.nonce => (),
+                    _ => {
+                        best = Some(PendingNonce {
+                            nonce: n,
+                            nodes: vec![web3.clone()],
+                        })
+                    },
+                },
+                Err(e) => log!("Error " (e) " when getting nonce for addr " [addr]),
+            }
+        }
+        if let Some(best) = best {
+            return Ok(best);
+        }
+        // all requests errored
+        errors += 1;
+        if errors > 5 {
+            return ERR!("Couldn't get nonce after 5 errored attempts, aborting");
+        }
+        Timer::sleep(round_interval_s).await
+    }
+}
+
+/// Requests the pending nonce from all available nodes and returns the highest one (CRD ch.35 R35.1.12).
+/// Nodes might need some time to sync and there can be other coins that use same nodes in different order;
+/// a lagging node is outvoted instead of being waited for.
 #[cfg_attr(test, mockable)]
 pub fn get_addr_nonce(addr: Address, web3s: Vec<Web3Instance>) -> Box<dyn Future<Item = U256, Error = String> + Send> {
     let fut = async move {
-        let mut errors: u32 = 0;
-        loop {
-            let futures: Vec<_> = web3s
-                .iter()
-                .map(|w| {
-                    let provider = w.web3.clone();
-                    let is_parity = w.is_parity;
-                    use crate::eth::alloy_compat::assert_send_future;
-                    assert_send_future(async move {
-                        // LP-17: alloy raw RPC for parity_nextNonce / eth_getTransactionCount.
-                        if is_parity {
-                            provider
-                                .client()
-                                .request::<_, U256>("parity_nextNonce", (addr,))
-                                .await
-                                .map_err(|e| e.to_string())
-                        } else {
-                            provider
-                                .client()
-                                .request::<_, U256>("eth_getTransactionCount", (addr, BlockNumber::Pending))
-                                .await
-                                .map_err(|e| e.to_string())
-                        }
-                    })
-                })
-                .collect();
-
-            let nonces: Vec<_> = join_all(futures)
-                .await
-                .into_iter()
-                .filter_map(|nonce_res| match nonce_res {
-                    Ok(n) => Some(n),
-                    Err(e) => {
-                        log!("Error " (e) " when getting nonce for addr " [addr]);
-                        None
-                    },
-                })
-                .collect();
-            if nonces.is_empty() {
-                // all requests errored
-                errors += 1;
-                if errors > 5 {
-                    return ERR!("Couldn't get nonce after 5 errored attempts, aborting");
-                }
-            } else {
-                let max = nonces.iter().max().unwrap();
-                let min = nonces.iter().min().unwrap();
-                if max == min {
-                    return Ok(*max);
-                } else {
-                    log!("Max nonce " (max) " != " (min) " min nonce");
-                }
-            }
-            Timer::sleep(1.).await
-        }
+        pending_nonce_from_nodes(addr, &web3s, NONCE_ROUND_INTERVAL_S)
+            .await
+            .map(|pending| pending.nonce)
     };
     Box::new(Box::pin(fut).compat())
+}
+
+/// Switch for the signed-transaction broadcast (CRD ch.35 R35.1.12 step 2, D35.8 (v)).
+///
+/// `true`: the transaction goes concurrently to every node that reported the highest pending nonce; the first
+/// acceptance wins. `false` is the maintainer's alternative, "a self-signed send leaves rotation and cutoff
+/// out: one node, one bound": the transaction goes to the first node of that set only.
+const BROADCAST_TO_EVERY_HIGHEST_NONCE_NODE: bool = true;
+
+/// Broadcasts the signed transaction `raw` to `nodes` (CRD ch.35 R35.1.12 step 2), concurrently. Each node is
+/// asked through its own single-node provider, so the request has its own per-request bound and neither the
+/// cutoff nor the rotation of the failover path applies. The broadcast succeeds as soon as one node accepts and
+/// fails only when all of them fail, with the last failure's text. A node that answers "already known" or
+/// "nonce too low" because a sibling took the transaction first does not fail the broadcast.
+pub(crate) async fn broadcast_signed_tx(nodes: &[Web3Instance], raw: &[u8]) -> Result<(), String> {
+    use crate::eth::alloy_compat::assert_send_future;
+
+    let nodes = if BROADCAST_TO_EVERY_HIGHEST_NONCE_NODE {
+        nodes
+    } else {
+        &nodes[..nodes.len().min(1)]
+    };
+    if nodes.is_empty() {
+        return ERR!("No node to broadcast the transaction to");
+    }
+    let sends = nodes.iter().map(|node| {
+        let provider = node.web3.clone();
+        let raw = raw.to_vec();
+        // `select_ok` needs `Unpin` futures.
+        Box::pin(assert_send_future(async move {
+            // The returned `PendingTransactionBuilder` is discarded: broadcast acceptance is all that is
+            // confirmed here; inclusion is awaited by the nonce-increase wait of the caller.
+            provider
+                .send_raw_transaction(&raw)
+                .await
+                .map(|_pending| ())
+                .map_err(|e| e.to_string())
+        }))
+    });
+    futures::future::select_ok(sends)
+        .await
+        .map(|(accepted, _rest)| accepted)
 }
 
 /// Proportional increase: `num + (num / 100) * percent`, integer division applied first.

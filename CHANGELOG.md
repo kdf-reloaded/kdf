@@ -51,6 +51,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
+  whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
+  longer holds a request for a minute before the next node is tried. A request given up on is now
+  closed too, instead of staying open in the background for as long as the node keeps silent. More in
+  ch.35 §35.1.F.
+
+- **EVM and Tron log lines and errors name a node by scheme, host and port only.** Paths, query
+  strings and credentials, where hosted providers keep API keys, are never printed: the activation
+  probe, the per-node failure logs, the error that lists the nodes tried, and the lower-layer texts
+  they carry. When a node answers with an error, the log says so
+  (`EVM RPC <host> answered <method> with error <code>: <message>`) and the error returned to the
+  caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
+  The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
+  also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+
 - **A shielded (ARRR) send that has to wait for an earlier unmined send now waits up to 10 minutes
   instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
   waiting could free enough funds. More in
@@ -149,6 +164,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   configuration). Detail: PR #64.
 
 ### Fixed
+
+- **An EVM node that answers with an error no longer ends the request; the next configured node is
+  tried.** Before, the first node's answer was accepted even when it carried an error object, such as
+  "block range too large" or a revert, so one picky node failed the call although the others could
+  serve it. Now the nodes are tried one at a time, a refusing node counts as a failed node, and the
+  node that finally answers is tried first the next time. When every node fails, the caller gets the
+  last node's own error. More in ch.35 §35.1.F.
+
+- **A swap or withdraw on an EVM coin no longer waits for all nodes to agree on the nonce.** One
+  lagging node used to hold the transaction indefinitely. Now the highest pending nonce wins and the
+  signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
+  of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
+  by node instead. More in ch.35 §35.1.F.
 
 - **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
   Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal

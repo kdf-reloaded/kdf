@@ -14,6 +14,7 @@
 
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
+use crate::eth::node_url::host_only;
 
 use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimitV2, EthSigner,
                  SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
@@ -80,7 +81,8 @@ pub async fn tron_coin_from_conf_and_request(
     // Validate URLs eagerly so misconfiguration surfaces at activation time.
     for url in &urls {
         if http::Uri::from_str(url).is_err() {
-            return Err(format!("TRON node URL '{url}' is not a valid URI"));
+            // Never echo the configured string: it may carry an API key (CRD ch.35 R35.1.14).
+            return Err(format!("TRON node URL '{}' is not a valid URI", host_only(url)));
         }
     }
 
@@ -242,6 +244,22 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("not a valid URI"));
+    }
+
+    #[tokio::test]
+    async fn invalid_url_error_does_not_echo_the_configured_string() {
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let conf = json::json!({});
+        let req = json::json!({"urls": ["https://user:secret@bad host/APIKEY?token=X"]});
+        let err = tron_coin_from_conf_and_request(&ctx, "TRX", &conf, &req, &priv_key(), CoinProtocol::TRX {
+            network: Network::Mainnet,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("not a valid URI"), "{err}");
+        for secret in ["user", "secret", "APIKEY", "token=X", "bad host"] {
+            assert!(!err.contains(secret), "{secret} in {err}");
+        }
     }
 
     #[tokio::test]

@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::eth::eth_hd_wallet::{EthHDAccount, EthHDWallet};
+use crate::eth::node_url::{host_only, scrub_node_url};
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::HDWalletCoinStorage;
 use crate::is_wallet_only_conf;
@@ -492,8 +493,11 @@ pub(crate) async fn eth_coin_from_params_with_trezor(
 /// Probes every node with `web3_clientVersion` and returns the providers that answered.
 ///
 /// When none answers the failure is [`EthCoinBuildError::Transport`] (CRD R35.1.6): every node unresponsive is a
-/// transport failure whichever way each node failed. The per-node causes are logged, never returned, because a
-/// node URL can embed an API key.
+/// transport failure whichever way each node failed. The per-node causes are logged, never returned, and a node
+/// is named by scheme, host and port only, because a node URL can embed an API key (CRD R35.1.14).
+///
+/// The probe itself runs under the per-node cutoff of the failover path (R35.1.10). The provider kept for a node
+/// is a direct one: nonce gathering and the signed-transaction broadcast (R35.1.12) address each node on its own.
 async fn probe_eth_nodes(
     ctx: &MmArc,
     ticker: &str,
@@ -502,23 +506,31 @@ async fn probe_eth_nodes(
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let mut web3_instances = vec![];
     for url in urls.iter() {
+        let node = host_only(url);
         // LP-17: alloy provider per URL + alloy raw web3_clientVersion.
         let provider = match super::alloy_compat::build_provider(vec![url.clone()], event_handlers.clone()) {
             Ok(p) => p,
             Err(e) => {
-                log!("Failed to build alloy provider for url " (url) ", " (e));
+                log!("Failed to build alloy provider for node " (node) ", " (scrub_node_url(&e, url)));
                 continue;
             },
         };
         let version: String = match provider.client().request_noparams("web3_clientVersion").await {
             Ok(v) => v,
             Err(e) => {
-                log!("Couldn't get client version for url " (url) ", " (e));
+                log!("Couldn't get client version for node " (node) ", " (scrub_node_url(&e.to_string(), url)));
+                continue;
+            },
+        };
+        let direct = match super::alloy_compat::build_direct_provider(url.clone(), event_handlers.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                log!("Failed to build alloy provider for node " (node) ", " (scrub_node_url(&e, url)));
                 continue;
             },
         };
         web3_instances.push(Web3Instance {
-            web3: provider,
+            web3: direct,
             is_parity: version.contains("Parity") || version.contains("parity"),
         })
     }
@@ -1009,6 +1021,49 @@ mod tests {
                 eth_full_derivation_path(&conf, &path).map_err(|e| e.into_inner()),
                 Err(EthCoinBuildError::InvalidPayload(_))
             ));
+        }
+    }
+
+    /// T35.28: the activation probe names a failing node by scheme, host and port only, in its log lines and
+    /// in the error it returns.
+    #[test]
+    fn the_activation_probe_names_no_credential() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+
+        let capturing = install_log_capture();
+        let url = "http://user:secret@127.0.0.1:1/v3/APIKEY?token=X".to_owned();
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let err = common::block_on(probe_eth_nodes(&ctx, "ETH", &[url])).unwrap_err();
+        assert!(matches!(err.get_inner(), EthCoinBuildError::Transport(_)), "{err}");
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|line| line.contains("client version for node"))
+            .collect();
+        if capturing {
+            assert_eq!(lines.len(), 1, "{lines:?}");
+            assert!(lines[0].contains("http://127.0.0.1:1"), "{lines:?}");
+        }
+        for text in lines.iter().map(String::as_str).chain([err.to_string().as_str()]) {
+            for secret in ["user", "secret", "/v3/APIKEY", "APIKEY", "token=X"] {
+                assert!(!text.contains(secret), "{secret} in {text}");
+            }
+        }
+    }
+
+    /// T35.28 (`wss://` variant): until a WebSocket transport exists the URL is rejected at activation, and the
+    /// rejection names none of its userinfo, path or query.
+    #[test]
+    fn a_rejected_node_url_is_not_echoed() {
+        for url in [
+            "wss://user:secret@rpc.example.org:8546/v3/APIKEY?token=X",
+            "ftp://user:secret@rpc.example.org/v3/APIKEY?token=X",
+            "user:secret@rpc.example.org/v3/APIKEY?token=X",
+            "https://user:secret@rpc example.org/v3/APIKEY?token=X",
+        ] {
+            let err = validate_eth_node_url(url).unwrap_err().to_string();
+            for secret in ["user", "secret", "/v3/APIKEY", "APIKEY", "token=X"] {
+                assert!(!err.contains(secret), "{secret} in {err} for {url}");
+            }
         }
     }
 }

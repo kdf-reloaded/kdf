@@ -686,10 +686,17 @@ by one of several nodes can be attributed. The appended fragment is part of
 the human-readable message only; it changes no `error_type`, `error_data`
 shape or HTTP status.
 
-> **Reloaded divergence (2026-10-26).** As of this date Reloaded puts the node
-> list into random order once at activation (R35.1.7 -- parity) and probes
+> **Closed divergence (2026-10-26).** The gaps described below are closed:
+> Reloaded now follows R35.1.8 -- R35.1.12 and R35.1.14 -- R35.1.15, with the
+> D35.8 choices and the two Reloaded notes of this section. It also bounds a
+> node exchange that the cutoff abandons, so the abandoned exchange no longer
+> stays open in the background. The paragraph that follows records the
+> behavior before the fix.
+>
+> **Reloaded divergence (2026-10-26, before the fix).** Reloaded put the node
+> list into random order once at activation (R35.1.7 -- parity) and probed
 > each node with a client-version request before use (R35.1.6, the documented
-> `Transport` case). Thereafter it diverges from R35.1.8 -- R35.1.11: on every
+> `Transport` case). Thereafter it diverged from R35.1.8 -- R35.1.11: on every
 > request the nodes are tried in a **fixed** order with no rotation on
 > success; the **first success (2xx) body is accepted even when it carries a
 > JSON-RPC error object**, so a node that reverts or rejects is never failed
@@ -702,16 +709,16 @@ shape or HTTP status.
 > logs the two extremes and asks again every second without a bound, so one
 > lagging node holds the send indefinitely instead of the highest nonce
 > winning. It then broadcasts through the same fixed-order path instead of
-> concurrently to the highest-nonce nodes (step 2). These are the gaps the
-> fix for this section closes; the shuffle and the probe are already in
-> place.
+> concurrently to the highest-nonce nodes (step 2). The shuffle and the probe
+> were already in place.
 
 > **Code-quality finding (informative; source: this repository, trigger:
 > contradiction between a comment and the code it documents).** The module
 > comment of Reloaded's multi-URL EVM transport states that its error strings
 > never carry RPC URLs, while the all-failed error that module builds embeds
 > every configured URL together with that node's failure text. R35.1.14
-> resolves the contradiction in favor of the comment.
+> resolves the contradiction in favor of the comment, and the rewritten
+> module now keeps to it.
 
 ---
 
