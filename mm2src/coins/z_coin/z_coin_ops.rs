@@ -5,12 +5,11 @@ use super::*;
 /// failure). One pass costs at most a block plus a shielded-sync poll period, so
 /// this allows several attempts without outliving the swap timeouts above it.
 #[cfg(not(target_arch = "wasm32"))]
-const IN_FLIGHT_SPEND_WAIT_SECS: u64 = 300;
+const IN_FLIGHT_SPEND_WAIT_SECS: u64 = 600;
 
-/// Gap between re-selection attempts while waiting. Matches the polling cadence
-/// used elsewhere on this path.
+/// Gap between re-selection attempts while waiting.
 #[cfg(not(target_arch = "wasm32"))]
-const IN_FLIGHT_SPEND_RETRY_SECS: f64 = 10.;
+const IN_FLIGHT_SPEND_RETRY_SECS: f64 = 15.;
 
 /// How long `send_outputs` waits for its own broadcast to reach one confirmation, in seconds.
 #[cfg(not(target_arch = "wasm32"))]
@@ -20,8 +19,8 @@ const CONFIRMATION_WAIT_SECS: u64 = 4000;
 #[cfg(not(target_arch = "wasm32"))]
 const CONFIRMATION_CHECK_SECS: u64 = 10;
 
-/// The production pacing of `send_outputs`: exactly the values it used before the pacing became a
-/// field, which is what [`ZCoinBuilder`] installs.
+/// The production pacing of `send_outputs`, which is what [`ZCoinBuilder`] installs: an in-flight
+/// wait budget of 600 s retried every 15 s, and the confirmation wait unchanged.
 #[cfg(not(target_arch = "wasm32"))]
 impl Default for SendPacing {
     fn default() -> Self {
