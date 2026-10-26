@@ -18,8 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
   wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
-  Any positive fee is accepted, including one below the estimate; whether the network relays such a
-  transaction is untested. Any other fee type sent for Siacoin is now rejected with an
+  Any positive fee is accepted, including one below the estimate; a fee one tenth of the estimate was
+  accepted and mined within about ten minutes on an uncongested transaction pool (checked live
+  2026-10-26; a full pool is untested). Any other fee type sent for Siacoin is now rejected with an
   invalid-fee-policy error instead of being silently ignored. More in
   [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md).
 - **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
@@ -328,9 +329,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — its substance shipped: the
   minimum trading volume now matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins
   (PR #66).
-- [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — moved from parked to in
-  progress: a Siacoin `withdraw` now honors a custom fee (PR #77); the live test of a fee below the
-  node's estimate is still to do.
+- [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — moved from parked to done:
+  a Siacoin `withdraw` now honors a custom fee (PR #77), and a fee below the node's estimate was
+  checked live on an uncongested transaction pool (2026-10-26).
 
 ### Known limitations
 

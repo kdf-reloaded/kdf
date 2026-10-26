@@ -1,6 +1,6 @@
 # Plan: operator-selectable Siacoin withdraw fee
 
-**Status:** in progress (custom fee shipped in PR #77; waiting for the live below-estimate fee test) — **Last reviewed:** 2026-10-25
+**Status:** done (shipped in PR #77; below-estimate fee verified live 2026-10-26 on an uncongested txpool) — **Last reviewed:** 2026-10-26
 
 > **Context:** parked deliberately on 2026-09-20 during the
 > beta triage of the Siacoin work. Nothing here is a defect fix: the gap is a
@@ -13,9 +13,9 @@
 > per input like the estimate; no new Sia-specific variant now. This is what the Komodo wallet sends
 > (it posts `UtxoPerKbyte` for SC and labels the box "SC/kb"), so its custom-fee switch works with
 > no wallet change, and the "hide the switch" half of step 6 is unnecessary. There is **no floor** at
-> walletd's estimate: any positive rate is accepted, deliberately; whether walletd or the Sia
-> network accepts a below-estimate transaction is **untested** and will be checked in the live
-> swaplab run. Every other fee type for SC is rejected with the invalid-fee-policy error naming the
+> walletd's estimate: any positive rate is accepted, deliberately; a fee one tenth of
+> the estimate was accepted by walletd and mined within about ten minutes on an uncongested
+> transaction pool (checked live in the swaplab run, 2026-10-26); a full pool is **untested**. Every other fee type for SC is rejected with the invalid-fee-policy error naming the
 > accepted type (the reference ignores `fee` for SC, so this is a documented divergence row, not a
 > switch). Built in `mm2src/coins/siacoin/sia_withdraw.rs` (pure fee decision and planners, tests
 > include the exact wallet JSON and the absent-fee equivalence); CRD ch.20 R-W3 amended with
