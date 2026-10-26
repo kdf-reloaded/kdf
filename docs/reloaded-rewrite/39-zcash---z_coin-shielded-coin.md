@@ -2380,6 +2380,125 @@ used here is the single lightwalletd tip (R39.11.8(f), R39.11.9), which is also 
 source of the scanned blocks, so an entry cannot be ahead of the height used to
 count its confirmations.
 
+#### 39.8.5.1 Unmined transactions, same-block order, and amounts of an own send
+
+> **Dirty-side derivation record (sanitized).** R39.8.9f--R39.8.9h, the notes
+> under them, T39.8.9a--T39.8.9d and D39.8.0h were authored by the KDF Spec
+> Reader under the chapter-01 two-team workflow (§1.4A), from the reference
+> states `v2.6.0-beta` and `v3.0.0-beta` (chapter 02 §2.15A), which agree on
+> every fact bound below: the shielded history query, its paging, and the
+> post-broadcast handling of an own send are identical at the two states. They
+> carry only the externally observable contract of the history page; no
+> implementation expression was carried across. The KDF Dirty Gate passed
+> this subsection on 2026-10-26 (discretionary-expression measure 0.02, no
+> leaks to scrub); the provenance footer records its scope attestation.
+
+R39.8.9f **Unmined transactions are not history rows.** A shielded transaction
+this wallet has broadcast, and a shielded transaction addressed to this wallet
+that the backend reports only as a mempool member, shall not appear in
+`z_coin_tx_history` at any position until the transaction has been mined and
+its block has been scanned into the shielded wallet database. The history is
+derived from scanned blocks alone (R39.8.0q, §39.8.0.6, D39.8.0g): the
+post-broadcast state of an own send is held by the in-flight exclusion record
+of §39.8.0.7 and by the pending-receipt balance path of §39.8.0.6, neither of
+which feeds the history query. Consequently every history row carries a
+positive `block_height` (the height of the block that mined it), a `timestamp`
+equal to that block's time, and a `confirmations` value computed by R39.8.9e
+that is at least 1 whenever the backend tip is at or above the row's height.
+There is no row with `block_height` 0, no row with a zero `timestamp`, and no
+row with zero `confirmations` other than one whose height exceeds a stale tip.
+
+> **Reloaded divergence (2026-10-26).** Reloaded records an own shielded send in
+> the wallet database at broadcast time and serves it as a history row before it
+> is mined, ordered by the mined height with an absent height sorting below every
+> real height, so the unmined row appears **last** on the final page. The
+> reference has no such row. Either outcome of D39.8.0h cures the divergence:
+> removing the unmined row restores reference parity; keeping it as a deliberate
+> Reloaded feature requires it to sort **ahead of** every mined row (the
+> unconfirmed-first convention the generic histories use, chapter 38 §38.5A
+> R38.5A.1 and R38.5A.6) and to carry the amounts R39.8.9g binds. Sorting an
+> unmined row last is non-conformant under either choice.
+
+R39.8.9g **Amounts of an own send.** Because an own send becomes a history row
+only once mined (R39.8.9f), the row's amounts are computed once, from scanned
+wallet state, by R39.8.9b: `spent_by_me` is the total value of the wallet notes
+the transaction consumed, `received_by_me` is the total value of the wallet
+notes the transaction created -- the change note included -- and
+`my_balance_change` is their difference, which equals the negated sum of the
+value paid to other parties and the fee. No earlier figure for the same
+transaction is ever served: in particular the history never reports the whole
+value of the consumed notes as the wallet's loss while the transaction is
+unmined and the net figure afterward. A client that merges successive pages by
+position therefore never sees a row whose amounts change between two reads.
+
+> **Reloaded divergence (2026-10-26).** Reloaded's unmined row (see the note
+> under R39.8.9f) reports the full value of the consumed notes as the loss
+> (observed: `-0.00198` for a send whose true net change is `-0.00051`) and the
+> correct net figure only after the transaction is mined. The mined figure
+> matches R39.8.9b and R39.8.9g; the unmined figure matches nothing in the
+> reference. If D39.8.0h keeps the row, its amounts shall be the mined-row
+> amounts from the start: the change the wallet pays itself is known when the
+> transaction is constructed (it is the value of the change output) and shall
+> be counted in `received_by_me`.
+
+R39.8.9h **Same-block tie-break and platform note.** The stable order R39.8.9a
+requires within one block is **ascending** wallet-database transaction
+identifier (the `internal_id` of R39.8.7): among transactions mined in the same
+block, the one the wallet recorded first is served first. The complete key is
+therefore (block height descending, `internal_id` ascending); `FromId` paging
+locates the supplied `internal_id` in that same key order, and `total` counts
+every row of the wallet's transaction table. The order is a total order over
+distinct `internal_id` values and is therefore deterministic across repeated
+requests and across restarts.
+
+> **Reference platform difference (informative).** The reference's native
+> (SQLite) history path serves the key above. Its browser (WASM) path orders by
+> descending wallet-database row identifier alone, without grouping by block,
+> and its `FromId` paging is keyed to that row order. The native order is the
+> one R39.8.9a and
+> R39.8.9h bind; a Reloaded WASM build shall serve the native order too, so the
+> same wallet produces the same page on both platforms.
+
+D39.8.0h **Whether to keep a visible unmined own send is a maintainer
+decision.** The reference shows nothing between broadcast and mining
+(R39.8.9f, D39.8.0g); Reloaded currently shows a row, in the wrong position and
+with the wrong amounts (notes under R39.8.9f and R39.8.9g). The two conforming
+outcomes are stated in those notes; the chapter binds the reference behaviour
+until the decision is recorded here. Whichever is chosen, the row -- if any --
+shall never be served last, and the amounts of a transaction shall never change
+between its unmined and mined states.
+
+T39.8.9a *Unmined own send is absent.* A test shall broadcast a shielded send
+from a wallet whose database is in a known scanned state, then query
+`z_coin_tx_history` before any further block is scanned: the response shall not
+contain the broadcast transaction at any position, `total` shall be unchanged,
+and the pending change shall be visible only through the balance path of
+§39.8.0.6. After the block containing the send is scanned, the same query shall
+return the row first (newest block), with `block_height` equal to that block's
+height, `timestamp` equal to that block's time, `confirmations` at least 1, and
+the amounts of R39.8.9g. If D39.8.0h later elects to keep a visible unmined
+row, this test's first half shall instead assert that the row is served first,
+carries the mined-row amounts, and keeps those amounts after mining.
+
+T39.8.9b *Same-block tie-break.* A test fixture with three wallet transactions
+mined in one block and one in the following block shall return the later block's
+row first and then the three same-block rows in ascending `internal_id`, both
+for `PageNumber` paging and for `FromId` paging that starts inside the block;
+the fixture shall assign `internal_id` values whose ascending order differs from
+the ascending order of their transaction hashes, so a hash-ordered tie-break
+fails the test.
+
+T39.8.9c *Deterministic order.* Two consecutive `z_coin_tx_history` requests
+with the same arguments against an unchanged wallet database, and the same
+request after closing and reopening the database, shall return identical row
+sequences.
+
+T39.8.9d *Amounts never change.* For a send of amount `A` with fee `F` from a
+single note of value `V > A + F`, the only history row ever served for that
+transaction shall report `spent_by_me = V`, `received_by_me = V - A - F`, and
+`my_balance_change = -(A + F)`; a test shall assert that no response at any
+point in the transaction's life reports `my_balance_change = -V`.
+
 ### 39.8.6 Relationship to the generic `my_tx_history` v2 method
 
 R39.8.10 `z_coin_tx_history` reuses the **same v2 request/response envelope
@@ -4350,6 +4469,11 @@ different cause. At least one live endpoint was observed in this state on
   `sync_status: Finished` while the shielded sync is healthy, and rejects
   non-shielded coins (`NotSupportedFor`) and inactive coins (`CoinIsNotActive`)
   (§39.8).
+- History order and unmined sends (§39.8.5.1): an own shielded send is absent
+  from `z_coin_tx_history` until mined and scanned, then appears newest-first
+  with the mined block's height and time and its final amounts; rows in one
+  block are served in ascending `internal_id`; the order is identical across
+  repeated requests and restarts (T39.8.9a--T39.8.9d). Pending D39.8.0h.
 - Sync-failure reporting (§39.8.0.5, R39.8.0au): when a background pass fails —
   unreachable chain tip, every shielded backend failed, or a scan error — the
   reported history-sync state is the error state carrying a message and the
@@ -4452,7 +4576,24 @@ different cause. At least one live endpoint was observed in this state on
   also consulted, at `v2.6.0-beta` and `v3.0.0-beta`, only to establish
   that a shielded coin's floors follow the UTXO rule and that a shielded
   HTLC spend deducts a fixed 1,000 base units; no discretionary
-  expression reproduced.) Otherwise consulted, under the chapter-01 two-team clean-room
+  expression reproduced.) Also consulted on 2026-10-26, at `v2.6.0-beta` and
+  `v3.0.0-beta`, for §39.8.5.1 (R39.8.9f--R39.8.9h, T39.8.9a--T39.8.9d,
+  D39.8.0h and the notes under them -- the absence of unmined rows, the
+  same-block tie-break and the amounts of an own send), as that
+  subsection's derivation record states. The KDF Dirty Gate passed
+  §39.8.5.1 on 2026-10-26: verdict PASS, discretionary-expression measure
+  0.02 (FAIL threshold 0.10), no leaks to scrub, and the chapter 02 §2.15A
+  reference-state check passed. Scope attestation, in corpus-free terms:
+  *extent* -- the reference's shielded history query and both of its
+  storage backends, the shielded send and broadcast path, and the paging
+  of the shielded history method, at both states, as part of a
+  transaction-history pass of about 18 source files shared with chapter 38
+  §38.5A, plus a mechanical diff between the two states; *method* -- the
+  candidate hunks and the corresponding reference regions read in full, a
+  targeted search of the reference for every identifier, number, phrase
+  and ordering claim of the candidate, and the inter-state diff; the
+  mechanical gate tool was not run because the candidate has no code
+  blocks; *measure* -- 0.02. Otherwise consulted, under the chapter-01 two-team clean-room
   workflow, for §39.8.0.4, §39.8.0.7, §39.10, §39.11 and R39.8.0av (with the
   parity-position note under R39.8.0an and the sharpened start-point
   divergence note in §39.10.6 that follow from it) -- and, for §39.10,
