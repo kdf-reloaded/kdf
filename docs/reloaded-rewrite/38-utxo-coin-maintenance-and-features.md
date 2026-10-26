@@ -25,6 +25,13 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   [chapter 37](37-utxo-spv-and-block-header-validation.md) §37.5).
   Exception: the KIP-0001 reward reduction of R38.4.1 is required but NOT
   as-built (issue #11; see §38.4).
+- **§38.5A (T-DOC, reference-bound):** the transaction-history order,
+  persistence and row-identity contract of the legacy `my_tx_history` method
+  (UTXO and QRC20) and of the mmrpc-2.0 `my_tx_history` method, distilled from
+  the reference states through the two-team workflow. Reloaded diverges today
+  in the equal-height tie-break of the legacy UTXO history and in serving the
+  mmrpc-2.0 method from the legacy file; the divergence notes under R38.5A.1
+  and R38.5A.7 state what must change.
 - **§38.6 (T-PORT, required, NOT yet in reloaded):** capabilities verified
   **absent** in reloaded that must be ported -- PoSV support, Taproot output
   parsing & withdraw guard, P2PK show/spend, Electrum connection prioritisation
@@ -297,6 +304,278 @@ whose dialect reloaded does not yet support needs no `chain_variant` at all
 > pending merge; ch. 58 §58.5 as-built statement). The sentence remains
 > true as a statement of configuration: Radiant still needs no
 > `chain_variant`. The cleared rule text above is unchanged.
+
+## 38.5A Transaction history: order, persistence, and row identity (T-DOC)
+
+> **Scope.** This section binds the order in which transaction-history rows are
+> served and persisted, when the persisted history is written, and what one row
+> stands for, for three surfaces: the legacy `my_tx_history` method over the
+> per-coin history file of a UTXO coin (Electrum and native modes); the same
+> legacy method over the history of a QRC20 token; and the mmrpc-2.0
+> `my_tx_history` method over the SQLite history store. It exists because a
+> client that merges successive pages by position (the desktop wallet does)
+> depends on a deterministic, stable order. Shielded history is bound by
+> [Chapter 39](39-zcash---z_coin-shielded-coin.md) §39.8.5 (R39.8.9a,
+> R39.8.9f--R39.8.9h) and Sia history by [Chapter 53](53-sia-transaction-history.md)
+> (R53.4.5); both follow the same unconfirmed-first, newest-first,
+> identifier-tie-break convention stated here. Field names of the two methods
+> are the dictated public wire contract; nothing below adds or renames a field.
+
+> **Dirty-side derivation record (sanitized).** R38.5A.1--R38.5A.8, the notes
+> under them and T38.5A.1--T38.5A.6 were authored by the KDF Spec Reader under
+> the chapter-01 two-team workflow (§1.4A), from the reference states
+> `v2.6.0-beta` and `v3.0.0-beta` (chapter 02 §2.15A), which agree on every
+> fact bound below: the legacy history collector, the QRC20 history collector,
+> the legacy method's paging, the SQLite store's page query and the mmrpc-2.0
+> method's coin-family routing are identical at the two states. Only the
+> externally observable contract was carried across. The KDF Dirty Gate
+> passed this section on 2026-10-26 (discretionary-expression measure 0.05, no
+> leaks to scrub); the provenance footer records its scope attestation.
+
+R38.5A.1 **Order of the legacy UTXO history (persisted and served).** The
+history of a UTXO coin shall be a sequence sorted by this key, in this
+precedence: (1) rows whose `block_height` is 0 (unconfirmed) come before every
+confirmed row; (2) confirmed rows are ordered by `block_height` **descending**
+(newest block first); (3) rows with equal `block_height` -- including several
+unconfirmed rows -- are ordered by `internal_id` **ascending**, compared
+bytewise. For a UTXO coin the `internal_id` is the transaction hash in its
+displayed byte order, so the tie-break is ascending transaction hash. This key
+is a total order over distinct `internal_id` values; the resulting sequence is
+therefore deterministic, independent of the order in which the backend listed
+the transactions and of the order in which the collector processed them, and
+identical for Electrum and native modes, whose listings differ only as a
+source. Two rows never compare equal unless they share an `internal_id`, which
+R38.5A.4 forbids.
+
+> **Reloaded divergence (2026-10-26).** Reloaded's legacy UTXO collector keeps
+> rows in a hash map and persists its iteration order, and its comparator is
+> not a total order for two rows of height 0, so rows of equal height -- and
+> several unconfirmed rows in particular -- are served in an order that can
+> differ between two writes of the same set. This violates R38.5A.1 (3). The
+> fix is a comparator that applies the full key above, including the bytewise
+> `internal_id` tie-break at equal height, before every write (R38.5A.3).
+
+R38.5A.2 **Serving the legacy history.** The legacy `my_tx_history` method
+shall serve the persisted sequence as stored -- it does not re-sort at read
+time, so R38.5A.1 is a property of every write. `page_number` paging skips
+`(page_number - 1) * limit` rows; `from_id` paging skips every row up to and
+including the row whose `internal_id` equals the supplied value, and an unknown
+`from_id` is an error, not an empty page; `max: true` returns every row and
+reports the row count as `limit`. `confirmations` is computed at read time per
+row: 0 when the row's `block_height` is 0 or exceeds the current tip,
+otherwise `tip - block_height + 1`. The response reports `total` (the row
+count), `skipped`, `current_block`, `sync_status`, the echoed `from_id` and
+`page_number`, and `total_pages` computed from `total` and the requested
+`limit`.
+
+R38.5A.3 **When the legacy UTXO history is written.** Every write shall first
+sort the whole sequence by R38.5A.1 and then replace the stored history
+atomically (a complete new file substituted for the old one, never a partial
+overwrite). Within one collection pass the history is written (a) after rows
+are removed because the backend listing no longer contains their hashes, if
+any were removed, and (b) *(informative, see the note below)* after **each**
+transaction that is newly added or whose stored row was updated -- not once at
+the end of the pass. A client reading between two writes sees a consistent,
+fully sorted subset of the final result, never an unsorted or truncated file.
+A pass that changes nothing writes nothing.
+
+> **Informative: write cadence.** Item (b) records the reference's write
+> cadence. No history method can observe how often the background collector
+> writes, so (b) binds nothing: an implementation conforms whether it writes
+> after each transaction or once per pass, provided every write satisfies the
+> first sentence of this rule. T38.5A.2 and the persistence bullet of R38.5A.8
+> are informative for the same reason.
+
+R38.5A.4 **One row per transaction (UTXO).** For a UTXO coin the legacy history
+shall contain exactly one row per transaction hash, and the row's
+`internal_id` shall equal that hash. The collector keys its working set by
+transaction hash, so a hash the backend lists more than once collapses into a
+single row: the native wallet listing yields one entry per affected own
+address and per direction, so a self-send (one send entry and one receive
+entry), a payment with several outputs to own addresses, and a transaction that
+touches several own addresses each appear once; an Electrum listing yields one
+entry per transaction per script hash. The single row's amounts are net over
+the whole transaction: `spent_by_me` is the sum of the values of all inputs the
+wallet owns, `received_by_me` the sum of all outputs the wallet owns,
+`my_balance_change` their difference, `total_amount` the sum of all input
+values, and the fee the difference between total inputs and total outputs
+(coinbase and other input-less transactions take their fee from the
+backend-reported per-input fee fields, which is 0 for ordinary chains). Address
+lists are deduplicated. The collector never writes two rows with one
+`internal_id`; a persisted history that nevertheless contains them (external
+corruption) collapses to one row at the collector's next write, because its
+keyed working set holds one row per hash. A history whose stored form cannot be
+decoded is discarded and rebuilt from the backend; an absent history reads as
+empty.
+
+> **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded keyed
+> the rows it loaded from the history file by the first 32 bytes of the
+> `tx_hash` text (the first 32 hexadecimal characters) instead of by the parsed
+> transaction hash, so no loaded row ever matched a listed hash. The first pass
+> after every restart re-fetched each listed transaction as new and wrote it
+> beside the stored row: the history then held two rows, with one
+> `internal_id`, for every transaction it had before the restart. The working
+> set is now keyed by the hash parsed from `tx_hash`, so a history already
+> doubled on disk collapses to one row per hash at the next write. A stored row
+> whose `tx_hash` does not parse as a hash is dropped, with an error log, and
+> fetched again from the backend as a new transaction.
+
+R38.5A.5 **Maturation of a stored row.** A stored row with `block_height` 0, or
+with the all-ones sentinel value that older histories may still hold for an
+unconfirmed transaction, shall have its `block_height`
+replaced in place when the backend listing later reports a positive height for
+its hash; the row then moves from the unconfirmed group to its block's position
+at the next write. A stored row with a zero `timestamp`, and for FIRO a row
+whose fee is negative, shall be re-fetched and replaced whole. The collector's
+need-to-run test on each pass is "balance changed since the last pass, or any
+stored row still needs one of these updates"; otherwise the pass is skipped.
+
+R38.5A.6 **Order of the mmrpc-2.0 history page.** The page query over the
+SQLite history store shall order by: (1) confirmation status ascending, where
+unconfirmed (stored `block_height` 0) sorts before confirmed; (2)
+`block_height` descending; (3) `internal_id` ascending. The `internal_id` is
+stored as a lowercase hexadecimal string, so its lexicographic order equals the
+bytewise order of equal-length identifiers; for a UTXO coin it is the
+transaction hash. `total` is the count of rows matching the request's address
+filter in that same order, and `FromId` paging locates the supplied
+`internal_id` in that order; a `FromId` not present in the filtered set yields
+an empty page with `skipped` 0 and the full `total`, not an error. The browser
+(WASM) store sorts the filtered set with the same three-part key, so both
+platforms serve the same page. `confirmations` is computed at read time as
+`current_block + 1 - block_height`, or 0 when `block_height` exceeds the tip
+(an unconfirmed row with `block_height` 0 therefore reports `current_block + 1`
+under the reference arithmetic -- see the note below).
+
+> **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded's
+> SQLite page query and its `FromId` offset broke ties at equal height by the
+> table's integer row identifier (insertion order) instead of by `internal_id`;
+> both now use the key above. Reloaded serves the mmrpc-2.0 method only in
+> native builds (a browser build answers `NotSupportedInWasm`), so the sentence
+> on the browser store has no Reloaded counterpart today. Reloaded's read-time
+> `confirmations` already reports 0 for a stored height of 0, the fix the
+> finding below proposes.
+
+> **Code-quality finding (informative) -- v2 confirmations of an unconfirmed
+> row.** The read-time arithmetic of the mmrpc-2.0 method does not special-case
+> a stored height of 0, so an unconfirmed row reports `tip + 1` confirmations,
+> while the legacy method (R38.5A.2) and the shielded method (R39.8.9e) report 0
+> for the same situation. The finding fell out of reading the two formulas side
+> by side. Proposed fix: report 0 when the stored height is 0, matching the
+> legacy surface; the stored confirmation-status column already distinguishes
+> the case.
+
+R38.5A.7 **Which coin families the mmrpc-2.0 method serves, and from where.**
+The mmrpc-2.0 `my_tx_history` method shall serve its page from the SQLite
+history store for exactly these families: standard UTXO coins, Qtum, BCH, SLP
+tokens, Tendermint coins and Tendermint tokens. Every other family -- QRC20
+tokens, EVM coins and tokens, shielded coins (R39.8.0c), Lightning -- shall be
+rejected with `NotSupportedFor`. There is no fallback from the mmrpc-2.0
+method to a legacy per-coin history for any family. The store of a UTXO or
+Qtum coin is populated only by the v2 background collector, which the
+task-based activation (`task::enable_utxo::init` / `task::enable_qtum::init`
+with `tx_history` true, [Chapter 55](55-coin-activation-wire-contract.md))
+starts; the flat legacy activation methods with `tx_history` true start the
+legacy file collector of R38.5A.1--R38.5A.5 instead. A coin activated by a
+legacy method therefore answers the mmrpc-2.0 method with
+`StorageIsNotInitialized`, and a coin activated by the task method serves the
+legacy method from a history file the legacy collector never wrote (empty, or
+stale from an earlier legacy activation). The two stores are independent; a
+transaction is never written to both by one activation.
+
+> **Reloaded divergence (2026-10-26).** Reloaded serves the mmrpc-2.0 method for
+> UTXO coins from the legacy history file today, so its v2 page order is
+> whatever the legacy file holds (R38.5A.1 and its divergence note), and the
+> two methods share one store. The dictated page order of R38.5A.6 and the
+> legacy order of R38.5A.1 coincide for a UTXO coin (unconfirmed first, height
+> descending, hash ascending), so a Reloaded build that fixes the R38.5A.1
+> divergence serves conforming v2 pages from the shared file; the independence
+> of the two stores is not itself a wire-visible property and is not required
+> for parity.
+
+R38.5A.8 **QRC20 token history.** The legacy `my_tx_history` method for a QRC20
+token is served from the token's own history collector and shall follow the
+same persisted order as R38.5A.1 and the same read-time rules as R38.5A.2, with
+two differences:
+
+- *Row identity.* One row stands for one token-transfer event, not for one
+  transaction. Its `internal_id` is the transaction hash followed by the index
+  of the output that carried the contract call and the index of the transfer
+  event within that output's receipt, each as an 8-byte big-endian integer, so
+  a transaction with several transfers legitimately yields several rows. Those
+  rows share `block_height` and sort adjacently and deterministically because
+  their identifiers share the leading hash bytes and differ only in the two
+  index fields. The `block_height` of such a row is the receipt's block
+  number, and the row's fee details carry the transaction's miner fee (its
+  QTUM fee less all gas the transaction consumed) together with the gas limit,
+  gas price and gas used of the row's own contract call. On load, a stored
+  history with two rows of one `internal_id`, or with an `internal_id` of the
+  wrong shape, is discarded whole and rebuilt from the backend rather than
+  silently collapsed.
+- *Persistence (informative as to cadence, see the note under R38.5A.3).* The
+  token collector writes its history **once per pass**, after
+  every listed transaction has been processed, and only when the pass changed
+  something; it does not write after each transaction. Each write sorts the
+  whole sequence by R38.5A.1 and replaces the stored history atomically.
+
+Maturation follows R38.5A.5 for the height (updated in place from the listing)
+and the timestamp (re-fetched from the parent transaction); a cached transfer
+set whose rows disagree about their transaction hash is discarded and re-fetched
+whole.
+
+> **Code-quality finding (informative) -- native-mode height fallback.** In
+> native mode the legacy UTXO collector pairs each listed transaction hash with
+> the wallet listing's *position of the transaction within its block*, and
+> uses that number as the fallback `block_height` when the verbose lookup
+> reports none and as the in-place height update of R38.5A.5. The verbose
+> lookup normally supplies the real height, and a row whose timestamp is still
+> zero is re-fetched whole, so the wrong value is usually overwritten; a
+> confirmed transaction whose verbose lookup lacks a height but carries a
+> timestamp would keep a block index as its height. The finding fell out of
+> reading the two listing paths side by side. Proposed fix: pair the hash with
+> the listing's block height, or with 0 when the entry is unconfirmed, in
+> native mode as the Electrum path already does.
+>
+> *Reloaded (2026-10-26):* Reloaded had the same defect and now pairs each
+> hash with the listing's `blockheight`, or with 0 when the daemon reports
+> none, so the existing re-fetch supplies the real height.
+
+T38.5A.1 *Deterministic legacy order.* A test shall seed a legacy history with
+at least two unconfirmed rows and two rows at one confirmed height, written in
+two different insertion orders, and assert that both writes produce the same
+file sequence: unconfirmed rows first in ascending hash order, then confirmed
+rows by height descending with ascending hash at equal height; `my_tx_history`
+pages shall return that sequence unchanged across `page_number` and `from_id`
+requests.
+
+T38.5A.2 *Per-transaction persistence (informative; not a conformance test,
+see the note under R38.5A.3).* A test may drive one collection pass
+over a backend fixture listing N new transactions and assert that the stored
+history is written N times (plus once if rows were pruned), that every
+intermediate file is sorted by R38.5A.1, and that the final file equals the
+expected sequence.
+
+T38.5A.3 *One row per hash.* A test shall feed the legacy collector a native
+wallet listing in which one hash appears as both a send and a receive entry and
+another hash appears for two own addresses, and assert that each hash produces
+exactly one row whose `internal_id` equals the hash and whose `spent_by_me`,
+`received_by_me`, `my_balance_change` and `total_amount` are the net values of
+R38.5A.4; the same test over an Electrum fixture shall produce identical rows.
+
+T38.5A.4 *Row maturation moves the row.* A test shall store a height-0 row, run a
+pass whose listing reports a positive height for it, and assert that the row
+keeps its `internal_id`, acquires that height, and is served after the
+remaining unconfirmed rows at its block's position.
+
+T38.5A.5 *mmrpc-2.0 page order and routing.* A test over a seeded SQLite history
+store with unconfirmed rows and several rows at one height shall assert the
+three-part order of R38.5A.6 for `PageNumber` and `FromId` paging, an empty page
+with full `total` for an unknown `FromId`, and `NotSupportedFor` for a QRC20
+token, an EVM coin and a shielded coin.
+
+T38.5A.6 *QRC20 rows.* A test over a QRC20 fixture transaction carrying two
+transfer events shall assert two rows with distinct `internal_id` values that
+share the leading transaction-hash bytes, adjacent in the served order with the
+lower output/event index first, and a single history write for the pass.
 
 ---
 
@@ -719,7 +998,32 @@ R38.8.6 **Tests (two-direction, observable).**
 - *Sibling-allowlist consultations:* [Chapter 5](05-hd-wallet-support.md)
   §5.9A, [Chapter 37](37-utxo-spv-and-block-header-validation.md) §37.5.
 - *Two-team workflow record:* the Spec Reader role (AGENTS.md §2) was
-  used, and the Dirty Gate passed, for the absence-verification and
+  used on 2026-10-26 for §38.5A (R38.5A.1--R38.5A.8, T38.5A.1--T38.5A.6 and
+  the notes under them). It read the reference states `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, which agree on every fact bound there.
+  **The KDF Dirty Gate passed §38.5A on 2026-10-26**: verdict PASS,
+  discretionary-expression measure 0.05 (FAIL threshold 0.10), no leaks to
+  scrub, and the chapter 02 §2.15A reference-state check passed. Scope
+  attestation, in corpus-free terms: *extent* -- the reference's
+  transaction-history surfaces at both states: the legacy per-coin history
+  method with its file persistence and ordering, the legacy UTXO collector
+  in Electrum and native modes and its transaction-details builder, the
+  QRC20 collector, the mmrpc-2.0 history method, the v2 history store with
+  its SQLite and browser backends, the UTXO v2 history loop, the UTXO coin
+  builder and the activation paths that start either collector; about 18
+  source files, plus a mechanical diff between the two states and one
+  third-party SQL-builder crate consulted for join semantics; *method* --
+  the candidate hunks and the corresponding reference regions read in full,
+  a targeted search of the reference for every identifier, number, phrase
+  and ordering claim of the candidate, and the inter-state diff; the
+  mechanical gate tool was not run because the candidate has no code
+  blocks; *measure* -- 0.05. Every identifier the section shares with the
+  reference is a wire-visible field, method, error or paging token, or an
+  on-disk column described by its behavior. After the gate, the clean
+  editor marked R38.5A.3 (b), T38.5A.2 and the persistence bullet of
+  R38.5A.8 informative, since write cadence is not wire-observable.
+  Earlier, the same role was used, and the Dirty Gate passed, for the
+  absence-verification and
   feature-scope determination of §38.6/§38.8 only -- identifying that PoSV support, Taproot output
   handling, P2PK balance/spend, Electrum connection prioritisation, UTXO
   balance event streaming, fixed-fee/min-volume policy, and FIRO Spark
@@ -733,7 +1037,7 @@ R38.8.6 **Tests (two-direction, observable).**
   KIP-0001 (§38.10). The corpus was consulted only to confirm that both
   reference lineages apply the same public rule and to supply the
   code-quality finding. No other section of this chapter draws on the
-  two-team workflow except §38.6.6, below.
+  two-team workflow except §38.5A, above, and §38.6.6, below.
 - *Fee-policy item (§38.6.6, 2026-10-25).* R38.6.6a–i, the §38.0 scope
   line and the Part B status note were rewritten by the Spec Reader under
   the two-team workflow at the reference designations `v2.6.0-beta` and

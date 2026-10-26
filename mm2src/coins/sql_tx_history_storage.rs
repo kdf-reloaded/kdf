@@ -181,7 +181,7 @@ fn finalize_get_history_sql_builder(sql_builder: &mut SqlBuilder, offset: usize,
     sql_builder.limit(limit);
     sql_builder.order_asc("confirmation_status");
     sql_builder.order_desc("block_height");
-    sql_builder.order_asc("id");
+    sql_builder.order_asc("internal_id");
 }
 
 #[derive(Clone)]
@@ -477,7 +477,7 @@ impl TxHistoryStorage for SqliteTxHistoryStorage {
                         &sql_builder,
                         params,
                         "internal_id",
-                        "confirmation_status ASC, block_height DESC, id ASC",
+                        "confirmation_status ASC, block_height DESC, internal_id ASC",
                         "internal_id = ?2",
                     )?;
                     match maybe_offset {
@@ -789,11 +789,12 @@ mod sql_tx_history_storage_tests {
         let result = block_on(storage.get_history(coin_type, paging, limit)).unwrap();
 
         let expected_internal_ids: Vec<BytesJson> = vec![
-            "433b641bc89e1b59c22717918583c60ec98421805c8e85b064691705d9aeb970".into(),
-            "cd6ec10b0cd9747ddc66ac5c97c2d7b493e8cea191bc2d847b3498719d4bd989".into(),
+            // rows of equal height are in `internal_id` ascending order (R38.5A.6 (3))
+            "babe9bd0dc1495dff0920da14a76311b744daadc9d01314f8bd4e2438c6b183b".into(),
             "1c1e68357cf5a6dacb53881f13aa5d2048fe0d0fab24b76c9ec48f53884bed97".into(),
-            "c4304b5ef4f1b88ed4939534a8ca9eca79f592939233174ae08002e8454e3f06".into(),
+            "cd6ec10b0cd9747ddc66ac5c97c2d7b493e8cea191bc2d847b3498719d4bd989".into(),
             "b0035434a1e7be5af2ed991ee2a21a90b271c5852a684a0b7d315c5a770d1b1c".into(),
+            "c4304b5ef4f1b88ed4939534a8ca9eca79f592939233174ae08002e8454e3f06".into(),
         ];
 
         let actual_ids: Vec<_> = result.transactions.into_iter().map(|tx| tx.internal_id).collect();
@@ -801,6 +802,58 @@ mod sql_tx_history_storage_tests {
         assert_eq!(5, result.skipped);
         assert_eq!(121, result.total);
         assert_eq!(expected_internal_ids, actual_ids);
+    }
+
+    // CRD ch.38 T38.5A.5 (order part) and R38.5A.6: unconfirmed rows first, then confirmed rows by
+    // height descending, ties broken by `internal_id` ascending, for both paging modes. The rows
+    // are inserted in the OPPOSITE order of their `internal_id`, so an insertion-order (`id`)
+    // tie-break would fail this test.
+    #[test]
+    fn sql_history_page_order_unconfirmed_first_then_height_desc() {
+        let for_coin = "tBCH";
+        let storage = SqliteTxHistoryStorage::in_memory();
+        block_on(storage.init(for_coin)).unwrap();
+        let fixtures: Vec<TransactionDetails> =
+            json::from_str(include_str!("for_tests/tBCH_tx_history_fixtures.json")).unwrap();
+        // coin rows only, each given one of the heights under test and an `internal_id` that
+        // descends with the insertion order
+        let heights = [100, 0, 100, 50, 0, 100];
+        let mut transactions: Vec<TransactionDetails> = fixtures
+            .into_iter()
+            .filter(|tx| !matches!(tx.transaction_type, TransactionType::TokenTransfer(_)))
+            .take(heights.len())
+            .collect();
+        assert_eq!(transactions.len(), heights.len());
+        for (position, (tx, height)) in transactions.iter_mut().zip(heights).enumerate() {
+            tx.block_height = height;
+            tx.internal_id = BytesJson::from(vec![0xa0, (heights.len() - position) as u8]);
+        }
+        block_on(storage.add_transactions_to_history(for_coin, transactions)).unwrap();
+
+        let page = |paging, limit| {
+            block_on(storage.get_history(HistoryCoinType::Coin(for_coin.into()), paging, limit))
+                .unwrap()
+                .transactions
+                .into_iter()
+                .map(|tx| (tx.block_height, tx.internal_id.0[1]))
+                .collect::<Vec<_>>()
+        };
+
+        // heights: unconfirmed first; inside a height, `internal_id` ascending
+        let expected = vec![(0, 2), (0, 5), (100, 1), (100, 4), (100, 6), (50, 3)];
+        let all = page(PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()), 6);
+        assert_eq!(all, expected);
+
+        let second_page = page(PagingOptionsEnum::PageNumber(NonZeroUsize::new(2).unwrap()), 4);
+        assert_eq!(second_page, expected[4..]);
+
+        let id_of = |byte: u8| BytesJson::from(vec![0xa0, byte]);
+        // FromId inside the unconfirmed group and inside the height-100 group continues in the
+        // same order the page serves
+        let after_first_unconfirmed = page(PagingOptionsEnum::FromId(id_of(2)), 3);
+        assert_eq!(after_first_unconfirmed, expected[1..4]);
+        let after_first_at_100 = page(PagingOptionsEnum::FromId(id_of(1)), 3);
+        assert_eq!(after_first_at_100, expected[3..]);
     }
 
     #[test]
@@ -858,9 +911,10 @@ mod sql_tx_history_storage_tests {
         let result = block_on(storage.get_history(coin_type, paging, limit)).unwrap();
 
         let expected_internal_ids: Vec<BytesJson> = vec![
-            "cd6ec10b0cd9747ddc66ac5c97c2d7b493e8cea191bc2d847b3498719d4bd989".into(),
+            // rows of equal height are in `internal_id` ascending order (R38.5A.6 (3))
+            "babe9bd0dc1495dff0920da14a76311b744daadc9d01314f8bd4e2438c6b183b".into(),
             "1c1e68357cf5a6dacb53881f13aa5d2048fe0d0fab24b76c9ec48f53884bed97".into(),
-            "c4304b5ef4f1b88ed4939534a8ca9eca79f592939233174ae08002e8454e3f06".into(),
+            "cd6ec10b0cd9747ddc66ac5c97c2d7b493e8cea191bc2d847b3498719d4bd989".into(),
             "b0035434a1e7be5af2ed991ee2a21a90b271c5852a684a0b7d315c5a770d1b1c".into(),
         ];
 

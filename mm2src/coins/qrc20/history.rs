@@ -188,13 +188,9 @@ impl Qrc20Coin {
                 .flat_map(|(_, value)| value)
                 .map(|(_tx_id, tx)| tx.clone())
                 .collect();
-            to_write.sort_unstable_by(|a, b| {
-                match sort_newest_to_oldest(a.block_height, b.block_height) {
-                    // do not reverse `transfer` events in one transaction
-                    Ordering::Equal => a.internal_id.cmp(&b.internal_id),
-                    ord => ord,
-                }
-            });
+            // rows of one transaction share the leading `internal_id` bytes, so they stay adjacent
+            // with the lower output/event index first
+            to_write.sort_unstable_by(utxo_common::legacy_history_order);
             if let Err(e) = self.save_history_to_file(&ctx, to_write).compat().await {
                 ctx.log.log(
                     "",
@@ -827,17 +823,6 @@ fn is_transferred_to_contract(script_pubkey: &Script) -> bool {
     }
 }
 
-fn sort_newest_to_oldest(x_height: u64, y_height: u64) -> Ordering {
-    // the transactions with block_height == 0 are the most recent
-    if x_height == 0 {
-        Ordering::Less
-    } else if y_height == 0 {
-        Ordering::Greater
-    } else {
-        y_height.cmp(&x_height)
-    }
-}
-
 fn is_transfer_event_log(log: &LogEntry) -> bool {
     match log.topics.first() {
         Some(first_topic) => first_topic == QRC20_TRANSFER_TOPIC,
@@ -852,6 +837,40 @@ mod tests {
     use mm2_metrics::{MetricType, MetricsJson, MetricsOps};
     use mm2_test_helpers::for_tests::find_metrics_in_json;
     use qrc20_tests::qrc20_coin_for_test;
+
+    // CRD ch.38 T38.5A.6 (order part): the transfer rows of one transaction stay adjacent, the
+    // lower output/event index first, between rows of other transactions at the same height.
+    #[test]
+    fn qrc20_history_order_keeps_transfer_rows_adjacent() {
+        let internal_id = |hash_byte: u8, output_index: u64, log_index: u64| -> Vec<u8> {
+            BytesJson::from(TxInternalId::new(
+                H256Json::from([hash_byte; 32]),
+                output_index,
+                log_index,
+            ))
+            .0
+        };
+        let mut rows = vec![
+            utxo_common::history_row_for_test(500, internal_id(0x40, 1, 0)),
+            utxo_common::history_row_for_test(500, internal_id(0x50, 0, 0)),
+            utxo_common::history_row_for_test(500, internal_id(0x40, 0, 1)),
+            utxo_common::history_row_for_test(0, internal_id(0x70, 0, 0)),
+            utxo_common::history_row_for_test(500, internal_id(0x40, 0, 0)),
+        ];
+        let expected = vec![
+            internal_id(0x70, 0, 0),
+            internal_id(0x40, 0, 0),
+            internal_id(0x40, 0, 1),
+            internal_id(0x40, 1, 0),
+            internal_id(0x50, 0, 0),
+        ];
+        for _ in 0..2 {
+            rows.sort_unstable_by(utxo_common::legacy_history_order);
+            let ids: Vec<Vec<u8>> = rows.iter().map(|r| r.internal_id.0.clone()).collect();
+            assert_eq!(ids, expected);
+            rows.reverse();
+        }
+    }
 
     #[test]
     fn history_retry_delay_backs_off_and_is_bounded() {
