@@ -81,6 +81,14 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   within about ten minutes on an uncongested transaction pool (checked live
   2026-10-26; a full pool is untested). Code: `coins/siacoin/sia_withdraw.rs`.
 
+- **PIVX header lists are read by the header version.** GLEEC KDF reads a
+  32-byte field after the nonce in every header of a coin configured as PIVX,
+  which is wrong for version-7 headers (80 bytes on the chain from height
+  2153200 to 2700499). Reloaded reads that field only for header versions 4 to 6
+  and 8 and above (CRD ch.37 R37.5.5), so a swap's time-lock lookup works across
+  every version era. No compat switch: no wire value, signed preimage or RPC
+  shape depends on it. Code: `kdf_chain/src/header.rs`.
+
 - Reloaded-specific Z-coin shielded database names isolate the upgraded stable
   `librustzcash` schema from GLEEC KDF's legacy schema. See
   [Shielded database isolation](#shielded-database-isolation) below.

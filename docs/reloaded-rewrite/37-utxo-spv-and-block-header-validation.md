@@ -1064,10 +1064,25 @@ As built:
   recognition (R37.5.4) still applies to them and the exclusivity of R37.5.3,
   PPC's suppression of the Equihash reading of version-4 headers and the
   RICK/MORTY rule for every version are **not** implemented (§37.9 D1 steps
-  2 and 4). `"LBC"` and `"PIVX"` have no reader: such a coin activates, and
-  every header read of it, on every path below, fails with a typed "header
-  layout not implemented for `chain_variant`" error instead of reading
-  standard headers.
+  2 and 4). `"LBC"` and `"PIVX"` have their own readers since 2026-10-26
+  (below); until then such a coin failed every header read with a typed
+  "not implemented" error.
+- **The LBRY and PIVX readers are implemented (2026-10-26, R37.5.2, R37.5.5).**
+  `"LBC"` reads the 112-byte claim-trie header in every header whatever its
+  version. `"PIVX"` reads the 80-byte header and, only for header versions 4
+  to 6 and 8 and above, the 32-byte field after the nonce; versions 7 and 3
+  and below are 80 bytes. The size of each header in a list comes from its own
+  version field, and the list must be consumed exactly. Each family has a
+  dedicated reader, so a PIVX version-4 header is not read as Equihash-style
+  and an LBC header is not read as Qtum (R37.5.3). R37.5.6's std-80 re-read
+  applies to PIVX (a lone header or a list that is exactly 80 bytes per
+  header) and not to LBC, whose layout is fixed. Both re-encode to the
+  served bytes, and the identity hash is a double-SHA256 of them for every
+  version (R37.5.7). Verified on real headers fetched from public Electrum
+  servers for every PIVX version era including the three version boundaries
+  (`kdf_chain/src/test_data/README.md`). The thresholded PIVX read is a
+  Reloaded improvement over the reference's unconditional read, which
+  misreads version-7 headers; no peer observes the difference.
 - The resolved reader reaches every read path of R37.5.1a that the Electrum
   backend has (§37.9 D1 step 3): the median-time-past list, header-list
   reads of the sync loop and the reorg walk, single-header reads (block
@@ -1081,8 +1096,8 @@ As built:
   of R37.5.2 and R37.5.4, per header; it was once matched against two exact
   version values, which this implementation no longer does. The Equihash-style
   layout (version 4), Verus, Firo MTP and ProgPoW, and KawPoW are all chosen
-  from the version value alone. The LBRY, PIVX and Peercoin families and the
-  RICK/MORTY genesis rule are not implemented. So R37.5.3 and R37.5.4 are not
+  from the version value alone. The Peercoin family's rule and the
+  RICK/MORTY genesis rule are not implemented (the LBRY and PIVX readers are, below). So R37.5.3 and R37.5.4 are not
   met: KawPoW is still recognised by its version value for every non-Qtum
   coin. Withdrawing that before the configuration key exists would leave
   KawPoW coins unable to read their headers.
@@ -1839,9 +1854,8 @@ steps:
 *Progress (2026-10-25).* Step 1 is done and step 3 is done for every path the
 Electrum backend has (§37.5.8 lists them and the one exception, the Lightning
 platform's block-header read). Step 2 is partial: `"QTUM"` and the
-default-reader families are mapped, and `"LBC"` and `"PIVX"` resolve and
-then refuse every header read as not implemented, because their readers do
-not exist. Steps 4a and 4b are **not** done: `"BTC"` still reads
+default-reader families are mapped, and the LBRY and PIVX readers were added
+on 2026-10-26 (§37.5.8); the Peercoin and RICK/MORTY rules remain. Steps 4a and 4b are **not** done: `"BTC"` still reads
 version-signalled families, and version-only KawPoW recognition under the
 default family stands.
 
