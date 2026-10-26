@@ -171,10 +171,22 @@ pub struct BlockHeader {
     /// Riecoin: the time field is a 64-bit integer on the wire (`time` still holds the value, which
     /// is checked to fit 32 bits when read). Set only by the `Riecoin` layout (CRD ch.37 R37.5.9).
     pub wide_time: bool,
+    /// LBRY: the claim-trie root, between the Merkle root and the time (CRD ch.37 R37.5.2). Set only
+    /// by the `Lbc` layout.
+    pub claim_trie_root: Option<H256>,
+    /// PIVX: the 32-byte field after the nonce (zerocoin accumulator checkpoint for header versions
+    /// 4-6, final Sapling root for 8 and above; CRD ch.37 R37.5.2). Kept apart from
+    /// `hash_final_sapling_root`, which sits before the time in the Equihash layout. Set only by the
+    /// `Pivx` layout.
+    pub pivx_trailer: Option<H256>,
 }
 
 impl BlockHeader {
     /// Block hash = DSHA-256 over the canonical serialization.
+    ///
+    /// The identity hash is a double-SHA256 of the full header bytes for every family and every PIVX
+    /// header version, matching the reference (CRD ch.37 R37.5.7); the chain's own pre-version-4 Quark
+    /// hash is not used for identity.
     pub fn hash(&self) -> H256 { dhash256(&serialize(self)) }
 
     pub fn is_prog_pow(&self) -> bool { self.version == MTP_POW_VERSION && self.time >= PROG_POW_SWITCH_TIME }
@@ -213,6 +225,19 @@ impl BlockHeader {
             CoinVariant::Riecoin => return read_all(bytes, coin_variant, BlockHeader::read_riecoin),
             CoinVariant::KawpowAuxpowMixed => {
                 return match read_all(bytes, coin_variant, |reader| BlockHeader::read_mixed(reader, true)) {
+                    Err(_) if bytes.len() == MIN_RAW_HEADER_SIZE => {
+                        read_all(bytes, CoinVariant::Standard, BlockHeader::read_standard)
+                    },
+                    parsed => parsed,
+                };
+            },
+            // LBRY fixes its layout unconditionally: a header of any other length is malformed, so
+            // there is no std-80 re-read (R37.5.6).
+            CoinVariant::Lbc => return read_all(bytes, coin_variant, BlockHeader::read_lbc),
+            // The trailing field is chosen by the header's own version, a within-family choice that
+            // the guard of R37.5.6 covers.
+            CoinVariant::Pivx => {
+                return match read_all(bytes, coin_variant, BlockHeader::read_pivx) {
                     Err(_) if bytes.len() == MIN_RAW_HEADER_SIZE => {
                         read_all(bytes, CoinVariant::Standard, BlockHeader::read_standard)
                     },
@@ -262,6 +287,26 @@ impl BlockHeader {
                     (0..count).map(|_| BlockHeader::read_mixed(reader, false)).collect()
                 });
                 return match mixed {
+                    Err(_) if count.checked_mul(MIN_RAW_HEADER_SIZE) == Some(bytes.len()) => {
+                        read_all(bytes, CoinVariant::Standard, |reader| {
+                            (0..count).map(|_| BlockHeader::read_standard(reader)).collect()
+                        })
+                    },
+                    parsed => parsed,
+                };
+            },
+            CoinVariant::Lbc => {
+                return read_all(bytes, coin_variant, |reader| {
+                    (0..count).map(|_| BlockHeader::read_lbc(reader)).collect()
+                });
+            },
+            CoinVariant::Pivx => {
+                // Each header's length comes from its own version field, so the list is read at its
+                // true boundaries.
+                let pivx = read_all(bytes, coin_variant, |reader| {
+                    (0..count).map(|_| BlockHeader::read_pivx(reader)).collect()
+                });
+                return match pivx {
                     Err(_) if count.checked_mul(MIN_RAW_HEADER_SIZE) == Some(bytes.len()) => {
                         read_all(bytes, CoinVariant::Standard, |reader| {
                             (0..count).map(|_| BlockHeader::read_standard(reader)).collect()
@@ -336,6 +381,8 @@ impl BlockHeader {
             n_nonce_u64: None,
             mix_hash: None,
             wide_time: false,
+            claim_trie_root: None,
+            pivx_trailer: None,
         }
     }
 
@@ -353,6 +400,32 @@ impl BlockHeader {
         let nonce = BlockHeaderNonce::H256(reader.read()?);
         let mut header = Self::plain(version, previous_header_hash, merkle_root_hash, time, bits, nonce);
         header.wide_time = true;
+        Ok(header)
+    }
+
+    /// Reads the 112-byte LBRY layout: the claim-trie root follows the Merkle root, in every header
+    /// whatever its version value (CRD ch.37 R37.5.2, R37.5.5).
+    fn read_lbc<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
+        let version = reader.read()?;
+        let previous_header_hash = reader.read()?;
+        let merkle_root_hash = reader.read()?;
+        let claim_trie_root = reader.read()?;
+        let time = reader.read()?;
+        let bits = BlockHeaderBits::Compact(reader.read()?);
+        let nonce = BlockHeaderNonce::U32(reader.read()?);
+        let mut header = Self::plain(version, previous_header_hash, merkle_root_hash, time, bits, nonce);
+        header.claim_trie_root = Some(claim_trie_root);
+        Ok(header)
+    }
+
+    /// Reads one PIVX header: std-80, then a 32-byte field only for header versions 4, 5, 6 and 8 and
+    /// above; versions 7 and 3 and below are std-80 (CRD ch.37 R37.5.2, R37.5.5).
+    fn read_pivx<T: io::Read>(reader: &mut Reader<T>) -> Result<Self, serialization::Error> {
+        let version: u32 = reader.read()?;
+        let mut header = Self::read_standard_after_version(reader, version)?;
+        if matches!(version, 4..=6) || version >= 8 {
+            header.pivx_trailer = Some(reader.read()?);
+        }
         Ok(header)
     }
 
@@ -420,6 +493,7 @@ where
 }
 
 #[cfg(test)] mod layout_tests;
+#[cfg(test)] mod pivx_lbc_tests;
 
 impl From<&'static str> for BlockHeader {
     fn from(s: &'static str) -> Self {
@@ -438,6 +512,9 @@ impl Serializable for BlockHeader {
         }
         s.append(&self.previous_header_hash);
         s.append(&self.merkle_root_hash);
+        if let Some(root) = &self.claim_trie_root {
+            s.append(root);
+        }
         if let Some(h) = &self.hash_final_sapling_root {
             s.append(h);
         }
@@ -453,6 +530,9 @@ impl Serializable for BlockHeader {
         // still has its 4-byte nonce, including a nonce of zero.
         if self.n_height.is_none() && self.prog_pow.is_none() {
             s.append(&self.nonce);
+        }
+        if let Some(field) = &self.pivx_trailer {
+            s.append(field);
         }
         if let Some(sol) = &self.solution {
             s.append_list(sol);
@@ -587,6 +667,8 @@ impl Deserializable for BlockHeader {
             n_nonce_u64,
             mix_hash,
             wide_time: false,
+            claim_trie_root: None,
+            pivx_trailer: None,
         })
     }
 }

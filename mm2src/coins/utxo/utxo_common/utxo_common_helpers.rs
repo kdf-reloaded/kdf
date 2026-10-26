@@ -172,7 +172,7 @@ pub fn checked_address_from_str<T: UtxoCommonOps>(coin: &T, address: &str) -> Re
 }
 
 /// The median time past, read under the coin's one header policy (CRD ch.37 R37.5.1a): the same
-/// layout, refusal and fallback as every other header read of the coin.
+/// layout and fallback as every other header read of the coin.
 pub async fn get_current_mtp(coin: &UtxoCoinFields) -> UtxoRpcResult<u32> {
     let current_block = coin.rpc_client.get_block_count().compat().await?;
     coin.rpc_client

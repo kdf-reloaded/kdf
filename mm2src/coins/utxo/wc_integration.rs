@@ -624,7 +624,7 @@ mod tests {
 
     // The genesis lookup under a `chain_variant` read from the coin JSON (CRD ch.37 R37.5.1, R37.5.9e):
     // the registry's `"BTC"` RIC/MEWC entries are rescued by the fallback, a QTUM-pinned coin reads
-    // Qtum and never falls back, and LBC/PIVX refuse the read.
+    // Qtum and never falls back, and PIVX/LBC read their own layouts.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn genesis_lookup_follows_the_chain_variant_of_the_conf() {
@@ -646,10 +646,15 @@ mod tests {
         }
         genesis(utxo("QTUM"), None, &Fixture::qtum()).unwrap();
         genesis(utxo("RVN"), None, &Fixture::kawpow()).unwrap();
-        for variant in ["LBC", "PIVX"] {
-            let err = genesis(utxo(variant), None, &Fixture::standard()).unwrap_err();
-            assert!(err.contains("not implemented") && err.contains(variant), "{err}");
+        // PIVX and LBC read their own layouts (80- and 112-byte PIVX headers, 112-byte LBC headers).
+        use crate::utxo::utxo_tests::header_read_path_tests::{LBC_FILES, PIVX_FILES};
+        // 80-byte (v3, v7) and 112-byte (v4, v11 tip) first headers.
+        for index in [0, 2, 5, 8] {
+            genesis(utxo("PIVX"), None, &Fixture::pivx(PIVX_FILES[index].1)).unwrap();
         }
+        genesis(utxo("LBC"), None, &Fixture::lbc(LBC_FILES[0].1)).unwrap();
+        // ... and refuse a header that is not theirs.
+        genesis(utxo("LBC"), None, &Fixture::standard()).unwrap_err();
         // header_layout wins over a conflicting chain_variant.
         let pinned = json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": "QTUM" });
         genesis(pinned, None, &Fixture::riecoin()).unwrap();

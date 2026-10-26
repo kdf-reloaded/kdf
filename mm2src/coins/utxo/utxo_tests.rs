@@ -6977,8 +6977,88 @@ pub(crate) mod header_read_path_tests {
 
     fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
 
-    fn time_at(bytes: &[u8], start: usize) -> u32 {
-        u32::from_le_bytes(bytes[start + 68..start + 72].try_into().unwrap())
+    pub(crate) const PIVX_FILES: [(&str, &str); 9] = [
+        (
+            "v3",
+            include_str!("../../kdf_chain/src/test_data/pivx_100000_x11_v3.hex"),
+        ),
+        (
+            "v3_to_v4",
+            include_str!("../../kdf_chain/src/test_data/pivx_863780_x11_v3_to_v4.hex"),
+        ),
+        (
+            "v4",
+            include_str!("../../kdf_chain/src/test_data/pivx_1500000_x11_v4.hex"),
+        ),
+        (
+            "v5",
+            include_str!("../../kdf_chain/src/test_data/pivx_1900000_x11_v5.hex"),
+        ),
+        (
+            "v6_to_v7",
+            include_str!("../../kdf_chain/src/test_data/pivx_2153195_x11_v6_to_v7.hex"),
+        ),
+        (
+            "v7",
+            include_str!("../../kdf_chain/src/test_data/pivx_2400000_x11_v7.hex"),
+        ),
+        (
+            "v7_to_v8",
+            include_str!("../../kdf_chain/src/test_data/pivx_2700495_x11_v7_to_v8.hex"),
+        ),
+        (
+            "v10_v11",
+            include_str!("../../kdf_chain/src/test_data/pivx_3000000_x11_v10_v11.hex"),
+        ),
+        (
+            "tip",
+            include_str!("../../kdf_chain/src/test_data/pivx_5642858_x11_v11_tip.hex"),
+        ),
+    ];
+    pub(crate) const LBC_FILES: [(&str, &str); 4] = [
+        ("lbc_1", include_str!("../../kdf_chain/src/test_data/lbc_1_x11.hex")),
+        (
+            "lbc_500000",
+            include_str!("../../kdf_chain/src/test_data/lbc_500000_x11.hex"),
+        ),
+        (
+            "lbc_2000000",
+            include_str!("../../kdf_chain/src/test_data/lbc_2000000_x11.hex"),
+        ),
+        (
+            "lbc_tip",
+            include_str!("../../kdf_chain/src/test_data/lbc_2209626_x11_tip.hex"),
+        ),
+    ];
+    const RUNES_TIP: &str = include_str!("../../kdf_chain/src/test_data/runes_2953197_x11_qtum_tip.hex");
+    const RUNES_500K: &str = include_str!("../../kdf_chain/src/test_data/runes_500000_x11_qtum.hex");
+
+    fn time_at(bytes: &[u8], start: usize) -> u32 { time_at_offset(bytes, start, 68) }
+
+    fn time_at_offset(bytes: &[u8], start: usize, offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[start + offset..start + offset + 4].try_into().unwrap())
+    }
+
+    /// The size of the PIVX header at the start of `bytes`, stated from its version field by the
+    /// chapter's rule (4-6 and 8 and above carry the 32-byte field), independent of the reader.
+    pub(crate) fn pivx_size(bytes: &[u8]) -> usize {
+        match u32::from_le_bytes(bytes[..4].try_into().unwrap()) {
+            4..=6 | 8.. => 112,
+            _ => 80,
+        }
+    }
+
+    /// Size of a Qtum header with a one-byte compact-size signature.
+    fn qtum_size(bytes: &[u8]) -> usize { 181 + usize::from(bytes[180]) }
+
+    pub(crate) fn split_by(bytes: &[u8], size: fn(&[u8]) -> usize) -> Vec<&[u8]> {
+        let (mut out, mut rest) = (Vec::new(), bytes);
+        while !rest.is_empty() {
+            let (head, tail) = rest.split_at(size(rest));
+            out.push(head);
+            rest = tail;
+        }
+        out
     }
 
     /// One served chain section: a lone header and a list, both in the layout `layout`.
@@ -6987,6 +7067,8 @@ pub(crate) mod header_read_path_tests {
         pub(crate) lone: Vec<u8>,
         pub(crate) list: Vec<u8>,
         pub(crate) count: usize,
+        /// Where the time field sits in a header of this layout.
+        pub(crate) time_offset: usize,
     }
 
     impl Fixture {
@@ -6996,6 +7078,7 @@ pub(crate) mod header_read_path_tests {
                 lone: served(RIC_LONE),
                 list: served(RIC_LIST),
                 count: 11,
+                time_offset: 68,
             }
         }
 
@@ -7005,6 +7088,7 @@ pub(crate) mod header_read_path_tests {
                 lone: served(MEWC_LONE_NATIVE),
                 list: served(MEWC_MIXED),
                 count: 11,
+                time_offset: 68,
             }
         }
 
@@ -7035,6 +7119,7 @@ pub(crate) mod header_read_path_tests {
                 lone: headers[0].clone(),
                 list: headers.concat(),
                 count: 11,
+                time_offset: 68,
             }
         }
 
@@ -7053,6 +7138,7 @@ pub(crate) mod header_read_path_tests {
                 lone: list[..120].to_vec(),
                 count: 11,
                 list,
+                time_offset: 68,
             }
         }
 
@@ -7063,12 +7149,61 @@ pub(crate) mod header_read_path_tests {
                 lone: list[..80].to_vec(),
                 count: 6,
                 list,
+                time_offset: 68,
             }
         }
 
-        pub(crate) fn lone_time(&self) -> u64 { time_at(&self.lone, 0) as u64 }
+        /// A real PIVX window; the lone header is its first header.
+        pub(crate) fn pivx(hex: &str) -> Self {
+            let list = served(hex);
+            let lone = split_by(&list, pivx_size)[0].to_vec();
+            Fixture {
+                layout: CoinVariant::Pivx,
+                lone,
+                count: 11,
+                list,
+                time_offset: 68,
+            }
+        }
 
-        pub(crate) fn list_time(&self) -> u64 { time_at(&self.list, 0) as u64 }
+        /// A real LBC window (eleven 112-byte headers); the lone header is its first header.
+        pub(crate) fn lbc(hex: &str) -> Self {
+            let list = served(hex);
+            Fixture {
+                layout: CoinVariant::Lbc,
+                lone: list[..112].to_vec(),
+                count: 11,
+                list,
+                time_offset: 100,
+            }
+        }
+
+        /// A real Runebase window (Qtum-shaped headers); the lone header is its first header.
+        pub(crate) fn runes(hex: &str) -> Self {
+            let list = served(hex);
+            let lone = split_by(&list, qtum_size)[0].to_vec();
+            Fixture {
+                layout: CoinVariant::Qtum,
+                lone,
+                count: 11,
+                list,
+                time_offset: 68,
+            }
+        }
+
+        /// The median of the eleven time fields, read straight from the fixture bytes.
+        pub(crate) fn independent_median(&self, size: fn(&[u8]) -> usize) -> u64 {
+            let mut times: Vec<u32> = split_by(&self.list, size)
+                .iter()
+                .map(|piece| time_at_offset(piece, 0, self.time_offset))
+                .collect();
+            times.sort_unstable();
+            times[times.len() / 2] as u64
+        }
+
+        pub(crate) fn lone_time(&self) -> u64 { time_at_offset(&self.lone, 0, self.time_offset) as u64 }
+
+        pub(crate) fn list_time(&self) -> u64 { time_at_offset(&self.list, 0, self.time_offset) as u64 }
 
         /// The median the median-time-past path derives from the whole list, stated from the parse
         /// under the fixture's true layout.
@@ -7619,20 +7754,276 @@ pub(crate) mod header_read_path_tests {
         }
     }
 
+    fn all_pivx() -> Vec<(&'static str, Fixture)> { PIVX_FILES.iter().map(|(n, h)| (*n, Fixture::pivx(h))).collect() }
+
+    fn all_lbc() -> Vec<(&'static str, Fixture)> { LBC_FILES.iter().map(|(n, h)| (*n, Fixture::lbc(h))).collect() }
+
     #[test]
-    fn lbc_and_pivx_refuse_every_header_read_with_a_typed_error() {
+    fn pivx_chain_variant_reads_every_era_window_on_every_path() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_pivx() {
+                let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+                read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                assert!(!logged(&coin), "{name}/{window}: a PIVX coin never falls back");
+            }
+        }
+    }
+
+    #[test]
+    fn lbc_chain_variant_reads_every_window_on_every_path() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_lbc() {
+                let coin = coin_from_protocol(utxo(json!("LBC")), None);
+                read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                assert!(!logged(&coin), "{name}/{window}: an LBC coin never falls back");
+            }
+        }
+    }
+
+    /// The swap-critical case: the median time past of the latest eleven headers is the true
+    /// median of their time fields, stated here from the fixture bytes.
+    #[test]
+    fn the_tip_window_median_time_past_is_the_true_median_of_the_eleven_times() {
+        let cases: [(&str, Fixture, fn(&[u8]) -> usize); 2] = [
+            ("PIVX", Fixture::pivx(PIVX_FILES[8].1), pivx_size),
+            ("LBC", Fixture::lbc(LBC_FILES[3].1), |_| 112),
+        ];
+        for (variant, fx, size) in cases {
+            let expected = fx.independent_median(size);
+            let coin = coin_from_protocol(utxo(json!(variant)), None);
+            assert_eq!(path_median(&coin, &fx), Ok(expected), "{variant}: get_current_mtp");
+            let via_client = electrum(&coin)
+                .get_median_time_past_with_policy(5000, NonZeroU64::new(11).unwrap(), policy_of(&coin))
+                .wait()
+                .unwrap();
+            assert_eq!(
+                via_client as u64, expected,
+                "{variant}: get_median_time_past_with_policy"
+            );
+        }
+        // Every PIVX era window, including the boundaries, gives its true median too.
+        for (window, fx) in all_pivx() {
+            let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+            assert_eq!(
+                path_median(&coin, &fx),
+                Ok(fx.independent_median(pivx_size)),
+                "{window}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_store_keeps_112_and_80_byte_pivx_and_112_byte_lbc_headers() {
+        for (variant, fx, size) in [
+            ("PIVX", Fixture::pivx(PIVX_FILES[1].1), pivx_size as fn(&[u8]) -> usize),
+            ("LBC", Fixture::lbc(LBC_FILES[3].1), |_| 112),
+        ] {
+            let coin = coin_from_protocol(utxo(json!(variant)), None);
+            let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+            let pieces = split_by(&fx.list, size);
+            let headers = chain::BlockHeader::list_from_served_bytes(&fx.list, 11, fx.layout).unwrap();
+            let registry: HashMap<u64, chain::BlockHeader> = (100u64..).zip(headers.iter().cloned()).collect();
+            block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+            for (height, piece) in (100u64..).zip(&pieces) {
+                let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+                assert_eq!(
+                    &read.raw()[..],
+                    *piece,
+                    "{variant}: stored bytes equal served bytes at {height}"
+                );
+            }
+            let lens: std::collections::BTreeSet<usize> = pieces.iter().map(|p| p.len()).collect();
+            let wanted: Vec<usize> = if variant == "PIVX" { vec![80, 112] } else { vec![112] };
+            assert_eq!(lens.into_iter().collect::<Vec<_>>(), wanted);
+            assert!(!logged(&coin));
+        }
+    }
+
+    #[test]
+    fn pivx_and_lbc_reject_malformed_input_on_every_path_without_panicking() {
+        for (variant, good) in [
+            ("PIVX", Fixture::pivx(PIVX_FILES[7].1)),
+            ("LBC", Fixture::lbc(LBC_FILES[0].1)),
+        ] {
+            let mut cases: Vec<(&str, Vec<u8>, Vec<u8>, u64)> = Vec::new();
+            let mut trailing = good.list.clone();
+            trailing.push(0);
+            cases.push(("trailing byte", good.lone.clone(), trailing, 11));
+            cases.push((
+                "truncated",
+                good.lone.clone(),
+                good.list[..good.list.len() - 1].to_vec(),
+                11,
+            ));
+            cases.push((
+                "one header short",
+                good.lone.clone(),
+                good.list[..10 * 112].to_vec(),
+                11,
+            ));
+            cases.push(("count mismatch (10)", good.lone.clone(), good.list.clone(), 10));
+            cases.push(("count mismatch (12)", good.lone.clone(), good.list.clone(), 12));
+            for (what, lone, list, count) in cases {
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                let fx = Fixture {
+                    layout: good.layout,
+                    lone,
+                    list,
+                    count: count as usize,
+                    time_offset: good.time_offset,
+                };
+                // the list-based paths reject; the lone-header paths are not affected by a bad list
+                for (name, read) in [
+                    ("retrieve_last_headers", path_retrieve_last_headers as PathFn),
+                    ("median", path_median as PathFn),
+                ] {
+                    let err = read(&coin, &fx);
+                    assert!(err.is_err(), "{variant}/{what}/{name}: {err:?}");
+                }
+            }
+        }
+        // LBC is fixed-layout: a list of 80-byte headers, and a lone 80-byte header, are malformed.
+        let lbc = Fixture::lbc(LBC_FILES[0].1);
+        let eighty: Vec<u8> = lbc.list.chunks(112).flat_map(|c| c[..80].to_vec()).collect();
+        let coin = coin_from_protocol(utxo(json!("LBC")), None);
+        serve(&lbc.list[..80], &eighty, 11);
+        assert!(electrum(&coin)
+            .retrieve_last_headers(NonZeroU64::new(11).unwrap(), 5000, policy_of(&coin))
+            .wait()
+            .is_err());
+        assert!(block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin))
+        )
+        .is_err());
+        // PIVX: a version-7 header served with 112 bytes is rejected (not 80 bytes, not its layout).
+        let v7 = Fixture::pivx(PIVX_FILES[5].1);
+        let mut padded = v7.lone.clone();
+        padded.extend_from_slice(&[0u8; 32]);
+        let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+        serve(&padded, &v7.list, 11);
+        assert!(block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pivx_structural_guard_accepts_an_exactly_80_byte_version_4_header_as_std_80() {
+        // R37.5.6 covers the PIVX trailing field, which the version chooses: a header served as
+        // exactly 80 bytes is read as std-80 (here a stripped version-4 header).
+        let v4 = Fixture::pivx(PIVX_FILES[2].1);
+        let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+        serve(&v4.lone[..80], &v4.list, 11);
+        let time = block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin)),
+        )
+        .unwrap();
+        assert_eq!(time, v4.lone_time());
+        // A 79-byte or 81-byte header gets no re-read.
+        for len in [79, 81] {
+            serve(&v4.lone[..len], &v4.list, 11);
+            assert!(block_on(
+                coin.as_ref()
+                    .rpc_client
+                    .get_block_timestamp_with_policy(77, &policy_of(&coin))
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn pivx_and_lbc_do_not_read_the_other_layouts() {
+        // The Qtum-shaped list (246-byte headers) fits neither fixed length family.
+        let qtum = Fixture::qtum();
         for variant in ["LBC", "PIVX"] {
             for (name, read, _) in paths() {
-                // a plain standard-80 header and the other layouts are all refused, never silently read
-                for fx in [Fixture::standard(), Fixture::riecoin(), Fixture::qtum()] {
-                    let coin = coin_from_protocol(utxo(json!(variant)), None);
-                    let err = read_err(name, &coin, &fx, read);
-                    assert!(
-                        err.contains("not implemented") && err.contains(variant),
-                        "{name}/{variant}: {err}"
-                    );
-                    assert!(!logged(&coin));
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                read_err(name, &coin, &qtum, read);
+                assert!(!logged(&coin));
+            }
+        }
+        // A plain 80-byte header chain is not an LBC chain.
+        let coin = coin_from_protocol(utxo(json!("LBC")), None);
+        read_err(
+            "retrieve_last_headers",
+            &coin,
+            &Fixture::standard(),
+            path_retrieve_last_headers,
+        );
+    }
+
+    #[test]
+    fn pivx_and_lbc_are_outside_the_default_switch_so_they_never_fall_back() {
+        for variant in ["PIVX", "LBC"] {
+            let conf = conf_from_protocol(utxo(json!(variant)), None).unwrap();
+            assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_none());
+            assert_eq!(
+                crate::utxo::header_layout_fallback::coin_family(&conf),
+                variant,
+                "the family is the chain_variant value"
+            );
+            let expected = if variant == "PIVX" {
+                CoinVariant::Pivx
+            } else {
+                CoinVariant::Lbc
+            };
+            assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), expected);
+        }
+    }
+
+    /// Regression pin: a coin with no `chain_variant` reads PIVX-shaped bytes exactly as before this
+    /// change: the 80-byte eras are standard headers, the 112-byte eras are rejected (no fallback
+    /// rescues them), on every path.
+    #[test]
+    fn a_coin_without_chain_variant_reads_pivx_bytes_as_before() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_pivx() {
+                let coin = coin_from_protocol(json!({ "type": "UTXO" }), None);
+                let eighty_only = matches!(window, "v3" | "v7");
+                if eighty_only {
+                    // The standard reader reads them; the fixture states the parse under the PIVX
+                    // layout, which for 80-byte headers is the same read.
+                    read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                } else if window == "v4" || window == "v5" || window == "tip" {
+                    read_err(&format!("{name}/{window}"), &coin, &fx, read);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn runebase_qtum_lists_read_on_the_median_and_sync_paths() {
+        for (hex, label) in [(RUNES_TIP, "tip"), (RUNES_500K, "500000")] {
+            let fx = Fixture::runes(hex);
+            assert_eq!(fx.list.len(), 11 * fx.lone.len(), "{label}: eleven equal-size headers");
+            let expected_median = fx.independent_median(qtum_size);
+            for protocol in [utxo(json!("QTUM")), json!({ "type": "QTUM" })] {
+                let coin = coin_from_protocol(protocol, None);
+                // median path
+                assert_eq!(path_median(&coin, &fx), Ok(expected_median), "{label}: median");
+                // sync path: retrieve_last_headers consumes the bytes exactly and re-encodes them
+                assert_eq!(
+                    path_retrieve_last_headers(&coin, &fx),
+                    Ok(fx.list_time()),
+                    "{label}: retrieve_last_headers"
+                );
+                // the lone-header paths and the store
+                assert_eq!(path_get_block_timestamp(&coin, &fx), Ok(fx.lone_time()), "{label}");
+                assert_eq!(
+                    path_valid_block_header_from_storage(&coin, &fx),
+                    Ok(fx.lone_time()),
+                    "{label}"
+                );
+                assert!(!logged(&coin));
+                // a fresh coin: the paths above already stored these headers at other heights
+                let fresh = coin_from_protocol(utxo(json!("QTUM")), None);
+                assert_eq!(path_store(&fresh, &fx), Ok(fx.list_time()), "{label}: store");
             }
         }
     }

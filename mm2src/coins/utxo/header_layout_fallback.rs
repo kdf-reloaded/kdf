@@ -58,20 +58,22 @@ impl ChainVariant {
     /// The spellings, comma-separated, for error texts.
     pub fn names() -> String { Self::ALL.map(ChainVariant::name).join(", ") }
 
-    /// The reader this family selects, or `None` for a family whose header layout is not implemented.
+    /// The reader this family selects.
     ///
-    /// The exclusivity and thresholded rules of R37.5.3 and R37.5.5 (`"BTC"` reading standard-80 only,
+    /// `"QTUM"`, `"LBC"` and `"PIVX"` have dedicated readers (R37.5.3, R37.5.5). The exclusivity and
+    /// thresholded rules of the remaining families (`"BTC"` reading standard-80 only,
     /// `"PPC"` suppressing the Equihash reading of version-4 headers, `"RICK"`/`"MORTY"` reading
     /// Equihash for every version) are plan step H4 and are not implemented: those families read the
     /// standard reader, which keeps the version-signalled recognition of R37.5.4 (for `"RVN"` that
     /// includes the KawPoW trailer at version 0x30000000).
-    fn reader(self) -> Option<CoinVariant> {
+    fn reader(self) -> CoinVariant {
         match self {
-            ChainVariant::Qtum => Some(CoinVariant::Qtum),
+            ChainVariant::Qtum => CoinVariant::Qtum,
+            ChainVariant::Lbc => CoinVariant::Lbc,
+            ChainVariant::Pivx => CoinVariant::Pivx,
             ChainVariant::Btc | ChainVariant::Ppc | ChainVariant::Rick | ChainVariant::Morty | ChainVariant::Rvn => {
-                Some(CoinVariant::Standard)
+                CoinVariant::Standard
             },
-            ChainVariant::Lbc | ChainVariant::Pivx => None,
         }
     }
 }
@@ -117,7 +119,7 @@ impl HeaderLayoutFallback {
         let name = match layout {
             CoinVariant::Riecoin => "riecoin",
             CoinVariant::KawpowAuxpowMixed => "kawpow_auxpow_mixed",
-            CoinVariant::Standard | CoinVariant::Qtum => return,
+            CoinVariant::Standard | CoinVariant::Qtum | CoinVariant::Lbc | CoinVariant::Pivx => return,
         };
         common::log::info!(
             "{}: the standard header layout did not fit the served headers; read them with the '{}' layout \
@@ -139,14 +141,6 @@ pub enum FallbackReadError<E> {
     /// More than one alternative layout consumed the bytes exactly; the operator resolves it by
     /// pinning the coin with `header_layout` (CRD ch.37 R37.5.9e).
     Ambiguous(String),
-    /// The coin's `chain_variant` family has no header reader in this build: every header read of
-    /// the coin is refused, never read as a standard header.
-    NotImplemented(ChainVariant),
-}
-
-/// The refusal text of a family without a header reader.
-pub(crate) fn not_implemented_reason(family: ChainVariant) -> String {
-    format!("header layout not implemented for chain_variant {}", family.name())
 }
 
 fn layout_name(layout: CoinVariant) -> &'static str {
@@ -155,6 +149,8 @@ fn layout_name(layout: CoinVariant) -> &'static str {
         CoinVariant::KawpowAuxpowMixed => "kawpow_auxpow_mixed",
         CoinVariant::Standard => "standard",
         CoinVariant::Qtum => "qtum",
+        CoinVariant::Lbc => "lbc",
+        CoinVariant::Pivx => "pivx",
     }
 }
 
@@ -202,7 +198,6 @@ impl<E> FallbackReadError<E> {
         match self {
             FallbackReadError::Rejected(e) => describe(e),
             FallbackReadError::Ambiguous(reason) => reason,
-            FallbackReadError::NotImplemented(family) => not_implemented_reason(family),
         }
     }
 }
@@ -214,8 +209,6 @@ impl<E> FallbackReadError<E> {
 #[derive(Clone, Debug)]
 pub struct HeaderReadPolicy {
     layout: CoinVariant,
-    /// Set for a coin whose `chain_variant` family has no reader: every read is refused.
-    refusal: Option<ChainVariant>,
     fallback: Option<HeaderLayoutFallback>,
 }
 
@@ -225,29 +218,19 @@ impl HeaderReadPolicy {
     /// reader (Qtum for QTUM and QRC20 coins, a documented divergence from R37.5.1 that the
     /// maintainer keeps); else the standard reader.
     pub(crate) fn for_conf(conf: &UtxoCoinConf) -> Self {
-        let (layout, refusal) = match (conf.header_layout, conf.chain_variant) {
-            (Some(layout), _) => (layout, None),
-            (None, Some(family)) => match family.reader() {
-                Some(layout) => (layout, None),
-                None => (CoinVariant::Standard, Some(family)),
-            },
-            (None, None) => (conf.protocol_header_reader, None),
+        let layout = match (conf.header_layout, conf.chain_variant) {
+            (Some(layout), _) => layout,
+            (None, Some(family)) => family.reader(),
+            (None, None) => conf.protocol_header_reader,
         };
         HeaderReadPolicy {
             layout,
-            refusal,
             fallback: HeaderLayoutFallback::for_conf(conf),
         }
     }
 
-    /// Reads with `layout` only: no refusal, no fallback.
-    pub(crate) fn with_layout(layout: CoinVariant) -> Self {
-        HeaderReadPolicy {
-            layout,
-            refusal: None,
-            fallback: None,
-        }
-    }
+    /// Reads with `layout` only: no fallback.
+    pub(crate) fn with_layout(layout: CoinVariant) -> Self { HeaderReadPolicy { layout, fallback: None } }
 
     /// Reads with the standard layout only: no pinned layout, no fallback.
     pub fn standard() -> Self { Self::with_layout(CoinVariant::Standard) }
@@ -257,7 +240,6 @@ impl HeaderReadPolicy {
 
     /// Reads one header from exactly the bytes served for it.
     pub fn read_header(&self, bytes: &[u8]) -> Result<BlockHeader, FallbackReadError<serialization::Error>> {
-        self.check_implemented()?;
         read_with_fallback(self.layout, self.fallback.as_ref(), |layout| {
             BlockHeader::from_served_bytes(bytes, layout)
         })
@@ -269,17 +251,8 @@ impl HeaderReadPolicy {
         bytes: &[u8],
         count: usize,
     ) -> Result<Vec<BlockHeader>, FallbackReadError<serialization::Error>> {
-        self.check_implemented()?;
         read_with_fallback(self.layout, self.fallback.as_ref(), |layout| {
             BlockHeader::list_from_served_bytes(bytes, count, layout)
         })
-    }
-
-    /// Fails for a coin whose family has no header reader. Every read of the policy goes through it.
-    pub(crate) fn check_implemented<E>(&self) -> Result<(), FallbackReadError<E>> {
-        match self.refusal {
-            Some(family) => Err(FallbackReadError::NotImplemented(family)),
-            None => Ok(()),
-        }
     }
 }
