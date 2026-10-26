@@ -742,6 +742,37 @@ R38.6.3.
 
 ---
 
+## #17 — Orderbook: legacy `orderbook` fails, legacy `best_orders` drops, on a shielded-coin order — **OPEN (chapter cleared 2026-10-26; implementation pending)**
+
+CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
+§32.8 R-F6b, R-F6c, R-F6d, R-F6e, T-F6.1–T-F6.4;
+[`39-zcash---z_coin-shielded-coin.md`](./39-zcash---z_coin-shielded-coin.md)
+R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
+
+- [ ] With one maker order for a shielded-coin/UTXO pair on the book, the
+  legacy `orderbook` for that pair fails on every call with an internal
+  error (address derivation unsupported for the shielded protocol), so a
+  taker on the legacy generation cannot read the pair at all; the legacy
+  `best_orders` silently omits the same order. The mmrpc-2.0 generation of
+  both methods is correct (order listed with `{"address_type":"Shielded"}`).
+  Reproduced in the swap lab on 2026-10-26.
+- [ ] This is parity with a **reference defect**: at both designations the
+  legacy generation routes through a coin-generic resolver with no shielded
+  outcome and aborts (orderbook) or omits (best_orders). Reloaded deliberately
+  diverges: ch. 32 R-F6d routes both legacy methods through the single
+  R-F6 derivation, R-F6e renders the shielded outcome as the fixed string
+  `Shielded`, and R-F6c (drop only the unresolvable order) applies to all four
+  methods.
+- [ ] Same root cause, wider than shielded coins: Siacoin and Lightning orders
+  (the earlier R-F6b fix reached mmrpc 2.0 only) and Tendermint orders
+  (Reloaded's coin-generic resolver refuses the family the reference derives)
+  abort the legacy `orderbook` too. Covered by the same routing change.
+- [ ] Node-local response shape only; nothing on the P2P wire changes. The
+  placeholder string is a Reloaded decision with no reference counterpart; a
+  `docs/GLEEC_COMPATIBILITY.md` note is appropriate once implemented.
+
+---
+
 ## Audit method (for reproducibility)
 
 1. Extracted the 223 unique upstream wire-method strings from

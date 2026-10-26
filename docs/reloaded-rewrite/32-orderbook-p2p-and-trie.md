@@ -708,6 +708,9 @@ entirely rather than displaying it without an address.
 > fix changed only these two arms' outcome and left R-F6c's general
 > drop behaviour untouched, which correctly remains for a coin
 > family that has no address-resolution path defined at all.
+> *(Scope note, 2026-10-26: that correction reached the mmrpc-2.0
+> generation only; the legacy generation is bound and its remaining
+> defect recorded under R-F6d and R-F6e below.)*
 
 **R-F6c (address-resolution failure drops only that order).**
 When address derivation for a specific order's coin genuinely
@@ -726,6 +729,145 @@ address-derivation path moves from this rule to the transparent
 case of R-F6; a future coin family recognised as address-
 undisplayable-by-design moves to R-F6b's shielded case instead of
 sitting on this rule.
+
+**R-F6d (two RPC generations, one derivation, two renderings).**
+The orderbook read surface is served in two RPC generations, and
+an order entry's `address` member has a different shape in each:
+
+- the legacy `orderbook` and `best_orders` methods (the
+  envelope-less generation) carry `address` as a **plain
+  string**;
+- the mmrpc-2.0 `orderbook` and `best_orders` methods carry
+  `address` as the tagged union of R-F6: an object whose
+  `address_type` member is `Transparent`, with the address string
+  in `address_data`, or whose `address_type` member is
+  `Shielded`, with no `address_data` member.
+
+Both generations MUST resolve the address through the single
+derivation of R-F6 -- the same coin-family-to-outcome mapping,
+the same shielded success of R-F6b, the same drop-only-that-order
+rule of R-F6c -- and MUST differ only in how the outcome is
+rendered. The derivation runs for the coin the entry is listed
+under: the requested base coin for an ask, the requested rel coin
+for a bid, and, for `best_orders`, the coin the entry is grouped
+under in the response (the counterpart of the requested coin).
+
+*Reference provenance.* At `v2.6.0-beta`, at `v3.0.0-beta` and
+at `dev (as of 2026-03-27)`, the two generations do **not** share
+a derivation. The mmrpc-2.0 methods behave as R-F6, R-F6b and
+R-F6c describe: a shielded-coin order is rendered with the
+`Shielded` marker, and an order whose coin family has no
+derivation is omitted while the rest of the response is served.
+The legacy methods instead route through an older, coin-generic
+address-from-pubkey resolver that has no shielded outcome at all
+and, at all three rows, refuses the shielded (`ZHTLC`), Lightning,
+Siacoin and Solana/SPL families; the TRON family it refuses at
+`v2.6.0-beta` only, while at `v3.0.0-beta` and `dev (as of
+2026-03-27)` it derives a transparent TRON address from the
+pubkey. The legacy `orderbook` then **fails the whole
+response** on the first such order, so a pair carrying one
+shielded-coin ask (or, queried in the other direction, one
+shielded-coin bid) has no readable legacy orderbook at either
+reference row; the legacy `best_orders` silently omits such
+orders. A desktop client of the reference lineage consumes the
+mmrpc-2.0 generation, which is consistent with the legacy
+defect having persisted through both rows unnoticed. Reloaded
+does not inherit it: the legacy-generation behavior bound by this
+rule and by R-F6e is a deliberate Reloaded divergence from the
+reference, confined to a node-local RPC response and invisible on
+the peer-to-peer wire.
+
+**R-F6e (legacy string form of the shielded outcome).** When an
+entry's derivation yields the shielded outcome of R-F6b and the
+response is of the legacy generation, the `address` string MUST
+be the fixed placeholder `Shielded` -- the same spelling as the
+mmrpc-2.0 `address_type` tag value, so that a consumer moving
+between generations meets one vocabulary. It MUST NOT be an empty
+string, the order's pubkey, a transparent address derived from
+that pubkey, or any other value that could be mistaken for a real
+address of the coin. The placeholder is display-only; nothing in
+the order-matching or swap paths reads it back.
+
+> **Reloaded divergence (2026-10-26).** Observed on the
+> development line: with one maker order for a shielded-coin/UTXO
+> pair on the book, the legacy `orderbook` request for that pair
+> failed on every call from a second node with an internal error
+> stating that address derivation is unsupported for the shielded
+> protocol, while the maker's own `setprice` had succeeded.
+> Reloaded's legacy `orderbook` path still resolves addresses
+> through the coin-generic resolver described under R-F6d and
+> treats its refusal as fatal for the whole response -- parity
+> with a reference defect -- so a taker on the legacy generation
+> cannot read any pair that carries a shielded-coin order on the
+> derived side. Reloaded's legacy `best_orders` path uses the same
+> resolver and drops such orders instead. The fix is to route
+> both legacy methods through the single derivation of R-F6 and
+> render the outcome per R-F6e (shielded) and R-F6c (drop only
+> that order); the mmrpc-2.0 paths already conform.
+
+> **Code-quality finding (informative).** Two things fall out of
+> reading Reloaded's two generations side by side. First, the
+> earlier finding under R-F6b, recorded there as resolved, was
+> resolved for the mmrpc-2.0 generation only: the legacy
+> generation never called the corrected derivation, so a live
+> Siacoin or Lightning order still aborts the legacy `orderbook`
+> and is still dropped from the legacy `best_orders` -- the very
+> defect shape that finding describes. Second, Reloaded's
+> coin-generic resolver refuses the Tendermint family (platform
+> coin and IBC token alike), which the reference's equivalent
+> derives transparently at both rows and which Reloaded's own
+> mmrpc-2.0 derivation also derives; so the legacy `orderbook`
+> for a pair with a Tendermint-coin order on the derived side
+> fails in Reloaded where it succeeds in the reference. Routing
+> the legacy generation through the R-F6 derivation, as R-F6d
+> requires, cures both at once. The two legacy RPC paths are the
+> coin-generic resolver's only callers in Reloaded today, so after
+> the routing change it has none and may be removed as dead code;
+> this rule does not require its removal.
+
+**T-F6.1** *Legacy orderbook with a shielded-coin order
+succeeds.* A test shall place a maker order selling a
+`ZHTLC`-protocol coin for a UTXO coin on one node, then call the
+legacy `orderbook` for that pair (shielded coin as base) and for
+the reversed pair (shielded coin as rel) from a second node. Both
+calls shall succeed; the first shall list the order among the
+asks and the second among the bids, each with `address` equal to
+the string `Shielded`. The same two calls over mmrpc 2.0 shall
+list the same order with `address` equal to
+`{"address_type":"Shielded"}`.
+
+**T-F6.2** *Address shapes agree across generations.* For a
+UTXO-coin order, the legacy entry's `address` shall be the
+transparent address string, and the mmrpc-2.0 entry's `address`
+shall be `{"address_type":"Transparent","address_data":<that
+same string>}`. For a shielded-coin order, the pair of shapes is
+the one T-F6.1 asserts. The two generations shall never disagree
+on which R-F6 outcome an order received.
+
+**T-F6.3** *One unresolvable order never fails a response.* A
+test shall seed an orderbook with one well-formed UTXO-coin order
+and one order whose coin's configured protocol family has no
+address derivation at all (the R-F6c case; the Solana family is
+such a case today), both on the same pair side, and call all
+four methods -- legacy and mmrpc-2.0 `orderbook`, legacy and
+mmrpc-2.0 `best_orders`. Every call shall succeed, shall contain
+the UTXO-coin order, and shall omit the unresolvable order; none
+shall return an error.
+
+**T-F6.4** *Legacy best_orders includes shielded-coin orders.*
+With the order of T-F6.1 on the book, a legacy `best_orders`
+request that matches it shall list it under its coin with
+`address` equal to the string `Shielded`, and the mmrpc-2.0
+`best_orders` shall list it with `address` equal to
+`{"address_type":"Shielded"}`.
+
+> **Clearance (chapter 01 T1, R40) -- passed.** R-F6d, R-F6e,
+> the Reloaded-divergence note, the code-quality finding and
+> T-F6.1--T-F6.4 above were authored by the KDF Spec Reader on
+> 2026-10-26 under the two-team procedure of chapter 01 §1.4A and
+> **passed the KDF Dirty Gate** on 2026-10-26 (PASS, no leaks to
+> scrub). The extent, method and measure are recorded once, in the
+> clearance item of §32.13, and are not restated here.
 
 **R-F6a (subscription tracking).** The per-topic subscription
 state MUST distinguish "already requested" from "subscribed but
@@ -1014,3 +1156,55 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
     control-flow transcription, no local name, no error or log
     literal, no per-method table keyed to internal names, no
     internal module tree and no test identifier.
+- *Scoped addition (2026-10-26) -- legacy-generation orderbook
+  surfaces (R-F6d, R-F6e, T-F6.1--T-F6.4 and the two notes beside
+  them in §32.8):* prompted by a reproduced failure of the legacy
+  `orderbook` method for a pair carrying a shielded-coin order.
+  *Inputs:* this repository's own two orderbook RPC generations,
+  read side by side; and the forbidden corpus, consulted at the
+  rows `v2.6.0-beta`, `v3.0.0-beta` and `dev (as of 2026-03-27)`
+  of the reference-state table of [Chapter 02](02-baseline-state.md)
+  §2.15A, **only** to establish, for each of the four methods (two
+  generations of `orderbook` and of `best_orders`), which coin
+  families reach which R-F6 outcome and whether a per-order
+  derivation failure aborts the response or omits the order. What
+  crosses into this chapter is that outcome mapping and the
+  abort-versus-omit fact per method, the public response shapes
+  (`address` as a string on the legacy generation, the
+  `address_type`/`address_data` object on mmrpc 2.0), and the
+  observation that the three rows agree except for the TRON
+  family, which the legacy resolver refuses at `v2.6.0-beta` only
+  and derives at the two later rows; no function name,
+  argument list, match-arm structure, error wording or comment
+  text was reproduced. The legacy placeholder string of R-F6e has
+  no reference counterpart and is a Reloaded decision.
+- *Dirty Gate clearance for the 2026-10-26 scoped addition:*
+  **PASS** (2026-10-26). The material named in the item above
+  (R-F6d, R-F6e, the Reloaded-divergence note, the code-quality
+  finding, T-F6.1--T-F6.4 and the scope note under R-F6b) passed the
+  KDF Dirty Gate, with a file-level score of 0.02 against the
+  threshold of 0.10 and no leaks to scrub. One Reference-State
+  (R13) finding on this chapter was corrected by the Spec Reader
+  and the corrected lines re-gated at 0.00. Every token that
+  matches the reference is wire-visible (the method names
+  `orderbook` and `best_orders`, the response members `address`,
+  `address_type` and `address_data`, the values `Transparent` and
+  `Shielded`, and the protocol tag `ZHTLC`); the residual 0.02 is a
+  paraphrase of an error this project's own binary emits, not
+  reference expression. *Extent:* the orderbook read surface at
+  the three rows `v2.6.0-beta`, `v3.0.0-beta` and `dev (as of
+  2026-03-27)` -- both generations of `orderbook` and of
+  `best_orders` and the two address-derivation routines they
+  call, read at the relevant routines with row-to-row
+  differences -- plus the four files of this project's own tree
+  that the Reloaded-side claims rest on and a full-tree search for
+  callers of the coin-generic resolver. *Method:* reading,
+  row-pinned search for the routines and call sites, inter-row
+  differences, and a scan of the candidate's added lines for commit
+  identifiers, pull-request numbers, reference paths, module names
+  and code tokens (no hits); the mechanical gate tool was not run
+  because the material contains no code blocks. *Measure:* 0.02
+  for this chapter, 0.00 for the cross-reference in chapter 39
+  R39.5.3, 0.00 for entry 17 of the upstream-parity gaps. The
+  earlier clearance positions recorded above are untouched by this
+  addition.
