@@ -85,6 +85,8 @@ const ZCOIN_MAX_REORG_REWINDS: u32 = 3;
 /// carry in place of a serialized commitment tree. See
 /// [`parse_checkpoint_commitment_tree`].
 const SAPLING_COMMITMENT_ROOT_LEN: usize = 32;
+/// How often a balance read repeats when the unmined notes change while it runs.
+const BALANCE_READ_ATTEMPTS: usize = 3;
 
 pub(crate) type LightwalletdClient = z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient<Channel>;
 type ReloadedWalletDb = WalletDb<Connection, ZcoinConsensusParams, SystemClock, OsRng>;
@@ -1288,8 +1290,36 @@ impl ZCoinShieldedHistory {
             .map_err(|e| e.to_string())
     }
 
+    /// The balance of the scanned wallet notes, in zatoshi.
+    ///
+    /// The notes of a transaction that is not yet mined are left out. Recording a broadcast
+    /// declares the wallet's own outputs of that transaction as received notes (so the history row
+    /// of the unmined transaction carries its final amounts, R39.8.9i (d)); the wallet database's
+    /// summary counts such a note as pending value, which would put it into this scanned-notes
+    /// figure. It is reported once, as the pending receipt of R39.8.0af, and enters this figure when
+    /// the block that mines it is scanned (R39.8.0q, R39.8.0ah).
     pub(crate) fn balance(&self, consensus_params: ZcoinConsensusParams) -> Result<u64, String> {
         let wallet_db = open_wallet_db(&self.wallet_db_path, consensus_params)?;
+        // The summary and the unmined value are separate reads. A broadcast recorded between them
+        // would be subtracted without having been counted, so the read repeats until the unmined
+        // value is the same before and after the summary.
+        for _ in 0..BALANCE_READ_ATTEMPTS {
+            let unmined_before = self.unmined_note_value(&wallet_db)?;
+            let summary_total = Self::wallet_summary_total(&wallet_db)?;
+            let unmined_after = self.unmined_note_value(&wallet_db)?;
+            if unmined_before == unmined_after {
+                return summary_total.checked_sub(unmined_before).ok_or_else(|| {
+                    format!(
+                        "Shielded wallet balance {} is below the value {} of its unmined notes",
+                        summary_total, unmined_before
+                    )
+                });
+            }
+        }
+        Err("The shielded wallet database changed while its balance was being read".to_owned())
+    }
+
+    fn wallet_summary_total(wallet_db: &ReloadedWalletDb) -> Result<u64, String> {
         let summary = wallet_db
             .get_wallet_summary(ConfirmationsPolicy::MIN)
             .map_err(|e| e.to_string())?;
@@ -1302,6 +1332,41 @@ impl ZCoinShieldedHistory {
             }
         }
         Ok(total)
+    }
+
+    /// The value of the unspent notes the wallet database holds for transactions that are not mined
+    /// and not expired, which is exactly the part of the wallet summary that those transactions
+    /// contribute. A transaction is unexpired by the wallet database's own test: it never expires
+    /// (expiry height 0), or its expiry height is at or above the target height (chain tip + 1), or
+    /// its expiry height is unknown and it was first seen within the default expiry delta.
+    fn unmined_note_value(&self, wallet_db: &ReloadedWalletDb) -> Result<u64, String> {
+        let Some(chain_tip) = wallet_db.chain_height().map_err(|e| e.to_string())? else {
+            // No chain tip: the summary is empty as well.
+            return Ok(0);
+        };
+        let target_height = u32::from(chain_tip).saturating_add(1);
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        let value: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(rn.value), 0)
+                 FROM sapling_received_notes rn
+                 INNER JOIN transactions t ON t.id_tx = rn.transaction_id
+                 WHERE t.mined_height IS NULL
+                   AND (t.expiry_height = 0
+                        OR t.expiry_height >= ?1
+                        OR (t.expiry_height IS NULL AND t.min_observed_height + ?2 >= ?1))
+                   AND NOT EXISTS (
+                        SELECT 1 FROM sapling_received_note_spends s WHERE s.sapling_received_note_id = rn.id
+                   )",
+                params![
+                    target_height,
+                    zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        u64::try_from(value).map_err(|e| e.to_string())
     }
 
     pub(crate) fn scan_cached_blocks_to_height<F: FnMut(u64, u64)>(
@@ -1508,8 +1573,9 @@ impl ZCoinShieldedHistory {
         current_block: u64,
         paging_options: &PagingOptionsEnum<i64>,
         limit: usize,
+        include_unmined_sends: bool,
     ) -> Result<ZCoinTxHistoryPage, String> {
-        let rows = self.load_rows()?;
+        let rows = self.load_rows(include_unmined_sends)?;
         let total = rows.len();
         let skipped = skipped_by_paging(&rows, paging_options, limit)?;
         let transactions = rows
@@ -1527,7 +1593,14 @@ impl ZCoinShieldedHistory {
         })
     }
 
-    fn load_rows(&self) -> Result<Vec<ZCoinStoredHistoryRow>, String> {
+    /// The history rows in the order of R39.8.9i (b) and R39.8.9h: unmined own sends first (ascending
+    /// `internal_id`), then mined rows by block height descending and, inside one block, ascending
+    /// `internal_id`. With `include_unmined_sends` false only mined rows are served (R39.8.9f).
+    ///
+    /// An unmined row is an own send: it spends wallet notes (`total_spent` > 0) and has not expired
+    /// (the wallet database's `expired_unmined` flag, which is set from the expiry height once the
+    /// chain tip has passed it, R39.8.0ar).
+    fn load_rows(&self, include_unmined_sends: bool) -> Result<Vec<ZCoinStoredHistoryRow>, String> {
         let conn = Connection::open(&self.wallet_db_path).map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
@@ -1555,13 +1628,15 @@ impl ZCoinShieldedHistory {
                     ), '') AS sent_addresses
                 FROM v_transactions vt
                 INNER JOIN transactions t ON t.txid = vt.txid
+                WHERE vt.mined_height IS NOT NULL
+                   OR (?1 AND vt.expired_unmined = 0 AND vt.total_spent > 0)
                 GROUP BY t.id_tx, vt.txid, vt.mined_height, vt.block_time
-                ORDER BY COALESCE(vt.mined_height, -1) DESC, t.id_tx DESC",
+                ORDER BY (vt.mined_height IS NOT NULL) ASC, COALESCE(vt.mined_height, 0) DESC, t.id_tx ASC",
             )
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
-            .query_map([], |row| {
+            .query_map(params![include_unmined_sends], |row| {
                 let txid: Vec<u8> = row.get(1)?;
                 let received: i64 = row.get(4)?;
                 let spent: i64 = row.get(5)?;
@@ -3265,6 +3340,359 @@ pub(crate) mod tests {
         );
     }
 
+    // ---- z_coin_tx_history order, unmined own sends and tie-break (CRD ch.39 R39.8.9f--R39.8.9i) ----
+
+    /// The heights of the mined rows of the live snapshot the order tests are modelled on.
+    const SNAPSHOT_HEIGHTS: [u32; 4] = [4_184_427, 4_184_446, 4_184_455, 4_184_456];
+    /// The note the unmined own send spends, and the change it pays the wallet.
+    const SNAPSHOT_SPENT_SAT: i64 = 198_000;
+    const SNAPSHOT_CHANGE_SAT: i64 = 147_000;
+    const SNAPSHOT_EXPIRY: u32 = 4_184_456 + 40;
+
+    fn snapshot_page(
+        history: &ZCoinShieldedHistory,
+        paging: PagingOptionsEnum<i64>,
+        limit: usize,
+        include_unmined: bool,
+    ) -> ZCoinTxHistoryPage {
+        history
+            .load_page("ARRR", "zs-wallet", 8, 4_184_456, &paging, limit, include_unmined)
+            .unwrap()
+    }
+
+    fn page_number(page: usize) -> PagingOptionsEnum<i64> {
+        PagingOptionsEnum::PageNumber(NonZeroUsize::new(page).unwrap())
+    }
+
+    fn page_ids(page: &ZCoinTxHistoryPage) -> Vec<i64> { page.transactions.iter().map(|tx| tx.internal_id).collect() }
+
+    /// An empty wallet database at `db_dir`, anchored below the snapshot heights and with a chain tip
+    /// at the last of them.
+    fn open_snapshot_history(db_dir: &Path) -> ZCoinShieldedHistory {
+        let history =
+            ZCoinShieldedHistory::open_or_create("ARRR", db_dir.to_path_buf(), test_params(), &test_extfvk(7), None)
+                .unwrap();
+        let mut wallet_db = open_wallet_db(history.wallet_db_path(), test_params()).unwrap();
+        if wallet_db.get_account_ids().unwrap().is_empty() {
+            let ufvk = sapling_ufvk(&history.extfvk).unwrap();
+            import_wallet_account(
+                &mut wallet_db,
+                &ufvk,
+                ChainState::empty(BlockHeight::from_u32(SNAPSHOT_HEIGHTS[0] - 1), BlockHash([10u8; 32])),
+            )
+            .unwrap();
+        }
+        wallet_db
+            .update_chain_tip(BlockHeight::from_u32(SNAPSHOT_HEIGHTS[3]))
+            .unwrap();
+        drop(wallet_db);
+        history
+    }
+
+    fn snapshot_connection(history: &ZCoinShieldedHistory) -> (Connection, i64, i64) {
+        let conn = Connection::open(history.wallet_db_path()).unwrap();
+        let account_id: i64 = conn
+            .query_row("SELECT id FROM accounts LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        let address_id: i64 = conn
+            .query_row(
+                "SELECT id FROM addresses WHERE account_id = ?1 LIMIT 1",
+                params![account_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (conn, account_id, address_id)
+    }
+
+    fn insert_snapshot_block(conn: &Connection, height: u32) {
+        conn.execute(
+            "INSERT INTO blocks (height, hash, time, sapling_tree, sapling_commitment_tree_size, sapling_output_count)
+             VALUES (?1, ?2, ?3, ?4, 0, 0)",
+            params![
+                height,
+                vec![height as u8; 32],
+                height - 4_000_000,
+                empty_sapling_tree_bytes()
+            ],
+        )
+        .unwrap();
+    }
+
+    /// A transaction row. `mined_at` None is a recorded, unmined broadcast with the given expiry.
+    fn insert_snapshot_tx(conn: &Connection, id_tx: i64, txid: [u8; 32], mined_at: Option<u32>, expiry: u32) {
+        conn.execute(
+            "INSERT INTO transactions (id_tx, txid, block, mined_height, tx_index, expiry_height, min_observed_height)
+             VALUES (?1, ?2, ?3, ?3, ?4, ?5, ?6)",
+            params![
+                id_tx,
+                txid.to_vec(),
+                mined_at,
+                mined_at.map(|_| 0u32),
+                expiry,
+                mined_at.unwrap_or(SNAPSHOT_HEIGHTS[3])
+            ],
+        )
+        .unwrap();
+    }
+
+    /// A received note of the wallet; `mined` notes carry a nullifier and a tree position, the note of
+    /// an unmined transaction carries neither (as the wallet database records it at broadcast).
+    fn insert_snapshot_note(
+        conn: &Connection,
+        ids: (i64, i64),
+        tx: i64,
+        output_index: u32,
+        value: i64,
+        mined: bool,
+    ) -> i64 {
+        let (account_id, address_id) = ids;
+        let marker = (tx as u8) * 10 + output_index as u8;
+        conn.execute(
+            "INSERT INTO sapling_received_notes (
+                transaction_id, output_index, account_id, diversifier, value, rcm, nf,
+                is_change, commitment_tree_position, recipient_key_scope, address_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, 0, ?9)",
+            params![
+                tx,
+                output_index,
+                account_id,
+                vec![marker; 11],
+                value,
+                vec![marker; 32],
+                mined.then(|| vec![marker; 32]),
+                mined.then_some(i64::from(marker)),
+                address_id
+            ],
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT id FROM sapling_received_notes WHERE transaction_id = ?1 AND output_index = ?2",
+            params![tx, output_index],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The live snapshot: four mined transactions (internal ids 1-4) of which the first pays the wallet
+    /// the note the fifth, an unmined own send with internal id 5, spends and returns the change of.
+    /// `unmined_expiry` is the expiry height of that send.
+    fn insert_snapshot(history: &ZCoinShieldedHistory, unmined_expiry: u32) {
+        let (conn, account_id, address_id) = snapshot_connection(history);
+        let ids = (account_id, address_id);
+        for height in SNAPSHOT_HEIGHTS {
+            insert_snapshot_block(&conn, height);
+        }
+        for (index, height) in SNAPSHOT_HEIGHTS.iter().enumerate() {
+            insert_snapshot_tx(&conn, index as i64 + 1, [index as u8 + 1; 32], Some(*height), 0);
+        }
+        let spent_note = insert_snapshot_note(&conn, ids, 1, 0, SNAPSHOT_SPENT_SAT, true);
+        for tx in 2..=4 {
+            insert_snapshot_note(&conn, ids, tx, 0, 1_000 * tx, true);
+        }
+        insert_snapshot_tx(&conn, 5, [5u8; 32], None, unmined_expiry);
+        insert_snapshot_note(&conn, ids, 5, 1, SNAPSHOT_CHANGE_SAT, false);
+        conn.execute(
+            "INSERT INTO sapling_received_note_spends (sapling_received_note_id, transaction_id) VALUES (?1, 5)",
+            params![spent_note],
+        )
+        .unwrap();
+    }
+
+    fn sat_amount(sat: i64) -> BigDecimal { big_decimal_from_sat_unsigned(sat as u64, 8) }
+
+    /// T39.8.9a, default half: the unmined own send is the first row; its position, fields and amounts.
+    #[test]
+    fn load_page_serves_unmined_own_send_first() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-unmined-first"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(page.total, 5);
+        assert_eq!(
+            page_ids(&page),
+            vec![5, 4, 3, 2, 1],
+            "unmined first, then newest block first"
+        );
+        let unmined = &page.transactions[0];
+        assert_eq!(
+            (unmined.block_height, unmined.timestamp, unmined.confirmations),
+            (0, 0, 0)
+        );
+        // the mined rows keep their block height and confirmations
+        assert_eq!(page.transactions[1].block_height, u64::from(SNAPSHOT_HEIGHTS[3]));
+        assert_eq!(page.transactions[1].confirmations, 1);
+        // R39.8.9g: the loss is the net amount, not the whole spent note
+        assert_eq!(unmined.spent_by_me, sat_amount(SNAPSHOT_SPENT_SAT));
+        assert_eq!(unmined.received_by_me, sat_amount(SNAPSHOT_CHANGE_SAT));
+        assert_eq!(
+            unmined.my_balance_change,
+            sat_amount(SNAPSHOT_CHANGE_SAT) - sat_amount(SNAPSHOT_SPENT_SAT)
+        );
+
+        // FromId and the page skip follow the same sequence
+        let after_unmined = snapshot_page(&history, PagingOptionsEnum::FromId(5), 10, true);
+        assert_eq!((after_unmined.skipped, page_ids(&after_unmined)), (1, vec![4, 3, 2, 1]));
+        let second_page = snapshot_page(&history, page_number(2), 2, true);
+        assert_eq!((second_page.skipped, page_ids(&second_page)), (2, vec![3, 2]));
+    }
+
+    /// The unmined row, once its block is known, is the same row with the same amounts, now at the
+    /// position and with the block fields of a mined row (R39.8.9i (e)). The scan itself is driven by
+    /// `z_note_lock_tests`; here the wallet database is moved to the state a scan leaves.
+    #[test]
+    fn load_page_unmined_row_moves_to_its_block_with_unchanged_amounts() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-mined-move"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let before = snapshot_page(&history, page_number(1), 10, true).transactions.remove(0);
+
+        let (conn, _, _) = snapshot_connection(&history);
+        let mined_at = SNAPSHOT_HEIGHTS[3] + 1;
+        insert_snapshot_block(&conn, mined_at);
+        conn.execute(
+            "UPDATE transactions SET block = ?1, mined_height = ?1, tx_index = 0 WHERE id_tx = 5",
+            params![mined_at],
+        )
+        .unwrap();
+        drop(conn);
+
+        let page = history
+            .load_page("ARRR", "zs-wallet", 8, u64::from(mined_at), &page_number(1), 10, true)
+            .unwrap();
+        assert_eq!((page.total, page_ids(&page)), (5, vec![5, 4, 3, 2, 1]));
+        let after = &page.transactions[0];
+        assert_eq!(after.internal_id, before.internal_id);
+        assert_eq!(after.tx_hash, before.tx_hash);
+        assert_eq!(after.spent_by_me, before.spent_by_me);
+        assert_eq!(after.received_by_me, before.received_by_me);
+        assert_eq!(after.my_balance_change, before.my_balance_change);
+        assert_eq!(after.block_height, u64::from(mined_at));
+        assert_ne!(after.timestamp, 0);
+        assert_eq!(after.confirmations, 1);
+    }
+
+    /// T39.8.9a, parity half: with the switch off no unmined row is served and `total` counts mined rows.
+    #[test]
+    fn load_page_omits_unmined_rows_when_switch_off() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-switch-off"));
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+
+        let page = snapshot_page(&history, page_number(1), 10, false);
+        assert_eq!((page.total, page.total_pages), (4, 1));
+        assert_eq!(page_ids(&page), vec![4, 3, 2, 1]);
+        // paging counts the mined rows only
+        let from_newest = snapshot_page(&history, PagingOptionsEnum::FromId(4), 10, false);
+        assert_eq!(page_ids(&from_newest), vec![3, 2, 1]);
+        let err = history
+            .load_page(
+                "ARRR",
+                "zs-wallet",
+                8,
+                4_184_456,
+                &PagingOptionsEnum::FromId(5),
+                10,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("Unknown shielded transaction history internal_id 5"),
+            "{err}"
+        );
+    }
+
+    /// R39.8.9i (e): an unmined send whose expiry height the chain has passed is no longer served, and
+    /// it is served up to and including the block at which it can still be mined.
+    #[test]
+    fn load_page_omits_expired_unmined_send() {
+        let tip = SNAPSHOT_HEIGHTS[3];
+        // expiry == tip: the transaction can no longer be mined in the next block (target = tip + 1)
+        let expired = open_snapshot_history(&test_db_dir("snapshot-expired"));
+        insert_snapshot(&expired, tip);
+        let page = snapshot_page(&expired, page_number(1), 10, true);
+        assert_eq!((page.total, page_ids(&page)), (4, vec![4, 3, 2, 1]));
+
+        // expiry == tip + 1: it can still be mined in the next block
+        let live = open_snapshot_history(&test_db_dir("snapshot-last-block"));
+        insert_snapshot(&live, tip + 1);
+        let page = snapshot_page(&live, page_number(1), 10, true);
+        assert_eq!((page.total, page_ids(&page)), (5, vec![5, 4, 3, 2, 1]));
+    }
+
+    /// The transactions of one block: internal ids 1, 2, 3 whose transaction hashes sort 0x80 < 0xff
+    /// and 0x01, so neither a hash order nor the reverse of the internal id order serves them as
+    /// 1, 2, 3. A fourth transaction is in the following block.
+    fn insert_same_block_snapshot(history: &ZCoinShieldedHistory) {
+        let (conn, account_id, address_id) = snapshot_connection(history);
+        let ids = (account_id, address_id);
+        for height in [SNAPSHOT_HEIGHTS[2], SNAPSHOT_HEIGHTS[3]] {
+            insert_snapshot_block(&conn, height);
+        }
+        // inserted out of internal-id order as well
+        for (id_tx, hash_byte, height) in [
+            (3i64, 0x01u8, SNAPSHOT_HEIGHTS[2]),
+            (1, 0x80, SNAPSHOT_HEIGHTS[2]),
+            (4, 0x40, SNAPSHOT_HEIGHTS[3]),
+            (2, 0xff, SNAPSHOT_HEIGHTS[2]),
+        ] {
+            insert_snapshot_tx(&conn, id_tx, [hash_byte; 32], Some(height), 0);
+            insert_snapshot_note(&conn, ids, id_tx, 0, 1_000 * id_tx, true);
+        }
+    }
+
+    /// T39.8.9b: inside one block the rows are served by ascending internal id, for both paging modes.
+    #[test]
+    fn load_page_same_block_tie_break_ascending_internal_id() {
+        let history = open_snapshot_history(&test_db_dir("snapshot-tie-break"));
+        insert_same_block_snapshot(&history);
+
+        let page = snapshot_page(&history, page_number(1), 10, true);
+        assert_eq!(
+            page_ids(&page),
+            vec![4, 1, 2, 3],
+            "later block first, then ascending internal id"
+        );
+        assert_eq!(page.total, 4);
+        // PageNumber inside the block
+        let second_page = snapshot_page(&history, page_number(2), 2, true);
+        assert_eq!((second_page.skipped, page_ids(&second_page)), (2, vec![2, 3]));
+        // FromId inside the block continues in the same order
+        let after_first = snapshot_page(&history, PagingOptionsEnum::FromId(1), 10, true);
+        assert_eq!((after_first.skipped, page_ids(&after_first)), (2, vec![2, 3]));
+        let after_second = snapshot_page(&history, PagingOptionsEnum::FromId(2), 10, true);
+        assert_eq!((after_second.skipped, page_ids(&after_second)), (3, vec![3]));
+        // the hashes really are not in internal id order
+        let hashes = page
+            .transactions
+            .iter()
+            .map(|tx| tx.tx_hash.clone())
+            .collect::<Vec<_>>();
+        let mut sorted = hashes.clone();
+        sorted.sort();
+        assert_ne!(hashes[1..], sorted[..3]);
+        sorted.reverse();
+        assert_ne!(hashes[1..], sorted[..3]);
+    }
+
+    /// T39.8.9c: the sequence is the same on every request and after closing and reopening the database.
+    #[test]
+    fn load_page_order_is_stable_across_requests_and_reopen() {
+        let db_dir = test_db_dir("snapshot-stable");
+        let history = open_snapshot_history(&db_dir);
+        insert_snapshot(&history, SNAPSHOT_EXPIRY);
+        let rows = |history: &ZCoinShieldedHistory| {
+            snapshot_page(history, page_number(1), 10, true)
+                .transactions
+                .into_iter()
+                .map(|tx| (tx.internal_id, tx.tx_hash, tx.block_height, tx.my_balance_change))
+                .collect::<Vec<_>>()
+        };
+        let first = rows(&history);
+        assert_eq!(first.len(), 5);
+        assert_eq!(rows(&history), first);
+        drop(history);
+        let reopened = open_snapshot_history(&db_dir);
+        assert_eq!(rows(&reopened), first);
+    }
+
     #[test]
     fn empty_wallet_uses_recent_lightwalletd_start_when_no_start_requested() {
         let history = open_test_history();
@@ -3638,6 +4066,7 @@ pub(crate) mod tests {
                 12,
                 &PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
                 10,
+                true,
             )
             .unwrap();
 
@@ -3663,6 +4092,7 @@ pub(crate) mod tests {
                 12,
                 &PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
                 10,
+                true,
             )
             .unwrap();
 
@@ -3708,7 +4138,7 @@ pub(crate) mod tests {
         insert_history_fixture(&history);
 
         let err = history
-            .load_page("ARRR", "zs-wallet", 8, 12, &PagingOptionsEnum::FromId(999), 10)
+            .load_page("ARRR", "zs-wallet", 8, 12, &PagingOptionsEnum::FromId(999), 10, true)
             .unwrap_err();
 
         assert!(err.contains("Unknown shielded transaction history internal_id 999"));
@@ -5299,6 +5729,7 @@ pub(crate) mod tests {
                 11,
                 &PagingOptionsEnum::PageNumber(NonZeroUsize::new(1).unwrap()),
                 10,
+                true,
             )
             .unwrap();
         assert_eq!(page.total, 1);

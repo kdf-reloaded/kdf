@@ -408,6 +408,18 @@ keyed working set holds one row per hash. A history whose stored form cannot be
 decoded is discarded and rebuilt from the backend; an absent history reads as
 empty.
 
+> **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded keyed
+> the rows it loaded from the history file by the first 32 bytes of the
+> `tx_hash` text (the first 32 hexadecimal characters) instead of by the parsed
+> transaction hash, so no loaded row ever matched a listed hash. The first pass
+> after every restart re-fetched each listed transaction as new and wrote it
+> beside the stored row: the history then held two rows, with one
+> `internal_id`, for every transaction it had before the restart. The working
+> set is now keyed by the hash parsed from `tx_hash`, so a history already
+> doubled on disk collapses to one row per hash at the next write. A stored row
+> whose `tx_hash` does not parse as a hash is dropped, with an error log, and
+> fetched again from the backend as a new transaction.
+
 R38.5A.5 **Maturation of a stored row.** A stored row with `block_height` 0, or
 with the all-ones sentinel value that older histories may still hold for an
 unconfirmed transaction, shall have its `block_height`
@@ -433,6 +445,15 @@ platforms serve the same page. `confirmations` is computed at read time as
 `current_block + 1 - block_height`, or 0 when `block_height` exceeds the tip
 (an unconfirmed row with `block_height` 0 therefore reports `current_block + 1`
 under the reference arithmetic -- see the note below).
+
+> **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded's
+> SQLite page query and its `FromId` offset broke ties at equal height by the
+> table's integer row identifier (insertion order) instead of by `internal_id`;
+> both now use the key above. Reloaded serves the mmrpc-2.0 method only in
+> native builds (a browser build answers `NotSupportedInWasm`), so the sentence
+> on the browser store has no Reloaded counterpart today. Reloaded's read-time
+> `confirmations` already reports 0 for a stored height of 0, the fix the
+> finding below proposes.
 
 > **Code-quality finding (informative) -- v2 confirmations of an unconfirmed
 > row.** The read-time arithmetic of the mmrpc-2.0 method does not special-case
@@ -513,6 +534,10 @@ whole.
 > reading the two listing paths side by side. Proposed fix: pair the hash with
 > the listing's block height, or with 0 when the entry is unconfirmed, in
 > native mode as the Electrum path already does.
+>
+> *Reloaded (2026-10-26):* Reloaded had the same defect and now pairs each
+> hash with the listing's `blockheight`, or with 0 when the daemon reports
+> none, so the existing re-fetch supplies the real height.
 
 T38.5A.1 *Deterministic legacy order.* A test shall seed a legacy history with
 at least two unconfirmed rows and two rows at one confirmed height, written in

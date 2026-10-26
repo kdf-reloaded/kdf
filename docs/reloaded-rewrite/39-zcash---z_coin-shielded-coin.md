@@ -1051,7 +1051,12 @@ post-swap Desktop display shall reflect confirmed wallet-db scan results, with
 the existing locked-note/change tracking used only to prevent unsafe local
 double-spends while waiting for confirmation. Reporting an unconfirmed receipt as
 a *pending* (non-spendable) amount is required separately by §39.8.0.6 and does
-not relax this requirement.
+not relax this requirement. One exception concerns the history only: with the
+switch `shielded_history_unmined_sends` at its default, an own shielded send is
+listed in the transaction history from broadcast on, first and with its final
+amounts (R39.8.9i, decided in D39.8.0h). That row is display only; it makes
+nothing spendable, and with the switch set to `false` the history again reflects
+scanned results alone.
 
 > **Status update (reloaded, 2026-08-09).** Light mode satisfies the spendable
 > half of this requirement: its balance is read from the scanned wallet database,
@@ -1978,8 +1983,11 @@ unaffected: it waits out such a shortfall (R39.8.0at) and never surfaces this er
 
 D39.8.0g A built but unsubmitted withdrawal is invisible to the user. The history
 (`z_coin_tx_history`) is derived from the scanned chain (R39.8.0q, §39.8.0.6), so a
-transaction that has been built and not broadcast appears nowhere, and one that was
-broadcast appears only as a pending receipt of change. Showing built-but-unsent
+transaction that has been built and not broadcast appears nowhere. One that was
+broadcast appears at once as the first history row, with its final amounts (R39.8.9i,
+decided in D39.8.0h), and its change also counts as a pending receipt; with the switch
+`shielded_history_unmined_sends` set to `false` it appears only as that pending
+receipt until it is mined, as in the reference. Showing built-but-unsent
 transactions is a user-experience gap, deliberately out of scope here: it would need
 a record of unbroadcast builds, which is exactly the state R39.8.0ap declines to
 create.
@@ -2419,6 +2427,12 @@ row with zero `confirmations` other than one whose height exceeds a stale tip.
 > R38.5A.1 and R38.5A.6) and to carry the amounts R39.8.9g binds. Sorting an
 > unmined row last is non-conformant under either choice.
 
+> **Scope since D39.8.0h (2026-10-26).** The maintainer kept the row. R39.8.9f
+> states the reference contract and binds a Reloaded node only with
+> `shielded_history_unmined_sends` set to `false`; at the default, an own send
+> is governed by R39.8.9i. A mempool-only transaction addressed to this wallet
+> is never a row under either setting.
+
 R39.8.9g **Amounts of an own send.** Because an own send becomes a history row
 only once mined (R39.8.9f), the row's amounts are computed once, from scanned
 wallet state, by R39.8.9b: `spent_by_me` is the total value of the wallet notes
@@ -2463,10 +2477,53 @@ D39.8.0h **Whether to keep a visible unmined own send is a maintainer
 decision.** The reference shows nothing between broadcast and mining
 (R39.8.9f, D39.8.0g); Reloaded currently shows a row, in the wrong position and
 with the wrong amounts (notes under R39.8.9f and R39.8.9g). The two conforming
-outcomes are stated in those notes; the chapter binds the reference behaviour
-until the decision is recorded here. Whichever is chosen, the row -- if any --
+outcomes are stated in those notes. Whichever is chosen, the row -- if any --
 shall never be served last, and the amounts of a transaction shall never change
 between its unmined and mined states.
+
+**Decision (maintainer, 2026-10-26): keep the row.** By default a Reloaded node
+serves an own shielded send from broadcast on, under R39.8.9i; the reference
+behaviour of R39.8.9f stays reachable through the switch of R39.8.9i (f). This
+is a deliberate divergence placed by the second arm of the default-side rule
+(`docs/COMPAT_SWITCHES.md`): it changes no wire format and no other node, and
+only shortens the time before a user sees their own send. It is recorded in
+`docs/GLEEC_COMPATIBILITY.md`.
+
+R39.8.9i **Visible unmined own send (Reloaded divergence, default).** This rule
+is clean-room-original and applies while the switch of (f) is on:
+
+- (a) *Which rows.* A transaction this wallet built and recorded in the shielded
+  wallet database at broadcast (§39.8.0.7) shall be served by
+  `z_coin_tx_history` while it is unmined. A transaction addressed to this
+  wallet that is known only from the mempool is still not a row (R39.8.0ag):
+  only own sends are.
+- (b) *Position.* Unmined rows shall be served ahead of every mined row; several
+  unmined rows are ordered by ascending `internal_id`. Mined rows follow in the
+  order of R39.8.9h. `FromId` paging and `total` use this same sequence.
+- (c) *Fields.* An unmined row reports `block_height` 0, `timestamp` 0 and
+  `confirmations` 0.
+- (d) *Amounts.* From its first appearance the row reports the amounts
+  R39.8.9g binds for the mined row: the value of the change output the wallet
+  pays itself is known when the transaction is built and shall be counted in
+  `received_by_me`. Recording that change at broadcast shall not make it
+  spendable before the block is scanned (R39.8.0q) and shall not count it twice
+  in the balance (the pending-receipt amount of R39.8.0af and the recorded
+  change are one amount, never added together).
+- (e) *Life of the row.* When the block that mines the transaction is scanned,
+  the same row -- same `internal_id`, same amounts -- moves to its block's
+  position under R39.8.9h; at no point are two rows served for one
+  transaction. A transaction that expires unmined (the chain passes its expiry
+  height, R39.8.0ar) shall no longer be served.
+- (f) *Opt-back switch.* The top-level `MM2.json` boolean
+  `shielded_history_unmined_sends` selects this rule. It defaults to `true`;
+  only the JSON value `false` turns it off, and then `z_coin_tx_history`
+  follows R39.8.9f: no unmined row is served and `total` counts mined rows
+  only. The switch changes nothing in the balance, in note selection or in any
+  other method.
+
+> **Compatibility:** for behavior matching GLEEC KDF, set
+> `shielded_history_unmined_sends` to `false`; an own shielded send then
+> appears in `z_coin_tx_history` only after it is mined.
 
 T39.8.9a *Unmined own send is absent.* A test shall broadcast a shielded send
 from a wallet whose database is in a known scanned state, then query
@@ -2476,9 +2533,12 @@ and the pending change shall be visible only through the balance path of
 §39.8.0.6. After the block containing the send is scanned, the same query shall
 return the row first (newest block), with `block_height` equal to that block's
 height, `timestamp` equal to that block's time, `confirmations` at least 1, and
-the amounts of R39.8.9g. If D39.8.0h later elects to keep a visible unmined
-row, this test's first half shall instead assert that the row is served first,
-carries the mined-row amounts, and keeps those amounts after mining.
+the amounts of R39.8.9g. This form of the test applies with the switch of
+R39.8.9i (f) set to `false`. With the switch at its default (D39.8.0h keeps the
+row), the first half shall instead assert that the row is served first, reports
+`block_height`, `timestamp` and `confirmations` 0, carries the mined-row
+amounts, and keeps those amounts and its `internal_id` after mining; a further
+case shall assert that a transaction which expires unmined is no longer served.
 
 T39.8.9b *Same-block tie-break.* A test fixture with three wallet transactions
 mined in one block and one in the following block shall return the later block's
@@ -4469,11 +4529,14 @@ different cause. At least one live endpoint was observed in this state on
   `sync_status: Finished` while the shielded sync is healthy, and rejects
   non-shielded coins (`NotSupportedFor`) and inactive coins (`CoinIsNotActive`)
   (§39.8).
-- History order and unmined sends (§39.8.5.1): an own shielded send is absent
-  from `z_coin_tx_history` until mined and scanned, then appears newest-first
-  with the mined block's height and time and its final amounts; rows in one
-  block are served in ascending `internal_id`; the order is identical across
-  repeated requests and restarts (T39.8.9a--T39.8.9d). Pending D39.8.0h.
+- History order and unmined sends (§39.8.5.1): by default an own shielded send
+  is served from broadcast on, ahead of every mined row, with its final
+  amounts, and moves to its block's position once mined (R39.8.9i, decided in
+  D39.8.0h); with `shielded_history_unmined_sends` set to `false` it is absent
+  until mined and scanned, as in the reference. Mined rows are served
+  newest-first with the mined block's height and time; rows in one block are
+  served in ascending `internal_id`; the order is identical across repeated
+  requests and restarts (T39.8.9a--T39.8.9d).
 - Sync-failure reporting (§39.8.0.5, R39.8.0au): when a background pass fails —
   unreachable chain tip, every shielded backend failed, or a scan error — the
   reported history-sync state is the error state carrying a message and the

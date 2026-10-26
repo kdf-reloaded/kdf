@@ -11,6 +11,61 @@ lazy_static! {
 
 pub const HISTORY_TOO_LARGE_ERR_CODE: i64 = -1;
 
+/// The order in which a legacy (file-backed) history is persisted and served: unconfirmed rows
+/// (`block_height` 0) first, then confirmed rows by `block_height` descending, and rows of equal
+/// height by `internal_id` ascending, compared bytewise (CRD ch.38 R38.5A.1). Over distinct
+/// `internal_id` values this is a total order, so the result does not depend on the order in which
+/// the rows were collected. Shared by the UTXO and the QRC20 history writers (R38.5A.8).
+pub(crate) fn legacy_history_order(a: &TransactionDetails, b: &TransactionDetails) -> Ordering {
+    let a_confirmed = a.block_height != 0;
+    let b_confirmed = b.block_height != 0;
+    a_confirmed
+        .cmp(&b_confirmed)
+        .then_with(|| b.block_height.cmp(&a.block_height))
+        .then_with(|| a.internal_id.0.cmp(&b.internal_id.0))
+}
+
+/// Keys the loaded history rows by their transaction hash (R38.5A.4: one row per hash, and for a
+/// UTXO coin `internal_id` is that hash). A stored history that holds several rows for one hash
+/// collapses to one row here; a row whose `tx_hash` is not a valid hash is dropped and re-fetched
+/// from the backend as a new transaction.
+fn history_map_by_hash(history: Vec<TransactionDetails>) -> HashMap<H256Json, TransactionDetails> {
+    history
+        .into_iter()
+        .filter_map(|tx| match H256Json::from_str(&tx.tx_hash) {
+            Ok(hash) => Some((hash, tx)),
+            Err(e) => {
+                error!(
+                    "Dropping a stored history row with invalid tx_hash '{}': {}",
+                    tx.tx_hash, e
+                );
+                None
+            },
+        })
+        .collect()
+}
+
+/// The rows of the working set in the persisted order (R38.5A.3: every write is sorted first).
+fn sorted_rows_to_write(history_map: &HashMap<H256Json, TransactionDetails>) -> Vec<TransactionDetails> {
+    let mut to_write: Vec<TransactionDetails> = history_map.values().cloned().collect();
+    to_write.sort_unstable_by(legacy_history_order);
+    to_write
+}
+
+/// Keys a freshly loaded history (see [`history_map_by_hash`]) and, when keying collapsed or dropped
+/// rows, returns the sorted rows that replace the stored file. The legacy `my_tx_history` serves the
+/// stored file, and the loop writes it only when a transaction is new or updated, so a history that
+/// an older key left doubled on disk would otherwise stay doubled until the next new transaction
+/// (R38.5A.4). Nothing to collapse: no rows to write.
+fn load_history_working_set(
+    history: Vec<TransactionDetails>,
+) -> (HashMap<H256Json, TransactionDetails>, Option<Vec<TransactionDetails>>) {
+    let loaded_len = history.len();
+    let history_map = history_map_by_hash(history);
+    let healed = (history_map.len() < loaded_len).then(|| sorted_rows_to_write(&history_map));
+    (history_map, healed)
+}
+
 #[allow(clippy::cognitive_complexity)]
 pub async fn process_history_loop<T>(coin: T, ctx: MmArc)
 where
@@ -30,10 +85,19 @@ where
             return;
         },
     };
-    let mut history_map: HashMap<H256Json, TransactionDetails> = history
-        .into_iter()
-        .map(|tx| (H256Json::from(tx.tx_hash.as_bytes()), tx))
-        .collect();
+    let (mut history_map, healed_rows) = load_history_working_set(history);
+    if let Some(to_write) = healed_rows {
+        if let Err(e) = coin.save_history_to_file(&ctx, to_write).compat().await {
+            log_tag!(
+                ctx,
+                "",
+                "tx_history",
+                "coin" => coin.as_ref().conf.ticker;
+                fmt = "Error {} on 'save_history_to_file', stop the history loop", e
+            );
+            return;
+        };
+    }
 
     // Watch this coin's address so a confirmed transaction shortens the wait
     // below instead of costing a full idle interval. Electrum-backed coins only;
@@ -232,18 +296,7 @@ where
                 },
             }
             if updated {
-                let mut to_write: Vec<TransactionDetails> =
-                    history_map.iter().map(|(_, value)| value.clone()).collect();
-                // the transactions with block_height == 0 are the most recent so we need to separately handle them while sorting
-                to_write.sort_unstable_by(|a, b| {
-                    if a.block_height == 0 {
-                        Ordering::Less
-                    } else if b.block_height == 0 {
-                        Ordering::Greater
-                    } else {
-                        b.block_height.cmp(&a.block_height)
-                    }
-                });
+                let to_write = sorted_rows_to_write(&history_map);
                 if let Err(e) = coin.save_history_to_file(&ctx, to_write).compat().await {
                     log_tag!(
                         ctx,
@@ -345,7 +398,7 @@ where
                 .into_iter()
                 .filter_map(|item| {
                     if item.address == my_address {
-                        Some((item.txid, item.blockindex))
+                        Some((item.txid, item.block_height()))
                     } else {
                         None
                     }
@@ -675,4 +728,181 @@ pub async fn calc_interest_of_tx<T: UtxoCommonOps>(
 
 pub fn history_sync_status(coin: &UtxoCoinFields) -> HistorySyncState {
     coin.history_sync_state.lock().unwrap().clone()
+}
+
+/// A minimal history row for the ordering and keying tests: `tx_hash` is the hex of the first 32
+/// bytes of `internal_id`.
+#[cfg(test)]
+pub(crate) fn history_row_for_test(block_height: u64, internal_id: Vec<u8>) -> TransactionDetails {
+    json::from_value(json!({
+        "tx_hex": "",
+        "tx_hash": hex::encode(&internal_id[..32]),
+        "from": [],
+        "to": [],
+        "total_amount": "0",
+        "spent_by_me": "0",
+        "received_by_me": "0",
+        "my_balance_change": "0",
+        "block_height": block_height,
+        "timestamp": 1,
+        "coin": "TEST",
+        "internal_id": hex::encode(&internal_id),
+    }))
+    .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(block_height: u64, id_byte: u8) -> TransactionDetails {
+        history_row_for_test(block_height, vec![id_byte; 32])
+    }
+
+    fn sorted_ids(mut rows: Vec<TransactionDetails>) -> Vec<(u64, u8)> {
+        rows.sort_unstable_by(legacy_history_order);
+        rows.iter().map(|r| (r.block_height, r.internal_id.0[0])).collect()
+    }
+
+    /// Calls `f` with every permutation of `items` (Heap's algorithm).
+    fn for_each_permutation<T: Clone>(items: &mut Vec<T>, k: usize, f: &mut dyn FnMut(&[T])) {
+        if k <= 1 {
+            f(items);
+            return;
+        }
+        for i in 0..k {
+            for_each_permutation(items, k - 1, f);
+            let swap_with = if k % 2 == 0 { i } else { 0 };
+            items.swap(swap_with, k - 1);
+        }
+    }
+
+    // CRD ch.38 T38.5A.1. `my_tx_history` itself needs a context to run, so the paging skip is not
+    // exercised here: the persisted sequence, which the method serves unchanged, is what is asserted.
+    #[test]
+    fn legacy_history_order_is_total_and_deterministic() {
+        // two unconfirmed rows, two rows at one confirmed height, one row at a lower height
+        let mut rows = vec![
+            row(0, 0x30),
+            row(0, 0x10),
+            row(200, 0x50),
+            row(200, 0x20),
+            row(100, 0x01),
+        ];
+        let expected = vec![(0, 0x10), (0, 0x30), (200, 0x20), (200, 0x50), (100, 0x01)];
+
+        // the forward and the reversed insertion order
+        assert_eq!(sorted_ids(rows.clone()), expected);
+        rows.reverse();
+        assert_eq!(sorted_ids(rows.clone()), expected);
+
+        // and every other insertion order
+        let n = rows.len();
+        let mut checked = 0;
+        for_each_permutation(&mut rows, n, &mut |permutation| {
+            assert_eq!(sorted_ids(permutation.to_vec()), expected);
+            checked += 1;
+        });
+        assert_eq!(checked, 120);
+    }
+
+    // CRD ch.38 T38.5A.3, reduced: the collapse by hash that the loop relies on is
+    // `history_map_by_hash` (the loop itself needs a coin and a backend); the per-transaction net
+    // amounts are not covered here.
+    #[test]
+    fn legacy_history_one_row_per_hash() {
+        // a persisted history that holds one transaction twice collapses to one row ...
+        let history = vec![row(10, 0xab), row(0, 0xab), row(11, 0xcd)];
+        let map = history_map_by_hash(history);
+        assert_eq!(map.len(), 2);
+
+        // ... that is found under the transaction hash a backend listing reports (a hash parsed
+        // from its hex form), with the `internal_id` equal to that hash
+        let listed: H256Json = H256Json::from_str(&hex::encode([0xab; 32])).unwrap();
+        let stored = map.get(&listed).expect("the row is keyed by the listed hash");
+        assert_eq!(stored.internal_id.0, listed.0.to_vec());
+
+        // a row whose `tx_hash` is not a hash is dropped, not kept under a wrong key
+        let mut bad = row(5, 0x01);
+        bad.tx_hash = "not a hash".to_owned();
+        assert!(history_map_by_hash(vec![bad]).is_empty());
+    }
+
+    // CRD ch.38 R38.5A.4: a history doubled on disk by the old key is rewritten once, sorted, right
+    // after loading. The test drives `load_history_working_set`, the helper the loop calls before its
+    // first pass; the loop itself (coin, backend, file save) is not run.
+    #[test]
+    fn legacy_history_doubled_file_heals_on_first_load() {
+        let unique = vec![row(0, 0x30), row(100, 0x01), row(200, 0x50), row(100, 0x02)];
+        // every transaction stored twice, identical copies, in an arbitrary order
+        let doubled: Vec<TransactionDetails> = unique.iter().chain(unique.iter().rev()).cloned().collect();
+        let (map, healed) = load_history_working_set(doubled);
+        assert_eq!(map.len(), 4);
+        let written = healed.expect("a collapsed history is rewritten");
+        assert_eq!(
+            written
+                .iter()
+                .map(|r| (r.block_height, r.internal_id.0[0]))
+                .collect::<Vec<_>>(),
+            vec![(0, 0x30), (200, 0x50), (100, 0x01), (100, 0x02)]
+        );
+        let hashes: std::collections::HashSet<_> = written.iter().map(|r| r.tx_hash.clone()).collect();
+        assert_eq!(hashes.len(), written.len());
+
+        // a row whose hash cannot be parsed is dropped, which also rewrites the file
+        let mut bad = row(5, 0x01);
+        bad.tx_hash = "not a hash".to_owned();
+        let (map, healed) = load_history_working_set(vec![row(7, 0x09), bad]);
+        assert_eq!(map.len(), 1);
+        assert_eq!(healed.expect("a dropped row is rewritten").len(), 1);
+
+        // nothing to collapse: no write (an empty history included)
+        let (map, healed) = load_history_working_set(unique);
+        assert_eq!(map.len(), 4);
+        assert!(healed.is_none());
+        assert!(load_history_working_set(Vec::new()).1.is_none());
+    }
+
+    // CRD ch.38 T38.5A.4 (order part): the row keeps its `internal_id` and moves.
+    #[test]
+    fn legacy_history_maturation_moves_row() {
+        let mut rows = vec![row(0, 0x10), row(0, 0x20), row(0, 0x30), row(100, 0x01)];
+        assert_eq!(sorted_ids(rows.clone()), vec![
+            (0, 0x10),
+            (0, 0x20),
+            (0, 0x30),
+            (100, 0x01)
+        ]);
+
+        // the middle unconfirmed row is mined above the confirmed one
+        let matured = rows.iter_mut().find(|r| r.internal_id.0[0] == 0x20).unwrap();
+        assert!(matured.should_update_block_height());
+        matured.block_height = 150;
+        assert_eq!(sorted_ids(rows), vec![(0, 0x10), (0, 0x30), (150, 0x20), (100, 0x01)]);
+    }
+
+    // The native listing pairs a hash with a block height (never the position inside the block).
+    #[test]
+    fn native_listing_pairs_hash_with_block_height() {
+        let confirmed: crate::utxo::rpc_clients::ListTransactionsItem = json::from_value(json!({
+            "address": "a", "category": "receive", "amount": 1.0, "vout": 0, "timereceived": 1,
+            "blockindex": 437, "blockheight": 700000, "confirmations": 5,
+            "txid": hex::encode([0x11; 32]),
+        }))
+        .unwrap();
+        let pair = (confirmed.txid, confirmed.block_height());
+        assert_eq!(pair, (H256Json::from([0x11; 32]), 700000));
+
+        // no height reported (an unconfirmed entry, or a daemon without the field): 0, not `blockindex`
+        let unconfirmed: crate::utxo::rpc_clients::ListTransactionsItem = json::from_value(json!({
+            "address": "a", "category": "receive", "amount": 1.0, "vout": 0, "timereceived": 1,
+            "blockindex": 437, "confirmations": 0,
+            "txid": hex::encode([0x22; 32]),
+        }))
+        .unwrap();
+        assert_eq!(
+            (unconfirmed.txid, unconfirmed.block_height()),
+            (H256Json::from([0x22; 32]), 0)
+        );
+    }
 }

@@ -146,6 +146,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **After a restart, the transaction history of UTXO coins no longer lists every earlier
+  transaction twice.** Each restart re-read the stored history under a wrong key, fetched every
+  transaction again as if it were new, and stored it a second time beside the old copy, so RIN,
+  KMD, LTC and every other UTXO coin showed two identical rows for each transaction it had before
+  the restart. A history already doubled on disk heals itself: the first sync after the upgrade
+  rewrites it with one row per transaction, and nothing needs to be deleted. Detail: PR #81;
+  CRD ch.38 R38.5A.4.
+- **The transaction history now lists transactions in a fixed order.** UTXO and QRC20 histories
+  list unconfirmed transactions first, then newer blocks before older ones, and transactions of
+  one block always in the same order. Before, transactions of one block could swap places
+  between two refreshes, and a wallet that merges history pages by position could show a
+  transaction twice and miss another. On a node that reads its transactions from a coin daemon
+  instead of Electrum, a transaction's block height is now the real height, not its position in
+  the block. Detail: PR #81; CRD ch.38 §38.5A.
+- **An ARRR send now appears in the transaction history at once, at the top, with its final
+  amount.** It used to appear at the bottom of the list until it was mined, and showed the whole
+  spent note as lost (for example -0.00198 instead of -0.00051), so the desktop wallet showed
+  another transaction twice and hid the send. Now the send is listed at the top from broadcast on,
+  with the change it pays back to the wallet already counted, and moves to its block's place once
+  mined; a send that expires unmined disappears. Transactions of one block keep a fixed order.
+  GLEEC KDF lists the send only once it is mined; set the `MM2.json` boolean
+  `shielded_history_unmined_sends` to `false` for that behavior. Detail: PR #81; CRD ch.39 §39.8.5.1.
+
 - **A swap spend or refund whose fee would exceed the payment is now refused instead of broadcast
   as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value
   wrapped and the coin daemon rejected the transaction. They now fail with an error and broadcast

@@ -718,6 +718,18 @@ this value for every family that can swap.
   fixes its value too (ch. 21 §21.11A). Solana has no parity target,
   because neither tree can trade it (ch. 40 §40.6A, finding F6).
 
+## #15 — EVM legacy transaction history: equal-height order not deterministic — **OPEN (follow-up, not verified against the reference)**
+
+The EVM history writers (`mm2src/coins/eth/eth_impl.rs`, the two sorts of the
+collected history) use a comparator that is not a total order: it ranks
+unconfirmed rows first but leaves rows of equal height, and several unconfirmed
+rows, in whatever order the collection produced. The UTXO and QRC20 writers
+had the same comparator and now follow ch. 38 R38.5A.1 (unconfirmed first,
+height descending, `internal_id` ascending). §38.5A does not cover EVM, so the
+reference order for EVM is not established yet: a Spec Reader question comes
+before any change. Low priority: the desktop wallet does not read EVM history
+from KDF (it uses an explorer proxy), so it is not affected.
+
 ---
 
 ## Audit method (for reproducibility)
