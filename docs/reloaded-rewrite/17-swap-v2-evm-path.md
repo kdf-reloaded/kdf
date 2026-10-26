@@ -442,6 +442,13 @@ the standard `eth_blockNumber` polling mechanism shared with the
 V1 EVM path. The symmetric pattern (a different topic, the
 maker-payment contract address) covers `MakerPaymentSpent`.
 
+Every `eth_getLogs`, `eth_blockNumber` and transaction read named in
+this section is issued under the multi-node access contract of
+[Chapter 35](35-evm-v2-activation-rpcs.md) §35.1.F (per-request failover
+including on a JSON-RPC error body, sticky last-good node, 10 s per-node
+cutoff, host-only node naming), and every signed swap transaction this
+chapter broadcasts follows R35.1.12 there.
+
 ---
 
 ## 17.9 NFT variant
