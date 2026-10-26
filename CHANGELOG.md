@@ -390,7 +390,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   checked live on an uncongested transaction pool (2026-10-26).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
   the Electrum servers' per-session limit of about one request per second. The rules for batching,
-  fee reuse, read spreading and balance polling are written (PR #TBD).
+  fee reuse, read spreading and balance polling are written (PR #95).
 
 ### Known limitations
 
