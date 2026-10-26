@@ -1,7 +1,7 @@
 use super::{is_my_order, mm2_internal_pubkey_hex, orderbook_address, subscribe_to_orderbook_topic, OrdermatchContext,
             RpcOrderbookEntry};
 use crate::mm2::lp_ordermatch::{addr_format_from_protocol_info, RpcOrderbookEntryV2};
-use coins::{address_by_coin_conf_and_pubkey_str, coin_conf, is_wallet_only_conf};
+use coins::{coin_conf, is_wallet_only_conf};
 use common::log::warn;
 use common::mm_number::{BigRational, MmNumberMultiRepr};
 use common::{mm_number::MmNumber, now_ms, HttpStatusCode};
@@ -147,13 +147,13 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                     uuid
                 ))?;
                 let address_format = addr_format_from_protocol_info(&ask.base_protocol_info);
-                let address = try_s!(address_by_coin_conf_and_pubkey_str(
-                    &ctx,
-                    &req.base,
-                    &base_coin_conf,
-                    &ask.pubkey,
-                    address_format,
-                ));
+                let address = match orderbook_address(&ctx, &req.base, &base_coin_conf, &ask.pubkey, address_format) {
+                    Ok(a) => a.into_legacy_string(),
+                    Err(e) => {
+                        warn!("Error {} on getting address for order {}", e, ask.uuid);
+                        continue;
+                    },
+                };
                 let is_mine = is_my_order(&ask.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(ask.as_rpc_entry_ask(address, is_mine));
             }
@@ -174,13 +174,13 @@ pub async fn orderbook_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
                     uuid
                 ))?;
                 let address_format = addr_format_from_protocol_info(&bid.base_protocol_info);
-                let address = try_s!(address_by_coin_conf_and_pubkey_str(
-                    &ctx,
-                    &req.rel,
-                    &rel_coin_conf,
-                    &bid.pubkey,
-                    address_format,
-                ));
+                let address = match orderbook_address(&ctx, &req.rel, &rel_coin_conf, &bid.pubkey, address_format) {
+                    Ok(a) => a.into_legacy_string(),
+                    Err(e) => {
+                        warn!("Error {} on getting address for order {}", e, bid.uuid);
+                        continue;
+                    },
+                };
                 let is_mine = is_my_order(&bid.pubkey, &my_pubsecp, &orderbook.my_p2p_pubkeys);
                 orderbook_entries.push(bid.as_rpc_entry_bid(address, is_mine));
             }

@@ -813,55 +813,6 @@ pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<
     })));
     Ok(try_s!(Response::builder().body(response)))
 }
-pub fn address_by_coin_conf_and_pubkey_str(
-    ctx: &MmArc,
-    coin: &str,
-    conf: &Json,
-    pubkey: &str,
-    addr_format: UtxoAddressFormat,
-) -> Result<String, String> {
-    let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(conf["protocol"].clone()));
-    match protocol {
-        CoinProtocol::ERC20 { .. } | CoinProtocol::ETH { .. } => eth::addr_from_pubkey_str(pubkey),
-        CoinProtocol::UTXO | CoinProtocol::QTUM | CoinProtocol::QRC20 { .. } | CoinProtocol::BCH { .. } => {
-            utxo::address_by_conf_and_pubkey_str(coin, conf, pubkey, addr_format)
-        },
-        CoinProtocol::SLPTOKEN { platform, .. } => {
-            let platform_conf = coin_conf(ctx, &platform);
-            if platform_conf.is_null() {
-                return ERR!("platform {} conf is null", platform);
-            }
-            // TODO is there any way to make it better without duplicating the prefix in the SLP conf?
-            let platform_protocol: CoinProtocol =
-                try_s!(CoinProtocol::from_conf_json(platform_conf["protocol"].clone()));
-            match platform_protocol {
-                CoinProtocol::BCH { slp_prefix } => {
-                    slp_addr_from_pubkey_str(pubkey, &slp_prefix).map_err(|e| ERRL!("{}", e))
-                },
-                _ => ERR!("Platform protocol {:?} is not BCH", platform_protocol),
-            }
-        },
-        #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::LIGHTNING { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not implemented for lightning protocol yet!")
-        },
-        #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => {
-            ERR!("Solana pubkey is the public address - you do not need to use this rpc call.")
-        },
-        CoinProtocol::ZHTLC(_) => ERR!("address_by_coin_conf_and_pubkey_str is not supported for ZHTLC protocol!"),
-        CoinProtocol::SIA => ERR!("address_by_coin_conf_and_pubkey_str is not supported for SIA protocol!"),
-        CoinProtocol::TENDERMINT { .. } | CoinProtocol::TENDERMINTTOKEN { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for Tendermint protocol!")
-        },
-        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for TRON protocol!")
-        },
-        CoinProtocol::NFT { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for NFT protocol - use enable_nft instead!")
-        },
-    }
-}
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn load_history_from_file_impl<T>(coin: &T, ctx: &MmArc) -> TxHistoryFut<Vec<TransactionDetails>>
 where

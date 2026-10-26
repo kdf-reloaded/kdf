@@ -150,6 +150,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
+  Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal
+  error, and the older `best_orders` silently left the order out. The order now appears with the
+  address `Shielded` (the same word the newer interface uses), and an order whose coin has no address
+  to show is left out on its own instead of failing the response. Tendermint, Siacoin and Lightning
+  orders now show up on the older methods too. Detail: PR #88; CRD ch.32 R-F6d, R-F6e.
+
 - **PIVX and LBRY (LBC) swaps can now complete.** Their block headers are now read correctly. Before,
   a PIVX swap failed at the final step, after the taker had already paid, because the headers it needs
   to set the spend's time lock could not be read; LBC had the same gap. PIVX headers carry an extra field

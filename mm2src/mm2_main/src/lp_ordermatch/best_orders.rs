@@ -2,7 +2,7 @@ use super::{addr_format_from_protocol_info, is_my_order, mm2_internal_pubkey_hex
             OrderConfirmationsSettings, OrderbookP2PItemWithProof, OrdermatchContext, OrdermatchRequest};
 use crate::mm2::lp_network::{request_any_relay, P2PRequest};
 use crate::mm2::lp_ordermatch::{orderbook_address, RpcOrderbookEntryV2};
-use coins::{address_by_coin_conf_and_pubkey_str, coin_conf, is_wallet_only_conf, is_wallet_only_ticker};
+use coins::{coin_conf, is_wallet_only_conf, is_wallet_only_ticker};
 use common::mm_number::{BigRational, MmNumber};
 use common::{log, HttpStatusCode};
 use derive_more::Display;
@@ -252,14 +252,13 @@ pub async fn best_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>,
                     BestOrdersAction::Buy => addr_format_from_protocol_info(&proto_infos.rel),
                     BestOrdersAction::Sell => addr_format_from_protocol_info(&proto_infos.base),
                 };
-                let address =
-                    match address_by_coin_conf_and_pubkey_str(&ctx, &coin, &coin_conf, &order.pubkey, addr_format) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            log::error!("Error {} getting coin {} address from pubkey {}", e, coin, order.pubkey);
-                            continue;
-                        },
-                    };
+                let address = match orderbook_address(&ctx, &coin, &coin_conf, &order.pubkey, addr_format) {
+                    Ok(a) => a.into_legacy_string(),
+                    Err(e) => {
+                        log::error!("Error {} getting coin {} address from pubkey {}", e, coin, order.pubkey);
+                        continue;
+                    },
+                };
                 let conf_settings = p2p_response.conf_infos.get(&order.uuid);
                 let is_mine = is_my_order(&order.pubkey, &my_pubsecp, &my_p2p_pubkeys);
                 let entry = match req.action {
@@ -498,5 +497,126 @@ mod best_orders_test {
 
         let v2_from_new: BestOrdersResV2 = rmp_serde::from_slice(&new_serialized).unwrap();
         assert_eq!(v2, v2_from_new);
+    }
+
+    // ---- Legacy `best_orders` address rendering (CRD ch.32 R-F6c..R-F6e, T-F6.3, T-F6.4) ----
+
+    /// Answers the next `best_orders` P2P request of `ctx` with `orders` grouped under their coins.
+    fn answer_best_orders_request(orders: Vec<(&str, Vec<OrderbookItem>)>) {
+        use crate::mm2::lp_network::P2PContext;
+        use futures::StreamExt;
+        use mm2_p2p::atomicdex_behaviour::AdexBehaviourCmd;
+        use mocktopus::mocking::{MockResult, Mockable};
+
+        let (cmd_tx, mut cmd_rx) = futures::channel::mpsc::channel(10);
+        P2PContext::fetch_from_mm_arc
+            .mock_safe(move |_| MockResult::Return(std::sync::Arc::new(P2PContext::new(cmd_tx.clone()))));
+        let orders = orders
+            .into_iter()
+            .map(|(coin, items)| {
+                let items = items
+                    .into_iter()
+                    .map(|item| OrderbookP2PItemWithProof {
+                        order: item.into(),
+                        last_message_payload: vec![],
+                        proof: TrieProof::default(),
+                    })
+                    .collect();
+                (coin.to_owned(), items)
+            })
+            .collect();
+        let response = BestOrdersP2PRes {
+            orders,
+            protocol_infos: HashMap::new(),
+            conf_infos: HashMap::new(),
+        };
+        let encoded = rmp_serde::to_vec_named(&response).unwrap();
+        std::thread::spawn(move || {
+            if let Some(AdexBehaviourCmd::RequestAnyRelay { response_tx, .. }) =
+                futures::executor::block_on(cmd_rx.next())
+            {
+                let _ = response_tx.send(Some((mm2_p2p::PeerId::random(), encoded)));
+            }
+        });
+    }
+
+    fn legacy_best_orders(ctx: &MmArc, coin: &str, action: &str) -> Json {
+        let req = json::json!({ "coin": coin, "action": action, "volume": "1" });
+        let response = common::block_on(best_orders_rpc(ctx.clone(), req)).expect("legacy best_orders must succeed");
+        json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+    }
+
+    fn v2_best_orders(ctx: &MmArc, coin: &str, action: &str) -> Json {
+        let req: BestOrdersRequestV2 = json::from_value(json::json!({
+            "coin": coin, "action": action, "request_by": {"type": "number", "value": 10}
+        }))
+        .unwrap();
+        let response =
+            common::block_on(best_orders_rpc_v2(ctx.clone(), req)).expect("mmrpc 2.0 best_orders must succeed");
+        json::to_value(response).unwrap()["orders"].clone()
+    }
+
+    fn orders_of(result: &Json, coin: &str) -> Vec<Json> {
+        result.get(coin).and_then(|o| o.as_array()).cloned().unwrap_or_default()
+    }
+
+    /// T-F6.1 / T-F6.4: a shielded-coin order is listed by the legacy `best_orders` under its coin with
+    /// `address` = `Shielded`, and by mmrpc 2.0 with `{"address_type":"Shielded"}`.
+    #[test]
+    fn test_legacy_best_orders_lists_shielded_coin_order_t_f6_4() {
+        let (ctx, pubkey, secret) = crate::mm2::lp_ordermatch::ordermatch_tests::ctx_for_legacy_rendering_tests(&[]);
+        let item = make_random_orders(pubkey, &secret, "ZOMBIE".into(), "DOC".into(), 1).remove(0);
+        let uuid = item.uuid.to_string();
+
+        answer_best_orders_request(vec![("ZOMBIE", vec![item.clone()])]);
+        let legacy = orders_of(&legacy_best_orders(&ctx, "DOC", "buy"), "ZOMBIE");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0]["uuid"], uuid);
+        assert_eq!(legacy[0]["address"], "Shielded");
+
+        answer_best_orders_request(vec![("ZOMBIE", vec![item])]);
+        let v2 = orders_of(&v2_best_orders(&ctx, "DOC", "buy"), "ZOMBIE");
+        assert_eq!(v2.len(), 1);
+        assert_eq!(v2[0]["address"], json::json!({"address_type": "Shielded"}));
+    }
+
+    /// T-F6.2 / T-F6.3 / Tendermint: UTXO and Tendermint orders render as strings, the order of a coin
+    /// family with no derivation (Solana) is omitted while the others are served.
+    #[test]
+    fn test_legacy_best_orders_omits_only_unresolvable_order_t_f6_3() {
+        let (ctx, pubkey, secret) = crate::mm2::lp_ordermatch::ordermatch_tests::ctx_for_legacy_rendering_tests(&[]);
+        let doc = make_random_orders(pubkey.clone(), &secret, "DOC".into(), "MARTY".into(), 1).remove(0);
+        let sol = make_random_orders(pubkey.clone(), &secret, "SOL".into(), "MARTY".into(), 1).remove(0);
+        let iris = make_random_orders(pubkey, &secret, "IRIS".into(), "MARTY".into(), 1).remove(0);
+        let all = || {
+            vec![
+                ("DOC", vec![doc.clone()]),
+                ("SOL", vec![sol.clone()]),
+                ("IRIS", vec![iris.clone()]),
+            ]
+        };
+
+        answer_best_orders_request(all());
+        let legacy = legacy_best_orders(&ctx, "MARTY", "buy");
+        answer_best_orders_request(all());
+        let v2 = v2_best_orders(&ctx, "MARTY", "buy");
+
+        assert!(orders_of(&legacy, "SOL").is_empty());
+        assert!(orders_of(&v2, "SOL").is_empty());
+        for coin in ["DOC", "IRIS"] {
+            let legacy_orders = orders_of(&legacy, coin);
+            let v2_orders = orders_of(&v2, coin);
+            assert_eq!((legacy_orders.len(), v2_orders.len()), (1, 1), "coin {coin}");
+            let legacy_addr = legacy_orders[0]["address"].as_str().expect("plain string");
+            assert_eq!(
+                v2_orders[0]["address"],
+                json::json!({"address_type": "Transparent", "address_data": legacy_addr})
+            );
+        }
+        // Tendermint: the legacy path used to refuse the family (Reloaded-only regression).
+        assert!(orders_of(&legacy, "IRIS")[0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("iaa"));
     }
 }

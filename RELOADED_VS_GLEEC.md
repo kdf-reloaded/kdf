@@ -50,6 +50,18 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   integration written against either shape keeps working unchanged. Code:
   `coins/lp_coins_types.rs`, `coins/siacoin/siacoin_mm_coin.rs`.
 
+- **The legacy `orderbook` and `best_orders` show a shielded-coin order as
+  `Shielded`.** GLEEC KDF's legacy `orderbook` fails the whole response when
+  the pair carries one shielded-coin (ARRR) order, because its legacy address
+  resolver has no shielded outcome; its legacy `best_orders` leaves such orders
+  out. Reloaded routes both legacy methods through the same derivation as the
+  mmrpc-2.0 methods (CRD ch.32 R-F6d), renders the shielded outcome as the fixed
+  string `Shielded` (R-F6e), and leaves out only an order whose coin has no
+  address derivation (R-F6c). Tendermint, Siacoin and Lightning orders are now
+  served on the legacy methods as well. No compat switch: the response is
+  node-local and nothing on the wire changes. Code:
+  `mm2_main/src/lp_ordermatch/orderbook_rpc.rs`, `best_orders.rs`.
+
 - **Siacoin withdraw carries the signed transaction in both encodings, and
   `send_raw_transaction` accepts either.** Sia is the coin family whose native
   serialisation of a signed transaction is JSON text rather than a binary
