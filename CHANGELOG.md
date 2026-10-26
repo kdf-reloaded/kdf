@@ -51,6 +51,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A shielded (ARRR) send that has to wait for an earlier unmined send now waits up to 10 minutes
+  instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
+  waiting could free enough funds. More in
+  [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md). Detail: PR #TBD.
+
 - **Fixed-fee UTXO coins now pay their `txfee` per kilobyte proportionally, as the reference does.**
   Every coin with a nonzero `txfee`, or none, used to pay the whole per-kilobyte fee for every
   started kilobyte, so a 226-byte KMD transaction cost 1,000 base units instead of 226. Withdrawals,
