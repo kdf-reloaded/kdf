@@ -15,6 +15,14 @@
 > rule that a send waits only while this process's in-flight total could cover the shortfall is
 > unchanged. Provenance: Spec Reader triage 2026-10-26.
 >
+> **Added to the two-daemon item, 2026-10-26.** The change of an own unmined send now shows as
+> unspendable balance from the wallet database itself (CRD ch.39 R39.8.0ag1). The change of a send made
+> by *another* instance on the same seed still does not show until mined. The mempool poll decrypts
+> with the external viewing key only, and change goes to the internal (change) address. Closing that
+> means also trial-decrypting mempool outputs with the internal viewing key, de-duplicated against
+> recorded notes by transaction and output. It belongs with the two-daemon item and is postponed with
+> it. No code yet.
+>
 > **T39.8.0h harness built, 2026-10-25.** A test harness now drives a real Light-mode `ZCoin` over
 > a real shielded wallet database in a temporary directory, with the lightwalletd backend replaced by
 > the scripted transport the lightwalletd tests already had (`mm2src/coins/z_coin/z_note_lock_tests.rs`).

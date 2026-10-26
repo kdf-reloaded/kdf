@@ -1290,33 +1290,47 @@ impl ZCoinShieldedHistory {
             .map_err(|e| e.to_string())
     }
 
-    /// The balance of the scanned wallet notes, in zatoshi.
+    /// The balance of the scanned wallet notes, in zatoshi, together with the unmined notes it
+    /// leaves out (see [`ScannedBalance`]).
     ///
-    /// The notes of a transaction that is not yet mined are left out. Recording a broadcast
-    /// declares the wallet's own outputs of that transaction as received notes (so the history row
-    /// of the unmined transaction carries its final amounts, R39.8.9i (d)); the wallet database's
-    /// summary counts such a note as pending value, which would put it into this scanned-notes
-    /// figure. It is reported once, as the pending receipt of R39.8.0af, and enters this figure when
-    /// the block that mines it is scanned (R39.8.0q, R39.8.0ah).
-    pub(crate) fn balance(&self, consensus_params: ZcoinConsensusParams) -> Result<u64, String> {
+    /// The notes of a transaction that is not yet mined are left out of the spendable figure.
+    /// Recording a broadcast declares the wallet's own outputs of that transaction as received notes
+    /// (so the history row of the unmined transaction carries its final amounts, R39.8.9i (d)); the
+    /// wallet database's summary counts such a note as pending value, which would put it into this
+    /// scanned-notes figure. The notes are returned to the caller instead, which reports their value
+    /// as non-spendable balance (R39.8.0ag1), and they enter the spendable figure when the block that
+    /// mines their transaction is scanned (R39.8.0q, R39.8.0ah).
+    pub(crate) fn scanned_balance(&self, consensus_params: ZcoinConsensusParams) -> Result<ScannedBalance, String> {
         let wallet_db = open_wallet_db(&self.wallet_db_path, consensus_params)?;
-        // The summary and the unmined value are separate reads. A broadcast recorded between them
+        // The summary and the unmined notes are separate reads. A broadcast recorded between them
         // would be subtracted without having been counted, so the read repeats until the unmined
-        // value is the same before and after the summary.
+        // notes are the same before and after the summary. The notes returned are the ones the
+        // summary was read against.
         for _ in 0..BALANCE_READ_ATTEMPTS {
-            let unmined_before = self.unmined_note_value(&wallet_db)?;
+            let unmined_before = self.unmined_notes(&wallet_db)?;
             let summary_total = Self::wallet_summary_total(&wallet_db)?;
-            let unmined_after = self.unmined_note_value(&wallet_db)?;
+            let unmined_after = self.unmined_notes(&wallet_db)?;
             if unmined_before == unmined_after {
-                return summary_total.checked_sub(unmined_before).ok_or_else(|| {
+                let unmined_value = unmined_value(&unmined_before)?;
+                let spendable = summary_total.checked_sub(unmined_value).ok_or_else(|| {
                     format!(
                         "Shielded wallet balance {} is below the value {} of its unmined notes",
-                        summary_total, unmined_before
+                        summary_total, unmined_value
                     )
+                })?;
+                return Ok(ScannedBalance {
+                    spendable,
+                    unmined_notes: unmined_before,
                 });
             }
         }
         Err("The shielded wallet database changed while its balance was being read".to_owned())
+    }
+
+    /// The spendable balance alone, as [`Self::scanned_balance`] reads it.
+    #[cfg(test)]
+    pub(crate) fn balance(&self, consensus_params: ZcoinConsensusParams) -> Result<u64, String> {
+        self.scanned_balance(consensus_params).map(|balance| balance.spendable)
     }
 
     fn wallet_summary_total(wallet_db: &ReloadedWalletDb) -> Result<u64, String> {
@@ -1334,22 +1348,23 @@ impl ZCoinShieldedHistory {
         Ok(total)
     }
 
-    /// The value of the unspent notes the wallet database holds for transactions that are not mined
-    /// and not expired, which is exactly the part of the wallet summary that those transactions
-    /// contribute. A transaction is unexpired by the wallet database's own test: it never expires
-    /// (expiry height 0), or its expiry height is at or above the target height (chain tip + 1), or
-    /// its expiry height is unknown and it was first seen within the default expiry delta.
-    fn unmined_note_value(&self, wallet_db: &ReloadedWalletDb) -> Result<u64, String> {
+    /// The unspent notes the wallet database holds for transactions that are not mined and not
+    /// expired, which are exactly the part of the wallet summary that those transactions contribute.
+    /// A transaction is unexpired by the wallet database's own test: it never expires (expiry height
+    /// 0), or its expiry height is at or above the target height (chain tip + 1), or its expiry
+    /// height is unknown and it was first seen within the default expiry delta. The notes are in a
+    /// fixed order, so two reads of an unchanged database are equal.
+    fn unmined_notes(&self, wallet_db: &ReloadedWalletDb) -> Result<Vec<UnminedNote>, String> {
         let Some(chain_tip) = wallet_db.chain_height().map_err(|e| e.to_string())? else {
             // No chain tip: the summary is empty as well.
-            return Ok(0);
+            return Ok(Vec::new());
         };
         let target_height = u32::from(chain_tip).saturating_add(1);
         let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|e| e.to_string())?;
-        let value: i64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(rn.value), 0)
+        let mut stmt = conn
+            .prepare(
+                "SELECT t.txid, rn.output_index, rn.value
                  FROM sapling_received_notes rn
                  INNER JOIN transactions t ON t.id_tx = rn.transaction_id
                  WHERE t.mined_height IS NULL
@@ -1358,15 +1373,32 @@ impl ZCoinShieldedHistory {
                         OR (t.expiry_height IS NULL AND t.min_observed_height + ?2 >= ?1))
                    AND NOT EXISTS (
                         SELECT 1 FROM sapling_received_note_spends s WHERE s.sapling_received_note_id = rn.id
-                   )",
+                   )
+                 ORDER BY t.txid, rn.output_index",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
                 params![
                     target_height,
                     zcash_primitives::transaction::builder::DEFAULT_TX_EXPIRY_DELTA
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
             )
             .map_err(|e| e.to_string())?;
-        u64::try_from(value).map_err(|e| e.to_string())
+        let mut notes = Vec::new();
+        for row in rows {
+            let (txid, output_index, value) = row.map_err(|e| e.to_string())?;
+            notes.push(UnminedNote {
+                txid: txid
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| format!("Wallet transaction id of {} bytes is not 32 bytes", txid.len()))?,
+                output_index: u32::try_from(output_index).map_err(|e| e.to_string())?,
+                value: u64::try_from(value).map_err(|e| e.to_string())?,
+            });
+        }
+        Ok(notes)
     }
 
     pub(crate) fn scan_cached_blocks_to_height<F: FnMut(u64, u64)>(
@@ -3311,8 +3343,8 @@ pub(crate) mod tests {
     /// Recording a broadcast this wallet made inserts a `transactions` row while
     /// the transaction is still unmined (CRD ch.39 R39.8.0ap). That row carries no
     /// received note, so counting it as scanned would drop the in-flight exclusion
-    /// early and hide the transaction's unconfirmed change from the pending-receipt
-    /// balance (R39.8.0ah). Only a mined height means the block was scanned.
+    /// early and hide the transaction's unconfirmed change from the non-spendable
+    /// balance (R39.8.0ag1, R39.8.0ah). Only a mined height means the block was scanned.
     #[test]
     fn unmined_transaction_row_is_not_reported_as_scanned() {
         const UNMINED_TXID: [u8; 32] = [0xab; 32];
@@ -6613,6 +6645,36 @@ pub(crate) mod tests {
             .expect("the note is free once the transaction has expired");
         assert_eq!(sapling_nullifiers(&first), sapling_nullifiers(&retry));
     }
+}
+
+/// An unspent wallet note of a transaction that is recorded in the wallet database but not mined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UnminedNote {
+    /// Transaction identifier, in the byte order of [`PendingReceipt::txid`] (the wallet database
+    /// stores the order the backend reports).
+    pub(crate) txid: [u8; 32],
+    /// Index of the note's output within that transaction.
+    pub(crate) output_index: u32,
+    /// Note value in zatoshi.
+    pub(crate) value: u64,
+}
+
+/// What one consistent read of the wallet database yields for the balance.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ScannedBalance {
+    /// The value of the scanned, mined notes, in zatoshi. The unmined notes are not in it.
+    pub(crate) spendable: u64,
+    /// The unmined notes left out of `spendable`, reported as non-spendable balance (R39.8.0ag1).
+    pub(crate) unmined_notes: Vec<UnminedNote>,
+}
+
+/// The total value of `notes`, in zatoshi.
+pub(crate) fn unmined_value(notes: &[UnminedNote]) -> Result<u64, String> {
+    notes.iter().try_fold(0u64, |total, note| {
+        total
+            .checked_add(note.value)
+            .ok_or_else(|| "Shielded wallet unmined note value overflow".to_owned())
+    })
 }
 
 /// A wallet-owned Sapling output observed in a mempool transaction that the

@@ -1136,8 +1136,9 @@ pub(crate) fn record_sent_in_wallet_db(
     //
     // Declaring them neither spends nor counts them early. They belong to a transaction without a
     // mined height, so note selection cannot offer them (it requires a mined note under the anchor),
-    // and `ZCoinShieldedHistory::balance` leaves the notes of an unmined transaction out, which keeps
-    // them in the pending-receipt amount alone (R39.8.0q, R39.8.0af--R39.8.0ah). When the block is
+    // and `ZCoinShieldedHistory::scanned_balance` leaves the notes of an unmined transaction out of
+    // the spendable figure and hands them back, to be reported as non-spendable balance
+    // (R39.8.0q, R39.8.0ag1, R39.8.0ah). When the block is
     // scanned the scanner writes the same (transaction, output index) note again, so there is one
     // received note per output.
     let ufvks = wallet_db
