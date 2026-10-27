@@ -179,6 +179,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.** For a few milliseconds after a cancel or a price change, the node's order index was already up to date while the data behind its keep-alive messages and its answers to other nodes' sync requests was not, so it could still announce the old state, and a node that had already seen the cancel could log "recently cancelled" when the old order was listed again. Keep-alives and sync answers are now built only once both are up to date: a keep-alive is skipped for that round and a sync request gets a "retry" answer instead. Detail: PR #TBD; CRD ch.32 R-T3b.
 
+- **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
+
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could

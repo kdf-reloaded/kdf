@@ -932,7 +932,10 @@ request that matches it shall list it under its coin with
 state MUST distinguish "already requested" from "subscribed but
 not yet requested, since timestamp T". It is owned by the
 subscription-tracking domain (§32.2), not by the read index. The
-representation is discretionary (R36).
+representation is discretionary (R36). The recording of this state by
+the own-order re-announcement path, and its gating effect on
+keep-alive-driven synchronization requests on a non-relay node, are
+bound by [Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7.
 
 **R-F7 (empty-trie root).** The subsystem MUST be able to compute
 the constant empty-trie root for its trie layout (§32.6 R-T1) to

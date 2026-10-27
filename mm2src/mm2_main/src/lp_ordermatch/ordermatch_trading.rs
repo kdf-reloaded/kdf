@@ -597,6 +597,31 @@ pub(crate) fn lp_connected_alice(ctx: MmArc, taker_order: TakerOrder, taker_matc
     });
 }
 
+/// Selects the tracked public keys whose state the maintenance sweep must evict (CRD ch.59 R59.6.4),
+/// together with the identifiers of the orders they own.
+///
+/// The node's own persistent public key and every per-order public key it makes orders under
+/// (`my_p2p_pubkeys`) are never selected (R59.6.5): our own keep-alives are not delivered back to us,
+/// so their liveness instant would otherwise age out.
+pub(crate) fn stale_pubkeys(
+    pubkeys_state: &HashMap<String, OrderbookPubkeyState>,
+    my_persistent_pubkey: &str,
+    my_p2p_pubkeys: &HashSet<String>,
+    timeout_secs: u64,
+    now_secs: u64,
+) -> (Vec<Uuid>, Vec<String>) {
+    let mut uuids_to_remove = vec![];
+    let mut pubkeys_to_remove = vec![];
+    for (pubkey, state) in pubkeys_state.iter() {
+        let is_own = pubkey == my_persistent_pubkey || my_p2p_pubkeys.contains(pubkey);
+        if !is_own && state.last_keep_alive + timeout_secs <= now_secs {
+            uuids_to_remove.extend(state.orders_uuids.iter().map(|(uuid, _)| *uuid));
+            pubkeys_to_remove.push(pubkey.clone());
+        }
+    }
+    (uuids_to_remove, pubkeys_to_remove)
+}
+
 pub async fn lp_ordermatch_loop(ctx: MmArc) {
     let crypto_ctx = match CryptoCtx::from_ctx(&ctx) {
         Ok(c) => c,
@@ -636,19 +661,19 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
             // Remove "timed out" pubkeys states with their orders from orderbook.
             // Phase 1: identify stale pubkeys and their orders using trie_store,
             // then remove index entries under orderbook lock, collecting trie ops.
-            let trie_store = ordermatch_ctx.trie_store.lock();
-            let mut uuids_to_remove = vec![];
-            let mut pubkeys_to_remove = vec![];
-            for (pubkey, state) in trie_store.pubkeys_state.iter() {
-                let to_keep = pubkey == &my_pubsecp || state.last_keep_alive + maker_order_timeout > now_ms() / 1000;
-                if !to_keep {
-                    for (uuid, _) in &state.orders_uuids {
-                        uuids_to_remove.push(*uuid);
-                    }
-                    pubkeys_to_remove.push(pubkey.clone());
-                }
-            }
-            drop(trie_store);
+            // Lock order: `orderbook` first (cloned out and released), then `trie_store`,
+            // matching `process_sync_pubkey_orderbook_state`; the two are never held together here.
+            let my_p2p_pubkeys = ordermatch_ctx.orderbook.lock().my_p2p_pubkeys.clone();
+            let (uuids_to_remove, pubkeys_to_remove) = {
+                let trie_store = ordermatch_ctx.trie_store.lock();
+                stale_pubkeys(
+                    &trie_store.pubkeys_state,
+                    &my_pubsecp,
+                    &my_p2p_pubkeys,
+                    maker_order_timeout,
+                    now_ms() / 1000,
+                )
+            };
 
             {
                 let mut ops = Vec::new();
