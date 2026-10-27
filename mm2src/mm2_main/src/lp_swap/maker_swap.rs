@@ -2060,10 +2060,10 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
         };
     }
     let running_swap = Arc::new(swap);
-    let weak_ref = Arc::downgrade(&running_swap);
     let swap_ctx = SwapsContext::from_ctx(&ctx).unwrap();
     swap_ctx.init_msg_store(running_swap.uuid, running_swap.taker);
-    swap_ctx.running_swaps.lock().unwrap().push(weak_ref);
+    // Removes the registry entry and the message store on every exit of this function (R58A, R58B).
+    let _registry_guard = swap_ctx.register_running_swap(running_swap.clone());
     let shutdown_rx = swap_ctx.shutdown_rx.clone();
     let swap_for_log = running_swap.clone();
     let mut swap_fut = Box::pin(
