@@ -849,7 +849,7 @@ account semantics).
 | --- | --- | --- |
 | the coin cannot be built: native wallet configuration unreadable or RPC port unknown, fee-method detection fails, hardware policy requested but the hardware-wallet context is not initialised, the coin's configuration does not support the hardware wallet, any other non-internal build failure | `CoinCreationError` | `{ticker, error}` |
 | an internal build failure, including Electrum connection settings that cannot be used (`min_connected` below 1 or above `max_connected`, unusable server entries; [Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b item 3) | `Internal` | string |
-| no Electrum server can be reached, or protocol-version negotiation fails with every server: building does not wait for a connection (Chapter 38 R38.6.4k), so the failure is first observed by the block-height query below, which connects the pool itself (Chapter 38 R38.6.4f item 2) | `Transport` | string |
+| no Electrum server can be reached, or protocol-version negotiation fails with every server: Reloaded's build probes every listed server in parallel and fails when none connects within the call budget, naming each server (Chapter 38 R38.6.4k-R); under the reference's R38.6.4k the build does not wait, and the failure is first observed by the block-height query below | `Transport` | string |
 | SPV synchronisation reports a permanent failure, or its progress feed ends unexpectedly | `CoinCreationError` | `{ticker, error}` |
 | the block-height query after build fails | `Transport` | string |
 | balance query: transport failure or malformed answer | `Transport` | string |
@@ -877,9 +877,10 @@ account semantics).
 > exist on the wire but are never emitted (D55.4); `path_to_address` is honored
 > for a software global-HD account only, not under the Trezor policy;
 > unreachable Electrum servers are detected while building the coin rather than
-> lazily (the observable discriminant is the bound `Transport`; Chapter 38
-> §38.6.4's "Reloaded divergence (2026-10-27)" note records the wait and the
-> rest of today's Electrum pool behavior against R38.6.4b–R38.6.4k).
+> lazily. Building probes every listed server in parallel and fails only when
+> none connects within the call budget (Chapter 38 R38.6.4k-R, a
+> Reloaded-original rule that replaces R38.6.4k); the observable discriminant
+> is the bound `Transport` either way.
 
 ---
 

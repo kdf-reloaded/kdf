@@ -51,6 +51,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Electrum servers are kept in priority order and recover.** The listed order is the priority and a
+  recovered higher-priority server is used again; a server that keeps failing is skipped for a growing
+  time (20 s doubling up to 12 h); if every connected server fails, every listed server is tried;
+  connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
+  server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
+  one connects; if none does, the error names each server. More in ch.38 §38.6.4.
+
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
   whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
   longer holds a request for a minute before the next node is tried. A request given up on is now
@@ -177,6 +184,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
+  later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
+- **Electrum change notifications are no longer dropped.** A server's message that an address or the
+  chain tip changed was read as an answer to no request and discarded, so balance streaming and
+  history refresh never saw it; it now reaches the waiting watcher, also after the connection that
+  carried the subscription was replaced. More in ch.38 §38.6.4 and §38.6.5.
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could
