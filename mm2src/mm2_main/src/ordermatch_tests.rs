@@ -2918,6 +2918,221 @@ fn test_remove_and_purge_pubkey_pair_orders() {
     check_if_orderbook_contains_only(&ctx, &pubkey, &doc_kmd_orders);
 }
 
+// CRD ch.32 R-T3a tests: a batch of trie ops takes effect exactly as the same ops applied one at a time.
+fn trie_op_item(pubkey: &str, base: &str, rel: &str, uuid: Uuid, price_numer: u64) -> OrderbookItem {
+    OrderbookItem {
+        pubkey: pubkey.to_owned(),
+        base: base.to_owned(),
+        rel: rel.to_owned(),
+        price: BigRational::new(price_numer.into(), 1000.into()),
+        max_volume: BigRational::from_integer(1.into()),
+        min_volume: BigRational::from_integer(0.into()),
+        uuid,
+        created_at: 1_700_000_000,
+        base_protocol_info: vec![],
+        rel_protocol_info: vec![],
+        conf_settings: None,
+    }
+}
+
+fn trie_op_uuid(n: u64) -> Uuid { Uuid::from_fields(0, 0, 0, &n.to_be_bytes()).unwrap() }
+
+fn trie_op_insert(pubkey: &str, uuid: Uuid, price_numer: u64) -> TrieOp {
+    TrieOp::Insert {
+        pubkey: pubkey.to_owned(),
+        alb_pair: alb_ordered_pair("DOC", "MARTY"),
+        uuid,
+        order: trie_op_item(pubkey, "DOC", "MARTY", uuid, price_numer),
+    }
+}
+
+fn trie_op_remove(pubkey: &str, uuid: Uuid) -> TrieOp {
+    TrieOp::Remove {
+        pubkey: pubkey.to_owned(),
+        alb_pair: alb_ordered_pair("DOC", "MARTY"),
+        uuid,
+    }
+}
+
+fn trie_op_clear(pubkey: &str) -> TrieOp {
+    TrieOp::ClearPair {
+        pubkey: pubkey.to_owned(),
+        alb_pair: alb_ordered_pair("DOC", "MARTY"),
+    }
+}
+
+fn assert_trie_stores_equal(a: &TrieStore, b: &TrieStore, what: &str) {
+    let keys = |s: &TrieStore| s.pubkeys_state.keys().cloned().collect::<HashSet<_>>();
+    assert_eq!(keys(a), keys(b), "{what}: pubkey sets differ");
+    for (pubkey, sa) in a.pubkeys_state.iter() {
+        let sb = &b.pubkeys_state[pubkey];
+        assert_eq!(sa.trie_roots, sb.trie_roots, "{what}: trie_roots differ for {pubkey}");
+        assert_eq!(
+            sa.orders_uuids, sb.orders_uuids,
+            "{what}: orders_uuids differ for {pubkey}"
+        );
+    }
+}
+
+/// T-T1: apply `batch` after `prelude`, and compare with a store that only ever saw `survivors`.
+fn check_batch_order_case(name: &str, prelude: Vec<TrieOp>, batch: Vec<TrieOp>, survivors: Vec<TrieOp>) {
+    let pair = alb_ordered_pair("DOC", "MARTY");
+    let mut store = TrieStore::default();
+    store.apply_ops(prelude);
+    store.apply_ops(batch);
+
+    let mut reference = TrieStore::default();
+    reference.apply_ops(survivors);
+
+    let pk = "02aaaa";
+    let (state, ref_state) = (store.pubkeys_state.get(pk), reference.pubkeys_state.get(pk));
+    assert_eq!(
+        state.and_then(|s| s.trie_roots.get(&pair)),
+        ref_state.and_then(|s| s.trie_roots.get(&pair)),
+        "{name}: pair root differs from survivors-only trie"
+    );
+    assert_eq!(
+        state.map(|s| s.orders_uuids.clone()).unwrap_or_default(),
+        ref_state.map(|s| s.orders_uuids.clone()).unwrap_or_default(),
+        "{name}: order identifiers differ"
+    );
+    // value presence
+    if let (Some(state), Some(ref_state)) = (state, ref_state) {
+        if let (Some(root), Some(ref_root)) = (state.trie_roots.get(&pair), ref_state.trie_roots.get(&pair)) {
+            let trie = TrieDB::<Layout>::new(&store.memory_db, root).expect("!TrieDB::new");
+            let ref_trie = TrieDB::<Layout>::new(&reference.memory_db, ref_root).expect("!TrieDB::new");
+            for (_, uuid) in ref_state.orders_uuids.iter() {
+                assert_eq!(
+                    trie.get(uuid.as_bytes()).unwrap(),
+                    ref_trie.get(uuid.as_bytes()).unwrap(),
+                    "{name}: value differs"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_trie_apply_ops_batch_order_t_t1() {
+    let pk = "02aaaa";
+    let u = trie_op_uuid(1);
+    let x = trie_op_uuid(2);
+    let other_pair_pubkey_op = |price| trie_op_insert("02bbbb", trie_op_uuid(9), price);
+
+    // remove then insert -> present with the inserted value
+    check_batch_order_case(
+        "remove->insert",
+        vec![trie_op_insert(pk, x, 5), trie_op_insert(pk, u, 10)],
+        vec![trie_op_remove(pk, u), trie_op_insert(pk, u, 20)],
+        vec![trie_op_insert(pk, x, 5), trie_op_insert(pk, u, 20)],
+    );
+    // insert then remove -> absent (u previously present, and previously absent)
+    check_batch_order_case(
+        "insert->remove (present before)",
+        vec![trie_op_insert(pk, x, 5), trie_op_insert(pk, u, 10)],
+        vec![trie_op_insert(pk, u, 20), trie_op_remove(pk, u)],
+        vec![trie_op_insert(pk, x, 5)],
+    );
+    check_batch_order_case(
+        "insert->remove (absent before)",
+        vec![trie_op_insert(pk, x, 5)],
+        vec![trie_op_insert(pk, u, 20), trie_op_remove(pk, u)],
+        vec![trie_op_insert(pk, x, 5)],
+    );
+    // insert A then insert B -> B
+    check_batch_order_case(
+        "insert A->insert B",
+        vec![trie_op_insert(pk, x, 5)],
+        vec![trie_op_insert(pk, u, 11), trie_op_insert(pk, u, 22)],
+        vec![trie_op_insert(pk, x, 5), trie_op_insert(pk, u, 22)],
+    );
+    // clear then insert -> only the insert
+    check_batch_order_case(
+        "clear->insert",
+        vec![trie_op_insert(pk, x, 5), trie_op_insert(pk, u, 10)],
+        vec![trie_op_clear(pk), trie_op_insert(pk, u, 30)],
+        vec![trie_op_insert(pk, u, 30)],
+    );
+    // insert then clear -> empty slice
+    check_batch_order_case(
+        "insert->clear",
+        vec![trie_op_insert(pk, x, 5)],
+        vec![trie_op_insert(pk, u, 30), trie_op_clear(pk)],
+        vec![],
+    );
+    // drop pubkey then insert -> only the insert; another pubkey is untouched
+    check_batch_order_case(
+        "drop pubkey->insert",
+        vec![
+            trie_op_insert(pk, x, 5),
+            trie_op_insert(pk, u, 10),
+            other_pair_pubkey_op(1),
+        ],
+        vec![
+            TrieOp::RemovePubkey { pubkey: pk.to_owned() },
+            trie_op_insert(pk, u, 40),
+            other_pair_pubkey_op(1),
+        ],
+        vec![trie_op_insert(pk, u, 40)],
+    );
+}
+
+fn trie_ops_lcg(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *state >> 33
+}
+
+fn random_trie_ops(seed: u64, n: usize) -> Vec<TrieOp> {
+    let mut st = seed;
+    let pubkeys = ["02aaaa", "02bbbb"];
+    let pairs = [("DOC", "MARTY"), ("DOC", "KMD")];
+    (0..n)
+        .map(|_| {
+            let pubkey = pubkeys[(trie_ops_lcg(&mut st) % 2) as usize];
+            let (base, rel) = pairs[(trie_ops_lcg(&mut st) % 2) as usize];
+            let alb_pair = alb_ordered_pair(base, rel);
+            let uuid = trie_op_uuid(trie_ops_lcg(&mut st) % 6 + 1);
+            match trie_ops_lcg(&mut st) % 20 {
+                0..=9 => TrieOp::Insert {
+                    pubkey: pubkey.to_owned(),
+                    alb_pair,
+                    uuid,
+                    order: trie_op_item(pubkey, base, rel, uuid, trie_ops_lcg(&mut st) % 1000 + 1),
+                },
+                10..=15 => TrieOp::Remove {
+                    pubkey: pubkey.to_owned(),
+                    alb_pair,
+                    uuid,
+                },
+                16..=18 => TrieOp::ClearPair {
+                    pubkey: pubkey.to_owned(),
+                    alb_pair,
+                },
+                _ => TrieOp::RemovePubkey {
+                    pubkey: pubkey.to_owned(),
+                },
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn test_trie_apply_ops_batch_equals_sequence_t_t2() {
+    for seed in 1..=30u64 {
+        let n = 200 + (seed as usize % 7) * 20;
+        let mut batch_store = TrieStore::default();
+        batch_store.apply_ops(random_trie_ops(seed, n));
+
+        let mut seq_store = TrieStore::default();
+        for op in random_trie_ops(seed, n) {
+            seq_store.apply_ops(vec![op]);
+        }
+        assert_trie_stores_equal(&batch_store, &seq_store, &format!("seed {seed}"));
+    }
+}
+
 #[test]
 fn test_orderbook_sync_trie_diff_time_cache() {
     let (ctx_bob, pubkey_bob, secret_bob) = make_ctx_for_tests();
