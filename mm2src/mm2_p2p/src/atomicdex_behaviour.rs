@@ -47,6 +47,18 @@ type AdexSpawnFn = fn(Box<dyn Future<Output = ()> + Send + Unpin + 'static>) -> 
 
 #[cfg(test)] mod tests;
 
+/// Content-addressed gossipsub message id (R13): the payload bytes followed by the sequence number are
+/// fed through `Hash` into the standard library's default hasher, and the 64-bit result is encoded as
+/// exactly 8 bytes, big-endian. The id is a wire value (IHAVE/IWANT), so the preimage and encoding
+/// must not change.
+fn gossipsub_message_id(data: &[u8], sequence_number: Option<u64>) -> MessageId {
+    let mut s = DefaultHasher::new();
+    // `Vec<u8>` and `[u8]` hash identically (length prefix, then bytes).
+    data.hash(&mut s);
+    sequence_number.hash(&mut s);
+    MessageId::from(s.finish().to_be_bytes().to_vec())
+}
+
 pub const PEERS_TOPIC: &str = "PEERS";
 const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(600);
@@ -1000,12 +1012,7 @@ fn start_gossipsub(
     let mut swarm = {
         // To content-address a message, take the hash of its payload plus sequence number and use
         // it as the message id, so duplicate payloads collapse to a single id (R13).
-        let message_id_fn = |message: &GossipsubMessage| {
-            let mut s = DefaultHasher::new();
-            message.data.hash(&mut s);
-            message.sequence_number.hash(&mut s);
-            MessageId::from(s.finish().to_string())
-        };
+        let message_id_fn = |message: &GossipsubMessage| gossipsub_message_id(&message.data, message.sequence_number);
 
         // set custom gossipsub
         let gossipsub_config = GossipsubConfigBuilder::default()
