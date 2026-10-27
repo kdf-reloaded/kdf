@@ -2051,6 +2051,24 @@ pub(crate) async fn subscribe_to_orderbook_topic(
     Ok(())
 }
 
+/// Records the subscription to `topic` as "subscribed, not yet requested" when no record exists and
+/// subscribes to the topic on the mesh in that case only; an existing record (including `Requested`)
+/// is kept unchanged and no second mesh subscription is made. No orderbook request is made
+/// (CRD ch.59 R59.6.7 item 2). The subscription lock is held only for the synchronous
+/// record-and-subscribe step, never across an await.
+pub(crate) fn record_topic_subscription_without_request(ctx: &MmArc, topic: String) -> Result<(), String> {
+    let current_timestamp = now_ms() / 1000;
+    let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
+    let mut subscriptions = ordermatch_ctx.orderbook_subscriptions.write();
+    if let Entry::Vacant(e) = subscriptions.entry(topic.clone()) {
+        e.insert(OrderbookRequestingState::NotRequested {
+            subscribed_at: current_timestamp,
+        });
+        subscribe_to_topic(ctx, topic);
+    }
+    Ok(())
+}
+
 construct_detailed!(DetailedBaseMaxVolume, base_max_volume);
 construct_detailed!(DetailedBaseMinVolume, base_min_volume);
 construct_detailed!(DetailedRelMaxVolume, rel_max_volume);

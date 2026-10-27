@@ -87,6 +87,23 @@ async fn ensure_ibc_routing_min_balance(
     Ok(())
 }
 
+/// The per-order step of the periodic maintenance for an own maker order absent from the local
+/// orderbook (CRD ch.59 R59.6.7 item 2): record the pair subscription (and subscribe on the mesh
+/// only if there was no record), then re-broadcast the created notification. No orderbook request
+/// is made.
+pub(crate) fn reannounce_missing_own_order(
+    ctx: &MmArc,
+    order: &MakerOrder,
+    base_protocol_info: Vec<u8>,
+    rel_protocol_info: Vec<u8>,
+) {
+    if let Err(e) = record_topic_subscription_without_request(ctx, order.orderbook_topic()) {
+        log::error!("Error {} on recording the subscription of order {}", e, order.uuid);
+        return;
+    }
+    maker_order_created_p2p_notify(ctx.clone(), order, base_protocol_info, rel_protocol_info);
+}
+
 pub(crate) fn maker_order_created_p2p_notify(
     ctx: MmArc,
     order: &MakerOrder,
@@ -745,14 +762,7 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
 
                 // notify other nodes only if maker order is still there keeping maker_orders locked during the operation
                 if maker_orders.contains_key(&uuid) {
-                    let topic = order.orderbook_topic();
-                    subscribe_to_topic(&ctx, topic);
-                    maker_order_created_p2p_notify(
-                        ctx.clone(),
-                        &order,
-                        base.coin_protocol_info(),
-                        rel.coin_protocol_info(),
-                    );
+                    reannounce_missing_own_order(&ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
                 }
             }
 
