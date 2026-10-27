@@ -26,7 +26,8 @@ use mm2_err_handle::mm_error::MmError;
 use mm2_err_handle::prelude::*;
 use mm2_net::transport::slurp_url_with_headers;
 
-use super::{EstimationSource, FeePerGasEstimated, FeePerGasLevel};
+use super::{fee_service_status_error, fee_service_transport_error, EstimationSource, FeePerGasEstimated,
+            FeePerGasLevel};
 use crate::eth::{wei_from_gwei_decimal, Web3RpcError, Web3RpcResult};
 use crate::NumConversError;
 
@@ -122,9 +123,9 @@ impl InfuraFeeFetcher {
     async fn issue(req: InfuraRequest) -> Result<InfuraFeePerGas, MmError<String>> {
         let resp = slurp_url_with_headers(&req.url, req.headers)
             .await
-            .mm_err(|e| e.to_string())?;
+            .mm_err(|e| fee_service_transport_error(&e, &req.url))?;
         if resp.0 != StatusCode::OK {
-            return MmError::err(format!("{} failed with status code {}", req.url, resp.0));
+            return MmError::err(fee_service_status_error(&req.url, resp.0));
         }
         serde_json::from_slice(&resp.2).map_to_mm(|e| e.to_string())
     }

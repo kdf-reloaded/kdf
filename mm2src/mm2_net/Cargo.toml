@@ -34,5 +34,5 @@ js-sys = "0.3.27"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 http-body-util = "0.1"
 hyper = { version = "1", default-features = false }
-hyper-util = { version = "0.1", default-features = false, features = ["client-legacy"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "tokio"] }
 gstuff = { version = "0.7", features = ["crossterm"] }

@@ -28,6 +28,6 @@ pub mod provider;
 pub mod send_shim;
 pub mod transport;
 
-pub use provider::{build_provider, KdfProvider};
+pub use provider::{build_direct_provider, build_provider, provider_with_own_node_order, KdfProvider};
 pub use send_shim::assert_send_future;
 pub use transport::AlloyTransport;
