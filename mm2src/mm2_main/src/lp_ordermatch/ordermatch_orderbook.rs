@@ -1073,23 +1073,69 @@ impl TrieStore {
     where
         I: IntoIterator<Item = TrieOp>,
     {
+        // CRD ch.32 R-T3a: the outcome of a batch MUST equal applying its events one at a time in
+        // queue order. Grouping (R-T3) only coalesces events whose effect is provably identical:
+        //  * per uuid, a later insert supersedes everything earlier (the final leaf is the inserted
+        //    value either way); a remove after an insert is kept next to it (the insert still
+        //    shapes the trie/pubkey state it would have created);
+        //  * a `ClearPair` discards the earlier pending events of its slice (a clear erases their
+        //    effect), later events survive;
+        //  * `RemovePubkey` is a barrier: pending groups of that pubkey are applied first.
+        // Intermediate states are never observable (readers take the trie store lock), but the
+        // diff history may hold fewer entries than sequential application would produce.
+        #[derive(Default)]
+        struct UuidPending {
+            insert: Option<(usize, OrderbookItem)>,
+            remove: Option<usize>,
+        }
         #[derive(Default)]
         struct Group {
-            pub(crate) clear: bool,
-            pub(crate) inserts: Vec<(Uuid, OrderbookItem)>,
-            pub(crate) removes: Vec<Uuid>,
+            /// Some event (possibly discarded by a clear) touched the pubkey state.
+            touched: bool,
+            clear: bool,
+            pending: HashMap<Uuid, UuidPending>,
         }
 
-        // 1) Group ops by (pubkey, alb_pair) to minimize repeated trie/historical touches.
+        fn apply_group(store: &mut TrieStore, pubkey: &str, alb_pair: &str, g: Group) {
+            if g.touched {
+                // Sequential application would have created the pubkey state.
+                pubkey_state_mut(&mut store.pubkeys_state, pubkey);
+            }
+            if g.clear {
+                store.apply_clear_pair(pubkey, alb_pair);
+            }
+            let mut inserts = Vec::new();
+            let mut removes = Vec::new();
+            for (uuid, p) in g.pending {
+                if let Some((seq, order)) = p.insert {
+                    inserts.push((seq, uuid, order));
+                }
+                if let Some(seq) = p.remove {
+                    removes.push((seq, uuid));
+                }
+            }
+            inserts.sort_by_key(|(seq, ..)| *seq);
+            removes.sort_by_key(|(seq, _)| *seq);
+            for (_, uuid, order) in inserts {
+                store.apply_insert(pubkey, alb_pair, uuid, order);
+            }
+            for (_, uuid) in removes {
+                store.apply_remove(pubkey, alb_pair, uuid);
+            }
+        }
+
         let mut groups: HashMap<(String, String), Group> = HashMap::new();
-        let mut pubkeys_to_remove: HashSet<String> = HashSet::new();
+        let mut seq = 0usize;
         #[cfg(test)]
         let mut flush_senders: Vec<oneshot::Sender<()>> = Vec::new();
 
         for op in ops {
+            seq += 1;
             match op {
                 TrieOp::ClearPair { pubkey, alb_pair } => {
-                    groups.entry((pubkey, alb_pair)).or_default().clear = true;
+                    let g = groups.entry((pubkey, alb_pair)).or_default();
+                    g.clear = true;
+                    g.pending.clear();
                 },
                 TrieOp::Insert {
                     pubkey,
@@ -1098,13 +1144,25 @@ impl TrieStore {
                     order,
                 } => {
                     let g = groups.entry((pubkey, alb_pair)).or_default();
-                    g.inserts.push((uuid, order));
+                    g.touched = true;
+                    g.pending.insert(uuid, UuidPending {
+                        insert: Some((seq, order)),
+                        remove: None,
+                    });
                 },
                 TrieOp::Remove { pubkey, alb_pair, uuid } => {
-                    groups.entry((pubkey, alb_pair)).or_default().removes.push(uuid);
+                    let g = groups.entry((pubkey, alb_pair)).or_default();
+                    g.touched = true;
+                    g.pending.entry(uuid).or_default().remove = Some(seq);
                 },
                 TrieOp::RemovePubkey { pubkey } => {
-                    pubkeys_to_remove.insert(pubkey);
+                    let keys: Vec<_> = groups.keys().filter(|(pk, _)| *pk == pubkey).cloned().collect();
+                    for key in keys {
+                        if let Some(g) = groups.remove(&key) {
+                            apply_group(self, &key.0, &key.1, g);
+                        }
+                    }
+                    self.pubkeys_state.remove(&pubkey);
                 },
                 #[cfg(test)]
                 TrieOp::Flush(done) => {
@@ -1113,22 +1171,8 @@ impl TrieStore {
             }
         }
 
-        // 2) Apply per group: ClearPair (if any) -> all Inserts -> all Removes
         for ((pubkey, alb_pair), g) in groups {
-            if g.clear {
-                self.apply_clear_pair(&pubkey, &alb_pair);
-            }
-            for (uuid, order) in g.inserts {
-                self.apply_insert(&pubkey, &alb_pair, uuid, order);
-            }
-            for uuid in g.removes {
-                self.apply_remove(&pubkey, &alb_pair, uuid);
-            }
-        }
-
-        // 3) Remove entire pubkey states after their per-UUID removals have been processed.
-        for pubkey in pubkeys_to_remove {
-            self.pubkeys_state.remove(&pubkey);
+            apply_group(self, &pubkey, &alb_pair, g);
         }
 
         #[cfg(test)]

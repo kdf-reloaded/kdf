@@ -502,6 +502,29 @@ mutable reference returned, so callers never branch on absence.
 The specific helper functions that realise this are private and
 discretionary (R36).
 
+**R-T3a (apply order).** *Reloaded-original (2026-10-27).* A batch of
+mutation events MUST take effect exactly as if its events had been applied
+one at a time, in queue order. The grouping of R-T3 is an optimization and
+MUST NOT change the outcome. In particular, for events that concern one
+order: a removal followed by an insertion of the same order leaves the order
+present with the inserted value; an insertion followed by a removal leaves
+it absent; two insertions leave the later value. For events that concern a
+`(pubkey, pair)` slice: a clear followed by insertions leaves exactly those
+insertions, and insertions followed by a clear leave the slice empty. A drop
+of a whole pubkey's tries followed, in the same batch, by an insertion for
+that pubkey leaves the insertion. The trie roots and the per-pubkey order
+identifiers that result MUST be identical to those of applying the same
+events as separate single-event batches.
+
+> **Code-quality finding (informative).** A batch used to be applied in
+> three passes per `(pubkey, pair)` group: all clears, then all insertions,
+> then all removals, whatever the order the events arrived in. A removal
+> queued before an insertion of the same order was therefore applied after
+> it, and the order ended up missing from the trie while the read index held
+> it. No path was found that queues such a pair for one order today, because a
+> recently cancelled order is refused re-insertion, so this is a latent
+> defect rather than an observed one.
+
 ## 32.7 P2P Request/Response Wire Surface
 
 The subsystem answers a fixed set of peer-to-peer requests. The
@@ -883,6 +906,21 @@ the constant empty-trie root for its trie layout (§32.6 R-T1) to
 detect "no orders for this pubkey/pair" without materialising an
 empty trie.
 
+**T-T1** *Apply order within a batch (R-T3a).* One batch of mutation events
+is applied to a trie store for each of these event sequences on one order and
+one `(pubkey, pair)`: remove then insert; insert then remove; insert with
+value A then insert with value B; clear then insert; insert then clear; and,
+for a pubkey, drop then insert. After each batch the order is present with the
+value, or absent, that sequential application gives, the pair root equals the
+root of a trie built from only the surviving orders, and the pubkey's order
+identifiers match.
+
+**T-T2** *Batch equals sequence (R-T3a).* For a deterministic pseudo-random
+mix of at least 200 events over several orders, two pairs and two pubkeys,
+including removals, re-insertions, clears and drops, applying all events in one
+batch and applying them as single-event batches yield identical pair roots and
+identical per-pubkey order identifiers.
+
 ## 32.9 Lifecycle, Keep-Alive, and Expiry Semantics
 
 **R-K1 (cancellation guard TTL).** The cancellation-resurrection
@@ -1211,3 +1249,8 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   R39.5.3, 0.00 for entry 17 of the upstream-parity gaps. The
   earlier clearance positions recorded above are untouched by this
   addition.
+- *Reloaded-original addition (2026-10-27) -- R-T3a, T-T1, T-T2:* prompted by
+  a measurement on this project's own tree (the batch applier). *Inputs:* this
+  repository's own trie-store code and its tests; no reference input of any
+  kind. The forbidden corpus was not consulted for this item, and nothing in it
+  states a reference behavior.
