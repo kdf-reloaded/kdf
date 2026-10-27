@@ -1815,9 +1815,7 @@ fn test_process_get_orderbook_request() {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
         for order in orders_by_pubkeys.values().flatten() {
             let ops = orderbook.index_insert_or_update(order.clone());
-            if !ops.is_empty() {
-                let _ = ordermatch_ctx.trie_ops_tx.unbounded_send(ops);
-            }
+            orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
         }
     }
     // Flush the trie worker so process_get_orderbook_request can see pubkeys_state
@@ -1870,9 +1868,7 @@ fn test_process_get_orderbook_request_limit() {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
         for order in orders {
             let ops = orderbook.index_insert_or_update(order);
-            if !ops.is_empty() {
-                let _ = ordermatch_ctx.trie_ops_tx.unbounded_send(ops);
-            }
+            orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
         }
     }
     ordermatch_ctx.wait_trie_ops_flushed();
@@ -2403,13 +2399,17 @@ fn clone_orderbook_memory_db(ctx: &MmArc) -> MemoryDB<Blake2Hasher64> {
 
 fn remove_order(ctx: &MmArc, uuid: Uuid) {
     let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
-    let op = ordermatch_ctx
-        .orderbook
-        .lock()
-        .index_remove(uuid)
-        .map(|(_removed, op)| op);
-    if let Some(op) = op {
-        let _ = ordermatch_ctx.trie_ops_tx.unbounded_send(vec![op]);
+    let queued = {
+        let mut orderbook = ordermatch_ctx.orderbook.lock();
+        match orderbook.index_remove(uuid) {
+            Some((_removed, op)) => {
+                orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, vec![op]);
+                true
+            },
+            None => false,
+        }
+    };
+    if queued {
         ordermatch_ctx.wait_trie_ops_flushed();
     }
 }
@@ -4910,4 +4910,251 @@ mod tendermint_saved_orders {
 
         std::fs::remove_dir_all(&dbdir).ok();
     }
+}
+
+// CRD ch.32 R-T3b tests: queue order under concurrency (T-T4) and reads that never run ahead of
+// the trie (T-T3).
+
+/// An `OrdermatchContext` without a running trie worker; the test drains the queue by hand.
+fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedReceiver<Vec<TrieOp>>) {
+    let (trie_ops_tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
+    let ctx = OrdermatchContext {
+        maker_orders_ctx: Default::default(),
+        my_taker_orders: Default::default(),
+        orderbook: Default::default(),
+        trie_store: Arc::new(parking_lot::Mutex::new(TrieStore::default())),
+        trie_ops_tx,
+        orderbook_subscriptions: Default::default(),
+        pending_maker_reserved: Default::default(),
+        orderbook_tickers: Default::default(),
+        original_tickers: Default::default(),
+    };
+    (Arc::new(ctx), rx)
+}
+
+/// Do what the worker does for every queued batch.
+fn drain_trie_queue(ctx: &OrdermatchContext, rx: &mut mpsc::UnboundedReceiver<Vec<TrieOp>>) {
+    while let Ok(ops) = rx.try_recv() {
+        ctx.trie_store.lock().apply_batch(ops);
+    }
+}
+
+/// An index insert/update with its trie events queued under the guard, as production does.
+fn index_insert_and_queue(ctx: &OrdermatchContext, item: OrderbookItem) {
+    let mut orderbook = ctx.orderbook.lock();
+    let ops = orderbook.index_insert_or_update(item);
+    orderbook.queue_trie_ops(&ctx.trie_ops_tx, ops);
+}
+
+fn index_remove_and_queue(ctx: &OrdermatchContext, uuid: Uuid) {
+    let mut orderbook = ctx.orderbook.lock();
+    if let Some((_item, op)) = orderbook.index_remove(uuid) {
+        orderbook.queue_trie_ops(&ctx.trie_ops_tx, vec![op]);
+    }
+}
+
+const SHORT_WAIT_MS: u64 = 10;
+const SYNC_NO_WAIT_LIMIT_MS: u64 = 5 * TRIE_CATCH_UP_BOUND_MS / 25;
+
+fn sync_answer(
+    ctx: &MmArc,
+    pubkey: &str,
+    pair: &str,
+    root: H64,
+) -> Result<Option<SyncPubkeyOrderbookStateRes>, String> {
+    process_sync_pubkey_orderbook_state(
+        ctx.clone(),
+        pubkey.to_owned(),
+        HashMap::from_iter(iter::once((pair.to_owned(), root))),
+    )
+}
+
+/// What a sync answer says about `uuid`: `Some(Some(price))` listed, `Some(None)` listed as removed,
+/// `None` not mentioned.
+fn sync_answer_order(res: &mut SyncPubkeyOrderbookStateRes, pair: &str, uuid: Uuid) -> Option<Option<BigRational>> {
+    match res.pair_orders_diff.remove(pair).expect("pair in answer") {
+        DeltaOrFullTrie::Delta(delta) => delta
+            .into_iter()
+            .find(|(u, _)| *u == uuid)
+            .map(|(_, o)| o.map(|o| o.price)),
+        DeltaOrFullTrie::FullTrie(full) => full.into_iter().find(|(u, _)| *u == uuid).map(|(_, o)| Some(o.price)),
+    }
+}
+
+#[test]
+fn test_reads_never_run_ahead_of_trie_cancel() {
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let (octx, mut rx) = ordermatch_ctx_without_worker();
+    let octx2 = octx.clone();
+    OrdermatchContext::from_ctx.mock_safe(move |_| MockResult::Return(Ok(octx2.clone())));
+    let pair = alb_ordered_pair("C1", "C2");
+
+    let mut orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 3);
+    let cancelled = orders[0].uuid;
+    let third = orders.pop().unwrap();
+    for o in orders {
+        index_insert_and_queue(&octx, o);
+    }
+    drain_trie_queue(&octx, &mut rx);
+    let older_root = pair_trie_root_by_pub_ctx(&octx, &pubkey, &pair);
+    index_insert_and_queue(&octx, third);
+    drain_trie_queue(&octx, &mut rx);
+    let old_root = pair_trie_root_by_pub_ctx(&octx, &pubkey, &pair);
+    assert_ne!(older_root, old_root);
+
+    // Consistent: nothing withheld.
+    let payload = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS));
+    assert_eq!(payload.unwrap().unwrap().0.get(&pair), Some(&old_root));
+    assert!(sync_answer(&ctx, &pubkey, &pair, old_root).is_ok());
+
+    // Cancel in the index while the worker is held back.
+    index_remove_and_queue(&octx, cancelled);
+    assert!(block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS)).is_err());
+    for root in [old_root, older_root] {
+        let started = std::time::Instant::now();
+        let err = sync_answer(&ctx, &pubkey, &pair, root).expect_err("must be the retryable error");
+        assert!(err.contains("retry"), "{}", err);
+        // The inbound path never waits for the worker (R-T3b item 3).
+        assert!(started.elapsed() < Duration::from_millis(SYNC_NO_WAIT_LIMIT_MS));
+    }
+
+    // The worker catches up.
+    drain_trie_queue(&octx, &mut rx);
+    let (roots, _topics) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
+        .unwrap()
+        .unwrap();
+    let new_root = roots[&pair];
+    assert_ne!(new_root, old_root);
+    for root in [old_root, older_root] {
+        let mut res = sync_answer(&ctx, &pubkey, &pair, root).unwrap().unwrap();
+        assert_eq!(sync_answer_order(&mut res, &pair, cancelled), Some(None));
+    }
+}
+
+#[test]
+fn test_reads_never_run_ahead_of_trie_price_change() {
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let (octx, mut rx) = ordermatch_ctx_without_worker();
+    let octx2 = octx.clone();
+    OrdermatchContext::from_ctx.mock_safe(move |_| MockResult::Return(Ok(octx2.clone())));
+    let pair = alb_ordered_pair("C1", "C2");
+
+    let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 2);
+    let mut changed = orders[0].clone();
+    for o in orders {
+        index_insert_and_queue(&octx, o);
+    }
+    drain_trie_queue(&octx, &mut rx);
+    let old_root = pair_trie_root_by_pub_ctx(&octx, &pubkey, &pair);
+
+    changed.price = &changed.price + BigRational::from_integer(7.into());
+    let new_price = changed.price.clone();
+    index_insert_and_queue(&octx, changed.clone());
+    assert!(block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS)).is_err());
+    assert!(sync_answer(&ctx, &pubkey, &pair, old_root)
+        .expect_err("retryable")
+        .contains("retry"));
+
+    drain_trie_queue(&octx, &mut rx);
+    let (roots, _) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
+        .unwrap()
+        .unwrap();
+    assert_ne!(roots[&pair], old_root);
+    let mut res = sync_answer(&ctx, &pubkey, &pair, old_root).unwrap().unwrap();
+    assert_eq!(sync_answer_order(&mut res, &pair, changed.uuid), Some(Some(new_price)));
+}
+
+#[test]
+fn test_reads_not_withheld_with_running_worker() {
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    let pair = alb_ordered_pair("C1", "C2");
+    let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 50);
+    let first = orders[0].uuid;
+    for o in orders {
+        insert_or_update_order(&ctx, o);
+    }
+    delete_my_order(&ctx, first, None);
+    // No flush: the keep-alive producer waits for the worker within the normal bound; the inbound
+    // sync answer never waits, so it is asked after that.
+    let (roots, _) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, TRIE_CATCH_UP_BOUND_MS))
+        .unwrap()
+        .unwrap();
+    assert!(roots.contains_key(&pair));
+    let answer = process_sync_pubkey_orderbook_state(
+        ctx.clone(),
+        pubkey.clone(),
+        HashMap::from_iter(iter::once((pair.clone(), H64::default()))),
+    );
+    assert!(answer.unwrap().is_some());
+}
+
+fn pair_trie_root_by_pub_ctx(octx: &OrdermatchContext, pubkey: &str, pair: &str) -> H64 {
+    *octx
+        .trie_store
+        .lock()
+        .pubkeys_state
+        .get(pubkey)
+        .unwrap()
+        .trie_roots
+        .get(pair)
+        .unwrap()
+}
+
+/// The value the trie holds for `uuid` under (pubkey, pair), if any.
+fn trie_value_of(octx: &OrdermatchContext, pubkey: &str, pair: &str, uuid: &Uuid) -> Option<Vec<u8>> {
+    let store = octx.trie_store.lock();
+    let root = store.pubkeys_state.get(pubkey)?.trie_roots.get(pair)?;
+    if *root == H64::default() {
+        return None;
+    }
+    let trie = TrieDB::<Layout>::new(&store.memory_db, root).unwrap();
+    trie.get(uuid.as_bytes()).unwrap()
+}
+
+#[test]
+fn test_trie_queue_order_under_concurrency() {
+    const ROUNDS: usize = 300;
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    let pair = alb_ordered_pair("C1", "C2");
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (round_tx, round_rx) = std::sync::mpsc::channel::<Option<OrderbookItem>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+    // Thread A updates the price of the order each round, the main thread cancels it concurrently.
+    let updater = {
+        let (ctx, barrier) = (ctx.clone(), barrier.clone());
+        std::thread::spawn(move || {
+            while let Ok(Some(item)) = round_rx.recv() {
+                barrier.wait();
+                insert_or_update_order(&ctx, item);
+                done_tx.send(()).unwrap();
+            }
+        })
+    };
+
+    for round in 0..ROUNDS {
+        let mut item = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
+        insert_or_update_order(&ctx, item.clone());
+        item.price = &item.price + BigRational::from_integer((round as u64 + 1).into());
+        round_tx.send(Some(item.clone())).unwrap();
+        barrier.wait();
+        delete_my_order(&ctx, item.uuid, None);
+        done_rx.recv().unwrap();
+        octx.wait_trie_ops_flushed();
+
+        let in_index = octx.orderbook.lock().order_set.get(&item.uuid).cloned();
+        let in_trie = trie_value_of(&octx, &pubkey, &pair, &item.uuid);
+        assert_eq!(
+            in_trie,
+            in_index.map(|o| o.trie_state_bytes()),
+            "round {}: trie and read index disagree",
+            round
+        );
+        // tidy up so rounds stay independent
+        delete_my_order(&ctx, item.uuid, None);
+    }
+    round_tx.send(None).unwrap();
+    updater.join().unwrap();
 }

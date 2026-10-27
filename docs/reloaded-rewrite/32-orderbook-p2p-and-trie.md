@@ -525,6 +525,42 @@ events as separate single-event batches.
 > recently cancelled order is refused re-insertion, so this is a latent
 > defect rather than an observed one.
 
+**R-T3b (index and trie stay consistent where they are read).**
+*Reloaded-original (2026-10-27).*
+
+1. *Queue order.* A mutation event MUST enter the queue in the same order
+   as the read-index operation that produced it. The event is therefore
+   queued while that operation still holds the read index, so that two
+   concurrent operations on one order reach the trie in the order they
+   reached the index.
+2. *No stale reads.* A keep-alive advertisement, and the answer to a
+   pubkey-state sync request, MUST NOT reflect trie state older than the
+   last completed read-index operation of this node. When a trie root is
+   advertised or a sync answer is built, every mutation event produced by
+   an index operation completed before that moment has been applied to the
+   trie store. If the worker has not yet caught up, a reader that runs on its
+   own task (the keep-alive producer) waits for it for a short bounded time,
+   short compared with the keep-alive interval and otherwise discretionary
+   (R36), and if the bound is exceeded the keep-alive for that round is not
+   sent (the next round carries the roots). A reader that runs on the inbound
+   networking path (the answer to a sync request) MUST NOT wait: it checks
+   once and, if the worker has not caught up, answers with a retryable error,
+   and the requester asks again on a later keep-alive. A root that predates a
+   completed operation MUST NOT be advertised, and an answer that predates it
+   MUST NOT be served.
+3. *Nobody else waits.* The producer of an index operation MUST NOT wait for
+   the worker, and no wait of item 2 may happen on the inbound networking
+   path (R-T7).
+
+> **Measurement (informative).** On this project's own code, a cancelled order
+> was still advertised in the pair's trie root, and could still be listed in a
+> sync answer built from an older root the requester held, for the few
+> milliseconds between the index update and the trie update (about 4 to 7 ms
+> for a burst of 200 cancels with an idle worker in an optimized build). The
+> queue between the two has no bound, and in an unoptimized build under load
+> the lag grew to tens of seconds. Item 2 closes that window without bounding
+> the queue; bounding it is a separate decision.
+
 ## 32.7 P2P Request/Response Wire Surface
 
 The subsystem answers a fixed set of peer-to-peer requests. The
@@ -921,6 +957,22 @@ including removals, re-insertions, clears and drops, applying all events in one
 batch and applying them as single-event batches yield identical pair roots and
 identical per-pubkey order identifiers.
 
+**T-T3** *Reads never run ahead of the trie (R-T3b item 2).* With the worker
+held back, an order is cancelled (or its price changed) in the read index.
+While the trie still lacks that event: a keep-alive is not produced for the
+affected pubkey, and a sync request for that pubkey is answered with the
+retryable error, in both cases for the request roots of the old trie state and
+of the older state a peer might hold. Once the worker has applied the event, a
+keep-alive carries the new root and the sync answers reflect the cancel (the
+cancelled order is absent, the changed price is the new one). With the worker
+released from the start, nothing is withheld.
+
+**T-T4** *Queue order under concurrency (R-T3b item 1).* Two threads each run
+many rounds of operations on the same order: one updates its price, the other
+cancels it and the first then finds it gone. After all events are applied, the
+trie holds the order exactly when the read index holds it, with the same value,
+for every round and for at least 200 rounds.
+
 ## 32.9 Lifecycle, Keep-Alive, and Expiry Semantics
 
 **R-K1 (cancellation guard TTL).** The cancellation-resurrection
@@ -1254,3 +1306,8 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   repository's own trie-store code and its tests; no reference input of any
   kind. The forbidden corpus was not consulted for this item, and nothing in it
   states a reference behavior.
+- *Reloaded-original addition (2026-10-27) -- R-T3b, T-T3, T-T4:* prompted
+  by a measurement on this project's own tree (the index and trie update
+  windows). *Inputs:* this repository's own code and a throwaway measurement
+  harness of it; no reference input of any kind. The forbidden corpus was not
+  consulted for this item, and nothing in it states a reference behavior.

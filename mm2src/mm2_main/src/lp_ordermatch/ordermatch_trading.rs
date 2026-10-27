@@ -222,13 +222,8 @@ pub(crate) fn process_my_maker_order_updated(ctx: &MmArc, message: &new_protocol
         order.apply_updated(message);
         // Phase 1: index update under orderbook lock, collect trie ops
         let ops = orderbook.index_insert_or_update(order);
-        drop(orderbook);
-        // Phase 2: enqueue trie ops
-        if !ops.is_empty() {
-            if let Err(e) = ordermatch_ctx.trie_ops_tx.unbounded_send(ops) {
-                error!("Failed to send trie ops: {}", e);
-            }
-        }
+        // Phase 2: queue the trie ops before the guard is released (CRD ch.32 R-T3b item 1)
+        orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
     }
 }
 
@@ -345,18 +340,42 @@ pub(crate) fn keep_alive_roots_and_topics(
     (trie_roots, topics)
 }
 
-pub(crate) fn broadcast_keep_alive_for_pub(
-    ctx: &MmArc,
+/// The trie roots and topics a keep-alive for `pubkey` would carry, taken from a snapshot in which
+/// the trie store has applied every completed index operation (CRD ch.32 R-T3b item 2).
+/// `Ok(None)` means the pubkey has no state; `Err` means the worker did not catch up within the
+/// bound, so no root may be advertised this round.
+pub(crate) async fn keep_alive_payload_for_pub(
+    ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
-    trie_store: &TrieStore,
+    catch_up_bound_ms: u64,
+) -> Result<Option<(HashMap<AlbOrderedOrderbookPair, H64>, HashSet<String>)>, TrieNotCaughtUp> {
+    ordermatch_ctx
+        .with_consistent_state(catch_up_bound_ms, |_orderbook, trie_store| {
+            trie_store
+                .pubkeys_state
+                .get(pubkey)
+                .map(|state| keep_alive_roots_and_topics(&state.trie_roots))
+        })
+        .await
+}
+
+pub(crate) async fn broadcast_keep_alive_for_pub(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    pubkey: &str,
     p2p_privkey: Option<&KeyPair>,
 ) {
-    let state = match trie_store.pubkeys_state.get(pubkey) {
-        Some(s) => s,
-        None => return,
+    let (trie_roots, topics) = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
+        Ok(Some(payload)) => payload,
+        Ok(None) => return,
+        Err(TrieNotCaughtUp) => {
+            log::warn!(
+                "Trie store is behind the orderbook index, skipping the keep-alive of pubkey {} this round",
+                pubkey
+            );
+            return;
+        },
     };
-
-    let (trie_roots, topics) = keep_alive_roots_and_topics(&state.trie_roots);
 
     let message = new_protocol::PubkeyKeepAlive {
         trie_roots,
@@ -388,13 +407,11 @@ pub async fn broadcast_maker_orders_keep_alive_loop(ctx: MmArc) {
                 // but it seems to keep holding the guard
                 drop(order);
                 let pubsecp = hex::encode(p2p_privkey.public_slice());
-                let trie_store = ordermatch_ctx.trie_store.lock();
-                broadcast_keep_alive_for_pub(&ctx, &pubsecp, &trie_store, Some(p2p_privkey.key_pair()));
+                broadcast_keep_alive_for_pub(&ctx, &ordermatch_ctx, &pubsecp, Some(p2p_privkey.key_pair())).await;
             }
         }
 
-        let trie_store = ordermatch_ctx.trie_store.lock();
-        broadcast_keep_alive_for_pub(&ctx, &persistent_pubsecp, &trie_store, None);
+        broadcast_keep_alive_for_pub(&ctx, &ordermatch_ctx, &persistent_pubsecp, None).await;
     }
 }
 
@@ -658,8 +675,8 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
                 )
             };
 
-            let mut ops = Vec::new();
             {
+                let mut ops = Vec::new();
                 let mut orderbook = ordermatch_ctx.orderbook.lock();
                 for uuid in uuids_to_remove {
                     if let Some((_item, op)) = orderbook.index_remove(uuid) {
@@ -669,14 +686,9 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
                 for pubkey in &pubkeys_to_remove {
                     ops.push(TrieOp::RemovePubkey { pubkey: pubkey.clone() });
                 }
+                // Phase 2: queue the trie ops before the guard is released (CRD ch.32 R-T3b item 1)
+                orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
                 collect_orderbook_metrics(&ctx, &orderbook);
-            }
-
-            // Phase 2: enqueue trie ops (orderbook lock released)
-            if !ops.is_empty() {
-                if let Err(e) = ordermatch_ctx.trie_ops_tx.unbounded_send(ops) {
-                    error!("Failed to send trie ops: {}", e);
-                }
             }
         }
 
