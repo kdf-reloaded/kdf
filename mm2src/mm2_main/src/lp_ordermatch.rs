@@ -330,7 +330,7 @@ impl Default for OrdermatchContext {
         common::executor::spawn(async move {
             while let Some(ops) = trie_ops_rx.next().await {
                 let mut store = ts.lock();
-                store.apply_ops(ops);
+                store.apply_batch(ops);
             }
         });
         OrdermatchContext {
