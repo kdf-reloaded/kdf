@@ -4446,6 +4446,115 @@ fn test_orderbook_address_legacy_string_rendering() {
     assert_eq!(lightning.into_legacy_string(), "Shielded");
 }
 
+fn pubkey_state_with_keep_alive(last_keep_alive: u64) -> OrderbookPubkeyState {
+    let mut state = OrderbookPubkeyState::with_history_timeout(Duration::from_secs(60));
+    state.last_keep_alive = last_keep_alive;
+    state
+}
+
+/// CRD ch.59 R59.6.4/R59.6.5: the sweep keeps the persistent key and own per-order keys, evicts stale foreign keys.
+#[test]
+fn test_stale_pubkeys_exempts_own_persistent_and_per_order_keys() {
+    const WINDOW: u64 = 90;
+    let now = 10_000;
+    let stale_at = now - WINDOW - 1;
+    let uuid = Uuid::new_v4();
+
+    let mut stale_foreign = pubkey_state_with_keep_alive(stale_at);
+    stale_foreign
+        .orders_uuids
+        .insert((uuid, alb_ordered_pair("BASE", "REL")));
+
+    let mut states = HashMap::new();
+    states.insert("foreign_stale".to_owned(), stale_foreign);
+    states.insert("persistent".to_owned(), pubkey_state_with_keep_alive(stale_at));
+    states.insert("per_order".to_owned(), pubkey_state_with_keep_alive(stale_at));
+    states.insert(
+        "foreign_fresh".to_owned(),
+        pubkey_state_with_keep_alive(now - WINDOW + 1),
+    );
+
+    // (a) the same stale state is evicted for a foreign key and kept for an own per-order key.
+    // (b) the persistent key stays exempt; (c) a foreign key within the window stays.
+    let own_per_order: HashSet<String> = HashSet::from_iter(["per_order".to_owned()]);
+    let (uuids, pubkeys) = stale_pubkeys(&states, "persistent", &own_per_order, WINDOW, now);
+    assert_eq!(pubkeys, vec!["foreign_stale".to_owned()]);
+    assert_eq!(uuids, vec![uuid]);
+
+    // Without the per-order exemption the per-order key would have been evicted too.
+    let (_, mut pubkeys) = stale_pubkeys(&states, "persistent", &HashSet::new(), WINDOW, now);
+    pubkeys.sort();
+    assert_eq!(pubkeys, vec!["foreign_stale".to_owned(), "per_order".to_owned()]);
+
+    // The boundary instant (exactly one window old) is already stale.
+    let (_, pubkeys) = stale_pubkeys(&states, "persistent", &own_per_order, WINDOW, stale_at + WINDOW);
+    assert!(pubkeys.contains(&"foreign_stale".to_owned()));
+}
+
+/// An own shielded-pair maker order made under a per-order key survives the sweep, and the key's
+/// stale state becomes sweepable again once the order is cancelled.
+#[test]
+fn test_stale_pubkeys_keeps_real_per_order_state_until_order_cancelled() {
+    let (ctx, persistent_pubkey, secret) = make_ctx_for_tests();
+    let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+    let p2p_key = SerializableSecp256k1Keypair::random();
+    let order_pubkey = hex::encode(p2p_key.public_slice());
+
+    let item = make_random_orders(order_pubkey.clone(), &secret, "ZBASE".into(), "REL".into(), 1).remove(0);
+    let uuid = item.uuid;
+    let created_at = now_ms() / 1000;
+    let maker = MakerOrder {
+        base: "ZBASE".into(),
+        rel: "REL".into(),
+        created_at: now_ms(),
+        updated_at: Some(now_ms()),
+        max_base_vol: 1.into(),
+        min_base_vol: 0.into(),
+        price: 1.into(),
+        matches: HashMap::new(),
+        started_swaps: Vec::new(),
+        uuid,
+        conf_settings: None,
+        changes_history: None,
+        save_in_history: false,
+        base_orderbook_ticker: None,
+        rel_orderbook_ticker: None,
+        p2p_privkey: Some(p2p_key),
+        timeout_in_minutes: None,
+        swap_version: SwapVersion::default(),
+    };
+    insert_or_update_my_order(&ctx, item, &maker);
+    ordermatch_ctx.wait_trie_ops_flushed();
+
+    let sweep = |now: u64| {
+        let my_p2p_pubkeys = ordermatch_ctx.orderbook.lock().my_p2p_pubkeys.clone();
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        stale_pubkeys(
+            &trie_store.pubkeys_state,
+            &persistent_pubkey,
+            &my_p2p_pubkeys,
+            MAKER_ORDER_TIMEOUT,
+            now,
+        )
+    };
+
+    // (d) 91 s after creation the own per-order key is not selected; order and state are intact.
+    let (uuids, pubkeys) = sweep(created_at + MAKER_ORDER_TIMEOUT + 1);
+    assert!(uuids.is_empty() && pubkeys.is_empty());
+    assert!(ordermatch_ctx.orderbook.lock().order_set.contains_key(&uuid));
+    assert!(ordermatch_ctx
+        .trie_store
+        .lock()
+        .pubkeys_state
+        .contains_key(&order_pubkey));
+
+    // (e) after cancellation the key leaves `my_p2p_pubkeys`, so its stale state is selected: nothing leaks.
+    delete_my_order(&ctx, uuid, maker.p2p_privkey.as_ref());
+    ordermatch_ctx.wait_trie_ops_flushed();
+    let (_, pubkeys) = sweep(created_at + MAKER_ORDER_TIMEOUT + 1);
+    assert_eq!(pubkeys, vec![order_pubkey]);
+}
+
 // ---- Saved orders with a Tendermint coin are cancelled at startup while Tendermint swaps are off ----
 
 #[cfg(not(target_arch = "wasm32"))]

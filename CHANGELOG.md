@@ -177,6 +177,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
+
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could
