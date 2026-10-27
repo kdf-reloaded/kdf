@@ -179,6 +179,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Gossip message ids now use the compact 8-byte form other KDF nodes use, which should cut the bandwidth a relay spends on duplicate messages.** Our nodes announced each message with an id written as decimal text, while the other implementations write the same 64-bit value as 8 raw bytes, so an id announced by one side never matched the id the other side already held and every announced message was requested again, then dropped as a duplicate. The id is now the 8-byte big-endian form; what it is computed from is unchanged. Nodes on the old and new encoding still exchange messages normally, but each message is sent once more between them until both sides are upgraded. Detail: PR #99; CRD ch.28 R13.
 - **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.** For a few milliseconds after a cancel or a price change, the node's order index was already up to date while the data behind its keep-alive messages and its answers to other nodes' sync requests was not, so it could still announce the old state, and a node that had already seen the cancel could log "recently cancelled" when the old order was listed again. Keep-alives and sync answers are now built only once both are up to date: a keep-alive is skipped for that round and a sync request gets a "retry" answer instead. Detail: PR #98; CRD ch.32 R-T3b.
 
 - **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
@@ -399,6 +400,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
   protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
   PR #55; CRD ch.37 R37.5.2, R37.5.4.
+
+- **A node no longer keeps memory for every swap it has ever run, and stopping it no longer waits for the swap bookkeeping.** Each finished swap left a small record behind for as long as the node ran (about 3 KB for a maker or taker swap in total), so a node that runs many swaps grew slowly without bound. The record of a running swap is now dropped as soon as the swap ends, on every way it can end, together with the messages kept for it. When the node is told to stop, it clears this list at once instead of waiting for it to empty. Detail: PR #100; CRD ch.51 R58A, R58B.
 
 ### Plans touched
 
