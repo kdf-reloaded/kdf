@@ -5158,3 +5158,161 @@ fn test_trie_queue_order_under_concurrency() {
     round_tx.send(None).unwrap();
     updater.join().unwrap();
 }
+
+// CRD ch.59 R59.6.7 / T10: the re-announcement of an own maker order absent from the local orderbook
+// records the pair subscription, subscribes on the mesh only without a prior record, and requests nothing.
+mod reannounce_missing_own_order_tests {
+    use super::*;
+
+    fn own_order() -> MakerOrder {
+        MakerOrder {
+            uuid: Uuid::new_v4(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            matches: HashMap::new(),
+            max_base_vol: 10.into(),
+            min_base_vol: 1.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+            changes_history: None,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn ctx_with_channel() -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let (ctx, ..) = make_ctx_for_tests();
+        let (tx, rx) = mpsc::channel(10);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, rx)
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> Vec<AdexBehaviourCmd> {
+        let mut cmds = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            cmds.push(cmd);
+        }
+        cmds
+    }
+
+    #[test]
+    fn test_reannounce_records_subscription_without_request() {
+        let (ctx, mut rx) = ctx_with_channel();
+        let order = own_order();
+        let topic = order.orderbook_topic();
+
+        reannounce_missing_own_order(&ctx, &order, vec![], vec![]);
+
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        match ordermatch_ctx.orderbook_subscriptions.read().get(&topic) {
+            Some(OrderbookRequestingState::NotRequested { .. }) => (),
+            other => panic!("NotRequested record expected, got {:?}", other),
+        }
+
+        let cmds = drain(&mut rx);
+        assert_eq!(cmds.len(), 2, "Subscribe and PublishMsg expected only");
+        match &cmds[0] {
+            AdexBehaviourCmd::Subscribe { topic: t } => assert_eq!(*t, topic),
+            _ => panic!("Subscribe must be sent first"),
+        }
+        match &cmds[1] {
+            AdexBehaviourCmd::PublishMsg { topics, .. } => assert_eq!(topics, &vec![topic]),
+            _ => panic!("PublishMsg must follow the Subscribe"),
+        }
+    }
+
+    #[test]
+    fn test_reannounce_keeps_existing_requested_record() {
+        let (ctx, mut rx) = ctx_with_channel();
+        let order = own_order();
+        let topic = order.orderbook_topic();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        ordermatch_ctx
+            .orderbook_subscriptions
+            .write()
+            .insert(topic.clone(), OrderbookRequestingState::Requested);
+
+        reannounce_missing_own_order(&ctx, &order, vec![], vec![]);
+
+        match ordermatch_ctx.orderbook_subscriptions.read().get(&topic) {
+            Some(OrderbookRequestingState::Requested) => (),
+            other => panic!("Requested record must be kept, got {:?}", other),
+        }
+        let cmds = drain(&mut rx);
+        assert_eq!(cmds.len(), 1, "no second Subscribe, only the notification");
+        assert!(matches!(cmds[0], AdexBehaviourCmd::PublishMsg { .. }));
+    }
+
+    #[test]
+    fn test_reannounce_keeps_existing_not_requested_timestamp() {
+        let (ctx, mut rx) = ctx_with_channel();
+        let order = own_order();
+        let topic = order.orderbook_topic();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        ordermatch_ctx
+            .orderbook_subscriptions
+            .write()
+            .insert(topic.clone(), OrderbookRequestingState::NotRequested {
+                subscribed_at: 7,
+            });
+
+        reannounce_missing_own_order(&ctx, &order, vec![], vec![]);
+
+        match ordermatch_ctx.orderbook_subscriptions.read().get(&topic) {
+            Some(OrderbookRequestingState::NotRequested { subscribed_at: 7 }) => (),
+            other => panic!("record must be unchanged, got {:?}", other),
+        }
+        assert_eq!(drain(&mut rx).len(), 1);
+    }
+
+    fn keep_alive_for(pair: &str) -> PubkeyKeepAlive {
+        let mut trie_roots = HashMap::new();
+        trie_roots.insert(pair.to_owned(), [1; 8]);
+        PubkeyKeepAlive {
+            trie_roots,
+            timestamp: now_ms() / 1000,
+        }
+    }
+
+    fn keep_alive_request(ctx: &MmArc, pair: &str, i_am_relay: bool) -> Option<OrdermatchRequest> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let subscribed: HashSet<String> = ordermatch_ctx.orderbook_subscriptions.read().keys().cloned().collect();
+        let mut trie_store = ordermatch_ctx.trie_store.lock();
+        trie_store.prepare_sync_request_for_keep_alive("other-pubkey", keep_alive_for(pair), i_am_relay, |t| {
+            subscribed.contains(t)
+        })
+    }
+
+    #[test]
+    fn test_kickstart_keep_alive_requests_sync_on_non_relay_node() {
+        let (ctx, _rx) = ctx_with_channel();
+        let own_pair = alb_ordered_pair("DOC", "MARTY");
+        let other_pair = alb_ordered_pair("C1", "C2");
+
+        // Before any re-announcement a non-relay node does not request, a relay node does.
+        assert!(keep_alive_request(&ctx, &own_pair, false).is_none());
+
+        reannounce_missing_own_order(&ctx, &own_order(), vec![], vec![]);
+
+        match keep_alive_request(&ctx, &own_pair, false) {
+            Some(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                assert_eq!(pubkey, "other-pubkey");
+                assert_eq!(trie_roots.len(), 1);
+                assert!(trie_roots.contains_key(&own_pair));
+            },
+            other => panic!("one SyncPubkeyOrderbookState expected, got {:?}", other),
+        }
+        // A pair with no own order and no record sends nothing on a non-relay node.
+        assert!(keep_alive_request(&ctx, &other_pair, false).is_none());
+        // A relay node requests in both cases.
+        assert!(keep_alive_request(&ctx, &own_pair, true).is_some());
+        assert!(keep_alive_request(&ctx, &other_pair, true).is_some());
+    }
+}
