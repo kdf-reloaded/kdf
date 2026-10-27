@@ -287,7 +287,9 @@ test of T4.
 > Its clearance is therefore *complete* and not pending: nothing in this
 > section is a candidate awaiting a gate. The extent, method and measure
 > of that pass are recorded once, in the *Dirty Gate clearance* item of
-> §59.11, and are not restated here.
+> §59.11, and are not restated here. **Exception (2026-10-27):** R59.6.7
+> and the status update in R59.6.6 were added after that pass and passed the
+> KDF Dirty Gate on 2026-10-27 (§59.11, addition of 2026-10-27).
 
 **R59.6.1** *Expiry runs on the receiver's clock.* A tracked maker public
 key's liveness instant shall be the receiver's **own local receipt time**
@@ -360,12 +362,48 @@ predicate at the eviction site.
 
 **R59.6.6** *Implementation status of §59.6.* At the time of writing:
 R59.6.2 and R59.6.4 are as-built in reloaded. R59.6.1's correction is
-implemented on an unmerged work branch and is **not** in the integration
-branch, so a reloaded binary built from the integration branch still
-expires peers on their self-reported timestamps; the correction must
-land before this chapter's §59.6 is accurate of the shipped tree.
-R59.6.5's per-order half is unimplemented. R59.6.3 is a conclusion and
-carries no implementation.
+merged into this project's integration branch (status as of
+2026-10-27), so a reloaded binary built from it expires peers on its own
+receipt clock. R59.6.5's per-order half is unimplemented. R59.6.7 is
+unimplemented: the re-announcement path subscribes to the topic without
+recording the subscription state (its divergence note). R59.6.3 is a
+conclusion and carries no implementation.
+
+**R59.6.7** *Re-announcement records the pair subscription.* (Authored
+by the KDF Spec Reader 2026-10-27 from the rows `v2.6.0-beta` and
+`v3.0.0-beta` of chapter 02 §2.15A, identical at both; passed the KDF Dirty Gate on 2026-10-27, see §59.11.) Two facts combine:
+
+1. *Synchronization requests are gated on recorded subscriptions.* On
+   receiving a keep-alive, a node compares the advertised per-pair roots
+   with the roots it holds for that public key and requests a
+   synchronization for a pair whose root differs — but a **non-relay**
+   node does so only for pairs whose orderbook topic is in its recorded
+   subscription state ([Chapter 32](32-orderbook-p2p-and-trie.md)
+   R-F6a); a relay node does so for every pair. A pair the node is
+   subscribed to on the mesh but has not recorded is, for this purpose,
+   not subscribed. This gating is baseline behavior (V4).
+2. *Re-announcement records before it broadcasts.* When the periodic
+   maintenance of R59.4.1 finds one of the node's own maker orders
+   absent from the local orderbook — after a restart, or after the
+   node's own public-key state was evicted (R59.6.4, R59.6.5) — it
+   records a subscription for the order's pair in the subscription state
+   (as "subscribed, not yet requested" if no record exists; an existing
+   record is kept), subscribes to the topic on the mesh if it was not
+   subscribed, and only then re-broadcasts the order's created
+   notification ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+   R60.4.6 item 5 binds the balance reconciliation that precedes it). No
+   orderbook request is made at this point. Order creation records the
+   subscription the same way; the re-announcement path is bound here
+   because it runs without any operator request.
+
+> **Reloaded divergence (2026-10-27).** Reloaded's re-announcement path
+> subscribes to the topic on the mesh without recording the subscription
+> state — the baseline's behavior (V4). On a non-relay node whose maker
+> orders were restored at start, item 1 then never fires for those pairs
+> until something else — an orderbook request, a new order on the pair —
+> records the subscription: a peer's keep-alive with a differing root
+> brings no synchronization request, and the node's view of the other
+> makers on its own pairs goes stale.
 
 ## 59.7 Tests
 
@@ -416,6 +454,14 @@ key whose last receipt is older than the configured window is evicted
 along with its rows; the node's own keys are not, at any age
 (R59.6.4, R59.6.5). The configured override is honoured in place of the
 three-interval default.
+
+**T10.** *Kick-start on a non-relay node (R59.6.7).* Start a non-relay
+node with one stored maker order and no operator orderbook request.
+After its first maintenance pass, deliver a keep-alive from another
+public key whose root for that pair differs from the one the node holds.
+Exactly one synchronization request for that pair is sent. The same
+keep-alive for a pair the node has no order on and never requested sends
+nothing; on a relay node it sends a request in both cases.
 
 ## 59.8 Deferred Work
 
@@ -505,6 +551,22 @@ and the per-order own-key exemption are not.*
 - *Cross-reference.* [Chapter 32](32-orderbook-p2p-and-trie.md) R-P3 and
   §32.5.
 
+**V4.** *The re-announcement's subscription recording is post-baseline;
+its gating is not.*
+
+- *Claim.* The baseline re-announces an own order missing from the local
+  orderbook after a plain mesh subscription that records no subscription
+  state, so R59.6.7 item 2 is a post-baseline correction on the
+  reference side that Reloaded has not followed. The non-relay gating of
+  R59.6.7 item 1 is baseline.
+- *Verification.* In the baseline commit
+  `c1d46c0c1592faa0860f704008b2b2381bc3840f`, the order-match loop's
+  missing-order branch subscribes to the topic directly before
+  broadcasting the created notification, while the keep-alive handler
+  already skips, on a non-relay node, every pair outside the recorded
+  subscription set.
+- *Cross-reference.* [Chapter 32](32-orderbook-p2p-and-trie.md) R-F6a.
+
 ## 59.10 External References
 
 - libp2p gossipsub, for the broadcast transport all four messages of
@@ -579,7 +641,21 @@ and the per-order own-key exemption are not.*
   and no test identifier — was reproduced; the message kind names and the
   keep-alive member names are dictated wire identifiers under chapter 01
   R11's inter-operability carve-out, and the configuration member name is
-  a dictated configuration key.
+  a dictated configuration key. (Addition of 2026-10-27, KDF Spec Reader,
+  passed the KDF Dirty Gate on 2026-10-27: R59.6.7, T10 and V4 rest on the rows `v2.6.0-beta`
+  and `v3.0.0-beta` of chapter 02 §2.15A, identical at both, compared
+  with the baseline anchor. The facts taken are the non-relay gating of
+  keep-alive-driven synchronization requests on the recorded subscription
+  state, and the re-announcement path's recording of that state before
+  it re-broadcasts, with no orderbook request. The R59.6.6 status update
+  rests on this project's own tree only. No private identifier, function
+  body, helper decomposition, log or error literal was reproduced. Dirty Gate clearance (chapter 01 T1, R40): PASS, measure 0.02, no leaks;
+  every reference fact confirmed at both rows. *Extent:* the keep-alive
+  synchronization gating and the re-announcement path, one file per row and
+  the baseline. *Method:* reading plus a mechanical regex scan of every added
+  line against private identifiers, literals and distinctive phrases; the
+  mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
+  threshold.)
 - *Dirty Gate clearance (chapter 01 T1, R40, R43).* The whole of this
   chapter's forbidden-class-sourced material — the scoped item above,
   which is the selection contract of §59.3, the timeout and maker-side
