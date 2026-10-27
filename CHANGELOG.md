@@ -177,6 +177,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A node no longer keeps memory for every swap it has ever run, and stopping it no longer waits for the swap bookkeeping.** Each finished swap left a small record behind for as long as the node ran (about 3 KB for a maker or taker swap in total), so a node that runs many swaps grew slowly without bound. The record of a running swap is now dropped as soon as the swap ends, on every way it can end, together with the messages kept for it. When the node is told to stop, it clears this list at once instead of waiting for it to empty. Detail: PR #TBD; CRD ch.51 R58A, R58B.
+
 - **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
 
 - **An EVM node that answers with an error no longer ends the request; the next configured node is

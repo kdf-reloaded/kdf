@@ -83,7 +83,7 @@ use serde_json::{self as json, Value as Json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use swap_v2_common::ActiveSwapV2Info;
 use swap_v2_pb::*;
 use uuid::Uuid;
@@ -330,8 +330,29 @@ impl SwapV2MsgStore {
     }
 }
 
+/// Locks the mutex even if a previous holder panicked: registry cleanup runs from `Drop`, possibly while
+/// unwinding, where a second panic would abort the process.
+fn lock_ignoring_poison<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Removes a swap's running-swap registry entry and V1 message store when dropped (CRD ch.51 R58A item 2,
+/// R58B). It is created right after the entry is inserted and lives in the swap's run function, so every
+/// exit path (normal completion, failure, abort by shutdown, early return, panic, cancellation of the
+/// run future) removes the entry by key, independently of how many other handles on the swap exist.
+pub(crate) struct RunningSwapGuard {
+    swap_ctx: Arc<SwapsContext>,
+    uuid: Uuid,
+}
+
+impl Drop for RunningSwapGuard {
+    fn drop(&mut self) { self.swap_ctx.finish_running_swap(&self.uuid); }
+}
+
 struct SwapsContext {
-    running_swaps: Mutex<Vec<Weak<dyn AtomicSwap>>>,
+    /// The running-swap registry (CRD ch.51 R51, R58A): swap uuid -> owning handle. An entry exists exactly
+    /// while the swap's run loop is executing; see `RunningSwapGuard`.
+    running_swaps: Mutex<HashMap<Uuid, Arc<dyn AtomicSwap>>>,
     banned_pubkeys: Mutex<HashMap<H256Json, BannedPubkey>>,
     /// The cloneable receiver of multi-consumer async channel awaiting for shutdown_tx.send() to be
     /// invoked to stop all running swaps.
@@ -372,7 +393,7 @@ impl SwapsContext {
             }));
 
             Ok(SwapsContext {
-                running_swaps: Mutex::new(vec![]),
+                running_swaps: Mutex::new(HashMap::new()),
                 banned_pubkeys: Mutex::new(HashMap::new()),
                 shutdown_rx,
                 swap_msgs: Mutex::new(HashMap::new()),
@@ -389,6 +410,34 @@ impl SwapsContext {
     pub fn init_msg_store(&self, uuid: Uuid, accept_only_from: bits256) {
         let store = SwapMsgStore::new(accept_only_from);
         self.swap_msgs.lock().unwrap().insert(uuid, store);
+    }
+
+    /// Inserts the swap into the running-swap registry, keyed by its uuid (R58A item 1), and returns the
+    /// guard that removes the entry, and the swap's V1 message store (R58B), when dropped.
+    /// The guard must be kept alive for exactly as long as the swap's run loop executes.
+    fn register_running_swap(self: &Arc<Self>, swap: Arc<dyn AtomicSwap>) -> RunningSwapGuard {
+        let uuid = *swap.uuid();
+        lock_ignoring_poison(&self.running_swaps).insert(uuid, swap);
+        RunningSwapGuard {
+            swap_ctx: self.clone(),
+            uuid,
+        }
+    }
+
+    /// Removes the registry entry and the V1 message store of the swap by key (R58A item 2, R58B).
+    /// Idempotent: a missing entry (e.g. after `clear_running_swaps`) is not an error.
+    fn finish_running_swap(&self, uuid: &Uuid) {
+        // Take the handle out first and drop it after the locks are released.
+        let removed = lock_ignoring_poison(&self.running_swaps).remove(uuid);
+        let removed_store = lock_ignoring_poison(&self.swap_msgs).remove(uuid);
+        drop(removed);
+        drop(removed_store);
+    }
+
+    /// Drops every strong handle in the registry in one step (R58A item 3). Stops no swap.
+    fn clear_running_swaps(&self) {
+        let drained = std::mem::take(&mut *lock_ignoring_poison(&self.running_swaps));
+        drop(drained);
     }
 
     /// Initialise a V2 message store for the given swap UUID.
@@ -535,21 +584,21 @@ pub fn get_locked_amount(ctx: &MmArc, coin: &str) -> MmNumber {
 
     // V1 locked amounts (from running_swaps)
     let swap_lock = swap_ctx.running_swaps.lock().unwrap();
-    let v1_total = swap_lock
-        .iter()
-        .filter_map(|swap| swap.upgrade())
-        .flat_map(|swap| swap.locked_amount())
-        .fold(MmNumber::from(0), |mut total_amount, locked| {
-            if locked.coin == coin {
-                total_amount += locked.amount;
-            }
-            if let Some(trade_fee) = locked.trade_fee {
-                if trade_fee.coin == coin && !trade_fee.paid_from_trading_vol {
-                    total_amount += trade_fee.amount;
+    let v1_total =
+        swap_lock
+            .values()
+            .flat_map(|swap| swap.locked_amount())
+            .fold(MmNumber::from(0), |mut total_amount, locked| {
+                if locked.coin == coin {
+                    total_amount += locked.amount;
                 }
-            }
-            total_amount
-        });
+                if let Some(trade_fee) = locked.trade_fee {
+                    if trade_fee.coin == coin && !trade_fee.paid_from_trading_vol {
+                        total_amount += trade_fee.amount;
+                    }
+                }
+                total_amount
+            });
     drop(swap_lock);
 
     // V2 locked amounts
@@ -627,10 +676,15 @@ pub async fn get_locked_amount_rpc(
 pub fn running_swaps_num(ctx: &MmArc) -> u64 {
     let swap_ctx = SwapsContext::from_ctx(ctx).unwrap();
     let swaps = swap_ctx.running_swaps.lock().unwrap();
-    swaps.iter().fold(0, |total, swap| match swap.upgrade() {
-        Some(_) => total + 1,
-        None => total,
-    })
+    swaps.len() as u64
+}
+
+/// Drops every strong handle in the running-swap registry in one step. Called at node shutdown once the
+/// stop signal has been observed (CRD ch.51 R58A item 3); it does not wait for swaps and stops none.
+pub fn clear_running_swaps(ctx: &MmArc) {
+    if let Ok(swap_ctx) = SwapsContext::from_ctx(ctx) {
+        swap_ctx.clear_running_swaps();
+    }
 }
 
 /// Get total amount of selected coin locked by all currently ongoing swaps except the one with selected uuid
@@ -639,8 +693,7 @@ fn get_locked_amount_by_other_swaps(ctx: &MmArc, except_uuid: &Uuid, coin: &str)
     let swap_lock = swap_ctx.running_swaps.lock().unwrap();
 
     let v1_total = swap_lock
-        .iter()
-        .filter_map(|swap| swap.upgrade())
+        .values()
         .filter(|swap| swap.uuid() != except_uuid)
         .flat_map(|swap| swap.locked_amount())
         .fold(MmNumber::from(0), |mut total_amount, locked| {
@@ -688,11 +741,9 @@ pub fn active_swaps_using_coin(ctx: &MmArc, coin: &str) -> Result<Vec<Uuid>, Str
     let swap_ctx = try_s!(SwapsContext::from_ctx(ctx));
     let swaps = try_s!(swap_ctx.running_swaps.lock());
     let mut uuids = vec![];
-    for swap in swaps.iter() {
-        if let Some(swap) = swap.upgrade() {
-            if swap.maker_coin() == coin || swap.taker_coin() == coin {
-                uuids.push(*swap.uuid())
-            }
+    for swap in swaps.values() {
+        if swap.maker_coin() == coin || swap.taker_coin() == coin {
+            uuids.push(*swap.uuid())
         }
     }
     drop(swaps);
@@ -708,11 +759,7 @@ pub fn active_swaps_using_coin(ctx: &MmArc, coin: &str) -> Result<Vec<Uuid>, Str
 pub fn active_swaps(ctx: &MmArc) -> Result<Vec<(Uuid, u8)>, String> {
     let swap_ctx = try_s!(SwapsContext::from_ctx(ctx));
     let swaps = try_s!(swap_ctx.running_swaps.lock());
-    let mut uuids: Vec<(Uuid, u8)> = swaps
-        .iter()
-        .filter_map(|swap| swap.upgrade())
-        .map(|swap| (*swap.uuid(), LEGACY_SWAP_TYPE))
-        .collect();
+    let mut uuids: Vec<(Uuid, u8)> = swaps.values().map(|swap| (*swap.uuid(), LEGACY_SWAP_TYPE)).collect();
     drop(swaps);
 
     let v2_swaps = swap_ctx.active_swaps_v2_snapshot();
@@ -1500,4 +1547,260 @@ mod secret_hash_algo_selection_tests {
     // cross-reference and code review instead (see the doc comment on
     // `select_secret_hash_algo` above); a real regression test needs test
     // doubles for these coin families that do not exist yet.
+}
+
+#[cfg(test)]
+mod running_swap_registry_tests {
+    //! CRD ch.51 R58A / R58B / T24 / T25: the running-swap registry is a keyed map of owning handles whose
+    //! entry (and the V1 message store) is removed by a guard when the run function exits.
+    use super::*;
+    use common::{block_on, new_uuid};
+    use crypto::privkey::key_pair_from_seed;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::time::{Duration, Instant};
+
+    struct DummySwap {
+        uuid: Uuid,
+        maker_coin: String,
+        taker_coin: String,
+        locked: Option<(String, i32)>,
+    }
+
+    impl DummySwap {
+        fn new(uuid: Uuid) -> Arc<DummySwap> {
+            Arc::new(DummySwap {
+                uuid,
+                maker_coin: "AAA".into(),
+                taker_coin: "BBB".into(),
+                locked: None,
+            })
+        }
+    }
+
+    impl AtomicSwap for DummySwap {
+        fn locked_amount(&self) -> Vec<LockedAmount> {
+            self.locked
+                .iter()
+                .map(|(coin, amount)| LockedAmount {
+                    coin: coin.clone(),
+                    amount: MmNumber::from(*amount),
+                    trade_fee: None,
+                })
+                .collect()
+        }
+        fn uuid(&self) -> &Uuid { &self.uuid }
+        fn maker_coin(&self) -> &str { &self.maker_coin }
+        fn taker_coin(&self) -> &str { &self.taker_coin }
+    }
+
+    fn test_ctx() -> MmArc {
+        MmCtxBuilder::default()
+            .with_conf(json::json!({"netid": 8762}))
+            .into_mm_arc()
+    }
+
+    fn registry_len(sc: &SwapsContext) -> usize { sc.running_swaps.lock().unwrap().len() }
+    fn store_len(sc: &SwapsContext) -> usize { sc.swap_msgs.lock().unwrap().len() }
+
+    /// Mirrors the run functions: store, register, then run.
+    fn start(sc: &Arc<SwapsContext>, swap: Arc<dyn AtomicSwap>) -> RunningSwapGuard {
+        sc.init_msg_store(*swap.uuid(), bits256::default());
+        sc.register_running_swap(swap)
+    }
+
+    #[test]
+    fn guard_removes_registry_entry_and_message_store_on_drop() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let uuid = new_uuid();
+        let swap = DummySwap::new(uuid);
+        let probe = Arc::downgrade(&swap);
+        let guard = start(&sc, swap);
+        assert_eq!(registry_len(&sc), 1);
+        assert_eq!(store_len(&sc), 1);
+        assert_eq!(running_swaps_num(&ctx), 1);
+        assert_eq!(active_swaps(&ctx).unwrap(), vec![(uuid, LEGACY_SWAP_TYPE)]);
+        assert_eq!(active_swaps_using_coin(&ctx, "AAA").unwrap(), vec![uuid]);
+        assert!(active_swaps_using_coin(&ctx, "ZZZ").unwrap().is_empty());
+        drop(guard);
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+        assert_eq!(running_swaps_num(&ctx), 0);
+        assert!(active_swaps(&ctx).unwrap().is_empty());
+        // The owning handle was released: removal does not depend on other clones, and nothing leaks.
+        assert!(probe.upgrade().is_none());
+    }
+
+    #[test]
+    fn guard_removes_entry_although_the_run_function_holds_other_clones() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let swap = DummySwap::new(new_uuid());
+        let keep_alive = swap.clone();
+        let guard = start(&sc, swap);
+        assert_eq!(Arc::strong_count(&keep_alive), 2);
+        drop(guard);
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(Arc::strong_count(&keep_alive), 1);
+    }
+
+    #[test]
+    fn guard_removes_entry_on_early_return() {
+        fn run(sc: &Arc<SwapsContext>, swap: Arc<dyn AtomicSwap>) -> Result<(), String> {
+            let _guard = start(sc, swap);
+            Err::<(), String>("refused".into())?;
+            Ok(())
+        }
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        assert!(run(&sc, DummySwap::new(new_uuid())).is_err());
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+    }
+
+    #[test]
+    fn guard_removes_entry_on_panic_unwinding() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = start(&sc, DummySwap::new(new_uuid()));
+            assert_eq!(registry_len(&sc), 1);
+            panic!("swap run function panicked");
+        }));
+        assert!(res.is_err());
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+        assert_eq!(running_swaps_num(&ctx), 0);
+    }
+
+    #[test]
+    fn guard_removes_entry_when_the_run_future_is_dropped_unfinished() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let sc2 = sc.clone();
+        let swap = DummySwap::new(new_uuid());
+        let mut fut = Box::pin(async move {
+            let _guard = start(&sc2, swap);
+            futures::future::pending::<()>().await;
+        });
+        // Poll once so the body (and the guard) runs, then cancel.
+        assert!(futures::FutureExt::now_or_never(&mut fut).is_none());
+        assert_eq!(registry_len(&sc), 1);
+        drop(fut);
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+    }
+
+    #[test]
+    fn registry_size_never_exceeds_the_swaps_alive_and_is_empty_afterwards() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let mut alive: std::collections::VecDeque<(RunningSwapGuard, std::sync::Weak<DummySwap>)> = Default::default();
+        let mut probes = vec![];
+        for i in 0..2000usize {
+            let swap = DummySwap::new(new_uuid());
+            probes.push(Arc::downgrade(&swap));
+            let weak = Arc::downgrade(&swap);
+            alive.push_back((start(&sc, swap), weak));
+            // Interleave: keep at most 7 swaps running at once.
+            if alive.len() > 7 {
+                alive.pop_front();
+            }
+            assert_eq!(registry_len(&sc), alive.len(), "iteration {i}");
+            assert_eq!(store_len(&sc), alive.len(), "iteration {i}");
+            assert_eq!(running_swaps_num(&ctx), alive.len() as u64);
+        }
+        alive.clear();
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+        assert_eq!(running_swaps_num(&ctx), 0);
+        assert!(
+            probes.iter().all(|p| p.upgrade().is_none()),
+            "a finished swap stayed allocated"
+        );
+        println!(
+            "size_of per running entry: key {} + handle {} bytes",
+            std::mem::size_of::<Uuid>(),
+            std::mem::size_of::<Arc<dyn AtomicSwap>>()
+        );
+    }
+
+    #[test]
+    fn locked_amount_is_zero_after_the_swaps_finish() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let mut guards = vec![];
+        for _ in 0..10 {
+            let swap = Arc::new(DummySwap {
+                uuid: new_uuid(),
+                maker_coin: "AAA".into(),
+                taker_coin: "BBB".into(),
+                locked: Some(("AAA".into(), 3)),
+            });
+            guards.push(start(&sc, swap));
+        }
+        assert_eq!(get_locked_amount(&ctx, "AAA"), MmNumber::from(30));
+        assert_eq!(
+            get_locked_amount_by_other_swaps(&ctx, &new_uuid(), "AAA"),
+            MmNumber::from(30)
+        );
+        guards.clear();
+        assert_eq!(get_locked_amount(&ctx, "AAA"), MmNumber::from(0));
+        assert_eq!(
+            get_locked_amount_by_other_swaps(&ctx, &new_uuid(), "AAA"),
+            MmNumber::from(0)
+        );
+    }
+
+    #[test]
+    fn shutdown_clear_returns_immediately_with_live_entries_and_drops_handles() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let mut guards = vec![];
+        let mut probes = vec![];
+        for _ in 0..50 {
+            let swap = DummySwap::new(new_uuid());
+            probes.push(Arc::downgrade(&swap));
+            guards.push(start(&sc, swap));
+        }
+        assert_eq!(running_swaps_num(&ctx), 50);
+        let started = Instant::now();
+        clear_running_swaps(&ctx);
+        assert!(started.elapsed() < Duration::from_secs(1), "clearing must not wait");
+        assert_eq!(running_swaps_num(&ctx), 0);
+        assert_eq!(registry_len(&sc), 0);
+        assert!(
+            probes.iter().all(|p| p.upgrade().is_none()),
+            "registry handles were not dropped"
+        );
+        // The run functions are still "running": their guards later remove by key and find nothing.
+        drop(guards);
+        assert_eq!(registry_len(&sc), 0);
+        assert_eq!(store_len(&sc), 0);
+    }
+
+    #[test]
+    fn late_message_for_a_finished_swap_is_ignored() {
+        let ctx = test_ctx();
+        let sc = SwapsContext::from_ctx(&ctx).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let mut accept = bits256::default();
+        accept.bytes.copy_from_slice(&key_pair.public_slice()[1..33]);
+        let uuid = new_uuid();
+        let encoded = encode_and_sign(&SwapMsg::Negotiated(true), &key_pair.private_bytes()).unwrap();
+
+        // Running: the message from the negotiated counterparty is stored.
+        sc.init_msg_store(uuid, accept);
+        let guard = sc.register_running_swap(DummySwap::new(uuid));
+        block_on(process_msg(ctx.clone(), &uuid.to_string(), &encoded));
+        assert_eq!(sc.swap_msgs.lock().unwrap().get(&uuid).unwrap().negotiated, Some(true));
+
+        // Finished: the store is gone and a late message is ignored without panicking or re-creating it.
+        drop(guard);
+        block_on(process_msg(ctx.clone(), &uuid.to_string(), &encoded));
+        assert_eq!(store_len(&sc), 0);
+    }
 }

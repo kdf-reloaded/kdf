@@ -43,7 +43,7 @@ use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe
 use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_memory_loop, init_ordermatch_context,
                                 lp_ordermatch_loop, orders_kick_start, BalanceUpdateOrdermatchHandler,
                                 OrdermatchInitError};
-use crate::mm2::lp_swap::{running_swaps_num, swap_kick_starts};
+use crate::mm2::lp_swap::{clear_running_swaps, swap_kick_starts};
 use crate::mm2::rpc::spawn_rpc;
 use crate::mm2::{MM_DATETIME, MM_VERSION};
 
@@ -583,13 +583,9 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
         Timer::sleep(0.2).await
     }
 
-    // wait for swaps to stop
-    loop {
-        if running_swaps_num(&ctx) == 0 {
-            break;
-        };
-        Timer::sleep(0.2).await
-    }
+    // The stop signal was observed. Swaps stop by task-scope cancellation / the swap shutdown channel; here
+    // the registry's strong handles are dropped in one step, without waiting for the swap count (CRD ch.51 R58A).
+    clear_running_swaps(&ctx);
     Ok(())
 }
 

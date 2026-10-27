@@ -368,10 +368,10 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     let uuid = swap.uuid.to_string();
     let to_broadcast = !(swap.maker_coin.is_privacy() || swap.taker_coin.is_privacy());
     let running_swap = Arc::new(swap);
-    let weak_ref = Arc::downgrade(&running_swap);
     let swap_ctx = SwapsContext::from_ctx(&ctx).unwrap();
     swap_ctx.init_msg_store(running_swap.uuid, running_swap.maker);
-    swap_ctx.running_swaps.lock().unwrap().push(weak_ref);
+    // Removes the registry entry and the message store on every exit of this function (R58A, R58B).
+    let _registry_guard = swap_ctx.register_running_swap(running_swap.clone());
     let shutdown_rx = swap_ctx.shutdown_rx.clone();
     let swap_for_log = running_swap.clone();
 
@@ -3147,8 +3147,7 @@ mod taker_swap_tests {
         let (swap, _) = TakerSwap::load_from_saved(ctx.clone(), maker_coin, taker_coin, taker_saved_swap).unwrap();
         let swaps_ctx = SwapsContext::from_ctx(&ctx).unwrap();
         let arc = Arc::new(swap);
-        let weak_ref = Arc::downgrade(&arc);
-        swaps_ctx.running_swaps.lock().unwrap().push(weak_ref);
+        let _registry_guard = swaps_ctx.register_running_swap(arc.clone());
 
         let actual = get_locked_amount(&ctx, "DOC");
         assert_eq!(actual, MmNumber::from(0));
@@ -3243,8 +3242,7 @@ mod taker_swap_tests {
             let (swap, _) = TakerSwap::load_from_saved(ctx.clone(), maker_coin, taker_coin, taker_saved_swap).unwrap();
             let swaps_ctx = SwapsContext::from_ctx(&ctx).unwrap();
             let arc = Arc::new(swap);
-            let weak_ref = Arc::downgrade(&arc);
-            swaps_ctx.running_swaps.lock().unwrap().push(weak_ref);
+            let _registry_guard = swaps_ctx.register_running_swap(arc.clone());
 
             get_locked_amount(&ctx, "MARTY")
         }
