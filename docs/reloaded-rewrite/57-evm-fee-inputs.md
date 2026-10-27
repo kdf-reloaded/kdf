@@ -476,7 +476,7 @@ sender-side preimage consolidation (one 300000 constant becoming
 This gap is also recorded in
 [`UPSTREAM-PARITY-GAPS.md`](UPSTREAM-PARITY-GAPS.md).
 
-> **As built (2026-10-28, PR #TBD) -- R57.5.4 closed.** The `gas_limit` block is read
+> **As built (2026-10-28, PR #105) -- R57.5.4 closed.** The `gas_limit` block is read
 > at coin activation (token entry first, then its platform coin's whole block, R57.5.3),
 > the defaults of R57.5.2 replace the baseline constants, and every V1 call site uses
 > the coin's value: native and token sends, the maximum-native-withdrawal deduction and
@@ -561,7 +561,7 @@ no `nft_maker` sub-object as a configurable unit. Closing this adopts
 R57.6.2's values along with the override reading, on the same
 one-change rule as R57.5.4.
 
-> **As built (2026-10-28, PR #TBD) -- R57.6.4 closed.** The `gas_limit_v2` block is read
+> **As built (2026-10-28, PR #105) -- R57.6.4 closed.** The `gas_limit_v2` block is read
 > with the sub-object and member names of R57.6.2 (`maker`, `taker`, `nft_maker`), inherited
 > by a token as a whole block from its platform coin, and the V2 defaults are the table of
 > R57.6.2. A V2 `approve_payment` is used as configured, with no estimate.

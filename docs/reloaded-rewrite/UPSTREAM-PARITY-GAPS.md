@@ -369,7 +369,7 @@ chain's fee quote needs at least the first two closed before it matches.
   other platform coins. This is the larger half of the reported fee error on
   those chains.
 - [x] **`gas_limit` and `gas_limit_v2` coin-configuration blocks are never
-  read (ch. 57 R57.5.1–R57.5.4, R57.6.1–R57.6.4) -- implemented in PR #TBD (2026-10-28).** This is the gap the
+  read (ch. 57 R57.5.1–R57.5.4, R57.6.1–R57.6.4) -- implemented in PR #105 (2026-10-28).** This is the gap the
   tracker previously did not record at all. Reloaded hard-codes 21000 for a
   native send, 210000 for a token send, 150000 for every V1 HTLC send, spend
   and refund, 300000 for the platform-coin sender preimage, and builds its V2
