@@ -51,6 +51,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #TBD; CRD ch.11 R10.
+
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
   whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
   longer holds a request for a minute before the next node is tried. A request given up on is now

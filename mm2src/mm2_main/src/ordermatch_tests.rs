@@ -2358,6 +2358,33 @@ fn test_recently_cancelled_blocks_insert() {
     );
 }
 
+/// An entry older than the time-to-live must no longer suppress an insert, even though it was not
+/// reclaimed yet (reclaiming happens on writes only).
+#[test]
+fn test_recently_cancelled_expired_entry_allows_insert() {
+    let (_, pubkey, secret) = make_ctx_for_tests();
+    let mut orderbook = Orderbook {
+        recently_cancelled: TimeCache::new(Duration::from_millis(50)),
+        ..Default::default()
+    };
+    let order = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 1).remove(0);
+    let uuid = order.uuid;
+
+    orderbook.recently_cancelled.insert(uuid, pubkey.clone());
+    orderbook.index_insert_or_update(order.clone());
+    assert!(
+        !orderbook.order_set.contains_key(&uuid),
+        "insert within the window must be suppressed"
+    );
+
+    std::thread::sleep(Duration::from_millis(150));
+    orderbook.index_insert_or_update(order);
+    assert!(
+        orderbook.order_set.contains_key(&uuid),
+        "insert after the entry exceeded the time-to-live must go through"
+    );
+}
+
 /// If a cancel is recorded for pubkey A but the insert comes from pubkey B (different sender),
 /// it should go through (the pubkeys don't match the recently_cancelled entry).
 #[test]

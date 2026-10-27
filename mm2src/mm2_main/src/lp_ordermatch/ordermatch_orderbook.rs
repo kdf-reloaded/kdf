@@ -1452,7 +1452,7 @@ impl Orderbook {
     /// Index-only method: updates in-memory indices and returns the trie mutations
     /// that must be applied by TrieStore. No trie/memory_db mutation happens here.
     pub(crate) fn index_insert_or_update(&mut self, order: OrderbookItem) -> Vec<TrieOp> {
-        if self.recently_cancelled.get(&order.uuid) == Some(&order.pubkey) {
+        if self.recently_cancelled.get_unexpired(&order.uuid) == Some(&order.pubkey) {
             log::warn!("Order {} was recently cancelled, ignoring insert", order.uuid);
             return Vec::new();
         }
