@@ -82,6 +82,7 @@ pub mod eth_hd_wallet;
 pub(crate) mod eth_swap_v2;
 pub mod fee_estimation;
 pub mod legacy_tx;
+pub(crate) mod node_url;
 pub mod tron;
 
 /// Public re-export of the NFT swap V2 surface so mm2_main's swap
@@ -137,7 +138,9 @@ pub(crate) mod abi;
 pub(crate) use abi::{AbiError, Contract, Function, Token};
 
 #[cfg(test)] mod abi_golden_tests;
+#[cfg(test)] mod eth_failover_tests;
 #[cfg(test)] mod eth_tests;
+#[cfg(test)] mod fee_service_url_tests;
 #[cfg(test)] mod typed_tx_vector_tests;
 // Local `geth --dev` integration tests for the v1 ETH/ERC20 HTLC payment +
 // refund path. Native only; they skip themselves when `geth` is not on PATH.

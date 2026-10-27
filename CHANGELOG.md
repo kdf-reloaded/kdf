@@ -51,6 +51,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
+  whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
+  longer holds a request for a minute before the next node is tried. A request given up on is now
+  closed too, instead of staying open in the background for as long as the node keeps silent. More in
+  ch.35 §35.1.F.
+
+- **EVM and Tron log lines and errors name a node by scheme, host and port only.** Paths, query
+  strings and credentials, where hosted providers keep API keys, are never printed: the activation
+  probe, the per-node failure logs, the error that lists the nodes tried, and the lower-layer texts
+  they carry. When a node answers with an error, the log says so
+  (`EVM RPC <host> answered <method> with error <code>: <message>`) and the error returned to the
+  caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
+  The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
+  also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
@@ -165,6 +179,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
 
+- **An EVM node that answers with an error no longer ends the request; the next configured node is
+  tried.** Before, the first node's answer was accepted even when it carried an error object, such as
+  "block range too large" or a revert, so one picky node failed the call although the others could
+  serve it. Now the nodes are tried one at a time, a refusing node counts as a failed node, and the
+  node that finally answers is tried first the next time. When every node fails, the caller gets the
+  last node's own error. More in ch.35 §35.1.F.
+
+- **A swap or withdraw on an EVM coin no longer waits for all nodes to agree on the nonce.** One
+  lagging node used to hold the transaction indefinitely. Now the highest pending nonce wins and the
+  signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
+  of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
+  by node instead. More in ch.35 §35.1.F.
 - **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
   ignored and every listed server was connected; with `max_connected: 1` only one server is connected
   now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are

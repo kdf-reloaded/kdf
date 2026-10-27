@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use super::address::TronAddress;
 use super::proto::TaposBlockData;
+use crate::eth::node_url::scrub_node_url;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -40,6 +41,25 @@ impl From<MmError<SlurpError>> for TronApiError {
             SlurpError::Transport { error, .. } => TronApiError::Transport(error),
             SlurpError::Timeout { error, .. } => TronApiError::Timeout(error),
             other => TronApiError::InvalidResponse(other.to_string()),
+        }
+    }
+}
+
+impl TronApiError {
+    /// The error with the node's URL removed from its text (CRD ch.35 R35.1.14 via ch.21 R-N1): the lower layer
+    /// prints the full URL it was given, and a node URL can embed an API key. `urls` are the strings the
+    /// request was built from.
+    fn without_node_urls(self, urls: &[&str]) -> Self {
+        let scrub = |text: String| urls.iter().fold(text, |text, url| scrub_node_url(&text, url));
+        match self {
+            TronApiError::Transport(text) => TronApiError::Transport(scrub(text)),
+            TronApiError::Timeout(text) => TronApiError::Timeout(scrub(text)),
+            TronApiError::RemoteError { code, message } => TronApiError::RemoteError {
+                code,
+                message: scrub(message),
+            },
+            TronApiError::InvalidResponse(text) => TronApiError::InvalidResponse(scrub(text)),
+            TronApiError::AllNodesFailed(text) => TronApiError::AllNodesFailed(scrub(text)),
         }
     }
 }
@@ -233,7 +253,7 @@ impl TronApiClient {
                     return Ok(resp);
                 },
                 Err(e) => {
-                    let api_err = TronApiError::from(e);
+                    let api_err = TronApiError::from(e).without_node_urls(&[&url, &nodes[i]]);
                     if !is_retryable(&api_err) {
                         return Err(api_err);
                     }
@@ -410,5 +430,49 @@ mod tests {
         let resp: TriggerConstantContractResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.constant_result.unwrap().len(), 1);
         assert_eq!(resp.energy_used, Some(685));
+    }
+
+    #[test]
+    fn node_urls_are_scrubbed_from_every_lower_layer_text() {
+        let node = "https://user:secret@tron.example.org:8090/APIKEY";
+        let url = format!("{node}/wallet/getnowblock");
+        let secrets = ["user", "secret", "APIKEY"];
+        for slurp in [
+            SlurpError::Transport {
+                uri: url.clone(),
+                error: format!("connection refused for {url}"),
+            },
+            SlurpError::Timeout {
+                uri: url.clone(),
+                error: format!("timed out on {node}"),
+            },
+            SlurpError::Timeout {
+                uri: url.clone(),
+                error: "timed out".to_owned(),
+            },
+            SlurpError::ErrorDeserializing {
+                uri: url.clone(),
+                error: "expected value".to_owned(),
+            },
+        ] {
+            let err = TronApiError::from(MmError::new(slurp)).without_node_urls(&[&url, node]);
+            let text = err.to_string();
+            for secret in secrets {
+                assert!(!text.contains(secret), "{secret} in {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn all_nodes_failed_error_names_no_key() {
+        // Port 1 on the loopback is closed: every attempt fails at connect.
+        let client = TronApiClient::new(vec![
+            "http://user:secret@127.0.0.1:1/APIKEY".to_owned(),
+            "http://127.0.0.1:1/OTHERKEY".to_owned(),
+        ]);
+        let err = common::block_on(client.get_now_block()).unwrap_err().to_string();
+        for secret in ["user", "secret", "APIKEY", "OTHERKEY"] {
+            assert!(!err.contains(secret), "{secret} in {err}");
+        }
     }
 }
