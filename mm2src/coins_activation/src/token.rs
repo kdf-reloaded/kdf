@@ -106,8 +106,8 @@ pub enum EnableTokenError {
     PlatformCoinMismatch,
     #[display(fmt = "Could not fetch the balance: {}", _0)]
     CouldNotFetchBalance(String),
-    /// Reserved by the chapter: no failure maps here today.
-    #[allow(dead_code)]
+    /// The token's coin-configuration entry holds an unusable value, e.g. a `gas_limit` member that is not a
+    /// non-negative integer (CRD R57.5.1). The message names the key.
     #[display(fmt = "Invalid config: {}", _0)]
     InvalidConfig(String),
     Internal(String),
