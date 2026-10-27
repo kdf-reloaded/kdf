@@ -49,6 +49,17 @@
 8. **QRC20 rule placement:** it stays in ch. 57 R57.7A.6, with a pointer from
    ch. 38 R38.6.6g (ch. 57 D8).
 
+> **Beta availability (2026-10-26).** By maintainer decision three families
+> take part in no trade in the coming beta: Solana
+> (`SOLANA_ACTIVATION_AVAILABLE`) and TRON (`TRON_ACTIVATION_AVAILABLE`) cannot
+> be activated, and Tendermint coins and tokens are wallet-only
+> (`TENDERMINT_SWAPS_AVAILABLE`), all three constants in
+> `coins/lp_coins_ops.rs` set to `false`. Items 6 and 7 and the Tendermint row
+> of ch. 60 (C1) stand unchanged for when the families return (Solana and TRON
+> planned for the next beta, Tendermint swaps for a later release); turning the
+> families back on belongs to plans `solana-support`, `tron-swap-support` and
+> `tendermint-activation-features`, not to this one.
+
 ## Work packages and merge order
 
 | # | Branch / PR | Content | Depends on |

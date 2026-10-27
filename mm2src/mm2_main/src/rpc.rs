@@ -677,7 +677,10 @@ mod server_tests {
         }
     }
 
-    fn start_server() -> (MmArc, SocketAddr) {
+    fn start_server() -> (MmArc, SocketAddr) { start_server_with_coins(json!([])) }
+
+    /// Like [`start_server`], with `coins` as the coins configuration and `pw` as the RPC password.
+    fn start_server_with_coins(coins: Json) -> (MmArc, SocketAddr) {
         // Reserve a free port, then hand it to the server (`rpcport: 0` would hide the chosen port).
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -685,10 +688,34 @@ mod server_tests {
             .unwrap()
             .port();
         let ctx = MmCtxBuilder::default()
-            .with_conf(json!({ "rpcip": "127.0.0.1", "rpcport": port.max(1024), "rpccors": "http://example.test" }))
+            .with_conf(json!({
+                "rpcip": "127.0.0.1",
+                "rpcport": port.max(1024),
+                "rpccors": "http://example.test",
+                "rpc_password": "pw",
+                "coins": coins,
+            }))
             .into_mm_arc();
         spawn_rpc(ctx.ffi_handle().unwrap()).unwrap();
         (ctx, SocketAddr::from(([127, 0, 0, 1], port.max(1024))))
+    }
+
+    /// POSTs `request` and returns the status line and the JSON body exactly as a client receives them.
+    fn post(addr: SocketAddr, request: &Json) -> (String, Json) {
+        let body = request.to_string();
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response.lines().next().unwrap_or_default().to_owned();
+        let (_, payload) = response.split_once("\r\n\r\n").expect("a complete response");
+        let payload = serde_json::from_str(payload).unwrap_or_else(|e| panic!("{e}: {response}"));
+        (status, payload)
     }
 
     fn connect(addr: SocketAddr) -> TcpStream {
@@ -747,6 +774,88 @@ mod server_tests {
                 .contains("access-control-allow-origin: http://example.test"),
             "{response}"
         );
+    }
+
+    /// Tendermint swaps are postponed for this beta (`coins::TENDERMINT_SWAPS_AVAILABLE`): over the wire, a real
+    /// Tendermint platform coin and a real Tendermint token are refused by the routes that start a new trade
+    /// (`setprice`, `buy`, `sell` and the v2 `start_swap`), on either side of the pair, with the usual
+    /// wallet-only answer.
+    #[test]
+    fn tendermint_coins_are_refused_by_the_new_trade_routes() {
+        use coins::tendermint::{tendermint_coin_from_conf_and_request, TendermintToken};
+        use coins::{CoinsContext, MmCoinEnum, TestCoin};
+
+        let coins = json!([
+            { "coin": "IRIS", "avg_blocktime": 5, "mm2": 1, "protocol": { "type": "TENDERMINT", "protocol_data": {
+                "denom": "uiris", "decimals": 6, "account_prefix": "iaa", "chain_id": "irishub-1" } } },
+            { "coin": "IRIS-NYAN", "mm2": 1, "protocol": { "type": "TENDERMINTTOKEN", "protocol_data": {
+                "platform": "IRIS", "decimals": 6, "denom": "unyan" } } },
+            { "coin": "TRADE", "mm2": 1 },
+        ]);
+        let (ctx, addr) = start_server_with_coins(coins.clone());
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tendermint trade refusal test passphrase")
+            .expect("initialize the crypto context");
+        let priv_key = *ctx.secp256k1_key_pair().private().secret;
+        let node = serde_json::from_value(json!({ "url": "http://127.0.0.1:1" })).unwrap();
+        let platform = common::block_on(tendermint_coin_from_conf_and_request(
+            &ctx,
+            "IRIS".to_owned(),
+            &coins[0],
+            vec![node],
+            &priv_key,
+            false,
+        ))
+        .unwrap_or_else(|e| panic!("cannot build the platform: {e}"));
+        let token = TendermintToken::from_protocol("IRIS-NYAN".to_owned(), platform.clone(), 6, "unyan").unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for coin in [
+            MmCoinEnum::from(platform),
+            MmCoinEnum::from(token),
+            MmCoinEnum::Test(TestCoin::new("TRADE")),
+        ] {
+            common::block_on(coins_ctx.add_coin(coin)).unwrap();
+        }
+
+        for tendermint in ["IRIS", "IRIS-NYAN"] {
+            for (base, rel, side) in [(tendermint, "TRADE", "Base"), ("TRADE", tendermint, "Rel")] {
+                let wallet_only_error = format!("{side} coin {tendermint} is wallet only");
+
+                // The legacy routes answer `{"error": ...}` with HTTP 500.
+                for method in ["setprice", "buy", "sell"] {
+                    let request = json!({
+                        "userpass": "pw", "method": method, "base": base, "rel": rel, "price": 1, "volume": 1
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(status.contains("500"), "{method} {base}/{rel}: {status}");
+                    let error = body["error"].as_str().unwrap_or_else(|| panic!("{method}: {body}"));
+                    assert!(error.ends_with(&wallet_only_error), "{method} {base}/{rel}: {body}");
+                }
+
+                // `start_swap` is the v2 front of the same three.
+                for method in ["set_price", "buy", "sell"] {
+                    let request = json!({
+                        "mmrpc": "2.0", "userpass": "pw", "method": "start_swap", "id": 3,
+                        "params": {
+                            "base": base, "rel": rel, "base_coin_amount": "1", "rel_coin_amount": "1",
+                            "method": { method: {} },
+                        },
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(
+                        status.contains("500"),
+                        "start_swap {method} {base}/{rel}: {status} {body}"
+                    );
+                    assert_eq!(body["error_type"], "Internal", "{body}");
+                    assert!(
+                        body["error_data"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .ends_with(&wallet_only_error),
+                        "start_swap {method} {base}/{rel}: {body}"
+                    );
+                }
+            }
+        }
     }
 
     /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.

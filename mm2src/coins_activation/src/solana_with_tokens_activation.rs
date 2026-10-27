@@ -1,7 +1,7 @@
-use crate::platform_coin_with_tokens::{EnablePlatformCoinWithTokensError, GetPlatformBalance,
-                                       InitTokensAsMmCoinsError, PlatformWithTokensActivationOps, RegisterTokenInfo,
-                                       TokenActivationParams, TokenActivationRequest, TokenAsMmCoinInitializer,
-                                       TokenInitializer, TokenOf};
+use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens, EnablePlatformCoinWithTokensError,
+                                       EnablePlatformCoinWithTokensReq, GetPlatformBalance, InitTokensAsMmCoinsError,
+                                       PlatformWithTokensActivationOps, RegisterTokenInfo, TokenActivationParams,
+                                       TokenActivationRequest, TokenAsMmCoinInitializer, TokenInitializer, TokenOf};
 use crate::prelude::*;
 use crate::prelude::{CoinAddressInfo, TokenBalances, TryFromCoinProtocol, TxHistory};
 use crate::spl_token_activation::SplActivationRequest;
@@ -10,7 +10,7 @@ use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::solana::spl::{SplProtocolConf, SplTokenCreationError};
 use coins::{solana_coin_from_conf_and_params, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps,
-            SolanaActivationParams, SolanaCoin, SplToken};
+            SolanaActivationParams, SolanaCoin, SplToken, SOLANA_ACTIVATION_AVAILABLE, SOLANA_NOT_AVAILABLE};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
 use futures::future::AbortHandle;
@@ -20,6 +20,24 @@ use mm2_metrics::MetricsArc;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::HashMap;
+
+/// The `enable_solana_with_tokens` entry point.
+///
+/// While [`SOLANA_ACTIVATION_AVAILABLE`] is `false` (Solana is postponed for the current beta) the request is
+/// refused with a `PlatformCoinCreationError` saying so, and nothing is registered. Otherwise it is the generic
+/// platform activation.
+pub async fn enable_solana_with_tokens(
+    ctx: MmArc,
+    req: EnablePlatformCoinWithTokensReq<SolanaWithTokensActivationRequest>,
+) -> Result<SolanaWithTokensActivationResult, MmError<EnablePlatformCoinWithTokensError>> {
+    if !SOLANA_ACTIVATION_AVAILABLE {
+        return MmError::err(EnablePlatformCoinWithTokensError::PlatformCoinCreationError {
+            ticker: req.ticker,
+            error: SOLANA_NOT_AVAILABLE.to_owned(),
+        });
+    }
+    enable_platform_coin_with_tokens::<SolanaCoin>(ctx, req).await
+}
 
 pub struct SplTokenInitializer {
     platform_coin: SolanaCoin,
