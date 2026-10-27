@@ -69,7 +69,8 @@ time and are the practical reason this chapter exists:
 Bound rules R1–R7 cover the run loop and lifecycle; R8–R19 the maker
 stage graph; R20–R32 the taker stage graph; R33–R40 the refusal and
 abort contract; R41–R50 the message contract and timeout budget;
-R51–R58 the reserved-funds semantics; R59–R66 the wire field and type
+R51–R58B the reserved-funds semantics and the registry and message-store
+lifecycle; R59–R66 the wire field and type
 expectations; R71–R73 the secret-hash algorithm selection; R67–R70 the
 reference-version split.
 
@@ -823,6 +824,63 @@ that a reservation leak is unbounded within a process lifetime and is
 cleared only by restarting, which is why R52 and R57 are stated as hard
 requirements rather than as optimisations.
 
+**R58A.** *Registry lifecycle.* (Authored by the KDF Spec Reader
+2026-10-27 from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+§2.15A, identical at both; passed the KDF Dirty Gate on 2026-10-27, see §51.16.) The
+running-swap registry of R51 is a map from swap identifier to a strong
+(owning) handle on the running swap, with this lifecycle:
+
+1. *Insertion.* An entry is inserted when the swap's run loop begins —
+   for a maker swap and a taker swap alike, and whether the swap was
+   freshly negotiated or resumed from storage at node start (R6). A
+   resumed swap and a fresh one enter the same run loop and therefore
+   the same insertion point; there is no separate kick-start path that
+   could miss it.
+2. *Removal.* The entry is removed by key when the run loop exits, on
+   the maker path and on the taker path (R4), on every exit — normal
+   completion, failure, refusal and abort. Removal is an explicit
+   operation and never depends on the last handle being dropped.
+3. *Shutdown.* When the node is stopping, the registry is cleared in one
+   step once the stop signal has been observed. The node does **not**
+   wait for the number of running swaps to reach zero. Clearing stops no
+   swap — swaps are stopped by canceling the task scopes they run
+   under — it only drops the strong handles so that the shared
+   application context can be released.
+4. *Reads.* Every question about running swaps — the count, the list of
+   active swaps with their protocol versions, the swaps that use a given
+   coin set, and the reservation totals of R53 — is answered from the
+   map's entries directly. There is no liveness probe: an entry is a
+   running swap, by construction of items 1–3.
+
+> **Reloaded divergence (2026-10-27).** Reloaded today keeps the
+> baseline's shape (V3): a vector of weak handles, appended at swap start
+> and never pruned. A finished swap leaves a dead entry behind, the
+> count is the number of entries whose weak handle still upgrades, every
+> count and reservation query walks all entries, and shutdown spins until
+> that count reaches zero. For a market maker the vector grows by one
+> dead entry per completed swap for the process lifetime. R51 and R57
+> already forbid the reservation side of this shape; R58A binds the rest.
+
+**R58B.** *Per-swap message store (shared weakness; Reloaded-original
+improvement).* The legacy protocol keeps, per running swap, a store for
+the counterparty messages received for that swap: keyed by swap
+identifier, created when the swap starts, and accepting a message only
+from the negotiated counterparty's key (a message for an identifier with
+no store, or from any other key, is ignored). At both rows the reference
+never removes a legacy store entry — the map grows by one entry per swap
+for the process lifetime — whereas the version-two engine (the subsystem
+of [Chapter 52](52-swap-v2-state-machine.md)) removes its store entry
+when its swap finishes; that is a reference fact at both rows, not a rule
+chapter 52 states. Reloaded is in the same state today (V7). Reloaded
+SHALL remove the store entry when the run loop exits, at the point of
+R58A item 2. The two observable effects are intended: a late message for
+a finished swap is ignored exactly as a message for an unknown swap is;
+and the watcher-side check that declines to watch a swap this node is
+itself a party to, which consults the store, no longer recognizes a
+finished swap — a difference only for a reused identifier, which
+version-4 random identifiers make negligible. This is a
+Reloaded-original divergence from both rows, documented here as such.
+
 ## 51.9 Bound Wire Field and Type Expectations
 
 **R59.** *Three negotiation-data shapes, untagged.* The negotiation
@@ -1303,6 +1361,22 @@ resume maps, acceptance checks, refusal conditions and budgets asserted
 by T1–T22 hold identically when the swap is configured for netid `8762`
 and for netid `6133` (R67, R69).
 
+**T24.** *Registry returns to empty (R58A).* Run N legacy swaps to
+completion on one node — any mix of maker and taker roles, successful
+and failed. After the last run loop exits, the registry has no entries,
+the running-swap count is zero, and the reservation total of every coin
+is zero. Run N more: the registry's size never exceeds the number of
+swaps concurrently running at any instant. A resumed swap (R6) counts
+exactly once while it runs and zero after it exits.
+
+**T25.** *Shutdown with a running swap, and store removal (R58A item 3,
+R58B).* Stop a node while a legacy swap is in a waiting stage. The stop
+completes without waiting for the swap to finish, the registry is empty
+afterwards, and the swap's persisted event log is intact and resumes
+under R6 at the next start. Separately, after a swap finishes normally
+the node holds no message store for its identifier, and a message
+addressed to that identifier is ignored.
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1379,6 +1453,12 @@ whereas the reference lineages carry payload data on it. Chapter 44
 R44.8A.5 already requires tolerant parsing of this event; this chapter
 does not bind its payload shape.
 
+**V7.** The baseline tree's legacy per-swap message store is created at
+swap start and never removed, and its running-swap registry is the weak
+vector of V3. R58A restores the keyed, owning registry the reference
+rows carry; R58B is a tightening relative to the baseline and to both
+reference rows alike.
+
 ## 51.15 External References
 
 - The hash-time-locked-contract atomic-swap construction that the
@@ -1441,7 +1521,23 @@ does not bind its payload shape.
   after R38 restates chapter 60's corpus-sourced finding that no volume
   check precedes or accompanies negotiation; cleared by the Dirty Gate
   with [Chapter 60](60-trading-floors-and-refusal-contract.md) on
-  2026-10-25, attestation in its §60.12.) Otherwise
+  2026-10-25, attestation in its §60.12.) (Addition of 2026-10-27, KDF
+  Spec Reader, passed the KDF Dirty Gate on 2026-10-27: R58A, R58B, T24, T25 and V7 rest on
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A,
+  identical at both, compared with the baseline anchor. The facts taken
+  are the keyed strong-handle registry, its insertion and removal
+  points, the one-step clearing at shutdown without waiting, the
+  map-based reads, and the never-removed legacy message store beside a
+  removed version-two one. No private identifier, function body, helper
+  decomposition, log or error literal was reproduced. Dirty Gate
+  clearance (chapter 01 T1, R40): PASS, measure 0.02, no leaks; every
+  reference fact confirmed at both rows. *Extent:* the registry lifecycle,
+  the shutdown path and the per-swap message stores, five files per row and two
+  baseline files, with the row-to-row difference. *Method:* reading of the
+  compared regions plus a mechanical regex scan of every added line against
+  private identifiers, literals and distinctive phrases; the mechanical gate
+  tool was not run (prose). *Measure:* 0.02 against the 0.10 threshold.)
+  Otherwise
   consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the legacy swap state
   machine only — specifically the refusal-transmission conditions of

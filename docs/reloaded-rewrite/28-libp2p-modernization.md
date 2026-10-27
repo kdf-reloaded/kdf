@@ -285,7 +285,26 @@ expose:
 
 - a content-addressed message-id function that hashes payload-plus-
   sequence-number, so duplicate payloads collapse to a single
-  message id;
+  message id. The id is a wire value — it travels in the gossipsub
+  IHAVE and IWANT control messages, whose message-id field the public
+  gossipsub specification defines as a byte string — so both its
+  preimage and its encoding are dictated interop. *Preimage:* the
+  message's payload bytes followed by its sequence number, each fed
+  through the Rust standard library's `Hash` implementation for the
+  field's type into the standard library's default hasher (SipHash-1-3
+  with zero keys, as the standard library implements it today; the
+  library documents the algorithm as unspecified, so a change there
+  would break id agreement with reference peers). Both trees pin the
+  same libp2p fork (R0a), so the field types, and with them the
+  preimage, are identical. *Encoding:* the 64-bit hash output
+  serialized as exactly **8 bytes, big-endian**. *Per row (verified
+  2026-10-27):* at the baseline anchor (R1) the same hash was emitted
+  as its decimal ASCII string; `v2.6.0-beta` — the netid `8762`
+  reference — and `v3.0.0-beta` — the netid `6133` reference — both
+  emit the 8-byte big-endian form, and the public release history
+  shows the change first at `v2.0.0-beta`. Adopting the 8-byte form
+  therefore moves Reloaded toward, not away from, every reference peer
+  on both supported netids;
 - the three mesh-size watermarks (`mesh_n_low`, `mesh_n`,
    `mesh_n_high`), with substrate-level values differing between
    client and relay roles. The bound per-role triples are
@@ -301,6 +320,18 @@ expose:
   validating a message, which gives the application the ability to
   drop invalid messages before forwarding;
 - a maximum transmit size bound at slightly under 1 MiB.
+
+> **Reloaded divergence (2026-10-27).** Reloaded today still emits the
+> baseline's decimal-string id; its preimage and hasher already match
+> R13. Consequence: a message id a Reloaded node announces in IHAVE
+> never equals the id a reference node holds for the same message, and
+> vice versa, so every announced message is re-requested with IWANT,
+> delivered in full a second time and then dropped by the receiver's
+> duplicate cache. The mesh still converges — IWANT echoes whatever id
+> the announcer used, so the lookup on the announcer's side succeeds —
+> but every gossip round between a Reloaded node and a reference node
+> costs a full retransmission of every announced message in both
+> directions. Closing it is an encoding change only (T10).
 
 **R14.** The substrate MUST NOT enable the peer-scoring / reputation
 extension present in the standard gossipsub implementation. Abusive-peer
@@ -655,6 +686,15 @@ requirements. A separate test MUST confirm that a supporting peer whose
 reported timestamp is more than 20 seconds away from local UTC is
 disconnected.
 
+**T10.** *Message-id wire encoding (R13).* For one gossipsub message —
+identical payload bytes and sequence number — the id a Reloaded node
+announces in IHAVE is 8 bytes long and equals, byte for byte, the
+big-endian serialization of the R13 hash; a decimal ASCII rendering of
+the same hash MUST fail the test. A conformance variant records the
+IHAVE ids a reference node at `v2.6.0-beta` or `v3.0.0-beta` announces
+for a captured message and asserts byte equality with the Reloaded
+node's id for the same message.
+
 ## 28.11 Deferred Work
 
 > **Note.** The §28.9A items (peer health-check RPC, time-sync
@@ -774,6 +814,13 @@ sets bound in R0b. A verification MUST show the baseline pin/flags, and
 a separate check MUST confirm the adopted pin matches R0a/R0b once the
 port lands.
 
+**V4.** The baseline glue crate's gossipsub configuration MUST be
+confirmed to derive the message id from the payload and the sequence
+number with the standard library's default hasher and to emit it as a
+decimal string. R13's 8-byte big-endian encoding is therefore a
+post-baseline change on the reference side that Reloaded has not yet
+followed (R13 divergence note).
+
 ## 28.14 Provenance Footer
 
 - *Inputs consulted for this chapter:* the baseline tree at project
@@ -806,4 +853,19 @@ port lands.
   set.
 - *Forbidden corpus:* consulted only for seed/relay compatibility of the
   generic request-response timestamp check and peer-exchange protocol
-  negotiation.
+  negotiation; and (addition of 2026-10-27, KDF Spec Reader, passed the KDF Dirty Gate
+  on 2026-10-27) for the message-id preimage and wire encoding of R13 at the
+  rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, compared
+  with the baseline anchor (V4). The facts taken are the two hash
+  inputs, the hasher family, the 8-byte big-endian encoding and the
+  release at which it first appears; the per-row encoding statement
+  also rests on the public release history. No private identifier,
+  function body, helper decomposition, log or error literal was
+  reproduced. Dirty Gate clearance (chapter 01 T1, R40): PASS on 2026-10-27, measure
+  0.01, no leaks; every reference fact confirmed at both rows, including the
+  per-row encoding. *Extent:* the gossipsub message-id derivation and encoding at
+  both rows, the baseline anchor and the public releases `v1.0.7-beta` and
+  `v2.0.0-beta` (five files). *Method:* reading of the compared regions plus a
+  mechanical regex scan of every added line against private identifiers,
+  literals and distinctive phrases; the mechanical gate tool was not run
+  (prose). *Measure:* 0.01 against the 0.10 threshold.
