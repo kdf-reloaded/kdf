@@ -564,9 +564,27 @@ transaction hash itself, never by comparing the hash bytes with the text of
 its hexadecimal form.
 
 > **Provenance of R38.5A.9 and R38.5A.10 (2026-10-26).** Clean-room original.
-> R38.5A.9 was written from a behavioral description only; per the Spec Reader
-> on 2026-10-26, the behavior matches the reference at both reference states.
-> R38.5A.10 states what Reloaded's collector was written to do.
+> R38.5A.9 was written from a behavioral description only. Part of it matches
+> the reference at both reference states: the per-transaction error for an
+> out-of-range previous-output index, the log, skip and continue of the legacy
+> collector, and the error for a BCH transaction with no outputs. The rest of
+> R38.5A.9 is a Reloaded requirement: the error in the KMD reward
+> accumulation, the error for an SLP genesis with an empty decimals field, and
+> skip and continue in the mmrpc-2.0 BCH and SLP collector. R38.5A.10 states
+> what Reloaded's collector was written to do. The reference also matches the
+> row by the hash value and gives it the listed height and block time.
+>
+> **Dirty Gate (2026-10-26, post-hoc).** PASS, score 0.01 (threshold 0.10),
+> compared by reading against both reference rows (`v2.6.0-beta` and
+> `v3.0.0-beta`) over the UTXO transaction-history subsystem. No reference
+> expression crossed. The gate confirmed reference parity for the
+> out-of-range-index error and the log-skip-continue behavior of the legacy
+> collector, the BCH no-outputs error, and R38.5A.10's hash-value matching
+> with height and block time. It did not confirm reference parity for the
+> KMD-reward-accumulation error clause, the empty-decimals SLP genesis clause,
+> or skip-and-continue in the mmrpc-2.0 (BCH/SLP) collector; those are
+> Reloaded requirements, and the parity statement above is limited to the
+> confirmed items.
 >
 > **Reloaded divergence (2026-10-26, fixed in the same change).** Reloaded read
 > the previous transaction's output at the input's index without a bounds
@@ -674,6 +692,27 @@ can be spent.
 > Native (coin daemon) mode has no P2PK path yet; see
 > [`UPSTREAM-PARITY-GAPS.md`](./UPSTREAM-PARITY-GAPS.md) #16.
 
+R38.6.3a *One round trip per read (passed the KDF Dirty Gate on 2026-10-26; see §38.9).*
+For an Electrum-backed coin with a legacy address, the P2PK lookup that
+R38.6.3 adds to a balance read or an unspent-list read shall travel in the
+same Electrum JSON-RPC batch as the P2PKH lookup it accompanies, so that
+each such read costs the server exactly one request message. It shall never
+be issued as a separate sequential request.
+
+*Rationale (this project's own measurement, 2026-10-26).* Public ElectrumX
+servers limit each client session: after a burst of about 26 requests, a
+session is served about one request message per second, and a JSON-RPC
+batch counts as one message whatever its length. Idle time does not reset
+the limit; only a new session does. A long-lived node session therefore
+pays about one second per sequential request, and a second request per read
+doubles the time of every balance and unspent read of a legacy-address coin.
+Nothing here is visible to a peer.
+
+*Acceptance.* A balance read and an unspent-list read of a legacy Electrum
+address each send one request message to the server, carrying both
+lookups. A segwit or non-legacy address sends the P2PKH lookup alone, as
+before.
+
 ### 38.6.4 Electrum connection prioritisation
 R38.6.4 The Electrum client shall support configurable minimum and maximum
 connected-server counts and shall prioritise servers by their order in the
@@ -697,6 +736,40 @@ does not stall block-count discovery.
 > it. The removal is specified in chapter 39 R39.11.1, R39.11.3 and R39.11.7, and
 > none of it exists yet; chapter 39's §39.11 status notes record the boundary.
 > Nothing about R38.6.4 itself changes either way.
+
+R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
+maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
+1. *What spreads.* With `electrum_spread_reads` enabled, the client sends
+   each read-only query of a coin to the next connected session in turn,
+   round-robin over the sessions R38.6.4 keeps connected. Read-only queries
+   are balance, unspent-list, history, header, block-count, transaction-get,
+   fee-estimate and relay-fee requests, and the R38.6.3a batches that carry
+   them.
+2. *What does not.* Transaction broadcasts, subscriptions and the
+   keep-alive ping keep their current routing.
+3. *Failover.* A query that fails on its session falls back to the other
+   connected sessions, exactly as a query does today.
+4. *Consistency.* The recently-spent-output cache already shields a read
+   that follows this node's own broadcast from a session that has not yet
+   seen the broadcast. That shielding shall continue to hold whichever
+   session answers the read.
+5. *Switch.* `electrum_spread_reads` is a top-level `MM2.json` boolean,
+   default `true`. With `false`, every query follows the priority order of
+   R38.6.4.
+
+*Rationale (this project's own measurement, 2026-10-26).* The per-session
+limit of R38.6.3a applies to each session separately. With three connected
+servers, spreading triples the read budget an order-posting burst can draw
+on.
+
+> **Upstream divergence (informative).** R38.6.4 prioritises servers by their
+> configured order. This sub-rule deliberately departs from that ordering for
+> read-only queries. Under `docs/COMPAT_SWITCHES.md`, "The default-side rule",
+> this is arm 2: no peer observes it, and it changes only which of the
+> operator's own configured servers answers a read.
+>
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `electrum_spread_reads` to `false`.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -868,6 +941,45 @@ tests of [Chapter 60](60-trading-floors-and-refusal-contract.md) T60.1–T60.2.
 > R38.6.6c over 496 bytes. The whole-kilobyte floor term is `r`. An explicit
 > per-request withdraw fee, which this subsection does not cover, keeps its
 > existing per-started-kilobyte meaning. R38.6.6i is now fully as-built.
+
+R38.6.6j *Fee-estimate reuse and short cache (Reloaded-original, maintainer
+Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
+1. *One read per request.* An order-posting request — `setprice`,
+   `update_maker_order`, `buy`, `sell`, `trade_preimage`, `max_maker_vol`,
+   `max_taker_vol`, and the maker balance watch of chapter 60 R60.4.5 —
+   obtains a dynamic-fee coin's current fee estimate at most once, and every
+   consumer within that request uses the same value: the pre-trade check of
+   chapter 60 R60.6.7, the sender and receiver trade fees, and the
+   maximum-volume calculation. The same applies to the minimum relay fee of
+   a coin that forces it.
+2. *Optional short cache.* A fee estimate obtained by an order-posting
+   request may be reused by later order-posting requests for the same coin
+   for at most `fee_estimate_cache_secs` seconds. This is a top-level
+   `MM2.json` integer from 0 to 30, default 15; 0 disables the cache, and a
+   value outside the range fails node start with an error naming the key.
+3. *Never on swap execution.* A swap's own transactions — payments,
+   spends, refunds, and every fee a peer recomputes or validates (chapter 16
+   R14A, R17) — always use a fresh estimate. Neither the reuse of item 1
+   nor the cache of item 2 applies to them.
+4. *Arithmetic unchanged.* R38.6.6b–e are applied to the reused value
+   exactly as to a fresh one.
+
+*Rationale (this project's own measurement, 2026-10-26).* Each Electrum
+session is served about one request message per second once its burst is
+spent (R38.6.3a). Today a single `setprice` with a dynamic-fee leg reads the
+same estimate up to three times in sequence.
+
+> **Upstream divergence (informative; passed the KDF Dirty Gate on 2026-10-27).** The reference obtains the
+> fee estimate separately for each consumer and caches nothing. This sentence
+> rests on a KDF Spec Reader summary that was relayed before its gate pass; the
+> Dirty Gate verified it as accurate at both reference designations. Under `docs/COMPAT_SWITCHES.md`,
+> "The default-side rule", this is arm 2: no wire effect, the node's own
+> requests only. With `fee_estimate_cache_secs` set to 0, a request still
+> reuses its single reading (item 1), which reaches the same values, but no
+> value is reused across requests.
+>
+> **Compatibility:** for behaviour matching GLEEC KDF most closely, set
+> `fee_estimate_cache_secs` to `0`.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -1181,3 +1293,30 @@ R38.8.6 **Tests (two-direction, observable).**
   the full record is in chapter 60 §60.12.
 - *Forbidden corpus:* consulted only through the two-team workflow, for
   the items this footer names; never otherwise.
+- *Addition of 2026-10-26, cleared by the KDF Dirty Gate.* R38.6.3a was written by
+  a session that never read the corpus. Its rationale and acceptance come
+  from this project's own Electrum measurements and code reading. Before
+  writing it, however, that session had received a KDF Spec Reader's
+  behavioural summary of the reference, relayed before any gate pass, and
+  the batching it requires coincides with that summary. Its provenance is
+  therefore recorded here rather than claimed as clean-room-original.
+  *Dirty Gate clearance (chapter 01 T1, R40).* PASS on 2026-10-26, measure
+  0.02, no leaks, with the pre-gate summary declared as an input. *Extent:*
+  the Electrum-client balance-read and unspent-list-read surface within the
+  scope of §38.6.3, at `v2.6.0-beta` and `v3.0.0-beta`. *Method:* reading
+  plus mechanical text search for identifiers, phrases and figures; the
+  gate script was not run because there are no code blocks. *Measure:*
+  0.02 against the 0.10 threshold. The gate confirmed the rationale's rate
+  limit measurements as independent of the reference.
+- *Reloaded-original additions (2026-10-27), cleared by the KDF Dirty Gate.* R38.6.4a and R38.6.6j were
+  written by a session that never read the corpus, from the maintainer's
+  Decisions P and R of 2026-10-27 and this project's own Electrum measurements and code reading. The informative notes saying
+  the reference reads its fee estimate or gas price per consumer and caches
+  nothing rest on a KDF Spec Reader summary relayed before its gate pass, and
+  are declared here as that input. *Dirty Gate clearance (chapter 01 T1,
+  R40).* PASS on 2026-10-27, measure 0.01, no leaks; the declared input
+  was verified accurate at both rows, and the switch names do not occur in the
+  reference. *Extent:* the UTXO coin layer's dynamic fee-rate and minimum-relay-fee acquisition surface used by trade-fee, trade-preimage and maximum-volume consumers, and the Electrum client's fee-estimate, relay-fee and server-selection surface, at `v2.6.0-beta` and `v3.0.0-beta`.
+  *Method:* reading plus mechanical text search against both rows; the gate
+  script was not run because there are no code blocks. *Measure:* 0.01
+  against the 0.10 threshold.

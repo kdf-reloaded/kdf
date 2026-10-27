@@ -5,7 +5,7 @@ use crate::utxo_activation::init_utxo_standard_statuses::{UtxoStandardAwaitingSt
 use crate::utxo_activation::utxo_standard_activation_result::{UtxoStandardActivationResult, UtxoWalletBalance};
 use coins::coin_balance::EnableCoinBalanceOps;
 use coins::hd_pubkey::RpcTaskXPubExtractor;
-use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
+use coins::utxo::UtxoActivationParams;
 use coins::{MarketCoinOps, PrivKeyActivationPolicy, PrivKeyBuildPolicy};
 use crypto::hw_rpc_task::HwConnectStatuses;
 use crypto::{CryptoCtx, HwRpcError};
@@ -18,35 +18,13 @@ use mm2_err_handle::prelude::*;
 pub fn validate_electrum_connection_settings(
     activation_params: &UtxoActivationParams,
 ) -> MmResult<(), InitUtxoStandardError> {
-    let (servers, min_connected, max_connected) = match &activation_params.mode {
-        UtxoRpcMode::Native => return Ok(()),
-        UtxoRpcMode::Electrum {
-            servers,
-            min_connected,
-            max_connected,
-        } => (servers, min_connected, max_connected),
-    };
-    let invalid = |reason: &str| {
-        MmError::err(InitUtxoStandardError::Internal(format!(
+    match activation_params.mode.electrum_connection_settings_error() {
+        Some(reason) => MmError::err(InitUtxoStandardError::Internal(format!(
             "Unusable Electrum connection settings: {}",
             reason
-        )))
-    };
-    if servers.is_empty() {
-        return invalid("no server is configured");
+        ))),
+        None => Ok(()),
     }
-    if *min_connected == Some(0) {
-        return invalid("'min_connected' must be at least 1");
-    }
-    if *max_connected == Some(0) {
-        return invalid("'max_connected' must be at least 1");
-    }
-    if let (Some(min_connected), Some(max_connected)) = (min_connected, max_connected) {
-        if min_connected > max_connected {
-            return invalid("'min_connected' must not exceed 'max_connected'");
-        }
-    }
-    Ok(())
 }
 
 pub async fn get_activation_result<Coin>(

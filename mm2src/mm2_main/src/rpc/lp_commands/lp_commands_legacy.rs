@@ -620,4 +620,63 @@ mod tests {
         assert!(!err.contains("not supported by lp_coininit"), "{err}");
         assert!(block_on(lp_coinfind(&ctx, "SC")).unwrap().is_none());
     }
+
+    /// TRON and Solana are postponed for this beta: the legacy `enable` and `electrum` refuse every coin of
+    /// those families with the "not available in this build" text and register nothing. The node keeps running.
+    #[test]
+    fn legacy_enable_and_electrum_refuse_tron_and_solana_coins() {
+        use coins::{SOLANA_NOT_AVAILABLE, TRON_NOT_AVAILABLE};
+        use crypto::CryptoCtx;
+
+        let mut coins = vec![
+            (
+                "TRX",
+                json!({ "type": "TRX", "protocol_data": { "network": "Mainnet" } }),
+                TRON_NOT_AVAILABLE,
+            ),
+            (
+                "USDT-TRC20",
+                json!({ "type": "TRC20", "protocol_data": {
+                    "platform": "TRX", "contract_address": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t" } }),
+                TRON_NOT_AVAILABLE,
+            ),
+        ];
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            coins.push(("SOL", json!({ "type": "SOLANA" }), SOLANA_NOT_AVAILABLE));
+            coins.push((
+                "USDC-SOL",
+                json!({ "type": "SPLTOKEN", "protocol_data": {
+                    "platform": "SOL",
+                    "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "decimals": 6 } }),
+                SOLANA_NOT_AVAILABLE,
+            ));
+        }
+        let conf_coins: Vec<Json> = coins
+            .iter()
+            .map(|(ticker, protocol, _)| {
+                json!({ "coin": ticker, "mm2": 1, "decimals": 6, "required_confirmations": 1, "protocol": protocol })
+            })
+            .collect();
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "coins": conf_coins }))
+            .into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy tron solana refusal test passphrase").unwrap();
+
+        for (ticker, _, message) in &coins {
+            let request = |method: &str| {
+                json!({ "method": method, "coin": ticker, "urls": ["https://api.trongrid.io"],
+                        "servers": [{ "url": "127.0.0.1:1" }], "tx_history": false })
+            };
+            let err = block_on(enable(ctx.clone(), request("enable"))).unwrap_err();
+            assert!(err.ends_with(message), "enable {ticker}: {err}");
+            let err = block_on(electrum(ctx.clone(), request("electrum"))).unwrap_err();
+            assert!(err.ends_with(message), "electrum {ticker}: {err}");
+            assert!(
+                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
+                "{ticker} registered"
+            );
+        }
+    }
 }

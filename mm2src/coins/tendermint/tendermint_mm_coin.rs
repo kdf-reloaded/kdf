@@ -11,7 +11,8 @@ use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsign
 use crate::{BalanceError, FeeApproxStage, HistorySyncState, MarketCoinOps, MmCoin, RawTransactionError,
             RawTransactionFut, RawTransactionRequest, RawTransactionRes, TradeFee, TradePreimageError,
             TradePreimageFut, TradePreimageResult, TradePreimageValue, TransactionDetails, TransactionType,
-            TxFeeDetails, ValidateAddressResult, WithdrawError, WithdrawFee, WithdrawFut, WithdrawRequest};
+            TxFeeDetails, ValidateAddressResult, WithdrawError, WithdrawFee, WithdrawFut, WithdrawRequest,
+            TENDERMINT_SWAPS_AVAILABLE};
 use bigdecimal::BigDecimal;
 use common::mm_number::MmNumber;
 use common::now_ms;
@@ -167,6 +168,13 @@ impl TendermintCoin {
 #[allow(unused_variables)]
 impl MmCoin for TendermintCoin {
     fn is_asset_chain(&self) -> bool { false }
+
+    /// Wallet-only while [`TENDERMINT_SWAPS_AVAILABLE`] is `false` (swaps for the family are postponed for the
+    /// current beta), whatever the coins-config entry says; otherwise the entry decides. Only order placement
+    /// asks this: a swap that has already started never does.
+    fn wallet_only(&self, ctx: &MmArc) -> bool {
+        !TENDERMINT_SWAPS_AVAILABLE || crate::is_wallet_only_ticker(ctx, self.ticker())
+    }
 
     fn withdraw(&self, req: WithdrawRequest) -> WithdrawFut {
         let coin = self.clone();
@@ -458,7 +466,10 @@ impl MmCoin for TendermintCoin {
 
     fn coin_protocol_info(&self) -> Vec<u8> { Vec::new() }
 
-    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { true }
+    /// Declines every new match while [`TENDERMINT_SWAPS_AVAILABLE`] is `false`, so an order saved before the
+    /// switch was turned off, or a peer's request against one, cannot start a new swap. This is asked only when
+    /// an order is matched, never by a swap that is running, being kick-started or recovered.
+    fn is_coin_protocol_supported(&self, _info: &Option<Vec<u8>>) -> bool { TENDERMINT_SWAPS_AVAILABLE }
 }
 
 // ————————————————————————————————————————————————————————————————

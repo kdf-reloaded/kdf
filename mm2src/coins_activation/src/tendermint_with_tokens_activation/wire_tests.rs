@@ -72,9 +72,11 @@ fn tendermint_coins() -> Vec<Json> {
     ]
 }
 
-fn ctx() -> MmArc {
+fn ctx() -> MmArc { ctx_with(tendermint_coins()) }
+
+fn ctx_with(tendermint: Vec<Json>) -> MmArc {
     let mut coins = coins_conf().as_array().cloned().unwrap_or_default();
-    coins.extend(tendermint_coins());
+    coins.extend(tendermint);
     let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
     crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tendermint activation test passphrase")
         .expect("initialize the crypto context");
@@ -390,6 +392,30 @@ fn a_token_registered_after_a_successful_activation_is_recorded_on_the_platform(
     let token = TendermintToken::from_protocol("IRIS-NYAN".to_owned(), platform.clone(), 6, "unyan").unwrap();
     <TendermintToken as crate::token::TokenActivationOps>::on_token_registered(&platform, &token);
     assert!(platform.activated_token_tickers().contains("IRIS-NYAN"));
+}
+
+/// Tendermint swaps are postponed for this beta (`coins::TENDERMINT_SWAPS_AVAILABLE`): a platform coin and a
+/// token report `wallet_only` true and decline every match, whatever their coins-config entries say.
+#[test]
+fn a_tendermint_platform_and_token_are_wallet_only_whatever_the_config_says() {
+    use coins::MmCoin;
+
+    for flag in [None, Some(false), Some(true)] {
+        let mut confs = tendermint_coins();
+        for conf in confs.iter_mut() {
+            if let Some(flag) = flag {
+                conf["wallet_only"] = json!(flag);
+            }
+        }
+        let ctx = ctx_with(confs);
+        let platform = register_platform(&ctx);
+        let token = TendermintToken::from_protocol("IRIS-NYAN".to_owned(), platform.clone(), 6, "unyan").unwrap();
+
+        assert!(platform.wallet_only(&ctx), "platform, flag {flag:?}");
+        assert!(token.wallet_only(&ctx), "token, flag {flag:?}");
+        assert!(!platform.is_coin_protocol_supported(&None), "platform, flag {flag:?}");
+        assert!(!token.is_coin_protocol_supported(&None), "token, flag {flag:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -358,8 +358,8 @@ not routed answers `NoSuchMethod` there.
 
 | Reloaded method string | Routed in `v2.6.0-beta` | Routed in `v3.0.0-beta` | Reference equivalent |
 | --- | --- | --- | --- |
-| `enable_solana_with_tokens` | no | no | `experimental::enable_solana_with_assets` |
-| `enable_spl` | no | no | `experimental::enable_solana_token` |
+| `enable_solana_with_tokens` (routed, refuses in this beta) | no | no | `experimental::enable_solana_with_assets` |
+| `enable_spl` (routed, refuses in this beta) | no | no | `experimental::enable_solana_token` |
 | `enable_lightning` (one-shot) | no | no | none one-shot; `task::enable_lightning::*` |
 | `init_lightning` | no | no | `task::enable_lightning::init` |
 | `init_lightning_status` | no | no | `task::enable_lightning::status` |
@@ -402,7 +402,10 @@ adds stability, backward compatibility or uniform naming:
   Lightning the same flat `init_<coin>*` names the other task families have
   (uniform naming).
 - `enable_solana_with_tokens` and `enable_spl`: Reloaded's primary Solana
-  surface ([Chapter 40](40-solana-coin.md)).
+  surface ([Chapter 40](40-solana-coin.md)). In this beta both stay routed but
+  refuse every request with "Solana support is not available in this build",
+  because Solana is switched off (`SOLANA_ACTIVATION_AVAILABLE` is `false`,
+  maintainer decision 2026-10-26); it is planned to return in the next beta.
 
 None of these names is routed by `v2.6.0-beta`, so keeping them is not required
 for compatibility with clients written for that tag, and does not conflict with

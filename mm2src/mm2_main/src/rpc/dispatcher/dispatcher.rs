@@ -82,7 +82,7 @@ cfg_native! {
     use coins::lightning::{add_trusted_node, close_channel, connect_to_lightning_node, generate_invoice, get_channel_details,
         get_claimable_balances, get_payment_details, list_closed_channels_by_filter, list_open_channels_by_filter, list_payments_by_filter, list_trusted_nodes, open_channel,
         remove_trusted_node, send_payment, update_channel, LightningCoin};
-    use coins::{SolanaCoin, SplToken};
+    use coins_activation::{enable_solana_with_tokens, enable_spl};
     use coins::my_tx_history_v2::z_coin_tx_history_rpc;
     use crate::mm2::lp_wallet::{change_mnemonic_password_rpc, create_wallet_rpc, delete_wallet_rpc, get_mnemonic_rpc, get_wallet_names_rpc};
     use crate::mm2::rpc::trezor::trezor_connection_status_rpc;
@@ -340,10 +340,8 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             "list_payments_by_filter" => handle_mmrpc(ctx, request, list_payments_by_filter).await,
             "open_channel" => handle_mmrpc(ctx, request, open_channel).await,
             "send_payment" => handle_mmrpc(ctx, request, send_payment).await,
-            "enable_solana_with_tokens" => {
-                handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<SolanaCoin>).await
-            },
-            "enable_spl" => handle_mmrpc(ctx, request, enable_token::<SplToken>).await,
+            "enable_solana_with_tokens" => handle_mmrpc(ctx, request, enable_solana_with_tokens).await,
+            "enable_spl" => handle_mmrpc(ctx, request, enable_spl).await,
             "trezor_connection_status" => handle_mmrpc(ctx, request, trezor_connection_status_rpc).await,
             _ => {
                 warn!("No such v2 RPC method: '{}'", native_only_methods);
@@ -769,6 +767,77 @@ mod tests {
                 failure.0["error_type"], "InvalidRequest",
                 "{sub_method}: {:?}",
                 failure.0
+            );
+        }
+    }
+
+    /// The status and the JSON body of a well-formed v2 request the dispatcher answers.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn answer_of(ctx: &MmArc, method: &str, params: serde_json::Value) -> (http::StatusCode, serde_json::Value) {
+        let request = MmRpcRequest {
+            mmrpc: MmRpcVersion::V2,
+            userpass: None,
+            method: method.to_owned(),
+            params,
+            id: Some(7),
+        };
+        match block_on(dispatcher_v2(request, ctx.clone())) {
+            Ok(response) => (response.status(), serde_json::from_slice(response.body()).unwrap()),
+            Err(_) => panic!("`{}` must reach its handler", method),
+        }
+    }
+
+    /// Solana is postponed for this beta: `enable_solana_with_tokens` and `enable_spl` refuse a well-formed
+    /// request with the "not available in this build" text and register nothing (the switch is
+    /// `coins::SOLANA_ACTIVATION_AVAILABLE`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_activation_routes_refuse_while_solana_is_switched_off() {
+        use coins::{lp_coinfind, SOLANA_NOT_AVAILABLE};
+
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "coins": [
+                { "coin": "SOL", "mm2": 1, "protocol": { "type": "SOLANA" } },
+                { "coin": "USDC-SOL", "mm2": 1, "protocol": { "type": "SPLTOKEN", "protocol_data": {
+                    "platform": "SOL",
+                    "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "decimals": 6 } } },
+            ] }))
+            .into_mm_arc();
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_solana_with_tokens",
+            json!({
+                "ticker": "SOL",
+                "confirmation_commitment": "finalized",
+                "client_url": "http://127.0.0.1:1",
+                "tx_history": false,
+                "spl_tokens_requests": [{ "ticker": "USDC-SOL" }],
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["mmrpc"], "2.0");
+        assert_eq!(body["id"], 7);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "SOL");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_spl",
+            json!({ "ticker": "USDC-SOL", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        for ticker in ["SOL", "USDC-SOL"] {
+            assert!(
+                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
+                "{ticker} registered"
             );
         }
     }

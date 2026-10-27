@@ -4554,3 +4554,145 @@ fn test_stale_pubkeys_keeps_real_per_order_state_until_order_cancelled() {
     let (_, pubkeys) = sweep(created_at + MAKER_ORDER_TIMEOUT + 1);
     assert_eq!(pubkeys, vec![order_pubkey]);
 }
+
+// ---- Saved orders with a Tendermint coin are cancelled at startup while Tendermint swaps are off ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod tendermint_saved_orders {
+    use super::*;
+    use crate::mm2::lp_ordermatch::ordermatch_trading::tendermint_order_cancel_message;
+
+    fn conf() -> Json {
+        json::json!([
+            {"coin":"DOC","asset":"DOC","mm2":1,"protocol":{"type":"UTXO"}},
+            {"coin":"MARTY","asset":"MARTY","mm2":1,"protocol":{"type":"UTXO"}},
+            {"coin":"IRIS","asset":"IRIS","mm2":1,"protocol":{"type":"TENDERMINT","protocol_data":{
+                "decimals":6,"denom":"uiris","account_prefix":"iaa","chain_id":"irishub-1"}}},
+            {"coin":"IRIS-ATOM","asset":"IRIS-ATOM","mm2":1,"protocol":{"type":"TENDERMINTTOKEN","protocol_data":{
+                "platform":"IRIS","decimals":6,"denom":"ibc/ATOM"}}},
+        ])
+    }
+
+    fn maker(base: &str, rel: &str) -> MakerOrder {
+        MakerOrder {
+            base: base.into(),
+            rel: rel.into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            max_base_vol: 10.into(),
+            min_base_vol: 0.into(),
+            price: 1.into(),
+            matches: HashMap::new(),
+            started_swaps: Vec::new(),
+            uuid: Uuid::new_v4(),
+            conf_settings: None,
+            changes_history: None,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn taker(base: &str, rel: &str) -> TakerOrder {
+        TakerOrder {
+            request: TakerRequest {
+                base: base.into(),
+                rel: rel.into(),
+                uuid: Uuid::new_v4(),
+                dest_pub_key: H256Json::default(),
+                sender_pubkey: H256Json::default(),
+                base_amount: 10.into(),
+                rel_amount: 10.into(),
+                action: TakerAction::Buy,
+                match_by: MatchBy::Any,
+                conf_settings: None,
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            },
+            matches: HashMap::new(),
+            created_at: now_ms(),
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        }
+    }
+
+    #[test]
+    fn saved_orders_with_a_tendermint_coin_are_cancelled_at_startup() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-tendermint-saved-orders-{}", Uuid::new_v4()));
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json::json!({ "coins": conf(), "dbdir": dbdir.to_str().unwrap() }))
+            .into_mm_arc();
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+
+        let tendermint_base = maker("IRIS", "DOC");
+        let tendermint_token_rel = maker("DOC", "IRIS-ATOM");
+        let plain = maker("DOC", "MARTY");
+        let tendermint_taker = taker("MARTY", "IRIS");
+        let plain_taker = taker("DOC", "MARTY");
+        for order in [&tendermint_base, &tendermint_token_rel, &plain] {
+            block_on(save_my_new_maker_order(ctx.clone(), order)).unwrap();
+        }
+        for order in [&tendermint_taker, &plain_taker] {
+            block_on(save_my_new_taker_order(ctx.clone(), order)).unwrap();
+        }
+
+        let coins = block_on(orders_kick_start(&ctx)).unwrap();
+
+        // The coins needed for the kick-start come from the kept orders alone.
+        assert_eq!(
+            coins,
+            ["DOC", "MARTY"].iter().map(|c| c.to_string()).collect::<HashSet<_>>()
+        );
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let loaded = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
+        assert_eq!(loaded.keys().copied().collect::<Vec<_>>(), vec![plain.uuid]);
+        let taker_orders = block_on(ordermatch_ctx.my_taker_orders.lock());
+        assert_eq!(taker_orders.keys().copied().collect::<Vec<_>>(), vec![
+            plain_taker.request.uuid
+        ]);
+
+        // Nothing is left in the storage: only the kept orders are saved.
+        let storage = MyOrdersStorage::new(ctx.clone());
+        let saved: Vec<_> = block_on(storage.load_active_maker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain.uuid]);
+        let saved: Vec<_> = block_on(storage.load_active_taker_orders())
+            .unwrap()
+            .into_iter()
+            .map(|o| o.request.uuid)
+            .collect();
+        assert_eq!(saved, vec![plain_taker.request.uuid]);
+
+        // The log line names the order and the pair; a kept order produces none.
+        assert_eq!(
+            tendermint_order_cancel_message(&ctx, "maker", &tendermint_base.uuid, "IRIS", "DOC").unwrap(),
+            format!(
+                "Cancelled saved maker order {} (IRIS/DOC): Tendermint swaps are not available in this build",
+                tendermint_base.uuid
+            )
+        );
+        assert_eq!(
+            tendermint_order_cancel_message(&ctx, "maker", &tendermint_token_rel.uuid, "DOC", "IRIS-ATOM").unwrap(),
+            format!(
+                "Cancelled saved maker order {} (DOC/IRIS-ATOM): Tendermint swaps are not available in this build",
+                tendermint_token_rel.uuid
+            )
+        );
+        assert!(tendermint_order_cancel_message(&ctx, "maker", &plain.uuid, "DOC", "MARTY").is_none());
+
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+}

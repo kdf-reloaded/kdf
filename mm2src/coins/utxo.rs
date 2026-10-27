@@ -1431,6 +1431,13 @@ pub enum UtxoFromLegacyReqErr {
     InvalidCheckUtxoMaturity(json::Error),
     InvalidScanPolicy(json::Error),
     InvalidPrivKeyPolicy(json::Error),
+    #[display(fmt = "Invalid 'min_connected': {}", _0)]
+    InvalidMinConnected(json::Error),
+    #[display(fmt = "Invalid 'max_connected': {}", _0)]
+    InvalidMaxConnected(json::Error),
+    /// Electrum connection settings that cannot be used (CRD ch. 55 R55.4.3, R55.5.14).
+    #[display(fmt = "Unusable Electrum connection settings: {}", _0)]
+    UnusableElectrumConnectionSettings(&'static str),
 }
 
 impl UtxoActivationParams {
@@ -1440,11 +1447,20 @@ impl UtxoActivationParams {
             Some("electrum") => {
                 let servers =
                     json::from_value(req["servers"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumServers)?;
-                UtxoRpcMode::Electrum {
+                // Absent or `null` leaves the defaults: at least one connection, at most one per server.
+                let min_connected = json::from_value(req["min_connected"].clone())
+                    .map_to_mm(UtxoFromLegacyReqErr::InvalidMinConnected)?;
+                let max_connected = json::from_value(req["max_connected"].clone())
+                    .map_to_mm(UtxoFromLegacyReqErr::InvalidMaxConnected)?;
+                let mode = UtxoRpcMode::Electrum {
                     servers,
-                    min_connected: None,
-                    max_connected: None,
+                    min_connected,
+                    max_connected,
+                };
+                if let Some(reason) = mode.electrum_connection_settings_error() {
+                    return MmError::err(UtxoFromLegacyReqErr::UnusableElectrumConnectionSettings(reason));
                 }
+                mode
             },
             _ => return MmError::err(UtxoFromLegacyReqErr::UnexpectedMethod),
         };
@@ -1495,6 +1511,37 @@ pub enum UtxoRpcMode {
         #[serde(default)]
         max_connected: Option<usize>,
     },
+}
+
+impl UtxoRpcMode {
+    /// Why the Electrum connection settings cannot be used, if they cannot (CRD ch. 55 R55.5.14): no server,
+    /// `min_connected` or `max_connected` below 1, or `min_connected` above `max_connected`.
+    /// Always `None` in the native mode. Shared by the legacy and the task-based activation.
+    pub fn electrum_connection_settings_error(&self) -> Option<&'static str> {
+        let UtxoRpcMode::Electrum {
+            servers,
+            min_connected,
+            max_connected,
+        } = self
+        else {
+            return None;
+        };
+        if servers.is_empty() {
+            return Some("no server is configured");
+        }
+        if *min_connected == Some(0) {
+            return Some("'min_connected' must be at least 1");
+        }
+        if *max_connected == Some(0) {
+            return Some("'max_connected' must be at least 1");
+        }
+        match (min_connected, max_connected) {
+            (Some(min_connected), Some(max_connected)) if min_connected > max_connected => {
+                Some("'min_connected' must not exceed 'max_connected'")
+            },
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]

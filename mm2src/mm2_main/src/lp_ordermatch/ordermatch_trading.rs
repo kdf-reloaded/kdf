@@ -2567,6 +2567,30 @@ pub struct HistoricalOrder {
     pub(crate) conf_settings: Option<OrderConfirmationsSettings>,
 }
 
+/// The log line for a saved order that must be cancelled at startup because it involves a Tendermint platform
+/// coin or token while [`coins::TENDERMINT_SWAPS_AVAILABLE`] is `false`; `None` when the order is kept. The coins
+/// configuration decides, so the coins do not have to be activated yet.
+pub(super) fn tendermint_order_cancel_message(
+    ctx: &MmArc,
+    kind: &str,
+    uuid: &Uuid,
+    base: &str,
+    rel: &str,
+) -> Option<String> {
+    let is_tendermint = |ticker: &str| {
+        matches!(
+            coin_conf(ctx, ticker)["protocol"]["type"].as_str(),
+            Some("TENDERMINT" | "TENDERMINTTOKEN")
+        )
+    };
+    if coins::TENDERMINT_SWAPS_AVAILABLE || !(is_tendermint(base) || is_tendermint(rel)) {
+        return None;
+    }
+    Some(format!(
+        "Cancelled saved {kind} order {uuid} ({base}/{rel}): Tendermint swaps are not available in this build"
+    ))
+}
+
 pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let mut coins = HashSet::new();
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
@@ -2576,6 +2600,14 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
     let saved_taker_orders = try_s!(storage.load_active_taker_orders().await);
 
     for order in saved_maker_orders {
+        if let Some(message) = tendermint_order_cancel_message(ctx, "maker", &order.uuid, &order.base, &order.rel) {
+            log::info!("{}", message);
+            delete_my_maker_order(ctx.clone(), order, MakerOrderCancellationReason::Cancelled)
+                .compat()
+                .await
+                .ok();
+            continue;
+        }
         coins.insert(order.base.clone());
         coins.insert(order.rel.clone());
         let order_arc = Arc::new(AsyncMutex::new(order.clone()));
@@ -2584,6 +2616,16 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
 
     let mut taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
     for order in saved_taker_orders {
+        let request = &order.request;
+        if let Some(message) = tendermint_order_cancel_message(ctx, "taker", &request.uuid, &request.base, &request.rel)
+        {
+            log::info!("{}", message);
+            delete_my_taker_order(ctx.clone(), order, TakerOrderCancellationReason::Cancelled)
+                .compat()
+                .await
+                .ok();
+            continue;
+        }
         coins.insert(order.request.base.clone());
         coins.insert(order.request.rel.clone());
         taker_orders.insert(order.request.uuid, order);

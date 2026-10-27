@@ -51,6 +51,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
+  answers "TRON support is not available in this build" instead, and the rest of the node is
+  unaffected. It is planned to return in the next beta.
+
+- **Solana (SOL, SPL tokens) cannot be activated in this beta.** Its support is not finished;
+  `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
+  build" instead, and the rest of the node is unaffected. It is planned to return in the next beta.
+
+- **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
+  work; orders and swaps are not available and are planned to return in a later release. A swap
+  already in progress still completes. An order with a Tendermint coin saved by an earlier
+  version is cancelled at startup.
+
 - **A shielded (ARRR) send that has to wait for an earlier unmined send now waits up to 10 minutes
   instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
   waiting could free enough funds. More in
@@ -151,6 +164,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
+
+- **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
+  ignored and every listed server was connected; with `max_connected: 1` only one server is connected
+  now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
+  refused with the usual error answer, as on the newer activation methods. This also applies to BCH
+  and QRC20 activated through `electrum`. More in ch.55 R55.4.3 and ch.38 R38.6.4.
 
 - **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
   Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal
@@ -355,6 +374,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
+- [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
+  [`tron-gasfree`](docs/plans/tron-gasfree.md),
+  [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) and
+  [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — each notes that its family is
+  switched off (TRON, Solana) or wallet-only (Tendermint) for this beta, and that turning it back on
+  belongs to the family's plan.
+
 - [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — the
   withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50). The test harness for the locked-notes check landed
   (PR #71); the only open item is two daemon instances sharing one wallet.
@@ -390,6 +416,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — moved from parked to done:
   a Siacoin `withdraw` now honors a custom fee (PR #77), and a fee below the node's estimate was
   checked live on an uncongested transaction pool (2026-10-26).
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
+  the Electrum servers' per-session limit of about one request per second. The rules for batching,
+  fee reuse, read spreading and balance polling are written (PR #95).
 
 ### Known limitations
 
@@ -412,6 +441,13 @@ lives.
   signs, but swaps with it are not established. The swap watcher, which finishes a swap for you when
   you are offline, does not work yet (issue #56). More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
+- **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
+  finished, so activation answers a clear error instead. Both are planned to return in the next beta.
+  More in [`tron-swap-support`](docs/plans/tron-swap-support.md) and
+  [`solana-support`](docs/plans/solana-support.md).
+- **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
+  work; orders and swaps are planned to return in a later release. More in
+  [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md).
 
 ## [0.3.0-alpha.3] — development milestone, not released
 

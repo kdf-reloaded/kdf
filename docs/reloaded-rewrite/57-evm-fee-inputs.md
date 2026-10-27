@@ -100,7 +100,12 @@ coin shall be resolved by querying the coin's node for both of:
 
 and taking the **maximum** of whichever of the two produced a value. A
 source that errors is dropped with a diagnostic and does not fail the
-resolution. If neither source produced a value, resolution fails with an
+resolution. Each of the two queries is itself issued under the multi-node
+access contract of [Chapter 35](35-evm-v2-activation-rpcs.md) §35.1.F, so
+"the coin's node" above means whichever configured node answers first
+under that contract, and a source counts as errored only after every node
+has failed it (R35.1.11 there). If neither source produced a value,
+resolution fails with an
 internal error. The two queries shall be issued concurrently.
 
 **R57.2.2** *Fee-history request and selection.* The `eth_feeHistory`
@@ -178,6 +183,26 @@ identifier-keyed table. Every chain-specific adjustment is configuration:
 ([Chapter 35](35-evm-v2-activation-rpcs.md) R35.6), and the per-coin
 envelope-type cap (ch. 35 D35.7). A Coder shall not introduce a
 ticker-keyed or chain-id-keyed branch into this surface.
+
+**R57.2.6** *Reuse within one request, and a short cache (Reloaded-original,
+maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).* The resolved legacy gas price of
+R57.2.1 is subject to the same rules as the fee estimate of chapter 38
+R38.6.6j items 1–4, under the same `fee_estimate_cache_secs` key:
+- an order-posting request resolves it at most once per coin, and uses that
+  one value for the sender fee, the receiver fee and the maximum volume;
+- order-posting requests may reuse it for up to the configured number of
+  seconds;
+- a swap's own transactions always resolve it fresh.
+The resolution itself, with its two concurrent queries and its maximum, is
+unchanged. *Rationale:* a `setprice` resolves the gas price twice today,
+once for the sender fee and once for the receiver fee, and each resolution
+makes its node queries one after another, contrary to R57.2.1.
+
+> **Upstream divergence (informative; passed the KDF Dirty Gate on 2026-10-27).** The reference resolves the gas
+> price separately for each consumer and caches nothing. This rests on the
+> same relayed summary as chapter 38 R38.6.6j's note; the Dirty Gate verified
+> it as accurate at both reference designations. **Compatibility:** for behaviour matching GLEEC KDF most
+> closely, set `fee_estimate_cache_secs` to `0`.
 
 ## 57.3 The proportional-increase arithmetic
 
@@ -1572,3 +1597,15 @@ pre-anchor baseline code.*
     trees; internal test identifiers; any location within the compared
     material; and any post-anchor commit identifier or branch
     designation.
+- *Reloaded-original additions (2026-10-27), cleared by the KDF Dirty Gate.* R57.2.6 was
+  written by a session that never read the corpus, from the maintainer's
+  Decisions P and R of 2026-10-27 and this project's own code reading, which shows a `setprice` resolving the gas price twice with its node queries made one after another; no EVM latency was measured. The informative notes saying
+  the reference reads its fee estimate or gas price per consumer and caches
+  nothing rest on a KDF Spec Reader summary relayed before its gate pass, and
+  are declared here as that input. *Dirty Gate clearance (chapter 01 T1,
+  R40).* PASS on 2026-10-27, measure 0.01, no leaks; the declared input
+  was verified accurate at both rows, and the switch names do not occur in the
+  reference. *Extent:* the EVM legacy gas-price resolution surface of §57.2, at `v2.6.0-beta` and `v3.0.0-beta`.
+  *Method:* reading plus mechanical text search against both rows; the gate
+  script was not run because there are no code blocks. *Measure:* 0.01
+  against the 0.10 threshold.

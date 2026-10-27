@@ -2,6 +2,19 @@
 
 **Status:** driving-spec (reloaded's own activation surface is primary; the reference surface of §40.1-§40.3 is bound as an additional compatibility surface, deferred; the remaining sections document shipped reloaded behaviour).
 
+> **Availability in the beta (maintainer decision 2026-10-26).** Solana
+> support is not finished, so it is switched off for the coming beta: while
+> the build constant `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`)
+> is `false`, `enable_solana_with_tokens` answers `PlatformCoinCreationError`
+> (object `{ticker, error}`), `enable_spl` answers `Internal` (string), both
+> HTTP 500 with "Solana support is not available in this build", and the
+> legacy `enable` / `electrum` answer the same text (Chapter 55 R55.4.7);
+> nothing is registered, and the coin code stays compiled with its unit tests
+> running. Solana is postponed, not dropped: it is planned to return in the
+> next beta. "Shipped" behaviour in the status line and in §40.4-§40.6
+> describes the code with the constant set to `true`; the 2026-10-11
+> maintainer decision below stands for when Solana returns.
+
 > **One-sentence claim:** the project shall support Solana as a platform coin and
 > SPL tokens as its child tokens, activating them through the
 > `experimental::enable_solana_with_assets` / `experimental::enable_solana_token`
@@ -239,7 +252,8 @@ project's common transaction-details shape.
 ## 40.6 Reloaded status (informative)
 
 Reloaded currently ships the baseline-era Solana surface, which differs from
-§40.1-§40.3 in every wire aspect:
+§40.1-§40.3 in every wire aspect (in this beta the surface is routed but
+refuses every request; see the availability note at the top of this chapter):
 
 1. **Method names.** Reloaded routes `enable_solana_with_tokens` and
    `enable_spl` (both present at the GPLv2 baseline) and routes neither
@@ -266,7 +280,9 @@ Reloaded currently ships the baseline-era Solana surface, which differs from
 
 > **Decision recorded (informative).** The baseline-inherited
 > `enable_solana_with_tokens` / `enable_spl` methods stay routed as the primary
-> surface (see the maintainer decision at the top of this chapter). Items 1-6
+> surface (see the maintainer decision at the top of this chapter); in this
+> beta they refuse every request while `SOLANA_ACTIVATION_AVAILABLE` is
+> `false`, and the decision applies again when Solana returns. Items 1-6
 > above are therefore read as "the compatibility surface is not yet added", not
 > as defects of the primary surface; item 6's error-mapping differences apply
 > to the compatibility surface and are re-evaluated for the primary surface in
@@ -338,6 +354,12 @@ T40.7 `tx_history: true` does not abort the request (R40.2.5).
 
 T40.8 An HD-wallet context yields HTTP 500 `PlatformCoinCreationError`.
 
+T40.9 (beta) While `SOLANA_ACTIVATION_AVAILABLE` is `false`, a well-formed
+`enable_solana_with_tokens` request answers HTTP 500 `PlatformCoinCreationError`
+and `enable_spl` answers HTTP 500 `Internal`, each with "Solana support is not
+available in this build"; legacy `enable` / `electrum` answer the same text; no
+Solana coin is registered.
+
 ## 40.8 Deferred Work
 
 D40.1 Solana transaction history.
@@ -349,6 +371,11 @@ D40.3 Add the reference compatibility surface of §40.1-§40.3 (the two
 coin-configuration forms) alongside reloaded's primary surface, and bind the
 primary surface's own wire shapes in this chapter. Deferred to a dedicated
 session; see `docs/plans/solana-support.md`.
+
+D40.4 Switching Solana back on (planned for the next beta; maintainer decision
+2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana
+docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
+Part of `docs/plans/solana-support.md`.
 
 ## 40.9 Baseline Verifications
 

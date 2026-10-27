@@ -7,6 +7,14 @@
 > that Reloaded's Solana activation differs from the reference implementation in
 > every wire aspect. To be executed in a dedicated session.
 
+> **Beta availability (2026-10-26).** By maintainer decision Solana (SOL, SPL)
+> is switched off for the coming beta: while `SOLANA_ACTIVATION_AVAILABLE`
+> (`coins/lp_coins_ops.rs`) is `false`, `enable_solana_with_tokens`,
+> `enable_spl` and the legacy `enable` / `electrum` answer "Solana support is
+> not available in this build" (CRD ch. 40 availability note). Solana is
+> planned to return in the next beta; turning it back on (work package 7) is
+> part of this plan. The decision below stands for that return.
+
 ## Decision this plan follows
 
 Recorded in CRD ch. 40 (maintainer decision of 2026-10-11):
@@ -72,6 +80,11 @@ From ch. 40 §40.6 and `docs/reloaded-rewrite/UPSTREAM-PARITY-GAPS.md`:
 6. **Key policies** (item 7), then **history** (item 8), then the
    **swap and market surface** (item 9), each as its own CRD pass where the
    reference behavior is needed (Spec Reader, Dirty Gate, Coder).
+7. **Switch Solana back on** (CRD ch. 40 D40.4): set
+   `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana docker tests
+   of `docs/DISABLED_TESTS.md` group 6, and retire the refusal tests and the
+   beta notes in ch. 40, ch. 55 and `RELOADED_VS_GLEEC.md`. The maintainer
+   decides which of the packages above must land first.
 
 ## Out of scope here
 

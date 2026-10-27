@@ -10,6 +10,14 @@
 > the branch: it is neither to be merged nor deleted. This plan, not a dangling
 > ref, is what keeps the work findable.
 
+> **Beta availability (2026-10-26).** By maintainer decision TRON (TRX, TRC20)
+> activation is switched off on `dev` for the coming beta: while
+> `TRON_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`, every TRON
+> activation route answers "TRON support is not available in this build" (CRD
+> ch.21 availability note). TRON is planned to return in the next beta; turning
+> activation back on (ch.21 D6) precedes the activation-time steps below and is
+> part of any revival of this plan.
+
 ## Blocker: the derived custody address is knowingly wrong
 
 **Nothing reachable may be built on this derivation until the proxy creation
@@ -222,7 +230,7 @@ the only record of the verdict anywhere.** Recent chapters on `dev` carry gate
 clearance inline in the chapter text instead -- see
 [ch.47 §47 clearance notes](../reloaded-rewrite/47-metamask-integration.md)
 (lines 359 and 877) and
-[ch.55](../reloaded-rewrite/55-coin-activation-wire-contract.md) (line 1387) --
+[ch.55](../reloaded-rewrite/55-coin-activation-wire-contract.md) (§55.16 provenance footer) --
 and a squash merge of this branch would destroy the only record of its pass.
 
 So: **the first step of any revival is to copy the `0.08` verdict into the
