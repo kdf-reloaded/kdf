@@ -600,6 +600,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
+- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new, in progress: ARRR's per-swap HTLC
+  key derived as other KDF nodes derive it, so each side can recover the other's swaps from the seed,
+  and an ARRR refund that waits for the chain's median time instead of failing as too early.
 - [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
   ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
   wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
