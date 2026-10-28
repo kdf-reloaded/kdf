@@ -313,7 +313,13 @@ on transient errors), broadcasts the refund and emits
 refund success and emits `MakerPaymentRefundFinished`. For a coin that
 refunds automatically the execute stage MUST instead wait for the coin's
 own refund to complete and emit `MakerPaymentRefunded` with no
-transaction identifier.
+transaction identifier. For a shielded coin, when the refund becomes
+permitted and what the refund transaction is are bound by
+[chapter 39](39-zcash---z_coin-shielded-coin.md) R39.5.12, and for this
+project R39.5.13 (Decision AP): the refund also waits for the chain's
+median time past, and a refund rejected as non-final is retried instead
+of ending in `MakerPaymentRefundFailed`. The taker chain of R31 follows
+the same rules.
 
 **R19.** *Maker event set and resume map.* The maker machine MUST use
 exactly the twenty-seven event types below, with exactly these resume
@@ -1083,7 +1089,9 @@ counterparty's key MUST accept exactly 33 bytes. This chapter binds
 these two operations as `derive_htlc_pubkey` and `validate_other_pubkey`
 respectively. Neither the swap machines nor the negotiation message may
 be made key-length-polymorphic; the 33-byte width is a property of the
-deployed wire format, not of secp256k1.
+deployed wire format, not of secp256k1. For a shielded coin, the HTLC key
+behind that public key is derived per swap and never stored
+([chapter 39](39-zcash---z_coin-shielded-coin.md) R39.5.6--R39.5.9).
 
 **R64.** *Representation of non-secp256k1 keys — the dictated padding
 convention.* A chain whose native key is not a 33-byte secp256k1 point

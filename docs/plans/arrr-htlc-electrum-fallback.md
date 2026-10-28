@@ -31,17 +31,17 @@
 
 ## Steps
 
-1. **CRD and documents.** Ch.39 §39.11.5 (the reference contract, R39.11.18–R39.11.24,
+1. **CRD and documents.** *(Done: #120.)* Ch.39 §39.11.5 (the reference contract, R39.11.18–R39.11.24,
    gated) plus the decided rules R39.11.25–R39.11.28 and tests T39.11.l–T39.11.s. Ch.38
    §38.6.4 carve-out, ch.55 rows, `GLEEC_COMPATIBILITY.md`. This plan.
-2. **Own-send record** (R39.11.26). Look up the wallet database's record of own sends
+2. **Own-send record** (R39.11.26). *(Done: #125.)* Look up the wallet database's record of own sends
    before any server is asked. Short.
-3. **Electrum fallback** (R39.11.25). Wire the Electrum client into the shielded coin
+3. **Electrum fallback** (R39.11.25). *(Done: #130.)* Wire the Electrum client into the shielded coin
    for the three questions only: identity check, lag bound, script-history and unspent
    reads decoded with the Zcash reader, decision rules and logging.
 4. **Fresh-swap skip and taker refusal** (R39.11.27, R39.11.28) in the legacy swap state
-   machine.
-5. **Field check.**
+   machine. *(Done in this step's pull request.)*
+5. **Field check.** *(Left.)*
    - An ARRR swap between two Reloaded nodes whose `lightwalletd` list holds only the
      no-index servers, with the ElectrumX configured.
    - The recovery black box against the same servers.

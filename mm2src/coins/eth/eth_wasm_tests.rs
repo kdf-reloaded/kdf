@@ -28,7 +28,11 @@ async fn test_send() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8565".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8565".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let coin = EthCoin(Arc::new(EthCoinImpl {
         ticker: "ETH".into(),

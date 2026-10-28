@@ -389,6 +389,12 @@ impl SwapOps for ZCoin {
         )
     }
 
+    fn htlc_key_is_random_per_swap(&self) -> bool { true }
+
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> {
+        z_tx_read::ensure_own_payment_watchable(self).await
+    }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
         z_tx_read::extract_secret(secret_hash, spend_tx)
     }
