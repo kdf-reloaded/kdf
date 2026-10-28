@@ -215,7 +215,6 @@ pub struct ListUnspentArgs {
 /// https://developer.bitcoin.org/reference/rpc/index.html - Bitcoin RPC API reference
 /// Other coins have additional methods or miss some of these
 /// This description will be updated with more info
-#[derive(Debug)]
 pub struct NativeClientImpl {
     /// Name of coin the rpc client is intended to work with
     pub coin_ticker: String,
@@ -227,6 +226,19 @@ pub struct NativeClientImpl {
     pub event_handlers: Vec<RpcTransportEventHandlerShared>,
     pub request_id: AtomicU64,
     pub list_unspent_concurrent_map: ConcurrentRequestMap<ListUnspentArgs, Vec<NativeUnspent>>,
+}
+
+/// The debug form shows the daemon in its host-only form and the credentials as set, never their value (CRD ch.38
+/// R38.6.9b, ch.35 R35.1.17).
+impl fmt::Debug for NativeClientImpl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NativeClientImpl")
+            .field("coin_ticker", &self.coin_ticker)
+            .field("uri", &host_only(&self.uri))
+            .field("auth", &SECRET_SET)
+            .field("request_id", &self.request_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]
@@ -294,9 +306,11 @@ impl JsonRpcClient for NativeClientImpl {
             .body(Vec::from(request_body)));
 
         let event_handles = self.event_handlers.clone();
+        let named_uri = uri.clone();
         Box::new(slurp_req(http_request).boxed().compat().then(
             move |result| -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
-                let res = try_s!(result);
+                // The daemon is named in its host-only form in every text (CRD ch.38 R38.6.9b item 1).
+                let res = result.map_err(|e| scrub_node_url(&e.to_string(), &named_uri))?;
                 // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
                 event_handles.on_incoming_response(&res.2);
 
@@ -783,5 +797,47 @@ impl NativeClientImpl {
                 Ok(address_info.is_mine || address_info.is_watch_only)
             },
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod node_naming_tests {
+    use super::*;
+
+    fn client() -> NativeClient {
+        NativeClient(Arc::new(NativeClientImpl {
+            coin_ticker: "RIN".to_owned(),
+            uri: "http://127.0.0.1:1".to_owned(),
+            // "Basic base64(rpcuser:rpcsecret)"
+            auth: "Basic cnBjdXNlcjpycGNzZWNyZXQ=".to_owned(),
+            ..Default::default()
+        }))
+    }
+
+    /// T38.6.9.2 (R38.6.9b item 2): the debug form shows neither the credentials nor the header value.
+    #[test]
+    fn the_debug_form_of_the_native_client_hides_the_credentials() {
+        let client = client();
+        let utxo_client = UtxoRpcClientEnum::Native(client.clone());
+        for rendered in [
+            format!("{client:?}"),
+            format!("{:#?}", client.0),
+            format!("{utxo_client:?}"),
+        ] {
+            assert!(rendered.contains("http://127.0.0.1:1"), "{rendered}");
+            for secret in ["rpcuser", "rpcsecret", "cnBjdXNlcjpycGNzZWNyZXQ=", "Basic"] {
+                assert!(!rendered.contains(secret), "a credential is rendered");
+            }
+        }
+    }
+
+    /// T38.6.9.2 (R38.6.9b item 1): a request to a closed port names the daemon host-only and nothing more.
+    #[test]
+    fn a_failing_request_names_the_daemon_host_only() {
+        let error = common::block_on(client().get_block_count().compat())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("http://127.0.0.1:1"), "{error}");
+        assert!(!error.contains("http://127.0.0.1:1/"), "{error}");
     }
 }

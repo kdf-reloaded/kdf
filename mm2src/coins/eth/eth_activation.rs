@@ -9,10 +9,10 @@
 
 use super::*;
 use crate::eth::eth_hd_wallet::{EthHDAccount, EthHDWallet};
-use crate::eth::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::HDWalletCoinStorage;
 use crate::is_wallet_only_conf;
+use crate::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::rpc_command::get_my_address::PathToAddress;
 use alloy::providers::Provider as _;
 use common::log::{info, warn};
@@ -60,7 +60,7 @@ pub enum Erc20BuildError {
 
 /// Typed activation parameters of an EVM platform coin (the request fields of CRD R35.1.1 that reach
 /// the coin builder).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct EthCoinActivationParams {
     /// The EVM JSON-RPC endpoints (HTTP or HTTPS).
     pub urls: Vec<String>,
@@ -91,6 +91,28 @@ pub struct EthCoinActivationParams {
     pub swap_gas_fee_policy: Option<SwapGasFeePolicy>,
     /// Which route set [`Self::swap_gas_fee_policy`]; only used to log it at activation.
     pub swap_gas_fee_policy_source: SwapGasFeePolicySource,
+}
+
+/// The debug form names each node and the gas-station endpoint by its host-only form (CRD ch.35 R35.1.17).
+impl fmt::Debug for EthCoinActivationParams {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let nodes: Vec<String> = self.urls.iter().map(|url| host_only(url)).collect();
+        f.debug_struct("EthCoinActivationParams")
+            .field("urls", &nodes)
+            .field("swap_contract_address", &self.swap_contract_address)
+            .field("fallback_swap_contract", &self.fallback_swap_contract)
+            .field("swap_v2_contracts", &self.swap_v2_contracts)
+            .field("nft_swap_v2_contract", &self.nft_swap_v2_contract)
+            .field("required_confirmations", &self.required_confirmations)
+            .field("default_required_confirmations", &self.default_required_confirmations)
+            .field("tx_history", &self.tx_history)
+            .field("gas_station_url", &self.gas_station_url.as_deref().map(host_only))
+            .field("gas_station_decimals", &self.gas_station_decimals)
+            .field("gas_station_policy", &self.gas_station_policy)
+            .field("swap_gas_fee_policy", &self.swap_gas_fee_policy)
+            .field("swap_gas_fee_policy_source", &self.swap_gas_fee_policy_source)
+            .finish()
+    }
 }
 
 /// Which route set the initial swap gas-fee policy of a platform coin (CRD R35.1.1: request
@@ -1110,18 +1132,24 @@ mod tests {
         let url = "http://user:secret@127.0.0.1:1/v3/APIKEY?token=X".to_owned();
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
         let err = common::block_on(probe_eth_nodes(&ctx, "ETH", &listed_nodes("ETH", vec![url]))).unwrap_err();
-        assert!(matches!(err.get_inner(), EthCoinBuildError::Transport(_)), "{err}");
+        assert!(
+            matches!(err.get_inner(), EthCoinBuildError::Transport(_)),
+            "the probe failure is not a transport error"
+        );
         let lines: Vec<String> = captured_log_lines()
             .into_iter()
             .filter(|line| line.contains("[ETH] Couldn't get client version for node"))
             .collect();
         if capturing {
-            assert_eq!(lines.len(), 1, "{lines:?}");
-            assert!(lines[0].contains("http://127.0.0.1:1"), "{lines:?}");
+            assert_eq!(lines.len(), 1, "the probe logs one line per node");
+            assert!(
+                lines[0].contains("http://127.0.0.1:1"),
+                "the host-only form is missing from the log line"
+            );
         }
         for text in lines.iter().map(String::as_str).chain([err.to_string().as_str()]) {
             for secret in ["user", "secret", "/v3/APIKEY", "APIKEY", "token=X"] {
-                assert!(!text.contains(secret), "{secret} in {text}");
+                assert!(!text.contains(secret), "a credential part is rendered");
             }
         }
     }
@@ -1195,8 +1223,24 @@ mod tests {
         ] {
             let err = validate_eth_node_url(url).unwrap_err().to_string();
             for secret in ["user", "secret", "/v3/APIKEY", "APIKEY", "token=X"] {
-                assert!(!err.contains(secret), "{secret} in {err} for {url}");
+                assert!(!err.contains(secret), "a credential part is rendered");
             }
+        }
+    }
+
+    /// T35.36: the debug form of the activation parameters names the nodes and the gas station host-only.
+    #[test]
+    fn t35_36_the_debug_form_of_the_parameters_is_host_only() {
+        let params = EthCoinActivationParams {
+            urls: vec!["https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X".to_owned()],
+            gas_station_url: Some("https://gas.example.org/v3/GASKEY?key=Y".to_owned()),
+            ..Default::default()
+        };
+        let rendered = format!("{params:?}");
+        assert!(rendered.contains("https://rpc.example.org:8545"), "{rendered}");
+        assert!(rendered.contains("https://gas.example.org"), "{rendered}");
+        for secret in ["user", "secret", "/v3/", "APIKEY", "GASKEY", "token=", "key=Y"] {
+            assert!(!rendered.contains(secret), "a credential part is rendered");
         }
     }
 }

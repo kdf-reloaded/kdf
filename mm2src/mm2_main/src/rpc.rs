@@ -18,6 +18,8 @@
 //
 
 use crate::mm2::rpc::rate_limiter::RateLimitError;
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+use coins::node_url::redact_urls_in_text;
 #[cfg(feature = "unsafe-rpc-wire-dump")] use common::log::trace;
 #[cfg(not(target_arch = "wasm32"))] use common::log::warn;
 use common::log::{error, info};
@@ -141,6 +143,9 @@ fn redact_rpc_wire_dump_json(value: &mut Json) {
                 redact_rpc_wire_dump_json(item);
             }
         },
+        // A URL inside a string keeps its scheme, host and port; its userinfo, path, query and fragment are
+        // marked (CRD ch.35, the rule after R35.1.17, D35.10). Nothing else of the value changes.
+        Json::String(text) if text.contains("://") => *text = redact_urls_in_text(text),
         _ => {},
     }
 }
@@ -474,6 +479,66 @@ mod wire_dump_tests {
 
         assert_eq!(parsed["userpass"], "abc");
         assert_eq!(parsed["params"]["token"], "123");
+    }
+
+    /// T35.35 / D35.10: in the redacted mode, a URL keeps its scheme, host and port and shows a marker for each
+    /// part it had; nothing else of the dump changes. With the secrets switch on, the dump is the input.
+    #[test]
+    fn t35_35_redacted_dump_keeps_the_host_of_a_url_and_marks_the_rest() {
+        const REMOVED_PARTS: [&str; 6] = ["alice", "pw1", "KEYA", "KEYB", "tok1", "tok2"];
+        let rin = br#"{"userpass":"abc","method":"electrum","coin":"RIN","mm2":1,"servers":[
+            {"url":"electrum.example.org:50002","protocol":"SSL"},
+            {"url":"wss://alice:pw1@electrum.example.org:443/ws/KEYA?token=tok1","protocol":"WSS"},
+            {"url":"wss://electrum2.example.org:443/","protocol":"WSS"}]}"#;
+        let evm = br#"{"method":"enable_eth_with_tokens","mmrpc":"2.0","params":{"ticker":"ETH","tx_history":true,
+            "nodes":[{"url":"https://alice:pw1@rpc.example.org:8545/v3/KEYA?x=tok1"},
+                     {"url":"https://rpc2.example.org/v3/KEYB"},
+                     {"url":"https://rpc3.example.org:8545/"}]},
+            "error":"error sending request for url (https://rpc.example.org:8545/v3/KEYB?token=tok2): dns error"}"#;
+
+        let rin_dump = format_rpc_wire_dump_payload(rin, false);
+        let redacted_rin: Json = json::from_str(&rin_dump).unwrap();
+        assert_eq!(redacted_rin["coin"], "RIN");
+        assert_eq!(redacted_rin["method"], "electrum");
+        assert_eq!(redacted_rin["mm2"], 1);
+        assert_eq!(redacted_rin["userpass"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(redacted_rin["servers"][0]["url"], "electrum.example.org:50002");
+        assert_eq!(redacted_rin["servers"][0]["protocol"], "SSL");
+        assert_eq!(
+            redacted_rin["servers"][1]["url"],
+            "wss://<redacted>@electrum.example.org:443/<redacted>?<redacted>"
+        );
+        assert_eq!(redacted_rin["servers"][2]["url"], "wss://electrum2.example.org:443/");
+
+        let evm_dump = format_rpc_wire_dump_payload(evm, false);
+        let redacted_evm: Json = json::from_str(&evm_dump).unwrap();
+        assert_eq!(redacted_evm["method"], "enable_eth_with_tokens");
+        assert_eq!(redacted_evm["params"]["ticker"], "ETH");
+        assert_eq!(redacted_evm["params"]["tx_history"], true);
+        let nodes = &redacted_evm["params"]["nodes"];
+        assert_eq!(
+            nodes[0]["url"],
+            "https://<redacted>@rpc.example.org:8545/<redacted>?<redacted>"
+        );
+        assert_eq!(nodes[1]["url"], "https://rpc2.example.org/<redacted>");
+        assert_eq!(nodes[2]["url"], "https://rpc3.example.org:8545/");
+        assert_eq!(
+            redacted_evm["error"],
+            "error sending request for url (https://rpc.example.org:8545/<redacted>?<redacted>): dns error"
+        );
+
+        for dumped in [&rin_dump, &evm_dump] {
+            assert!(
+                REMOVED_PARTS.iter().all(|part| !dumped.contains(part)),
+                "a removed URL part is still in the redacted dump"
+            );
+        }
+
+        for payload in [&rin[..], &evm[..]] {
+            let input: Json = json::from_slice(payload).unwrap();
+            let full: Json = json::from_str(&format_rpc_wire_dump_payload(payload, true)).unwrap();
+            assert_eq!(full, input);
+        }
     }
 }
 

@@ -31,6 +31,7 @@ use rpc::v1::types::Bytes as BytesJson;
 
 use common::now_ms;
 
+use crate::siacoin::sia_text;
 use crate::siacoin::{hastings_to_siacoin, siacoin_to_hastings, Address, ApiClientHelpers, Currency, SiaApiClient,
                      SiaCoin, SiaFeeDetails, SiaFeePolicy, SiaKeypair as Keypair, SiacoinElement, SiacoinOutput,
                      SpendPolicy, TxpoolFeeRequest, V2Transaction, V2TransactionBuilder};
@@ -374,7 +375,7 @@ impl<'a> SiaWithdrawBuilder<'a> {
                     .client
                     .dispatcher(TxpoolFeeRequest)
                     .await
-                    .map_err(|e| WithdrawError::Transport(e.to_string()))?
+                    .map_err(|e| WithdrawError::Transport(sia_text(&e)))?
                     .0,
             ),
         };
@@ -384,7 +385,7 @@ impl<'a> SiaWithdrawBuilder<'a> {
             .client
             .get_unspent_outputs(&self.from_address, None, None, true)
             .await
-            .map_err(|e| WithdrawError::Transport(e.to_string()))?;
+            .map_err(|e| WithdrawError::Transport(sia_text(&e)))?;
         let basis = unspent.basis;
 
         let ticker = self.coin.ticker().to_string();

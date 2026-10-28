@@ -1,3 +1,4 @@
+use crate::node_url::host_only;
 use cosmrs::tendermint::block::Height;
 use derive_more::Display;
 use http::header::{ACCEPT, CONTENT_TYPE};
@@ -18,9 +19,18 @@ use tendermint_rpc::Response;
 /// `Content-Type`/`Accept` value used for all Tendermint JSON-RPC calls.
 const APPLICATION_JSON: &str = "application/json";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpClient {
     uri: String,
+}
+
+/// The debug form names the node by its host-only form (CRD ch.36 R36.5A.2).
+impl std::fmt::Debug for HttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpClient")
+            .field("node", &host_only(&self.uri))
+            .finish()
+    }
 }
 
 #[derive(Debug, Display)]

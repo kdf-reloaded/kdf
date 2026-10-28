@@ -74,7 +74,7 @@ impl MarketCoinOps for SiaCoin {
                 .client
                 .address_balance(my_address)
                 .await
-                .map_to_mm(|e| BalanceError::Transport(e.to_string()))?;
+                .map_to_mm(|e| BalanceError::Transport(sia_text(&e)))?;
             Ok(CoinBalance {
                 spendable: hastings_to_siacoin(balance.siacoins),
                 unspendable: hastings_to_siacoin(balance.immature_siacoins),
@@ -123,7 +123,7 @@ impl MarketCoinOps for SiaCoin {
             client
                 .broadcast_transaction(&transaction)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| sia_text(&e))?;
             Ok(txid)
         };
         Box::new(fut.boxed().compat())
@@ -159,7 +159,7 @@ impl MarketCoinOps for SiaCoin {
                             return Ok(());
                         }
                     },
-                    Err(e) => info!("Waiting for confirmation of Sia txid {}: {}", txid, e),
+                    Err(e) => info!("Waiting for confirmation of Sia txid {}: {}", txid, sia_text(&e)),
                 }
 
                 Timer::sleep(check_every as f64).await;
@@ -197,7 +197,7 @@ impl MarketCoinOps for SiaCoin {
                 let mempool_transactions = match client.dispatcher(TxpoolTransactionsRequest).await {
                     Ok(response) => response.v2transactions,
                     Err(e) => {
-                        debug!("SiaCoin::wait_for_tx_spend: mempool query failed: {}", e);
+                        debug!("SiaCoin::wait_for_tx_spend: mempool query failed: {}", sia_text(&e));
                         Vec::new()
                     },
                 };
@@ -214,7 +214,10 @@ impl MarketCoinOps for SiaCoin {
 
                 match found_in_block {
                     Ok(Some(tx)) => return Ok(TransactionEnum::SiaTransaction(SiaTransaction(tx))),
-                    Err(e) => debug!("SiaCoin::wait_for_tx_spend: find_where_utxo_spent failed: {}", e),
+                    Err(e) => debug!(
+                        "SiaCoin::wait_for_tx_spend: find_where_utxo_spent failed: {}",
+                        sia_text(&e)
+                    ),
                     _ => (),
                 }
 
@@ -239,7 +242,7 @@ impl MarketCoinOps for SiaCoin {
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> {
         let client = self.client.clone();
-        let height_fut = async move { client.current_height().await.map_err(|e| e.to_string()) }
+        let height_fut = async move { client.current_height().await.map_err(|e| sia_text(&e)) }
             .boxed()
             .compat();
         Box::new(height_fut)

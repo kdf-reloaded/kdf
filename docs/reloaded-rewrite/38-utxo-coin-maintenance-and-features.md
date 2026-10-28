@@ -1996,14 +1996,14 @@ of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the
 default. The scope limit of R35.1.17 for the RPC wire dump applies. Both are
 recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 
-> **Status (2026-10-28).** Not implemented yet. In this repository a native
-> build already names a parsed Electrum server as `host:port`, but the errors
-> for an address that cannot be parsed echo the configured string, and so
-> does the activation log line for a server that is not used. The browser
-> build names a server by its configured string and builds its WebSocket URL
-> from it. The native client derives a debug form that prints the
-> `Authorization` header value; the daemon itself is already named
-> `http://127.0.0.1:<port>`.
+> **Status (2026-10-28).** Implemented. Every log line and error names an
+> Electrum server as `host:port` through the shared helper
+> (`coins/node_url.rs`), on both builds and on the shielded-coin Electrum
+> fallback; an address that cannot be parsed is named by a placeholder and its
+> position. An address with userinfo or a path before the port is rejected
+> when the server is added. The native daemon client's debug form shows the
+> `Authorization` value as set, not its content. The browser build is checked
+> to compile; its runtime is not tested.
 
 T38.6.9.1 *Electrum naming.* On the native build, an activation lists a server
 whose address carries userinfo (`user:secret@host:50002`) and a valid server

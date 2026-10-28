@@ -83,7 +83,6 @@ pub mod eth_hd_wallet;
 pub(crate) mod eth_swap_v2;
 pub mod fee_estimation;
 pub mod legacy_tx;
-pub(crate) mod node_url;
 pub mod tron;
 
 /// Public re-export of the NFT swap V2 surface so mm2_main's swap
