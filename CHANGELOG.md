@@ -51,6 +51,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot that
+  re-submits all of its orders on every refresh used to send one message per order to every node, even
+  when price, volumes and confirmations stayed the same. Such an update is still saved and answered as
+  before, but no message goes out, so the network carries only real changes. Set the `MM2.json` boolean
+  `suppress_unchanged_order_updates` to `false` to broadcast every update again. Detail: CRD ch.59
+  R59.4.6.
+
 - **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
 
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the

@@ -2101,13 +2101,28 @@ pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result
         return ERR!("Order state has changed after price/volume/balance checks. Please try to update the order again if it's still needed.");
     }
     order.apply_updated(&update_msg);
+    let broadcast =
+        !suppress_unchanged_order_updates(ctx) || maker_order_update_changes_order(&order_before_update, &order);
     if let Err(e) = save_maker_order_on_update(ctx.clone(), &order).await {
         *order = order_before_update;
         return ERR!("Error on saving updated order state to database:{}", e);
     }
-    update_msg.with_new_max_volume((new_volume - reserved_amount).into());
-    maker_order_updated_p2p_notify(ctx.clone(), order.orderbook_topic(), update_msg, order.p2p_keypair());
+    // CRD ch.59 R59.4.6: an update that changes nothing peers see is not broadcast.
+    if broadcast {
+        update_msg.with_new_max_volume((new_volume - reserved_amount).into());
+        maker_order_updated_p2p_notify(ctx.clone(), order.orderbook_topic(), update_msg, order.p2p_keypair());
+    }
     Ok(order.clone())
+}
+
+/// Whether an update turned `before` into an order that differs in anything the order-updated
+/// message carries: price, maximum volume, minimum volume or confirmation settings. Amounts are
+/// compared as numbers (CRD ch.59 R59.4.6).
+pub(crate) fn maker_order_update_changes_order(before: &MakerOrder, after: &MakerOrder) -> bool {
+    before.price != after.price
+        || before.max_base_vol != after.max_base_vol
+        || before.min_base_vol != after.min_base_vol
+        || before.conf_settings != after.conf_settings
 }
 
 pub async fn update_maker_order_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {

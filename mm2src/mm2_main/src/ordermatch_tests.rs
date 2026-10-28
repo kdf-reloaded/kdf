@@ -5677,3 +5677,140 @@ mod keep_alive_receiver_catch_up_tests {
         );
     }
 }
+
+/// CRD ch.59 R59.4.6, T11: an own maker-order update that changes nothing is not broadcast.
+mod unchanged_order_update_tests {
+    use super::*;
+    use coins::{CoinsContext, MarketCoinOps, MmCoinEnum};
+
+    fn maker_order() -> MakerOrder {
+        let base = MmCoinEnum::Test(TestCoin::new("DYN"));
+        let rel = MmCoinEnum::Test(TestCoin::new("KMD"));
+        MakerOrderBuilder::new(&base, &rel)
+            .with_max_base_vol(MmNumber::from("10"))
+            .with_min_base_vol(Some(MmNumber::from("1")))
+            .with_price(MmNumber::from("0.5"))
+            .with_conf_settings(OrderConfirmationsSettings::default())
+            .with_save_in_history(false)
+            .build_unchecked()
+    }
+
+    #[test]
+    fn every_carried_field_counts_and_amounts_compare_as_numbers() {
+        let before = maker_order();
+
+        let mut same = before.clone();
+        same.price = MmNumber::from(BigRational::new_raw(2.into(), 4.into()));
+        same.updated_at = Some(now_ms());
+        assert!(!maker_order_update_changes_order(&before, &same));
+
+        let mut price = before.clone();
+        price.price = MmNumber::from("0.51");
+        assert!(maker_order_update_changes_order(&before, &price));
+
+        let mut max = before.clone();
+        max.max_base_vol = MmNumber::from("11");
+        assert!(maker_order_update_changes_order(&before, &max));
+
+        let mut min = before.clone();
+        min.min_base_vol = MmNumber::from("2");
+        assert!(maker_order_update_changes_order(&before, &min));
+
+        let mut confs = before.clone();
+        confs.conf_settings = Some(OrderConfirmationsSettings {
+            base_confs: 5,
+            ..OrderConfirmationsSettings::default()
+        });
+        assert!(maker_order_update_changes_order(&before, &confs));
+    }
+
+    /// A node with the two test coins, the given extra configuration, an order directory in a fresh
+    /// temporary directory, one own maker order and a channel that receives what it publishes.
+    fn node_with_order(conf: Json) -> (MmArc, MakerOrder, mpsc::Receiver<AdexBehaviourCmd>, std::path::PathBuf) {
+        TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(MmNumber::from("0.0001")));
+        let dbdir = std::env::temp_dir().join(format!("kdf-noop-update-{}", Uuid::new_v4()));
+        let mut conf = conf;
+        conf["dbdir"] = json!(dbdir.to_string_lossy());
+        conf["pre_trade_spend_check"] = json!(false);
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("passphrase").unwrap())
+            .unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["DYN", "KMD"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        let (tx, rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+
+        let order = maker_order();
+        OrdermatchContext::from_ctx(&ctx)
+            .unwrap()
+            .maker_orders_ctx
+            .lock()
+            .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+        (ctx, order, rx, dbdir)
+    }
+
+    fn update_price(ctx: &MmArc, uuid: Uuid, price: &'static str) {
+        let req = MakerOrderUpdateReq {
+            uuid,
+            new_price: Some(MmNumber::from(price)),
+            max: None,
+            volume_delta: None,
+            min_volume: None,
+            base_confs: None,
+            base_nota: None,
+            rel_confs: None,
+            rel_nota: None,
+        };
+        block_on(update_maker_order(ctx, req)).unwrap();
+    }
+
+    fn published_updates(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> Vec<String> {
+        let mut topics = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let AdexBehaviourCmd::PublishMsg { topics: t, msg }
+            | AdexBehaviourCmd::PublishMsgFrom { topics: t, msg, .. } = cmd
+            {
+                if let Ok((new_protocol::OrdermatchMessage::MakerOrderUpdated(_), ..)) =
+                    decode_signed::<new_protocol::OrdermatchMessage>(&msg)
+                {
+                    topics.extend(t);
+                }
+            }
+        }
+        topics
+    }
+
+    #[test]
+    fn t11_unchanged_update_is_saved_but_not_broadcast() {
+        let (ctx, order, mut rx, dbdir) = node_with_order(json!({}));
+
+        update_price(&ctx, order.uuid, "0.50");
+        assert!(
+            published_updates(&mut rx).is_empty(),
+            "an unchanged update is not broadcast"
+        );
+        assert!(
+            my_maker_order_file_path(&ctx, &order.uuid).exists(),
+            "the order is still saved"
+        );
+
+        update_price(&ctx, order.uuid, "0.6");
+        assert_eq!(published_updates(&mut rx), vec![order.orderbook_topic()]);
+
+        std::fs::remove_dir_all(dbdir).ok();
+    }
+
+    #[test]
+    fn t11_switch_off_broadcasts_every_update() {
+        let (ctx, order, mut rx, dbdir) = node_with_order(json!({ "suppress_unchanged_order_updates": false }));
+
+        update_price(&ctx, order.uuid, "0.5");
+        assert_eq!(published_updates(&mut rx), vec![order.orderbook_topic()]);
+
+        std::fs::remove_dir_all(dbdir).ok();
+    }
+}
