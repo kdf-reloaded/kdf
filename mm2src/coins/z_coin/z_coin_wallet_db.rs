@@ -142,6 +142,14 @@ fn wallet_db_mutation_lock(wallet_db_path: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// A transaction row of the shielded wallet database: the whole transaction and the height it was
+/// mined at, `None` while it is only recorded as sent.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RecordedTransaction {
+    pub(crate) raw: Vec<u8>,
+    pub(crate) mined_height: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ZCoinShieldedHistory {
     compact_blocks_path: PathBuf,
@@ -6850,6 +6858,38 @@ impl ZCoinShieldedHistory {
             )
             .map_err(|e| e.to_string())?;
         Ok(count > 0)
+    }
+
+    /// The transactions the wallet database holds in full whose bytes contain `script_pubkey`, with the
+    /// height each was mined at (`None` while unmined), in the order they were recorded.
+    ///
+    /// This is the wallet's own send record (R39.11.26, §39.8.0.7): a broadcast the backend accepted
+    /// is written here with its whole transaction. The byte match only narrows the rows; the caller
+    /// decides whether a row really pays the script. An error is the database's, never an empty answer.
+    pub(crate) fn recorded_transactions_containing(
+        &self,
+        script_pubkey: &[u8],
+    ) -> Result<Vec<RecordedTransaction>, String> {
+        let conn = Connection::open_with_flags(&self.wallet_db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT raw, mined_height FROM transactions
+                 WHERE raw IS NOT NULL AND instr(raw, ?1) > 0
+                 ORDER BY id_tx",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![script_pubkey], |row| {
+                Ok(RecordedTransaction {
+                    raw: row.get(0)?,
+                    mined_height: row.get(1)?,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        Ok(rows)
     }
 
     /// Total value of the wallet's notes that the transaction `txid` spends, as recorded in
