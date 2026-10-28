@@ -304,7 +304,7 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > re-announcement are the same. Tests: T60.7 (g) in the same module, whose coin
 > mocks try the order's lock during the reads.
 > Its cancellation step deletes the order's record only after the order's lock
-> is released, as every cancel path does under ch.12 R7a (PR #TBD).
+> is released, as every cancel path does under ch.12 R7a (PR #149).
 
 ## 60.5 Refusal and failure map — what a peer observes
 

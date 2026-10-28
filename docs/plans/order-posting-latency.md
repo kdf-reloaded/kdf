@@ -63,7 +63,7 @@ per coin before each order. On the implementation before this plan the full loop
   periodic balance check, the timed-out match removal, an order's timeout expiry, the cancel paths and
   `update_maker_order` no longer hold an order's own lock across file or database writes. Each copies
   under a brief lock, writes unlocked, then re-locks and re-checks before it applies. Writes of one order
-  keep the order of its changes, and nothing recreates a cancelled order's record (ch.12 R7a, R7b; PR #TBD).
+  keep the order of its changes, and nothing recreates a cancelled order's record (ch.12 R7a, R7b; PR #149).
   The match-negotiation paths keep their write under the lock and join the same write ordering.
 - **Balance watch on shared EVM RPC endpoints (maintainer, 2026-10-28).** F2 is parity: a base coin with maker
   orders costs one balance read per 30 s against its node or RPC endpoint, as the reference does (ch.60 R60.4.5,
