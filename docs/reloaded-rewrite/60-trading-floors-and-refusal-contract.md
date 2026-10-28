@@ -257,6 +257,38 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
    maintenance pass, before the watch's first poll. This path is
    baseline behavior (V60.2); items 1–4 are post-baseline.
 
+> **As-built note (2026-10-28, clean-side record).** R60.4.5 and R60.4.6
+> items 1–4 are implemented (PR #116); item 5 is the unchanged baseline path.
+> The per-coin 10 s balance loop that coin registration used to spawn is
+> removed. The watch registry lives in the maker-order store of the
+> order-matching context, next to the per-base-coin order counts: the last
+> order of a base coin leaving the store (cancelled, matched away, expired, or
+> removed by disabling the coin) ends that coin's watch in the same step, and a
+> new watch for the coin gets a new generation, so a task of an ended watch
+> finds itself superseded at its next wake and ends without reading. The task
+> sleeps first, 30 s, then polls: one spendable-balance read; the existing
+> balance handlers (the order-matching handler, the only one registered) run
+> once only when the value differs from the last one seen and a maker order
+> with that base still exists. A failed read, and a coin that is not active (a
+> restored order whose coin is not yet enabled), change nothing and cost no
+> read; the watch simply polls again 30 s later. The creation paths
+> (`setprice`, `start_swap` with `SetPrice`, the simple market-maker bot: all
+> go through the one order-creation function) seed the watch with the
+> spendable balance that the creation's own balance check read (the fixed-volume
+> check and the `max` volume computation both return it), the same quantity the
+> poll compares; a watch that already runs keeps its own last-seen value. A
+> restored order and a converted taker order start the watch unseeded and read
+> no balance at insertion. The interval is a constant of the build; no
+> configuration member reads it. The maintenance step of item 5 was moved
+> unchanged into its own function so a test can run it; nothing in it changed.
+> Not implemented: nothing of items 1–4 is left open. Tests: T60.7 (a)–(e) and
+> the start, stop and seeding cases are in `ordermatch_tests.rs`, module
+> `t60_7_maker_balance_watch_tests`, driven by a sleeper the test passes to
+> the task, so no test waits. The cost is one balance read per 30 s per base
+> coin with maker orders, against that coin's node or RPC endpoint; several
+> such coins on one shared EVM endpoint each cost that one read, as at the
+> reference designations R60.4.6 names (maintainer, 2026-10-28: no change).
+
 ## 60.5 Refusal and failure map — what a peer observes
 
 This section answers whether a floor is a wire parameter. It is, in two

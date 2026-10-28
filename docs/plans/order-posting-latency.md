@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (pass 1 merged; F2 and pass 2 in review; maintainer Decisions R, AC and AD) — **Last reviewed:** 2026-10-28
+**Status:** in progress (pass 1 and F2 merged; pass 2 in review; maintainer Decisions R, AC and AD) — **Last reviewed:** 2026-10-28
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -37,6 +37,7 @@ per coin before each order. On the implementation before this plan the full loop
 ## Decisions (maintainer)
 
 - **Decision R.** Do all of F1–F5, in the order below.
+
 - **Decision P (2026-10-27, superseded by AC).** The pre-trade check ran on create and on volume or `max`
   changes, and was skipped on price-only, minimum-volume and confirmation updates. Its fee-rate reading was
   reused by the same request. The skip was accepted only until a fee cache existed.
@@ -57,6 +58,9 @@ per coin before each order. On the implementation before this plan the full loop
 - **Lock scope (2026-10-28).** The reconciliation of own orders missing from the orderbook reads the
   balance and the maximum volume without holding the order's lock, and locks only to apply the result.
   The other lock holds across file and database writes are Decision AM, open with the maintainer.
+- **Balance watch on shared EVM RPC endpoints (maintainer, 2026-10-28).** F2 is parity: a base coin with maker
+  orders costs one balance read per 30 s against its node or RPC endpoint, as the reference does (ch.60 R60.4.5,
+  R60.4.6). Several such coins on one shared EVM endpoint each cost that one read; no change is planned.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 
@@ -65,8 +69,8 @@ per coin before each order. On the implementation before this plan the full loop
 | # | Content | Rules | State |
 |---|---|---|---|
 | 0 | CRD branch `crd/order-post-latency` (PR #95) | all of the above | merged 2026-10-27 |
-| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | implemented (PR #114) |
+| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | merged 2026-10-28 (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs` with per-coin lifetime and per-chain gas price; F5 read spreading `electrum_spread_reads`; spend check on every update again | R38.6.6j items 2–4, R38.6.6k, R57.2.6, R57.2.7, R38.6.4a, R60.6.7 amendment (AC) | in progress |
-| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | ready; after pass 1 |
+| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | merged 2026-10-28 (PR #116) |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.

@@ -274,6 +274,33 @@ standard gossipsub state, five additional pieces of state:
    when it exceeds it;
 3. preserve every entry in the explicit-relay list against eviction.
 
+**R11a (relay forward ordering).** *(Authored by the KDF Spec Reader
+2026-10-28 from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+§2.15A, identical at both, and from the public gossipsub library both
+rows pin; compared with the baseline anchor (V5). **Passed the KDF Dirty Gate
+on 2026-10-28**, measure 0.02; §28.14.)* When `i_am_relay` (R12) is set, the vendored gossipsub
+behaviour MUST, on receiving a message it accepts into its caches,
+(1) deliver it to the consumer whether or not the node is subscribed to
+the topic, and (2) forward it at once — before, and independently of,
+any consumer validation — to the topic peers that included this node in
+their relay mesh (R10) **and** to the relays of this node's own relay
+mesh (R10), excluding in both sets the peer it arrived from, the
+message's author and any peer the message is already known to have come
+from. The consumer's later propagate call (R13, manual-propagation flag)
+then forwards the same message a second time to the same recipients; the
+substrate de-duplicates none of its own outbound copies, and recipients
+drop the second copy by their duplicate cache. *(Correction of the
+same day, re-checked by the KDF Dirty Gate on 2026-10-28, measure 0.02: the
+next two sentences replace a first wording that said a
+non-relay forwards once on the consumer's report.)* When `i_am_relay` is
+not set, **nothing the node received is forwarded**: with manual
+validation configured the substrate does not forward on receipt, and the
+consumer issues the propagate call only when the node is a relay. A
+non-relay sends only what it publishes itself. The behaviour is
+post-baseline (V5) and identical in Reloaded's vendored copy and
+dispatch: **parity**. Chapter 32 R-F3a and R-F3b state the consequence
+for the orderbook keep-alive.
+
 **R12.** The substrate's `IAmRelay` control message is bound: nodes
 that act as relays MUST emit it; nodes that act as clients MUST NOT.
 The configuration flag that selects which role applies is bound as a
@@ -332,6 +359,37 @@ expose:
 > but every gossip round between a Reloaded node and a reference node
 > costs a full retransmission of every announced message in both
 > directions. Closing it is an encoding change only (T10).
+>
+> *Scope and status (2026-10-28; the reference half passed the KDF Dirty
+> Gate on 2026-10-28, measure 0.02).* The retransmission cost arises only between peers that share a
+> **subscribed** topic and only within the per-peer, per-heartbeat caps
+> of R13a: IHAVE is emitted for topics in the announcer's own mesh or
+> fanout, to peers that announced a subscription, and is honored only for
+> topics in the receiver's own mesh. A relay that subscribes to no
+> orderbook topic — the reference seed's configuration — is not party to
+> the exchange in either direction, so the id mismatch added no traffic
+> and no state between a Reloaded maker and a reference seed; it did
+> between the maker and reference makers or takers on its pairs.
+> Reloaded's integration branch emits the 8-byte form as of 2026-10-28
+> (the divergence is closed; the note is kept for the record and V4 is
+> updated accordingly).
+
+**R13a (control-message bounds the substrate provides).** *(Same
+authorship, rows and status as R11a.)* The vendored gossipsub behaviour
+MUST keep the library's defaults for the following bounds, which the
+orderbook layer relies on (chapter 32 §32.9A R-B1): a heartbeat every
+1 s; a message cache of five heartbeats of which three are announced; a
+duplicate cache of 60 s; at most 10 IHAVE control messages honored per
+peer per heartbeat and at most 5000 message ids requested per peer per
+heartbeat, with the pending-request set and the per-peer counters
+cleared every heartbeat; at most 3 retransmissions of one cached message
+to one peer. IHAVE is emitted only for topics in this node's own mesh or
+fanout and only to peers that announced a subscription to the topic, and
+is honored only for topics in this node's own mesh; a relay that
+subscribes to no orderbook topic therefore neither announces nor
+requests message ids for them. Peer scoring stays off (R14), so reaching
+any of these limits penalises nobody. The per-peer caps are
+post-baseline hardening carried by the pinned fork (V5).
 
 **R14.** The substrate MUST NOT enable the peer-scoring / reputation
 extension present in the standard gossipsub implementation. Abusive-peer
@@ -814,6 +872,18 @@ IHAVE ids a reference node at `v2.6.0-beta` or `v3.0.0-beta` announces
 for a captured message and asserts byte equality with the Reloaded
 node's id for the same message.
 
+**T11.** *Relay forward ordering and control bounds (R11a, R13a).* With
+`i_am_relay` set, a received message on a topic the node is not
+subscribed to is forwarded to a downstream topic peer before the consumer
+has been polled, and a second copy follows the consumer's propagate call;
+with the flag clear, no copy of a received message leaves the node at
+all *(correction re-checked by the KDF Dirty Gate on 2026-10-28)*. A peer
+announcing 20 IHAVE messages of 1000 unknown ids each within one
+heartbeat receives IWANT for at most 5000 ids drawn from at most 10 of
+the announcements, and the next heartbeat starts the count afresh. A node
+with no orderbook topic in its mesh emits no IHAVE for such topics and
+ignores IHAVE for them.
+
 ## 28.11 Deferred Work
 
 > **Note.** The §28.9A items (peer health-check RPC, time-sync
@@ -851,6 +921,24 @@ currently degrades to "no connection" for such clients.
 **D6.** Automatic production seed-node discovery is deferred. Operators
 remain responsible for supplying reachable relay addresses when the binary
 does not carry a usable registry fallback for the selected netid.
+
+**D7.** *Per-peer outbound queue bound (Reloaded-original candidate;
+added 2026-10-28; the reference fact passed the KDF Dirty Gate on
+2026-10-28).* The vendored
+gossipsub connection handler's outbound queue has no bound at either
+reference row or in Reloaded (chapter 32 §32.9A R-B1 row 17): every
+forwarded message is cloned per recipient and held until that
+recipient's stream is writable, so a peer that reads slowly makes this
+node's memory grow at that peer's share of the forwarded traffic,
+released only by disconnection — and the ping disconnect of R9 fires
+only when the peer stops answering pings, not when it merely reads
+slowly. A bound — dropping the oldest queued forwards past a per-peer
+limit, or disconnecting a peer whose queue has exceeded a limit for
+longer than a grace period — is a Reloaded-original hardening candidate;
+the two copies per message of R11a are the other half of the same cost
+and a candidate of their own (forward once, on the consumer's report).
+Either is a divergence to record in the
+operator-facing compatibility documents; neither changes a wire shape.
 
 ## 28.11A Open Questions
 
@@ -937,8 +1025,15 @@ port lands.
 confirmed to derive the message id from the payload and the sequence
 number with the standard library's default hasher and to emit it as a
 decimal string. R13's 8-byte big-endian encoding is therefore a
-post-baseline change on the reference side that Reloaded has not yet
-followed (R13 divergence note).
+post-baseline change on the reference side, which Reloaded followed on
+its integration branch as of 2026-10-28 (R13 divergence note).
+
+**V5.** The baseline in-tree gossipsub MUST be confirmed to forward a
+received message, when manual propagation is configured, only on the
+consumer's propagate call — a relay's immediate forward on receipt
+(R11a) is post-baseline — and to request every unknown id of every
+IHAVE without per-peer caps (the caps of R13a are post-baseline
+hardening carried by the pinned fork).
 
 ## 28.14 Provenance Footer
 
@@ -988,3 +1083,44 @@ followed (R13 divergence note).
   mechanical regex scan of every added line against private identifiers,
   literals and distinctive phrases; the mechanical gate tool was not run
   (prose). *Measure:* 0.01 against the 0.10 threshold.
+- *Scoped addition (2026-10-28, second pass) -- R11a, R13a, the scope
+  paragraph appended to the R13 divergence note, T11, D7, V5 and the V4
+  status sentence. Dirty Gate: PASS on 2026-10-28, recorded below.* Prompted by the continued memory
+  growth of public seed nodes under a Reloaded maker. *Inputs:* the public
+  gossipsub library of the libp2p fork both reference rows and Reloaded
+  pin (a permitted sibling source, not forbidden-class material) for the
+  forward ordering, the announcement caps and the cache windows; the
+  baseline anchor's in-tree gossipsub (V5); this repository's own vendored
+  copy, configuration builder and propagate call (every parity statement);
+  and the forbidden corpus, consulted at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, identical in every respect taken,
+  **only** to establish that the reference configures the relay flag and
+  manual propagation as R11a describes, calls the propagate on the
+  application's success, and that a reference seed subscribes to no
+  orderbook topic. What crosses is behaviour and the library's public
+  default values; no private identifier, function body, helper
+  decomposition, log or error literal was reproduced. The hardening
+  candidates of D7 are Reloaded-original.
+- *Dirty Gate clearance for the 2026-10-28 second-pass addition (chapter 01
+  T1, R40):* PASS on 2026-10-28, measure 0.02, no leaks; every reference fact
+  confirmed at both rows. The non-relay-forwarding corrections marked in the
+  text were re-checked the same day: PASS, measure 0.02, nothing held.
+  *Extent:* the order-matching subsystem's keep-alive receiver,
+  synchronization requester and responder, trie store, trie worker, periodic
+  expiry sweep and memory purge; the network dispatch loop and command/event
+  plumbing; the composed p2p behaviour's configuration, channel sizing and
+  relay-connection maintenance; the request-response wrapper's pending table
+  and timeout sweep; peer-exchange capacity; and the daemon start-up
+  subscriptions -- at the rows `v2.6.0-beta` and `v3.0.0-beta` (nine source
+  files at each row, identical in every respect taken); also compared, as
+  permitted sibling and own-tree input, the MIT-licensed gossipsub crate both
+  rows pin (in Reloaded's vendored copy, compared with the pinned fork) and
+  the baseline anchor's in-tree gossipsub (V5). The re-check covered the
+  dispatch loop's forwarding decision and the gossipsub configuration at both
+  rows, the vendored crate's forwarding, propagate, validation gating, IHAVE
+  emission and IWANT service, and Reloaded's own dispatch gate. *Method:*
+  reading of the compared regions, plus mechanical comparison (inter-row diff,
+  recursive diff of the vendored crate against the pinned fork, extraction of
+  every backticked token and hexadecimal fragment from the added lines); the
+  mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
+  threshold. The clearance is complete and not pending.
