@@ -201,7 +201,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
   back.** Confirmations, and the decision that a transaction has expired, are now counted against
   the current tip, not against the highest one ever seen. A lagging server can now only make a wait
-  longer, never shorter. Detail: CRD ch.39 R39.11.10a.
+  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
 - **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
   ignored and every listed server was connected; with `max_connected: 1` only one server is connected
   now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
