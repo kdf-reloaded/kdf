@@ -183,6 +183,10 @@ impl SwapOps for ZCoin {
     fn derive_swap_htlc_key_pair(&self, swap_unique_input: &[u8]) -> Result<KeyPair, String> {
         self.derived_htlc_key_pair(swap_unique_input)
     }
+
+    // The derived key is unique per swap (derived from the fresh secret hash or the uuid), so the property the
+    // fresh-swap skip needs still holds (CRD ch.39 R39.11.27).
+    fn htlc_key_is_random_per_swap(&self) -> bool { true }
 }
 
 #[async_trait]

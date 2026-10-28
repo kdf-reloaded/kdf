@@ -147,6 +147,23 @@ pub trait SwapOps {
         None
     }
 
+    /// Whether this coin's HTLC script is unique to one swap by construction: the key it pays to is
+    /// unique per swap (random, or derived from the swap's unique input, see
+    /// [`SwapOps::derives_swap_htlc_key`]) and the secret hash is fresh, so no payment to
+    /// the script can exist unless the swap sent it (CRD ch.39 R39.5.4, R39.11.27). The swap layer uses
+    /// this to skip the already-sent question in a swap this process started a moment ago.
+    ///
+    /// The default is `false`: every other coin pays a script that the persistent key (or the chain's own
+    /// rules) can reproduce, and keeps asking.
+    fn htlc_key_is_random_per_swap(&self) -> bool { false }
+
+    /// Whether this coin can watch the taker's own payment for the maker's spend, checked before the taker
+    /// fee is sent (CRD ch.39 R39.11.28). The error names every source that could not answer.
+    ///
+    /// The default is `Ok(())`: only a Light-mode shielded coin, whose watch depends on the address
+    /// questions of a remote index, can be unable to watch.
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> { Ok(()) }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
     /// Whether the refund transaction can be sent now

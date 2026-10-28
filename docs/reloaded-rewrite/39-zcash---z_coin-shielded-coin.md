@@ -5200,6 +5200,24 @@ Electrum server with its condition, and says that the taker could not watch its
 payment for the maker's spend. A maker, and a taker paying with any other coin,
 are not affected.
 
+> **Status update (reloaded, 2026-10-28).** R39.11.27 and R39.11.28 are implemented
+> (T39.11.r, T39.11.s).
+>
+> - **"A shielded coin" in R39.11.27.** It is decided by the property the rule rests on:
+>   the coin's HTLC key is random per swap (only the shielded coin has it).
+> - **"Started in this process".** Recorded when the swap is started new, never when it
+>   is restored from its saved log.
+> - **The address read of R39.11.28.** It is the transparent-address listing of the
+>   wallet's own transparent address on each admitted lightwalletd endpoint, then the
+>   script history of that address on each identity-checked Electrum server.
+>   - An endpoint that answers with the no-address-index rejection is marked
+>     (R39.11.4i).
+>   - The check runs in the taker's start step, after the balance check and before
+>     anything is sent.
+> - **Not exercised end to end.** No test drives the whole start step: its balance check
+>   has no test double. The refusal step is tested directly, with the fee step made to
+>   fail if reached.
+
 #### Tests
 
 > **Status update (reloaded, Step C).** T39.11.a--T39.11.d, T39.11.f and

@@ -62,7 +62,8 @@ fn eth_coin_for_test_with_netid_and_decimals(
     netid: u16,
     decimals: u8,
 ) -> (MmArc, EthCoin) {
-    let web3 = crate::eth::alloy_compat::build_provider(urls, vec![]).unwrap();
+    let web3 =
+        crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
     let web3_instances = vec![Web3Instance {
         web3: web3.clone(),
         is_parity: true,
@@ -181,7 +182,11 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         .unwrap()
         .address();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH".to_string(),
         EthCoinType::Erc20 { .. } => "JST".to_string(),
@@ -364,7 +369,11 @@ fn test_wait_for_payment_spend_timeout() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8555".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
 
     let my_addr = key_pair.address();
@@ -535,7 +544,11 @@ mod search_for_swap_tx_spend_scripted {
             &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
         )
         .unwrap();
-        let web3 = crate::eth::alloy_compat::build_provider(vec![url.to_owned()], vec![]).unwrap();
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
         let ctx = MmCtxBuilder::new().into_mm_arc();
         let swap_contract_address = Address::from_str(SWAP_CONTRACT_ADDR).unwrap();
         let my_addr = key_pair.address();
@@ -1415,7 +1428,11 @@ fn test_message_hash() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1465,7 +1482,11 @@ fn test_sign_verify_message() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1647,7 +1668,11 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
     let public = *key_pair.public();
     let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let conf = json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [] });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
     let ticker = match coin_type {
@@ -2233,7 +2258,11 @@ mod swap_send_path_wire_form {
             &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
         )
         .unwrap();
-        let web3 = crate::eth::alloy_compat::build_provider(vec![url.to_owned()], vec![]).unwrap();
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
         let mut coins = vec![
             json!({"coin": "USDC-PLG20", "protocol": {"type": "ERC20", "protocol_data":
                 {"platform": "MATIC", "contract_address": format!("{:#x}", token_addr)}}}),
@@ -2765,7 +2794,11 @@ mod scripted_node_ports {
         let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
             .into_iter()
             .map(|url| Web3Instance {
-                web3: crate::eth::alloy_compat::build_provider(vec![url], vec![]).unwrap(),
+                web3: crate::eth::alloy_compat::build_provider(
+                    crate::eth::node_url::listed_nodes("TEST", vec![url]),
+                    vec![],
+                )
+                .unwrap(),
                 is_parity: false,
             })
             .collect();

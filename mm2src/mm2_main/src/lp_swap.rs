@@ -1238,6 +1238,32 @@ fn htlc_keypair_owns_pubkey(coin: &MmCoinEnum, keypair: &KeyPair, pubkey: &H264)
         .is_ok_and(|derived| derived[..] == pubkey[..])
 }
 
+/// Whether a payment step skips the already-sent question (CRD ch.39 R39.11.27). It does when this process
+/// started the swap (it was not restored from its saved log), the log holds no payment event of this
+/// role, and the paying coin's HTLC key is random per swap, so no payment to the script can exist
+/// unless this swap sent it, and a swap started a moment ago has not sent it before this step. A
+/// restored swap, a swap with a payment event and every coin that does not use a per-swap key keep
+/// asking (CRD ch.39 R39.11.18). One `info` line names the swap, the coin and the rule.
+pub(crate) fn skips_already_sent_question(
+    coin: &MmCoinEnum,
+    swap_uuid: &Uuid,
+    role: &str,
+    started_in_this_process: bool,
+    has_payment_event: bool,
+) -> bool {
+    let skip = started_in_this_process && !has_payment_event && coin.htlc_key_is_random_per_swap();
+    if skip {
+        info!(
+            "Swap {} ({} payment, {}): skipping the already-sent question, a swap started in this process has \
+             sent nothing to this coin's per-swap HTLC script (CRD ch.39 R39.11.27)",
+            swap_uuid,
+            role,
+            coin.ticker()
+        );
+    }
+    skip
+}
+
 /// Picks the HTLC key a recovery uses for a payment (CRD ch.39 R39.5.4 and its candidate-order amendment):
 /// (1) the key re-derived from the saved swap input, (2) the private key saved with the swap that belongs to
 /// the saved public key, (3) the coin's persistent key; whichever first rebuilds the script the payment pays.

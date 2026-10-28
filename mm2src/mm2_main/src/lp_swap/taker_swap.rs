@@ -330,7 +330,10 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     };
 
     let (swap, mut command) = match swap {
-        RunTakerSwapInput::StartNew(swap) => (swap, TakerSwapCommand::Start),
+        RunTakerSwapInput::StartNew(swap) => {
+            swap.started_in_this_process.store(true, Ordering::Relaxed);
+            (swap, TakerSwapCommand::Start)
+        },
         RunTakerSwapInput::KickStart {
             maker_coin,
             taker_coin,
@@ -539,6 +542,10 @@ pub struct TakerSwap {
     conf_settings: SwapConfirmationsSettings,
     payment_locktime: u64,
     p2p_privkey: Option<KeyPair>,
+    /// Whether this process started the swap (`RunTakerSwapInput::StartNew`) rather than restoring it from
+    /// its saved log. Set only by `run_taker_swap`; a swap restored by any other path stays `false` and
+    /// asks every question (CRD ch.39 R39.11.27).
+    started_in_this_process: AtomicBool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -973,6 +980,7 @@ impl TakerSwap {
             conf_settings,
             payment_locktime,
             p2p_privkey,
+            started_in_this_process: AtomicBool::new(false),
             mutable: RwLock::new(TakerSwapMut {
                 data: TakerSwapData::default(),
                 other_maker_coin_htlc_pub: H264::default(),
@@ -1024,6 +1032,19 @@ impl TakerSwap {
                 maker_coin_swap_contract,
                 taker_coin_swap_contract,
             })
+        }
+    }
+
+    /// CRD ch.39 R39.11.28: before the taker fee is sent, the taker's own payment coin must have a source that
+    /// can watch the payment for the maker's spend (the spend watch is the taker's only way to learn the
+    /// secret). `Some` is the step's result when it cannot: `StartFailed`, nothing sent. A coin that has
+    /// nothing to check answers `Ok` and the swap goes on.
+    async fn refuse_if_own_payment_unwatchable(&self) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
+        match self.taker_coin.ensure_own_payment_watchable().await {
+            Ok(()) => None,
+            Err(e) => Some((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
+                ERRL!("!taker_coin.ensure_own_payment_watchable {}", e).into(),
+            )])),
         }
     }
 
@@ -1128,6 +1149,10 @@ impl TakerSwap {
             return Ok((Some(TakerSwapCommand::Finish), vec![TakerSwapEvent::StartFailed(
                 ERRL!("!check_balance_for_taker_swap {}", e).into(),
             )]));
+        }
+
+        if let Some(refusal) = self.refuse_if_own_payment_unwatchable().await {
+            return Ok(refusal);
         }
 
         let started_at = now_ms() / 1000;
@@ -1502,15 +1527,28 @@ impl TakerSwap {
     }
 
     async fn send_taker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
-        let f = self.taker_coin.check_if_my_payment_sent(
-            self.r().data.taker_payment_lock as u32,
-            &*self.r().my_taker_coin_htlc_pub,
-            self.r().other_taker_coin_htlc_pub.as_slice(),
-            &self.r().secret_hash.0,
-            self.r().data.taker_coin_start_block,
-            &self.r().data.taker_coin_swap_contract_address,
+        // CRD ch.39 R39.11.27: a shielded coin's payment in a swap this process started has nothing to find.
+        let skip_already_sent = super::skips_already_sent_question(
+            &self.taker_coin,
+            &self.uuid,
+            "taker",
+            self.started_in_this_process.load(Ordering::Relaxed),
+            self.r().taker_payment.is_some(),
         );
-        let transaction = match f.compat().await {
+        let already_sent = if skip_already_sent {
+            Ok(None)
+        } else {
+            let f = self.taker_coin.check_if_my_payment_sent(
+                self.r().data.taker_payment_lock as u32,
+                &*self.r().my_taker_coin_htlc_pub,
+                self.r().other_taker_coin_htlc_pub.as_slice(),
+                &self.r().secret_hash.0,
+                self.r().data.taker_coin_start_block,
+                &self.r().data.taker_coin_swap_contract_address,
+            );
+            f.compat().await
+        };
+        let transaction = match already_sent {
             Ok(res) => match res {
                 Some(tx) => tx,
                 None => {
@@ -3042,6 +3080,189 @@ mod taker_swap_tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], TakerSwapEvent::TakerPaymentSent(_)));
         assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    thread_local! {
+        static SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Runs the taker payment step of a swap inside its send deadline, with the already-sent search finding
+    /// nothing. `fresh` is whether this process started the swap, `shielded` whether the coin's HTLC key is
+    /// random per swap, `with_payment_event` whether the log already holds `TakerPaymentSent`. Returns how
+    /// many times the search ran, how many payments were sent, and the step's result.
+    fn run_taker_payment_step(
+        fresh: bool,
+        shielded: bool,
+        with_payment_event: bool,
+    ) -> (usize, usize, (Option<TakerSwapCommand>, Vec<TakerSwapEvent>)) {
+        SEARCHES.with(|c| c.set(0));
+        SENDS.with(|c| c.set(0));
+        let taker_swap = taker_swap_for_payment_stage();
+        taker_swap.w().data.started_at = now_ms() / 1000;
+        taker_swap.w().data.maker_payment_wait = now_ms() / 1000 + 1000;
+        taker_swap.started_in_this_process.store(fresh, Ordering::Relaxed);
+        if with_payment_event {
+            let tx: coins::TransactionEnum = eth_tx_for_test().into();
+            taker_swap.w().taker_payment = Some(TransactionIdentifier {
+                tx_hex: tx.tx_hex().into(),
+                tx_hash: tx.tx_hash(),
+            });
+        }
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(move |_| MockResult::Return(shielded));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            SEARCHES.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(None)))
+        });
+        TestCoin::send_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        let result = block_on(taker_swap.send_taker_payment()).unwrap();
+        (SEARCHES.with(|c| c.get()), SENDS.with(|c| c.get()), result)
+    }
+
+    /// T39.11.r (CRD ch.39 R39.11.27), taker: a swap started in this process with no payment event sends a
+    /// shielded coin's payment without the already-sent query.
+    #[test]
+    fn fresh_taker_swap_skips_the_already_sent_question_for_a_shielded_coin() {
+        let (searches, sends, (command, events)) = run_taker_payment_step(true, true, false);
+        assert_eq!(searches, 0, "the already-sent search must not run");
+        assert_eq!(sends, 1);
+        assert!(matches!(command, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+        assert!(matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentSent(_)]));
+    }
+
+    /// T39.11.r, taker: the skip does not lift the step's deadline: past it, nothing is sent.
+    #[test]
+    fn fresh_taker_swap_past_the_send_deadline_still_fails_without_sending() {
+        SEARCHES.with(|c| c.set(0));
+        SENDS.with(|c| c.set(0));
+        let taker_swap = taker_swap_for_payment_stage();
+        assert!(taker_swap.r().data.maker_payment_wait < now_ms() / 1000);
+        taker_swap.started_in_this_process.store(true, Ordering::Relaxed);
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(|_| MockResult::Return(true));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            SEARCHES.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(None)))
+        });
+        TestCoin::send_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(taker_swap.send_taker_payment()).unwrap();
+
+        assert!(matches!(command, Some(TakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [TakerSwapEvent::TakerPaymentTransactionFailed(err)] => assert!(err.error.contains("Timeout")),
+            other => panic!("expected TakerPaymentTransactionFailed, got {other:?}"),
+        }
+        assert_eq!(SEARCHES.with(|c| c.get()), 0);
+        assert_eq!(SENDS.with(|c| c.get()), 0);
+    }
+
+    /// T39.11.r, taker: a swap restored from its saved log (kick-started) always asks.
+    #[test]
+    fn restored_taker_swap_asks_the_already_sent_question_for_a_shielded_coin() {
+        let (searches, sends, (command, _)) = run_taker_payment_step(false, true, false);
+        assert_eq!(searches, 1, "a restored swap must ask");
+        assert_eq!(sends, 1);
+        assert!(matches!(command, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+    }
+
+    /// T39.11.r, taker: a log that already holds the payment event asks, even in a swap this process started.
+    #[test]
+    fn taker_swap_with_a_payment_event_asks_the_already_sent_question() {
+        let (searches, _, _) = run_taker_payment_step(true, true, true);
+        assert_eq!(searches, 1);
+    }
+
+    /// A taker swap whose maker coin is `maker_ticker` and whose taker coin is `taker_ticker`, both test coins.
+    fn taker_swap_with_coins(maker_ticker: &str, taker_ticker: &str) -> TakerSwap {
+        let key_pair = key_pair_from_seed(SEED).unwrap();
+        TakerSwap::new(
+            test_ctx_with_netid(key_pair),
+            H256Json::default().0.into(),
+            1.into(),
+            1.into(),
+            H264::default(),
+            new_uuid(),
+            None,
+            SwapConfirmationsSettings {
+                maker_coin_confs: 1,
+                maker_coin_nota: false,
+                taker_coin_confs: 1,
+                taker_coin_nota: false,
+            },
+            MmCoinEnum::Test(TestCoin::new(maker_ticker)),
+            MmCoinEnum::Test(TestCoin::new(taker_ticker)),
+            7800,
+            None,
+        )
+    }
+
+    /// T39.11.s (CRD ch.39 R39.11.28): a taker whose own payment coin cannot be watched is refused at start with
+    /// `StartFailed` carrying the coin's error, and the step moves to `Finish`: nothing is sent.
+    #[test]
+    fn taker_whose_payment_coin_cannot_be_watched_fails_at_start() {
+        let swap = taker_swap_with_coins("MAKERCOIN", "SHIELDED");
+        TestCoin::ensure_own_payment_watchable.mock_safe(|coin| {
+            MockResult::Return(Box::pin(futures::future::ready(if coin.ticker() == "SHIELDED" {
+                Err("SHIELDED: the taker could not watch its payment for the maker's spend".to_owned())
+            } else {
+                Ok(())
+            })))
+        });
+        TestCoin::send_taker_fee.mock_safe(|_, _, _, _| panic!("no taker fee may be sent"));
+
+        let (command, events) = block_on(swap.refuse_if_own_payment_unwatchable()).expect("a refusal");
+
+        assert!(matches!(command, Some(TakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [TakerSwapEvent::StartFailed(err)] => {
+                assert!(
+                    err.error
+                        .contains("SHIELDED: the taker could not watch its payment for the maker's spend"),
+                    "{}",
+                    err.error
+                )
+            },
+            other => panic!("expected StartFailed, got {other:?}"),
+        }
+    }
+
+    /// T39.11.s, taker: a coin that can be watched, or one with nothing to check, lets the swap proceed; the
+    /// question is put to the taker coin only, so a taker paying another coin is unaffected by a maker coin
+    /// that could not be watched.
+    #[test]
+    fn taker_paying_another_coin_is_not_refused() {
+        let swap = taker_swap_with_coins("SHIELDED", "TRANSPARENT");
+        TestCoin::ensure_own_payment_watchable.mock_safe(|coin| {
+            MockResult::Return(Box::pin(futures::future::ready(if coin.ticker() == "SHIELDED" {
+                Err("SHIELDED cannot be watched".to_owned())
+            } else {
+                Ok(())
+            })))
+        });
+
+        assert!(block_on(swap.refuse_if_own_payment_unwatchable()).is_none());
+    }
+
+    /// The default answer, unmocked, is `Ok`: a coin with nothing to check never refuses.
+    #[test]
+    fn taker_coin_with_nothing_to_check_is_not_refused() {
+        let swap = taker_swap_with_coins("MAKERCOIN", "TRANSPARENT");
+        assert!(block_on(swap.refuse_if_own_payment_unwatchable()).is_none());
+    }
+
+    /// T39.11.r, taker: a transparent coin asks in a fresh swap and in a restored one.
+    #[test]
+    fn taker_swap_asks_the_already_sent_question_for_a_transparent_coin() {
+        for fresh in [true, false] {
+            let (searches, sends, _) = run_taker_payment_step(fresh, false, false);
+            assert_eq!((searches, sends), (1, 1), "fresh: {fresh}");
+        }
     }
 
     /// T21 (CRD ch.51 R29): the send deadline is the swap's stored `maker_payment_wait`, not start + 1/3 of the lock

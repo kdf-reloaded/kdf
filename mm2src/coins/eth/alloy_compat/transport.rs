@@ -1,8 +1,8 @@
 //! # Purpose
 //!
 //! An [`alloy::transports::Transport`] implementation behind which the EVM coin family reaches its JSON-RPC
-//! nodes. It realizes the multi-node access contract of CRD ch.35 §35.1.F (R35.1.8 -- R35.1.11, R35.1.14,
-//! R35.1.15):
+//! nodes. It realizes the multi-node access contract of CRD ch.35 §35.1.F (R35.1.8 -- R35.1.11, R35.1.14 --
+//! R35.1.16):
 //!
 //! 1. A request is tried on one node at a time in the current order and ends with the first node that
 //!    answers with a decodable, successful result. A connection failure, a non-2xx status, an undecodable body,
@@ -29,6 +29,10 @@
 //!   back; with concurrent requests the last writer wins (CRD ch.35 D35.8 (iii)).
 //! - **Node naming.** Nothing this module logs or returns names a node by more than scheme, host and port
 //!   (R35.1.14): lower-layer texts are scrubbed of the node's URL before they are used.
+//! - **Node log lines.** Every log line that names a node starts with `[<ticker>]` and carries
+//!   ` (node <i> of <n>)` right after the host (R35.1.16); `<i>` is the position the coin's activation request
+//!   gave the node, which each [`Node`] carries, so a single-node (direct) transport reports the node's place in
+//!   the coin's list and a copy made by `with_own_order` reports the same places.
 //! - **`Send + Sync + Clone + 'static`.** Required by the alloy [`Transport`] blanket impl. Internal state is
 //!   `Arc`-shared so cloning the transport shares the node order.
 
@@ -45,7 +49,7 @@ use common::log::{debug, warn};
 use futures::future::{select, Either};
 use tower::Service;
 
-use crate::eth::node_url::{host_only, scrub_node_url};
+use crate::eth::node_url::{host_only, scrub_node_url, ListedNode, NodeSlot};
 use crate::{RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
 /// Per-node bound of the failover path (CRD ch.35 R35.1.10): one attempt, from connecting to the decoded body,
@@ -84,10 +88,15 @@ struct Node {
     uri: http::Uri,
     /// The host-only form of the node (CRD ch.35 R35.1.14): the only way the node is named.
     label: String,
+    /// The coin's ticker and the node's position in the coin's list as the request gave it (R35.1.16).
+    slot: NodeSlot,
 }
 
 impl Node {
     fn scrub(&self, text: &str) -> String { scrub_node_url(text, &self.configured) }
+
+    /// A log line that names this node in the R35.1.14 / R35.1.16 form.
+    fn line(&self, before: &str, after: &str) -> String { self.slot.line(before, &self.label, after) }
 }
 
 /// The result of one HTTP exchange with one node: the body of a 2xx answer, or a description of the failure.
@@ -112,34 +121,39 @@ impl NodeSender for HttpSender {
 }
 
 impl AlloyTransport {
-    /// Build a transport that fails over between `urls` with the [`NODE_CUTOFF_S`] per-node cutoff and a list of
+    /// Build a transport that fails over between `nodes` with the [`NODE_CUTOFF_S`] per-node cutoff and a list of
     /// metrics handlers. Returns `Err` if any URL cannot be parsed as an [`http::Uri`].
     pub fn with_event_handlers(
-        urls: Vec<String>,
+        nodes: Vec<ListedNode>,
         event_handlers: Vec<RpcTransportEventHandlerShared>,
     ) -> Result<Self, String> {
-        Self::with_sender(urls, event_handlers, Arc::new(HttpSender), NODE_CUTOFF_S)
+        Self::with_sender(nodes, event_handlers, Arc::new(HttpSender), NODE_CUTOFF_S)
     }
 
     /// Like [`Self::with_event_handlers`] for a single node that is reached outside the failover path, with the
     /// [`DIRECT_NODE_TIMEOUT_S`] bound instead of the cutoff.
-    pub fn direct(url: String, event_handlers: Vec<RpcTransportEventHandlerShared>) -> Result<Self, String> {
-        Self::with_sender(vec![url], event_handlers, Arc::new(HttpSender), DIRECT_NODE_TIMEOUT_S)
+    pub fn direct(node: ListedNode, event_handlers: Vec<RpcTransportEventHandlerShared>) -> Result<Self, String> {
+        Self::with_sender(vec![node], event_handlers, Arc::new(HttpSender), DIRECT_NODE_TIMEOUT_S)
     }
 
     pub(crate) fn with_sender(
-        urls: Vec<String>,
+        nodes: Vec<ListedNode>,
         event_handlers: Vec<RpcTransportEventHandlerShared>,
         sender: Arc<dyn NodeSender>,
         cutoff_s: f64,
     ) -> Result<Self, String> {
-        let nodes = urls
+        let nodes = nodes
             .into_iter()
-            .map(|configured| {
+            .map(|ListedNode { url: configured, slot }| {
                 // The parse error of `http::Uri` does not echo its input, so it is safe to return.
                 let uri = configured.parse::<http::Uri>().map_err(|e| e.to_string())?;
                 let label = host_only(&configured);
-                Ok(Node { configured, uri, label })
+                Ok(Node {
+                    configured,
+                    uri,
+                    label,
+                    slot,
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         let order = Mutex::new((0..nodes.len()).collect());
@@ -168,6 +182,13 @@ impl AlloyTransport {
                 cutoff_s: self.inner.cutoff_s,
             }),
         }
+    }
+
+    /// `[<ticker>] <before><host> (node <i> of <n>)<after>` for the first node of this transport; the line of a
+    /// provider that talks to one node on its own (CRD ch.35 R35.1.12, R35.1.16). `None` for a transport without
+    /// nodes.
+    pub(crate) fn first_node_line(&self, before: &str, after: &str) -> Option<String> {
+        self.inner.nodes.first().map(|node| node.line(before, after))
     }
 
     /// The host-only names of the nodes in the order the next request starts with.
@@ -224,6 +245,26 @@ fn describe(failure: &NodeFailure, cutoff_s: f64) -> String {
 /// The method label used in logs: the method of a single request, the methods of a batch joined by commas.
 fn method_label(req: &RequestPacket) -> String { req.method_names().collect::<Vec<_>>().join(",") }
 
+/// The warn line of a node that answered with a JSON-RPC error object (CRD ch.35 R35.1.15, R35.1.16).
+fn answered_with_error_line(node: &Node, method: &str, payload: &ErrorPayload) -> String {
+    node.line(
+        "EVM RPC ",
+        &format!(
+            " answered {method} with error {}: {}",
+            payload.code,
+            node.scrub(&payload.message)
+        ),
+    )
+}
+
+/// The debug line of a node attempt that failed in any other way (CRD ch.35 R35.1.8, R35.1.10, R35.1.16).
+fn attempt_failed_line(node: &Node, method: &str, failure: &NodeFailure, cutoff_s: f64) -> String {
+    node.line(
+        "EVM RPC ",
+        &format!(" failed {method}: {}", describe(failure, cutoff_s)),
+    )
+}
+
 /// Serialise the [`RequestPacket`], try the nodes in the current order (CRD ch.35 R35.1.8), fire metrics
 /// callbacks, rotate the answering node to the front (R35.1.9) and return its answer, or the all-failed error
 /// (R35.1.11).
@@ -252,20 +293,9 @@ async fn send_packet(inner: Arc<Inner>, req: RequestPacket) -> Result<ResponsePa
             },
             Err(failure) => {
                 if let NodeFailure::JsonRpc(payload) = &failure {
-                    warn!(
-                        "EVM RPC {} answered {} with error {}: {}",
-                        node.label,
-                        method,
-                        payload.code,
-                        node.scrub(&payload.message)
-                    );
+                    warn!("{}", answered_with_error_line(node, &method, payload));
                 } else {
-                    debug!(
-                        "EVM RPC {} failed {}: {}",
-                        node.label,
-                        method,
-                        describe(&failure, inner.cutoff_s)
-                    );
+                    debug!("{}", attempt_failed_line(node, &method, &failure, inner.cutoff_s));
                 }
                 failures.push((index, failure));
             },

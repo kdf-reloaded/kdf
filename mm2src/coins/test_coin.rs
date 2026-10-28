@@ -248,6 +248,10 @@ impl SwapOps for TestCoin {
         None
     }
 
+    fn htlc_key_is_random_per_swap(&self) -> bool { false }
+
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> { Ok(()) }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }
 
     fn negotiate_swap_contract_addr(
