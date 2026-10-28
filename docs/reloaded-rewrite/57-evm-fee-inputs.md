@@ -629,8 +629,11 @@ estimation** before the limit is used. Its complete contract:
 > `estimate_gas_mult` reaches the legacy ERC-20 `approve` only (items 5-6). Every other
 > swap transaction (the taker fee, the payments, the spends, the refunds, and all
 > version-two calls) uses a fixed limit, so the means of changing one is the `gas_limit`
-> / `gas_limit_v2` block (R57.5.1, R57.6.1), set per chain on the platform coin's entry,
-> from which its tokens inherit (R57.5.3). On a chain that charges the gas *limit* rather
+> / `gas_limit_v2` block (R57.5.1, R57.6.1). The block can be set on the platform coin's
+> entry, from which its tokens inherit, or on a token's own entry (R57.5.3). A token's own
+> block replaces the platform coin's block as a whole: a member the token's block omits
+> takes the default of R57.5.2, not the platform coin's value, so a block copied to a token
+> must carry every member that token needs. On a chain that charges the gas *limit* rather
 > than the gas used (Monad does), every unit of limit above the real use is paid, so the
 > limits of such a chain should be set close to measured use, with a margin; on a chain
 > that refunds unused gas a generous limit costs only the up-front balance. A token
@@ -642,9 +645,10 @@ estimation** before the limit is used. Its complete contract:
 > Nothing here changes behavior; whether the multiplier should ever scale the fixed
 > limits is open and is not decided by this paragraph.
 
-**R57.5.4** *Implementation status (gap).* Reloaded reads neither
-`gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
-constants inherited from the pre-anchor baseline, and they differ from
+**R57.5.4** *Implementation status (gap; closed 2026-10-28, see the "As built"
+note below).* When this item was written Reloaded read neither
+`gas_limit` nor `gas_limit_v2`. Its V1 gas limits were compile-time
+constants inherited from the pre-anchor baseline, and they differed from
 the defaults of R57.5.2:
 
 | Operation | Reloaded (baseline constant) | R57.5.2 default |
