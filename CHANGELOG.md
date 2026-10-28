@@ -82,7 +82,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
   coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
   update that changes only the price, the minimum volume or the confirmation settings skips the
-  pre-trade spend check and makes no fee request. Detail: PR #TBD; CRD ch.38 R38.6.3a, R38.6.6j,
+  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
   ch.57 R57.2.6, ch.60 R60.6.7.
 
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the

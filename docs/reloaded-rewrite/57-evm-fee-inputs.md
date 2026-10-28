@@ -205,7 +205,7 @@ makes its node queries one after another, contrary to R57.2.1.
 > closely, set `fee_estimate_cache_secs` to `0`.
 
 > **As-built note (2026-10-27, clean-side record).** R57.2.1's concurrency and
-> R57.2.6's first point are implemented in PR #TBD. The resolution now issues
+> R57.2.6's first point are implemented in PR #114. The resolution now issues
 > its queries together, and an order-posting request resolves the gas price
 > once per coin, through the same request scope as chapter 38 R38.6.6j. The
 > cache is not implemented yet.

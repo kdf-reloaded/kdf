@@ -36,7 +36,7 @@
 | # | Content | Rules | State |
 |---|---|---|---|
 | 0 | CRD branch `crd/order-post-latency` (PR #95) | all of the above | merged 2026-10-27 |
-| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | implemented (PR #TBD) |
+| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | implemented (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs`; F5 read spreading `electrum_spread_reads` | R38.6.6j items 2–4, R57.2.6, R38.6.4a | after pass 1 |
 | 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | ready; after pass 1 |
 

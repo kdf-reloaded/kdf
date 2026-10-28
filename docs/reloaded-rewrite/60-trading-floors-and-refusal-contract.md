@@ -544,7 +544,7 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    fee rate at most once (chapter 38 R38.6.6j, chapter 57 R57.2.6).
 
 > **As-built note (2026-10-27, clean-side record).** The Amendment under item 3
-> and item 8 are implemented in PR #TBD. `update_maker_order` runs the check
+> and item 8 are implemented in PR #114. `update_maker_order` runs the check
 > only for a volume delta or `max`. The check's fee reading is shared with the
 > request's trade-fee calculation through the request scope of chapter 38
 > R38.6.6j.
