@@ -1,6 +1,7 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::rpc_clients::electrum_pool::electrum_server_order;
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
                                ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -651,11 +652,10 @@ pub trait UtxoCoinBuilderCommonOps {
             max_connected,
             client_name,
             timings: ElectrumPoolTimings::default(),
+            order: electrum_server_order(&ctx),
         });
-        for server in &servers {
-            if let Err(e) = client.add_server(server) {
-                log!("Error " (e) " using " [server] ". Address won't be used");
-            }
+        for (server, e) in client.add_servers(&servers) {
+            log!("Error " (e) " using " [server] ". Address won't be used");
         }
         // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
         // coin lands here) leaves the pool; with none left there is nothing to wait for.

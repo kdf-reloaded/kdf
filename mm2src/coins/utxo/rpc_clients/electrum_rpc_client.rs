@@ -319,9 +319,15 @@ impl ElectrumClientImpl {
         ));
     }
 
-    /// Adds a server to the pool. The position in the call order is the server's priority. A server
+    /// Adds a server to the pool. The position in the call order is the server's priority; see [`Self::add_servers`]. A server
     /// this build cannot use stays in the pool as removed and the reason is returned.
     pub fn add_server(&self, req: &ElectrumRpcRequest) -> Result<(), String> { self.pool.add_server(req) }
+
+    /// Adds the servers, given in the listed order, ranked by the pool's order: drawn once at random, or
+    /// the listed order (CRD ch.38 R38.6.4b-R). Returns the servers this build cannot use, with the reason.
+    pub fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(ElectrumRpcRequest, String)> {
+        self.pool.add_servers(reqs)
+    }
 
     /// The activation probe (CRD ch.38 R38.6.4k-R): connects every server of the pool at once and
     /// returns when the first connection is established, or fails with the failure of each server.

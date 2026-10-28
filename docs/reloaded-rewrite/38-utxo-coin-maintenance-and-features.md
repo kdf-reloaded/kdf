@@ -801,6 +801,45 @@ R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
    reach and runs its maintenance on the regular cadence.
 4. A shielded coin has no such pool (the carve-out above).
 
+R38.6.4b-R **Server order drawn once at activation (Reloaded-original,
+maintainer decision 2026-10-28; amends R38.6.4b item 1 for Reloaded).**
+1. The top-level `MM2.json` string `electrum_server_order` selects the
+   coin's priority order. Two values are recognized:
+   - `random` (the default): building the coin puts the listed servers into a
+     uniformly random order once;
+   - `listed`: the listed order is kept, as in R38.6.4b item 1.
+
+   An absent switch means `random`. Any other value means `random`, and the
+   activation logs one warning naming the switch and the value.
+
+   The selected order is the coin's priority order wherever R38.6.4b –
+   R38.6.4k-R speak of priority or rank:
+   - the maintained set, and maintenance with displacement (R38.6.4c);
+   - routing, including the retry's visiting order (R38.6.4f);
+   - the activation probe's offer rule (R38.6.4k-R item 3).
+2. The order is held only in the running coin instance. It is not persisted,
+   and a re-activation draws a fresh order. A token or coin that reuses a
+   platform's Electrum client reuses that client's order.
+3. Two further values, `mixed` and `measured`, are reserved for the measured
+   server order planned as a follow-up (`docs/plans/electrum-measured-server-order.md`).
+   Until that follow-up lands, they fall back to `random` as unrecognized
+   values do.
+
+*Rationale.* Every wallet ships the same coins file, so ranking by list
+position sends every user to the same first server and leaves the later
+servers almost unused. A one-time draw spreads users across the listed
+servers while each node's own order stays stable, as the EVM node list already
+does (chapter 35 R35.1.7).
+
+> **Reloaded divergence (informative).** The reference ranks by list position.
+> The draw has no wire effect and no peer observes it: it changes only which of
+> the operator's own configured servers a node uses. By the second arm of the
+> default-side rule of `docs/COMPAT_SWITCHES.md`, Reloaded's variant is the
+> default.
+>
+> **Compatibility:** for behavior matching GLEEC KDF, set
+> `electrum_server_order` to `listed`.
+
 R38.6.4c **Maintenance of the set.**
 1. A maintenance pass runs at activation, then every 5 minutes, and at once
    whenever the maintained count falls below the floor.
@@ -1143,6 +1182,21 @@ assert each of the following (R38.6.4k-R):
 - with every server dead, the build fails within *B* with a failure naming the
   coin and each server's `host:port`, reported as `Transport`;
 - the build never waits longer than *B*.
+
+T38.6.4.13-R *Server order drawn at activation.* With an injected permutation,
+a test shall assert that the maintained set, the routing order, the retry's
+visiting order, displacement and the probe's offer rule all follow the drawn
+order. With `electrum_server_order` set to `listed`, the listed order is kept.
+Each of these settings shall parse as stated:
+- an absent switch means `random`;
+- `random` means `random`;
+- `listed` means `listed`;
+- any other value, including `mixed`, `measured`, a different letter case or
+  a non-string, means `random` with one warning.
+
+Two activations shall draw independently of each other. Over many draws with
+the real random source, each server shall come first roughly equally often,
+within generous bounds (R38.6.4b-R).
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -1723,6 +1777,8 @@ R38.8.6 **Tests (two-direction, observable).**
   maintainer's decision of 2026-10-27 and this repository's own code and
   tests:
   - R38.6.4k-R with its rationale and divergence note, and T38.6.4.12-R;
+  - R38.6.4b-R (the `electrum_server_order` switch, maintainer decision of
+    2026-10-28) with its rationale and divergence note, and T38.6.4.13-R;
   - the Reloaded sentences in R38.6.4e item 5, R38.6.4f item 2, R38.6.4h and
     R38.6.4j item 4;
   - the "no later than" wording of T38.6.4.11;

@@ -1,9 +1,10 @@
-//! Tests of the Electrum connection pool against scripted stub servers (CRD ch.38 T38.6.4.1 - T38.6.4.12-R).
+//! Tests of the Electrum connection pool against scripted stub servers (CRD ch.38 T38.6.4.1 - T38.6.4.13-R).
 //!
 //! The pool is built with millisecond timings, so no test waits real seconds. The production figures are
 //! pinned in `electrum_pool::budget_tests`; the 12-hour suspension cap is tested there with a clock stub.
 
-use super::electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerStateSnapshot};
+use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerOrder,
+                           ServerStateSnapshot};
 use super::electrum_stub_server::{StubBehavior, StubServer};
 use super::*;
 use crate::utxo::UtxoRpcMode;
@@ -56,17 +57,27 @@ fn pool_client_of(
     max_connected: Option<usize>,
     timings: ElectrumPoolTimings,
 ) -> Arc<ElectrumClientImpl> {
+    pool_client_ordered(requests, min_connected, max_connected, timings, ServerOrder::Listed)
+}
+
+/// The pool of the listed `requests`, ranked by `order` (R38.6.4b-R). Every other helper ranks by the listed order.
+fn pool_client_ordered(
+    requests: Vec<ElectrumRpcRequest>,
+    min_connected: usize,
+    max_connected: Option<usize>,
+    timings: ElectrumPoolTimings,
+    order: ServerOrder,
+) -> Arc<ElectrumClientImpl> {
     let mut client = ElectrumClientImpl::new(TICKER.into(), vec![]);
     client.configure_pool(ElectrumPoolOptions {
         min_connected,
         max_connected,
         client_name: Some(CLIENT_NAME.into()),
         timings,
+        order,
     });
-    for request in &requests {
-        // A server that cannot be used stays in the pool as removed; the tests look at the snapshot.
-        let _ = client.add_server(request);
-    }
+    // A server that cannot be used stays in the pool as removed; the tests look at the snapshot.
+    let _ = client.add_servers(&requests);
     Arc::new(client)
 }
 
@@ -1204,4 +1215,225 @@ fn a_down_stub_keeps_its_port_reserved_and_refuses_connections() {
         drop(down);
         assert!(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.is_ok());
     });
+}
+
+// ---- T38.6.4.13-R: the server order drawn at activation ---------------------------------------------
+
+/// The injected draw of these tests: rank 0 is the listed server 2, rank 1 the listed server 0, rank 2 the
+/// listed server 1.
+fn drawn() -> ServerOrder { ServerOrder::Fixed(vec![2, 0, 1]) }
+
+fn three_servers(
+    servers: &[StubServer; 3],
+    max_connected: Option<usize>,
+    order: ServerOrder,
+) -> Arc<ElectrumClientImpl> {
+    pool_client_ordered(
+        servers.iter().map(|server| server.request()).collect(),
+        1,
+        max_connected,
+        test_timings(),
+        order,
+    )
+}
+
+async fn three_answering() -> [StubServer; 3] {
+    [
+        StubServer::start(StubBehavior::Answer).await,
+        StubServer::start(StubBehavior::Answer).await,
+        StubServer::start(StubBehavior::Answer).await,
+    ]
+}
+
+fn ranked_addrs(client: &ElectrumClientImpl) -> Vec<String> {
+    client
+        .pool_snapshot()
+        .iter()
+        .map(|server| server.addr.clone())
+        .collect()
+}
+
+/// R38.6.4b-R item 1: the rank is the position in the drawn order; the maintained set and the routing follow it.
+#[test]
+fn t38_6_4_13_r_the_maintained_set_and_the_routing_follow_the_drawn_order() {
+    block_on(async {
+        let servers = three_answering().await;
+        let client = three_servers(&servers, Some(2), drawn());
+        assert_eq!(ranked_addrs(&client), vec![
+            servers[2].addr(),
+            servers[0].addr(),
+            servers[1].addr()
+        ]);
+
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client), vec![0, 1]);
+        assert_eq!(snap(&client, 0).addr, servers[2].addr());
+        assert_eq!(snap(&client, 1).addr, servers[0].addr());
+        assert!(!snap(&client, 2).connected);
+        assert_eq!(ask(&client, "server.ping").await.unwrap(), servers[2].addr());
+    });
+}
+
+/// R38.6.4f: the retry visits the servers in the drawn order.
+#[test]
+fn t38_6_4_13_r_the_retry_visits_the_servers_in_the_drawn_order() {
+    block_on(async {
+        let servers = three_answering().await;
+        let timings = ElectrumPoolTimings {
+            call_budget: ms(1_200),
+            ..test_timings()
+        };
+        let client = pool_client_ordered(
+            servers.iter().map(|server| server.request()).collect(),
+            1,
+            None,
+            timings,
+            drawn(),
+        );
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client), vec![0, 1, 2]);
+        // Rank 0 (listed server 2) swallows the request: rank 1 (listed server 0) answers, rank 2 is not asked.
+        servers[2].set_behavior(StubBehavior::BlackHoleRequests).await;
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[0].addr()
+        );
+        assert_eq!(servers[2].requests("blockchain.block.header"), 1);
+        assert_eq!(servers[0].requests("blockchain.block.header"), 1);
+        assert_eq!(servers[1].requests("blockchain.block.header"), 0);
+    });
+}
+
+/// R38.6.4c: a recovered server outranking the lowest-ranked member displaces it, by the drawn order.
+#[test]
+fn t38_6_4_13_r_displacement_follows_the_drawn_order() {
+    block_on(async {
+        let servers = [
+            StubServer::start(StubBehavior::Answer).await,
+            StubServer::start(StubBehavior::Answer).await,
+            StubServer::start(StubBehavior::Down).await,
+        ];
+        let client = three_servers(&servers, Some(1), drawn());
+        start(&client);
+        // Rank 0 (listed server 2) is down: rank 1 (listed server 0) is maintained.
+        wait_until("rank 1 maintained", || maintained(&client) == vec![1]).await;
+
+        servers[2].set_behavior(StubBehavior::Answer).await;
+        wait_until("the suspension of rank 0 to lapse", || {
+            snap(&client, 0).suspended_until.is_none()
+        })
+        .await;
+        client.pool.trigger();
+        wait_until("rank 0 displaces rank 1", || maintained(&client) == vec![0]).await;
+        assert_eq!(snap(&client, 0).addr, servers[2].addr());
+    });
+}
+
+/// R38.6.4k-R item 3: the probe keeps the highest-ranked server of those that connected, by the drawn order.
+#[test]
+fn t38_6_4_13_r_the_probe_keeps_the_highest_ranked_by_the_drawn_order() {
+    block_on(async {
+        let servers = three_answering().await;
+        // Rank 0 (listed server 2) connects last, rank 1 (listed server 0) after rank 2 (listed server 1).
+        servers[2].set_accept_delay(ms(120));
+        servers[0].set_accept_delay(ms(60));
+        let client = three_servers(&servers, Some(1), drawn());
+        client.activation_probe().await.unwrap();
+        wait_for_probe_end(&client).await;
+        assert_eq!(maintained(&client), vec![0]);
+        assert_eq!(snap(&client, 0).addr, servers[2].addr());
+    });
+}
+
+/// R38.6.4b-R item 3: with the switch at listed the listed order is the priority.
+#[test]
+fn t38_6_4_13_r_with_the_switch_at_listed_the_listed_order_is_kept() {
+    block_on(async {
+        let servers = three_answering().await;
+        let client = three_servers(&servers, Some(2), ServerOrder::Listed);
+        assert_eq!(ranked_addrs(&client), vec![
+            servers[0].addr(),
+            servers[1].addr(),
+            servers[2].addr()
+        ]);
+        client.pool.run_pass().await;
+        assert_eq!(maintained(&client), vec![0, 1]);
+        assert_eq!(ask(&client, "server.ping").await.unwrap(), servers[0].addr());
+    });
+}
+
+/// R38.6.4b-R item 1: `random` is the default, `listed` keeps the listed order, anything else is `random` with
+/// one warning naming the switch and the value.
+#[test]
+fn t38_6_4_13_r_the_switch_parses_as_stated() {
+    let order_of = |conf: Json| parse_server_order(&conf);
+    for conf in [json!({}), json!({ "electrum_server_order": "random" })] {
+        let (order, warning) = order_of(conf.clone());
+        assert!(matches!(order, ServerOrder::Random), "{conf}");
+        assert_eq!(warning, None, "{conf}");
+    }
+    let (order, warning) = order_of(json!({ "electrum_server_order": "listed" }));
+    assert!(matches!(order, ServerOrder::Listed));
+    assert_eq!(warning, None);
+
+    for (value, shown) in [
+        (json!("mixed"), "mixed"),
+        (json!("measured"), "measured"),
+        (json!("Listed"), "Listed"),
+        (json!(true), "true"),
+        (json!(1), "1"),
+    ] {
+        let (order, warning) = order_of(json!({ "electrum_server_order": value }));
+        assert!(matches!(order, ServerOrder::Random), "{value}");
+        assert_eq!(
+            warning.as_deref(),
+            Some(format!("electrum_server_order \"{shown}\" is not recognized; using \"random\"").as_str()),
+            "{value}"
+        );
+    }
+}
+
+/// R38.6.4b-R item 2: two activations draw independently, and a draw keeps every server exactly once.
+#[test]
+fn t38_6_4_13_r_two_draws_with_different_seeds_differ() {
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    let listed: Vec<usize> = (0..8).collect();
+    let draw = |seed: u64| ServerOrder::shuffle_with(listed.clone(), &mut SmallRng::seed_from_u64(seed));
+    let (first, second) = (draw(1), draw(2));
+    assert_ne!(first, second);
+    for order in [&first, &second] {
+        let mut sorted = (*order).clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, listed);
+    }
+    // The same seed draws the same order: the draw is the only source of difference.
+    assert_eq!(draw(1), first);
+
+    // The shuffled pool holds every listed server once.
+    block_on(async {
+        let servers = three_answering().await;
+        let client = three_servers(&servers, None, ServerOrder::Random);
+        let mut ranked = ranked_addrs(&client);
+        ranked.sort();
+        let mut expected: Vec<String> = servers.iter().map(|server| server.addr()).collect();
+        expected.sort();
+        assert_eq!(ranked, expected);
+    });
+}
+
+/// R38.6.4b-R: over many draws with the real random source each server comes first about equally often.
+#[test]
+fn t38_6_4_13_r_each_server_comes_first_about_equally_often() {
+    let mut rng = common::small_rng();
+    let mut first = [0usize; 3];
+    for _ in 0..900 {
+        first[ServerOrder::shuffle_with(vec![0usize, 1, 2], &mut rng)[0]] += 1;
+    }
+    for (server, count) in first.iter().enumerate() {
+        assert!(
+            (200..=400).contains(count),
+            "server {server} came first {count} times of 900: {first:?}"
+        );
+    }
 }

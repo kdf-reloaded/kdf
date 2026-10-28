@@ -51,8 +51,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **Electrum servers are kept in priority order and recover.** The listed order is the priority and a
-  recovered higher-priority server is used again; a server that keeps failing is skipped for a growing
+- **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
+  random once when the coin is enabled, so users spread across the listed servers (set
+  `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
+  used again; a server that keeps failing is skipped for a growing
   time (20 s doubling up to 12 h); if every connected server fails, every listed server is tried;
   connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
   server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as

@@ -1,7 +1,8 @@
 //! The Electrum connection pool of a coin (CRD ch.38 R38.6.4b-R38.6.4k-R).
 //!
 //! The servers listed at activation form the pool for the coin's lifetime. The pool keeps a *maintained
-//! set* of connections between a floor and a ceiling, prefers the servers listed first, suspends a
+//! set* of connections between a floor and a ceiling, prefers the servers ranked first (the order
+//! drawn once at activation, or the listed order, see [`ServerOrder`]), suspends a
 //! server that keeps failing for a growing time, routes every request through the maintained set in
 //! priority order, retries over every server of the pool when the maintained set fails, and derives
 //! the time each attempt may take from the call's overall budget (R38.6.4j).
@@ -11,10 +12,12 @@
 
 use super::electrum_rpc_client::{open_session, server_spec, ServerSpec, Session, SessionEnded};
 use super::*;
-use common::log::debug;
+use common::log::{debug, warn};
 use futures::channel::mpsc as futures_mpsc;
 use futures::future::{join_all, select as select_future, Either as EitherFuture};
 use futures::stream::FuturesUnordered;
+use mm2_core::mm_ctx::MmArc;
+use rand::seq::SliceRandom;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Mutex as StdMutex, RwLock, Weak};
@@ -65,6 +68,79 @@ impl Default for ElectrumPoolTimings {
     }
 }
 
+/// The order in which the listed servers are ranked (CRD ch.38 R38.6.4b-R). The rank is the position in
+/// that order and the only notion of priority the pool has.
+#[derive(Clone, Debug, Default)]
+pub enum ServerOrder {
+    /// The listed order is the priority.
+    #[default]
+    Listed,
+    /// A uniformly random order, drawn once when the servers are added.
+    Random,
+    /// Tests: the server at rank `i` is the listed server `order[i]`.
+    #[cfg(test)]
+    Fixed(Vec<usize>),
+}
+
+impl ServerOrder {
+    /// A uniformly random order of `items`, drawn from `rng`.
+    pub(super) fn shuffle_with<T, R: rand::Rng>(mut items: Vec<T>, rng: &mut R) -> Vec<T> {
+        items.shuffle(rng);
+        items
+    }
+
+    /// Puts `items`, given in the listed order, into the pool's order.
+    pub(super) fn arrange<T>(&self, items: Vec<T>) -> Vec<T> {
+        match self {
+            ServerOrder::Listed => items,
+            ServerOrder::Random => ServerOrder::shuffle_with(items, &mut common::small_rng()),
+            #[cfg(test)]
+            ServerOrder::Fixed(order) => {
+                assert_eq!(order.len(), items.len(), "the injected order must cover every server");
+                let mut listed: Vec<Option<T>> = items.into_iter().map(Some).collect();
+                order
+                    .iter()
+                    .map(|index| listed[*index].take().expect("the injected order repeats a server"))
+                    .collect()
+            },
+        }
+    }
+}
+
+/// The order `conf` asks for, and the warning to log when its `electrum_server_order` is not recognized.
+pub(super) fn parse_server_order(conf: &Json) -> (ServerOrder, Option<String>) {
+    match &conf["electrum_server_order"] {
+        Json::Null => (ServerOrder::Random, None),
+        Json::String(value) if value == "random" => (ServerOrder::Random, None),
+        Json::String(value) if value == "listed" => (ServerOrder::Listed, None),
+        other => {
+            let shown = match other {
+                Json::String(value) => value.clone(),
+                other => other.to_string(),
+            };
+            (
+                ServerOrder::Random,
+                Some(format!(
+                    "electrum_server_order \"{shown}\" is not recognized; using \"random\""
+                )),
+            )
+        },
+    }
+}
+
+/// CRD ch.38 R38.6.4b-R: the `MM2.json` string `electrum_server_order`. `random` (the default, also used when
+/// the key is absent) draws the order once at activation; `listed` keeps the listed order. Any other value
+/// is taken as `random` and one warning is logged.
+///
+/// **Compatibility:** for behaviour matching GLEEC KDF, set `electrum_server_order` to `listed`.
+pub(crate) fn electrum_server_order(ctx: &MmArc) -> ServerOrder {
+    let (order, warning) = parse_server_order(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    order
+}
+
 /// How a coin's pool is set up (CRD ch.38 R38.6.4b).
 #[derive(Clone, Debug)]
 pub struct ElectrumPoolOptions {
@@ -75,6 +151,8 @@ pub struct ElectrumPoolOptions {
     /// The client name offered in `server.version`. `None` skips the version negotiation.
     pub client_name: Option<String>,
     pub timings: ElectrumPoolTimings,
+    /// How [`ElectrumClientImpl::add_servers`] ranks the listed servers.
+    pub order: ServerOrder,
 }
 
 impl Default for ElectrumPoolOptions {
@@ -84,6 +162,7 @@ impl Default for ElectrumPoolOptions {
             max_connected: None,
             client_name: None,
             timings: ElectrumPoolTimings::default(),
+            order: ServerOrder::default(),
         }
     }
 }
@@ -164,7 +243,7 @@ struct SlotState {
     suspension: Suspension,
 }
 
-/// One server of the pool. The position in the configured list is the priority (`rank`, 0 is the highest).
+/// One server of the pool. The position in the pool's order is the priority (`rank`, 0 is the highest).
 pub(super) struct ServerSlot {
     rank: usize,
     addr: String,
@@ -274,6 +353,7 @@ pub(super) struct PoolShared {
     max_connected: Option<usize>,
     pub(super) timings: ElectrumPoolTimings,
     client_name: Option<String>,
+    order: ServerOrder,
     protocol_version: OrdRange<f32>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     next_session_id: AtomicU64,
@@ -300,6 +380,7 @@ impl PoolShared {
             max_connected: options.max_connected,
             timings: options.timings,
             client_name: options.client_name,
+            order: options.order,
             protocol_version,
             event_handlers,
             next_session_id: AtomicU64::new(1),
@@ -324,6 +405,16 @@ impl PoolShared {
             Some(reason) => Err(reason),
             None => Ok(()),
         }
+    }
+
+    /// Adds the servers, given in the listed order, ranked by the pool's order (R38.6.4b-R): the order is
+    /// drawn here, once. Returns the servers this build cannot use, with the reason.
+    pub(super) fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(ElectrumRpcRequest, String)> {
+        self.order
+            .arrange(reqs.to_vec())
+            .into_iter()
+            .filter_map(|req| self.add_server(&req).err().map(|reason| (req, reason)))
+            .collect()
     }
 
     pub(super) fn slots(&self) -> Vec<Arc<ServerSlot>> {
