@@ -47,8 +47,9 @@ fn shielded_unavailable_error(ticker: &str) -> ZcoinInitError {
 
 /// The backend an activation request asks for. A Light-mode request with no lightwalletd endpoint is
 /// a configuration error naming the coin, reported before any shielded work begins -- not a
-/// transient backend failure (CRD ch.39 R39.11.5). `electrum_servers` and the Electrum connection
-/// counts are accepted on the wire and have no effect here (R39.11.5, R39.11.7). A Native-mode request is
+/// transient backend failure (CRD ch.39 R39.11.5). `electrum_servers` is accepted on the wire and kept for the
+/// fallback of three swap-path questions (R39.11.25); nothing connects to it here, and an empty list means no
+/// fallback (R39.11.5, R39.11.7). The Electrum connection counts are accepted and ignored. A Native-mode request is
 /// refused the same way: native mode is not supported in this release (R39.11.1a); the request still
 /// deserializes, so the wire shape is unchanged.
 fn zcoin_backend(ticker: &str, mode: &ZcoinRpcMode) -> Result<ZcoinBackend, ZcoinInitError> {
@@ -59,7 +60,9 @@ fn zcoin_backend(ticker: &str, mode: &ZcoinRpcMode) -> Result<ZcoinBackend, Zcoi
             error: format!("{ticker} native mode is not supported in this release; use light mode"),
         }),
         ZcoinRpcMode::Light {
-            light_wallet_d_servers, ..
+            light_wallet_d_servers,
+            electrum_servers,
+            ..
         } => {
             if light_wallet_d_servers.is_empty() {
                 return Err(ZcoinInitError::CoinCreationError {
@@ -69,6 +72,7 @@ fn zcoin_backend(ticker: &str, mode: &ZcoinRpcMode) -> Result<ZcoinBackend, Zcoi
             }
             Ok(ZcoinBackend::Light {
                 light_wallet_d_servers: light_wallet_d_servers.clone(),
+                electrum_servers: electrum_servers.clone(),
             })
         },
     }
@@ -155,20 +159,21 @@ pub enum ZcoinRpcMode {
     /// lightwalletd backend. `"Electrum"` is accepted as a synonym of `"Light"`, as the public
     /// `ZcoinRpcModeEnum` documents it (CRD ch.39 R39.10.4).
     ///
-    /// lightwalletd is the **sole** backend of a Light-mode coin (R39.11.1, R39.11.7): no Electrum
-    /// connection is opened, attempted, probed or reported on, and activation never fails for an
-    /// Electrum-related reason.
+    /// lightwalletd serves the whole of a Light-mode coin (R39.11.1, R39.11.7): no Electrum connection
+    /// is opened, attempted, probed or reported on at activation, and activation never fails for an
+    /// Electrum-related reason. The Electrum servers are kept for the fallback of R39.11.25.
     #[serde(alias = "Electrum")]
     Light {
-        /// Accepted and ignored (R39.11.5): deployed KDF-family wallets send it unconditionally and a
-        /// parse rejection would break every one of them. It may be absent or empty. `servers` is
-        /// accepted as a synonym (CRD ch.39 R39.10.4).
+        /// Accepted and optional (R39.11.5): deployed KDF-family wallets send it unconditionally. It may
+        /// be absent or empty, which means no fallback. Its servers are used for one thing only, the
+        /// fallback of three swap-path questions (R39.11.25), and are connected on its first use.
+        /// `servers` is accepted as a synonym (CRD ch.39 R39.10.4).
         #[serde(default, alias = "servers")]
         electrum_servers: Vec<ElectrumRpcRequest>,
-        /// Accepted and ignored, like `electrum_servers` (R39.11.5).
+        /// Accepted and ignored (R39.11.5).
         #[serde(default)]
         min_connected: Option<usize>,
-        /// Accepted and ignored, like `electrum_servers` (R39.11.5).
+        /// Accepted and ignored (R39.11.5).
         #[serde(default)]
         max_connected: Option<usize>,
         /// Mandatory and non-empty (R39.11.5): the only backend of the coin.
@@ -1138,10 +1143,11 @@ mod tests {
         }
     }
 
-    /// T39.11.b / R39.11.5, R39.11.7: absent, empty and populated (unreachable) `electrum_servers`
-    /// all activate identically, because the field is accepted and ignored.
+    /// T39.11.b, T39.11.p / R39.11.5, R39.11.7, R39.11.25(e): absent, empty and populated (unreachable)
+    /// `electrum_servers` all activate: the backend's lightwalletd list is the same, the Electrum servers
+    /// are kept for the fallback exactly as listed, and nothing here connects to them.
     #[test]
-    fn electrum_servers_are_accepted_and_have_no_effect() {
+    fn electrum_servers_are_accepted_kept_for_the_fallback_and_never_connected_at_activation() {
         let lightd = json!(["https://lightd1.example:443", "https://lightd2.example:443"]);
         let variants = [
             json!({ "light_wallet_d_servers": lightd }),
@@ -1154,11 +1160,18 @@ mod tests {
             }),
         ];
         let mut backends = Vec::new();
+        let mut kept = Vec::new();
         for rpc_data in variants {
             let params: ZcoinActivationParams =
                 serde_json::from_value(json!({ "mode": { "rpc": "Light", "rpc_data": rpc_data } })).unwrap();
             match zcoin_backend("ARRR", &params.mode).ok().unwrap() {
-                ZcoinBackend::Light { light_wallet_d_servers } => backends.push(light_wallet_d_servers),
+                ZcoinBackend::Light {
+                    light_wallet_d_servers,
+                    electrum_servers,
+                } => {
+                    backends.push(light_wallet_d_servers);
+                    kept.push(electrum_servers.into_iter().map(|s| s.url).collect::<Vec<_>>());
+                },
                 #[cfg(not(target_arch = "wasm32"))]
                 ZcoinBackend::Native => panic!("Light mode must select the lightwalletd backend"),
             }
@@ -1168,6 +1181,10 @@ mod tests {
             "https://lightd2.example:443"
         ]);
         assert!(backends.iter().all(|servers| servers == &backends[0]));
+        assert_eq!(kept, vec![Vec::<String>::new(), Vec::<String>::new(), vec![
+            "unreachable.invalid:10008".to_owned(),
+            "also-unreachable.invalid:10008".to_owned()
+        ],]);
     }
 
     /// T39.11.b / R39.11.6: an unreachable endpoint set and an excluded one are different failures.

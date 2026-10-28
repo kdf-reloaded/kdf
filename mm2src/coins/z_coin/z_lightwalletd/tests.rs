@@ -418,6 +418,11 @@ pub(crate) struct Script {
     pub(crate) history: Vec<RawTx>,
     /// How long a transparent-history request takes to be answered.
     pub(crate) history_delay: Option<std::time::Duration>,
+    /// What every transparent-address read (history, unspent listing) fails with, when set: an endpoint
+    /// whose node keeps no address index answers each of them with the same rejection.
+    pub(crate) address_error: Option<EndpointError>,
+    /// The block hash `GetBlock` answers per height; a height not listed is unscripted.
+    pub(crate) block_hashes: HashMap<u64, [u8; 32]>,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -492,6 +497,15 @@ impl LightwalletdTransport for FakeTransport {
         Ok(1_000 + height as u32)
     }
 
+    async fn block_hash(&self, server: &str, height: u64) -> Result<[u8; 32], EndpointError> {
+        self.record(server, "block");
+        self.scripts
+            .lock()
+            .get(server)
+            .and_then(|s| s.block_hashes.get(&height).copied())
+            .ok_or_else(Self::unscripted)
+    }
+
     async fn transaction(&self, server: &str, txid: [u8; 32]) -> Result<RawTx, EndpointError> {
         self.record(server, "tx");
         *self.last_txid.lock() = Some(txid);
@@ -548,6 +562,13 @@ impl LightwalletdTransport for FakeTransport {
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+        let refused = self.scripts.lock().get(server).and_then(|s| s.address_error.clone());
+        if let Some(error) = refused {
+            return WindowRead {
+                txs: Vec::new(),
+                error: Some(WindowError::from(&error)),
+            };
+        }
         let txs = self
             .scripts
             .lock()
@@ -565,7 +586,10 @@ impl LightwalletdTransport for FakeTransport {
 
     async fn address_utxos(&self, server: &str, _address: &str) -> Result<Vec<TransparentUtxo>, EndpointError> {
         self.record(server, "utxos");
-        Ok(Vec::new())
+        match self.scripts.lock().get(server).and_then(|s| s.address_error.clone()) {
+            Some(error) => Err(error),
+            None => Ok(Vec::new()),
+        }
     }
 }
 

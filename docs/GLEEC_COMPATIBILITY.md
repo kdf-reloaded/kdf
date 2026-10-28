@@ -63,8 +63,7 @@ containing transactions. An opt-back would also re-arm the two defects the new d
 closes: the wallet following an off-branch endpoint's chain, and HTLC spends and refunds
 built from a different chain height than ordinary sends, which are then born expired.
 
-One use of Electrum comes back (CRD ch.39 R39.11.25, decided 2026-10-28; not yet
-implemented). On 2026-10-28 one published ARRR ElectrumX served the chain's tip, on
+One use of Electrum comes back (CRD ch.39 R39.11.25, decided 2026-10-28). On 2026-10-28 one published ARRR ElectrumX served the chain's tip, on
 the same chain as the `lightwalletd` endpoints. Reloaded asks the `electrum_servers`
 only when no `lightwalletd` endpoint can answer three swap questions: "was my payment
 already sent", "was this payment spent", and the wait for the counterparty's spend. A
@@ -117,7 +116,7 @@ What an integrator observes:
   "already sent" answer also checks that the transaction it found pays the HTLC script; GLEEC
   KDF takes the first entry of the address history without that check (ch.39 §39.11.5).
 - Two further Reloaded-only rules for a shielded coin's own swap payment (ch.39 R39.11.26 --
-  R39.11.28, decided 2026-10-28, not yet implemented):
+  R39.11.28, decided 2026-10-28; the first is implemented, the other two are not yet):
   - "Already sent" is answered first from the wallet's own record of the payments it
     broadcast.
   - A swap started fresh, with no earlier payment, does not ask "already sent" at all.

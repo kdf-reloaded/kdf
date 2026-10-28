@@ -3833,7 +3833,8 @@ which made the Electrum list mandatory.)*
 
 > **Amendment (2026-10-28, maintainer Decision AK).** The first bullet's "accepted and
 > ignored" became "accepted and optional, used only by the fallback of R39.11.25".
-> Not yet implemented; until it is, the status update below describes the code.
+> Implemented: the list is kept and handed to the fallback, and activation still never
+> connects to it (the status update below describes the rest unchanged).
 
 > **Status update (reloaded, Step C).** Implemented and tested (T39.11.b): an empty
 > `light_wallet_d_servers` is a `CoinCreationError` naming the coin, raised before
@@ -4850,6 +4851,20 @@ broadcast and the whole wallet half stay on lightwalletd (R39.11.9--R39.11.11).
   Electrum server (R39.11.5). The first use of each server logs one line at
   `info` with its identity result; each answer from the fallback is logged at the
   level of the detection that asked (R39.11.4h(d)).
+
+> **Status update (reloaded, 2026-10-28).** Implemented (T39.11.p).
+>
+> - **Construction.** The shared Electrum client is built on the fallback's first use,
+>   through the same builder every UTXO coin uses. It is kept for the coin afterwards.
+> - **Order and budget.** Servers are asked one at a time, in the chapter-38 order, within
+>   one 60-second budget per question.
+> - **Checks.** The identity check (a) is cached for the admission re-evaluation interval;
+>   the tip-lag check (b) runs for every question.
+> - **Errors.** When neither source answers, the error and the sync-error channel name
+>   the lightwalletd conditions and each Electrum server with its own.
+> - **Recorded check.** On 2026-10-28 a recovery of the September test swap ran against
+>   two `lightwalletd` servers without an address index plus one published ARRR ElectrumX.
+>   It reported the payment refunded, from Electrum.
 
 R39.11.26 **The wallet's own send record answers "sent" first.** *(binding;
 Reloaded-original, maintainer Decision AK of 2026-10-28; D39.11.h adopted.)* Before

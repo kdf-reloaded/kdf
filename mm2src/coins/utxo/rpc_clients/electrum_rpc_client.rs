@@ -371,6 +371,10 @@ impl ElectrumClientImpl {
     /// The size of the maintained set.
     pub async fn count_connected(&self) -> usize { self.pool.maintained_count() }
 
+    /// The addresses of the servers in the pool, in priority order (CRD ch.38 R38.6.4b), those removed
+    /// from it excluded. These are the names a directed request (R38.6.4g) is addressed to.
+    pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
+
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
 
@@ -506,6 +510,38 @@ impl ElectrumClient {
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
     pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
         rpc_func!(self, "blockchain.block.headers", start_height, count)
+    }
+}
+
+/// Read-only requests addressed to one named server (CRD ch.38 R38.6.4g): the request opens the server's
+/// connection if it is closed and releases it afterwards when the server is not maintained, and it is
+/// answered by that server or fails naming it. Used where the answer of a particular server is the
+/// point (chain-identity checks of the shielded-coin fallback, CRD ch.39 R39.11.25).
+impl ElectrumClient {
+    /// `blockchain.block.header` of `server`.
+    pub fn blockchain_block_header_from(&self, server: &str, height: u64) -> RpcRes<BytesJson> {
+        rpc_func_from!(self, server, "blockchain.block.header", height)
+    }
+
+    /// `blockchain.headers.subscribe` of `server`: its tip.
+    pub fn blockchain_headers_subscribe_from(&self, server: &str) -> RpcRes<ElectrumBlockHeader> {
+        rpc_func_from!(self, server, "blockchain.headers.subscribe")
+    }
+
+    /// `blockchain.scripthash.get_history` of `server`.
+    pub fn scripthash_get_history_from(&self, server: &str, hash: &str) -> RpcRes<Vec<ElectrumTxHistoryItem>> {
+        rpc_func_from!(self, server, "blockchain.scripthash.get_history", hash)
+    }
+
+    /// `blockchain.scripthash.listunspent` of `server`, as the server returns it.
+    pub fn scripthash_list_unspent_from(&self, server: &str, hash: &str) -> RpcRes<Vec<ElectrumUnspent>> {
+        rpc_func_from!(self, server, "blockchain.scripthash.listunspent", hash)
+    }
+
+    /// `blockchain.transaction.get` of `server`, the raw transaction bytes.
+    pub fn transaction_get_from(&self, server: &str, txid: &H256Json) -> RpcRes<BytesJson> {
+        let verbose = false;
+        rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
     }
 }
 

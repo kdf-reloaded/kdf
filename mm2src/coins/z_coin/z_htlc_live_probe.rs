@@ -145,6 +145,7 @@ fn live_coin() -> Option<(MmArc, ZCoin, Vec<String>)> {
         protocol_info,
         ZcoinBackend::Light {
             light_wallet_d_servers: servers.clone(),
+            electrum_servers: Vec::new(),
         },
     ))
     .unwrap();
