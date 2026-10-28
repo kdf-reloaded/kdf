@@ -1,7 +1,7 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::utxo::rpc_clients::electrum_pool::{electrum_server_order, electrum_spread_reads};
+use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order, electrum_spread_reads};
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
                                ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -459,6 +459,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
 pub(crate) async fn build_electrum_client(
     ctx: &MmArc,
     ticker: &str,
+    coin_conf: &Json,
     args: ElectrumBuilderArgs,
     servers: Vec<ElectrumRpcRequest>,
     min_connected: Option<usize>,
@@ -492,6 +493,7 @@ pub(crate) async fn build_electrum_client(
         timings: ElectrumPoolTimings::default(),
         order: electrum_server_order(ctx),
         spread_reads: electrum_spread_reads(ctx),
+        block_interval: electrum_block_interval(coin_conf),
     });
     for (server, e) in client.add_servers(&servers) {
         log!("Error " (e) " using " [server] ". Address won't be used");
@@ -686,7 +688,16 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
-        build_electrum_client(self.ctx(), self.ticker(), args, servers, min_connected, max_connected).await
+        build_electrum_client(
+            self.ctx(),
+            self.ticker(),
+            self.conf(),
+            args,
+            servers,
+            min_connected,
+            max_connected,
+        )
+        .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -133,6 +133,52 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
 /// Tells the pool that the connection with the given id ended.
 pub(crate) type SessionEnded = Arc<dyn Fn(u64) + Send + Sync>;
 
+/// Tells the pool the height of a header notification that arrived over a connection (CRD ch.38 R38.6.4l item 2).
+pub(crate) type HeaderNotified = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// No tip is known yet.
+const NO_TIP: u64 = u64::MAX;
+
+/// What a connection has learned about the chain tip: the height of the last header it carried, and whether
+/// a header request was answered over it, which makes the server push a notification for each new tip
+/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4).
+pub(crate) struct HeaderTrack {
+    notifying: AtomicBool,
+    tip: AtomicU64,
+    on_notification: HeaderNotified,
+}
+
+impl HeaderTrack {
+    fn new(on_notification: HeaderNotified) -> HeaderTrack {
+        HeaderTrack {
+            notifying: AtomicBool::new(false),
+            tip: AtomicU64::new(NO_TIP),
+            on_notification,
+        }
+    }
+
+    /// The answer to a header request: the server now pushes the tips that follow.
+    fn note_answer(&self, height: u64) {
+        self.tip.store(height, AtomicOrdering::Relaxed);
+        self.notifying.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// A header notification: the connection's height moves, and the pool is told.
+    fn note_notification(&self, height: u64) {
+        self.note_answer(height);
+        (self.on_notification)(height);
+    }
+
+    /// The height of the last header the connection carried.
+    pub(crate) fn tip(&self) -> Option<u64> {
+        let tip = self.tip.load(AtomicOrdering::Relaxed);
+        (tip != NO_TIP).then_some(tip)
+    }
+
+    /// Whether header notifications can arrive over the connection.
+    pub(crate) fn is_notifying(&self) -> bool { self.notifying.load(AtomicOrdering::Relaxed) }
+}
+
 /// One established connection to an Electrum server: the sender of the writing task, the answers
 /// waiting for a response, and the handle that ends the background tasks.
 ///
@@ -144,6 +190,8 @@ pub(crate) struct Session {
     /// Responses are stored here
     responses: JsonRpcPendingRequestsShared,
     closed: Arc<AtomicBool>,
+    /// The chain tip as this connection has seen it.
+    headers: Arc<HeaderTrack>,
     /// Ends the background tasks of the session.
     shutdown_tx: StdMutex<Option<oneshot::Sender<()>>>,
 }
@@ -154,6 +202,8 @@ impl Session {
     pub(crate) fn addr(&self) -> &str { &self.addr }
 
     pub(crate) fn is_closed(&self) -> bool { self.closed.load(AtomicOrdering::Relaxed) }
+
+    pub(crate) fn headers(&self) -> &HeaderTrack { &self.headers }
 
     /// Ends the session. The background tasks stop and the pool is told through [`SessionEnded`].
     pub(crate) fn close(&self) {
@@ -208,12 +258,28 @@ impl Session {
         };
         common::log::debug!("electrum {} {} {}", self.addr(), request_methods(request), result);
         let error = match outcome {
-            Ok(Ok(response)) => return Ok(response),
+            Ok(Ok(response)) => {
+                self.note_header_answer(request, &response);
+                return Ok(response);
+            },
             Ok(Err(error)) => error,
             Err(_) => format!("no answer within {:.1} s", timeout.as_secs_f64()),
         };
         self.responses.lock().await.remove(&id);
         Err(error)
+    }
+}
+
+impl Session {
+    /// An answer to a lone header request (`blockchain.headers.subscribe`) tells the connection's height.
+    fn note_header_answer(&self, request: &JsonRpcRequestEnum, response: &JsonRpcResponseEnum) {
+        if let (JsonRpcRequestEnum::Single(request), JsonRpcResponseEnum::Single(response)) = (request, response) {
+            if request.method == BLOCKCHAIN_HEADERS_SUB_ID && response.error.is_null() {
+                if let Some(height) = response.result["height"].as_u64() {
+                    self.headers.note_answer(height);
+                }
+            }
+        }
     }
 }
 
@@ -1201,7 +1267,7 @@ fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Erro
     rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
-async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared, headers: Option<&HeaderTrack>) {
     // detect if we got standard JSONRPC response or subscription response as JSONRPC request
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -1253,7 +1319,14 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
                 return;
             }
             let id = match req.method.as_ref() {
-                BLOCKCHAIN_HEADERS_SUB_ID => BLOCKCHAIN_HEADERS_SUB_ID,
+                BLOCKCHAIN_HEADERS_SUB_ID => {
+                    if let (Some(headers), Some(height)) =
+                        (headers, req.params.first().and_then(|p| p["height"].as_u64()))
+                    {
+                        headers.note_notification(height);
+                    }
+                    BLOCKCHAIN_HEADERS_SUB_ID
+                },
                 // Unknown subscription kinds are ignored rather than treated as
                 // errors: a server is free to send notifications we never asked
                 // for, and dropping them must not disturb the connection.
@@ -1281,10 +1354,10 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
 
 #[cfg(test)]
 pub(super) async fn electrum_process_json_for_test(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
-    electrum_process_json(raw_json, arc).await
+    electrum_process_json(raw_json, arc, None).await
 }
 
-async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared, headers: &HeaderTrack) {
     // we should split the received chunk because we can get several responses in 1 chunk.
     let split = chunk.split(|item| *item == b'\n');
     for chunk in split {
@@ -1297,7 +1370,7 @@ async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared
                     return;
                 },
             };
-            electrum_process_json(raw_json, arc).await
+            electrum_process_json(raw_json, arc, Some(headers)).await
         }
     }
 }
@@ -1419,6 +1492,7 @@ pub(crate) async fn open_session(
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     idle_cutoff: Duration,
     on_end: SessionEnded,
+    on_header: HeaderNotified,
 ) -> Result<Session, String> {
     let addr = spec.addr.clone();
     let connect_f = match &spec.config {
@@ -1463,12 +1537,14 @@ pub(crate) async fn open_session(
         }
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let headers = Arc::new(HeaderTrack::new(on_header));
 
     let (read, mut write) = tokio::io::split(stream);
     let recv_f = {
         let addr = addr.clone();
         let responses = responses.clone();
         let last_chunk = last_chunk.clone();
+        let headers = headers.clone();
         async move {
             let mut buffer = String::with_capacity(1024);
             let mut buf_reader = BufReader::new(read);
@@ -1489,7 +1565,7 @@ pub(crate) async fn open_session(
                 event_handlers.on_incoming_response(buffer.as_bytes());
                 last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
 
-                electrum_process_chunk(buffer.as_bytes(), &responses).await;
+                electrum_process_chunk(buffer.as_bytes(), &responses, &headers).await;
                 buffer.clear();
             }
         }
@@ -1527,6 +1603,7 @@ pub(crate) async fn open_session(
         tx: StdMutex::new(tx),
         responses,
         closed,
+        headers,
         shutdown_tx: StdMutex::new(Some(shutdown_tx)),
     })
 }
@@ -1540,6 +1617,7 @@ pub(crate) async fn open_session(
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     idle_cutoff: Duration,
     on_end: SessionEnded,
+    on_header: HeaderNotified,
 ) -> Result<Session, String> {
     use mm2_net::wasm_ws::ws_transport;
     use std::sync::atomic::AtomicUsize;
@@ -1562,12 +1640,14 @@ pub(crate) async fn open_session(
     let responses: JsonRpcPendingRequestsShared = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
     let (outgoing_tx, outgoing_rx) = mpsc::channel(0);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let headers = Arc::new(HeaderTrack::new(on_header));
 
     let incoming_fut = {
         let addr = addr.clone();
         let responses = responses.clone();
         let last_chunk = last_chunk.clone();
         let event_handlers = event_handlers.clone();
+        let headers = headers.clone();
         async move {
             while let Some(incoming_res) = transport_rx.next().await {
                 last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
@@ -1577,7 +1657,7 @@ pub(crate) async fn open_session(
                         let incoming_str = incoming_json.to_string();
                         event_handlers.on_incoming_response(incoming_str.as_bytes());
 
-                        electrum_process_json(incoming_json, &responses).await;
+                        electrum_process_json(incoming_json, &responses, Some(&headers)).await;
                     },
                     Err(e) => {
                         error!("{} error: {:?}", addr, e);
@@ -1629,6 +1709,7 @@ pub(crate) async fn open_session(
         tx: StdMutex::new(outgoing_tx),
         responses,
         closed,
+        headers,
         shutdown_tx: StdMutex::new(Some(shutdown_tx)),
     })
 }

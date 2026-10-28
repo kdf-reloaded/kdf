@@ -11,7 +11,7 @@ use futures::channel::oneshot;
 use futures::{FutureExt, StreamExt};
 use serde_json::{json, Value as Json};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -58,7 +58,12 @@ struct StubState {
     requests: Mutex<HashMap<String, usize>>,
     last_requests: Mutex<HashMap<String, Json>>,
     accepted: AtomicUsize,
-    live: Mutex<Vec<futures_mpsc::UnboundedSender<Control>>>,
+    /// The tip `blockchain.headers.subscribe` answers; without one it answers its canned result.
+    tip: Mutex<Option<u64>>,
+    /// How long the stub waits before it answers a method (CRD ch.38 R38.6.4l tests).
+    reply_delays: Mutex<HashMap<String, Duration>>,
+    /// The open connections, with whether each has been answered a `blockchain.headers.subscribe`.
+    live: Mutex<Vec<(futures_mpsc::UnboundedSender<Control>, Arc<AtomicBool>)>>,
     listener_stop: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -101,6 +106,8 @@ impl StubServer {
             requests: Mutex::new(HashMap::new()),
             last_requests: Mutex::new(HashMap::new()),
             accepted: AtomicUsize::new(0),
+            tip: Mutex::new(None),
+            reply_delays: Mutex::new(HashMap::new()),
             live: Mutex::new(Vec::new()),
             listener_stop: Mutex::new(None),
         });
@@ -141,8 +148,9 @@ impl StubServer {
                 let Ok((stream, _)) = accepted else { return };
                 let number = state.accepted.fetch_add(1, Ordering::SeqCst);
                 let (control_tx, control_rx) = futures_mpsc::unbounded();
-                state.live.lock().unwrap().push(control_tx);
-                spawn(serve_connection(state.clone(), stream, number, control_rx));
+                let subscribed = Arc::new(AtomicBool::new(false));
+                state.live.lock().unwrap().push((control_tx, subscribed.clone()));
+                spawn(serve_connection(state.clone(), stream, number, control_rx, subscribed));
             }
         });
     }
@@ -205,7 +213,7 @@ impl StubServer {
 
     /// Closes every open connection; the behavior stays.
     pub fn kill_connections(&self) {
-        for control in self.state.live.lock().unwrap().drain(..) {
+        for (control, _) in self.state.live.lock().unwrap().drain(..) {
             let _ = control.unbounded_send(Control::Close);
         }
     }
@@ -213,9 +221,47 @@ impl StubServer {
     /// Sends a notification (a request without an id) over every open connection.
     pub fn notify(&self, method: &str, params: Json) {
         let line = json!({"jsonrpc": "2.0", "method": method, "params": params}).to_string();
-        for control in self.state.live.lock().unwrap().iter() {
+        for (control, _) in self.state.live.lock().unwrap().iter() {
             let _ = control.unbounded_send(Control::Push(line.clone()));
         }
+    }
+
+    /// Makes the stub wait `delay` before it answers `method`; the delay is the latency a client measures.
+    /// A delayed answer does not hold up the requests that follow it on the connection.
+    pub fn set_reply_delay(&self, method: &str, delay: Duration) {
+        self.state.reply_delays.lock().unwrap().insert(method.to_owned(), delay);
+    }
+
+    /// Sets the chain tip `blockchain.headers.subscribe` answers and pushes it as a header notification over
+    /// every connection that has asked for headers.
+    pub fn set_tip(&self, height: u64) {
+        *self.state.tip.lock().unwrap() = Some(height);
+        self.push_header(height);
+    }
+
+    /// Pushes a header notification with `height` over every connection that has asked for headers, without
+    /// changing the tip the stub answers.
+    pub fn push_header(&self, height: u64) {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "blockchain.headers.subscribe",
+            "params": [header_json(height)],
+        })
+        .to_string();
+        for (control, subscribed) in self.state.live.lock().unwrap().iter() {
+            if subscribed.load(Ordering::SeqCst) {
+                let _ = control.unbounded_send(Control::Push(line.clone()));
+            }
+        }
+    }
+
+    /// How many open connections have been answered a `blockchain.headers.subscribe`.
+    pub fn header_subscriptions(&self) -> usize {
+        let mut live = self.state.live.lock().unwrap();
+        live.retain(|(control, _)| !control.is_closed());
+        live.iter()
+            .filter(|(_, subscribed)| subscribed.load(Ordering::SeqCst))
+            .count()
     }
 
     /// How many connections the stub accepted so far, refused ones included.
@@ -224,7 +270,7 @@ impl StubServer {
     /// How many connections are open now.
     pub fn open_connections(&self) -> usize {
         let mut live = self.state.live.lock().unwrap();
-        live.retain(|control| !control.is_closed());
+        live.retain(|(control, _)| !control.is_closed());
         live.len()
     }
 
@@ -274,8 +320,12 @@ impl StubServer {
     }
 }
 
-/// Answers one request; `None` stays unanswered.
-fn answer(state: &StubState, behavior: StubBehavior, request: &Json) -> Option<Json> {
+/// The header of a tip at `height`, as `blockchain.headers.subscribe` answers and notifies it.
+fn header_json(height: u64) -> Json { json!({"height": height, "hex": "00"}) }
+
+/// Answers one request; `None` stays unanswered. `subscribed` is set when the connection is answered a header
+/// subscription.
+fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed: &AtomicBool) -> Option<Json> {
     let method = request["method"].as_str().unwrap_or_default().to_owned();
     *state.requests.lock().unwrap().entry(method.clone()).or_default() += 1;
     state
@@ -296,6 +346,11 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json) -> Option<J
         (_, "server.ping") => result(Json::Null),
         (StubBehavior::BlackHoleRequests, _) => None,
         (StubBehavior::JsonRpcError, _) => error("stub error"),
+        (_, "blockchain.headers.subscribe") if state.tip.lock().unwrap().is_some() => {
+            subscribed.store(true, Ordering::SeqCst);
+            let height = state.tip.lock().unwrap().unwrap_or_default();
+            result(header_json(height))
+        },
         _ => {
             let scripthash = request["params"][0].as_str().unwrap_or_default().to_owned();
             let canned = state
@@ -322,6 +377,7 @@ async fn serve_connection(
     stream: TcpStream,
     number: usize,
     mut control_rx: futures_mpsc::UnboundedReceiver<Control>,
+    subscribed: Arc<AtomicBool>,
 ) {
     let delay = *state.accept_delay.lock().unwrap();
     if !delay.is_zero() {
@@ -332,7 +388,9 @@ async fn serve_connection(
             return;
         }
     }
-    let (read, mut write) = tokio::io::split(stream);
+    let (read, write) = tokio::io::split(stream);
+    // A delayed answer is written by a task of its own, so the writer is shared.
+    let write = Arc::new(tokio::sync::Mutex::new(write));
     let mut lines = BufReader::new(read).lines();
     loop {
         let line = futures::select! {
@@ -342,7 +400,7 @@ async fn serve_connection(
             },
             control = control_rx.next() => match control {
                 Some(Control::Push(line)) => {
-                    if write.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+                    if write.lock().await.write_all(format!("{line}\n").as_bytes()).await.is_err() {
                         return;
                     }
                     continue;
@@ -358,21 +416,51 @@ async fn serve_connection(
             StubBehavior::RefuseAfter(_) => StubBehavior::Answer,
             other => other,
         };
+        let methods: Vec<String> = match &request {
+            Json::Array(batch) => batch
+                .iter()
+                .map(|item| item["method"].as_str().unwrap_or_default().to_owned())
+                .collect(),
+            single => vec![single["method"].as_str().unwrap_or_default().to_owned()],
+        };
         let response = match &request {
             Json::Array(batch) => {
-                let answers: Vec<Json> = batch.iter().filter_map(|item| answer(&state, behavior, item)).collect();
+                let answers: Vec<Json> = batch
+                    .iter()
+                    .filter_map(|item| answer(&state, behavior, item, &subscribed))
+                    .collect();
                 if answers.is_empty() {
                     None
                 } else {
                     Some(Json::Array(answers))
                 }
             },
-            single => answer(&state, behavior, single),
+            single => answer(&state, behavior, single, &subscribed),
         };
-        if let Some(response) = response {
-            if write.write_all(format!("{response}\n").as_bytes()).await.is_err() {
-                return;
-            }
+        let Some(response) = response else { continue };
+        let delay = {
+            let delays = state.reply_delays.lock().unwrap();
+            methods.iter().filter_map(|method| delays.get(method)).max().copied()
+        };
+        match delay {
+            Some(delay) if !delay.is_zero() => {
+                let write = write.clone();
+                spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = write.lock().await.write_all(format!("{response}\n").as_bytes()).await;
+                });
+            },
+            _ => {
+                if write
+                    .lock()
+                    .await
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            },
         }
     }
 }
