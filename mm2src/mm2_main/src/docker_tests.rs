@@ -451,6 +451,7 @@ mod docker_tests {
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
             coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &[0; 20],
             &tx.tx_hex(),
             0,
@@ -488,6 +489,7 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
+            coin.my_public_key().unwrap(),
             coin.my_public_key().unwrap(),
             &[0; 20],
             &tx.tx_hex(),
@@ -528,6 +530,7 @@ mod docker_tests {
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
             coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &*dhash160(&secret),
             &tx.tx_hex(),
             0,
@@ -566,6 +569,7 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
+            coin.my_public_key().unwrap(),
             coin.my_public_key().unwrap(),
             &*dhash160(&secret),
             &tx.tx_hex(),

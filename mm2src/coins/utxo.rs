@@ -2314,38 +2314,53 @@ pub fn output_script(address: &Address, script_type: ScriptType) -> Script {
     }
 }
 
+/// Returns the Electrum client and the P2PK script (`<pubkey> OP_CHECKSIG`) to look up for the given legacy
+/// address, if the address belongs to the currently activated keypair and the coin is Electrum-backed.
+///
+/// Such outputs are not returned by the address-based P2PKH script-hash queries, so a P2PKH read of this address
+/// is accompanied by a P2PK read (CRD ch.38 R38.6.3). `None` means no P2PK lookup applies: a segwit or other
+/// non-legacy address, a foreign address, no keypair, or a Native or lightwalletd client.
+pub(crate) fn electrum_p2pk_lookup<'a>(
+    utxo: &'a UtxoCoinFields,
+    address: &Address,
+) -> Option<(&'a ElectrumClient, Script)> {
+    if !address.addr_format.is_legacy() {
+        return None;
+    }
+
+    let key_pair = utxo.priv_key_policy.key_pair()?;
+
+    let my_p2pkh_hash = AddressHashEnum::AddressHash(key_pair.public().address_hash());
+    if my_p2pkh_hash != address.hash {
+        return None;
+    }
+
+    let electrum = match &utxo.rpc_client {
+        UtxoRpcClientEnum::Electrum(electrum) => electrum,
+        UtxoRpcClientEnum::Native(_) => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        UtxoRpcClientEnum::LightWalletD(_) => return None,
+    };
+
+    Some((electrum, Builder::build_p2pk(key_pair.public())))
+}
+
 /// Returns Electrum P2PK unspents for the given legacy address if the address
 /// belongs to the currently activated keypair.
 ///
 /// This is used to discover legacy pay-to-pubkey outputs (`<pubkey> OP_CHECKSIG`)
 /// that are not returned by address-based P2PKH script-hash queries.
+///
+/// This is a request of its own. A balance read or an unspent-list read goes through
+/// [`electrum_p2pk_lookup`] instead, so that both lookups share one request message (R38.6.3a).
 pub(crate) async fn electrum_p2pk_unspents_for_address(
     utxo: &UtxoCoinFields,
     address: &Address,
 ) -> UtxoRpcResult<Vec<UnspentInfo>> {
-    if !address.addr_format.is_legacy() {
-        return Ok(vec![]);
+    match electrum_p2pk_lookup(utxo, address) {
+        Some((electrum, p2pk_script)) => electrum.list_unspent_for_script(&p2pk_script).compat().await,
+        None => Ok(vec![]),
     }
-
-    let key_pair = match utxo.priv_key_policy.key_pair() {
-        Some(key_pair) => key_pair,
-        None => return Ok(vec![]),
-    };
-
-    let my_p2pkh_hash = AddressHashEnum::AddressHash(key_pair.public().address_hash());
-    if my_p2pkh_hash != address.hash {
-        return Ok(vec![]);
-    }
-
-    let electrum = match &utxo.rpc_client {
-        UtxoRpcClientEnum::Electrum(electrum) => electrum,
-        UtxoRpcClientEnum::Native(_) => return Ok(vec![]),
-        #[cfg(not(target_arch = "wasm32"))]
-        UtxoRpcClientEnum::LightWalletD(_) => return Ok(vec![]),
-    };
-
-    let p2pk_script = Builder::build_p2pk(key_pair.public());
-    electrum.list_unspent_for_script(&p2pk_script).compat().await
 }
 
 /// Returns outpoints of Electrum P2PK unspents for the given legacy address.

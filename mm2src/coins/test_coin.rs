@@ -1,8 +1,8 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, RawTransactionFut, RawTransactionRequest, SwapOps,
             TradeFee, TransactionEnum, TransactionFut};
 use crate::SpendSafeAmountError;
-use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, SignatureResult,
-            TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
+use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, HtlcPaymentCheck, NegotiateSwapContractAddrErr,
+            SignatureResult, TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
             ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult, WatcherOps, WithdrawFut,
             WithdrawRequest};
 use async_trait::async_trait;
@@ -80,7 +80,9 @@ impl MarketCoinOps for TestCoin {
         unimplemented!()
     }
 
-    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> {
+        Err("TestCoin cannot read transactions".to_owned())
+    }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { unimplemented!() }
 
@@ -202,6 +204,7 @@ impl SwapOps for TestCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -214,6 +217,7 @@ impl SwapOps for TestCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -221,6 +225,27 @@ impl SwapOps for TestCoin {
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
         unimplemented!()
+    }
+
+    async fn check_payment_pays_htlc(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+        _payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        Ok(HtlcPaymentCheck::Pays)
+    }
+
+    fn htlc_detection_progress(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+    ) -> Option<String> {
+        None
     }
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }

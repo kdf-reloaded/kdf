@@ -716,6 +716,12 @@ address each send one request message to the server, carrying both
 lookups. A segwit or non-legacy address sends the P2PKH lookup alone, as
 before.
 
+> **As-built note (2026-10-27, clean-side record).** Implemented in PR #114 for
+> balance reads and unspent-list reads. The P2PK lookups that the send and
+> withdraw paths use to classify inputs are not balance or unspent-list reads.
+> They still cost one separate request each on a legacy address, which is
+> follow-up work.
+
 ### 38.6.4 Electrum connection prioritisation
 R38.6.4 The Electrum client shall support configurable minimum and maximum
 connected-server counts and shall prioritise servers by their order in the
@@ -726,18 +732,20 @@ use a bounded timeout and retry if the tx is not yet on chain. Acceptance: with 
 list of servers, connections are bounded and ordered by priority; a downed server
 does not stall block-count discovery.
 
-> **Shielded coins are carved out of this client.** R38.6.4 binds every
-> Electrum-backed UTXO coin. A ZHTLC (Zcash-family shielded) coin is not one: it
-> is served entirely by its `lightwalletd` endpoints, opens no Electrum
-> connection, and therefore has no connection pool for this requirement's
-> floor/ceiling and prioritisation semantics to govern. What serves each of its
-> functions instead is [chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.1.
+> **Shielded coins are carved out of this client, with one exception.** R38.6.4
+> binds every Electrum-backed UTXO coin. A ZHTLC (Zcash-family shielded) coin is
+> not one: it is served by its `lightwalletd` endpoints. What serves each of its
+> functions is [chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.1. The
+> exception is chapter 39 R39.11.25: when no `lightwalletd` endpoint can answer
+> three swap-path questions (already-sent, spend search, spend watch), the coin
+> asks the servers of its `electrum_servers`. That client follows R38.6.4's order
+> and time budget, opens its connections on first use, and serves nothing else of
+> the coin.
 >
-> **Status update (reloaded).** The carve-out is a **required change, not
-> implemented.** Today a Light-mode shielded coin's transparent side *is* backed
-> by this client under this requirement's policy, so R38.6.4 does currently bind
-> it. The removal is specified in chapter 39 R39.11.1, R39.11.3 and R39.11.7, and
-> none of it exists yet; chapter 39's §39.11 status notes record the boundary.
+> **Status update (reloaded, 2026-10-28).** The carve-out is **implemented** since
+> 2026-10-12: a Light-mode shielded coin's backend is `lightwalletd` alone, and no
+> Electrum connection is opened for it. The exception of chapter 39 R39.11.25
+> (maintainer Decision AK of 2026-10-28) is **specified, not yet implemented**.
 > Nothing about R38.6.4 itself changes either way.
 
 R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
@@ -1418,6 +1426,13 @@ same estimate up to three times in sequence.
 >
 > **Compatibility:** for behaviour matching GLEEC KDF most closely, set
 > `fee_estimate_cache_secs` to `0`.
+
+> **As-built note (2026-10-27, clean-side record).** Item 1 is implemented in PR
+> #114. A scope entered by each order-posting entry point and by the maker
+> balance-update handler shares one reading per coin, for the fee estimate and
+> the forced minimum relay fee alike. The scope ends with the request, and
+> work spawned outside it reads fresh. Items 2–4 (the cache and its key) are
+> not implemented yet.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the

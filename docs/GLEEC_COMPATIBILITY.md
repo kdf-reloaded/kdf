@@ -42,6 +42,7 @@ There is no global "GLEEC mode" switch and no shared JSON object — every setti
 | Own shielded (ARRR) send in the transaction history before it is mined | `shielded_history_unmined_sends` *(top-level `MM2.json` boolean)* | `false` -- `z_coin_tx_history` lists an own shielded send only once it is mined, as GLEEC KDF does. Default `true`: the send is listed from broadcast on, at the top of the history with `block_height`, `timestamp` and `confirmations` 0 and already with its final amounts (the change the wallet pays itself counted as received), then moves to its block's position once mined; a send that expires unmined disappears. Only a JSON `false` turns it off. Balances, note selection and other methods are the same either way, and no other node is affected, so by the second arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule) Reloaded's variant is the default. | No | [CRD ch.39 R39.8.9i, D39.8.0h](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Electrum server order | `electrum_server_order` *(top-level `MM2.json` string)* | `listed` -- a coin's Electrum servers are ranked in the order they are listed, as GLEEC KDF does, so every node with the same coins file prefers the same first server. Default `random`: the listed servers are put into a uniformly random order once when the coin is enabled, and that order is the priority everywhere (which servers are kept connected, which one answers a request and the order of the retry, which one the activation keeps); it is not saved, and enabling the coin again draws again. Any other value, including a wrong-case or non-string one, is taken as `random` and logs one warning at activation. No peer sees which Electrum server a node uses, so by the second arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule) Reloaded's variant is the default. | No | [CRD ch.38 R38.6.4b-R](reloaded-rewrite/38-utxo-coin-maintenance-and-features.md) |
 | TRON (TRX, TRC20) and Solana (SOL, SPL) activation in this beta | **none -- no switch exists** | Cannot be reproduced in this beta. Every activation route of KDF Reloaded refuses these coins with "TRON support is not available in this build" or "Solana support is not available in this build". GLEEC KDF `v3.0.0-beta` activates TRON through mmrpc 2.0 methods and offers experimental Solana methods, neither of which KDF Reloaded has routed. The support is not finished; a switch would only let it be turned on unfinished. Both families are planned to return in the next beta (compile-time constants `TRON_ACTIVATION_AVAILABLE`, `SOLANA_ACTIVATION_AVAILABLE`). | No | [CRD ch.21](reloaded-rewrite/21-tron-integration.md), [ch.40](reloaded-rewrite/40-solana-coin.md), [ch.55 D55.5](reloaded-rewrite/55-coin-activation-wire-contract.md) |
+| Shielded (ARRR) native mode in this release | **none -- no switch exists** | Cannot be reproduced in this release. An activation request with `mode.rpc` `Native` is refused with a configuration error saying native mode is not supported in this release and that light mode should be used. GLEEC KDF accepts native mode. KDF Reloaded's native path cannot build a working wallet for a fresh activation, and after Ironwood it could build transactions the network rejects; a switch would only turn on something that does not work. Light mode is unaffected. Native mode is planned to return in v0.4.0 ([plan](plans/arrr-native-and-ironwood-pool.md)). Decided by the maintainer on 2026-10-28 (third arm of [the default-side rule](COMPAT_SWITCHES.md#the-default-side-rule)). | No | [CRD ch.39 R39.11.1a](reloaded-rewrite/39-zcash---z_coin-shielded-coin.md) |
 | Tendermint (Cosmos) swaps in this beta | **none -- no switch exists** | Cannot be reproduced in this beta. Tendermint coins and tokens are wallet-only in KDF Reloaded: activation, balances and withdrawals work, but `setprice`, `buy`, `sell` and `start_swap` refuse them, they decline to match, and an order with a Tendermint coin saved by an earlier version is cancelled at startup. A swap already in progress still completes. GLEEC KDF lets Tendermint coins with an HTLC module (IRIS, Nucleus) take part in swaps, so a KDF Reloaded node does not trade them with GLEEC KDF peers during this beta; the order book still shows their orders. Swaps are planned to return in a later release (compile-time constant `TENDERMINT_SWAPS_AVAILABLE`). | No | [CRD ch.18](reloaded-rewrite/18-tendermint-ibc-htlc.md), [ch.36](reloaded-rewrite/36-tendermint-v2-activation-rpcs.md) |
 | Electrum call time budget | **none -- no switch exists** | Cannot be reproduced, and none is wanted. KDF Reloaded gives every call that may try several Electrum servers a time budget (60 s by default) and derives the bound of each attempt from that budget and the number of attempts still to make (never below 5 s), so a live server late in the list is reached inside the budget; in GLEEC KDF the per-attempt bounds do not depend on how many servers remain. Enabling a UTXO coin also probes every listed Electrum server at once and succeeds as soon as one connects (the build fails, naming each server, if none does within the budget); GLEEC KDF does not wait at activation. Both rules are Reloaded-only and not peer-visible: only the time a caller waits, and when an unreachable server set is reported, change. | No | [CRD ch.38 R38.6.4j, R38.6.4k-R](reloaded-rewrite/38-utxo-coin-maintenance-and-features.md) |
 
@@ -53,23 +54,30 @@ naming one that does not exist.
 KDF Reloaded serves a Light-mode shielded (ZHTLC) coin from `lightwalletd` alone
 (CRD ch.39 §39.11). The Electrum support GLEEC KDF uses for the coin's transparent
 side -- chain tip, transactions, balance, history, UTXOs and broadcast -- is
-**removed**, not deprecated and not kept behind a switch. An opt-back would restore a
-path that cannot be used: as of 2026-10-11 no host published for Pirate Chain (ARRR)
-runs an ElectrumX service at all, and the two that did were serving a fork that
-stopped at the first block of the Ironwood upgrade containing transactions. It would
-also re-arm the two defects the new design closes: the wallet following an off-branch
-endpoint's chain, and HTLC spends and refunds built from a different chain height than
-ordinary sends, which are then born expired.
+**removed** as the coin's backend, not deprecated and not kept behind a switch. On
+2026-10-11 no host published for Pirate Chain (ARRR) ran a working ElectrumX: the two
+that existed were serving a fork that stopped at the first block of the Ironwood upgrade
+containing transactions. An opt-back would also re-arm the two defects the new design
+closes: the wallet following an off-branch endpoint's chain, and HTLC spends and refunds
+built from a different chain height than ordinary sends, which are then born expired.
+
+One use of Electrum comes back (CRD ch.39 R39.11.25, decided 2026-10-28; not yet
+implemented). On 2026-10-28 one published ARRR ElectrumX served the chain's tip, on
+the same chain as the `lightwalletd` endpoints. Reloaded asks the `electrum_servers`
+only when no `lightwalletd` endpoint can answer three swap questions: "was my payment
+already sent", "was this payment spent", and the wait for the counterparty's spend. A
+server is used only after its block hash at a recent height matches the `lightwalletd`
+endpoints', and never for heights, broadcast or the wallet.
 
 What an integrator observes:
 
 - `light_wallet_d_servers` is **mandatory and must be non-empty** in the Light-mode
   `rpc_data`. An empty or absent list fails activation as a configuration error naming
   the coin (it no longer fails later as a scan error).
-- `electrum_servers`, `min_connected` and `max_connected` are still **accepted and
-  ignored**, so a payload written for GLEEC KDF activates unchanged. Absent, empty, or
-  populated with unreachable servers all behave identically. A caller supplying a
-  working Electrum list today is, in fact, supplying a list that no longer works.
+- `electrum_servers`, `min_connected` and `max_connected` are still **accepted**, so a
+  payload written for GLEEC KDF activates unchanged. `electrum_servers` is optional and
+  used only for the fallback above; activation never connects to it, so absent, empty,
+  or unreachable servers activate identically. The two connection counts are ignored.
 - Every configured `light_wallet_d_servers` entry is **admitted before use**: its
   `GetLightdInfo` network name and Sapling activation height must match the coin, and
   its consensus branch must be the one the wallet already follows (or, for a fresh
@@ -97,6 +105,24 @@ What an integrator observes:
   therefore waits, or stops with an explicit error, instead. No opt-out exists, because the
   alternative is a "not spent" that can be wrong. Wallet functions -- balance, history,
   receiving, sending, withdrawing -- are unaffected.
+- Those two questions need the **address index** of the node behind a `lightwalletd`
+  server; the wallet does not. A server whose node keeps no address index answers them with
+  "No information available for address". It is skipped for them for the rest of the
+  activation (CRD ch.39 R39.11.4i, R39.11.20); the question then goes to the Electrum
+  fallback. Only when neither source can answer does the payment step of a swap fail
+  before anything is broadcast (R39.11.19). GLEEC KDF never asks `lightwalletd` these
+  questions, so its swaps do not depend on that index. Reloaded's
+  "already sent" answer also checks that the transaction it found pays the HTLC script; GLEEC
+  KDF takes the first entry of the address history without that check (ch.39 §39.11.5).
+- Two further Reloaded-only rules for a shielded coin's own swap payment (ch.39 R39.11.26 --
+  R39.11.28, decided 2026-10-28, not yet implemented):
+  - "Already sent" is answered first from the wallet's own record of the payments it
+    broadcast.
+  - A swap started fresh, with no earlier payment, does not ask "already sent" at all.
+  - A taker paying with ARRR is refused at the start of the swap, before its fee is sent,
+    when no `lightwalletd` endpoint and no Electrum server can watch its payment for the
+    maker's spend. Without that watch a taker could not learn the secret and would lose
+    its payment. GLEEC KDF has no such refusal.
 
 **Compatibility:** GLEEC KDF has no equivalent of the endpoint admission check or of
 the single builder-height authority; both are additive for a deployment whose endpoints

@@ -18,18 +18,24 @@ fn strip_platform_suffix(ticker: &str) -> &str { ticker.split('-').next().unwrap
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn fetch_completion_fiat_snapshot(swap: &SavedSwap) -> Option<FiatPriceSnapshot> {
-    let maker_coin = swap.maker_coin_ticker().ok()?;
-    let taker_coin = swap.taker_coin_ticker().ok()?;
-    let maker_coin = strip_platform_suffix(&maker_coin);
-    let taker_coin = strip_platform_suffix(&taker_coin);
-
     let (status, _, body) = slurp_url(PRICE_SERVICE_ENDPOINT).await.ok()?;
     if status != StatusCode::OK {
         return None;
     }
 
-    let response = std::str::from_utf8(&body).ok()?.trim();
-    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response).ok()?;
+    let response = std::str::from_utf8(&body).ok()?;
+    fiat_snapshot_from_price_response(swap, response)
+}
+
+/// Picks the reference prices of the two coins of `swap` out of a price-service response body.
+#[cfg(not(target_arch = "wasm32"))]
+fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option<FiatPriceSnapshot> {
+    let maker_coin = swap.maker_coin_ticker().ok()?;
+    let taker_coin = swap.taker_coin_ticker().ok()?;
+    let maker_coin = strip_platform_suffix(&maker_coin);
+    let taker_coin = strip_platform_suffix(&taker_coin);
+
+    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response.trim()).ok()?;
 
     let maker_coin_usd_price = prices.get(maker_coin)?.last_price.to_string();
     let taker_coin_usd_price = prices.get(taker_coin)?.last_price.to_string();
@@ -72,9 +78,18 @@ pub async fn insert_new_swap_to_db_with_type(
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn save_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
     let fiat_snapshot = fetch_completion_fiat_snapshot(swap).await;
+    save_stats_swap_with_snapshot(ctx, swap, fiat_snapshot.as_ref()).await
+}
 
+/// Stores the record in the statistics store with the given fiat reference prices.
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_stats_swap_with_snapshot(
+    ctx: &MmArc,
+    swap: &SavedSwap,
+    fiat_snapshot: Option<&FiatPriceSnapshot>,
+) -> Result<(), String> {
     try_s!(swap.save_to_stats_db(ctx).await);
-    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, fiat_snapshot.as_ref());
+    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, fiat_snapshot);
     Ok(())
 }
 
@@ -196,23 +211,38 @@ pub(crate) struct SwapStatus {
     pub(crate) data: SavedSwap,
 }
 
-/// Broadcasts `my` swap status to P2P network
-pub(crate) async fn broadcast_my_swap_status(ctx: &MmArc, uuid: Uuid) -> Result<(), String> {
+/// Loads the node's own record of the swap and redacts it for the terminal report (CRD ch.51 R50A items 2-3).
+/// The stored record is not changed: only the loaded copy is redacted.
+async fn load_redacted_my_swap(ctx: &MmArc, uuid: Uuid) -> Result<SavedSwap, String> {
     let mut status = match try_s!(SavedSwap::load_my_swap_from_db(ctx, uuid).await) {
         Some(status) => status,
         None => return ERR!("swap data is not found"),
     };
     status.hide_secrets();
+    Ok(status)
+}
 
-    #[cfg(not(target_arch = "wasm32"))]
-    try_s!(save_stats_swap(ctx, &status).await);
-
+/// Publishes the redacted record as the unsigned `swapstatus` object on the swap topic (CRD ch.51 R48).
+fn publish_swap_status(ctx: &MmArc, status: SavedSwap) {
+    let uuid = *status.uuid();
     let status = SwapStatus {
         method: "swapstatus".into(),
         data: status,
     };
     let msg = json::to_vec(&status).expect("Swap status ser should never fail");
     broadcast_p2p_msg(ctx, vec![swap_topic(&uuid)], msg, None);
+}
+
+/// Makes the terminal swap-status report of the node's own swap (CRD ch.51 R48, R50A): loads and redacts the
+/// record, stores it in the node's own statistics store on a native build, then publishes it to the P2P network.
+/// The caller makes the report for every legacy swap termination, whatever the coins or the outcome.
+pub(crate) async fn broadcast_my_swap_status(ctx: &MmArc, uuid: Uuid) -> Result<(), String> {
+    let status = try_s!(load_redacted_my_swap(ctx, uuid).await);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    try_s!(save_stats_swap(ctx, &status).await);
+
+    publish_swap_status(ctx, status);
     Ok(())
 }
 
@@ -565,15 +595,20 @@ pub async fn recover_funds_of_swap(ctx: MmArc, req: Json) -> Result<Response<Vec
     };
 
     let recover_data = try_s!(swap.recover_funds(ctx).await);
-    let res = try_s!(json::to_vec(&json!({
+    let res = try_s!(json::to_vec(&recovered_swap_response(&recover_data)));
+    Ok(try_s!(Response::builder().body(res)))
+}
+
+/// The success response of `recover_funds_of_swap`. Its fields are the reference's; none is added (CRD ch.39 R39.5.4).
+fn recovered_swap_response(recover_data: &RecoveredSwap) -> Json {
+    json!({
         "result": {
             "action": recover_data.action,
             "coin": recover_data.coin,
             "tx_hash": recover_data.transaction.tx_hash(),
             "tx_hex": BytesJson::from(recover_data.transaction.tx_hex()),
         }
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    })
 }
 
 pub async fn import_swaps(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -662,6 +697,26 @@ mod lp_swap_tests {
 
     /// Tests use the legacy mainnet netid 8762 fee parameters.
     fn test_net_cfg() -> &'static dyn NetConfig { mm2_net_config::net_config_or_panic(8762) }
+
+    /// CRD ch.39 R39.5.4: the success response of `recover_funds_of_swap` keeps the reference's four fields;
+    /// the HTLC key that matched is reported in the log and in error texts only.
+    #[test]
+    fn recover_funds_of_swap_success_response_has_exactly_the_reference_fields() {
+        let tx: coins::utxo::UtxoTx = "0100000001de7aa8d29524906b2b54ee2e0281f3607f75662cbc9080df81d1047b78e21dbc00000000d7473044022079b6c50820040b1fbbe9251ced32ab334d33830f6f8d0bf0a40c7f1336b67d5b0220142ccf723ddabb34e542ed65c395abc1fbf5b6c3e730396f15d25c49b668a1a401209da937e5609680cb30bff4a7661364ca1d1851c2506fa80c443f00a3d3bf7365004c6b6304f62b0e5cb175210270e75970bb20029b3879ec76c4acd320a8d0589e003636264d01a7d566504bfbac6782012088a9142fb610d856c19fd57f2d0cffe8dff689074b3d8a882103f368228456c940ac113e53dad5c104cf209f2f102a409207269383b6ab9b03deac68ffffffff01d0dc9800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac40280e5c".into();
+        let recovered = RecoveredSwap {
+            action: RecoveredSwapAction::RefundedMyPayment,
+            coin: "ticker".to_owned(),
+            transaction: tx.into(),
+        };
+        let response = recovered_swap_response(&recovered);
+        let result = response["result"].as_object().expect("a result object");
+        let mut keys: Vec<&str> = result.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["action", "coin", "tx_hash", "tx_hex"]);
+        assert_eq!(response.as_object().expect("an object").len(), 1);
+        assert!(!response.to_string().contains("htlc_key"));
+        assert_eq!(result["action"], "RefundedMyPayment");
+    }
 
     #[test]
     fn recent_swap_status_json_skips_missing_swap() {
@@ -1148,3 +1203,7 @@ mod lp_swap_tests {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "terminal_report_tests.rs"]
+mod terminal_report_tests;

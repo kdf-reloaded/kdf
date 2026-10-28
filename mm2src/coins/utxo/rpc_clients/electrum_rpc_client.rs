@@ -197,7 +197,16 @@ impl Session {
                 .await
                 .map_err(|_| "the connection ended before the server answered".to_owned())
         };
+        let started = now_ms();
         let outcome = exchange.boxed().timeout(timeout).await;
+        // Every request message of the session passes here: one debug line per message, with the method names
+        // only (never params, script hashes, addresses or payloads).
+        let result = match &outcome {
+            Ok(Ok(_)) => now_ms().saturating_sub(started).to_string(),
+            Ok(Err(_)) => "failed".to_owned(),
+            Err(_) => "timeout".to_owned(),
+        };
+        common::log::debug!("electrum {} {} {}", self.addr(), request_methods(request), result);
         let error = match outcome {
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(error)) => error,
@@ -279,6 +288,12 @@ pub struct ElectrumClientImpl {
     protocol_version: OrdRange<f32>,
     get_balance_concurrent_map: ConcurrentRequestMap<String, ElectrumBalance>,
     list_unspent_concurrent_map: ConcurrentRequestMap<String, Vec<ElectrumUnspent>>,
+    /// Concurrent-request map of the R38.6.3a balance batch, keyed by the P2PKH and P2PK script hashes.
+    get_balance_with_p2pk_concurrent_map:
+        ConcurrentRequestMap<(String, String), (ElectrumBalance, Vec<ElectrumUnspent>)>,
+    /// Concurrent-request map of the R38.6.3a unspent-list batch, keyed by the P2PKH and P2PK script hashes.
+    list_unspent_with_p2pk_concurrent_map:
+        ConcurrentRequestMap<(String, String), (Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)>,
     /// Script hashes this client has asked its servers to watch (R38.6.5).
     ///
     /// Held so every subscription can be placed again over another connection
@@ -290,6 +305,14 @@ pub struct ElectrumClientImpl {
 
 impl fmt::Debug for PoolShared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "PoolShared") }
+}
+
+/// Drops the duplicates the server can return in an unspent list, keeping the first occurrence.
+fn dedup_unspents(unspents: Vec<ElectrumUnspent>) -> Vec<ElectrumUnspent> {
+    unspents
+        .into_iter()
+        .unique_by(|unspent| (unspent.tx_hash, unspent.tx_pos))
+        .collect()
 }
 
 async fn electrum_request_multi(
@@ -548,6 +571,89 @@ impl ElectrumClient {
         }))
     }
 
+    /// CRD ch.38 R38.6.3a: the P2PKH balance of `p2pkh_hash` and the P2PK unspents of `p2pk_hash` in ONE
+    /// Electrum JSON-RPC batch, that is one request message for the server.
+    /// The unspents are de-duplicated exactly as [`ElectrumClient::scripthash_list_unspent`] does.
+    pub fn scripthash_get_balance_and_list_unspent(
+        &self,
+        p2pkh_hash: &str,
+        p2pk_hash: &str,
+    ) -> RpcRes<(ElectrumBalance, Vec<ElectrumUnspent>)> {
+        let arc = self.clone();
+        let key = (p2pkh_hash.to_owned(), p2pk_hash.to_owned());
+        let request = self.p2pk_batch(
+            rpc_req!(self, "blockchain.scripthash.get_balance", p2pkh_hash),
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pk_hash),
+            |balance, p2pk_unspents| (balance, dedup_unspents(p2pk_unspents)),
+        );
+        let fut = async move {
+            arc.get_balance_with_p2pk_concurrent_map
+                .wrap_request(key, request)
+                .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// CRD ch.38 R38.6.3a: the unspents of `p2pkh_hash` and those of `p2pk_hash` in ONE Electrum JSON-RPC
+    /// batch, that is one request message for the server. Returns `(p2pkh_unspents, p2pk_unspents)`, each
+    /// de-duplicated exactly as [`ElectrumClient::scripthash_list_unspent`] does.
+    pub fn scripthash_list_unspent_with_p2pk(
+        &self,
+        p2pkh_hash: &str,
+        p2pk_hash: &str,
+    ) -> RpcRes<(Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)> {
+        let arc = self.clone();
+        let key = (p2pkh_hash.to_owned(), p2pk_hash.to_owned());
+        let request = self.p2pk_batch(
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pkh_hash),
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pk_hash),
+            |p2pkh_unspents: Vec<ElectrumUnspent>, p2pk_unspents: Vec<ElectrumUnspent>| {
+                (dedup_unspents(p2pkh_unspents), dedup_unspents(p2pk_unspents))
+            },
+        );
+        let fut = async move {
+            arc.list_unspent_with_p2pk_concurrent_map
+                .wrap_request(key, request)
+                .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Sends the two requests as one JSON-RPC batch and decodes the two responses, in the order requested.
+    fn p2pk_batch<A, B, R>(
+        &self,
+        p2pkh_request: JsonRpcRequest,
+        p2pk_request: JsonRpcRequest,
+        combine: impl FnOnce(A, B) -> R + Send + 'static,
+    ) -> RpcRes<R>
+    where
+        A: serde::de::DeserializeOwned + Send + 'static,
+        B: serde::de::DeserializeOwned + Send + 'static,
+        R: Send + 'static,
+    {
+        let client_info = JsonRpcClient::client_info(self);
+        let context_request = p2pkh_request.clone();
+        let fut = self
+            .batch_rpc::<_, Json>([p2pkh_request, p2pk_request])
+            .compat()
+            .map(move |result| {
+                let parse_error = |e: String| JsonRpcError {
+                    client_info: client_info.clone(),
+                    request: JsonRpcRequestEnum::Single(context_request.clone()),
+                    error: JsonRpcErrorType::Parse(JsonRpcRemoteAddr::default(), e),
+                };
+                let mut items = result?.into_iter();
+                let (first, second) = match (items.next(), items.next()) {
+                    (Some(first), Some(second)) => (first, second),
+                    _ => return Err(parse_error("expected two responses in the batch".to_owned())),
+                };
+                let first = json::from_value(first).map_err(|e| parse_error(e.to_string()))?;
+                let second = json::from_value(second).map_err(|e| parse_error(e.to_string()))?;
+                Ok(combine(first, second))
+            });
+        Box::new(fut.boxed().compat())
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-scripthash-get-history
     pub fn scripthash_get_history(&self, hash: &str) -> RpcRes<Vec<ElectrumTxHistoryItem>> {
         rpc_func!(self, "blockchain.scripthash.get_history", hash)
@@ -714,6 +820,59 @@ impl ElectrumClient {
                 }),
         )
     }
+}
+
+#[cfg_attr(test, mockable)]
+impl ElectrumClient {
+    /// CRD ch.38 R38.6.3a: the balance of the P2PKH script of `address`, and the unspents locked by
+    /// `p2pk_script` (the P2PK lookup R38.6.3 adds to a legacy-address balance), read in ONE Electrum
+    /// request message. Returns `(p2pkh_balance, p2pk_unspents)`.
+    pub fn display_balance_with_p2pk(
+        &self,
+        address: &Address,
+        decimals: u8,
+        p2pk_script: &Script,
+    ) -> UtxoRpcFut<(BigDecimal, Vec<UnspentInfo>)> {
+        let p2pkh_hash = hex::encode(electrum_script_hash(&output_script(address, ScriptType::P2PKH)));
+        let p2pk_hash = hex::encode(electrum_script_hash(p2pk_script));
+        Box::new(
+            self.scripthash_get_balance_and_list_unspent(&p2pkh_hash, &p2pk_hash)
+                .map_to_mm_fut(UtxoRpcError::from)
+                .map(move |(balance, p2pk_unspents)| {
+                    (balance.to_big_decimal(decimals), unspents_to_infos(&p2pk_unspents))
+                }),
+        )
+    }
+
+    /// CRD ch.38 R38.6.3a: the unspents of the P2PKH script of `address` followed by those locked by
+    /// `p2pk_script`, read in ONE Electrum request message.
+    pub fn list_unspent_with_p2pk(&self, address: &Address, p2pk_script: &Script) -> UtxoRpcFut<Vec<UnspentInfo>> {
+        let p2pkh_hash = hex::encode(electrum_script_hash(&output_script(address, ScriptType::P2PKH)));
+        let p2pk_hash = hex::encode(electrum_script_hash(p2pk_script));
+        Box::new(
+            self.scripthash_list_unspent_with_p2pk(&p2pkh_hash, &p2pk_hash)
+                .map_to_mm_fut(UtxoRpcError::from)
+                .map(move |(p2pkh_unspents, p2pk_unspents)| {
+                    let mut unspents = unspents_to_infos(&p2pkh_unspents);
+                    unspents.extend(unspents_to_infos(&p2pk_unspents));
+                    unspents
+                }),
+        )
+    }
+}
+
+fn unspents_to_infos(unspents: &[ElectrumUnspent]) -> Vec<UnspentInfo> {
+    unspents
+        .iter()
+        .map(|unspent| UnspentInfo {
+            outpoint: OutPoint {
+                hash: unspent.tx_hash.reversed().into(),
+                index: unspent.tx_pos,
+            },
+            value: unspent.value,
+            height: unspent.height,
+        })
+        .collect()
 }
 
 // if mockable is placed before async_trait there is `munmap_chunk(): invalid pointer` error on async fn mocking attempt
@@ -979,6 +1138,8 @@ impl ElectrumClientImpl {
             protocol_version,
             get_balance_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_concurrent_map: ConcurrentRequestMap::new(),
+            get_balance_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
+            list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
             watched_script_hashes: AsyncMutex::new(HashSet::new()),
         }
     }
@@ -1436,6 +1597,15 @@ pub(crate) async fn open_session(
     })
 }
 
+/// The method names of a request message, comma-separated for a batch. Only names: never params, script hashes,
+/// addresses or payloads.
+fn request_methods(request: &JsonRpcRequestEnum) -> String {
+    match request {
+        JsonRpcRequestEnum::Single(single) => single.method.clone(),
+        JsonRpcRequestEnum::Batch(batch) => batch.methods().join(","),
+    }
+}
+
 /// Runs until the session ends: the read side or the write side stops, the idle cutoff strikes, or
 /// the session is closed. Then it fails the requests still waiting and tells the pool.
 #[allow(clippy::too_many_arguments)]
@@ -1819,5 +1989,191 @@ mod tls_tests {
         assert!(DnsName::try_from("localhost").is_ok());
         assert!(DnsName::try_from("127.0.0.1").is_err());
         assert!(DnsName::try_from("").is_err());
+    }
+}
+
+/// An Electrum client connected to a loopback stub server (see `electrum_stub_server`), for tests that count request
+/// messages. `script` sets the stub's canned answers before the client connects; the stub records every message
+/// the client writes, and `StubServer::request_messages` returns those that are not the connection's own traffic.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn electrum_client_over_stub(
+    script: impl FnOnce(&super::electrum_stub_server::StubServer),
+) -> (ElectrumClient, super::electrum_stub_server::StubServer) {
+    use super::electrum_stub_server::{StubBehavior, StubServer};
+
+    common::block_on(async {
+        let server = StubServer::start(StubBehavior::Answer).await;
+        script(&server);
+        let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+        client
+            .add_server(&server.request())
+            .expect("the stub is a usable server");
+        let client = Arc::new(client);
+        client
+            .activation_probe()
+            .await
+            .expect("the stub accepts the connection");
+        (ElectrumClient(client), server)
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod p2pk_batch_tests {
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::rpc_clients::UtxoRpcClientOps;
+    use common::block_on;
+    use serde_json::json;
+
+    const P2PKH_HASH: &str = "aa";
+    const P2PK_HASH: &str = "bb";
+
+    fn script_balance(server: &StubServer) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.get_balance",
+            P2PKH_HASH,
+            json!({"confirmed": 500, "unconfirmed": 20}),
+        );
+    }
+
+    fn script_unspents(server: &StubServer) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            P2PKH_HASH,
+            json!([
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 300},
+                // The server can repeat an unspent; it is dropped as in the single-hash read.
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 300},
+            ]),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            P2PK_HASH,
+            json!([
+                {"tx_hash": "02".repeat(32), "tx_pos": 1, "height": 11, "value": 70}
+            ]),
+        );
+    }
+
+    fn script(server: &StubServer) {
+        script_balance(server);
+        script_unspents(server);
+    }
+
+    #[test]
+    fn balance_and_p2pk_lookups_travel_in_one_request_message() {
+        let (client, server) = electrum_client_over_stub(script);
+        let (balance, p2pk_unspents) = block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        )
+        .unwrap();
+
+        assert_eq!((balance.confirmed, balance.unconfirmed), (500, 20));
+        assert_eq!(p2pk_unspents.len(), 1);
+        assert_eq!(p2pk_unspents[0].value, 70);
+
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1, "one request message, not one per lookup");
+        let batch = messages[0].as_array().expect("a JSON-RPC batch");
+        let lookups: Vec<_> = batch
+            .iter()
+            .map(|r| (r["method"].as_str().unwrap(), r["params"][0].as_str().unwrap()))
+            .collect();
+        assert_eq!(lookups, vec![
+            ("blockchain.scripthash.get_balance", P2PKH_HASH),
+            ("blockchain.scripthash.listunspent", P2PK_HASH),
+        ]);
+    }
+
+    #[test]
+    fn unspent_lists_travel_in_one_request_message_and_keep_their_order() {
+        let (client, server) = electrum_client_over_stub(script);
+        let (p2pkh, p2pk) = block_on(client.scripthash_list_unspent_with_p2pk(P2PKH_HASH, P2PK_HASH).compat()).unwrap();
+
+        assert_eq!(
+            p2pkh.iter().map(|u| u.value).collect::<Vec<_>>(),
+            vec![300],
+            "duplicates dropped"
+        );
+        assert_eq!(p2pk.iter().map(|u| u.value).collect::<Vec<_>>(), vec![70]);
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_single_hash_read_is_still_one_plain_request() {
+        let (client, server) = electrum_client_over_stub(script);
+        let balance = block_on(client.scripthash_get_balance(P2PKH_HASH).compat()).unwrap();
+        assert_eq!(balance.confirmed, 500);
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_object(), "not a batch");
+    }
+
+    /// One debug line per request message, naming the server and the methods and nothing else.
+    #[test]
+    fn every_request_message_is_logged_once_without_its_payload() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        if !install_log_capture() {
+            // Another logger owns the process, so there is nothing to read the lines from.
+            return;
+        }
+        let (client, server) = electrum_client_over_stub(script);
+        let addr = server.addr();
+
+        block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        )
+        .unwrap();
+        block_on(client.scripthash_get_balance(P2PKH_HASH).compat()).unwrap();
+        assert_eq!(server.request_messages().len(), 2);
+
+        // The client also logs its connection events with the address; the request lines are the debug ones.
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|line| line.starts_with("DEBUG electrum ") && line.contains(&addr))
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per message: {lines:?}");
+        let fields = |line: &str| -> Vec<String> {
+            // "DEBUG electrum <addr> <methods> <ms>"
+            line.split_whitespace().map(str::to_owned).collect()
+        };
+        let batch = fields(&lines[0]);
+        assert_eq!(batch.len(), 5, "{lines:?}");
+        assert_eq!(&batch[..3], &["DEBUG", "electrum", addr.as_str()]);
+        assert_eq!(
+            batch[3],
+            "blockchain.scripthash.get_balance,blockchain.scripthash.listunspent"
+        );
+        assert!(batch[4].parse::<u64>().is_ok(), "{lines:?}");
+        let single = fields(&lines[1]);
+        assert_eq!(single.len(), 5, "{lines:?}");
+        assert_eq!(single[3], "blockchain.scripthash.get_balance");
+        assert!(single[4].parse::<u64>().is_ok(), "{lines:?}");
+        // The hashes (params) are not logged.
+        assert!(lines
+            .iter()
+            .all(|l| !l.contains(P2PKH_HASH) || l.contains("scripthash")));
+        assert!(lines.iter().all(|l| !l.contains(P2PK_HASH) || l.contains("scripthash")));
+    }
+
+    #[test]
+    fn a_failing_lookup_fails_the_whole_read() {
+        let (client, _server) = electrum_client_over_stub(|server| {
+            script_unspents(server);
+            // A balance answer that is not a balance.
+            server.set_result("blockchain.scripthash.get_balance", json!("not a balance"));
+        });
+        let res = block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        );
+        assert!(res.is_err());
     }
 }

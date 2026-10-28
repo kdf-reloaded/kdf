@@ -178,6 +178,12 @@ pub(crate) enum HtlcIndexError {
         funding
     )]
     IndexCoverage { funding: String },
+    /// Every admitted endpoint has been marked as keeping no address index (R39.11.4i(c)).
+    #[display(
+        fmt = "HTLC detection needs a server whose node keeps an address index (R39.11.17); no address index on: {}",
+        _0
+    )]
+    NoAddressIndex(String),
     /// The index knows the output but no longer lists it, and no spending transaction was delivered.
     #[display(
         fmt = "the HTLC output is indexed but no longer listed as unspent, and its spending transaction was not \
@@ -273,6 +279,10 @@ fn collect_form(ev: &FormEvidence, facts: &mut EndpointFacts, output_script: &[u
         Ok(read) => {
             if !read.gaps.is_empty() {
                 facts.gaps.extend(read.gaps.iter().copied());
+            }
+            // A read stopped under R39.11.4h(b) reports its stop failure below; its gaps are artifacts of the
+            // refusal and must not point at the transaction index (R39.11.4b(c) is the genuine-gap case).
+            if !read.gaps.is_empty() && !read.stopped_on_unservable_heights {
                 facts.problems.push(format!(
                     "{} history skipped height(s) {:?}: the node could not serve a transaction there (an HTLC spend \
                      has transparent inputs and no transparent outputs, which a node without its transaction index \
@@ -420,30 +430,183 @@ pub(crate) fn decide_sent(script_pubkey: &[u8], evidence: &[FormEvidence]) -> Re
 // Orchestration
 // ---------------------------------------------------------------------------------------------
 
+/// How one detection reports its progress (R39.11.4h(d)): the coin it is for, and whether it is one
+/// round of a polling wait, whose lines are repeated every few seconds and so go to `debug`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DetectionLog<'a> {
+    pub(crate) coin: &'a str,
+    pub(crate) polling: bool,
+}
+
+impl DetectionLog<'_> {
+    fn line(&self, message: String) {
+        if self.polling {
+            common::log::debug!("{}", message);
+        } else {
+            common::log::info!("{}", message);
+        }
+    }
+}
+
+/// Evidence standing in for an endpoint that is skipped for having no address index: a failure, so the
+/// endpoint is undetermined and the undetermined error lists it (R39.11.4i(b)).
+fn skipped_no_address_index(server: &str, node_message: &str) -> FormEvidence {
+    let reason = format!("skipped: no address index (node message: {})", node_message);
+    FormEvidence {
+        server: server.to_owned(),
+        encoding: IndexEncoding::PubkeyHash,
+        utxos: Err(reason.clone()),
+        history: Err(reason),
+    }
+}
+
+/// Runs `fut` unless `deadline` has passed or passes first; `None` is the endpoint's time budget
+/// (R39.11.4h(c)) being used up.
+async fn within_budget<T>(deadline: tokio::time::Instant, fut: impl std::future::Future<Output = T>) -> Option<T> {
+    if tokio::time::Instant::now() >= deadline {
+        return None;
+    }
+    tokio::time::timeout_at(deadline, fut).await.ok()
+}
+
+fn describe_spend_decision(result: &Result<SpendOutcome, HtlcIndexError>) -> String {
+    match result {
+        Ok(SpendOutcome::Spent(spend)) => format!(
+            "spent: found on {} under the {:?} form, input {}, height {:?}",
+            spend.server, spend.encoding, spend.input_index, spend.height
+        ),
+        Ok(SpendOutcome::NotSpent(proof)) => format!("not spent ({:?})", proof),
+        Err(e) => format!("undetermined: {}", e),
+    }
+}
+
+fn describe_sent_decision(result: &Result<SentOutcome, HtlcIndexError>) -> String {
+    match result {
+        Ok(SentOutcome::Sent(FundingFound::Transaction { height, .. })) => {
+            format!("sent: the payment transaction was delivered, height {:?}", height)
+        },
+        Ok(SentOutcome::Sent(FundingFound::Listed { txid })) => format!(
+            "sent: the unspent listing names transaction {:?}",
+            txid_internal_to_display(*txid)
+        ),
+        Ok(SentOutcome::NotSent) => "not sent".to_owned(),
+        Err(e) => format!("undetermined: {}", e),
+    }
+}
+
 impl LightwalletdBackend {
-    /// Reads both address forms of `hash` on `server`. A failed read is recorded as a failure.
-    async fn form_evidence(&self, server: &str, hash: [u8; 20], from: u64, to: u64) -> Vec<FormEvidence> {
+    /// Reads both address forms of `hash` on `server`, within the endpoint's time budget
+    /// (R39.11.4h(c)). A failed read is recorded as a failure, never as an empty result.
+    async fn form_evidence(
+        &self,
+        server: &str,
+        hash: [u8; 20],
+        from: u64,
+        to: u64,
+        log: &DetectionLog<'_>,
+    ) -> Vec<FormEvidence> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.endpoint_budget;
+        let budget = self.endpoint_budget;
         let mut out = Vec::with_capacity(2);
         for encoding in [IndexEncoding::PubkeyHash, IndexEncoding::ScriptHash] {
             let address = self.addressing.address(encoding, hash).to_string();
-            let utxos = self
-                .transport
-                .address_utxos(server, &address)
+            self.note_progress(
+                hash,
+                format!("{}, {:?} form, GetAddressUtxos of {}", server, encoding, address),
+            );
+            let utxos = within_budget(deadline, self.transport.address_utxos(server, &address))
                 .await
-                .map_err(|e| e.to_string());
+                .map_or_else(
+                    || {
+                        Err(format!(
+                            "lightwalletd {}: {:?} form, GetAddressUtxos of {}: the {:?} time budget for this \
+                             detection on this endpoint was used up",
+                            server, encoding, address, budget
+                        ))
+                    },
+                    |result| result.map_err(|e| e.to_string()),
+                );
             let history = {
                 let transport = self.transport.clone();
-                let address = address.clone();
-                let server = server.to_owned();
-                read_history(from, to, TADDR_HISTORY_WINDOW_BLOCKS, move |start, end| {
-                    let transport = transport.clone();
-                    let address = address.clone();
-                    let server = server.clone();
-                    async move { transport.taddr_txids(&server, &address, start, end).await }
-                })
+                let (history_address, history_server) = (address.clone(), server.to_owned());
+                read_history(
+                    from,
+                    to,
+                    TADDR_HISTORY_WINDOW_BLOCKS,
+                    HistoryLimits::HTLC,
+                    move |start, end| {
+                        self.note_progress(
+                            hash,
+                            format!(
+                                "{}, {:?} form, history of {} blocks {}..={}",
+                                history_server, encoding, history_address, start, end
+                            ),
+                        );
+                        let transport = transport.clone();
+                        let address = history_address.clone();
+                        let server = history_server.clone();
+                        async move {
+                            match within_budget(deadline, transport.taddr_txids(&server, &address, start, end)).await {
+                                Some(read) => read,
+                                None => WindowRead {
+                                    txs: Vec::new(),
+                                    error: Some(WindowError {
+                                        serve_failure: false,
+                                        message: format!(
+                                            "the {:?} time budget for this detection on this endpoint was used up in \
+                                         the history read of blocks {}..={}",
+                                            budget, start, end
+                                        ),
+                                    }),
+                                },
+                            }
+                        }
+                    },
+                )
                 .await
+                .map(|mut read| {
+                    read.failure = read.failure.map(|failure| {
+                        format!(
+                            "lightwalletd {}: {:?} form, history of {} stopped: {}",
+                            server, encoding, address, failure
+                        )
+                    });
+                    read
+                })
                 .map_err(|e| e.to_string())
             };
+            let summary = match (&utxos, &history) {
+                (Ok(rows), Ok(read)) => format!(
+                    "{} transaction(s), {} unspent row(s), {} gap(s), {} request(s)",
+                    read.transactions.len(),
+                    rows.len(),
+                    read.gaps.len(),
+                    read.requests
+                ),
+                (Err(e), Ok(read)) => format!(
+                    "{} transaction(s), unspent listing failed ({}), {} gap(s), {} request(s)",
+                    read.transactions.len(),
+                    e,
+                    read.gaps.len(),
+                    read.requests
+                ),
+                (_, Err(e)) => format!("history read failed: {}", e),
+            };
+            let stopped = history
+                .as_ref()
+                .ok()
+                .and_then(|read| read.failure.as_deref())
+                .map_or_else(String::new, |failure| format!("; stopped: {}", failure));
+            log.line(format!(
+                "HTLC detection for {}: {} {:?} form: {}, {} ms elapsed on this endpoint{}",
+                log.coin,
+                server,
+                encoding,
+                summary,
+                started.elapsed().as_millis(),
+                stopped
+            ));
             out.push(FormEvidence {
                 server: server.to_owned(),
                 encoding,
@@ -452,6 +615,66 @@ impl LightwalletdBackend {
             });
         }
         out
+    }
+
+    /// Marks `server` "no address index" if one of the reads in `forms` failed with the node's message
+    /// for it (R39.11.4i). The mark lasts as long as this backend does: a new activation builds a new one,
+    /// and re-evaluating admission does not touch it.
+    fn mark_if_no_address_index(&self, server: &str, forms: &[FormEvidence]) {
+        let message = forms.iter().find_map(|ev| {
+            let failures = [
+                ev.utxos.as_ref().err().map(String::as_str),
+                ev.history.as_ref().err().map(String::as_str),
+                ev.history.as_ref().ok().and_then(|read| read.failure.as_deref()),
+            ];
+            failures
+                .into_iter()
+                .flatten()
+                .find(|text| mentions_no_address_index(text))
+        });
+        let Some(message) = message else {
+            return;
+        };
+        let first = self
+            .no_address_index
+            .lock()
+            .insert(server.to_owned(), message.to_owned())
+            .is_none();
+        if first {
+            common::log::warn!(
+                "lightwalletd {} keeps no address index and is skipped by HTLC detection for the rest of this \
+                 activation; the node said: {}",
+                server,
+                message
+            );
+        }
+    }
+
+    fn no_address_index_message(&self, server: &str) -> Option<String> {
+        self.no_address_index.lock().get(server).cloned()
+    }
+
+    /// R39.11.4i(c): the detection cannot succeed when every admitted endpoint is marked.
+    fn all_without_address_index(&self, admitted: &[String]) -> Result<(), HtlcIndexError> {
+        let marks = self.no_address_index.lock();
+        if !admitted.is_empty() && admitted.iter().all(|server| marks.contains_key(server)) {
+            let listed: Vec<String> = admitted
+                .iter()
+                .map(|server| format!("{} (node message: {})", server, marks[server]))
+                .collect();
+            return Err(HtlcIndexError::NoAddressIndex(listed.join(", ")));
+        }
+        Ok(())
+    }
+
+    /// Records what the detection of the HTLC with redeem-script hash `hash` is reading, for the
+    /// recovery bound's error (R39.5.5). Replaced on every read; removed when the detection ends.
+    fn note_progress(&self, hash: [u8; 20], what: String) { self.detection_progress.lock().insert(hash, what); }
+
+    /// What the detection in flight for the HTLC with this redeem-script hash read last. After a
+    /// detection was dropped before it ended, this stays as it was (R39.5.5).
+    pub(crate) fn detection_progress(&self, hash: &[u8; 20]) -> Option<String> {
+        self.detection_progress.lock().get(hash).cloned()
     }
 
     /// Remembers, per endpoint, which form returned rows (R39.11.4d(b)). It never narrows what is
@@ -493,53 +716,108 @@ impl LightwalletdBackend {
         }
     }
 
-    /// The history window of a detection: from the caller's start (floored at the Sapling activation
-    /// height, below which no block is read) to the tip, widened to take in a funding height the
-    /// endpoint reports.
+    /// The history window of a detection, from the Sapling floor (below which no block is read).
+    ///
+    /// A spend cannot precede its funding, so when the funding transaction is reported mined the
+    /// window starts at its height, whatever the caller's start was, and reaches it even when it is
+    /// above the tip (R39.11.4h(a)). Without a funding height the window starts at the caller's
+    /// start and runs to the tip.
     fn history_window(&self, from_block: u64, tip: u64, funding: Option<FundingState>) -> (u64, u64) {
         let floor = self.sapling_activation_height().max(1);
-        let mut from = from_block.max(floor);
-        let mut to = tip.max(from);
-        if let Some(FundingState::Mined(height)) = funding {
-            from = from.min(height.max(floor));
-            to = to.max(height);
+        match funding {
+            Some(FundingState::Mined(height)) => {
+                let from = height.max(floor);
+                (from, tip.max(height).max(from))
+            },
+            _ => {
+                let from = from_block.max(floor);
+                (from, tip.max(from))
+            },
         }
-        (from, to)
     }
 
-    /// HTLC spend detection (R39.11.4d). `from_block` is the caller's search start.
+    /// HTLC spend detection (R39.11.4d). `from_block` is the caller's search start; it applies only
+    /// while the funding height is not known (R39.11.4h(a)).
     ///
     /// Endpoints are tried in configured order and the first conclusive answer is returned; an
-    /// endpoint that fails the methods needed is not an answer, and the next is tried.
+    /// endpoint that fails the methods needed, stops under a limit of R39.11.4h or uses up its time
+    /// budget is not an answer, and the next is tried.
     pub(crate) async fn detect_output_spend(
         &self,
         output: &OutputRef,
         from_block: u64,
+        log: &DetectionLog<'_>,
     ) -> Result<SpendOutcome, HtlcIndexError> {
         let hash = p2sh_hash_of(&output.script_pubkey).ok_or_else(|| {
             HtlcIndexError::Lookup("the watched output's script-pubkey is not pay-to-script-hash".to_owned())
         })?;
+        self.note_progress(hash, "endpoint admission, chain tip and funding lookup".to_owned());
+        let result = self.detect_output_spend_of(output, hash, from_block, log).await;
+        // Removed only when the detection ends; a detection dropped by a deadline leaves its last
+        // read for the error that reports the deadline (R39.5.5).
+        self.detection_progress.lock().remove(&hash);
+        result
+    }
+
+    async fn detect_output_spend_of(
+        &self,
+        output: &OutputRef,
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<SpendOutcome, HtlcIndexError> {
         let admitted = self
             .admitted()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
+        self.all_without_address_index(&admitted)?;
         let tip = self
             .chain_tip()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
         let funding = self.funding_state(output.txid).await;
         let (from, to) = self.history_window(from_block, tip, Some(funding));
+        log.line(format!(
+            "HTLC spend detection for {}: output {:?}:{}, funding {:?}, history blocks {}..={}, {} admitted endpoint(s)",
+            log.coin,
+            txid_internal_to_display(output.txid),
+            output.vout,
+            funding,
+            from,
+            to,
+            admitted.len()
+        ));
 
         let mut evidence = Vec::new();
         for server in admitted {
-            let forms = self.form_evidence(&server, hash, from, to).await;
+            if let Some(message) = self.no_address_index_message(&server) {
+                log.line(format!(
+                    "HTLC spend detection for {}: {} skipped: no address index",
+                    log.coin, server
+                ));
+                evidence.push(skipped_no_address_index(&server, &message));
+                continue;
+            }
+            let forms = self.form_evidence(&server, hash, from, to, log).await;
+            self.mark_if_no_address_index(&server, &forms);
             self.note_encodings(&server, &forms);
             evidence.extend(forms);
-            if let Ok(outcome) = decide_spend(output, funding, &evidence) {
-                return Ok(outcome);
+            if decide_spend(output, funding, &evidence).is_ok() {
+                break;
             }
         }
-        decide_spend(output, funding, &evidence)
+        let result = decide_spend(output, funding, &evidence);
+        log.line(format!(
+            "HTLC spend detection for {}: {}{}",
+            log.coin,
+            if result.is_ok() {
+                "decision "
+            } else {
+                "no endpoint gave an answer, "
+            },
+            describe_spend_decision(&result)
+        ));
+        result
     }
 
     /// Already-sent detection (R39.11.4d): is there a payment to `script_pubkey` on chain?
@@ -547,29 +825,73 @@ impl LightwalletdBackend {
         &self,
         script_pubkey: &[u8],
         from_block: u64,
+        log: &DetectionLog<'_>,
     ) -> Result<SentOutcome, HtlcIndexError> {
         let hash = p2sh_hash_of(script_pubkey)
             .ok_or_else(|| HtlcIndexError::Lookup("the HTLC script-pubkey is not pay-to-script-hash".to_owned()))?;
+        self.note_progress(hash, "endpoint admission and chain tip".to_owned());
+        let result = self.detect_funding_of(script_pubkey, hash, from_block, log).await;
+        self.detection_progress.lock().remove(&hash);
+        result
+    }
+
+    async fn detect_funding_of(
+        &self,
+        script_pubkey: &[u8],
+        hash: [u8; 20],
+        from_block: u64,
+        log: &DetectionLog<'_>,
+    ) -> Result<SentOutcome, HtlcIndexError> {
         let admitted = self
             .admitted()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
+        self.all_without_address_index(&admitted)?;
         let tip = self
             .chain_tip()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
         let (from, to) = self.history_window(from_block, tip, None);
+        log.line(format!(
+            "HTLC already-sent detection for {}: payment script {}, funding transaction not known, history blocks \
+             {}..={}, {} admitted endpoint(s)",
+            log.coin,
+            hex::encode(script_pubkey),
+            from,
+            to,
+            admitted.len()
+        ));
 
         let mut evidence = Vec::new();
         for server in admitted {
-            let forms = self.form_evidence(&server, hash, from, to).await;
+            if let Some(message) = self.no_address_index_message(&server) {
+                log.line(format!(
+                    "HTLC already-sent detection for {}: {} skipped: no address index",
+                    log.coin, server
+                ));
+                evidence.push(skipped_no_address_index(&server, &message));
+                continue;
+            }
+            let forms = self.form_evidence(&server, hash, from, to, log).await;
+            self.mark_if_no_address_index(&server, &forms);
             self.note_encodings(&server, &forms);
             evidence.extend(forms);
-            if let Ok(outcome) = decide_sent(script_pubkey, &evidence) {
-                return Ok(outcome);
+            if decide_sent(script_pubkey, &evidence).is_ok() {
+                break;
             }
         }
-        decide_sent(script_pubkey, &evidence)
+        let result = decide_sent(script_pubkey, &evidence);
+        log.line(format!(
+            "HTLC already-sent detection for {}: {}{}",
+            log.coin,
+            if result.is_ok() {
+                "decision "
+            } else {
+                "no endpoint gave an answer, "
+            },
+            describe_sent_decision(&result)
+        ));
+        result
     }
 }
 
