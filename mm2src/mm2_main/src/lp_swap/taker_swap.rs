@@ -3263,9 +3263,8 @@ mod taker_swap_tests {
         assert!(unsafe { TAKER_PAYMENT_REFUND_CALLED });
     }
 
-    /// The saved swap of the tests below: a taker payment of a shielded-style coin whose HTLC key is the per-swap
-    /// key `SAVED_TAKER_COIN_HTLC_PUB`, which is not the node's persistent key.
-    const SAVED_TAKER_COIN_HTLC_PUB: &str = "02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580";
+    /// The saved swap of the tests below: a taker payment of a shielded-style coin whose HTLC key is a per-swap
+    /// key pair, which is not the node's persistent key.
     const SAVED_WITH_TAKER_COIN_HTLC_PUB: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeSendFailed","MakerPaymentValidateFailed","TakerPaymentTransactionFailed","TakerPaymentDataSendFailed","TakerPaymentWaitForSpendFailed","MakerPaymentSpendFailed","TakerPaymentRefunded","TakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker":"1bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_wait":1563746537,"my_persistent_pub":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","started_at":1563743937,"taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_htlc_pubkey":"02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"taker_payment_lock":1563751737,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743937741},{"event":{"data":{"maker_payment_locktime":1563759539,"maker_pubkey":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret_hash":"432c8272ac59b47dea2d299b5cf1ee64ea1917b9"},"type":"Negotiated"},"timestamp":1563744003530},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeSent"},"timestamp":1563744020598},{"event":{"data":{"tx_hash":"0cf4acbcefde53645851c5c6053ea61fe0cbb5f828a906d69eb809e0b071a03b","tx_hex":"0400008085202f89025d5ae3e8c87418c9b735f8f2f7d29e26820c33c9f30d53f2d31f8b99ea9b1490010000006a47304402201185c06ca575261c539b287175751b7de642eb7466c59128639a19b4c2dd2f9b02201c8c4167d581864bedd4d1deb5596472e6e3ce29fe9e7996907a7b59c905d5490121031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8ffffffff06dbf9971c8dfd4a0c8c49f4f15c51de59ba13b2efa702682e26869843af9a87000000006a473044022012b47c12c7f6ad7d8b778fc4b5dcfd56a39325daf302f56e7b84753ba5216cfa022076bf571cf9e20facf70d2f134e8ed2de67aa08581a27ff3128bf93a9b594ac770121031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8ffffffff02fed727150000000017a914d5268b31131a652f9b6ddf57db62f02285cdfad1874e1d7835000000001976a914c3f710deb7320b0efa6edb14e3ebeeb9155fa90d88ac37cf345d000000000000000000000000000000"},"type":"MakerPaymentReceived"},"timestamp":1563744071778},{"event":{"type":"MakerPaymentWaitConfirmStarted"},"timestamp":1563744071781},{"event":{"type":"MakerPaymentValidatedAndConfirmed"},"timestamp":1563744118073},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"TakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563744118580}],"success_events":["Started","Negotiated","TakerFeeSent","MakerPaymentReceived","MakerPaymentWaitConfirmStarted","MakerPaymentValidatedAndConfirmed","TakerPaymentSent","TakerPaymentSpent","MakerPaymentSpent","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
     const SEED: &str = "spice describe gravity federal blast come thank unfair canal monkey style afraid";
 
@@ -3283,9 +3282,10 @@ mod taker_swap_tests {
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (taker_swap, _) = TakerSwap::load_from_saved(ctx, maker_coin, taker_coin, taker_saved_swap).unwrap();
-        // The saved record of the test carries the per-swap public key only; give the swap its private half.
+        // The swap's per-swap key is a key pair: the saved public key is that pair's public key (R39.5.4).
         let per_swap_key_pair = KeyPair::random_compressed();
         taker_swap.w().my_taker_coin_htlc_keypair = per_swap_key_pair;
+        taker_swap.w().my_taker_coin_htlc_pub = H264::from(&**per_swap_key_pair.public());
         (taker_swap, key_pair, per_swap_key_pair)
     }
 
@@ -3294,7 +3294,7 @@ mod taker_swap_tests {
     /// payment found refunded is reported as such, naming the refund transaction and the key that matched.
     #[test]
     fn test_recover_funds_taker_swap_uses_the_saved_taker_coin_htlc_key() {
-        let (taker_swap, key_pair, _) = taker_swap_with_saved_htlc_key();
+        let (taker_swap, key_pair, per_swap_key_pair) = taker_swap_with_saved_htlc_key();
         let persistent_pub = key_pair.public().to_vec();
 
         static SENT_LOOKUP_MY_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
@@ -3321,7 +3321,7 @@ mod taker_swap_tests {
             "{err}"
         );
 
-        let saved_pub = hex::decode(SAVED_TAKER_COIN_HTLC_PUB).unwrap();
+        let saved_pub = per_swap_key_pair.public().to_vec();
         assert_ne!(
             saved_pub, persistent_pub,
             "the saved swap key is not the persistent key"
@@ -3371,7 +3371,7 @@ mod taker_swap_tests {
             transaction: eth_tx_for_test().into(),
         });
         assert_eq!(*CANDIDATES_TRIED.lock().unwrap(), vec![
-            hex::decode(SAVED_TAKER_COIN_HTLC_PUB).unwrap(),
+            per_swap_key_pair.public().to_vec(),
             persistent_pub.clone()
         ]);
         assert_eq!(*SPEND_SEARCH_MY_PUB.lock().unwrap(), persistent_pub);
@@ -3433,6 +3433,75 @@ mod taker_swap_tests {
             *REFUND_PRIVKEY.lock().unwrap(),
             per_swap_key_pair.private().secret.to_vec()
         );
+    }
+
+    /// R39.5.4 (amendment 2026-10-28), taker side: a saved private key that does not belong to the saved public key,
+    /// where the saved public key is the persistent one, is replaced by the persistent key pair: the refund is
+    /// signed with the persistent private key.
+    #[test]
+    fn test_recover_funds_taker_swap_saved_private_key_of_the_persistent_pubkey_falls_back_to_the_persistent_pair() {
+        let (taker_swap, key_pair, saved_private_key_pair) = taker_swap_with_saved_htlc_key();
+        taker_swap.w().my_taker_coin_htlc_pub = H264::from(&**key_pair.public());
+        assert_ne!(key_pair.public(), saved_private_key_pair.public());
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        static REFUND_PRIVKEY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::send_taker_refunds_payment.mock_safe(|_, _, _, _, _, privkey, _| {
+            *REFUND_PRIVKEY.lock().unwrap() = privkey.to_vec();
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(taker_swap.recover_funds()).unwrap();
+        assert_eq!(actual.action, RecoveredSwapAction::RefundedMyPayment);
+        assert_eq!(*REFUND_PRIVKEY.lock().unwrap(), key_pair.private().secret.to_vec());
+        assert_ne!(
+            *REFUND_PRIVKEY.lock().unwrap(),
+            saved_private_key_pair.private().secret.to_vec(),
+            "the refund is not signed with the saved private key"
+        );
+    }
+
+    /// R39.5.4 (amendment 2026-10-28), taker side: the payment pays the saved public key, whose private key is
+    /// held neither in the swap record nor as the persistent key. Recovery stops before the spend search and the
+    /// refund, with the error naming the public key.
+    #[test]
+    fn test_recover_funds_taker_swap_without_the_private_key_of_the_paid_public_key_stops_naming_it() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        let unheld = KeyPair::random_compressed();
+        taker_swap.w().my_taker_coin_htlc_pub = H264::from(&**unheld.public());
+        static UNHELD_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        *UNHELD_PUB.lock().unwrap() = unheld.public().to_vec();
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, _, first, _, _, _| {
+            let check = if first == UNHELD_PUB.lock().unwrap().as_slice() {
+                HtlcPaymentCheck::Pays
+            } else {
+                HtlcPaymentCheck::PaysAnotherScript {
+                    payment_id: "abcd".to_owned(),
+                }
+            };
+            MockResult::Return(Box::pin(futures::future::ready(Ok(check))))
+        });
+        static SEARCHED: AtomicBool = AtomicBool::new(false);
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            SEARCHED.store(true, Ordering::Relaxed);
+            MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
+        });
+        static REFUND_CALLED: AtomicBool = AtomicBool::new(false);
+        TestCoin::send_taker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            REFUND_CALLED.store(true, Ordering::Relaxed);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let err = block_on(taker_swap.recover_funds()).unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "No private key is held for the HTLC public key {}",
+                hex::encode(unheld.public().to_vec())
+            )),
+            "{err}"
+        );
+        assert!(!SEARCHED.load(Ordering::Relaxed));
+        assert!(!REFUND_CALLED.load(Ordering::Relaxed));
     }
 
     /// CRD ch.39 R39.5.5 (T39.5.5 bullet 1), taker side: a spend search that never completes ends the

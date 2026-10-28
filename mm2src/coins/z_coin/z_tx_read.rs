@@ -967,6 +967,39 @@ mod tests {
         );
     }
 
+    /// A live ARRR (version 4) maker payment of a September swap, which another build saved with an HTLC public
+    /// key that is not the public key of its saved private key; public chain data. The payment's HTLC: lock time
+    /// 1790763971, refund key `032d2807...`, spend key `028a603b...`, secret hash160 `3b2403de...`.
+    const SEPTEMBER_PAYMENT_HEX: &str = include_str!("test-fixtures/arrr-htlc-payment-50408ff4.hex");
+    const SEPTEMBER_TIME_LOCK: u32 = 1_790_763_971;
+    const SEPTEMBER_REFUND_KEY: &str = "032d28070ec423fa8af21fb45d95c695c35591fa1639ce8ac4a4959fdc466377fa";
+    const SEPTEMBER_SPEND_KEY: &str = "028a603ba6b638e4d4b39c3ee73db8e10bef607b81605d2cc772608439173f6656";
+    const SEPTEMBER_SECRET_HASH: &str = "3b2403de80c871ca25719119e9a84a3ba96c3a68";
+
+    /// R39.5.4, the real payment of the key-pair defect: the real shielded-coin check says the payment pays the
+    /// script rebuilt with refund key `032d2807...` and spend key `028a603b...`, and another script for any
+    /// other refund key, such as a persistent key.
+    #[test]
+    fn check_payment_pays_htlc_on_the_real_september_payment_matches_only_its_refund_key() {
+        let payment = bytes_of(SEPTEMBER_PAYMENT_HEX.trim());
+        let secret_hash = bytes_of(SEPTEMBER_SECRET_HASH);
+        let (refund, spend) = (live_key(SEPTEMBER_REFUND_KEY), live_key(SEPTEMBER_SPEND_KEY));
+        assert_eq!(
+            check_payment_pays_htlc(SEPTEMBER_TIME_LOCK, &refund, &spend, &secret_hash, &payment),
+            Ok(HtlcPaymentCheck::Pays)
+        );
+        let persistent = live_key("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62");
+        assert!(matches!(
+            check_payment_pays_htlc(SEPTEMBER_TIME_LOCK, &persistent, &spend, &secret_hash, &payment),
+            Ok(HtlcPaymentCheck::PaysAnotherScript { .. })
+        ));
+        // The keys the other way round are another script too.
+        assert!(matches!(
+            check_payment_pays_htlc(SEPTEMBER_TIME_LOCK, &spend, &refund, &secret_hash, &payment),
+            Ok(HtlcPaymentCheck::PaysAnotherScript { .. })
+        ));
+    }
+
     /// T39.5.4: the live refund's input script classifies as a refund, and it spends the live payment.
     #[test]
     fn classify_live_arrr_refund_as_refunded() {

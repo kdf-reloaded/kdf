@@ -291,7 +291,17 @@ falls back to the saved key pair, as the swap restore does
 rebuild the script the payment pays, recovery shall try the coin's
 persistent key next: a swap saved by an older build, or by another build,
 may have negotiated with it. The first key that rebuilds the paid script is
-used for the rest of the recovery. Which key matched, "per-swap key" or
+used for the rest of the recovery. A key here is a key pair: the private key
+that refunds or spends is the one that belongs to the public key that rebuilt
+the script. When the private key saved with the swap does not belong to its
+saved public key, the coin's persistent key pair is used if its public key is
+that key. Otherwise recovery stops with an error naming the public key for which
+no private key is held, before anything is built. "Belongs to" means the public key
+the coin derives from the pair for its HTLC: the pair's own public key on a
+secp256k1 coin, but a different key on a coin whose HTLC field uses another curve.
+A saved public key with no private key held is still tried against the payment;
+when it does not rebuild the paid script, the persistent key is tried next as
+usual. Which key matched, "per-swap key" or
 "persistent key", is stated in a log line, and in the error text whenever
 recovery stops with an error (for example "refunded already by <txid>"). The
 response of a successful `recover_funds_of_swap` keeps its shape: no field is
@@ -331,6 +341,18 @@ and a successful response has the same fields as before. A payment of
 another swap still hits the hard stop; its message prints the transaction id
 in display order and says both keys were tried. A UTXO-coin case shows
 recovery unchanged there.
+
+A swap record whose saved HTLC public key is not the public key of its saved
+private key is refunded with the persistent key pair when the saved public key is
+the persistent one. When it is neither, recovery stops with the named "no private
+key" error; this is checked on the real payment of a September swap, whose refund
+key is `032d2807…`.
+
+> **Amendment (2026-10-28).** Clean-room original. A maker swap saved by
+> another build carried an HTLC public key that was not the public key of the
+> private key saved with it. Recovery matched the public key and then built the
+> refund with the saved private key, so the redeem script no longer matched the
+> payment, and the transaction builder rejected it as "Invalid address".
 
 R39.5.5 *Recovery returns within a bound and names its stage.*
 `recover_funds_of_swap` shall return within 10 minutes, for every coin and

@@ -2887,7 +2887,6 @@ mod maker_swap_tests {
         assert!(!err.to_lowercase().contains("wallet"), "{err}");
     }
 
-    const SAVED_MAKER_COIN_HTLC_PUB: &str = "02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580";
     const SAVED_WITH_MAKER_COIN_HTLC_PUB: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_htlc_pubkey":"02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_lock":1563759539,"my_persistent_pub":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret":"0000000000000000000000000000000000000000000000000000000000000000","started_at":1563743939,"taker":"101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743939211},{"event":{"data":{"taker_payment_locktime":1563751737,"taker_pubkey":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9"},"type":"Negotiated"},"timestamp":1563743979835},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeValidated"},"timestamp":1563744052878},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563763243350}],"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
 
     fn maker_swap_with_saved_htlc_key() -> (MakerSwap, KeyPair, KeyPair) {
@@ -2904,9 +2903,10 @@ mod maker_swap_tests {
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (maker_swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap).unwrap();
-        // The saved record of the test carries the per-swap public key only; give the swap its private half.
+        // The swap's per-swap key is a key pair: the saved public key is that pair's public key (R39.5.4).
         let per_swap_key_pair = KeyPair::random_compressed();
         maker_swap.w().my_maker_coin_htlc_keypair = per_swap_key_pair;
+        maker_swap.w().my_maker_coin_htlc_pub = H264::from(&**per_swap_key_pair.public());
         (maker_swap, key_pair, per_swap_key_pair)
     }
 
@@ -2949,7 +2949,7 @@ mod maker_swap_tests {
             transaction: eth_tx_for_test().into(),
         });
         assert_eq!(*CANDIDATES_TRIED.lock().unwrap(), vec![
-            hex::decode(SAVED_MAKER_COIN_HTLC_PUB).unwrap(),
+            per_swap_key_pair.public().to_vec(),
             persistent_pub.clone()
         ]);
         assert_eq!(*SPEND_SEARCH_MY_PUB.lock().unwrap(), persistent_pub);
@@ -2981,7 +2981,7 @@ mod maker_swap_tests {
         assert_eq!(actual.action, RecoveredSwapAction::RefundedMyPayment);
         assert_eq!(
             *SPEND_SEARCH_MY_PUB.lock().unwrap(),
-            hex::decode(SAVED_MAKER_COIN_HTLC_PUB).unwrap()
+            per_swap_key_pair.public().to_vec()
         );
         assert_eq!(
             *REFUND_PRIVKEY.lock().unwrap(),
@@ -3009,6 +3009,214 @@ mod maker_swap_tests {
         assert!(
             err.contains("both the swap's per-swap key and the persistent key were tried"),
             "{err}"
+        );
+    }
+
+    /// The refund key, spend key, lock time and secret hash of the real ARRR payment of a September swap (public
+    /// chain data, the fixture of `z_tx_read`'s tests), and the check a shielded coin makes of it: output 0 must pay
+    /// the P2SH of the HTLC script rebuilt from the keys it is given.
+    const SEPTEMBER_PAYMENT_HEX: &str =
+        include_str!("../../../coins/z_coin/test-fixtures/arrr-htlc-payment-50408ff4.hex");
+    const SEPTEMBER_TIME_LOCK: u64 = 1_790_763_971;
+    const SEPTEMBER_REFUND_KEY: &str = "032d28070ec423fa8af21fb45d95c695c35591fa1639ce8ac4a4959fdc466377fa";
+    const SEPTEMBER_SPEND_KEY: &str = "028a603ba6b638e4d4b39c3ee73db8e10bef607b81605d2cc772608439173f6656";
+    const SEPTEMBER_SECRET_HASH: &str = "3b2403de80c871ca25719119e9a84a3ba96c3a68";
+
+    fn september_payment_pays_htlc(
+        time_lock: u32,
+        first: &[u8],
+        second: &[u8],
+        secret_hash: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        use coins::utxo::utxo_common::payment_script;
+        use coins::utxo::UtxoTx;
+        use kdf_crypto::dhash160;
+        use script::Builder;
+
+        let tx: UtxoTx = SEPTEMBER_PAYMENT_HEX.trim().into();
+        let (first, second) = (
+            keys::Public::from_slice(first).map_err(|e| e.to_string())?,
+            keys::Public::from_slice(second).map_err(|e| e.to_string())?,
+        );
+        let script = payment_script(time_lock, secret_hash, &first, &second);
+        let expected = Builder::build_p2sh(&dhash160(&script).into()).to_bytes();
+        Ok(if tx.outputs[0].script_pubkey == expected {
+            HtlcPaymentCheck::Pays
+        } else {
+            HtlcPaymentCheck::PaysAnotherScript {
+                payment_id: "50408ff4".to_owned(),
+            }
+        })
+    }
+
+    /// A maker swap whose maker payment is the real September payment: the swap's lock time, secret hash and the
+    /// counterparty's key are those of its script, and its saved HTLC public key is the payment's refund key.
+    /// The private key saved with the swap is the pair of `per_swap_key_pair`, which is a different key.
+    fn maker_swap_of_the_september_payment() -> (MakerSwap, KeyPair, KeyPair) {
+        let (maker_swap, key_pair, other_key_pair) = maker_swap_with_saved_htlc_key();
+        {
+            let mut w = maker_swap.w();
+            w.my_maker_coin_htlc_pub = H264::from(hex::decode(SEPTEMBER_REFUND_KEY).unwrap().as_slice());
+            w.other_maker_coin_htlc_pub = H264::from(hex::decode(SEPTEMBER_SPEND_KEY).unwrap().as_slice());
+            w.data.maker_payment_lock = SEPTEMBER_TIME_LOCK;
+            w.data.secret_hash = Some(hex::decode(SEPTEMBER_SECRET_HASH).unwrap().into());
+            w.maker_payment = Some(TransactionIdentifier {
+                tx_hex: hex::decode(SEPTEMBER_PAYMENT_HEX.trim()).unwrap().into(),
+                tx_hash: vec![0u8; 32].into(),
+            });
+        }
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, time_lock, first, second, secret_hash, _| {
+            MockResult::Return(Box::pin(futures::future::ready(september_payment_pays_htlc(
+                time_lock,
+                first,
+                second,
+                secret_hash,
+            ))))
+        });
+        (maker_swap, key_pair, other_key_pair)
+    }
+
+    /// CRD ch.39 R39.5.4, T39.5.4 (amendment 2026-10-28), the real payment: the swap's saved HTLC public key is the
+    /// payment's refund key `032d2807...`, but the private key saved with it is another key, and the persistent key
+    /// is neither. The payment is matched by the public key, there is no private key for it, so recovery stops with
+    /// the error naming the public key, and neither the spend search nor the refund runs.
+    #[test]
+    fn test_recover_funds_maker_swap_real_payment_without_the_private_key_of_its_public_key_stops_naming_it() {
+        let (maker_swap, key_pair, saved_private_key_pair) = maker_swap_of_the_september_payment();
+        assert_ne!(hex::decode(SEPTEMBER_REFUND_KEY).unwrap(), key_pair.public().to_vec());
+        assert_ne!(
+            hex::decode(SEPTEMBER_REFUND_KEY).unwrap(),
+            saved_private_key_pair.public().to_vec()
+        );
+        // The test helper is the real check: the refund key pays the payment's script, another key does not.
+        assert_eq!(
+            september_payment_pays_htlc(
+                SEPTEMBER_TIME_LOCK as u32,
+                &hex::decode(SEPTEMBER_REFUND_KEY).unwrap(),
+                &hex::decode(SEPTEMBER_SPEND_KEY).unwrap(),
+                &hex::decode(SEPTEMBER_SECRET_HASH).unwrap(),
+            ),
+            Ok(HtlcPaymentCheck::Pays)
+        );
+        assert!(matches!(
+            september_payment_pays_htlc(
+                SEPTEMBER_TIME_LOCK as u32,
+                key_pair.public(),
+                &hex::decode(SEPTEMBER_SPEND_KEY).unwrap(),
+                &hex::decode(SEPTEMBER_SECRET_HASH).unwrap(),
+            ),
+            Ok(HtlcPaymentCheck::PaysAnotherScript { .. })
+        ));
+
+        static SEARCHED: AtomicBool = AtomicBool::new(false);
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            SEARCHED.store(true, Ordering::Relaxed);
+            MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
+        });
+        static REFUND_CALLED: AtomicBool = AtomicBool::new(false);
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            REFUND_CALLED.store(true, Ordering::Relaxed);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let err = block_on(maker_swap.recover_funds()).unwrap_err();
+        assert!(
+            err.contains(&format!(
+                "No private key is held for the HTLC public key {SEPTEMBER_REFUND_KEY}, which the ticker payment pays"
+            )),
+            "{err}"
+        );
+        assert!(err.contains("recovery stops before anything is built"), "{err}");
+        assert!(!err.contains("Invalid address"), "{err}");
+        assert!(!SEARCHED.load(Ordering::Relaxed));
+        assert!(!REFUND_CALLED.load(Ordering::Relaxed));
+    }
+
+    /// R39.5.4, the unsignable key does not hide the persistent key: when the payment pays the persistent key and
+    /// not the saved public key (whose private key is not held), recovery goes on with the persistent key pair.
+    #[test]
+    fn test_recover_funds_maker_swap_unsignable_saved_key_does_not_stop_a_payment_of_the_persistent_key() {
+        let (maker_swap, key_pair, _) = maker_swap_with_saved_htlc_key();
+        // The saved public key is a key nobody holds the private key of.
+        maker_swap.w().my_maker_coin_htlc_pub = H264::from(KeyPair::random_compressed().public().to_vec().as_slice());
+        static PERSISTENT_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        *PERSISTENT_PUB.lock().unwrap() = key_pair.public().to_vec();
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, _, first, _, _, _| {
+            let check = if first == PERSISTENT_PUB.lock().unwrap().as_slice() {
+                HtlcPaymentCheck::Pays
+            } else {
+                HtlcPaymentCheck::PaysAnotherScript {
+                    payment_id: "abcd".to_owned(),
+                }
+            };
+            MockResult::Return(Box::pin(futures::future::ready(Ok(check))))
+        });
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        static REFUND_PRIVKEY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, privkey, _| {
+            *REFUND_PRIVKEY.lock().unwrap() = privkey.to_vec();
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(maker_swap.recover_funds()).unwrap();
+        assert_eq!(actual.action, RecoveredSwapAction::RefundedMyPayment);
+        assert_eq!(*REFUND_PRIVKEY.lock().unwrap(), key_pair.private().secret.to_vec());
+    }
+
+    /// R39.5.4, a saved private key that does not belong to the saved public key, where the saved public key is the
+    /// persistent one: the payment is paid by the persistent key and the refund is signed with the persistent key
+    /// pair, not with the saved private key. The key that matched is reported as the persistent key.
+    #[test]
+    fn test_recover_funds_maker_swap_saved_private_key_of_the_persistent_pubkey_falls_back_to_the_persistent_pair() {
+        let (maker_swap, key_pair, saved_private_key_pair) = maker_swap_with_saved_htlc_key();
+        // The swap negotiated with the persistent public key, but carries another key's private half.
+        maker_swap.w().my_maker_coin_htlc_pub = H264::from(&**key_pair.public());
+        assert_ne!(key_pair.public(), saved_private_key_pair.public());
+        static PERSISTENT_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        *PERSISTENT_PUB.lock().unwrap() = key_pair.public().to_vec();
+        static CANDIDATES_TRIED: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, _, first, _, _, _| {
+            CANDIDATES_TRIED.lock().unwrap().push(first.to_vec());
+            let check = if first == PERSISTENT_PUB.lock().unwrap().as_slice() {
+                HtlcPaymentCheck::Pays
+            } else {
+                HtlcPaymentCheck::PaysAnotherScript {
+                    payment_id: "abcd".to_owned(),
+                }
+            };
+            MockResult::Return(Box::pin(futures::future::ready(Ok(check))))
+        });
+        static SPEND_SEARCH_MY_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, my_pub, _, _, _, _, _| {
+            *SPEND_SEARCH_MY_PUB.lock().unwrap() = my_pub.to_vec();
+            MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Refunded(
+                eth_tx_for_test().into(),
+            ))))))
+        });
+
+        // The error of a stopped recovery names the key that matched, the persistent key, which signs.
+        let err = block_on(maker_swap.recover_funds()).unwrap_err();
+        assert!(err.contains("(matched the persistent key)"), "{err}");
+        // The persistent public key is the only candidate: the saved pair was replaced, not tried first.
+        assert_eq!(*CANDIDATES_TRIED.lock().unwrap(), vec![key_pair.public().to_vec()]);
+        assert_eq!(*SPEND_SEARCH_MY_PUB.lock().unwrap(), key_pair.public().to_vec());
+
+        // And the refund of the unspent payment is signed with the persistent private key.
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        static REFUND_PRIVKEY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, privkey, _| {
+            *REFUND_PRIVKEY.lock().unwrap() = privkey.to_vec();
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        let actual = block_on(maker_swap.recover_funds()).unwrap();
+        assert_eq!(actual.action, RecoveredSwapAction::RefundedMyPayment);
+        assert_eq!(*REFUND_PRIVKEY.lock().unwrap(), key_pair.private().secret.to_vec());
+        assert_ne!(
+            *REFUND_PRIVKEY.lock().unwrap(),
+            saved_private_key_pair.private().secret.to_vec(),
+            "the refund is not signed with the saved private key"
         );
     }
 
