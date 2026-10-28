@@ -505,6 +505,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
+- [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
+  ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
+  wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
+  refused before its fee.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
   ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
   release.
