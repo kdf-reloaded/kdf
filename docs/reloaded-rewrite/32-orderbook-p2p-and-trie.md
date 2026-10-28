@@ -241,7 +241,12 @@ which used the sender's timestamp here; see ch. 59 V3.
 each tracked `(pubkey, pair)` root. When a keep-alive advertises
 a *different* root for a pair the receiver already tracks, the
 receiver MUST request a sync (§32.7) targeting *only* the pairs
-whose roots diverged.
+whose roots diverged. The exact trigger (including the "already
+tracks" condition, which get-or-init turns into an all-zero
+placeholder for a pair first seen in a keep-alive), the content of
+the request, the responder's answer and the receiver's handling of
+the outcome are bound by §32.7.3 R-Q4 to R-Q6; the shape of the
+keep-alive that carries the advertisement is bound by §32.9 R-K2a.
 
 **R-P5.** The per-pair delta history MUST let a peer that holds a
 different but recent-enough root receive a compact delta list
@@ -290,6 +295,27 @@ eight fields, MessagePack-encoded in this order:
 Prices and volumes MUST be exact rationals (numerator and
 denominator), not floating point, so that price comparison and
 trie-root convergence are deterministic across peers.
+
+**R-W1a (dictated order-message root member; sent as zeros,
+never read).** *(Authored by the KDF Spec Reader 2026-10-28 from
+the rows `v2.6.0-beta` and `v3.0.0-beta` of
+[Chapter 02](02-baseline-state.md) §2.15A, identical at both.)*
+The three per-order gossip messages — maker-order created,
+maker-order updated (both generations of it) and maker-order
+cancelled — each carry, besides the order fields and the
+sender-side `timestamp`, a mandatory member `pair_trie_root` of
+the trie-root type (the 8-byte root of §32.6 R-T1). It is part of
+the dictated wire shape: a message lacking it does not decode.
+Its *content* is not: the reference fills it with all zeros on
+every one of these messages, and no receiver reads it — it is not
+compared with any held root, it triggers no synchronization
+request, and it is not stored. A sender therefore MUST emit the
+member and MUST fill it with all zeros; a receiver MUST decode the
+member and MUST make no use of its value, whatever it holds. The
+only root a peer acts on is the one advertised by the keep-alive
+(§32.9 R-K2a, §32.7.3 R-Q4). Reloaded sends zeros in all three
+messages and ignores the member on receipt: **parity**, no
+divergence to record.
 
 **R-W3 (canonical trie leaf, dictated).** The bytes hashed into
 the trie as an order's leaf MUST be the MessagePack encoding of
@@ -533,24 +559,50 @@ events as separate single-event batches.
    queued while that operation still holds the read index, so that two
    concurrent operations on one order reach the trie in the order they
    reached the index.
-2. *No stale reads.* A keep-alive advertisement, and the answer to a
-   pubkey-state sync request, MUST NOT reflect trie state older than the
-   last completed read-index operation of this node. When a trie root is
-   advertised or a sync answer is built, every mutation event produced by
-   an index operation completed before that moment has been applied to the
-   trie store. If the worker has not yet caught up, a reader that runs on its
-   own task (the keep-alive producer) waits for it for a short bounded time,
-   short compared with the keep-alive interval and otherwise discretionary
-   (R36), and if the bound is exceeded the keep-alive for that round is not
-   sent (the next round carries the roots). A reader that runs on the inbound
-   networking path (the answer to a sync request) MUST NOT wait: it checks
-   once and, if the worker has not caught up, answers with a retryable error,
-   and the requester asks again on a later keep-alive. A root that predates a
-   completed operation MUST NOT be advertised, and an answer that predates it
-   MUST NOT be served.
+2. *No stale advertisement; the answer never refuses.* *(Amended
+   2026-10-28 by the maintainer's decision on D5.)* A keep-alive
+   advertisement MUST NOT reflect trie state older than the last completed
+   read-index operation of this node: when a trie root is advertised, every
+   mutation event produced by an index operation completed before that
+   moment has been applied to the trie store. If the worker has not yet
+   caught up, the keep-alive producer, which runs on its own task, waits for
+   it for a short bounded time, short compared with the keep-alive interval
+   and otherwise discretionary (R36), and if the bound is exceeded the
+   keep-alive for that round is not sent (the next round carries the roots).
+   The answer to a pubkey-state synchronization request MUST be built from
+   the trie store as it stands when the request is handled, without waiting
+   and without refusing, as the reference answers. A delta the answer
+   reports is read from the delta history and ends at the trie store's
+   current root. A full snapshot lists the orders under that root, each with
+   the body the read index holds for it at that moment; an order the trie
+   store still holds but the read index no longer does (its removal is
+   queued for the worker) is left out of the snapshot. A lagging worker is
+   therefore never a reason to fail the answer, and §32.6 R-T5's
+   missing-value error remains reserved for a trie store and read index that
+   have diverged with no queued event to explain it. A root an answer
+   reflects that predates a completed index operation is tolerated: the
+   requester's next keep-alive comparison (§32.7.3 R-Q4) corrects it one
+   interval later, exactly as after any answer the maker has since moved
+   past. *(Previously the answer checked once and returned a retryable error
+   while the worker lagged; that outcome is withdrawn.)*
 3. *Nobody else waits.* The producer of an index operation MUST NOT wait for
    the worker, and no wait of item 2 may happen on the inbound networking
    path (R-T7).
+4. *The keep-alive receiver compares with a caught-up store.*
+   *Reloaded-original (2026-10-28).* The comparison of an advertised root
+   with the root this node holds (§32.7.3 R-Q4 steps 3 and 4) MUST use a
+   trie store that reflects every index operation completed before the
+   keep-alive is handled. The receiver records its receipt time first
+   (§32.4 R-P3, as R-Q4 requires) and then MAY wait for the worker for the
+   same short bound as the keep-alive producer; past the bound it compares
+   with the store as it stands. A received keep-alive is handled on a task
+   of its own, so this wait is not a wait on the inbound networking path of
+   item 3. Without it, a worker that has not yet applied an operation this
+   node completed makes the held root look older than it is, and the
+   receiver sends a request a caught-up store would not have needed. The
+   reference applies its trie updates without a separate worker, so its
+   comparison never sees a lagging store; this item keeps Reloaded's
+   comparison equivalent and is not a divergence.
 
 > **Measurement (informative).** On this project's own code, a cancelled order
 > was still advertised in the pair's trie root, and could still be listed in a
@@ -558,8 +610,33 @@ events as separate single-event batches.
 > milliseconds between the index update and the trie update (about 4 to 7 ms
 > for a burst of 200 cancels with an idle worker in an optimized build). The
 > queue between the two has no bound, and in an unoptimized build under load
-> the lag grew to tens of seconds. Item 2 closes that window without bounding
-> the queue; bounding it is a separate decision.
+> the lag grew to tens of seconds. Item 2 closes that window for the
+> advertisement without bounding the queue; bounding it is a separate decision.
+> Since the amendment of 2026-10-28 the window stays open for the
+> synchronization answer, by decision (D5).
+
+> **Upstream divergence / open decision (2026-10-28) — the refusing
+> answer of R-T3b item 2.** *(Authored by the KDF Spec Reader from the
+> rows `v2.6.0-beta` and `v3.0.0-beta` of
+> [Chapter 02](02-baseline-state.md) §2.15A, identical at both.)* The
+> reference never refuses a pubkey-state synchronization request: it
+> answers from whatever its index and trie store hold at the moment the
+> request is handled, with no notion of a lagging worker. R-T3b item 2 is
+> Reloaded-original (gated 2026-10-27) and makes Reloaded's responder
+> return a retryable error instead when its trie worker has not yet
+> applied every completed index operation. The network consequence,
+> stated from the requester's side under §32.7.3 R-Q5/R-Q6 and §32.8
+> R-F3a: a requesting relay that receives an error keeps the all-zero
+> placeholder it holds for the pair, does **not** forward the keep-alive
+> that triggered the request, and asks again only when the next
+> keep-alive arrives (30 s later) — so one refusal by a busy Reloaded
+> seed delays every downstream peer of that relay by at least one
+> advertisement interval, and repeated refusals under load cascade into
+> a mesh in which the maker's orders never propagate past the first
+> relay. A reference requester has no retry on the request itself
+> (R-Q6). **Resolved 2026-10-28:** the maintainer adopted the
+> alternative of §32.10 D5, and R-T3b item 2 now answers from the store
+> as it stands, without refusing; this note records why.
 
 ## 32.7 P2P Request/Response Wire Surface
 
@@ -581,7 +658,7 @@ these variants, serialised as a tagged enum:
 | Variant | Payload | Purpose |
 | --- | --- | --- |
 | `GetOrderbook` | `base`, `rel` | request the full orderbook for a directed pair |
-| `SyncPubkeyOrderbookState` | `pubkey`, map of alphabetically-ordered-pair → held root | reconcile divergence for the named pubkey's pairs |
+| `SyncPubkeyOrderbookState` | `pubkey`, `trie_roots`: map of alphabetically-ordered-pair → a root the requester names as its predecessor (which root, see §32.7.3 R-Q4) | reconcile divergence for the named pubkey's pairs |
 | `BestOrders` | `coin`, action (buy/sell), `volume` (rational) | best orders satisfying a target volume |
 | `OrderbookDepth` | list of `(base, rel)` pairs | order-count depth per pair |
 | `BestOrdersByNumber` | `coin`, action, `number` | best N orders |
@@ -635,6 +712,177 @@ its error type, and the per-type implementations are
 discretionary (R36); the *byte encodings* decoded are dictated
 where they correspond to wire/trie content (R29/R31).
 
+### 32.7.3 Keep-alive-driven synchronization (behavior, dictated at the wire)
+
+> *Authored by the KDF Spec Reader 2026-10-28 from the rows
+> `v2.6.0-beta` and `v3.0.0-beta` of
+> [Chapter 02](02-baseline-state.md) §2.15A, identical at both, during
+> the hotfix pass prompted by a live incident (Reloaded makers
+> overloading public seed nodes). **Passed the KDF Dirty Gate on
+> 2026-10-28** (PASS, no leaks; extent, method and measure in §32.13).*
+> The request and response shapes are dictated (R-Q1, R-Q2a). The
+> trigger, the root the request names, and the responder's reading of
+> it are behavior every peer on the mesh relies on, so they are bound
+> here as the interop contract; Reloaded's one permitted variation is
+> stated as an explicit option (R-Q4a).
+
+**R-Q4 (when a keep-alive produces a synchronization request, and what
+it names).** On receiving a keep-alive (§32.9 R-K2a) from pubkey P via
+forwarding peer F, the receiver MUST, in this order and before anything
+else: record its local receipt time for P (§32.4 R-P3), creating P's
+per-pubkey record if absent (§32.6 R-T8); then, for each `(pair, root)`
+entry the keep-alive carries:
+
+1. skip the pair if this node is not a relay and the pair's orderbook
+   topic is not in its recorded subscription state (§32.8 R-F6a;
+   [Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7 item 1);
+   a relay considers every pair;
+2. skip the pair if the advertised root is all zeros or is the
+   empty-trie root (§32.8 R-F7) — such a root is never requested;
+3. otherwise look up the root this node holds for `(P, pair)`,
+   **creating an all-zero placeholder entry if none exists** (get-or-init,
+   §32.6 R-T8); a pair first heard of in a keep-alive is therefore
+   tracked from that moment with an all-zero held root;
+4. if the held root differs from the advertised root, add the pair to
+   the request.
+
+Recording the receipt time precedes every step, and steps 1 and 2 both
+precede step 3. Steps 1 and 2 are skips without side effect, so their
+order relative to each other is not observable and is not bound.
+
+If the request is non-empty, the receiver MUST send exactly **one**
+`SyncPubkeyOrderbookState { pubkey: P, trie_roots }` (R-Q1) to F — the
+peer the keep-alive arrived from, not any relay — with one map entry
+per diverging pair. The reference puts the **advertised** root into
+each entry, so the request literally says "I hold the root you just
+advertised; bring me from there to your current state"; the
+consequences of that choice are drawn in R-Q4a. A matching root
+produces no request and no other action.
+
+**R-Q4a (Reloaded option: name the root actually held).**
+*Reloaded-original, wire-compatible.* Because the responder (R-Q5)
+treats every value in `trie_roots` only as the requester's claimed
+predecessor root — it never compares it with the advertised root,
+which it does not know — a requester MAY put its **own held root** for
+the pair into the entry instead of the advertised one. The request
+shape, the response shape and every responder on the mesh (reference
+or Reloaded) are unaffected. The answer then is the delta from what the
+requester really holds to the responder's current root, or a full
+snapshot when the held root is the all-zero placeholder, the
+empty-trie root, or a root the responder's history no longer covers.
+**Decision (2026-10-28, maintainer): adopted.** Reloaded MUST name the
+root it holds by default. This is a **deliberate, wire-compatible
+Reloaded divergence**, recorded in the operator-facing compatibility
+documents. The top-level `MM2.json` boolean
+`orderbook_sync_names_held_root` (default `true`) selects it; only a
+JSON `false` turns it off, and the request then names the advertised
+root as R-Q4 describes.
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `orderbook_sync_names_held_root` to `false`. *(Nothing a peer decodes
+> changes either way; the setting only decides which root this node
+> names as its predecessor.)*
+
+> **Why the advertised-root form does not converge for a maker that
+> changes state quickly (informative, behavioral).** Deltas are keyed by
+> predecessor root (§32.6 R-T4). When the responder's current root for
+> the pair *equals* the advertised root — the normal case, since the
+> responder usually is the maker itself or a relay already in step with
+> it — no delta starts at that root, so the responder answers with a
+> **full snapshot** every time; the delta machinery is never used on
+> this path. When the responder has already moved past the advertised
+> root (the maker updated an order between its keep-alive and the
+> request), the responder answers with the delta *from the advertised
+> root* — a state the requester never held — and the requester applies
+> insertions and removals meant for someone else's trie to its own,
+> which leaves it with a root that matches neither the advertised nor
+> the current one; the next keep-alive then differs again, and the
+> cycle repeats once per advertisement interval for as long as the maker
+> keeps changing. With the held-root form the requester receives the
+> delta it can actually apply, converges after one round, and asks for
+> a full snapshot only when it holds nothing (placeholder) or something
+> too old. Fewer and smaller answers per keep-alive is also the effect
+> the live incident needs.
+
+**R-Q5 (the responder's answer).** On receiving
+`SyncPubkeyOrderbookState { pubkey: P, trie_roots }`, the responder
+MUST build the answer from its **own** held state for P, treating each
+value in `trie_roots` only as the requester's predecessor root:
+
+1. if the responder holds no state at all for P, the outcome is the
+   explicit **"no data"** outcome of R-Q2 (an empty reply at the libp2p
+   layer), not an error and not an empty snapshot;
+2. the answer is **all-or-nothing** over the requested pairs: if any
+   requested pair has no held-root entry for P at the responder, the
+   whole request fails with a typed error that identifies the pair, and
+   no pair is answered;
+3. for each requested pair with a held root: if the responder keeps a
+   delta history for `(P, pair)` and the history has an entry keyed by
+   the requested root whose delta chain reaches the responder's current
+   held root, the answer for the pair is the chained **delta**
+   (§32.6 R-T4); otherwise — no history for the pair, no entry keyed by
+   the requested root, or a chain that ends short of the current root —
+   the answer for the pair is a **full snapshot** materialized from the
+   responder's **own current held root** (§32.6 R-T6). The responder
+   never opens a trie at the requested root. A held root that is itself
+   the all-zero placeholder (the responder has heard P's keep-alive for
+   the pair but has not yet synchronized) cannot be materialized: the
+   open fails with the trie library's invalid-state-root error, which by
+   item 2 fails the whole request;
+4. the side-channel maps of R-Q2a are populated from exactly the orders
+   present in the delta or snapshot branches, with entries removed for
+   orders the delta removes; the signed-payload member is sent empty
+   (§32.5.2 R-W5).
+
+The answer is built from the index and the trie store under both locks,
+synchronously, on the task that received the request (the reference
+does so on its inbound networking event loop; §32.6 R-T7 lets Reloaded
+place it elsewhere but R-T3b item 3 forbids waiting there).
+
+**R-Q6 (transport properties of the request, bound as facts the mesh
+relies on).** The request is a single one-shot request-response
+exchange with F: it times out after **10 seconds** with no answer; there
+is **no retry** of a timed-out, failed or "no data" request — the next
+keep-alive from P is the only thing that can trigger another; there is
+**no de-duplication** of concurrent in-flight requests for the same
+`(P, pair)` (two keep-alives processed concurrently produce two
+requests); and there is **no rate limiting** of requests on either side.
+What the requester does with each outcome is bound by §32.8 R-F3a.
+Reloaded today has the same four properties (parity); the hardening
+candidates that would change them are recorded under §32.10 D6 and
+are not bound here.
+
+**T-Q4** *Request content and target (R-Q4).* A keep-alive for P with a
+single pair entry whose root differs from the held one, delivered as if
+from peer F, produces exactly one `SyncPubkeyOrderbookState` to F
+naming P and that one pair; a keep-alive whose root matches produces
+none; an all-zero or empty-trie root produces none and leaves no held
+entry; a pair not in the recorded subscription state produces none on
+a non-relay node and one on a relay node; a pair never seen before
+produces a request and leaves an all-zero held entry for `(P, pair)`.
+
+**T-Q4a** *Held-root form (R-Q4a).* With the default setting, the request names the
+requester's held root; against a responder holding a later root reached
+by a recorded delta chain, the answer is a delta and the requester's
+root afterwards equals the responder's; against a responder whose
+history does not cover the named root, the answer is a full snapshot
+with the same result; with the requester at the all-zero placeholder,
+the answer is a full snapshot. With `orderbook_sync_names_held_root` set
+to `false`, the request names the advertised root, as T-Q4 describes.
+
+**T-Q5** *Responder outcomes (R-Q5).* For a responder holding P with
+pairs X and Y: a request for X naming X's previous root yields a delta;
+naming a root absent from the history yields a full snapshot of X;
+naming X's current root yields a full snapshot of X; a request for X and
+an untracked pair Z fails as a whole and names Z; a request for an
+unknown pubkey yields the "no data" outcome; a request for a pair whose
+held root is the all-zero placeholder fails as a whole.
+
+**T-Q6** *No retry, no de-duplication (R-Q6).* With the responder
+silenced, one keep-alive produces exactly one request and nothing more
+for at least two advertisement intervals; two keep-alives for the same
+`(P, pair)` processed concurrently produce two requests.
+
 ## 32.8 Cross-Boundary Entry Points and Internal Surface
 
 This section binds the *behaviour* the subsystem exposes to
@@ -682,6 +930,41 @@ processing, maker-order-updated processing, get-orderbook, sync-
 state) each likewise reporting "did this advance our state?";
 those handlers are internal and their signatures are
 discretionary (R36).
+
+**R-F3a (relay forwarding of a keep-alive).** *(Authored by the KDF
+Spec Reader 2026-10-28 from the rows `v2.6.0-beta` and `v3.0.0-beta`
+of [Chapter 02](02-baseline-state.md) §2.15A, identical at both.
+Passed the KDF Dirty Gate on 2026-10-28; see §32.13.)* The boolean of R-F3 is
+bound for the keep-alive message as follows. The receiver's own
+handling (§32.7.3 R-Q4) "advanced local state", and a relay MUST
+forward the keep-alive to the mesh, exactly when either no
+synchronization request was needed (every advertised pair was skipped
+or already matched) or the request was answered within the timeout
+with a usable answer — a decoded response whose per-pair order sets the
+receiver has turned into index mutations and queued for the trie
+worker (§32.6 R-T7). The forward does not wait for the worker: at the
+moment of forwarding the held root for the pair may still be the
+all-zero placeholder. On a timeout, a "no data" outcome, a transport
+error or an error answer, the receiver MUST NOT forward the keep-alive
+and MUST leave its held root for each requested pair as it was
+(normally the all-zero placeholder of R-Q4 item 3); nothing is retried
+(R-Q6), and the placeholder stays until either the next keep-alive
+from that pubkey repeats the cycle or the pubkey's state expires
+(§32.9 R-K3; 90 s by default). A non-relay never forwards, whatever
+the outcome. Reloaded forwards and withholds on the same conditions:
+**parity**.
+
+> **Consequence for the mesh (informative).** Because forwarding is
+> conditional on the forwarding relay's own synchronization succeeding,
+> every relay on the path between the maker and a reader must obtain a
+> usable answer from its own upstream peer before the keep-alive travels
+> one hop further. An answer that fails for the whole request (R-Q5
+> item 2), a refusal (withdrawn for Reloaded by the D5 decision of
+> 2026-10-28), or a
+> request too large to be answered within 10 s (K-pair requests against
+> K full tries, §32.9 R-K2a) therefore stops the maker's advertisement
+> at that relay for a full advertisement interval, for every peer
+> behind it.
 
 **R-F4 (own-side mutation and queries).** The subsystem MUST
 support, as internal surface: inserting/updating an order;
@@ -957,21 +1240,30 @@ including removals, re-insertions, clears and drops, applying all events in one
 batch and applying them as single-event batches yield identical pair roots and
 identical per-pubkey order identifiers.
 
-**T-T3** *Reads never run ahead of the trie (R-T3b item 2).* With the worker
-held back, an order is cancelled (or its price changed) in the read index.
-While the trie still lacks that event: a keep-alive is not produced for the
-affected pubkey, and a sync request for that pubkey is answered with the
-retryable error, in both cases for the request roots of the old trie state and
-of the older state a peer might hold. Once the worker has applied the event, a
-keep-alive carries the new root and the sync answers reflect the cancel (the
-cancelled order is absent, the changed price is the new one). With the worker
-released from the start, nothing is withheld.
+**T-T3** *The advertisement never runs ahead of the trie, the answer never
+refuses (R-T3b item 2).* With the worker held back, an order is cancelled (or
+its price changed) in the read index. While the trie still lacks that event, a
+keep-alive is not produced for the affected pubkey. A sync request for that
+pubkey is answered without waiting and without an error, for the request
+roots of the old trie state and of the older state a peer might hold: a full
+snapshot leaves the cancelled order out (and lists a changed order with its new
+price), and a delta ends at the trie's current root. Once the worker has
+applied the event, a keep-alive carries the new root and the sync answers
+reflect the cancel (the cancelled order is absent, the changed price is the new
+one). With the worker released from the start, nothing is withheld.
 
 **T-T4** *Queue order under concurrency (R-T3b item 1).* Two threads each run
 many rounds of operations on the same order: one updates its price, the other
 cancels it and the first then finds it gone. After all events are applied, the
 trie holds the order exactly when the read index holds it, with the same value,
 for every round and for at least 200 rounds.
+
+**T-T5** *The keep-alive receiver waits for the worker (R-T3b item 4).* A
+node's index holds an order the trie worker has not yet applied, and a
+keep-alive advertises the root that includes it. When the worker catches up
+within the bound, no synchronization request results. When it stays behind
+past the bound, the comparison uses the store as it stands and a request
+results. In both cases the receipt time is recorded before the wait.
 
 ## 32.9 Lifecycle, Keep-Alive, and Expiry Semantics
 
@@ -984,8 +1276,89 @@ the current binding; making it operator-configurable is deferred
 
 **R-K2 (keep-alive advertisement).** Each node MUST periodically
 advertise, per pubkey it makes orders under, its current per-pair
-trie roots in a keep-alive message on the gossip mesh, so that
-peers can detect divergence (§32.4 R-P4).
+trie roots in keep-alive messages on the gossip mesh, so that
+peers can detect divergence (§32.4 R-P4). The granularity of that
+advertisement — one message per pair, each carrying one root, each on
+its own pair's topic — is bound by R-K2a; "its current per-pair trie
+roots" in this rule is to be read as the union over those per-pair
+messages, not as one message holding all of them.
+
+**R-K2a (keep-alive granularity, dictated interop).** *(Authored by
+the KDF Spec Reader 2026-10-28 from the rows `v2.6.0-beta` and
+`v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A,
+identical at both, during the hotfix pass prompted by a live incident.
+Passed the KDF Dirty Gate on 2026-10-28; see §32.13.)* On
+every advertisement tick (the interval of
+[Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.4, 30 s in a
+production build), for each pubkey the node makes orders under — the
+persistent one and each per-order one — and for **each pair** for which
+that pubkey's held trie root is neither all zeros nor the empty-trie
+root (§32.8 R-F7), the node MUST publish **exactly one** keep-alive
+message (`trie_roots` plus `timestamp`, [Chapter 59](59-legacy-ordermatch-negotiation.md)
+R59.6.2) whose `trie_roots` map holds **exactly that pair's single
+entry**, signed by that pubkey, **on that pair's orderbook topic only**
+(§32.8 R-F1). A pair whose root is all zeros or the empty-trie root is
+not advertised at all; a pubkey with no state, or no advertisable pair,
+produces no message. A keep-alive message with more than one entry in
+`trie_roots`, or published on a topic other than the one entry's pair
+topic, is non-conforming. The reference publishes exactly this shape;
+every reference receiver processes a keep-alive as *one* independent
+gossip message per pair (one handler task, one comparison, at most one
+single-pair synchronization request, one forwarding decision), and
+that per-pair independence is what the shape exists to guarantee.
+
+> **Reloaded divergence (2026-10-28) — the incident shape; removed
+> the same day, Reloaded now conforms to R-K2a (parity).** Until then
+> Reloaded built, per pubkey and tick, **one** payload
+> whose `trie_roots` holds **all** K advertisable pair roots and
+> published that same payload once on **every** one of the K pair topics
+> (K distinct gossip messages, each carrying K roots). This is a
+> wire-decodable but non-conforming shape, and against reference
+> receivers it multiplies work quadratically: a relay subscribed to the
+> K topics receives K messages for one maker per tick; each is handled
+> on its own task and compares all K roots; the first to run installs K
+> all-zero placeholders (R-Q4 item 3) and sends one K-pair
+> synchronization request to the forwarding peer; the other K−1,
+> running concurrently before any answer has been applied, see the same
+> K mismatches and send K−1 more K-pair requests (R-Q6: no
+> de-duplication); the responder answers each with K full snapshots
+> (R-Q4a note: the advertised-root form yields snapshots, not deltas) —
+> K² tries built synchronously under the responder's locks, K² tries
+> decoded and applied by the requester. A single pair the responder
+> cannot answer (R-Q5 items 2 and 3, a placeholder root on the
+> responder, or the 10 s timeout on a large answer) fails **all** K
+> pairs of the request and stops the forwarding of that message
+> (R-F3a), for every downstream peer. With one single-entry message per
+> pair the same maker costs K requests of one pair each at most, and a
+> failure is confined to its pair. The aggregated form is what the
+> public seed nodes were observed to be overloaded by; conforming to
+> R-K2a is the fix, and nothing in the receiving side of Reloaded
+> depends on the aggregated form (T-K4 checks that the receiver ends in
+> the same state either way).
+
+**T-K1** *One message per pair per tick (R-K2a).* A maker with orders
+under one pubkey on three pairs publishes, per advertisement tick,
+exactly three keep-alive messages for that pubkey, each with a
+single-entry `trie_roots`, each on its own pair's topic, and no message
+on any other topic; a maker with per-order pubkeys publishes the same
+pattern per pubkey.
+
+**T-K2** *Single entry, correct topic (R-K2a).* Every published
+keep-alive is decoded and checked: `trie_roots` has exactly one entry,
+the message's topic is the orderbook topic of that entry's pair
+(§32.8 R-F1), and the entry's root equals the pubkey's held root for
+that pair at the time of the tick (subject to §32.6 R-T3b item 2).
+
+**T-K3** *Zero and empty-trie roots are not advertised (R-K2a).* After
+all of a pubkey's orders on a pair are cancelled, no keep-alive is
+published for that pair while messages for the pubkey's other pairs
+continue; a pubkey with no advertisable pair publishes nothing.
+
+**T-K4** *A conforming receiver is unaffected by the change (R-K2a,
+R-Q4).* Fed the per-pair messages of T-K1 as if from a peer, a
+receiver ends with the same held roots and the same order set as when
+fed the aggregated form, and issues at most one single-pair
+synchronization request per message.
 
 **R-K3 (pubkey-state expiry).** A tracked pubkey whose last
 keep-alive receipt (§32.4 R-P3) has aged past the pubkey-state
@@ -1032,6 +1405,92 @@ D4. **Test-only mutation-barrier event.** The test-only drain
     type. A test-only worker wrapper posting a sentinel through
     a side channel would keep the production type clean; this is
     a refactor item.
+
+D5. **The synchronization answer under a lagging worker (R-T3b item 2;
+    added 2026-10-28; RESOLVED the same day: the maintainer adopted the
+    alternative below, now in force as amended R-T3b item 2, with the
+    full-snapshot rule for orders whose removal is still queued).** The open-decision note under
+    §32.6 R-T3b records that the reference never refuses a
+    synchronization request, while R-T3b item 2 makes Reloaded's
+    responder return a retryable error when its trie worker lags,
+    and that a refusal stops the asking relay's forwarding for an
+    advertisement interval (§32.8 R-F3a). The alternative wording,
+    as prepared for the maintainer's decision (kept for the record):
+
+    > *R-T3b item 2 (alternative).* A keep-alive advertisement MUST NOT
+    > reflect trie state older than the last completed read-index
+    > operation of this node (the producer waits for the worker for a
+    > short bounded time and otherwise skips the round, as today). The
+    > answer to a pubkey-state synchronization request MUST be built
+    > from the trie store as it stands when the request is handled,
+    > without waiting and without refusing; a root the answer reports
+    > that predates a completed index operation is tolerated, because
+    > the requester's next keep-alive comparison (§32.7.3 R-Q4) corrects
+    > it one interval later, exactly as it would after any answer that
+    > the maker has since moved past. The retryable-error outcome is
+    > withdrawn; T-T3's second expectation changes to "answered from
+    > the trie state the store holds at that moment".
+
+    Trade-off to decide: the alternative restores the reference's
+    forwarding behavior under load and removes the cascade, at the price
+    of re-opening, for the sync answer only, the few-millisecond window
+    the measurement under R-T3b describes (a cancelled order may be
+    listed in an answer built from the older root). Keeping item 2 keeps
+    the window closed and keeps the cascade. A third option — answer
+    from the current state but mark the answer so that the requester
+    asks again sooner — would change the dictated response shape and is
+    not available.
+
+D6. **Reference unboundedness, and Reloaded-original hardening
+    candidates (informative; added 2026-10-28).** *(Facts established
+    by the KDF Spec Reader at the rows `v2.6.0-beta` and `v3.0.0-beta`
+    of [Chapter 02](02-baseline-state.md) §2.15A, identical at both;
+    stated as behavior, not as code. Passed the KDF Dirty Gate on
+    2026-10-28; see §32.13.)* The reference's synchronization path has these
+    **unbounded** resources: the trie-mutation queue between the inbound
+    handlers and the trie worker has no capacity limit (the reference's
+    own commentary acknowledges that rate limiting of orderbook
+    messages is missing and that a bound would belong with it); trie
+    nodes of a `(pubkey, pair)` slice that is cleared as a whole are
+    never released — the clear drops the root and the history but does
+    not dereference the nodes, and the periodic ten-minute store purge
+    releases only unreferenced nodes, so they stay for the life of the
+    process; every inbound gossip message is handled on its own spawned
+    task with no cap on the number in flight; and the full-trie answer
+    of §32.7.3 R-Q5 is built synchronously on the inbound networking
+    event loop under both locks. **Bounded** are: outbound pending
+    requests (10 s timeout, swept every few seconds), tracked pubkey
+    state (the 90 s default window of
+    [Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.4), the
+    delta history (a pair's history expires after 4 hours without a
+    change, each delta after 5 minutes), the two channels between the
+    application and the libp2p swarm (8192 entries each; an event that
+    finds the channel full is dropped), and the gossip library's
+    message cache (library defaults). Reloaded inherits the same
+    profile (R-T3b's measurement already notes the unbounded queue).
+    Candidates, all Reloaded-original and none bound here:
+
+    - a **bounded or coalescing mutation queue** — Reloaded already has
+      R-T3b item 1's queue ordering, which any bound must preserve; a
+      coalescing design merges consecutive events for one
+      `(pubkey, pair)` before they reach the worker and sheds load by
+      dropping a full-snapshot batch superseded by a later one for the
+      same slice, never by dropping single events out of order;
+    - **in-flight synchronization de-duplication** — at most one
+      outstanding request per `(pubkey, pair)` (or per pubkey), with a
+      keep-alive that arrives while one is pending recorded as handled
+      without a second request (its forwarding decision then follows
+      the pending request's outcome, or is made as "no request needed"
+      — to be decided together with R-F3a);
+    - **orphan release** — dereferencing a cleared slice's nodes so the
+      periodic purge reclaims them, or rebuilding the node store from
+      the live roots at purge time;
+    - a **cap on concurrently handled inbound gossip messages** per
+      peer or per topic, applied before the per-message task is spawned.
+
+    Each is a divergence candidate to be recorded under the
+    operator-facing compatibility documents when adopted, and none
+    changes a wire shape.
 
 ## 32.11 External References
 
@@ -1311,3 +1770,83 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   windows). *Inputs:* this repository's own code and a throwaway measurement
   harness of it; no reference input of any kind. The forbidden corpus was not
   consulted for this item, and nothing in it states a reference behavior.
+- *Scoped addition (2026-10-28) -- keep-alive shape and synchronization
+  contract (hotfix pass): R-W1a in §32.5.1; the open-decision note under
+  §32.6 R-T3b; §32.7.3 (R-Q4, R-Q4a, R-Q5, R-Q6, T-Q4, T-Q4a, T-Q5, T-Q6)
+  and the R-Q1 table cell it governs; R-F3a and its consequence note in
+  §32.8; the amended R-K2, R-K2a, its divergence note and T-K1 to T-K4 in
+  §32.9; D5 and D6 in §32.10; the pointer appended to §32.4 R-P4.*
+  Prompted by a live network incident: Reloaded makers overloading public
+  seed nodes. *Inputs:* this repository's own keep-alive producer,
+  keep-alive receiver, synchronization requester and responder, gossip
+  dispatch and multi-topic publish path (every Reloaded-side parity and
+  divergence statement rests on these); and the forbidden corpus,
+  consulted at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  [Chapter 02](02-baseline-state.md) §2.15A, which agree in every
+  respect taken (their difference in the files read is confined to an
+  unrelated coin-protocol arm, a network-identifier default and
+  copyright lines), **only** to establish: the per-pair, single-entry,
+  own-topic shape of the keep-alive and the zero/empty-root skip
+  (R-K2a); that the order messages' `pair_trie_root` is sent as zeros
+  and read by no receiver (R-W1a); the synchronization trigger
+  (subscription gating, zero/empty skip, get-or-init placeholder,
+  advertised root named in the request, one request to the forwarding
+  peer) and the responder's semantics ("no data" for an unknown pubkey,
+  all-or-nothing over pairs, delta-chain-or-own-snapshot, no trie opened
+  at the requested root, failure at an all-zero held root, synchronous
+  construction under both locks), together with the 10 s timeout and
+  the absence of retry, de-duplication and rate limiting (R-Q4 to
+  R-Q6); the forwarding condition (R-F3a); that the reference never
+  refuses a synchronization answer (the R-T3b note, D5); and the bounded
+  and unbounded resources D6 lists, including the existence of a
+  commentary acknowledging missing rate limiting, which is paraphrased
+  and not quoted. What crosses into this chapter is behavior,
+  dictated wire members (`trie_roots`, `timestamp`, `pair_trie_root`,
+  `pubkey`, the request tag of R-Q1) and numeric values peers can
+  observe on the wire or in their timing (30 s, 90 s, 10 s, 4 h,
+  5 min, 10 min, 8192); no function name, type or field name outside
+  the dictated wire members, no helper decomposition, no control-flow
+  transcription, no error, log or comment text was reproduced. The
+  held-root option R-Q4a, the alternative wording of D5, the hardening
+  candidates of D6 and the T-items are Reloaded-original; the
+  behavioral explanation of non-convergence under R-Q4a is reasoning
+  from the bound semantics, not a reference fact.
+- *Dirty Gate clearance for the 2026-10-28 scoped addition (chapter 01 T1,
+  R40).* Every item the addition names **passed the KDF Dirty Gate** on
+  2026-10-28: PASS, discretionary-expression measure 0.03 against the 0.10
+  threshold, no leaks and nothing to scrub. *Extent:* the orderbook
+  peer-to-peer keep-alive and pubkey-state synchronization surface --
+  keep-alive producer, receiver and request builder, synchronization
+  responder and delta/snapshot builder, per-order gossip wire shapes, the
+  peer-request enum, gossip dispatch and the one-peer request path,
+  request-response timeout handling, the trie-store worker and the periodic
+  purge -- at the rows `v2.6.0-beta` and `v3.0.0-beta` (the compared material
+  is identical at both). *Method:* line-by-line classification of every added
+  chapter line against the compared reference material, plus targeted
+  mechanical searches for identifiers, literals and constants; the mechanical
+  gate tool was not run (prose). *Measure:* 0.03. Only dictated wire members
+  and timing constants match; the invalid-state-root error R-Q5 names is the
+  trie library's public error variant; the one measured similarity is the
+  fact-level paraphrase of a reference comment under D6. The clearance is
+  complete and not pending, and the earlier clearance positions recorded
+  above are untouched by it. *(Clean-side edits after the pass, Reloaded
+  original, no forbidden-class input: the step-order sentence under R-Q4
+  that leaves the order of its two skips unbound, as the gate's
+  testability remark asked.)*
+- *Reloaded-original additions and decisions (2026-10-28), no forbidden-class
+  input:* R-T3b item 4 and T-T5 (the keep-alive receiver compares with a
+  caught-up trie store); the amendment of R-T3b item 2 that resolves D5 (the
+  synchronization answer never refuses, with the full-snapshot rule for an
+  order whose removal is still queued) and the matching changes to T-T3, the
+  R-T3b measurement note, the R-F3a consequence note and the resolution notes
+  under R-T3b and D5; the decision recorded under R-Q4a (adopted by default,
+  with the opt-back setting `orderbook_sync_names_held_root`) and the matching
+  wording of T-Q4a. *Inputs:* this repository's own keep-alive producer and
+  receiver, synchronization requester and responder and trie-store worker; a
+  deterministic measurement of that code with two in-process nodes (a fresh
+  peer named the advertised root and ended with 13 of 20 orders, and with the
+  held root 20 of 20; a fresh relay kept the all-zero root after an exchange
+  that counted as success and failed the next requester; one keep-alive's K
+  topic copies produced K requests); and the maintainer's decisions on D5 and
+  R-Q4a. The reference facts these items rely on are the gated ones of the
+  scoped addition above; nothing else from the reference was used.

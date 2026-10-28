@@ -784,6 +784,36 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 
 ---
 
+## #18 — Orderbook keep-alive: one aggregated message to every pair topic, where the reference sends one single-pair message per topic — **OPEN (hotfix; chapter material authored 2026-10-28, passed the KDF Dirty Gate 2026-10-28)**
+
+CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
+§32.9 R-K2a and its divergence note, T-K1–T-K4; §32.7.3 R-Q4–R-Q6;
+§32.8 R-F3a; §32.6 R-T3b open-decision note and §32.10 D5, D6;
+[`59-legacy-ordermatch-negotiation.md`](./59-legacy-ordermatch-negotiation.md)
+R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
+
+- [x] *Fixed 2026-10-28: Reloaded conforms to R-K2a.* A Reloaded maker with K advertisable pairs under one pubkey publishes,
+  every 30 s, K gossip messages that each carry all K roots, one per pair
+  topic. The reference publishes K messages that each carry one root, each
+  on its own pair's topic. Against reference relays the aggregated form
+  costs up to K K-pair synchronization requests and K² full snapshots per
+  maker per tick, and one unanswerable pair fails and un-forwards all K.
+  Observed live on 2026-10-28 as public seed nodes overloaded by Reloaded
+  makers. Fix: conform to R-K2a (sender side only; the receiver needs no
+  change).
+- [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
+  longer refuses while its trie worker lags (amended R-T3b item 2); it answers
+  from the store as it stands, as the reference does.
+- [x] *Done 2026-10-28 (ch. 32 R-Q4a):* Reloaded names its own held root in
+  the synchronization request by default; wire-compatible, yields usable
+  deltas; a deliberate divergence with the opt-back switch
+  `orderbook_sync_names_held_root`.
+- [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
+  in-flight synchronization de-duplication, orphan-node release, inbound
+  task cap. Deferred, none bound.
+
+---
+
 ## Audit method (for reproducibility)
 
 1. Extracted the 223 unique upstream wire-method strings from

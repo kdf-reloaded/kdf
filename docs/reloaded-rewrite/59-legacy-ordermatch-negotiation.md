@@ -221,6 +221,36 @@ a protocol the maker cannot actually honour for the longer maker leg.
 > *(Trigger: contradiction apparent between the reference's call shape
 > and reloaded's, seen side by side while establishing R59.3.2.)*
 
+**R59.4.6** *An update that changes nothing is not broadcast.*
+*Reloaded-original (2026-10-28); no forbidden-class input; outside the
+clearance of this section's reference-sourced material.* When an
+operator's update of one of the node's own maker orders (the
+`update_maker_order` request) leaves the order's price, maximum volume,
+minimum volume and confirmation settings all as they were, with amounts
+compared as numbers, the node MUST NOT broadcast a maker-order updated
+message for it. The update is otherwise handled as before: it is
+validated, the order is saved, and the response is the same. Updates the
+node makes itself (a volume cut after a balance change, the remaining
+volume after a match) always change the volume and are not affected.
+
+Rationale: such a message changes no peer's order set and no trie root
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.6), yet every relay
+forwards it to every subscriber of the pair. A maker driven by a bot that
+re-submits all of its orders on every refresh multiplies the gossip load
+for nothing. Observable effect: fewer messages, and no change to any
+peer's state. A peer that missed an earlier update is no longer repaired
+in passing by a later re-send that changes nothing; repair stays with the
+keep-alive synchronization of ch. 32 §32.7.3.
+
+The top-level `MM2.json` boolean `suppress_unchanged_order_updates`
+(default `true`) selects the rule; only a JSON `false` turns it off, and
+every update is then broadcast.
+
+> **Compatibility:** to broadcast every update, as the GPLv2 baseline
+> does, set `suppress_unchanged_order_updates` to `false`. This chapter
+> does not establish what GLEEC KDF does for an update that changes
+> nothing; the setting restores the baseline behavior.
+
 ## 59.5 Bound peer-penalty contract
 
 > **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
@@ -290,6 +320,10 @@ test of T4.
 > §59.11, and are not restated here. **Exception (2026-10-27):** R59.6.7
 > and the status update in R59.6.6 were added after that pass and passed the
 > KDF Dirty Gate on 2026-10-27 (§59.11, addition of 2026-10-27).
+> **Exception (2026-10-28):** the second paragraph of R59.6.2 and the
+> cross-reference sentence of R59.6.7 item 1 were added after those passes
+> and passed the KDF Dirty Gate on 2026-10-28 (§59.11, addition of
+> 2026-10-28).
 
 **R59.6.1** *Expiry runs on the receiver's clock.* A tracked maker public
 key's liveness instant shall be the receiver's **own local receipt time**
@@ -305,14 +339,23 @@ also records local receipt time, so R59.6.1 is a parity **fix** and not a
 divergence.
 
 **R59.6.2** *The wire timestamp is carried, ignored, and unvalidated.*
-The keep-alive message carries two members: the sender's per-pair trie
-roots, and a `timestamp` holding the sender's own time in whole seconds
-of Unix epoch. The receiver shall accept the member (it is part of the
+The keep-alive message carries two members: `trie_roots`, a map from
+alphabetically-ordered pair to the sender's trie root for that pair,
+and a `timestamp` holding the sender's own time in whole seconds of
+Unix epoch. The receiver shall accept the member (it is part of the
 dictated wire shape and a message lacking it is malformed) and shall
 make **no** use of it: it is not stored, not compared against the
 receiver's clock, not bounds-checked, and not a reason to reject the
 message. A sender's clock being hours wrong, or its timestamp being
 replayed, changes nothing a receiver does.
+
+The map type of `trie_roots` admits any number of entries, but the
+conforming message carries **exactly one**: a keep-alive is sent per
+pair, on that pair's orderbook topic, holding that single pair's root,
+and pairs whose root is all zeros or the empty-trie root get no message
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9 R-K2a, added
+2026-10-28, passed the KDF Dirty Gate on 2026-10-28). The receiver-side rules
+of this section hold for each such message independently.
 
 **R59.6.3** *Consequences for consumer-side freshness — the question
 answered.* Because every node on both sides of the wire derives staleness
@@ -381,7 +424,11 @@ by the KDF Spec Reader 2026-10-27 from the rows `v2.6.0-beta` and
    subscription state ([Chapter 32](32-orderbook-p2p-and-trie.md)
    R-F6a); a relay node does so for every pair. A pair the node is
    subscribed to on the mesh but has not recorded is, for this purpose,
-   not subscribed. This gating is baseline behavior (V4).
+   not subscribed. This gating is baseline behavior (V4). The full
+   trigger, the content of the request and the answer are bound by
+   [Chapter 32](32-orderbook-p2p-and-trie.md) §32.7.3 R-Q4 to R-Q6, and
+   because a conforming keep-alive carries one pair (R59.6.2, ch. 32
+   R-K2a), the comparison concerns one pair per message.
 2. *Re-announcement records before it broadcasts.* When the periodic
    maintenance of R59.4.1 finds one of the node's own maker orders
    absent from the local orderbook — after a restart, or after the
@@ -462,6 +509,15 @@ public key whose root for that pair differs from the one the node holds.
 Exactly one synchronization request for that pair is sent. The same
 keep-alive for a pair the node has no order on and never requested sends
 nothing; on a relay node it sends a request in both cases.
+
+**T11.** *An update that changes nothing is not broadcast (R59.4.6).* An
+own maker order is updated through `update_maker_order` once with its
+current price, volume, minimum volume and confirmation settings, and once
+with a new price. The first update is saved and answered but publishes no
+message; the second publishes one maker-order updated message on the
+pair's topic. A price given as an equal fraction written differently
+(2/4 for 1/2) counts as unchanged. With `suppress_unchanged_order_updates`
+set to `false`, both updates publish a message.
 
 ## 59.8 Deferred Work
 
@@ -582,8 +638,11 @@ its gating is not.*
 - [Chapter 32 — Orderbook Patricia-Trie and P2P Surface](32-orderbook-p2p-and-trie.md)
   §32.2 (the topic), §32.4 R-P3 (the receipt-time rule R59.6.1
   restates), §32.5 (the order-record wire shape), §32.7 (the
-  synchronisation surface D2 concerns) and §32.9 (the keep-alive and
-  expiry semantics R59.6.4 refines).
+  synchronisation surface D2 concerns; §32.7.3 R-Q4 to R-Q6 bind the
+  keep-alive-driven request and answer R59.6.7 item 1 relies on),
+  §32.8 R-F3a (relay forwarding of a keep-alive) and §32.9 (the
+  keep-alive and expiry semantics R59.6.4 refines; R-K2a binds the
+  one-pair-per-message shape R59.6.2 names).
 - [Chapter 51 — Legacy (V1) Atomic-Swap State Machine](51-legacy-v1-swap-state-machine.md)
   §51.6 (the refusal and abort contract the outcomes of R59.5.2 come
   from) and §51.8 (the reserved-funds semantics R59.3.3 protects).
@@ -655,7 +714,19 @@ its gating is not.*
   the baseline. *Method:* reading plus a mechanical regex scan of every added
   line against private identifiers, literals and distinctive phrases; the
   mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
-  threshold.)
+  threshold.) (Addition of 2026-10-28, KDF Spec Reader, hotfix pass: the
+  second paragraph of R59.6.2 — the one-entry-per-message shape of
+  `trie_roots` — the cross-reference sentence appended to R59.6.7 item 1,
+  and the §59.10 pointers to ch. 32 §32.7.3, R-F3a and R-K2a. The one
+  reference fact taken, the per-pair single-entry own-topic keep-alive
+  shape, rests on the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+  §2.15A, identical at both, and is bound in ch. 32 R-K2a; this chapter
+  only names it. No private identifier, function body, helper
+  decomposition, log or error literal was reproduced. These three
+  passages **passed the KDF Dirty Gate** on 2026-10-28: PASS, measure 0.00
+  against the 0.10 threshold, no leaks; extent, method and measure are those
+  recorded for the same pass in chapter 32 §32.13. The clearance is complete
+  and not pending.)
 - *Dirty Gate clearance (chapter 01 T1, R40, R43).* The whole of this
   chapter's forbidden-class-sourced material — the scoped item above,
   which is the selection contract of §59.3, the timeout and maker-side
@@ -767,3 +838,11 @@ its gating is not.*
     reservation (R59.4.3) — each of which a counterparty can see violated
     on the wire, which is the clean-channel class R39 admits rather than
     an internal arrangement.
+- *Reloaded-original addition (2026-10-28): R59.4.6 and T11.* The rule
+  that an own maker-order update that changes nothing is not broadcast,
+  and its opt-back setting. *Inputs:* this repository's own
+  `update_maker_order` path and maker-order update messages, and a
+  measurement of this repository's keep-alive and synchronization code.
+  No reference input of any kind: the forbidden corpus was not consulted
+  for this item, and the rule states no reference behavior (its
+  compatibility note says so). It needs no Dirty Gate pass.
