@@ -255,7 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `electrum_servers`, as other KDF nodes do. A server is used only if its block hash at a recent height
   matches the `lightwalletd` servers' and its tip is at most 10 blocks behind; nothing else of the coin uses
   Electrum. Activation never connects to these servers; the first question does. When neither source can
-  answer, the error names both. Detail: CRD ch.39 R39.11.25.
+  answer, the error names both. Detail: PR #130; CRD ch.39 R39.11.25.
 - **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending
   its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
   the wallet's own record of the transactions it broadcast. This works even when the configured
