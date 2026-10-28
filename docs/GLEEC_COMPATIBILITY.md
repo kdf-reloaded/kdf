@@ -118,7 +118,7 @@ What an integrator observes:
   "already sent" answer also checks that the transaction it found pays the HTLC script; GLEEC
   KDF takes the first entry of the address history without that check (ch.39 §39.11.5).
 - Two further Reloaded-only rules for a shielded coin's own swap payment (ch.39 R39.11.26 --
-  R39.11.28, decided 2026-10-28; the first is implemented, the other two are not yet):
+  R39.11.28, decided and implemented 2026-10-28):
   - "Already sent" is answered first from the wallet's own record of the payments it
     broadcast.
   - A swap started fresh, with no earlier payment, does not ask "already sent" at all.
