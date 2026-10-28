@@ -254,7 +254,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
   payment that is still waiting is refunded; and the swap completes if the other side spent it. The
   error, when it is genuine, now says both keys were tried and shows the transaction id the way
-  explorers do. Detail: CRD ch.39 R39.5.4.
+  explorers do. Detail: PR #109; CRD ch.39 R39.5.4.
 - **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
   input points past the end of the previous transaction's outputs, a BCH transaction with no
   outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
