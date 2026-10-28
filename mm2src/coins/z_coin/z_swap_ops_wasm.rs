@@ -175,6 +175,8 @@ impl SwapOps for ZCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { Some(KeyPair::random_compressed()) }
+
+    fn htlc_key_is_random_per_swap(&self) -> bool { true }
 }
 
 #[async_trait]

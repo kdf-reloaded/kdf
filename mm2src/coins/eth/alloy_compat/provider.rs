@@ -18,6 +18,7 @@
 //!   returns a ready-to-use [`KdfProvider`].
 //! - [`build_direct_provider`] — a provider for one node addressed on its own.
 //! - [`provider_with_own_node_order`] — a copy of a provider's node order.
+//! - `direct_node_line` — the R35.1.16 log line for the node of a direct provider.
 //!
 //! # Invariants
 //!
@@ -34,6 +35,7 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 
 use crate::eth::alloy_compat::transport::AlloyTransport;
+use crate::eth::node_url::ListedNode;
 use crate::RpcTransportEventHandlerShared;
 
 /// Concrete provider type used by every EVM coin in the project.
@@ -42,14 +44,14 @@ use crate::RpcTransportEventHandlerShared;
 /// handled at call time via `chain_id`, not via the type system.
 pub type KdfProvider = RootProvider<Ethereum>;
 
-/// Build a [`KdfProvider`] from a list of equivalent RPC URLs and a
-/// list of metrics handlers. The provider fails over between the URLs
-/// (CRD ch.35 §35.1.F).
+/// Build a [`KdfProvider`] from a list of equivalent RPC nodes and a
+/// list of metrics handlers. The provider fails over between the nodes
+/// (CRD ch.35 §35.1.F). Each node carries the ticker and the list position its log lines name (R35.1.16).
 pub fn build_provider(
-    urls: Vec<String>,
+    nodes: Vec<ListedNode>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
 ) -> Result<KdfProvider, String> {
-    let transport = AlloyTransport::with_event_handlers(urls, event_handlers)?;
+    let transport = AlloyTransport::with_event_handlers(nodes, event_handlers)?;
     Ok(provider_from_transport(transport))
 }
 
@@ -57,10 +59,10 @@ pub fn build_provider(
 /// the signed-transaction broadcast of CRD ch.35 R35.1.12) lives in the caller, so the request gets the
 /// lower-layer bound instead of the failover cutoff.
 pub fn build_direct_provider(
-    url: String,
+    node: ListedNode,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
 ) -> Result<KdfProvider, String> {
-    let transport = AlloyTransport::direct(url, event_handlers)?;
+    let transport = AlloyTransport::direct(node, event_handlers)?;
     Ok(provider_from_transport(transport))
 }
 
@@ -74,6 +76,18 @@ pub fn provider_with_own_node_order(provider: &KdfProvider) -> Option<KdfProvide
         .as_any()
         .downcast_ref::<AlloyTransport>()?;
     Some(provider_from_transport(transport.with_own_order()))
+}
+
+/// A log line that names the node of a provider that talks to one node on its own, in the form of CRD ch.35
+/// R35.1.16: `[<ticker>] <before><host> (node <i> of <n>)<after>`. `None` when the provider is not backed by an
+/// [`AlloyTransport`] or has no node.
+pub(crate) fn direct_node_line(provider: &KdfProvider, before: &str, after: &str) -> Option<String> {
+    provider
+        .client()
+        .transport()
+        .as_any()
+        .downcast_ref::<AlloyTransport>()?
+        .first_node_line(before, after)
 }
 
 pub(crate) fn provider_from_transport(transport: AlloyTransport) -> KdfProvider {

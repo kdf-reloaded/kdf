@@ -478,7 +478,7 @@ URLs at activation (deviation 2 in the note closing §35.1.E), so the
 WebSocket parts of the rules below bind Reloaded only if a WebSocket
 transport is added.
 The two reference rows agree on every rule below unless a rule says
-otherwise; the Reloaded-only rules R35.1.14 and R35.1.15 are marked as such.
+otherwise; the Reloaded-only rules R35.1.14 -- R35.1.16 are marked as such.
 The labels (a) -- (e) used below are the five questions settled by the
 2026-10-26 pass: (a) batch responses, (b) execution errors, (c) the scope of
 stickiness, (d) the scope of the cutoff, (e) re-sending a signed transaction.
@@ -685,6 +685,41 @@ R35.1.11, the error message returned to the caller shall end with
 by one of several nodes can be attributed. The appended fragment is part of
 the human-readable message only; it changes no `error_type`, `error_data`
 shape or HTTP status.
+
+R35.1.16 **Coin and list position in node log lines (Reloaded; clean-room
+original; maintainer instruction 2026-10-28).** Every log line of the
+R35.1.14 scope that names an EVM node shall also say which coin's node it is
+and where that node stands in the coin's list:
+
+1. **Coin.** The line starts with `[<ticker>]`, the ticker of the coin whose
+   activation request supplied the node list (`nodes` of the v2 route, `urls`
+   of the legacy `enable` route). An ERC-20 token activated on its platform
+   has no node list of its own: a line about a request it makes names the
+   platform, because the platform's list is the one the node belongs to.
+2. **Position.** Right after the host-only form of R35.1.14 the line carries
+   ` (node <i> of <n>)`, where `<n>` is the length of that list and `<i>` the
+   node's 1-based position in it **as the request gave it**, not its place in
+   the order drawn at activation (R35.1.7) or in the current rotation
+   (R35.1.9). Two nodes on one host with different paths, which R35.1.14
+   renders alike, are told apart by their positions.
+
+This covers the activation-time probe's per-node lines, the per-node failure
+and cutoff lines of R35.1.8 and R35.1.10, the warn line of R35.1.15 and the
+per-node lines of the nonce gathering and the broadcast of R35.1.12; a
+per-node line of R35.1.12 that so far named no node shall name it in this
+form. Examples:
+
+- `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), <reason>`
+- `[ETC] EVM RPC https://rpc.example.org (node 2 of 4) answered <method> with error <code>: <message>`
+
+The rule binds log lines only. The texts returned to a caller -- the
+all-failed error of R35.1.11 and the ` (node <host>)` suffix of R35.1.15 --
+are unchanged, because the request that receives them already names the
+coin. The RPC wire dump, which has its own switch, is outside this rule.
+TRON, which is off in this beta, is not bound by it; where TRON code shares
+the EVM transport, its lines take the same form. A log line is not
+peer-visible and no wire shape changes, so no switch exists, for the reason
+given in R35.1.14.
 
 > **Closed divergence (2026-10-26).** The gaps described below are closed:
 > Reloaded now follows R35.1.8 -- R35.1.12 and R35.1.14 -- R35.1.15, with the
@@ -1937,6 +1972,16 @@ that only checks an internal variant does not satisfy these rules.
   `decimals()` call with a JSON-RPC error and a second node that answers
   correctly returns the second node's values (binding for Reloaded, which
   takes the R35.1.13 choice per D35.8 (iv)).
+- **T35.34** *Coin and list position in node log lines (R35.1.16).* A coin
+  `ETC` with four configured nodes, of which the second as given fails the
+  activation probe: the probe's line for it starts with `[ETC]` and carries
+  the host-only form followed by `(node 2 of 4)`, whatever order activation
+  drew. A per-node failure and a JSON-RPC error answer logged by the
+  failover path, and a failing node of the nonce gathering, carry the same
+  prefix and position. Two coins with nodes on one host and different paths
+  produce lines that differ in the ticker; two nodes of one coin on one host
+  produce lines that differ in the position. The returned texts of R35.1.11
+  and R35.1.15 are unchanged.
 
 ## 35.8B Foreign-transaction decoding tests (binding)
 
@@ -2262,3 +2307,12 @@ plan (`docs/plans/swap-transaction-path-hardening.md`).
   nonce-agreement fact in the divergence note and the `wss://` condition in
   T35.28) were written by a context that never read the forbidden corpus and
   rest on this repository's own code.
+- *Clean-side addition (2026-10-28), R35.1.16 and T35.34:* written by a
+  context that never read the forbidden corpus, from an operator's report
+  that a node failure line did not say which coin it belonged to and from
+  the maintainer's instruction to keep host-only naming and add the coin
+  ticker and the node's position in its list. They rest on this
+  repository's own code and consulted no corpus, so chapter 01 R38 is not
+  engaged. The §35.1.F wording now naming R35.1.14 -- R35.1.16 as the
+  Reloaded-only rules is part of the same edit. The Dirty Gate clearance at
+  the head of §35.1.F does not cover them.

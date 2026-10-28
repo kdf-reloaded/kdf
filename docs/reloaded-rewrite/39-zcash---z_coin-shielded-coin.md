@@ -27,9 +27,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   parameters / checkpoint / HD path from `protocol_data`, and HD-derived
   shielded key-policy derivation are all implemented. One narrow platform gap
   remains: WASM shielded-transaction *building* (blocked by the absent
-  `LocalTxProver` parameter files; §39.6.1). The transparent UTXO side of a
-  shielded coin is iguana-derived even under an HD wallet; only the shielded
-  Sapling key is HD-derived, per R39.6.4 §2.
+  `LocalTxProver` parameter files; §39.6.1). Under an HD wallet the shielded
+  Sapling key is HD-derived per R39.6.4 §2; since maintainer Decision D39.5.a
+  (2026-10-28) the coin's transparent secp256k1 key is HD-derived too, at the
+  coins-file `derivation_path` (R39.6.4 §2, R39.5.9). That transparent part is not
+  yet implemented: the build still derives it from the seed key.
 - **§39.6.4 Ironwood (plan Step E, implemented):** the builder constructs the
   version-6 transaction format the Ironwood upgrade requires, selected by the
   coin's Ironwood activation height, which is configured or discovered at runtime
@@ -373,6 +375,212 @@ that:
 - a recovery that completes within the bound returns the same response as
   before.
 
+> **Candidate order with a derived key (amendment to R39.5.4, 2026-10-28).** Once a
+> shielded coin's HTLC key is derived as R39.5.6--R39.5.9 bind, recovery tries, in order:
+> (1) the key re-derived from the saved Started event (R39.5.11, parity); (2) a private key
+> saved with the swap that belongs to the saved HTLC public key, which recovers swaps a
+> Reloaded build made with a random per-swap key before the derivation; (3) the persistent
+> key. The named "no private key held" stop of R39.5.4 is kept as a Reloaded divergence
+> from R39.5.11(d), which has no such error class. It is reported only when a public key
+> that matched the payment has no private key among the candidates, and the swap wire is
+> unchanged.
+
+> **Derivation record (sanitized).** R39.5.6--R39.5.12, the code-quality finding and
+> T39.5.a--T39.5.e were authored by the KDF Spec Reader under the two-team procedure
+> (chapter 01 §1.4A) from the `v2.6.0-beta` and `v3.0.0-beta` designations, which agree
+> on everything stated here. The KDF Dirty Gate passed them on 2026-10-28 (PASS, measure
+> 0.01; the clearance item in §39.9 records the extent). The gate's candidate numbered
+> them R39.5.2--R39.5.9; they are placed here as R39.5.6--R39.5.13 because R39.5.2--R39.5.5
+> were already taken (gated R39.5.*n* = chapter R39.5.*n*+4). R39.5.13, D39.5.a, T39.5.f
+> and the informative pre-check under R39.5.11 are original to this design.
+
+R39.5.6 **Per-swap HTLC key of a shielded coin.** *(binding, parity.)* For every legacy (v1)
+swap in which a shielded coin is the maker coin or the taker coin, the shielded leg's HTLC
+key pair — the key whose 33-byte compressed public key is negotiated as that leg's
+`maker_coin_htlc_pub` / `taker_coin_htlc_pub` (ch. 51 R59 shape 3, R63) and saved as
+`maker_coin_htlc_pubkey` / `taker_coin_htlc_pubkey` in the Started event — shall be
+**derived deterministically** from (a) the coin's activated transparent secp256k1 private
+key and (b) the swap-unique input of R39.5.7, by the algorithm of R39.5.8. It shall not be
+the node's persistent key, shall not be random, and shall not be persisted anywhere: every
+later use (payment, spend, refund, already-sent check, spend search, recovery) re-derives
+it from the same two inputs.
+
+R39.5.7 **Swap-unique input.** *(binding, parity.)* The swap-unique input is role-dependent:
+- when this node is the **maker**, the swap's secret-hash bytes exactly as negotiated (the
+  Started event's `secret_hash`; when a saved swap predates that member, the hash of the saved
+  `secret` under the swap's secret-hash algorithm of ch. 51 §51.9.1);
+- when this node is the **taker**, the 16 raw bytes of the swap `uuid`.
+The same input is used for both legs of the swap; a non-shielded UTXO leg ignores it
+(its HTLC key is the activated key itself, ch. 51 R63 note), which is why the two legs'
+HTLC public keys differ exactly when one leg is shielded.
+
+R39.5.8 **Derivation algorithm.** *(binding, parity — cryptographic derivation, must be bit-exact for seed-compatible
+recovery.)* Given base private key *d* (secp256k1 scalar) and
+swap-unique input *u*:
+1. *m* = SHA-256(SHA-256(*u*)).
+2. *s* = DER-encoded ECDSA signature of *m* under *d* with the deterministic nonce of
+   RFC 6979 and low-S normalisation (the secp256k1 library default).
+3. *h* = SHA-256(SHA-256(*s*)) as 32 bytes.
+4. *k* = *h* with byte 0 cleared of its three least significant bits, byte 31 cleared of its
+   most significant bit and set in bit 6 (the Curve25519-style clamp; it yields a non-zero
+   scalar below the secp256k1 group order).
+5. HTLC private key = *k*; HTLC public key = compressed point of *k* (33 bytes).
+
+These interop facts make the derivation reproducible bit for bit, and both reference
+states agree on each:
+
+- (i) the ECDSA signature uses the RFC 6979 deterministic nonce with **no** extra entropy
+  and **no** low-R grinding, low-S normalisation, and bare DER encoding;
+- (ii) *m*, the double SHA-256 of *u*, is the 32-byte ECDSA message as it is, with no
+  signed-message prefix;
+- (iii) the DER signature bytes are hashed as they are, with no sighash byte appended;
+- (iv) the clamp works on the digest in its natural order: byte 0 is the first digest
+  byte (`&= 0xF8`), byte 31 the last (`&= 0x7F`, `|= 0x40`); the 32 bytes are then read
+  as a **big-endian** scalar, with no reversal. "Curve25519-style" names the bit
+  pattern only; it does not mean little-endian;
+- (v) the taker's input is the 16 raw UUID bytes in canonical RFC 4122 order (the
+  hyphen-less hex of the uuid), not a mixed-endian GUID layout;
+- (vi) the maker's input is the decoded secret-hash bytes as saved (20 bytes), not the
+  hex string; when the Started event has no secret-hash member, it is the hash of the
+  saved secret.
+
+R39.5.9 **Base key selection.** *(binding, parity.)* The base private key *d* of R39.5.8 is the
+shielded coin's activated transparent secp256k1 key under the node's global private-key
+policy: under the seed (iguana) policy the seed's secp256k1 key — the key behind
+`my_persistent_pub`; under the HD-wallet policy the key the UTXO builder activates for the
+coin at the coins-file `derivation_path` with the default account/change/index of the
+activation request. The Light-mode activation request (§39.10) carries no member that
+influences *d*; its `account` member selects only the Sapling spending-key account.
+Hardware-wallet policies are refused for this coin type.
+
+Under the HD-wallet policy this rests on the transparent derivation of R39.6.4 §2, adopted by
+maintainer Decision D39.5.a (2026-10-28).
+
+R39.5.10 **Where the key is used.** *(binding, parity.)* The derived key enters:
+- the payment: only as this node's key inside the HTLC redeem script whose P2SH is output 0
+  of the payment (output 1 is an OP_RETURN carrying the redeem script); the payment has no
+  transparent input and no transparent signature;
+- the spend and the refund: as the signer of the single transparent input (the payment's
+  output 0) and, with the counterparty's saved HTLC key, the locktime and the secret hash,
+  as a component of the rebuilt redeem script;
+- the already-sent check and both spend searches (R39.5.11).
+The DEX-fee transaction is fully shielded and involves no secp256k1 key; the swap `uuid` is
+carried as the memo of each fee output.
+
+R39.5.11 **Recovery obtains the key by re-derivation.** *(binding, parity.)* `recover_funds_of_swap`
+and any restart-time resumption shall obtain the shielded leg's HTLC private key only by
+re-applying R39.5.7–R39.5.9 to the saved Started event. Consequently:
+(a) both coins of the swap must be activated at the time of the call; otherwise the call fails
+    with a per-coin "not activated" class error;
+(b) the swap must be finished, its own payment not already refunded, and the counterparty's
+    payment not already spent-and-confirmed; each violation is a distinct error. On the taker
+    side the counterparty's payment must also be saved;
+(c) when the own payment transaction is not saved, it is searched through the coin's
+    already-sent check using the P2SH address built from the *derived* key — with a key that no
+    longer matches, the search finds nothing and recovery fails with a "payment not found"
+    class error;
+(d) the spend search shall rebuild the expected P2SH output script from (locktime, secret
+    hash, derived own key, saved counterparty key) and compare it with output 0 of the saved
+    payment; a mismatch is an error (script-mismatch class) and recovery stops there. There is
+    **no** separate "saved public key does not match a held key" check and no such error class;
+    a base-key mismatch is observable only as (c) or (d);
+(e) on success the response is `{"result":{"action":"RefundedMyPayment"|"SpentOtherPayment",
+    "coin":<ticker>,"tx_hash":<hex>,"tx_hex":<hex>}}`; on a broadcast failure the built
+    transaction is still published on the swap P2P transaction-helper topic and the node's
+    rejection text is returned as the error.
+> **Reloaded-original (informative, proposed).** Reloaded may add an explicit pre-check that
+> the re-derived public key equals the saved `*_coin_htlc_pubkey` and report a dedicated
+> error naming the mismatch before any chain query. This is additive and does not change the
+> parity behaviour above when the keys match.
+
+R39.5.12 **Refund gate and refund transaction of a shielded leg.** *(binding, parity.)*
+(a) The refund of a shielded leg becomes permitted when the node's wall clock exceeds the HTLC
+    locktime; until then the refund stage waits (locktime − now + 1) seconds and re-checks, and
+    on a check error retries after 30 seconds. No median-time-past or block-count condition is
+    consulted (contrast: the UTXO coins' gate also requires locktime < median-time-past and
+    bounds a single wait to 3600 s).
+(b) The refund transaction: nLockTime = the HTLC locktime exactly; one transparent input
+    spending the payment's output 0 with sequence 0xFFFFFFFE and the refund branch of the
+    redeem script; one Sapling output to the wallet's own shielded address of value HTLC value
+    minus a fixed 1000 zatoshi; expiry height = chain height at build time + 20 blocks.
+    The secret-spend differs only by sequence 0xFFFFFFFF and the secret branch.
+(c) A broadcast rejection is **terminal for the swap**: the built transaction is published on
+    the P2P transaction-helper topic, the leg's refund-failed event is recorded with the node's
+    text, and the swap finishes; it stays `recoverable`, and a later `recover_funds_of_swap`
+    builds a fresh refund (fresh expiry) under the same gate.
+(d) Event sequence (maker leg; taker mirrors): `MakerPaymentWaitRefundStarted` →
+    `MakerPaymentRefundStarted` → gate (a) → broadcast → `MakerPaymentRefunded` →
+    `MakerPaymentRefundFinished`; or … → `MakerPaymentRefundFailed` → finish.
+> **Code-quality finding (informative).** Zcash-family nodes judge a time-locked transaction
+> final against median-time-past (BIP 113 semantics), which lags the wall clock by several
+> block intervals. Under (a)+(b) the first refund broadcast is therefore expected to be rejected
+> as non-final on every chain, and the swap ends in the failed state of (c) although nothing
+> is wrong with the funds; a manual recovery attempted soon after may fail for the same reason.
+> **Reloaded change: R39.5.13 (maintainer Decision AP).**
+
+R39.5.13 **Median-time-past-aware shielded refund.** *(binding, Reloaded-original;
+maintainer Decision AP, 2026-10-28; not yet implemented. Supersedes R39.5.12(a) and (c) for
+this project while keeping (b) and (d) wire-identical.)* The shielded
+leg's refund gate shall require both that the wall clock has passed the HTLC locktime and
+that the chain's median-time-past (computed from the `time` field of the last 11 compact
+blocks served by the admitted `lightwalletd` endpoint of §39.11, or from the serving node's
+headers in Native mode) exceeds the HTLC locktime, bounding any single wait to 3600 s. A
+broadcast rejection whose node text indicates non-finality shall be retried on the next gate
+pass rather than terminating the swap, until the leg's refund deadline (locktime + 3700 s,
+ch. 51 R18/R30); other rejections keep R39.5.12(c). `recover_funds_of_swap` shall apply the
+same gate and report a "too early" error naming the earliest permitted instant.
+
+> **Divergence (informative).** Against the reference behavior of R39.5.12, three things
+> change: the refund of a shielded leg is broadcast once median time past, not only the wall
+> clock, has passed the locktime; a refund rejected as non-final is retried instead of ending
+> the swap in the refund-failed state; and `recover_funds_of_swap` called too early reports
+> "too early" instead of the node's rejection. The refund transaction, the event types and
+> the swap wire are unchanged, so a counterparty sees only when the refund appears. The
+> operator-facing entry is in `docs/GLEEC_COMPATIBILITY.md`, "ZHTLC backend".
+
+Tests for R39.5.6--R39.5.13:
+
+T39.5.a *Derivation vector.* *(parity.)* For a fixed base private key and the two swap-unique
+inputs (a 32-byte secret hash; a 16-byte UUID), the derived public key equals a vector taken
+from a swap file produced by the reference (2.6.0-beta) with the same seed (a throwaway,
+non-HD test wallet; until that vector exists the test runs on public Started fields as a
+structure check only, and the derivation code is not merged before it passes); the derived key
+for the UTXO leg equals `my_persistent_pub`, the shielded leg's does not.
+T39.5.b *No persistence.* *(parity.)* A saved swap contains no HTLC private key; the
+shielded leg's key is re-derived on restart and after re-activation and signs a valid refund.
+T39.5.c *Mismatch outcomes.* *(parity.)* With a different seed, recovery of a saved shielded
+swap fails with the script-mismatch class when the payment is saved and with the
+not-found class when it is not; no other error class is produced.
+T39.5.d *Refund shape.* *(parity.)* The refund has nLockTime = locktime, input sequence
+0xFFFFFFFE, expiry = height + 20, output value = HTLC value − 1000 zatoshi, to the own
+shielded address.
+T39.5.e *Refund-failed is terminal and recoverable.* *(parity.)* A rejected broadcast yields
+the refund-failed event, finish, `recoverable` = true, and a later recovery builds a fresh
+transaction.
+T39.5.f *MTP gate.* *(Reloaded.)* Under R39.5.13 the refund is not broadcast while
+median-time-past ≤ locktime even though wall clock > locktime; a simulated non-final
+rejection is retried, a script-failure rejection is terminal, and a non-final rejection
+after the leg's refund deadline is terminal as in R39.5.12(c). `recover_funds_of_swap`
+before the gate opens reports "too early" with the earliest permitted instant and
+broadcasts nothing.
+
+#### Deferred Work (§39.5)
+
+D39.5.a **Decided 2026-10-28 (maintainer): follow the reference.** Under the HD-wallet policy
+the shielded coin's transparent key, and with it the base key of R39.5.9, is the key at the
+coins-file `derivation_path` with the default account, change and address index; R39.6.4 §2
+binds it, with no divergence and no operator-facing exception. Under the seed policy nothing
+changes. A swap saved by an earlier Reloaded build with a random per-swap key keeps that saved
+key (R39.5.4, candidate (2)). The question as it was put:
+
+**HD-wallet base key for the shielded HTLC key.** §39.0 and §39.6 record that Reloaded derives the transparent
+side of a shielded coin from the seed key even under an HD wallet. That satisfies R39.5.9
+only for seed-policy nodes. For HD-policy nodes the reference's base key differs, so a swap
+started by the reference under HD cannot be recovered by Reloaded with the same seed (the
+script-mismatch outcome of R39.5.11(d)) and vice versa. Either R39.6.4 §2 is extended to
+HD-derive the transparent key as the reference does, or the divergence is recorded as a
+deliberate Reloaded exception in §39.0 and in the operator-facing compatibility document.
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -380,7 +588,9 @@ that:
 > **Status of Part B:** R39.6.1, R39.6.2, R39.6.3, and R39.6.4 are all
 > implemented, including HD-derived shielded key-policy support (R39.6.4 §2).
 > The transparent (UTXO) side of a shielded coin remains iguana-derived; only
-> the shielded Sapling spending key is HD-derived, as R39.6.4 §2 requires.
+> the shielded Sapling spending key is HD-derived, as R39.6.4 §2 required until
+> 2026-10-28. Maintainer Decision D39.5.a extended R39.6.4 §2 to the transparent
+> key under HD ("Transparent key under HD"); that part is not yet implemented.
 
 ## 39.6 Required shielded-coin ports
 
@@ -750,6 +960,18 @@ from hardcoded Zcash-mainnet constants. Concretely:
   key shall be derived along `z_derivation_path` with the activation `account`
   appended as a hardened child (R39.1.4); with a raw/iguana key policy the path
   is not required.
+- **Transparent key under HD.** *(binding, parity; maintainer Decision D39.5.a,
+  2026-10-28.)* When the key policy is HD-derived, the coin's transparent
+  secp256k1 key shall be the key the UTXO builder activates for a UTXO coin's
+  default address: the coins-file `derivation_path` with account 0 (hardened),
+  the external chain 0 and address index 0, i.e. `m/<derivation_path>/0'/0/0`.
+  The activation request carries no member that changes it; its `account` member
+  selects only the Sapling account. This key is the base key of R39.5.9 and the
+  key of every transparent use of the coin. With a raw/iguana key policy it is
+  the seed's secp256k1 key, as before. Under the HD policy a missing
+  `derivation_path` is a build error, as a missing `z_derivation_path` is (a
+  Reloaded choice: what the reference does without the member is not
+  established).
 - **Sync checkpoint.** `check_point_block` shall be the sync-start anchor. In
   native mode the wallet database is anchored at `check_point_block.height`,
   falling back to `sapling_activation_height` when the checkpoint is absent. In
@@ -795,7 +1017,9 @@ mainnet constants.
 >   ZIP32 master of the iguana secret. `account` is an optional `init_z_coin`
 >   request field defaulting to `0`, ignored under the Iguana policy. Under the
 >   HD policy a missing `z_derivation_path` is a build error. The transparent
->   UTXO side of the coin remains iguana-derived (out of R39.6.4 §2 scope).
+>   UTXO side of the coin remains iguana-derived (out of R39.6.4 §2 scope at the
+>   time; history since Decision D39.5.a, 2026-10-28, extended §2 to the
+>   transparent key under HD, not yet implemented).
 > - **ZOMBIE fixtures.** Test fixtures updated to carry full `protocol_data` with
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
@@ -3836,6 +4060,13 @@ which made the Electrum list mandatory.)*
 > Implemented: the list is kept and handed to the fallback, and activation still never
 > connects to it (the status update below describes the rest unchanged).
 
+> **Reference behavior (informative, black box, 2026-10-28).** The reference's 3.0.0-beta
+> release binary rejects a Light-mode request without `electrum_servers` as a parse error
+> naming the missing field, in line with the "required in Light" row of the §39.10 table.
+> Reloaded accepts both shapes, so a request that carries the field activates on either
+> implementation and one without it on Reloaded only. `docs/GLEEC_COMPATIBILITY.md`
+> ("ZHTLC backend") tells operators.
+
 > **Status update (reloaded, Step C).** Implemented and tested (T39.11.b): an empty
 > `light_wallet_d_servers` is a `CoinCreationError` naming the coin, raised before
 > the coin is built; `electrum_servers` and the connection counts are accepted, may
@@ -4073,6 +4304,10 @@ configured order. A list made only of one endpoint's spellings is a single
 endpoint and is treated as one.
 
 ### 39.11.3 Chain-height authority
+
+> **Pointer (2026-10-28).** The median time past that the shielded refund gate R39.5.13
+> (Decision AP) consults is read from compact-block times as R39.11.4f binds; it is not a
+> second height authority.
 
 R39.11.8 **Every consumer of the chain height.** The admitted backend's tip is
 the coin's only chain-height authority, and it is consumed by all of the
@@ -4917,6 +5152,24 @@ Electrum server with its condition, and says that the taker could not watch its
 payment for the maker's spend. A maker, and a taker paying with any other coin,
 are not affected.
 
+> **Status update (reloaded, 2026-10-28).** R39.11.27 and R39.11.28 are implemented
+> (T39.11.r, T39.11.s).
+>
+> - **"A shielded coin" in R39.11.27.** It is decided by the property the rule rests on:
+>   the coin's HTLC key is random per swap (only the shielded coin has it).
+> - **"Started in this process".** Recorded when the swap is started new, never when it
+>   is restored from its saved log.
+> - **The address read of R39.11.28.** It is the transparent-address listing of the
+>   wallet's own transparent address on each admitted lightwalletd endpoint, then the
+>   script history of that address on each identity-checked Electrum server.
+>   - An endpoint that answers with the no-address-index rejection is marked
+>     (R39.11.4i).
+>   - The check runs in the taker's start step, after the balance check and before
+>     anything is sent.
+> - **Not exercised end to end.** No test drives the whole start step: its balance check
+>   has no test double. The refusal step is tested directly, with the fee step made to
+>   fail if reached.
+
 #### Tests
 
 > **Status update (reloaded, Step C).** T39.11.a--T39.11.d, T39.11.f and
@@ -5277,8 +5530,9 @@ block predates the import.
   `sync_params`, or the default recent window of R39.8.0av when none is
   supplied -- whose anchor is fetched from the backend rather than read from
   the configured checkpoint (R39.6.4 §3, R39.8.0g).
-- R39.6.4 is implemented, including HD-derived shielded key-policy support
-  (the transparent UTXO side remains iguana-derived, which is outside R39.6.4 §2).
+- R39.6.4 is implemented, including HD-derived shielded key-policy support,
+  except its "Transparent key under HD" bullet (Decision D39.5.a, 2026-10-28):
+  the transparent UTXO side is still iguana-derived under HD.
 - Shielded history activation: a Light-mode ARRR activation initializes both the
   compact-block cache and shielded wallet database, reports compact-block and
   wallet-db scan progress, and reaches terminal activation only after wallet-db
@@ -5628,3 +5882,22 @@ block predates the import.
   before the text entered this chapter. A clean editor applied the gate's editor
   list; its public-data item on the ARRR notarization setting was found to depend
   on the coins-file revision and is recorded so in D39.11.i rather than as written.
+
+- *Dirty Gate clearance for R39.5.6--R39.5.12 (2026-10-28):* PASS, measure 0.01 (threshold
+  0.10), no leak items.
+  - *Extent:* the shielded coin's v1 swap operations at both clean-room rows, namely HTLC key
+    derivation, payment, spend, refund and DEX-fee construction, the already-sent check and
+    the spend searches. Also the maker and taker refund stages and funds-recovery paths, the
+    saved-swap recoverability predicate, the shielded coin's key policy and activation, the
+    shared UTXO swap helpers, and the key, hash and signature primitives. 17 files at the
+    first row, 10 diffed to the second, plus one file each of the pinned public Zcash library
+    and the pinned secp256k1 crate.
+  - *Method:* reading plus a mechanical diff between the two rows. The gate script was not
+    run, because the candidate is prose.
+  - *Corpus consulted:* the forbidden corpus, through the two-team procedure (chapter 01
+    §1.4A), at the designations `v2.6.0-beta` and `v3.0.0-beta`, for R39.5.6--R39.5.12 and
+    the code-quality finding.
+  - *Other inputs:* the public Zcash library fork (tag k-1.4.2), for the expiry delta and
+    the builder defaults; BIP 113 and zcashd's finality rule, as public specification.
+  - *Original to this design:* R39.5.13, D39.5.a and the informative pre-check under
+    R39.5.11.
