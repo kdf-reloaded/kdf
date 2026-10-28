@@ -6751,6 +6751,428 @@ mod sync_request_root_tests {
     }
 }
 
+/// The memory the trie store holds after a burst of order updates, a pair clear or a pubkey removal
+/// is given back by the maintenance tick (`run_trie_store_maintenance`), without any further traffic.
+mod trie_store_memory_retention {
+    use super::*;
+    use common::time_cache::SHRINK_FLOOR;
+    use mm2_metrics::MetricsOps;
+
+    const MAKER: &str = "021111111111111111111111111111111111111111111111111111111111111111";
+    /// The test time to live of the histories (`TRIE_ORDER_HISTORY_TIMEOUT`, `TRIE_STATE_HISTORY_TIMEOUT`)
+    /// plus a margin.
+    const PAST_TTL: Duration = Duration::from_millis(3500);
+
+    fn new_node() -> (MmArc, Arc<OrdermatchContext>) {
+        let (ctx, _, _) = make_ctx_for_tests();
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        (ctx, octx)
+    }
+
+    /// The pair histories of `MAKER` live an hour instead of the test default, so that only the
+    /// diffs of a pair history expire in the test.
+    fn keep_pair_histories(octx: &OrdermatchContext) {
+        octx.trie_store.lock().pubkeys_state.insert(
+            MAKER.to_owned(),
+            OrderbookPubkeyState::with_history_timeout(Duration::from_secs(3600)),
+        );
+    }
+
+    fn seed(ctx: &MmArc, octx: &OrdermatchContext, n: usize) -> Vec<OrderbookItem> {
+        let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "RIN".into(), "KMD".into(), n);
+        for order in &orders {
+            insert_or_update_order(ctx, order.clone());
+        }
+        octx.wait_trie_ops_flushed();
+        orders
+    }
+
+    /// `updates` price updates, round-robin over the orders, each one a different price.
+    fn burst(ctx: &MmArc, octx: &OrdermatchContext, orders: &[OrderbookItem], updates: u64) {
+        burst_from(ctx, octx, orders, 0, updates)
+    }
+
+    /// Like [`burst`], the prices start at `first_price_numer` (over one million).
+    fn burst_from(
+        ctx: &MmArc,
+        octx: &OrdermatchContext,
+        orders: &[OrderbookItem],
+        first_price_numer: u64,
+        updates: u64,
+    ) {
+        for i in 0..updates {
+            let mut update = MakerOrderUpdated::new(orders[i as usize % orders.len()].uuid);
+            update.with_new_price(BigRational::new(
+                (2000 + first_price_numer + i).into(),
+                1_000_000.into(),
+            ));
+            assert!(process_maker_order_updated(ctx.clone(), MAKER.to_owned(), update));
+            if i % 500 == 499 {
+                octx.wait_trie_ops_flushed();
+            }
+        }
+        octx.wait_trie_ops_flushed();
+    }
+
+    fn pair() -> String { alb_ordered_pair("RIN", "KMD") }
+
+    /// `(diffs in the pair history, its time-cache capacities, queued list length)`.
+    fn inner_state(octx: &OrdermatchContext) -> (usize, (usize, usize), usize) {
+        let trie_store = octx.trie_store.lock();
+        let histories = &trie_store.pubkeys_state[MAKER].order_pairs_trie_state_history;
+        let history = histories.get(&pair()).expect("the pair history exists");
+        (
+            history.inner.len(),
+            history.inner.capacities(),
+            history.inner.queued_len(),
+        )
+    }
+
+    /// `(pair histories, their time-cache capacities, queued list length)` of the per-pubkey cache.
+    fn outer_state(octx: &OrdermatchContext) -> (usize, (usize, usize), usize) {
+        let trie_store = octx.trie_store.lock();
+        let histories = &trie_store.pubkeys_state[MAKER].order_pairs_trie_state_history;
+        (histories.len(), histories.capacities(), histories.queued_len())
+    }
+
+    fn assert_not_sparse(what: &str, len: usize, (map_capacity, list_capacity): (usize, usize)) {
+        let bound = 2 * len + SHRINK_FLOOR;
+        assert!(map_capacity <= bound, "{what}: map capacity {map_capacity} > {bound}");
+        assert!(
+            list_capacity <= bound,
+            "{what}: list capacity {list_capacity} > {bound}"
+        );
+    }
+
+    fn roots(octx: &OrdermatchContext) -> HashMap<AlbOrderedOrderbookPair, H64> {
+        octx.wait_trie_ops_flushed();
+        octx.trie_store.lock().pubkeys_state[MAKER].trie_roots.clone()
+    }
+
+    #[test]
+    fn idle_pair_history_is_expired_and_shrunk_by_the_tick() {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 30);
+        burst(&ctx, &octx, &orders, 20_000);
+
+        let (diffs, ..) = inner_state(&octx);
+        assert!(diffs > 2, "the burst left {diffs} diffs");
+        let (pairs, _, queued) = outer_state(&octx);
+        assert_eq!(
+            (pairs, queued),
+            (1, 1),
+            "one list element per pair history after 20000 refreshes"
+        );
+        let bytes_before = octx.trie_store.lock().snapshot().memory_db_bytes;
+
+        std::thread::sleep(PAST_TTL);
+        // Nothing wrote to the pair, so nothing has reclaimed the expired diffs yet.
+        assert!(inner_state(&octx).0 > 2);
+
+        run_trie_store_maintenance(&ctx, &octx, true);
+
+        let (diffs, capacities, queued) = inner_state(&octx);
+        assert!(diffs <= 2, "{diffs} diffs left");
+        assert_eq!(queued, diffs, "no expired element is left in the list");
+        assert_not_sparse("diffs", diffs, capacities);
+        let (pairs, capacities, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (1, 1));
+        assert_not_sparse("pair histories", pairs, capacities);
+
+        // memory_db holds the live nodes of the 30 orders and nothing else: the same as a node that
+        // only ever saw the final orders
+        let (ref_ctx, ref_octx) = new_node();
+        let final_orders: Vec<OrderbookItem> = octx.orderbook.lock().order_set.values().cloned().collect();
+        assert_eq!(final_orders.len(), 30);
+        for order in final_orders {
+            insert_or_update_order(&ref_ctx, order);
+        }
+        ref_octx.wait_trie_ops_flushed();
+        run_trie_store_maintenance(&ref_ctx, &ref_octx, true);
+        assert_eq!(roots(&octx), roots(&ref_octx));
+
+        let live = octx.trie_store.lock().snapshot();
+        let reference = ref_octx.trie_store.lock().snapshot();
+        assert_eq!(live.memory_db_entries, reference.memory_db_entries);
+        assert!(
+            live.memory_db_bytes <= 2 * reference.memory_db_bytes,
+            "memory_db holds {} B for {} live nodes, a fresh one {} B",
+            live.memory_db_bytes,
+            live.memory_db_entries,
+            reference.memory_db_bytes
+        );
+        assert!(
+            bytes_before > 2 * reference.memory_db_bytes,
+            "the burst did not fill memory_db ({bytes_before} B), the test shows nothing"
+        );
+    }
+
+    #[test]
+    fn idle_pair_history_cache_is_emptied_by_the_tick_when_its_own_time_is_up() {
+        let (ctx, octx) = new_node();
+        let orders = seed(&ctx, &octx, 30);
+        burst(&ctx, &octx, &orders, 5_000);
+        let (pairs, _, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (1, 1));
+
+        std::thread::sleep(PAST_TTL);
+        run_trie_store_maintenance(&ctx, &octx, false);
+
+        let (pairs, capacities, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (0, 0));
+        assert_not_sparse("pair histories", pairs, capacities);
+        // the pair itself is still known
+        assert!(octx.trie_store.lock().pubkeys_state[MAKER]
+            .trie_roots
+            .contains_key(&pair()));
+    }
+
+    /// A node that holds the answer to a sync request for `old_root` of the maker's pair.
+    fn node_with_one_update() -> (MmArc, Arc<OrdermatchContext>, H64, Uuid) {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 5);
+        let old_root = roots(&octx)[&pair()];
+        burst(&ctx, &octx, &orders[..1], 1);
+        assert_ne!(roots(&octx)[&pair()], old_root);
+        (ctx, octx, old_root, orders[0].uuid)
+    }
+
+    fn answer(ctx: &MmArc, root: H64) -> DeltaOrFullTrie<Uuid, OrderbookP2PItem> {
+        let request = HashMap::from([(pair(), root)]);
+        let mut response = process_sync_pubkey_orderbook_state(ctx.clone(), MAKER.to_owned(), request)
+            .unwrap()
+            .unwrap();
+        response.pair_orders_diff.remove(&pair()).unwrap()
+    }
+
+    #[test]
+    fn the_tick_does_not_change_a_delta_answer_within_the_ttl_and_expired_roots_get_the_full_trie() {
+        let (ctx, octx, old_root, updated) = node_with_one_update();
+        // a second node whose expired diff is reclaimed lazily, by the next write to the pair
+        let (lazy_ctx, lazy_octx, lazy_old_root, _) = node_with_one_update();
+
+        let before = answer(&ctx, old_root);
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let after = answer(&ctx, old_root);
+        for delta in [before, after] {
+            match delta {
+                DeltaOrFullTrie::Delta(delta) => {
+                    assert_eq!(delta.keys().collect::<Vec<_>>(), vec![&updated]);
+                },
+                DeltaOrFullTrie::FullTrie(_) => panic!("the diff is within its time to live"),
+            }
+        }
+
+        std::thread::sleep(PAST_TTL);
+        run_trie_store_maintenance(&ctx, &octx, true);
+        match answer(&ctx, old_root) {
+            DeltaOrFullTrie::FullTrie(orders) => assert_eq!(orders.len(), 5),
+            DeltaOrFullTrie::Delta(_) => panic!("the diff expired and was reclaimed by the tick"),
+        }
+
+        // the same outcome as lazy expiry: the next write to the pair reclaims the expired diff
+        let lazy_orders: Vec<OrderbookItem> = lazy_octx.orderbook.lock().order_set.values().cloned().collect();
+        burst_from(&lazy_ctx, &lazy_octx, &lazy_orders[..1], 500_000, 1);
+        match answer(&lazy_ctx, lazy_old_root) {
+            DeltaOrFullTrie::FullTrie(orders) => assert_eq!(orders.len(), 5),
+            DeltaOrFullTrie::Delta(_) => panic!("lazy expiry has no diff for the old root either"),
+        }
+    }
+
+    fn gauges(ctx: &MmArc) -> HashMap<String, i64> {
+        let json = ctx.metrics.collect_json().unwrap();
+        json["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric["type"] == "gauge")
+            .map(|metric| {
+                (
+                    metric["key"].as_str().unwrap().to_owned(),
+                    metric["value"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tick_reports_the_gauges() {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 10);
+        burst(&ctx, &octx, &orders, 50);
+
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let reported = gauges(&ctx);
+        let snapshot = octx.trie_store.lock().snapshot();
+        assert_eq!(reported["orderbook.pubkeys"], 1);
+        assert_eq!(reported["orderbook.history.pairs"], 1);
+        // the 50 updates, and the 9 inserts after the first of the 10 orders (the first one has no previous root)
+        assert_eq!(reported["orderbook.history.deltas"], 59);
+        assert_eq!(reported["orderbook.trie_ops.pending"], 0);
+        assert_eq!(
+            reported["orderbook.memory_db.entries"],
+            snapshot.memory_db_entries as i64
+        );
+        assert!(snapshot.memory_db_entries >= 10, "at least a leaf per order");
+        assert_eq!(reported["orderbook.memory_db"], snapshot.memory_db_bytes as i64);
+        assert!(reported["orderbook.memory_db"] > 0);
+
+        // batches queued and not applied yet
+        collect_trie_store_metrics(&ctx, &snapshot, snapshot.applied_batches + 3);
+        assert_eq!(gauges(&ctx)["orderbook.trie_ops.pending"], 3);
+
+        // the sweep keeps reporting the length of the index
+        collect_orderbook_metrics(&ctx, &octx.orderbook.lock());
+        assert_eq!(gauges(&ctx)["orderbook.len"], 10);
+    }
+
+    // ---- ClearPair and RemovePubkey give the nodes of the pair trie back
+
+    const PAIR: &str = "DOC:MARTY";
+
+    fn item(item_pubkey: &str, uuid: Uuid, price_numer: u64) -> OrderbookItem {
+        trie_op_item(item_pubkey, "DOC", "MARTY", uuid, price_numer)
+    }
+
+    fn insert_op(pubkey: &str, item_pubkey: &str, uuid: Uuid, price_numer: u64) -> TrieOp {
+        TrieOp::Insert {
+            pubkey: pubkey.to_owned(),
+            alb_pair: PAIR.to_owned(),
+            uuid,
+            order: item(item_pubkey, uuid, price_numer),
+        }
+    }
+
+    fn insert_all_ops(pubkey: &str, item_pubkey: &str, orders: u64, price_base: u64) -> Vec<TrieOp> {
+        (0..orders)
+            .map(|n| insert_op(pubkey, item_pubkey, trie_op_uuid(n), price_base + n))
+            .collect()
+    }
+
+    /// Nodes some trie refers to; panics when a node has a negative count (a node removed twice).
+    fn live_nodes(store: &mut TrieStore) -> usize {
+        store.memory_db.purge();
+        let nodes = store.memory_db.keys();
+        assert!(
+            nodes.values().all(|rc| *rc > 0),
+            "a node has a negative reference count"
+        );
+        nodes.len()
+    }
+
+    fn read_back(store: &TrieStore, pubkey: &str) -> usize {
+        let root = store.pubkeys_state[pubkey].trie_roots[PAIR];
+        get_full_trie::<Uuid, OrderbookItem>(
+            &root,
+            &store.memory_db,
+            |uuid| Some(item("X", *uuid, 1)),
+            MissingValue::Fail,
+        )
+        .unwrap()
+        .len()
+    }
+
+    #[test]
+    fn full_resyncs_with_changed_data_leave_no_orphaned_nodes() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops(MAKER, MAKER, 30, 1000));
+        for round in 1..=20 {
+            let mut ops = vec![trie_op_clear(MAKER)];
+            ops.extend(insert_all_ops(MAKER, MAKER, 30, 1000 + round * 100));
+            store.apply_ops(ops);
+        }
+        let held = live_nodes(&mut store);
+
+        let mut fresh = TrieStore::default();
+        fresh.apply_ops(insert_all_ops(MAKER, MAKER, 30, 1000 + 20 * 100));
+        assert_eq!(
+            store.pubkeys_state[MAKER].trie_roots,
+            fresh.pubkeys_state[MAKER].trie_roots
+        );
+        assert_eq!(
+            held,
+            live_nodes(&mut fresh),
+            "only the nodes of the last resync are held"
+        );
+        assert_eq!(read_back(&store, MAKER), 30);
+    }
+
+    #[test]
+    fn clearing_a_pair_keeps_nodes_another_pubkey_shares() {
+        // Both pubkeys carry the same orders, so their tries are the same nodes.
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("B", "X", 30, 1000));
+        assert_eq!(store.pubkeys_state["A"].trie_roots, store.pubkeys_state["B"].trie_roots);
+        let shared = live_nodes(&mut store);
+
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "A".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), shared, "B still holds every node");
+        assert_eq!(read_back(&store, "B"), 30);
+
+        // A comes back with the same orders: the tries are shared again
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        assert_eq!(live_nodes(&mut store), shared);
+        assert_eq!(read_back(&store, "A"), 30);
+
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "B".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), shared);
+        assert_eq!(read_back(&store, "A"), 30);
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "A".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), 0, "nobody refers to a node any more");
+    }
+
+    #[test]
+    fn removing_a_pubkey_gives_its_nodes_back_and_keeps_shared_ones() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("B", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("C", "Y", 12, 5000));
+        let all = live_nodes(&mut store);
+
+        // a bare RemovePubkey, without the removal of the orders first
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "C".to_owned() }]);
+        let without_c = live_nodes(&mut store);
+        assert!(without_c < all);
+
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "A".to_owned() }]);
+        assert_eq!(live_nodes(&mut store), without_c, "B holds the nodes A shared");
+        assert_eq!(read_back(&store, "B"), 30);
+
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "B".to_owned() }]);
+        assert_eq!(live_nodes(&mut store), 0);
+    }
+
+    #[test]
+    fn removing_a_pubkey_after_its_orders_were_removed_still_works() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        let mut ops: Vec<TrieOp> = (0..30)
+            .map(|n| TrieOp::Remove {
+                pubkey: "A".to_owned(),
+                alb_pair: PAIR.to_owned(),
+                uuid: trie_op_uuid(n),
+            })
+            .collect();
+        ops.push(TrieOp::RemovePubkey { pubkey: "A".to_owned() });
+        store.apply_ops(ops);
+        assert!(store.pubkeys_state.is_empty());
+        assert_eq!(live_nodes(&mut store), 0);
+    }
+}
+
 /// CRD ch.60 T60.7 (R60.4.5, R60.4.6): the balance watch of the node's own maker orders. Time is driven by a
 /// sleeper that the test passes to the watch task; it logs every pause and every balance read in one list, so
 /// "sleep first, then one read per 30 s" is read off the order of the entries, and no test waits.

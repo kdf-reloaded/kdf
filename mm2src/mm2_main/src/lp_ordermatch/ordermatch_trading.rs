@@ -725,6 +725,29 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
     }
 }
 
+/// Period of the trie store maintenance. The diffs of a pair history live 300 s, so one that is past
+/// its time to live is held at most a tenth longer than it has to.
+const TRIE_MAINTENANCE_PERIOD_SECS: f64 = 30.;
+/// The nodes no trie refers to any more are purged on every 20th tick, that is every 600 s.
+const MEMORY_DB_PURGE_EVERY_TICKS: u64 = 20;
+
+/// One round of the trie store maintenance (never awaits, so no lock is held across a suspension):
+/// expire the histories, purge `memory_db` when `purge` is set, and report the gauges. The trie store
+/// lock and the orderbook lock are taken one after the other, never together.
+pub(crate) fn run_trie_store_maintenance(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext, purge: bool) {
+    let snapshot = {
+        let mut trie_store = ordermatch_ctx.trie_store.lock();
+        trie_store.expire_histories();
+        if purge {
+            trie_store.purge_memory_db();
+        }
+        trie_store.snapshot()
+    };
+    // Read after `applied_batches` (see `collect_trie_store_metrics`).
+    let enqueued_batches = ordermatch_ctx.orderbook.lock().trie_ops_enqueued;
+    collect_trie_store_metrics(ctx, &snapshot, enqueued_batches);
+}
+
 /// The maintenance step for the own maker orders that are absent from the local orderbook (CRD ch.60 R60.4.6
 /// item 5, ch.59 R59.6.7): reconcile each with a fresh balance read, then re-announce it or cancel it.
 ///
@@ -831,7 +854,10 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
     }
 }
 
+/// Keeps the memory of the trie store bounded independently of the traffic: histories expire on a
+/// timer, not on the next update of their pair, and `memory_db` is purged and shrunk every 600 s.
 pub async fn clean_memory_loop(ctx_weak: MmWeak) {
+    let mut tick: u64 = 0;
     loop {
         {
             let ctx = match MmArc::from_weak(&ctx_weak) {
@@ -843,10 +869,10 @@ pub async fn clean_memory_loop(ctx_weak: MmWeak) {
             }
 
             let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-            let mut trie_store = ordermatch_ctx.trie_store.lock();
-            trie_store.memory_db.purge();
+            run_trie_store_maintenance(&ctx, &ordermatch_ctx, tick.is_multiple_of(MEMORY_DB_PURGE_EVERY_TICKS));
         }
-        Timer::sleep(600.).await;
+        tick += 1;
+        Timer::sleep(TRIE_MAINTENANCE_PERIOD_SECS).await;
     }
 }
 

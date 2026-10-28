@@ -491,6 +491,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one whose cache answers with an error or whose height is more than 40 blocks behind the others.
   A failed admission now lists every excluded endpoint and why, and its message no longer claims
   that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
+- **A seed or relay now gives back the memory a burst of order updates used.** Every order update a node
+  applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and bookkeeping),
+  and none of it was released until the same order pair changed again, so a node that had seen
+  500 updates a second for a few minutes stayed about 150 MB larger afterward. The change history is
+  now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
+  shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
+  clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
+  pair). The metrics now also show the node store's size and entry count, the number of stored change
+  histories and changes, tracked pubkeys, and queued trie updates. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
