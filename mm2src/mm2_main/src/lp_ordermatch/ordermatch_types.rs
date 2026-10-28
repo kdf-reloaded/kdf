@@ -188,6 +188,22 @@ pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
     ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
 }
 
+/// CRD ch.32 §32.9B R-MP1 item 5: the MM2.json boolean `maker_update_coalescing`, default `true`. Only an
+/// explicit JSON `false` makes every maker-order message leave at once, as without the outbox.
+pub(crate) fn maker_update_coalescing(ctx: &MmArc) -> bool {
+    ctx.conf["maker_update_coalescing"].as_bool() != Some(false)
+}
+
+/// CRD ch.32 §32.9B R-MP2 item 1: the MM2.json number `maker_update_rate_max`, the ceiling of the rate at
+/// which the outbox releases created and updated messages, per second per maker pubkey. The default is 10;
+/// a value that is not a positive finite number is ignored.
+pub(crate) fn maker_update_rate_max(ctx: &MmArc) -> f64 {
+    ctx.conf["maker_update_rate_max"]
+        .as_f64()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(DEFAULT_MAKER_UPDATE_RATE_MAX)
+}
+
 /// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
 #[derive(Debug, Display)]
 pub(crate) enum SpendSafetyError {

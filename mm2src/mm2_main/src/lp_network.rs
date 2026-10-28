@@ -39,6 +39,7 @@ use rand::random;
 use serde::de;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::mm2::{lp_ordermatch, lp_stats, lp_swap};
@@ -130,6 +131,9 @@ pub struct P2PContext {
     /// Using Mutex helps to prevent cloning which can actually result to channel being unbounded in case of using 1 tx clone per 1 message.
     pub cmd_tx: PaMutex<AdexCmdTx>,
     pub(crate) pending_healthchecks: PaMutex<HashMap<String, PendingHealthcheckWaiter>>,
+    /// Whether the gossip send queue pressure signal is raised for any connection to a relay (CRD ch.28 §28.9B
+    /// RQ1 item 8). The swarm side sets it; the maker outbox reads it (CRD ch.32 §32.9B R-MP2 item 2).
+    pub relay_pressure: Arc<AtomicBool>,
 }
 
 #[cfg_attr(test, mockable)]
@@ -138,7 +142,14 @@ impl P2PContext {
         P2PContext {
             cmd_tx: PaMutex::new(cmd_tx),
             pending_healthchecks: PaMutex::new(HashMap::new()),
+            relay_pressure: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Uses `relay_pressure`, a flag the swarm side already updates, as the pressure flag of the context.
+    pub fn with_relay_pressure(mut self, relay_pressure: Arc<AtomicBool>) -> Self {
+        self.relay_pressure = relay_pressure;
+        self
     }
 
     pub fn store_to_mm_arc(self, ctx: &MmArc) { *ctx.p2p_ctx.lock().unwrap() = Some(Arc::new(self)) }
@@ -153,6 +164,18 @@ impl P2PContext {
             .downcast()
             .unwrap()
     }
+}
+
+/// Whether the node is under send queue pressure toward its relays (CRD ch.32 §32.9B R-MP2 item 2). `false`
+/// while there is no P2P context.
+pub fn relay_pressure(ctx: &MmArc) -> bool {
+    let p2p_ctx = match ctx.p2p_ctx.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .and_then(|p2p_ctx| p2p_ctx.clone().downcast::<P2PContext>().ok()),
+        Err(_) => None,
+    };
+    p2p_ctx.is_some_and(|p2p_ctx| p2p_ctx.relay_pressure.load(Ordering::Relaxed))
 }
 
 fn peer_healthcheck_topic(peer_id: &str) -> String { pub_sub_topic(PEER_HEALTHCHECK_PREFIX, peer_id) }
@@ -197,6 +220,7 @@ pub async fn peer_connection_healthcheck(ctx: MmArc, peer_address: String) -> Pe
     let publish_cmd = AdexBehaviourCmd::PublishMsg {
         topics: vec![peer_healthcheck_topic(&peer_address)],
         msg: signed_probe,
+        priority: false,
     };
     p2p_ctx
         .cmd_tx
@@ -304,13 +328,18 @@ pub async fn p2p_event_process_loop(ctx: MmWeak, mut rx: AdexEventRx, i_am_relay
                     log::error!("Error on process P2P request: {:?}", e);
                 }
             },
+            Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }) => {
+                log::debug!("Relay {} joined the relay mesh", peer_id);
+                // CRD ch.32 §32.9B R-MP4: the keep-alive round that replaces what a closed connection lost.
+                lp_ordermatch::schedule_reconnect_keep_alive_round(ctx);
+            },
             None => break,
             _ => (),
         }
     }
 }
 
-async fn process_p2p_message(
+pub(crate) async fn process_p2p_message(
     ctx: MmArc,
     peer_id: PeerId,
     message_id: MessageId,
@@ -318,6 +347,7 @@ async fn process_p2p_message(
     i_am_relay: bool,
 ) {
     let mut to_propagate = false;
+    let mut priority = false;
     let mut orderbook_pairs = vec![];
 
     for topic in std::iter::once(&message.topic) {
@@ -365,7 +395,7 @@ async fn process_p2p_message(
     }
 
     if !orderbook_pairs.is_empty() {
-        let process_fut = lp_ordermatch::process_msg(
+        let process_fut = lp_ordermatch::process_msg_with_priority(
             ctx.clone(),
             orderbook_pairs,
             peer_id.to_string(),
@@ -373,13 +403,17 @@ async fn process_p2p_message(
             i_am_relay,
         );
 
-        if process_fut.await {
+        let (propagate, is_priority) = process_fut.await;
+        if propagate {
             to_propagate = true;
+            // CRD ch.32 §32.9B R-MP1 item 2: a cancellation or a swap-negotiation message is propagated
+            // with priority.
+            priority = is_priority;
         }
     }
 
     if to_propagate && i_am_relay {
-        propagate_message(&ctx, message_id, peer_id);
+        propagate_message_with_priority(&ctx, message_id, peer_id, priority);
     }
 }
 
@@ -426,10 +460,27 @@ fn process_p2p_request(
 }
 
 pub fn broadcast_p2p_msg(ctx: &MmArc, topics: Vec<String>, msg: Vec<u8>, from: Option<PeerId>) {
+    broadcast_p2p_msg_with_priority(ctx, topics, msg, from, false)
+}
+
+/// Like [`broadcast_p2p_msg`]; a `priority` message goes through the priority lane of the send queue of every
+/// connection it is written to (CRD ch.28 §28.9B RQ1 item 9).
+pub fn broadcast_p2p_msg_with_priority(
+    ctx: &MmArc,
+    topics: Vec<String>,
+    msg: Vec<u8>,
+    from: Option<PeerId>,
+    priority: bool,
+) {
     let ctx = ctx.clone();
     let cmd = match from {
-        Some(from) => AdexBehaviourCmd::PublishMsgFrom { topics, msg, from },
-        None => AdexBehaviourCmd::PublishMsg { topics, msg },
+        Some(from) => AdexBehaviourCmd::PublishMsgFrom {
+            topics,
+            msg,
+            from,
+            priority,
+        },
+        None => AdexBehaviourCmd::PublishMsg { topics, msg, priority },
     };
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
     if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
@@ -575,11 +626,18 @@ fn parse_peers_responses<T: de::DeserializeOwned>(
 }
 
 pub fn propagate_message(ctx: &MmArc, message_id: MessageId, propagation_source: PeerId) {
+    propagate_message_with_priority(ctx, message_id, propagation_source, false)
+}
+
+/// Like [`propagate_message`]; a `priority` message goes through the priority lane of the send queue of every
+/// connection it is written to (CRD ch.28 §28.9B RQ1 item 9).
+pub fn propagate_message_with_priority(ctx: &MmArc, message_id: MessageId, propagation_source: PeerId, priority: bool) {
     let ctx = ctx.clone();
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd = AdexBehaviourCmd::PropagateMessage {
         message_id,
         propagation_source,
+        priority,
     };
     if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
         log::error!("propagate_message cmd_tx.send error {:?}", e);

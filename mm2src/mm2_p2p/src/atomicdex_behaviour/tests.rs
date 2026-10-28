@@ -476,6 +476,7 @@ async fn test_publish_reaches_direct_subscriber() {
             let _ = cmd_tx.try_send(AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source: peer_id,
+                priority: false,
             });
         }
     })
@@ -508,6 +509,7 @@ async fn test_publish_reaches_direct_subscriber() {
         .send_cmd(AdexBehaviourCmd::PublishMsg {
             topics: vec![topic.clone()],
             msg: payload.clone(),
+            priority: false,
         })
         .await;
 
@@ -544,6 +546,7 @@ async fn test_publish_reaches_subscriber_via_relay() {
             let _ = cmd_tx.try_send(AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source: peer_id,
+                priority: false,
             });
         }
     })
@@ -555,6 +558,7 @@ async fn test_publish_reaches_subscriber_via_relay() {
             let _ = cmd_tx.try_send(AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source: peer_id,
+                priority: false,
             });
         }
     })
@@ -585,6 +589,7 @@ async fn test_publish_reaches_subscriber_via_relay() {
         .send_cmd(AdexBehaviourCmd::PublishMsg {
             topics: vec![topic.clone()],
             msg: payload.clone(),
+            priority: false,
         })
         .await;
 
@@ -654,6 +659,7 @@ async fn test_watcher_node_observes_swap_traffic() {
             let _ = cmd_tx.try_send(AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source: peer_id,
+                priority: false,
             });
         }
     })
@@ -695,12 +701,14 @@ async fn test_watcher_node_observes_swap_traffic() {
         .send_cmd(AdexBehaviourCmd::PublishMsg {
             topics: vec![topic.clone()],
             msg: payload_a.clone(),
+            priority: false,
         })
         .await;
     publisher
         .send_cmd(AdexBehaviourCmd::PublishMsg {
             topics: vec![topic.clone()],
             msg: payload_b.clone(),
+            priority: false,
         })
         .await;
 
@@ -769,4 +777,61 @@ mod message_id_encoding {
         assert_eq!(a, gossipsub_message_id(PAYLOAD, Some(1)));
         assert_ne!(a, gossipsub_message_id(b"other payload", Some(1)));
     }
+}
+
+/// Spawns a light node that dials the given relay ports and counts the `RelayMeshJoined` events it gets.
+async fn light_node_counting_relay_mesh_joins(relay_ports: Vec<u64>) -> (Node, Arc<std::sync::atomic::AtomicUsize>) {
+    let joins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let joins_cpy = joins.clone();
+    let light = Node::spawn_light(relay_ports, move |_cmd_tx, event| {
+        if let AdexBehaviourEvent::RelayMeshJoined { .. } = event {
+            joins_cpy.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+    .await;
+    (light, joins)
+}
+
+async fn wait_for_joins(joins: &Arc<std::sync::atomic::AtomicUsize>, want: usize, secs: u64) {
+    for _ in 0..secs * 2 {
+        if joins.load(Ordering::Relaxed) >= want {
+            return;
+        }
+        async_std::task::sleep(Duration::from_millis(500)).await;
+    }
+    panic!(
+        "expected {want} relay mesh join event(s), got {}",
+        joins.load(Ordering::Relaxed)
+    );
+}
+
+/// CRD ch.32 §32.9B R-MP4: a light node learns that a relay it is connected to joined its relay mesh, once.
+#[tokio::test]
+async fn test_relay_mesh_join_is_reported_once_after_connecting() {
+    let _ = env_logger::try_init();
+    let relay_port = next_port();
+    let _relay = Node::spawn(relay_port, vec![], |_, _| ()).await;
+    let (_light, joins) = light_node_counting_relay_mesh_joins(vec![relay_port]).await;
+    wait_for_joins(&joins, 1, 20).await;
+    // Nothing more is reported for the same relay.
+    async_std::task::sleep(Duration::from_secs(3)).await;
+    assert_eq!(joins.load(Ordering::Relaxed), 1);
+}
+
+/// CRD ch.32 §32.9B R-MP4, T-MP7 (transport part): after the relay's connection is closed and the node
+/// connects to a relay again, the join of the relay mesh is reported again. The light node redials its bootstrap
+/// addresses at its next relay maintenance tick, every 30 seconds.
+#[tokio::test]
+#[ignore = "waits for the 30 s relay maintenance tick of the light node"]
+async fn test_relay_mesh_join_is_reported_again_after_a_forced_close() {
+    let _ = env_logger::try_init();
+    let (first_port, second_port) = (next_port(), next_port());
+    let first = Node::spawn(first_port, vec![], |_, _| ()).await;
+    let (mut light, joins) = light_node_counting_relay_mesh_joins(vec![first_port, second_port]).await;
+    wait_for_joins(&joins, 1, 20).await;
+
+    first.abort();
+    light.wait_peers_exact(0, 40).await;
+    let _second = Node::spawn(second_port, vec![], |_, _| ()).await;
+    wait_for_joins(&joins, 2, 90).await;
 }

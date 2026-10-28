@@ -5423,6 +5423,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         pending_maker_reserved: Default::default(),
+        maker_outbox: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
     };
@@ -5860,7 +5861,7 @@ mod keep_alive_shape_tests {
         let mut out = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
             let (topics, msg) = match cmd {
-                AdexBehaviourCmd::PublishMsg { topics, msg } => (topics, msg),
+                AdexBehaviourCmd::PublishMsg { topics, msg, .. } => (topics, msg),
                 AdexBehaviourCmd::PublishMsgFrom { topics, msg, .. } => (topics, msg),
                 _ => continue,
             };
@@ -6248,7 +6249,7 @@ mod unchanged_order_update_tests {
     fn published_updates(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> Vec<String> {
         let mut topics = Vec::new();
         while let Ok(cmd) = rx.try_recv() {
-            if let AdexBehaviourCmd::PublishMsg { topics: t, msg }
+            if let AdexBehaviourCmd::PublishMsg { topics: t, msg, .. }
             | AdexBehaviourCmd::PublishMsgFrom { topics: t, msg, .. } = cmd
             {
                 if let Ok((new_protocol::OrdermatchMessage::MakerOrderUpdated(_), ..)) =
@@ -7955,5 +7956,556 @@ mod t60_7_maker_balance_watch_tests {
         // Only the order that stayed was announced (the mock is the same for both bases, so it was lowered too).
         assert_eq!(publishes(&mut p2p_rx), 1);
         assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&kept.uuid));
+    }
+}
+
+/// CRD ch.32 §32.9B (Reloaded-original, maker publication rate): the outbox, the priority marking, the
+/// keep-alive ordering, the reconnect round, the metrics and the switch. T-MP1 and T-MP4 are the unit tests of
+/// `maker_outbox.rs`.
+mod maker_publication_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::new_protocol::OrdermatchMessage;
+    use mm2_metrics::MetricsOps;
+
+    /// A node with a channel that receives what it publishes. The channel is large enough for every test.
+    pub(super) fn node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        let _ = ctx.init_metrics();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "maker publication test passphrase").unwrap();
+        let (tx, rx) = mpsc::channel(20_000);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, rx)
+    }
+
+    pub(super) fn own_order(base: &str, rel: &str) -> MakerOrder {
+        MakerOrder {
+            uuid: Uuid::new_v4(),
+            base: base.into(),
+            rel: rel.into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            matches: HashMap::new(),
+            max_base_vol: 10.into(),
+            min_base_vol: 1.into(),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+            changes_history: None,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    pub(super) fn pubkey_of(ctx: &MmArc) -> String { hex::encode(ctx.secp256k1_key_pair().public_slice()) }
+
+    pub(super) struct Published {
+        pub(super) priority: bool,
+        pub(super) topics: Vec<String>,
+        pub(super) bytes: Vec<u8>,
+        pub(super) message: OrdermatchMessage,
+    }
+
+    pub(super) fn drain(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> Vec<Published> {
+        let mut published = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            let (topics, msg, priority) = match cmd {
+                AdexBehaviourCmd::PublishMsg { topics, msg, priority }
+                | AdexBehaviourCmd::PublishMsgFrom {
+                    topics, msg, priority, ..
+                } => (topics, msg, priority),
+                _ => continue,
+            };
+            let (message, _sig, _pubkey) = decode_signed::<OrdermatchMessage>(&msg).unwrap();
+            published.push(Published {
+                priority,
+                topics,
+                bytes: msg,
+                message,
+            });
+        }
+        published
+    }
+
+    fn ratio(n: i64) -> BigRational { BigRational::from_integer(n.into()) }
+
+    pub(super) fn update_price(ctx: &MmArc, order: &MakerOrder, price: i64) {
+        let mut message = MakerOrderUpdated::new(order.uuid);
+        message.with_new_price(ratio(price));
+        maker_order_updated_p2p_notify(ctx.clone(), order.orderbook_topic(), message, None);
+    }
+
+    fn pending(ctx: &MmArc) -> usize {
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let pending = octx.maker_outbox.outboxes.lock().pending_of(&pubkey_of(ctx));
+        pending
+    }
+
+    fn kind(message: &OrdermatchMessage) -> &'static str {
+        match message {
+            OrdermatchMessage::MakerOrderCreated(_) => "created",
+            OrdermatchMessage::MakerOrderUpdated(_) => "updated",
+            OrdermatchMessage::MakerOrderCancelled(_) => "cancelled",
+            OrdermatchMessage::PubkeyKeepAlive(_) => "keep-alive",
+            OrdermatchMessage::TakerRequest(_) => "taker request",
+            OrdermatchMessage::MakerReserved(_) => "maker reserved",
+            OrdermatchMessage::TakerConnect(_) => "taker connect",
+            OrdermatchMessage::MakerConnected(_) => "maker connected",
+        }
+    }
+
+    #[test]
+    fn settings_are_read_like_the_existing_switches() {
+        let ctx_with = |conf: Json| MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        assert!(maker_update_coalescing(&ctx_with(json!({}))));
+        assert!(!maker_update_coalescing(&ctx_with(
+            json!({ "maker_update_coalescing": false })
+        )));
+        // Only a JSON `false` turns the outbox off.
+        for other in [json!(true), json!("false"), json!(0), json!(null)] {
+            assert!(maker_update_coalescing(&ctx_with(
+                json!({ "maker_update_coalescing": other })
+            )));
+        }
+        assert_eq!(maker_update_rate_max(&ctx_with(json!({}))), 10.0);
+        assert_eq!(
+            maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": 25 }))),
+            25.0
+        );
+        assert_eq!(
+            maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": 0.5 }))),
+            0.5
+        );
+        // Not a positive finite number: the default.
+        for bad in [json!(0), json!(-3), json!("fast"), json!(null), json!(true)] {
+            assert_eq!(
+                maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": bad }))),
+                10.0
+            );
+        }
+    }
+
+    /// T-MP2: a cancellation leaves at once and with priority when the budget is exhausted, and discards the
+    /// pending message of the order. The local state and the update are not delayed.
+    #[test]
+    fn t_mp2_cancellation_is_released_at_once_with_priority() {
+        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let order = own_order("DOC", "MARTY");
+        // The burst of the budget is one message: the creation uses it.
+        maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
+        for price in 2..6 {
+            update_price(&ctx, &order, price);
+        }
+        let published = drain(&mut rx);
+        assert_eq!(published.len(), 1, "the updates wait in the outbox");
+        assert_eq!(kind(&published[0].message), "created");
+        assert_eq!(pending(&ctx), 1, "four updates merged into one pending message");
+        // The local order is current at once.
+        flush_trie(&ctx);
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert_eq!(
+            octx.orderbook.lock().find_order_by_uuid(&order.uuid).unwrap().price,
+            ratio(5)
+        );
+
+        maker_order_cancelled_p2p_notify(ctx.clone(), &order);
+        let published = drain(&mut rx);
+        assert_eq!(published.len(), 1);
+        assert_eq!(kind(&published[0].message), "cancelled");
+        assert!(published[0].priority);
+        assert_eq!(published[0].topics, vec![order.orderbook_topic()]);
+        assert_eq!(pending(&ctx), 0, "the pending update was discarded");
+    }
+
+    /// T-MP3 and the second bullet of T-MP12: the four swap-negotiation messages are published at once, with
+    /// priority, with the outbox full; a created, an updated and a keep-alive message are not priority.
+    #[test]
+    fn t_mp3_swap_messages_bypass_the_outbox_and_carry_priority() {
+        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (a, b) = (own_order("DOC", "MARTY"), own_order("DOC", "MARTY"));
+        maker_order_created_p2p_notify(ctx.clone(), &a, vec![], vec![]);
+        maker_order_created_p2p_notify(ctx.clone(), &b, vec![], vec![]);
+        update_price(&ctx, &a, 3);
+        flush_trie(&ctx);
+        let published = drain(&mut rx);
+        assert_eq!(published.len(), 1, "the budget is exhausted");
+        assert!(!published[0].priority, "a created message is not priority");
+        assert_eq!(pending(&ctx), 2);
+
+        let (taker_uuid, maker_uuid) = (Uuid::new_v4().into(), Uuid::new_v4().into());
+        let topic = a.orderbook_topic();
+        let messages = vec![
+            OrdermatchMessage::TakerRequest(new_protocol::TakerRequest {
+                base: "DOC".into(),
+                rel: "MARTY".into(),
+                base_amount: ratio(1),
+                rel_amount: ratio(1),
+                action: TakerAction::Buy,
+                uuid: taker_uuid,
+                match_by: new_protocol::MatchBy::Any,
+                conf_settings: OrderConfirmationsSettings::default(),
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            }),
+            OrdermatchMessage::MakerReserved(new_protocol::MakerReserved {
+                base: "DOC".into(),
+                rel: "MARTY".into(),
+                base_amount: ratio(1),
+                rel_amount: ratio(1),
+                taker_order_uuid: taker_uuid,
+                maker_order_uuid: maker_uuid,
+                conf_settings: OrderConfirmationsSettings::default(),
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            }),
+            OrdermatchMessage::TakerConnect(new_protocol::TakerConnect {
+                taker_order_uuid: taker_uuid,
+                maker_order_uuid: maker_uuid,
+            }),
+            OrdermatchMessage::MakerConnected(new_protocol::MakerConnected {
+                taker_order_uuid: taker_uuid,
+                maker_order_uuid: maker_uuid,
+            }),
+        ];
+        let expected: Vec<&str> = messages.iter().map(kind).collect();
+        for message in messages {
+            broadcast_ordermatch_message(&ctx, vec![topic.clone()], message, None);
+        }
+        let published = drain(&mut rx);
+        assert_eq!(published.iter().map(|p| kind(&p.message)).collect::<Vec<_>>(), expected);
+        assert!(
+            published.iter().all(|p| p.priority),
+            "every swap-negotiation message has priority"
+        );
+        assert_eq!(pending(&ctx), 2, "the outbox is untouched");
+
+        // A keep-alive is not priority.
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        block_on(broadcast_keep_alive_for_pub(&ctx, &octx, &pubkey_of(&ctx), None));
+        let published = drain(&mut rx);
+        assert!(published.iter().any(|p| kind(&p.message) == "keep-alive"));
+        assert!(published
+            .iter()
+            .filter(|p| kind(&p.message) == "keep-alive")
+            .all(|p| !p.priority));
+    }
+
+    /// T-MP9: below the ceiling every update is published as it is made; nothing is merged.
+    #[test]
+    fn t_mp9_healthy_relay_gets_every_update_at_once() {
+        let (ctx, mut rx) = node(json!({}));
+        let order = own_order("DOC", "MARTY");
+        maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
+        for price in 2..32 {
+            update_price(&ctx, &order, price);
+        }
+        let published = drain(&mut rx);
+        assert_eq!(published.len(), 31);
+        let prices: Vec<_> = published
+            .iter()
+            .skip(1)
+            .map(|p| match &p.message {
+                OrdermatchMessage::MakerOrderUpdated(u) => u.new_price().unwrap(),
+                other => panic!("an update expected, got {}", kind(other)),
+            })
+            .collect();
+        assert_eq!(prices, (2..32).map(|p| MmNumber::from(ratio(p))).collect::<Vec<_>>());
+        assert!(published.iter().all(|p| !p.priority));
+        assert_eq!(pending(&ctx), 0);
+    }
+
+    /// T-MP11: with `maker_update_coalescing` set to `false` every message is published at once; with the
+    /// default the same sequence is held back by the budget.
+    #[test]
+    fn t_mp11_switch_publishes_every_message_at_once() {
+        let run = |conf: Json| {
+            let (ctx, mut rx) = node(conf);
+            let order = own_order("DOC", "MARTY");
+            maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
+            for price in 2..7 {
+                update_price(&ctx, &order, price);
+            }
+            (drain(&mut rx).len(), pending(&ctx))
+        };
+        assert_eq!(
+            run(json!({ "maker_update_rate_max": 0.1, "maker_update_coalescing": false })),
+            (6, 0)
+        );
+        assert_eq!(run(json!({ "maker_update_rate_max": 0.1 })), (1, 1));
+    }
+
+    /// T-MP12 (propagation): a relay propagates a cancellation with priority and a created message without.
+    #[test]
+    fn t_mp12_a_relay_propagates_a_cancellation_with_priority() {
+        let (maker, _rx) = node(json!({}));
+        let (relay, _relay_rx) = node(json!({}));
+        let order = own_order("DOC", "MARTY");
+        let secret = maker.secp256k1_key_pair().private_bytes();
+        let created = new_protocol::MakerOrderCreated {
+            uuid: order.uuid.into(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            price: ratio(1),
+            max_volume: ratio(10),
+            min_volume: ratio(1),
+            created_at: 1,
+            conf_settings: OrderConfirmationsSettings::default(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+            base_protocol_info: vec![],
+            rel_protocol_info: vec![],
+        };
+        let created = encode_and_sign(&OrdermatchMessage::MakerOrderCreated(created), &secret).unwrap();
+        let cancelled = new_protocol::MakerOrderCancelled {
+            uuid: order.uuid.into(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+        };
+        let cancelled = encode_and_sign(&OrdermatchMessage::MakerOrderCancelled(cancelled), &secret).unwrap();
+
+        let (propagate, priority) = block_on(process_msg_with_priority(
+            relay.clone(),
+            vec![],
+            "peer".into(),
+            &created,
+            true,
+        ));
+        assert!(propagate && !priority);
+        let (propagate, priority) = block_on(process_msg_with_priority(
+            relay.clone(),
+            vec![],
+            "peer".into(),
+            &cancelled,
+            true,
+        ));
+        assert!(propagate && priority);
+    }
+
+    /// T-MP12 (relay): the relay's propagate command carries priority for a cancellation and not for a created
+    /// message, as the network layer issues it after processing a received message.
+    #[test]
+    fn t_mp12_the_propagate_command_of_a_relay_carries_the_priority() {
+        use crate::mm2::lp_network::process_p2p_message;
+        use libp2p::gossipsub::TopicHash;
+
+        let (relay, mut rx) = node(json!({}));
+        let order = own_order("DOC", "MARTY");
+        let secret = relay.secp256k1_key_pair().private_bytes();
+        let topic = order.orderbook_topic();
+        let created = new_protocol::MakerOrderCreated {
+            uuid: order.uuid.into(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            price: ratio(1),
+            max_volume: ratio(10),
+            min_volume: ratio(1),
+            created_at: 1,
+            conf_settings: OrderConfirmationsSettings::default(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+            base_protocol_info: vec![],
+            rel_protocol_info: vec![],
+        };
+        let cancelled = new_protocol::MakerOrderCancelled {
+            uuid: order.uuid.into(),
+            timestamp: 1,
+            pair_trie_root: H64::default(),
+        };
+        let received = |data: Vec<u8>| mm2_p2p::GossipsubMessage {
+            source: None,
+            data,
+            sequence_number: Some(1),
+            topic: TopicHash::from_raw(topic.clone()),
+        };
+        let propagated = |rx: &mut mpsc::Receiver<AdexBehaviourCmd>| match rx.try_recv() {
+            Ok(AdexBehaviourCmd::PropagateMessage { priority, .. }) => priority,
+            other => panic!("a propagate command expected, got {:?}", other),
+        };
+
+        let data = encode_and_sign(&OrdermatchMessage::MakerOrderCreated(created), &secret).unwrap();
+        block_on(process_p2p_message(
+            relay.clone(),
+            PeerId::random(),
+            mm2_p2p::MessageId::from(vec![1]),
+            received(data),
+            true,
+        ));
+        assert!(!propagated(&mut rx), "a created message is propagated without priority");
+
+        let data = encode_and_sign(&OrdermatchMessage::MakerOrderCancelled(cancelled), &secret).unwrap();
+        block_on(process_p2p_message(
+            relay.clone(),
+            PeerId::random(),
+            mm2_p2p::MessageId::from(vec![2]),
+            received(data),
+            true,
+        ));
+        assert!(propagated(&mut rx), "a cancellation is propagated with priority");
+    }
+
+    /// T-MP6: the pending messages of a pair are published before the keep-alive of that pair. A receiver that
+    /// applies the published messages in order holds the advertised root and requests no synchronization; without
+    /// the pending messages it does.
+    #[test]
+    fn t_mp6_the_changes_of_a_pair_precede_its_keep_alive() {
+        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let orders = [
+            own_order("DOC", "MARTY"),
+            own_order("DOC", "MARTY"),
+            own_order("C1", "C2"),
+            own_order("C1", "C2"),
+        ];
+        for order in &orders {
+            maker_order_created_p2p_notify(maker.clone(), order, vec![], vec![]);
+        }
+        update_price(&maker, &orders[1], 7);
+        flush_trie(&maker);
+        assert_eq!(pending(&maker), 3, "one creation left at once, the rest waits");
+        let octx = OrdermatchContext::from_ctx(&maker).unwrap();
+        block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
+        let published = drain(&mut rx);
+        assert_eq!(pending(&maker), 0);
+
+        // Per pair: everything published for the pair before its keep-alive is a change of an order.
+        let mut keep_alives = 0;
+        for (i, p) in published.iter().enumerate() {
+            if kind(&p.message) != "keep-alive" {
+                continue;
+            }
+            keep_alives += 1;
+            let before_for_pair = published[..i].iter().filter(|q| q.topics == p.topics).count();
+            assert_eq!(before_for_pair, 2, "both orders of the pair precede its keep-alive");
+            assert!(
+                published[i + 1..]
+                    .iter()
+                    .all(|q| q.topics != p.topics || kind(&q.message) == "keep-alive"),
+                "no change of the pair follows its keep-alive"
+            );
+        }
+        assert_eq!(keep_alives, 2, "one keep-alive per pair");
+
+        // A receiver applies the given published messages in order and collects its synchronization requests.
+        let apply = |messages: Vec<&Published>| {
+            let (receiver, _rx) = node(json!({}));
+            let recv_octx = OrdermatchContext::from_ctx(&receiver).unwrap();
+            let mut requests = Vec::new();
+            for p in messages {
+                let (message, _sig, signer) = decode_signed::<OrdermatchMessage>(&p.bytes).unwrap();
+                match message {
+                    OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
+                        let request = block_on(keep_alive_sync_request(
+                            &recv_octx,
+                            &signer.to_hex(),
+                            keep_alive,
+                            true,
+                            SyncRequestRoot::Held,
+                            TRIE_CATCH_UP_BOUND_MS,
+                        ));
+                        requests.push(request);
+                    },
+                    _ => {
+                        block_on(process_msg(receiver.clone(), vec![], "peer".into(), &p.bytes, true));
+                    },
+                }
+            }
+            requests
+        };
+        let all = apply(published.iter().collect());
+        assert_eq!(all.len(), 2);
+        assert!(
+            all.iter().all(|r| r.is_none()),
+            "the receiver holds both advertised roots: {:?}",
+            all
+        );
+
+        // Control: the same keep-alive after the one creation that was published at once, without the changes
+        // the flush released, diverges and makes the receiver ask for a synchronization.
+        let first_keep_alive = published.iter().position(|p| kind(&p.message) == "keep-alive").unwrap();
+        let requests = apply(vec![&published[0], &published[first_keep_alive]]);
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].is_some(),
+            "without the flushed changes the receiver diverges"
+        );
+    }
+
+    /// T-MP7: after a relay joined the relay mesh one keep-alive per pair leaves within 5 s, however many relays
+    /// joined in the same moment; a later join starts another round.
+    #[test]
+    fn t_mp7_a_relay_joining_the_mesh_triggers_one_keep_alive_per_pair() {
+        let (ctx, mut rx) = node(json!({}));
+        for (base, rel) in [("DOC", "MARTY"), ("C1", "C2"), ("C1", "C2")] {
+            maker_order_created_p2p_notify(ctx.clone(), &own_order(base, rel), vec![], vec![]);
+        }
+        flush_trie(&ctx);
+        drain(&mut rx);
+
+        let started = std::time::Instant::now();
+        schedule_reconnect_keep_alive_round(ctx.clone());
+        schedule_reconnect_keep_alive_round(ctx.clone());
+        schedule_reconnect_keep_alive_round(ctx.clone());
+        let mut round = Vec::new();
+        while started.elapsed() < Duration::from_secs(5) && round.len() < 2 {
+            block_on(Timer::sleep(0.05));
+            round.extend(drain(&mut rx));
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "the round took too long");
+        // Give a duplicated round the chance to show up.
+        block_on(Timer::sleep(1.5));
+        round.extend(drain(&mut rx));
+        assert_eq!(
+            round.len(),
+            2,
+            "one keep-alive per pair, joins in the same moment share the round"
+        );
+        assert!(round.iter().all(|p| kind(&p.message) == "keep-alive"));
+        assert_ne!(round[0].topics, round[1].topics);
+
+        schedule_reconnect_keep_alive_round(ctx.clone());
+        block_on(Timer::sleep(2.0));
+        assert_eq!(drain(&mut rx).len(), 2, "a later join starts another round");
+    }
+
+    fn gauge(ctx: &MmArc, key: &str) -> Option<i64> {
+        let json = ctx.metrics.collect_json().unwrap();
+        json["metrics"]
+            .as_array()?
+            .iter()
+            .find(|m| m["key"] == key)
+            .and_then(|m| m["value"].as_i64())
+    }
+
+    /// T-MP10 (outbox part): the outbox gauges show the pending messages, the rate and the pressure state, and
+    /// carry no label (no peer identity, no content).
+    #[test]
+    fn t_mp10_outbox_gauges_follow_the_state() {
+        let (ctx, _rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let order = own_order("DOC", "MARTY");
+        maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
+        for price in 2..5 {
+            update_price(&ctx, &order, price);
+        }
+        pump_maker_outbox(&ctx);
+        assert_eq!(gauge(&ctx, "p2p.outbox.pending"), Some(1));
+        // The rate is reported in thousandths of a message per second.
+        assert_eq!(gauge(&ctx, "p2p.outbox.rate"), Some(100));
+        assert_eq!(gauge(&ctx, "p2p.outbox.pressure"), Some(0));
+
+        P2PContext::fetch_from_mm_arc(&ctx)
+            .relay_pressure
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        pump_maker_outbox(&ctx);
+        assert_eq!(gauge(&ctx, "p2p.outbox.pressure"), Some(1));
+        let json = ctx.metrics.collect_json().unwrap();
+        for metric in json["metrics"].as_array().unwrap() {
+            if metric["key"].as_str().is_some_and(|k| k.starts_with("p2p.outbox")) {
+                assert!(metric["labels"].as_object().unwrap().is_empty(), "{metric}");
+            }
+        }
     }
 }
