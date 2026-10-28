@@ -26,7 +26,7 @@ use coins::utxo::{compressed_pub_key_from_priv_raw, ChecksumType, UtxoAddressFor
 use coins::{coin_conf, find_pair, lp_coinfind, BalanceTradeFeeUpdatedHandler, CoinProtocol, FeeApproxStage, MmCoinEnum};
 use common::executor::{spawn, Timer};
 use common::log::{error, LogOnError};
-use common::mm_number::{BigDecimal, BigRational, Fraction, MmNumber, MmNumberMultiRepr};
+use common::mm_number::{BigDecimal, BigRational, Fraction, MmNumber, MmNumberMultiRepr, RenderedDecimal};
 use common::time_cache::TimeCache;
 use common::{bits256, log, new_uuid, now_ms, HttpStatusCode};
 use crypto::privkey::SerializableSecp256k1Keypair;

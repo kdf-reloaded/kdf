@@ -236,3 +236,30 @@ awaiting each order in turn, and is outside this decision.
    that is a follow-up.
 4. The lock-wait problem of section 1 stays out of this change; another session
    is looking at the lock held across a remote call in the maintenance loop.
+
+## 10. Outcome of the implementation (2026-10-29)
+
+Built as sections 8 and 9 describe: a bounded, content-addressed memo of the decimal
+rendering (keyed by the exact numerator and denominator, 32,768 entries, emptied when full),
+typed serialization of the `my_orders` answer in place of the `json!` tree, and cached
+rendered strings (stage 3). One step beyond the stage list was needed: the available amount
+of an order without matches is a subtraction that cost about 8 ms of the 2,000-order call, so
+it has its own memo keyed by the exact maximum volume. The orderbook entries, the match
+amounts and the taker request amounts were left out: they are other makers' derived or
+one-off values and would push the operator's own orders out of the memo.
+
+Release build, 2,000 orders, interleaved old and new calls on the same orders, warm memo,
+machine load average 260 to 600:
+
+| Profile | Old | New, first call | New, repeated call | Target |
+|---|---|---|---|---|
+| B, decimal-born values | 56.0 ms | 39.4 ms | 12.3 ms (10.3 to 33.7) | under 10 ms: missed by about 2 ms |
+| A, non-terminating values | 210.1 ms | 188.1 ms | 17.5 ms (14.9 to 75.2) | under 50 ms: met |
+
+The first call after a restart, or after the memo empties, costs what it cost before. What
+remains in profile B is the lock-and-clone loop (about 3 ms) and the serialization of three
+rational arrays per order (about 6 ms); caching those would be a further stage and is not part
+of this change. The answer is byte for byte the old one for every order with at most one
+match; with two or more matches the order of the `matches` entries was already random (a
+`HashMap` with a per-instance hasher), so the test compares the parsed documents there.
+`my_orders` now returns an error instead of panicking if the answer cannot be serialized.

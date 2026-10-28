@@ -1,4 +1,9 @@
 use super::*;
+use common::mm_number::DecimalMemo;
+use std::sync::LazyLock;
+
+/// Number of entries the memo of unreserved available amounts holds before it is emptied.
+const UNRESERVED_AVAILABLE_MEMO_CAPACITY: usize = 32_768;
 
 pub(crate) fn get_true() -> bool { true }
 
@@ -1006,6 +1011,23 @@ pub(crate) fn zero_rat() -> BigRational { BigRational::zero() }
 
 impl MakerOrder {
     pub(crate) fn available_amount(&self) -> MmNumber { &self.max_base_vol - &self.reserved_amount() }
+
+    /// The decimal rendering of [`MakerOrder::available_amount`] for RPC answers.
+    ///
+    /// An order without matches reserves nothing, so its available amount is a function of `max_base_vol`
+    /// alone, and the rendering is memoized under the exact `max_base_vol` (a separate memo from the one for
+    /// plain decimals, because the subtraction can reduce a fraction that was stored unreduced). An order
+    /// with matches is computed in full.
+    pub(crate) fn available_amount_rendered(&self) -> RenderedDecimal {
+        if self.matches.is_empty() {
+            static UNRESERVED_AVAILABLE: LazyLock<DecimalMemo> =
+                LazyLock::new(|| DecimalMemo::with_capacity(UNRESERVED_AVAILABLE_MEMO_CAPACITY));
+            UNRESERVED_AVAILABLE
+                .get_or_compute_with(self.max_base_vol.as_ratio(), || self.available_amount().to_decimal())
+        } else {
+            self.available_amount().to_rendered_decimal()
+        }
+    }
 
     pub(crate) fn reserved_amount(&self) -> MmNumber {
         self.matches.iter().fold(

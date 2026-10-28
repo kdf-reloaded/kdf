@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
+  call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
+  12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
+  answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
+  speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an error
+  instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
+  Detail: PR #TBD.
+
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is

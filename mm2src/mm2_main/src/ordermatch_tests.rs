@@ -7317,3 +7317,604 @@ mod t60_7_maker_balance_watch_tests {
         std::fs::remove_dir_all(&dbdir).ok();
     }
 }
+
+/// `my_orders` speed work: the decimals of an order's numbers come from a content-addressed memo and the
+/// answer is serialized straight from the typed response. The answer must stay identical, digit for digit,
+/// to what the unmemoized conversion and the `json!` tree produced, so the reference path below keeps the
+/// old code unchanged and every order's bytes are compared against it.
+mod my_orders_speed_tests {
+    use super::*;
+    use rand::rngs::SmallRng;
+    use rand::SeedableRng;
+    use serde_json::value::RawValue;
+    use std::collections::BTreeMap;
+    use std::time::{Duration as StdDuration, Instant};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Profile {
+        /// Volumes and prices that are non-terminating rationals, as a price derived from a division gives.
+        NonTerminating,
+        /// Values born from 8-decimal strings, as a user types them into `setprice`.
+        DecimalBorn,
+    }
+
+    fn decimal_born(int: u64, frac: u64) -> MmNumber {
+        let d = <BigDecimal as std::str::FromStr>::from_str(&format!("{int}.{frac:08}")).unwrap();
+        MmNumber::from(d)
+    }
+
+    fn new_maker_order(base: String, rel: String, profile: Profile, rng: &mut SmallRng) -> MakerOrder {
+        let (max_base_vol, min_base_vol, price) = match profile {
+            Profile::NonTerminating => (
+                MmNumber::from((
+                    rng.gen_range(100_000_000..9_999_999_999u64),
+                    rng.gen_range(1_000..99_999u64),
+                )),
+                MmNumber::from((rng.gen_range(1_000..99_999u64), rng.gen_range(1_000_000..9_999_999u64))),
+                MmNumber::from((
+                    rng.gen_range(1_000_000..999_999_999u64),
+                    rng.gen_range(1_000..999_999u64),
+                )),
+            ),
+            Profile::DecimalBorn => (
+                decimal_born(rng.gen_range(1..9_999), rng.gen_range(0..99_999_999)),
+                decimal_born(0, rng.gen_range(1..99_999_999)),
+                decimal_born(rng.gen_range(0..999), rng.gen_range(0..99_999_999)),
+            ),
+        };
+        MakerOrder {
+            base,
+            rel,
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            max_base_vol,
+            min_base_vol,
+            price,
+            matches: HashMap::new(),
+            started_swaps: Vec::new(),
+            uuid: Uuid::new_v4(),
+            conf_settings: None,
+            changes_history: None,
+            save_in_history: true,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn maker_match(order: &MakerOrder, reserved_base: MmNumber, connected: bool) -> MakerMatch {
+        let taker_uuid = Uuid::new_v4();
+        let rel_amount = &reserved_base * &order.price;
+        let request = TakerRequest {
+            uuid: taker_uuid,
+            base: order.base.clone(),
+            rel: order.rel.clone(),
+            base_amount: reserved_base.clone(),
+            rel_amount: rel_amount.clone(),
+            sender_pubkey: H256Json::default(),
+            dest_pub_key: H256Json::default(),
+            action: TakerAction::Buy,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        };
+        MakerMatch {
+            request,
+            reserved: MakerReserved {
+                base: order.base.clone(),
+                rel: order.rel.clone(),
+                base_amount: reserved_base,
+                rel_amount,
+                sender_pubkey: H256Json::default(),
+                dest_pub_key: H256Json::default(),
+                maker_order_uuid: order.uuid,
+                taker_order_uuid: taker_uuid,
+                conf_settings: None,
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            },
+            connect: Some(TakerConnect {
+                taker_order_uuid: taker_uuid,
+                maker_order_uuid: order.uuid,
+                sender_pubkey: H256Json::default(),
+                dest_pub_key: H256Json::default(),
+            }),
+            connected: if connected {
+                Some(MakerConnected {
+                    taker_order_uuid: taker_uuid,
+                    maker_order_uuid: order.uuid,
+                    method: "connected".into(),
+                    sender_pubkey: H256Json::default(),
+                    dest_pub_key: H256Json::default(),
+                })
+            } else {
+                None
+            },
+            last_updated: now_ms(),
+        }
+    }
+
+    fn new_taker_order(rng: &mut SmallRng) -> TakerOrder {
+        let uuid = Uuid::new_v4();
+        let request = TakerRequest {
+            base: "TAKERBASE".into(),
+            rel: "TAKERREL".into(),
+            uuid,
+            dest_pub_key: H256Json::default(),
+            sender_pubkey: H256Json::default(),
+            base_amount: MmNumber::from((rng.gen_range(100_000..9_999_999u64), 7)),
+            rel_amount: MmNumber::from((rng.gen_range(100_000..9_999_999u64), 13)),
+            action: TakerAction::Sell,
+            match_by: MatchBy::Any,
+            conf_settings: None,
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        };
+        let maker_uuid = Uuid::new_v4();
+        let mut matches = HashMap::new();
+        matches.insert(maker_uuid, TakerMatch {
+            reserved: MakerReserved {
+                base: "TAKERBASE".into(),
+                rel: "TAKERREL".into(),
+                base_amount: MmNumber::from((1, 3)),
+                rel_amount: MmNumber::from((2, 7)),
+                sender_pubkey: H256Json::default(),
+                dest_pub_key: H256Json::default(),
+                maker_order_uuid: maker_uuid,
+                taker_order_uuid: uuid,
+                conf_settings: None,
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            },
+            connect: TakerConnect {
+                taker_order_uuid: uuid,
+                maker_order_uuid: maker_uuid,
+                sender_pubkey: H256Json::default(),
+                dest_pub_key: H256Json::default(),
+            },
+            connected: None,
+            last_updated: now_ms(),
+        });
+        TakerOrder {
+            request,
+            matches,
+            created_at: now_ms(),
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        }
+    }
+
+    /// `n_base * n_rel` pairs, a bid and an ask each, so `2 * n_base * n_rel` maker orders. Every
+    /// `matched_every`-th order (when non-zero) carries matches, so its `available_amount` differs from its
+    /// `max_base_vol`. One taker order is added when `with_taker`.
+    fn seed_orders(
+        ctx: &MmArc,
+        profile: Profile,
+        n_base: usize,
+        n_rel: usize,
+        matched_every: usize,
+        with_taker: bool,
+        seed: u64,
+    ) -> usize {
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let mut count = 0;
+        let add = |mut order: MakerOrder, count: &mut usize| {
+            if matched_every != 0 && count.is_multiple_of(matched_every) {
+                let third = &order.max_base_vol / &MmNumber::from(3);
+                let seventh = &order.max_base_vol / &MmNumber::from(7);
+                let first = maker_match(&order, third, true);
+                let second = maker_match(&order, seventh, false);
+                order.matches.insert(first.request.uuid, first);
+                order.matches.insert(second.request.uuid, second);
+            }
+            *count += 1;
+            let arc = Arc::new(AsyncMutex::new(order.clone()));
+            octx.maker_orders_ctx.lock().add_order(&order, arc);
+        };
+        for b in 0..n_base {
+            for r in 0..n_rel {
+                add(
+                    new_maker_order(format!("BASE{b}"), format!("REL{r:03}"), profile, &mut rng),
+                    &mut count,
+                );
+                add(
+                    new_maker_order(format!("REL{r:03}"), format!("BASE{b}"), profile, &mut rng),
+                    &mut count,
+                );
+            }
+        }
+        if with_taker {
+            let taker = new_taker_order(&mut rng);
+            block_on(octx.my_taker_orders.lock()).insert(taker.request.uuid, taker);
+        }
+        count
+    }
+
+    // ---- the reference path: the conversion and the `json!` tree as they were before the change ----
+
+    /// `MakerOrderForRpc` as it was: the same fields in the same order, the numbers plain `BigDecimal`s.
+    #[derive(Serialize)]
+    struct ReferenceMakerOrderForRpc<'a> {
+        base: &'a str,
+        rel: &'a str,
+        price: BigDecimal,
+        price_rat: &'a MmNumber,
+        max_base_vol: BigDecimal,
+        max_base_vol_rat: &'a MmNumber,
+        min_base_vol: BigDecimal,
+        min_base_vol_rat: &'a MmNumber,
+        created_at: u64,
+        updated_at: Option<u64>,
+        matches: HashMap<Uuid, MakerMatchForRpc<'a>>,
+        started_swaps: &'a [Uuid],
+        uuid: Uuid,
+        conf_settings: &'a Option<OrderConfirmationsSettings>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        changes_history: &'a Option<Vec<HistoricalOrder>>,
+        base_orderbook_ticker: &'a Option<String>,
+        rel_orderbook_ticker: &'a Option<String>,
+    }
+
+    /// `MakerOrderForMyOrdersRpc` as it was.
+    #[derive(Serialize)]
+    struct ReferenceMakerOrderForMyOrdersRpc<'a> {
+        #[serde(flatten)]
+        order: ReferenceMakerOrderForRpc<'a>,
+        cancellable: bool,
+        available_amount: BigDecimal,
+    }
+
+    fn reference_maker_for_rpc(order: &MakerOrder) -> ReferenceMakerOrderForRpc<'_> {
+        ReferenceMakerOrderForRpc {
+            base: &order.base,
+            rel: &order.rel,
+            price: order.price.to_decimal(),
+            price_rat: &order.price,
+            max_base_vol: order.max_base_vol.to_decimal(),
+            max_base_vol_rat: &order.max_base_vol,
+            min_base_vol: order.min_base_vol.to_decimal(),
+            min_base_vol_rat: &order.min_base_vol,
+            created_at: order.created_at,
+            updated_at: order.updated_at,
+            matches: order
+                .matches
+                .iter()
+                .map(|(uuid, order_match)| (*uuid, order_match.into()))
+                .collect(),
+            started_swaps: &order.started_swaps,
+            uuid: order.uuid,
+            conf_settings: &order.conf_settings,
+            changes_history: &order.changes_history,
+            base_orderbook_ticker: &order.base_orderbook_ticker,
+            rel_orderbook_ticker: &order.rel_orderbook_ticker,
+        }
+    }
+
+    fn reference_maker_for_my_orders(order: &MakerOrder) -> ReferenceMakerOrderForMyOrdersRpc<'_> {
+        ReferenceMakerOrderForMyOrdersRpc {
+            order: reference_maker_for_rpc(order),
+            cancellable: order.is_cancellable(),
+            available_amount: order.available_amount().into(),
+        }
+    }
+
+    /// `my_orders` as it was: convert with the unmemoized function, build a `json!` tree, write it out.
+    async fn reference_my_orders(ctx: MmArc) -> Vec<u8> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let my_maker_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
+        let mut maker_orders_map = HashMap::with_capacity(my_maker_orders.len());
+        for (uuid, order_mutex) in my_maker_orders.iter() {
+            let order = order_mutex.lock().await.clone();
+            maker_orders_map.insert(uuid, order);
+        }
+        let maker_orders_for_rpc: HashMap<_, _> = maker_orders_map
+            .iter()
+            .map(|(uuid, order)| (uuid, reference_maker_for_my_orders(order)))
+            .collect();
+
+        let taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
+        let taker_orders_for_rpc: HashMap<_, _> = taker_orders
+            .iter()
+            .map(|(uuid, order)| (uuid, TakerOrderForRpc::from(order)))
+            .collect();
+        let res = json!({
+            "result": {
+                "maker_orders": maker_orders_for_rpc,
+                "taker_orders": taker_orders_for_rpc,
+            }
+        });
+        json::to_vec(&res).unwrap()
+    }
+
+    /// An answer split per order: each order's object as the exact bytes it was written with. The maps are
+    /// sorted by uuid, so two answers whose hash maps iterate in different orders compare equal when every
+    /// object is the same.
+    #[derive(Deserialize)]
+    struct SplitBody {
+        result: SplitResult,
+    }
+
+    #[derive(Deserialize)]
+    struct SplitResult {
+        maker_orders: BTreeMap<String, Box<RawValue>>,
+        taker_orders: BTreeMap<String, Box<RawValue>>,
+    }
+
+    fn split(body: &[u8]) -> SplitBody {
+        assert!(
+            body.starts_with(br#"{"result":{"maker_orders":{"#),
+            "unexpected top-level structure"
+        );
+        json::from_slice(body).unwrap()
+    }
+
+    /// Panics at the first order whose bytes differ, naming the uuid and the first differing offset.
+    fn assert_same_per_order(expected: &SplitBody, actual: &SplitBody) {
+        for (kind, exp, act) in [
+            (
+                "maker_orders",
+                &expected.result.maker_orders,
+                &actual.result.maker_orders,
+            ),
+            (
+                "taker_orders",
+                &expected.result.taker_orders,
+                &actual.result.taker_orders,
+            ),
+        ] {
+            assert_eq!(
+                exp.keys().collect::<Vec<_>>(),
+                act.keys().collect::<Vec<_>>(),
+                "{kind}: different uuids"
+            );
+            for (uuid, e) in exp {
+                let a = &act[uuid];
+                if e.get() == a.get() {
+                    continue;
+                }
+                // `matches` is a hash map and iterates in a different order per map instance, in the
+                // reference as much as in the new path. An order with two or more matches may therefore
+                // differ in the order of the entries of `matches` only: same document, nothing else.
+                let (ev, av): (Json, Json) = (json::from_str(e.get()).unwrap(), json::from_str(a.get()).unwrap());
+                let several_matches = ev["matches"].as_object().is_some_and(|m| m.len() > 1);
+                if several_matches && ev == av {
+                    continue;
+                }
+                let at = e.get().bytes().zip(a.get().bytes()).position(|(x, y)| x != y);
+                panic!(
+                    "{kind} {uuid}: bytes differ at offset {at:?}\nexpected {}\nactual   {}",
+                    e.get(),
+                    a.get()
+                );
+            }
+        }
+    }
+
+    fn run_my_orders(ctx: &MmArc) -> Vec<u8> { block_on(my_orders(ctx.clone())).unwrap().into_body() }
+
+    fn byte_identity_for(profile: Profile) {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        // 5 bases x 200 rels x 2 directions = 2,000 maker orders, every 10th matched, one taker order.
+        let n = seed_orders(&ctx, profile, 5, 200, 10, true, 20261028);
+        assert_eq!(n, 2000);
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(octx.maker_orders_ctx.lock().clone_orders().len() == 2000);
+        assert_eq!(block_on(octx.my_taker_orders.lock()).len(), 1);
+
+        let expected_body = block_on(reference_my_orders(ctx.clone()));
+        let expected = split(&expected_body);
+        assert_eq!(expected.result.maker_orders.len(), 2000);
+        assert_eq!(expected.result.taker_orders.len(), 1);
+        // The matched orders are really in the comparison: their available amount differs from the maximum.
+        let matched_differs = expected.result.maker_orders.values().any(|raw| {
+            let v: Json = json::from_str(raw.get()).unwrap();
+            !v["matches"].as_object().unwrap().is_empty() && v["available_amount"] != v["max_base_vol"]
+        });
+        assert!(
+            matched_differs,
+            "no matched order with available_amount != max_base_vol"
+        );
+
+        // First call fills the memo from empty (every number a miss for these fresh values), the next ones
+        // are served from it. Both must equal the reference.
+        for call in 0..3 {
+            let actual_body = run_my_orders(&ctx);
+            assert_same_per_order(&expected, &split(&actual_body));
+            // Same JSON document too, modulo the order of keys inside the hash maps.
+            let e: Json = json::from_slice(&expected_body).unwrap();
+            let a: Json = json::from_slice(&actual_body).unwrap();
+            assert_eq!(e, a, "call {call}");
+        }
+    }
+
+    #[test]
+    fn my_orders_bytes_identical_non_terminating_values() { byte_identity_for(Profile::NonTerminating); }
+
+    #[test]
+    fn my_orders_bytes_identical_decimal_born_values() { byte_identity_for(Profile::DecimalBorn); }
+
+    #[test]
+    fn my_orders_empty_answer_is_unchanged() {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let body = run_my_orders(&ctx);
+        assert_eq!(body, br#"{"result":{"maker_orders":{},"taker_orders":{}}}"#.to_vec());
+        assert_eq!(body, block_on(reference_my_orders(ctx)));
+    }
+
+    /// The comparison itself: a single changed digit in one order is reported.
+    #[test]
+    #[should_panic(expected = "bytes differ")]
+    fn per_order_comparison_catches_one_digit() {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        seed_orders(&ctx, Profile::NonTerminating, 1, 3, 0, false, 7);
+        let body = run_my_orders(&ctx);
+        let expected = split(&body);
+        let mut actual = split(&body);
+        let (uuid, raw) = actual
+            .result
+            .maker_orders
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.get().to_string()))
+            .unwrap();
+        let at = raw.find("\"price\":\"").unwrap() + "\"price\":\"".len();
+        let digit = raw.as_bytes()[at];
+        let replaced = if digit == b'9' { '1' } else { (digit + 1) as char };
+        let changed = format!("{}{}{}", &raw[..at], replaced, &raw[at + 1..]);
+        actual
+            .result
+            .maker_orders
+            .insert(uuid, RawValue::from_string(changed).unwrap());
+        assert_same_per_order(&expected, &actual);
+    }
+
+    /// Several tasks calling `my_orders` at once, the memo shared, all answers equal to the reference.
+    #[test]
+    fn my_orders_concurrent_calls_agree_with_reference() {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        seed_orders(&ctx, Profile::NonTerminating, 2, 50, 7, true, 99);
+        let expected_body = block_on(reference_my_orders(ctx.clone()));
+        let expected = Arc::new(split(&expected_body));
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let (ctx, expected) = (ctx.clone(), expected.clone());
+                std::thread::spawn(move || {
+                    for _ in 0..5 {
+                        let actual = split(&run_my_orders(&ctx));
+                        assert_same_per_order(&expected, &actual);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("a worker thread panicked");
+        }
+    }
+
+    /// The rendering shared by `setprice`, `update_maker_order` and `order_status` is `MakerOrderForRpc`:
+    /// it must carry the unmemoized decimals, for fresh values and for repeated ones.
+    #[test]
+    fn maker_order_for_rpc_matches_unmemoized_conversion() {
+        let mut rng = SmallRng::seed_from_u64(5);
+        for profile in [Profile::NonTerminating, Profile::DecimalBorn] {
+            for _ in 0..200 {
+                let order = new_maker_order("A".into(), "B".into(), profile, &mut rng);
+                for _ in 0..2 {
+                    let actual = json::to_vec(&MakerOrderForRpc::from(&order)).unwrap();
+                    let expected = json::to_vec(&reference_maker_for_rpc(&order)).unwrap();
+                    assert_eq!(String::from_utf8(actual).unwrap(), String::from_utf8(expected).unwrap());
+                }
+            }
+        }
+    }
+
+    /// `available_amount_rendered` against the unmemoized `available_amount().to_decimal()`: without
+    /// matches (memoized under `max_base_vol`, hit on the second call), with matches, and for a maximum
+    /// stored as an unreduced fraction, which the subtraction reduces.
+    #[test]
+    fn available_amount_rendered_matches_unmemoized() {
+        let mut rng = SmallRng::seed_from_u64(11);
+        for profile in [Profile::NonTerminating, Profile::DecimalBorn] {
+            for i in 0..100usize {
+                let mut order = new_maker_order("A".into(), "B".into(), profile, &mut rng);
+                if i.is_multiple_of(3) {
+                    let numer = order.max_base_vol.numer() * common::mm_number::BigInt::from(6);
+                    let denom = order.max_base_vol.denom() * common::mm_number::BigInt::from(6);
+                    order.max_base_vol = MmNumber::from(BigRational::new_raw(numer, denom));
+                }
+                for _ in 0..2 {
+                    assert_eq!(
+                        order.available_amount_rendered().as_str(),
+                        order.available_amount().to_decimal().to_string()
+                    );
+                }
+                let third = &order.max_base_vol / &MmNumber::from(3);
+                let reserved = maker_match(&order, third, false);
+                order.matches.insert(reserved.request.uuid, reserved);
+                for _ in 0..2 {
+                    assert_eq!(
+                        order.available_amount_rendered().as_str(),
+                        order.available_amount().to_decimal().to_string()
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- timing: old handler against new on the same orders ----
+
+    fn median(v: &mut [f64]) -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    }
+
+    fn ms(d: StdDuration) -> f64 { d.as_secs_f64() * 1000.0 }
+
+    fn describe(label: &str, mut v: Vec<f64>) -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (min, max, med) = (v[0], v[v.len() - 1], median(&mut v));
+        println!(
+            "TIMING {label}: n={} min={min:.2} median={med:.2} max={max:.2} (ms)",
+            v.len()
+        );
+        med
+    }
+
+    /// Run with `cargo test --release -p mm2_main --lib my_orders_timing -- --ignored --nocapture`.
+    /// Targets at 2,000 orders: decimal-born values under 10 ms median, non-terminating under 50 ms.
+    #[test]
+    #[ignore]
+    fn my_orders_timing_old_vs_new() {
+        println!("TIMING debug_assertions={}", cfg!(debug_assertions));
+        for (profile, target_ms) in [(Profile::DecimalBorn, 10.0), (Profile::NonTerminating, 50.0)] {
+            // Several independent runs, each on freshly generated orders: the first new call of a run
+            // starts with a memo that has none of these values (cold); the following ones hit (warm).
+            let (mut old_all, mut new_cold, mut new_warm) = (vec![], vec![], vec![]);
+            for run in 0..7u64 {
+                let ctx = MmCtxBuilder::new().into_mm_arc();
+                seed_orders(&ctx, profile, 5, 200, 0, false, 1000 + run);
+                for _ in 0..2 {
+                    block_on(reference_my_orders(ctx.clone()));
+                }
+                let t = Instant::now();
+                run_my_orders(&ctx);
+                new_cold.push(ms(t.elapsed()));
+                let mut old_run = vec![];
+                let mut new_run = vec![];
+                for _ in 0..9 {
+                    let t = Instant::now();
+                    block_on(reference_my_orders(ctx.clone()));
+                    old_run.push(ms(t.elapsed()));
+                    let t = Instant::now();
+                    run_my_orders(&ctx);
+                    new_run.push(ms(t.elapsed()));
+                }
+                println!(
+                    "TIMING {profile:?} run {run}: old median {:.2} ms, new warm median {:.2} ms",
+                    median(&mut old_run.clone()),
+                    median(&mut new_run.clone())
+                );
+                old_all.extend(old_run);
+                new_warm.extend(new_run);
+            }
+            println!("TIMING ===== {profile:?}, 2000 orders, target {target_ms} ms =====");
+            describe("old handler", old_all);
+            describe("new handler, cold memo (first call)", new_cold);
+            let warm = describe("new handler, warm memo", new_warm);
+            println!("TIMING {profile:?} warm median {warm:.2} ms vs target {target_ms} ms");
+        }
+    }
+}
