@@ -2,6 +2,9 @@
 
 **Status:** parked (design approved 2026-10-28; starts after the Electrum pool PR) — **Last reviewed:** 2026-10-28
 
+**CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.14 and
+the open points D38.6.4l.1–D38.6.4l.9.
+
 > **Context.** The Electrum connection pool (CRD ch.38 §38.6.4) ranks a coin's
 > servers by an order drawn once at activation: R38.6.4b-R, with
 > `electrum_server_order` set to `random`, the default. This plan adds two
@@ -137,7 +140,7 @@ A maintained connection is **poor** when one of these holds:
 1. **CRD before code.** Write ch.38 R38.6.4l (Reloaded-original). It covers
    §1–§3 above, the two new values of `electrum_server_order`, and an
    amendment of R38.6.4b-R item 3 (the values stop being reserved). Add test
-   items T38.6.4.14-R onward, and add the divergence note: no wire effect,
+   items T38.6.4l.1 onward, and add the divergence note: no wire effect,
    arm 2 of the default-side rule, GLEEC value `listed`.
 2. **Stub server harness.** Extend `electrum_stub_server.rs` with:
    - a per-method reply delay;
@@ -173,6 +176,5 @@ A maintained connection is **poor** when one of these holds:
 
 - **Block interval per coin.** Check what the UTXO coin configurations carry;
   a coin without one uses the 10-minute fallback for P1.
-- **When `mixed` becomes the default.** In the same PR as the implementation,
-  or after a field run on a few coins (RIN first). This is the maintainer's
-  choice.
+- **When `mixed` becomes the default.** Decided 2026-10-28: after a field run
+  on RIN with `mixed`, as a separate change (CRD D38.6.4l.1).

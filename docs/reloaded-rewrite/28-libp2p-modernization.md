@@ -736,7 +736,8 @@ queue per connection of the RPCs waiting to be written to that peer.
    and its count of dropped data RPCs. The application uses the signal
    for the maker publication budget of
    [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts
-   for R-MP5. The thresholds are fixed values of the vendored crate,
+   for R-MP5. R-MP2 item 2 also reads whether the data queue is empty,
+   for its queue signal *(added 2026-10-28)*. The thresholds are fixed values of the vendored crate,
    which its configuration builder MAY override for tests.
 9. **Priority lane** *(amendment, maintainer decision AO option C,
    2026-10-28).* A published or forwarded message the application marks
