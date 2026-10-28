@@ -28,7 +28,8 @@ pub enum EthCoinBuildError {
     #[display(fmt = "{}", _0)]
     InvalidPayload(String),
     /// The coin's configuration entry holds a value the builder cannot use: a `gas_limit` /
-    /// `gas_limit_v2` member that is not a non-negative integer (CRD R57.5.1, R57.6.1). Names the key.
+    /// `gas_limit_v2` member that is not a non-negative integer (CRD R57.5.1, R57.6.1), or an
+    /// `estimate_gas_mult` member that is not a number (R57.5.3b). Names the key.
     #[display(fmt = "{}", _0)]
     InvalidConfig(String),
     /// Every supplied node failed the reachability probe (R35.1.6).
@@ -590,6 +591,24 @@ pub(crate) fn coin_gas_limits(
     result.map_to_mm(|e| EthCoinBuildError::InvalidConfig(e.to_string()))
 }
 
+/// The `estimate_gas_mult` of the coin whose configuration entry is `conf` (CRD R57.5.3b item 1): its own
+/// entry's member, else for an ERC-20 token its platform coin's entry (R57.5.3), else none (no scaling).
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidConfig`] naming the key when the member is not a JSON number.
+pub(crate) fn coin_estimate_gas_mult(
+    ctx: &MmArc,
+    conf: &Json,
+    protocol: &CoinProtocol,
+) -> Result<Option<f64>, MmError<EthCoinBuildError>> {
+    let result = match protocol {
+        CoinProtocol::ERC20 { platform, .. } => estimate_gas_mult_from_confs(&[conf, &crate::coin_conf(ctx, platform)]),
+        _ => estimate_gas_mult_from_confs(&[conf]),
+    };
+    result.map_to_mm(|e| EthCoinBuildError::InvalidConfig(e.to_string()))
+}
+
 /// Shared EVM-coin builder body: identical for every signing policy except how the [`EthSigner`] and the
 /// [`DerivationMethod`] are constructed.
 pub(crate) async fn build_eth_coin(
@@ -621,6 +640,8 @@ pub(crate) async fn build_eth_coin(
     };
     crate::request_fee_scope::per_coin_fee_estimate_cache_secs(&[conf, &platform_conf])
         .map_to_mm(EthCoinBuildError::InvalidConfig)?;
+    // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
+    let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,
     // which `validate_swap_contracts` never lets through for a trading-capable coin.
     let swap_contract_address = params.swap_contract_address.unwrap_or_default();
@@ -704,6 +725,7 @@ pub(crate) async fn build_eth_coin(
         swap_v2_contracts,
         gas_limit,
         gas_limit_v2,
+        estimate_gas_mult,
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,

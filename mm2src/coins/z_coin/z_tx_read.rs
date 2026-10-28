@@ -12,13 +12,14 @@
 //! helper's rule has a part that does not depend on the parser (secret extraction, the spend search,
 //! the wait loop) that part is the shared one, called with the facts this module read.
 
-use super::z_lightwalletd::{FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome, SpendOutcome};
+use super::z_lightwalletd::{DetectionLog, FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome,
+                            SpendOutcome};
 use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcClientOps};
 use crate::utxo::utxo_common::{self, classify_swap_spend, ensure_payment_pays_htlc, payment_script, PaymentOutputs,
                                SwapSpendKind, DEFAULT_SWAP_VOUT};
 use crate::utxo::{sat_from_big_decimal, UtxoCommonOps};
-use crate::{FoundSwapTxSpend, TransactionEnum, TransactionFut, ValidatePaymentInput};
+use crate::{FoundSwapTxSpend, HtlcPaymentCheck, TransactionEnum, TransactionFut, ValidatePaymentInput};
 use common::executor::Timer;
 use common::log;
 use futures::compat::Future01CompatExt;
@@ -192,14 +193,20 @@ fn watched_output(tx: &ZTransaction, vout: usize) -> Result<OutputRef, String> {
 
 /// Looks for the spend of `output` over lightwalletd and returns it as the Zcash transaction it is.
 /// `None` is the index's own positive statement that the output is unspent; anything it could not
-/// determine is an error.
+/// determine is an error. `polling` is set by the wait loop, whose detections repeat every few seconds
+/// and so log at `debug` (R39.11.4h(d)).
 async fn find_spend_over_lightwalletd(
     coin: &ZCoin,
     client: &LightwalletdClient,
     output: &OutputRef,
     from_block: u64,
+    polling: bool,
 ) -> Result<Option<(ZTransaction, usize)>, String> {
-    match client.0.detect_output_spend(output, from_block).await {
+    let log = DetectionLog {
+        coin: &coin.as_ref().conf.ticker,
+        polling,
+    };
+    match client.0.detect_output_spend(output, from_block, &log).await {
         Ok(SpendOutcome::NotSpent(_)) => Ok(None),
         Ok(SpendOutcome::Spent(spend)) => Ok(Some((read_tx(&spend.tx)?, spend.input_index))),
         Err(e) => Err(report_undetermined(coin, e)),
@@ -214,7 +221,7 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         let (coin, client, tx_debug) = (coin.clone(), client.clone(), format!("{:?}", tx));
         let fut = async move {
             loop {
-                match find_spend_over_lightwalletd(&coin, &client, &output, from_block).await {
+                match find_spend_over_lightwalletd(&coin, &client, &output, from_block, true).await {
                     Ok(Some((spend, _))) => return Ok(TransactionEnum::from(spend)),
                     Ok(None) => (),
                     // Undetermined is not a spend and not an answer: keep waiting, say why.
@@ -242,6 +249,54 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         DEFAULT_SWAP_VOUT,
         from_block,
         wait_until,
+    )
+}
+
+/// What the HTLC detection in flight for the payment script built from these parameters read last, or
+/// `None` when there is none, the keys are not keys, or the coin is not served over lightwalletd.
+pub(crate) fn htlc_detection_progress(
+    coin: &ZCoin,
+    time_lock: u32,
+    first_pub: &[u8],
+    second_pub: &[u8],
+    secret_hash: &[u8],
+) -> Option<String> {
+    let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client else {
+        return None;
+    };
+    let (first, second) = (
+        Public::from_slice(first_pub).ok()?,
+        Public::from_slice(second_pub).ok()?,
+    );
+    let hash: [u8; 20] = dhash160(&payment_script(time_lock, secret_hash, &first, &second))
+        .as_slice()
+        .try_into()
+        .ok()?;
+    client.0.detection_progress(&hash)
+}
+
+/// `check_payment_pays_htlc` for a ZHTLC coin: the payment is read with the Zcash reader and checked by the
+/// one shared check, [`ensure_payment_pays_htlc`], whose only failure is the script mismatch.
+pub(crate) fn check_payment_pays_htlc(
+    time_lock: u32,
+    first_pub: &Public,
+    second_pub: &Public,
+    secret_hash: &[u8],
+    payment_tx: &[u8],
+) -> Result<HtlcPaymentCheck, String> {
+    let tx = read_tx(payment_tx)?;
+    let payment = PaymentOutputs {
+        tx_hash: txid_internal(&tx),
+        output0_script_pubkey: script_pubkey_at(&tx, 0)?.into(),
+        spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT)?.into(),
+    };
+    Ok(
+        match ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment) {
+            Ok(()) => HtlcPaymentCheck::Pays,
+            Err(_) => HtlcPaymentCheck::PaysAnotherScript {
+                payment_id: format!("{:?}", payment.tx_hash.reversed()),
+            },
+        },
     )
 }
 
@@ -276,7 +331,7 @@ pub(crate) async fn search_for_swap_tx_spend(
     if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
         ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment)?;
         let output = watched_output(&tx, DEFAULT_SWAP_VOUT)?;
-        return match find_spend_over_lightwalletd(coin, client, &output, search_from_block).await? {
+        return match find_spend_over_lightwalletd(coin, client, &output, search_from_block, false).await? {
             None => Ok(None),
             Some((spend, input_index)) => classify_spend(spend, input_index).map(Some),
         };
@@ -335,9 +390,13 @@ pub(crate) fn check_if_my_payment_sent(
             // less is an error, because an empty answer here would double-fund the payment.
             UtxoRpcClientEnum::LightWalletD(client) => {
                 let script_pubkey = Builder::build_p2sh(&hash.into()).to_bytes();
+                let log = DetectionLog {
+                    coin: &coin.as_ref().conf.ticker,
+                    polling: false,
+                };
                 let outcome = client
                     .0
-                    .detect_funding(&script_pubkey, search_from_block)
+                    .detect_funding(&script_pubkey, search_from_block, &log)
                     .await
                     .map_err(|e| report_undetermined(&coin, e))?;
                 match outcome {
@@ -651,6 +710,141 @@ mod tests {
                 "the swap path must not name the shared UTXO transaction type"
             );
         }
+    }
+
+    /// A live ARRR (pre-Ironwood, version 4) taker payment that was refunded on chain, and its refund; public
+    /// chain data. The payment's HTLC: lock time 1790664056, refund key = the taker's, spend key = the
+    /// maker's, secret hash160 `cb03f4f7...`.
+    const LIVE_PAYMENT_HEX: &str = include_str!("test-fixtures/arrr-htlc-payment-75566e4d.hex");
+    const LIVE_REFUND_HEX: &str = include_str!("test-fixtures/arrr-htlc-refund-0496f6d3.hex");
+    const LIVE_PAYMENT_TXID_DISPLAY: &str = "75566e4d322874d79db2661d334fa404e449df15723b482957815fef203cf1e2";
+    const LIVE_PAYMENT_TXID_INTERNAL: &str = "e2f13c20ef5f815729483b7215df49e404a44f331d66b29dd77428324d6e5675";
+    const LIVE_TIME_LOCK: u32 = 1_790_664_056;
+    const LIVE_TAKER_KEY: &str = "03cd3144d880ce80ce9f2f4c24feb12d011bd6f067cdb44dcd2c41438923d64fe2";
+    const LIVE_MAKER_KEY: &str = "02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580";
+    const LIVE_SECRET_HASH: &str = "cb03f4f75479eb6731672f14069d05e1a08d8349";
+
+    fn live_key(hex_key: &str) -> Public { Public::from_slice(&bytes_of(hex_key)).expect("a valid public key") }
+
+    fn live_payment_outputs() -> PaymentOutputs {
+        let tx = read_tx(&bytes_of(LIVE_PAYMENT_HEX.trim())).expect("the live payment is readable");
+        PaymentOutputs {
+            tx_hash: txid_internal(&tx),
+            output0_script_pubkey: script_pubkey_at(&tx, 0).expect("output 0").into(),
+            spent_script_pubkey: script_pubkey_at(&tx, DEFAULT_SWAP_VOUT).expect("output 0").into(),
+        }
+    }
+
+    /// T39.5.4: with the swap's own key pair the live payment pays the rebuilt HTLC script.
+    #[test]
+    fn ensure_payment_pays_htlc_accepts_live_arrr_payment_with_swap_key() {
+        let payment = live_payment_outputs();
+        assert_eq!(hex::encode(payment.tx_hash.as_slice()), LIVE_PAYMENT_TXID_INTERNAL);
+        // The taker's payment: the taker holds the refund key, the maker the spend key.
+        let verdict = ensure_payment_pays_htlc(
+            LIVE_TIME_LOCK,
+            &live_key(LIVE_TAKER_KEY),
+            &live_key(LIVE_MAKER_KEY),
+            &bytes_of(LIVE_SECRET_HASH),
+            &payment,
+        );
+        assert_eq!(verdict, Ok(()));
+    }
+
+    /// T39.5.4: a key that is not the swap's (here: any other, such as a persistent key) is the hard stop,
+    /// and the message names the payment by its display-order transaction id.
+    #[test]
+    fn ensure_payment_pays_htlc_rejects_with_persistent_key_and_prints_display_txid() {
+        let payment = live_payment_outputs();
+        let persistent = live_key("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62");
+        let err = ensure_payment_pays_htlc(
+            LIVE_TIME_LOCK,
+            &persistent,
+            &live_key(LIVE_MAKER_KEY),
+            &bytes_of(LIVE_SECRET_HASH),
+            &payment,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("does not pay the HTLC script this swap negotiated"),
+            "{err}"
+        );
+        assert!(
+            err.contains(LIVE_PAYMENT_TXID_DISPLAY),
+            "display-order txid missing: {err}"
+        );
+        assert!(
+            !err.contains(LIVE_PAYMENT_TXID_INTERNAL),
+            "byte-reversed txid printed: {err}"
+        );
+    }
+
+    /// R39.5.4: the key choice asks `check_payment_pays_htlc`. The live payment, built with the swap's own
+    /// key pair, is paid by the swap key and is another script for any other key; the answer names the
+    /// payment in display order.
+    #[test]
+    fn check_payment_pays_htlc_matches_the_swap_key_and_names_the_payment_otherwise() {
+        let payment = bytes_of(LIVE_PAYMENT_HEX.trim());
+        let secret_hash = bytes_of(LIVE_SECRET_HASH);
+        let (taker, maker) = (live_key(LIVE_TAKER_KEY), live_key(LIVE_MAKER_KEY));
+        assert_eq!(
+            check_payment_pays_htlc(LIVE_TIME_LOCK, &taker, &maker, &secret_hash, &payment),
+            Ok(HtlcPaymentCheck::Pays)
+        );
+        let persistent = live_key("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62");
+        assert_eq!(
+            check_payment_pays_htlc(LIVE_TIME_LOCK, &persistent, &maker, &secret_hash, &payment),
+            Ok(HtlcPaymentCheck::PaysAnotherScript {
+                payment_id: LIVE_PAYMENT_TXID_DISPLAY.to_owned()
+            })
+        );
+        assert!(check_payment_pays_htlc(LIVE_TIME_LOCK, &taker, &maker, &secret_hash, &[0x01, 0x02]).is_err());
+    }
+
+    /// R39.5.4, the fallback: a payment built with the persistent key is paid by the persistent key and is
+    /// another script for the swap's per-swap key, so a recovery that tries the swap key first and the
+    /// persistent key next lands on the persistent key.
+    #[test]
+    fn a_payment_built_with_the_persistent_key_matches_only_the_persistent_key() {
+        let (persistent, per_swap, maker) = (
+            live_key("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62"),
+            live_key(LIVE_TAKER_KEY),
+            live_key(LIVE_MAKER_KEY),
+        );
+        let secret_hash = bytes_of(LIVE_SECRET_HASH);
+        let redeem = payment_script(LIVE_TIME_LOCK, &secret_hash, &persistent, &maker);
+        let raw = transparent_tx(false, &p2sh_script(&redeem), 100_000, &[0x00]);
+
+        assert!(matches!(
+            check_payment_pays_htlc(LIVE_TIME_LOCK, &per_swap, &maker, &secret_hash, &raw),
+            Ok(HtlcPaymentCheck::PaysAnotherScript { .. })
+        ));
+        assert_eq!(
+            check_payment_pays_htlc(LIVE_TIME_LOCK, &persistent, &maker, &secret_hash, &raw),
+            Ok(HtlcPaymentCheck::Pays)
+        );
+        // The counterparty's payment: this node's key is the spend key.
+        let redeem = payment_script(LIVE_TIME_LOCK, &secret_hash, &maker, &persistent);
+        let raw = transparent_tx(false, &p2sh_script(&redeem), 100_000, &[0x00]);
+        assert_eq!(
+            check_payment_pays_htlc(LIVE_TIME_LOCK, &maker, &persistent, &secret_hash, &raw),
+            Ok(HtlcPaymentCheck::Pays)
+        );
+    }
+
+    /// T39.5.4: the live refund's input script classifies as a refund, and it spends the live payment.
+    #[test]
+    fn classify_live_arrr_refund_as_refunded() {
+        let refund = read_tx(&bytes_of(LIVE_REFUND_HEX.trim())).expect("the live refund is readable");
+        let scripts = script_sigs(&refund);
+        assert_eq!(scripts.len(), 1);
+        assert_eq!(classify_swap_spend(&scripts[0]), Some(SwapSpendKind::Refunded));
+        let bundle = refund.transparent_bundle().expect("transparent input");
+        assert_eq!(
+            &bundle.vin[0].prevout().hash()[..],
+            txid_internal(&read_tx(&bytes_of(LIVE_PAYMENT_HEX.trim())).unwrap()).as_slice(),
+            "the refund spends the live payment"
+        );
     }
 
     /// Opt-in corpus check (`ARRR_IRONWOOD_FIXTURES` pointing at `local/arrr-ironwood-fixtures`, which is

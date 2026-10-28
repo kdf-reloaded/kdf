@@ -732,18 +732,20 @@ use a bounded timeout and retry if the tx is not yet on chain. Acceptance: with 
 list of servers, connections are bounded and ordered by priority; a downed server
 does not stall block-count discovery.
 
-> **Shielded coins are carved out of this client.** R38.6.4 binds every
-> Electrum-backed UTXO coin. A ZHTLC (Zcash-family shielded) coin is not one: it
-> is served entirely by its `lightwalletd` endpoints, opens no Electrum
-> connection, and therefore has no connection pool for this requirement's
-> floor/ceiling and prioritisation semantics to govern. What serves each of its
-> functions instead is [chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.1.
+> **Shielded coins are carved out of this client, with one exception.** R38.6.4
+> binds every Electrum-backed UTXO coin. A ZHTLC (Zcash-family shielded) coin is
+> not one: it is served by its `lightwalletd` endpoints. What serves each of its
+> functions is [chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.1. The
+> exception is chapter 39 R39.11.25: when no `lightwalletd` endpoint can answer
+> three swap-path questions (already-sent, spend search, spend watch), the coin
+> asks the servers of its `electrum_servers`. That client follows R38.6.4's order
+> and time budget, opens its connections on first use, and serves nothing else of
+> the coin.
 >
-> **Status update (reloaded).** The carve-out is a **required change, not
-> implemented.** Today a Light-mode shielded coin's transparent side *is* backed
-> by this client under this requirement's policy, so R38.6.4 does currently bind
-> it. The removal is specified in chapter 39 R39.11.1, R39.11.3 and R39.11.7, and
-> none of it exists yet; chapter 39's §39.11 status notes record the boundary.
+> **Status update (reloaded, 2026-10-28).** The carve-out is **implemented** since
+> 2026-10-12: a Light-mode shielded coin's backend is `lightwalletd` alone, and no
+> Electrum connection is opened for it. The exception of chapter 39 R39.11.25
+> (maintainer Decision AK of 2026-10-28) is **specified, not yet implemented**.
 > Nothing about R38.6.4 itself changes either way.
 
 R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,

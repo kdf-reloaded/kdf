@@ -1750,6 +1750,49 @@ fn lightwalletd_endpoint(server: &str) -> String {
     }
 }
 
+/// The identity of a configured lightwalletd endpoint (R39.11.7b): the form the transport connects
+/// with (`lightwalletd_endpoint`), reduced to lowercase scheme and host, the scheme's default port
+/// when none is given, and no trailing slash.
+///
+/// An entry that does not parse as a URL has no normal form to compare, so it is its own identity
+/// (the transport reports it as it does today).
+fn lightwalletd_endpoint_identity(server: &str) -> String {
+    let endpoint = lightwalletd_endpoint(server);
+    let Ok(url) = url::Url::parse(&endpoint) else {
+        return endpoint;
+    };
+    let Some(host) = url.host_str() else {
+        return endpoint;
+    };
+    let port = match url.port_or_known_default() {
+        Some(port) => format!(":{}", port),
+        None => String::new(),
+    };
+    format!(
+        "{}://{}{}{}",
+        url.scheme(),
+        host,
+        port,
+        url.path().trim_end_matches('/')
+    )
+}
+
+/// Normalizes and de-duplicates the configured endpoint list (R39.11.7b), keeping the configured
+/// order and the first spelling of each endpoint. Returns the kept list and, for every dropped
+/// entry, `(dropped spelling, kept spelling)`.
+pub(crate) fn dedupe_lightwalletd_endpoints(servers: Vec<String>) -> (Vec<String>, Vec<(String, String)>) {
+    let mut kept: Vec<(String, String)> = Vec::with_capacity(servers.len());
+    let mut dropped = Vec::new();
+    for server in servers {
+        let identity = lightwalletd_endpoint_identity(&server);
+        match kept.iter().find(|(kept_identity, _)| *kept_identity == identity) {
+            Some((_, first_spelling)) => dropped.push((server, first_spelling.clone())),
+            None => kept.push((identity, server)),
+        }
+    }
+    (kept.into_iter().map(|(_, spelling)| spelling).collect(), dropped)
+}
+
 fn decode_hex_field(name: &str, value: &str) -> Result<Vec<u8>, String> {
     let value = value.strip_prefix("0x").unwrap_or(value);
     hex::decode(value).map_err(|e| format!("Invalid {} hex: {}", name, e))

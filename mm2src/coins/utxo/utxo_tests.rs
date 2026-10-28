@@ -877,6 +877,7 @@ fn test_search_for_swap_tx_spend_electrum_was_spent() {
 
     let found = block_on(coin.search_for_swap_tx_spend_my(
         1711034482,
+        coin.my_public_key().unwrap(),
         &other_pub,
         &*dhash160(&secret),
         &payment_tx_bytes,
@@ -908,10 +909,17 @@ fn test_search_for_swap_tx_spend_electrum_was_refunded() {
         .unwrap();
     let refund_tx = TransactionEnum::UtxoTx(deserialize(refund_tx_bytes.as_slice()).unwrap());
 
-    let found =
-        block_on(coin.search_for_swap_tx_spend_my(1711148703, &other_pub, &secret_hash, &payment_tx_bytes, 0, &None))
-            .unwrap()
-            .unwrap();
+    let found = block_on(coin.search_for_swap_tx_spend_my(
+        1711148703,
+        coin.my_public_key().unwrap(),
+        &other_pub,
+        &secret_hash,
+        &payment_tx_bytes,
+        0,
+        &None,
+    ))
+    .unwrap()
+    .unwrap();
     assert_eq!(FoundSwapTxSpend::Refunded(refund_tx), found);
 }
 

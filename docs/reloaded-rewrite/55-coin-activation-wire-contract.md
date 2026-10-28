@@ -449,7 +449,7 @@ gives the status the discriminant would carry if it were mmrpc-level.
 | `task::enable_z_coin` | every configured light-wallet (lightwalletd) endpoint unreachable at activation (`LightwalletdUnreachable`) | `Transport` | string | 500 | status | [Ch. 39](39-zcash---z_coin-shielded-coin.md) R39.11.6 |
 | `task::enable_z_coin` | every configured light-wallet endpoint fails admission, or a fresh wallet finds no strict-majority branch (`LightwalletdExcluded`); an empty `light_wallet_d_servers` list; the first chain-state or tree-state query to the admitted endpoints fails, before the sync starts; or the coin cannot be built for another reason | `CoinCreationError` | object `{ticker, error}` | 400 | status | Ch. 39 R39.11.5, R39.11.6 |
 | `task::enable_z_coin` | light-wallet server unreachable during block-cache sync | none: the task stays `InProgress` with `TemporaryError` (string) while it retries | -- | 200 | status (in progress) | Ch. 39 |
-| `task::enable_z_coin` | block-height or balance query after sync fails (the height comes from the admitted light-wallet endpoints; Electrum is not used for a shielded coin, and `electrum_servers` is accepted and ignored, R39.11.5) | `Transport` | string | 500 | status | Ch. 39 |
+| `task::enable_z_coin` | block-height or balance query after sync fails (the height comes from the admitted light-wallet endpoints; a shielded coin uses Electrum only as the fallback for three swap-path questions and never for heights or balances, and `electrum_servers` is optional, R39.11.5, R39.11.25) | `Transport` | string | 500 | status | Ch. 39 |
 | `task::enable_sia` | wallet daemon unreachable at build | `CoinCreationError` | object `{ticker, error}` | 400 | status | [Ch. 46](46-sia-v2-activation-rpcs.md) |
 | `task::enable_sia` | block-height or balance query after build | `Transport` | string | 500 | status | Ch. 46 |
 | Solana platform activation | in this beta, every request, before any node is contacted (`SOLANA_ACTIVATION_AVAILABLE` is `false`; `error` is "Solana support is not available in this build") | `PlatformCoinCreationError` | object `{ticker, error}` | 500 | mmrpc | [Ch. 40](40-solana-coin.md) |
@@ -490,9 +490,10 @@ other row the public reference is silent and the reference release decides.
 > Z-coin and Sia (`Transport` after the build; Z-coin `TemporaryError` while the
 > sync runs; Chapters 39, 46), the Lightning task (Chapter 41) and the legacy
 > methods (§55.4). Z-coin matches as rebuilt by the Light-mode backend work
-> (Chapter 39 §39.11): lightwalletd is the sole backend, a non-empty
-> `light_wallet_d_servers` list is mandatory, `electrum_servers` is accepted and
-> ignored, and the backend failures are `LightwalletdUnreachable` (`Transport`)
+> (Chapter 39 §39.11): lightwalletd is the coin's backend, a non-empty
+> `light_wallet_d_servers` list is mandatory, `electrum_servers` is optional and
+> used only as the fallback for three swap-path questions (R39.11.25), activation
+> never opens an Electrum connection, and the backend failures are `LightwalletdUnreachable` (`Transport`)
 > and `LightwalletdExcluded` (`CoinCreationError`). Remaining deviation: the
 > Solana platform reports `Internal` (Chapter 40, deferred); in this beta
 > Solana is switched off and every Solana request ends at the refusal rows

@@ -864,17 +864,17 @@ pub fn check_if_my_payment_sent<T: UtxoCommonOps>(
 pub async fn search_for_swap_tx_spend_my(
     coin: &UtxoCoinFields,
     time_lock: u32,
+    my_pub: &[u8],
     other_pub: &[u8],
     secret_hash: &[u8],
     tx: &[u8],
     output_index: usize,
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
-    let my_public = try_s!(coin.priv_key_policy.key_pair_or_err()).public();
     search_for_swap_output_spend(
         coin,
         time_lock,
-        my_public,
+        &try_s!(Public::from_slice(my_pub)),
         &try_s!(Public::from_slice(other_pub)),
         secret_hash,
         tx,
@@ -887,18 +887,18 @@ pub async fn search_for_swap_tx_spend_my(
 pub async fn search_for_swap_tx_spend_other(
     coin: &UtxoCoinFields,
     time_lock: u32,
+    my_pub: &[u8],
     other_pub: &[u8],
     secret_hash: &[u8],
     tx: &[u8],
     output_index: usize,
     search_from_block: u64,
 ) -> Result<Option<FoundSwapTxSpend>, String> {
-    let my_public = try_s!(coin.priv_key_policy.key_pair_or_err()).public();
     search_for_swap_output_spend(
         coin,
         time_lock,
         &try_s!(Public::from_slice(other_pub)),
-        my_public,
+        &try_s!(Public::from_slice(my_pub)),
         secret_hash,
         tx,
         output_index,
@@ -1161,7 +1161,8 @@ pub(crate) fn ensure_payment_pays_htlc(
             "Payment tx {:?} output 0 does not pay the HTLC script this swap negotiated \
              (found script_pubkey {:?}, expected {:?} from the swap's saved pubkeys/secret_hash/locktime) \
              -- this payment cannot be recovered automatically",
-            payment.tx_hash,
+            // `payment.tx_hash` is in internal byte order; the transaction id is shown reversed.
+            payment.tx_hash.reversed(),
             payment.output0_script_pubkey,
             expected_script_pubkey
         );

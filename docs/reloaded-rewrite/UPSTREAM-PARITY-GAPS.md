@@ -388,11 +388,14 @@ chain's fee quote needs at least the first two closed before it matches.
   chain the shared defaults misprice, and the alternative a Coder would
   otherwise be tempted to hard-code.
 
-Three smaller items on the same surface are recorded as deferred rather than
-tracked here: the three additional fee-approximation stages (ch. 57 D1), the
-per-coin gas-estimate multiplier the configuration sets to 1.3 for two
-layer-two platform coins (ch. 57 D3), and the removal of reloaded's inert
-third (external gas-oracle) price source (ch. 57 D4).
+Two smaller items on the same surface are recorded as deferred rather than
+tracked here: the three additional fee-approximation stages (ch. 57 D1) and
+the removal of reloaded's inert third (external gas-oracle) price source
+(ch. 57 D4). The per-coin gas-estimate multiplier the configuration sets to
+1.3 for two layer-two platform coins, formerly ch. 57 D3, is bound since
+2026-10-27 as ch. 57 R57.5.3b (it scales only the legacy ERC-20 approve's
+estimated limit, never a configured or default limit) and is part of the
+`gas_limit` item above: reloaded reads neither.
 
 ---
 
@@ -781,6 +784,23 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   legacy `orderbook` still fails the whole response, where the mmrpc-2.0 handler
   skips that uuid with a warning. Not covered by R-F6c, which is about address
   derivation; a Reloaded-internal inconsistency, not a reference-parity item.
+
+## #19 — Statistics store: an existing row is not refreshed from a later terminal report — **OPEN (small, post-beta follow-up)**
+
+CRD reference: [`51-legacy-v1-swap-state-machine.md`](./51-legacy-v1-swap-state-machine.md)
+R50A item 5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
+
+The publication, redaction and own-role key fill of R50A are implemented in
+PR #108. Two small items remain:
+
+- [ ] For a swap identifier that is already in `stats_swaps`, R50A item 5 also
+  refreshes the fiat price, GUI and version columns from the later report.
+  Reloaded sets the own-role key column only and leaves the other columns as
+  the first report wrote them (the previous code did not refresh them either).
+  Needs a decision on which columns each role owns.
+- [ ] No state-16 migration corrects the key columns of databases already at
+  state 15; they keep the old both-parties values. Deliberately not done for
+  the beta, since almost no Reloaded node has a populated statistics store yet.
 
 ---
 

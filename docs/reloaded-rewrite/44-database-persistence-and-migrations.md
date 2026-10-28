@@ -280,6 +280,16 @@ The state `8 -> 9` migration shall append:
 | `maker_pubkey` | `VARCHAR(255)` |
 | `taker_pubkey` | `VARCHAR(255)` |
 
+> **Cross-reference (added 2026-10-27; passed the KDF Dirty Gate on 2026-10-28 with
+> chapter 51 R50A).** How these two columns are filled at live time is bound by
+> [Chapter 51](51-legacy-v1-swap-state-machine.md) R50A item 5: each
+> party's published terminal report supplies only its **own** persistent
+> public key — a maker record fills `maker_pubkey`, a taker record
+> `taker_pubkey` — so a swap's two columns are complete only once both
+> parties' reports have arrived, and a privacy-coin party's column stays
+> empty. The state-15 backfill of R44.6.3 applies the same own-role
+> derivation to historical records.
+
 ### 44.6.6 State 12 GUI and Version Columns
 
 The state `11 -> 12` migration shall append:

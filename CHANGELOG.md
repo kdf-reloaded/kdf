@@ -124,6 +124,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
+  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
+  not supported in this release and that light mode should be used. Native mode could not build a
+  working wallet for a fresh activation, and after Ironwood it could build transactions the network
+  rejects. Light mode is unchanged. Native mode returns in a later release, see
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
@@ -236,6 +243,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
+- **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
+- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
+  - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
+  - each server gets at most 120 seconds per check;
+  - the search starts at the payment's own block;
+  - each step is logged.
+
+  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39 R39.5.5, R39.11.4h, R39.11.4i.
+- **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
 - **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
   later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
 - **Electrum change notifications are no longer dropped.** A server's message that an address or the
@@ -277,6 +294,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
   of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
   by node instead. More in ch.35 §35.1.F.
+- **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
+  back.** Confirmations, and the decision that a transaction has expired, are now counted against
+  the current tip, not against the highest one ever seen. A lagging server can now only make a wait
+  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
+- **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node checks its
+  `light_wallet_d_servers` against each other, a server listed twice, also under a different spelling
+  such as with or without `https://` or the default port, now counts once. Before, `[A, A, B]` let A
+  outvote B with only two real servers. Each dropped duplicate is logged. Detail: PR #113; CRD ch.39
+  R39.11.7b.
 - **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
   ignored and every listed server was connected; with `max_connected: 1` only one server is connected
   now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
@@ -325,6 +351,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
   The change of a send made by another instance on the same seed still shows only once mined. Run
   one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39 R39.8.0ag1.
+- **Recovering an ARRR swap no longer fails with "does not pay the HTLC script".** Every ARRR swap
+  uses its own key for the swap's payment, but `recover_funds_of_swap` checked the payment with the
+  wallet's permanent key, so recovery always stopped with that error, even for a payment that had
+  long been refunded. Recovery now tries the swap's own key first and the wallet's permanent key
+  second, so swaps saved by older or other builds are recovered too. The log, and any error, say
+  which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
+  payment that is still waiting is refunded; and the swap completes if the other side spent it. The
+  error, when it is genuine, now says both keys were tried and shows the transaction id the way
+  explorers do. Detail: PR #109; CRD ch.39 R39.5.4.
 - **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
   input points past the end of the previous transaction's outputs, a BCH transaction with no
   outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
@@ -437,6 +472,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
   The MM2.json boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
   refusal. Detail: PR #28; CRD ch.35 R35.2.5.
+- **Swaps with a shielded coin such as ARRR now report their outcome to the network like every other
+  swap, and the report no longer names the traders.** When an older-style swap ends, whatever the
+  outcome, the node publishes the usual `swapstatus` summary that statistics nodes collect; before,
+  it stayed silent whenever a shielded coin was involved. The summary leaves out both parties' public
+  keys (the sender's own key too, when the swap used a one-off key), and a statistics node now fills
+  in only the key of the party that sent the report. More in
+  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #108.
 - **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
   sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
   now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree
@@ -489,6 +531,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
+
+- [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
+  ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
+  wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
+  refused before its fee.
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
+  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
+  release.
 
 - [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
   [`tron-gasfree`](docs/plans/tron-gasfree.md),

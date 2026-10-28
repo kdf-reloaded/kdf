@@ -205,6 +205,8 @@ impl MmCoin for EthCoin {
                 if allowed < value {
                     // estimate gas for the `approve` contract call
 
+                    // The RAW estimate: the gas-estimate multiplier is not applied on the fee-quote path
+                    // (CRD R57.5.3b item 6).
                     // Pass a dummy spender. Let's use `my_address`.
                     let spender = self.my_address;
                     let approve_function = ERC20_CONTRACT.function("approve")?;
