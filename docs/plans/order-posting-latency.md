@@ -28,6 +28,9 @@
 - **Decision R.** Do all of F1–F5, in the order below.
 - **Decision P.** The pre-trade check runs on create and on volume or `max` changes. It is skipped on
   price-only, minimum-volume and confirmation updates. Its fee-rate reading is reused by the same request.
+- **Balance watch on shared EVM RPC endpoints (maintainer, 2026-10-28).** F2 is parity: a base coin with maker
+  orders costs one balance read per 30 s against its node or RPC endpoint, as the reference does (ch.60 R60.4.5,
+  R60.4.6). Several such coins on one shared EVM endpoint each cost that one read; no change is planned.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 

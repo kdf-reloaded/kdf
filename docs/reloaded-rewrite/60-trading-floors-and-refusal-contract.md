@@ -284,7 +284,10 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > Not implemented: nothing of items 1–4 is left open. Tests: T60.7 (a)–(e) and
 > the start, stop and seeding cases are in `ordermatch_tests.rs`, module
 > `t60_7_maker_balance_watch_tests`, driven by a sleeper the test passes to
-> the task, so no test waits.
+> the task, so no test waits. The cost is one balance read per 30 s per base
+> coin with maker orders, against that coin's node or RPC endpoint; several
+> such coins on one shared EVM endpoint each cost that one read, as at the
+> reference designations R60.4.6 names (maintainer, 2026-10-28: no change).
 
 ## 60.5 Refusal and failure map — what a peer observes
 
