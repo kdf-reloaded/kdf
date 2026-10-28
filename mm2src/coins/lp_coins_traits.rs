@@ -131,6 +131,22 @@ pub trait SwapOps {
         Ok(HtlcPaymentCheck::Pays)
     }
 
+    /// What the shielded HTLC detection in flight for the payment script built from these parameters is
+    /// reading (the endpoint and address form it read last), for the error of the recovery bound
+    /// (CRD ch.39 R39.5.5, R39.11.4h). The parameters are those of the search or sent-check call:
+    /// `first_pub` is the refund key, `second_pub` the spend key.
+    ///
+    /// The default is `None`: only a coin that detects HTLCs over a remote index has anything to report.
+    fn htlc_detection_progress(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+    ) -> Option<String> {
+        None
+    }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
     /// Whether the refund transaction can be sent now

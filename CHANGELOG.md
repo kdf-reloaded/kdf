@@ -218,6 +218,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
+  - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
+  - each server gets at most 120 seconds per check;
+  - the search starts at the payment's own block;
+  - each step is logged.
+
+  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39 R39.5.5, R39.11.4h, R39.11.4i.
 - **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
 - **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
   later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
