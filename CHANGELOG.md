@@ -547,7 +547,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wallet cannot recreate from its viewing key, so it is now deleted. A wallet that has scanned blocks
   or holds transactions is never deleted this way, and the one backup a rebuild keeps of the previous
   wallet is unchanged. Existing `*.checkpoint.*.bak` files can be deleted safely. No RPC or wire
-  change. Detail: CRD ch.39 (shielded coins) R39.8.0ax.
+  change. Detail: PR #150; CRD ch.39 (shielded coins) R39.8.0ax.
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and
   `get_swap_gas_fee_policy` echoed it, but nothing read it, so every swap transaction was signed in
   the legacy form and `High` behaved exactly like `Legacy`. `Low`, `Medium` and `High` now emit an
