@@ -2217,7 +2217,11 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
                 Some(c) => {
                     // CRD ch.39 R39.5.11: the re-derived HTLC key must be the one the swap negotiated.
                     if let Err(e) = swap.check_rederived_htlc_keys() {
-                        log!("Error " (e) " resuming swap " (uuid));
+                        warn!(
+                            "{} Hint: start the node with the wallet (seed and key policy) the swap was started \
+                             with; the swap then resumes, and recover_funds_of_swap can recover it.",
+                            e
+                        );
                         return;
                     }
                     log!("Swap " (uuid) " kick started.");

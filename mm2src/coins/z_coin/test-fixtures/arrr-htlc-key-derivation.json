@@ -16,7 +16,7 @@
     "rin_htlc_pub": "022e6ef88fda3a4d86b0d2bfb839dc2d46d74f04b49e3930ed4089e37f2bd8af50"
   },
   "low_s_cases": {
-    "_comment": "Computed from CRD ch.39 R39.5.8 with the taker's base key, NOT observed from the reference. The inputs are chosen so that the raw ECDSA s is above n/2, i.e. low-S normalization changes the signature; each case also gives the key a derivation that skipped low-S would produce.",
+    "_comment": "Computed from CRD ch.39 R39.5.8 with the taker's base key, NOT observed from the reference. The expected values were computed by an independent pure-Python implementation of the CRD rule, written separately from this Rust code and not part of the repository. The inputs are chosen so that the raw ECDSA s is above n/2, i.e. low-S normalization changes the signature; each case also gives the key a derivation that skipped low-S would produce.",
     "base": "taker",
     "taker_uuid": {
       "input": "68ea8497-9b1f-4ac6-bd3a-df5df4365986",
