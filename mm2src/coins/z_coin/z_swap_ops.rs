@@ -362,6 +362,16 @@ impl SwapOps for ZCoin {
         .await
     }
 
+    fn htlc_detection_progress(
+        &self,
+        time_lock: u32,
+        first_pub: &[u8],
+        second_pub: &[u8],
+        secret_hash: &[u8],
+    ) -> Option<String> {
+        z_tx_read::htlc_detection_progress(self, time_lock, first_pub, second_pub, secret_hash)
+    }
+
     async fn check_payment_pays_htlc(
         &self,
         time_lock: u32,

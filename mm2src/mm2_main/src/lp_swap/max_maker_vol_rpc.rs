@@ -1,3 +1,4 @@
+use coins::request_fee_scope::with_request_fee_scope;
 use coins::{lp_coinfind_or_err, CoinFindError};
 use common::mm_number::MmNumberMultiRepr;
 use common::HttpStatusCode;
@@ -135,6 +136,13 @@ impl From<CheckBalanceError> for MaxMakerVolRpcError {
 }
 
 pub async fn max_maker_vol(
+    ctx: MmArc,
+    req: MaxMakerVolRequest,
+) -> Result<MaxMakerVolResponse, MmError<MaxMakerVolRpcError>> {
+    with_request_fee_scope(max_maker_vol_impl(ctx, req)).await
+}
+
+async fn max_maker_vol_impl(
     ctx: MmArc,
     req: MaxMakerVolRequest,
 ) -> Result<MaxMakerVolResponse, MmError<MaxMakerVolRpcError>> {

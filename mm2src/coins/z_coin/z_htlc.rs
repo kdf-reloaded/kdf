@@ -9,9 +9,10 @@ use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcError};
 use crate::utxo::utxo_common::payment_script;
 use crate::utxo::{sat_from_big_decimal, UtxoAddressFormat};
-use crate::z_coin::{BuilderHeightError, SendOutputsErr, ZOutput, DEX_FEE_OVK};
+use crate::z_coin::{z_tx_read, BuilderHeightError, SendOutputsErr, ZOutput, DEX_FEE_OVK};
 use crate::{NumConversError, PrivKeyNotAllowed, TransactionEnum};
 use bigdecimal::BigDecimal;
+use common::log;
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
 use kdf_crypto::dhash160;
@@ -135,6 +136,9 @@ impl ZP2SHSpendError {
     }
 }
 
+/// The identifier of `tx` in the usual display byte order.
+fn txid_hex(tx: &ZTransaction) -> String { format!("{:?}", z_tx_read::txid_display(tx)) }
+
 /// Spends P2SH output 0 to the coin's my_z_addr
 pub async fn z_p2sh_spend(
     coin: &ZCoin,
@@ -151,6 +155,14 @@ pub async fn z_p2sh_spend(
         .builder_target_height()
         .await
         .mm_err(ZP2SHSpendError::BuilderHeight)?;
+    let ticker = &coin.as_ref().conf.ticker;
+    let payment_txid = txid_hex(&p2sh_tx);
+    log::info!(
+        "{}: HTLC spend of payment {}: the builder's target height is {}",
+        ticker,
+        payment_txid,
+        target_height
+    );
     let mut tx_builder = ZTxBuilder::new(
         coin.z_fields.consensus_params.clone(),
         target_height.into(),
@@ -194,6 +206,11 @@ pub async fn z_p2sh_spend(
         .add_sapling_output(None, coin.z_fields.my_z_addr.clone(), payment_value, MemoBytes::empty())
         .map_to_mm(ZP2SHSpendError::from)?;
 
+    log::info!(
+        "{}: HTLC spend of payment {}: building the transaction",
+        ticker,
+        payment_txid
+    );
     let zcash_tx = tx_builder
         .build(
             &signing_set,
@@ -214,9 +231,30 @@ pub async fn z_p2sh_spend(
     // The transaction the builder produced is returned as it is: re-reading its bytes through the
     // shared UTXO parser would give the Zcash-transaction arm a UTXO-transaction one and the version
     // coverage of that parser (R39.11.14, R39.11.16a(b)).
+    let spend_txid = txid_hex(&zcash_tx);
+    log::info!(
+        "{}: HTLC spend of payment {}: broadcasting transaction {}",
+        ticker,
+        payment_txid,
+        spend_txid
+    );
     match coin.rpc_client().send_raw_transaction(tx_buffer.into()).compat().await {
-        Ok(_) => (),
-        Err(e) => return Err(ZP2SHSpendError::TxRecoverable(zcash_tx.into(), e.to_string()).into()),
+        Ok(_) => log::info!(
+            "{}: HTLC spend of payment {}: transaction {} was broadcast",
+            ticker,
+            payment_txid,
+            spend_txid
+        ),
+        Err(e) => {
+            log::info!(
+                "{}: HTLC spend of payment {}: broadcasting transaction {} failed: {}",
+                ticker,
+                payment_txid,
+                spend_txid,
+                e
+            );
+            return Err(ZP2SHSpendError::TxRecoverable(zcash_tx.into(), e.to_string()).into());
+        },
     };
 
     Ok(zcash_tx)

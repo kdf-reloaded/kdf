@@ -4445,7 +4445,8 @@ mod t60_6_pre_trade_spend_check_tests {
             uuid: order.uuid,
             new_price: None,
             max: None,
-            volume_delta: None,
+            // R60.6.7 Amendment: only an update that changes the volume is re-checked.
+            volume_delta: Some(MmNumber::from("0.5")),
             min_volume: Some(units_8(10_000)),
             base_confs: None,
             base_nota: None,
@@ -4492,6 +4493,401 @@ mod t60_6_pre_trade_spend_check_tests {
             maker.match_with_request(&request),
             OrderMatchResult::Matched((units_8(10_000), units_8(10_000)))
         );
+    }
+
+    /// CRD ch.60 R60.6.7 Amendment: only an update that changes the volume re-checks the order. The mock counts
+    /// the safe-amount reads and reports a safe amount no order can meet, so a read that happens shows as the
+    /// typed refusal and a read that does not happen shows as none.
+    mod update_maker_order_check_scope {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn update_request(uuid: Uuid, change: impl FnOnce(&mut MakerOrderUpdateReq)) -> MakerOrderUpdateReq {
+            let mut req = MakerOrderUpdateReq {
+                uuid,
+                new_price: None,
+                max: None,
+                volume_delta: None,
+                min_volume: None,
+                base_confs: None,
+                base_nota: None,
+                rel_confs: None,
+                rel_nota: None,
+            };
+            change(&mut req);
+            req
+        }
+
+        /// Runs the update against an order of `DYN`/`KMD` whose coins always report an unmeetable safe amount.
+        /// Returns the error text of the update, `None` if it succeeded, and the number of safe-amount reads.
+        fn run(change: impl FnOnce(&mut MakerOrderUpdateReq)) -> (Option<String>, usize) {
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+            // The mocks are per thread, and so is this counter: tests run in parallel.
+            let safe_amount_reads = Arc::new(AtomicUsize::new(0));
+            let counted = safe_amount_reads.clone();
+            TestCoin::spend_safe_amount.mock_safe(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                MockResult::Return(Box::pin(async { Ok(Some(MmNumber::from(1_000))) }))
+            });
+            let ctx = ctx_with(json!({}), &["DYN", "KMD"]);
+            let (base, rel) = pair("DYN", "KMD");
+            let order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(1.into())
+                .with_min_base_vol(Some(units_8(11_000)))
+                .with_price(1.into())
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .build_unchecked();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                block_on(update_maker_order(&ctx, update_request(order.uuid, change)))
+            }));
+            let reads = safe_amount_reads.load(Ordering::SeqCst);
+            // Whatever a later stage of the update does without a database and a network (it may fail or
+            // panic), it is not the check under test; only whether the check ran is.
+            let error = match outcome {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(e),
+                Err(_) => None,
+            };
+            (error, reads)
+        }
+
+        fn refused_by_the_check(error: &Option<String>) -> bool {
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("is too low, required at least"))
+        }
+
+        #[test]
+        fn price_only_update_is_not_rechecked() {
+            let (error, reads) = run(|req| req.new_price = Some(MmNumber::from("2")));
+            assert_eq!(reads, 0, "{error:?}");
+            assert!(!refused_by_the_check(&error), "{error:?}");
+        }
+
+        #[test]
+        fn min_volume_only_update_is_not_rechecked() {
+            let (error, reads) = run(|req| req.min_volume = Some(units_8(12_000)));
+            assert_eq!(reads, 0, "{error:?}");
+            assert!(!refused_by_the_check(&error), "{error:?}");
+        }
+
+        #[test]
+        fn confirmations_only_update_is_not_rechecked() {
+            let (error, reads) = run(|req| {
+                req.base_confs = Some(3);
+                req.rel_nota = Some(true);
+            });
+            assert_eq!(reads, 0, "{error:?}");
+            assert!(!refused_by_the_check(&error), "{error:?}");
+        }
+
+        #[test]
+        fn volume_delta_update_is_rechecked() {
+            let (error, reads) = run(|req| req.volume_delta = Some(MmNumber::from("0.5")));
+            assert!(reads > 0);
+            assert!(refused_by_the_check(&error), "{error:?}");
+        }
+
+        #[test]
+        fn max_update_is_rechecked() {
+            let (error, reads) = run(|req| req.max = Some(true));
+            assert!(reads > 0);
+            assert!(refused_by_the_check(&error), "{error:?}");
+        }
+
+        #[test]
+        fn max_false_is_not_a_volume_change() {
+            let (error, reads) = run(|req| {
+                req.max = Some(false);
+                req.new_price = Some(MmNumber::from("2"));
+            });
+            assert_eq!(reads, 0, "{error:?}");
+        }
+    }
+
+    /// CRD ch.38 R38.6.6j item 1, ch.57 R57.2.6, ch.60 R60.6.7 item 8: every order-posting entry point puts the
+    /// request fee scope in place before its first coin call, so that all of its consumers share one fee reading.
+    /// A probe in place of a coin method records whether a scope was active when the entry point reached it.
+    mod request_fee_scope_entry {
+        use super::*;
+        use crate::mm2::lp_swap::{max_maker_vol, max_taker_vol, max_taker_vol_v2, trade_preimage_rpc};
+        use coins::request_fee_scope::is_active;
+        use coins::{BalanceError, BalanceTradeFeeUpdatedHandler, TradePreimageError};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Counters of the probe: how often it was reached, and how often with a scope active.
+        #[derive(Default)]
+        struct Probe {
+            reached: AtomicUsize,
+            in_scope: AtomicUsize,
+        }
+
+        impl Probe {
+            fn hit(&self) {
+                self.reached.fetch_add(1, Ordering::SeqCst);
+                if is_active() {
+                    self.in_scope.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+
+            fn assert_reached_inside_a_scope(&self, entry: &str) {
+                assert!(
+                    self.reached.load(Ordering::SeqCst) > 0,
+                    "{entry}: the probe was never reached"
+                );
+                assert_eq!(
+                    self.in_scope.load(Ordering::SeqCst),
+                    self.reached.load(Ordering::SeqCst),
+                    "{entry}: reached outside a request fee scope"
+                );
+            }
+        }
+
+        /// `spend_safe_amount` and the balance of a `TestCoin` report to `probe` and fail, which ends the entry
+        /// point right after the first coin call it makes.
+        fn probe_coins(probe: &Arc<Probe>) {
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+            TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
+            let on_spend = probe.clone();
+            TestCoin::spend_safe_amount.mock_safe(move |_| {
+                let probe = on_spend.clone();
+                MockResult::Return(Box::pin(async move {
+                    probe.hit();
+                    MmError::err(SpendSafeAmountError::EstimateUnavailable("probe".to_owned()))
+                }))
+            });
+            let on_balance = probe.clone();
+            TestCoin::my_balance.mock_safe(move |_| {
+                on_balance.hit();
+                MockResult::Return(Box::new(futures01::future::err(MmError::new(BalanceError::Internal(
+                    "probe".to_owned(),
+                )))))
+            });
+            let on_taker_fee = probe.clone();
+            TestCoin::get_fee_to_send_taker_fee.mock_safe(move |_, _, _| {
+                let probe = on_taker_fee.clone();
+                MockResult::Return(Box::pin(async move {
+                    probe.hit();
+                    MmError::err(TradePreimageError::InternalError("probe".to_owned()))
+                }))
+            });
+            let on_fee = probe.clone();
+            TestCoin::get_sender_trade_fee.mock_safe(move |_, _, _| {
+                let probe = on_fee.clone();
+                MockResult::Return(Box::pin(async move {
+                    probe.hit();
+                    MmError::err(TradePreimageError::InternalError("probe".to_owned()))
+                }))
+            });
+        }
+
+        fn setup() -> (MmArc, Arc<Probe>) {
+            let probe = Arc::new(Probe::default());
+            probe_coins(&probe);
+            let conf = json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] });
+            (ctx_with(conf, &["DYN", "KMD"]), probe)
+        }
+
+        #[test]
+        fn setprice_enters_the_scope() {
+            let (ctx, probe) = setup();
+            let req: SetPriceReq =
+                json::from_value(json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"})).unwrap();
+            assert!(block_on(create_maker_order(&ctx, req)).is_err());
+            probe.assert_reached_inside_a_scope("setprice");
+        }
+
+        #[test]
+        fn update_maker_order_enters_the_scope() {
+            let (ctx, probe) = setup();
+            let (base, rel) = pair("DYN", "KMD");
+            let order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(1.into())
+                .with_min_base_vol(Some(units_8(11_000)))
+                .with_price(1.into())
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .build_unchecked();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+            let req = MakerOrderUpdateReq {
+                uuid: order.uuid,
+                new_price: None,
+                max: None,
+                volume_delta: Some(MmNumber::from("0.5")),
+                min_volume: None,
+                base_confs: None,
+                base_nota: None,
+                rel_confs: None,
+                rel_nota: None,
+            };
+            assert!(block_on(update_maker_order(&ctx, req)).is_err());
+            probe.assert_reached_inside_a_scope("update_maker_order");
+        }
+
+        #[test]
+        fn buy_and_sell_enter_the_scope() {
+            for method in ["buy", "sell"] {
+                let (ctx, probe) = setup();
+                let body = json!({"method": method, "base": "DYN", "rel": "KMD", "price": "1", "volume": "1"});
+                let result = if method == "buy" {
+                    block_on(buy(ctx, body))
+                } else {
+                    block_on(sell(ctx, body))
+                };
+                assert!(result.is_err());
+                probe.assert_reached_inside_a_scope(method);
+            }
+        }
+
+        #[test]
+        fn trade_preimage_enters_the_scope() {
+            for method in ["setprice", "buy", "sell"] {
+                let (ctx, probe) = setup();
+                let req = json::from_value(
+                    json!({"base": "DYN", "rel": "KMD", "swap_method": method, "price": "1", "volume": "1"}),
+                )
+                .unwrap();
+                assert!(block_on(trade_preimage_rpc(ctx, req)).is_err());
+                probe.assert_reached_inside_a_scope(&format!("trade_preimage {method}"));
+            }
+        }
+
+        #[test]
+        fn max_maker_vol_enters_the_scope() {
+            let (ctx, probe) = setup();
+            let req = json::from_value(json!({"coin": "DYN"})).unwrap();
+            assert!(block_on(max_maker_vol(ctx, req)).is_err());
+            probe.assert_reached_inside_a_scope("max_maker_vol");
+        }
+
+        #[test]
+        fn max_taker_vol_enters_the_scope() {
+            let (ctx, probe) = setup();
+            assert!(block_on(max_taker_vol(ctx, json!({"coin": "DYN"}))).is_err());
+            probe.assert_reached_inside_a_scope("max_taker_vol");
+
+            let (ctx, probe) = setup();
+            let req = json::from_value(json!({"coin": "DYN"})).unwrap();
+            assert!(block_on(max_taker_vol_v2(ctx, req)).is_err());
+            probe.assert_reached_inside_a_scope("max_taker_vol v2");
+        }
+
+        #[test]
+        fn maker_balance_update_enters_the_scope() {
+            let (ctx, probe) = setup();
+            let handler = BalanceUpdateOrdermatchHandler::new(ctx.clone());
+            let coin = MmCoinEnum::Test(TestCoin::new("DYN"));
+            block_on(handler.balance_updated(&coin, &BigDecimal::from(1)));
+            probe.assert_reached_inside_a_scope("balance update");
+        }
+
+        /// One `setprice`: the spend check, the sender trade fee of the base coin and the receiver trade fee of the
+        /// rel coin all take their coin's reading through the request scope, as the coin layer does. Each coin is
+        /// read once, whatever the number of consumers; a consumer outside any request reads afresh.
+        #[test]
+        fn setprice_takes_each_coin_reading_once() {
+            use coins::request_fee_scope::{memoize, FeeReadKind};
+            use coins::{CoinBalance, TradeFee};
+            use std::collections::HashMap;
+            use std::sync::Mutex;
+
+            for kind in [
+                FeeReadKind::UtxoFeeEstimate,
+                FeeReadKind::UtxoRelayFee,
+                FeeReadKind::EvmGasPrice,
+            ] {
+                let reads: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+                let read = move |reads: Arc<Mutex<HashMap<String, usize>>>, ticker: String| async move {
+                    let fetched = reads.clone();
+                    let fetch_ticker = ticker.clone();
+                    memoize::<u64, (), _>(kind, &ticker, async move {
+                        *fetched.lock().unwrap().entry(fetch_ticker).or_default() += 1;
+                        Ok(7)
+                    })
+                    .await
+                    .unwrap();
+                };
+
+                TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+                TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(BigDecimal::from(0)));
+                let r = reads.clone();
+                TestCoin::spend_safe_amount.mock_safe(move |coin| {
+                    let (reads, ticker) = (r.clone(), coin.ticker().to_owned());
+                    MockResult::Return(Box::pin(async move {
+                        read(reads, ticker).await;
+                        Ok(None)
+                    }))
+                });
+                let r = reads.clone();
+                TestCoin::get_sender_trade_fee.mock_safe(move |coin, _, _| {
+                    let (reads, ticker) = (r.clone(), coin.ticker().to_owned());
+                    MockResult::Return(Box::pin(async move {
+                        read(reads, ticker.clone()).await;
+                        Ok(TradeFee {
+                            coin: ticker,
+                            amount: MmNumber::from(0),
+                            paid_from_trading_vol: false,
+                        })
+                    }))
+                });
+                let r = reads.clone();
+                TestCoin::get_receiver_trade_fee.mock_safe(move |coin, _| {
+                    use futures::{FutureExt, TryFutureExt};
+                    let (reads, ticker) = (r.clone(), coin.ticker().to_owned());
+                    let fut = async move {
+                        read(reads, ticker.clone()).await;
+                        Ok(TradeFee {
+                            coin: ticker,
+                            amount: MmNumber::from(0),
+                            paid_from_trading_vol: true,
+                        })
+                    };
+                    MockResult::Return(Box::new(fut.boxed().compat()))
+                });
+                TestCoin::my_balance.mock_safe(|_| {
+                    MockResult::Return(Box::new(futures01::future::ok(CoinBalance {
+                        spendable: BigDecimal::from(100),
+                        unspendable: BigDecimal::from(0),
+                    })))
+                });
+
+                let ctx = ctx_with(json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0] }), &["DYN", "KMD"]);
+                let req: SetPriceReq =
+                    json::from_value(json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"})).unwrap();
+                // The order is not stored (there is no database here); only the readings it took matter.
+                let _ =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| block_on(create_maker_order(&ctx, req))));
+                let taken = reads.lock().unwrap().clone();
+                assert_eq!(taken.get("DYN"), Some(&1), "{kind:?}: {taken:?}");
+                assert_eq!(taken.get("KMD"), Some(&1), "{kind:?}: {taken:?}");
+
+                // Swap execution is outside any request: the same consumers read afresh.
+                reads.lock().unwrap().clear();
+                block_on(async {
+                    read(reads.clone(), "DYN".to_owned()).await;
+                    read(reads.clone(), "DYN".to_owned()).await;
+                });
+                assert_eq!(reads.lock().unwrap().get("DYN"), Some(&2), "{kind:?}");
+            }
+        }
+
+        /// The scope ends with the request: nothing leaks into code that runs afterwards.
+        #[test]
+        fn no_scope_is_left_behind() {
+            let (ctx, _probe) = setup();
+            let req: SetPriceReq =
+                json::from_value(json!({"base": "DYN", "rel": "KMD", "price": "1", "volume": "1"})).unwrap();
+            let _ = block_on(create_maker_order(&ctx, req));
+            assert!(!is_active());
+        }
     }
 }
 

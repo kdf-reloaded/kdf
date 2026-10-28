@@ -3182,11 +3182,31 @@ impl EthCoin {
     }
 
     /// Get gas price
+    ///
+    /// CRD ch.57 R57.2.1: the optional gas-station source, `eth_gasPrice` and `eth_feeHistory` are queried
+    /// concurrently and the maximum of the sources that produced a value wins.
+    /// CRD ch.57 R57.2.6: inside an order-posting request the resolved value is shared by every consumer of
+    /// that request ([`crate::request_fee_scope`]); outside such a request it is always resolved afresh.
     pub(crate) fn get_gas_price(&self) -> Web3RpcFut<U256> {
         let coin = self.clone();
         let fut = async move {
-            // TODO refactor to error_log_passthrough once simple maker bot is merged
-            let gas_station_price = match &coin.gas_station_url {
+            let ticker = coin.ticker.clone();
+            crate::request_fee_scope::memoize(
+                crate::request_fee_scope::FeeReadKind::EvmGasPrice,
+                &ticker,
+                coin.resolve_gas_price(),
+            )
+            .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Resolves the legacy gas price from all sources at once, see [`EthCoin::get_gas_price`].
+    async fn resolve_gas_price(&self) -> Web3RpcResult<U256> {
+        let coin = self.clone();
+        // TODO refactor to error_log_passthrough once simple maker bot is merged
+        let gas_station = async {
+            match &coin.gas_station_url {
                 Some(url) => {
                     match GasStationData::get_gas_price(url, coin.gas_station_decimals, coin.gas_station_policy)
                         .compat()
@@ -3200,52 +3220,54 @@ impl EthCoin {
                     }
                 },
                 None => None,
-            };
-
-            // LP-17: alloy raw RPC for eth_gasPrice + eth_feeHistory.
-            let eth_gas_price = {
-                use crate::eth::alloy_compat::assert_send_future;
-                let provider = coin.alloy_provider();
-                match assert_send_future(provider.client().request_noparams::<U256>("eth_gasPrice")).await {
-                    Ok(eth_gas) => Some(eth_gas),
-                    Err(e) => {
-                        error!("Error {} on eth_gasPrice request", e);
-                        None
-                    },
-                }
-            };
-
-            let eth_fee_history_price = {
-                use crate::eth::alloy_compat::assert_send_future;
-                let provider = coin.alloy_provider();
-                match assert_send_future(provider.client().request::<_, FeeHistoryResult>(
-                    "eth_feeHistory",
-                    (U256::from(1u64), BlockNumber::Latest, &[] as &[f64]),
-                ))
-                .await
-                {
-                    Ok(res) => res
-                        .base_fee_per_gas
-                        .first()
-                        .map(|val| increase_by_percent(*val, BASE_BLOCK_FEE_DIFF_PCT)),
-                    Err(e) => {
-                        common::log::debug!(
-                            "Optional eth_feeHistory gas-price source is unavailable: {}; using remaining sources",
-                            e
-                        );
-                        None
-                    },
-                }
-            };
-
-            let all_prices = vec![gas_station_price, eth_gas_price, eth_fee_history_price];
-            all_prices
-                .into_iter()
-                .flatten()
-                .max()
-                .or_mm_err(|| Web3RpcError::Internal("All requests failed".into()))
+            }
         };
-        Box::new(fut.boxed().compat())
+
+        // LP-17: alloy raw RPC for eth_gasPrice + eth_feeHistory.
+        let eth_gas_price = async {
+            use crate::eth::alloy_compat::assert_send_future;
+            let provider = coin.alloy_provider();
+            match assert_send_future(provider.client().request_noparams::<U256>("eth_gasPrice")).await {
+                Ok(eth_gas) => Some(eth_gas),
+                Err(e) => {
+                    error!("Error {} on eth_gasPrice request", e);
+                    None
+                },
+            }
+        };
+
+        let eth_fee_history_price = async {
+            use crate::eth::alloy_compat::assert_send_future;
+            let provider = coin.alloy_provider();
+            match assert_send_future(provider.client().request::<_, FeeHistoryResult>(
+                "eth_feeHistory",
+                (U256::from(1u64), BlockNumber::Latest, &[] as &[f64]),
+            ))
+            .await
+            {
+                Ok(res) => res
+                    .base_fee_per_gas
+                    .first()
+                    .map(|val| increase_by_percent(*val, BASE_BLOCK_FEE_DIFF_PCT)),
+                Err(e) => {
+                    common::log::debug!(
+                        "Optional eth_feeHistory gas-price source is unavailable: {}; using remaining sources",
+                        e
+                    );
+                    None
+                },
+            }
+        };
+
+        let (gas_station_price, eth_gas_price, eth_fee_history_price) =
+            futures::join!(gas_station, eth_gas_price, eth_fee_history_price);
+
+        let all_prices = vec![gas_station_price, eth_gas_price, eth_fee_history_price];
+        all_prices
+            .into_iter()
+            .flatten()
+            .max()
+            .or_mm_err(|| Web3RpcError::Internal("All requests failed".into()))
     }
 
     /// Get EIP-1559 gas fee estimates (base fee + priority fees at low/medium/high levels).

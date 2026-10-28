@@ -76,6 +76,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
 
+- **Posting and updating maker orders makes fewer Electrum and node requests.** Electrum servers
+  serve each connection about one request per second once its first burst is used, so every extra
+  request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
+  its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
+  coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
+  update that changes only the price, the minimum volume or the confirmation settings skips the
+  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
+  ch.57 R57.2.6, ch.60 R60.6.7.
+
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
   whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
   longer holds a request for a minute before the next node is tried. A request given up on is now
@@ -90,6 +99,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
+  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
+  not supported in this release and that light mode should be used. Native mode could not build a
+  working wallet for a fresh activation, and after Ironwood it could build transactions the network
+  rejects. Light mode is unchanged. Native mode returns in a later release, see
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
@@ -202,6 +218,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
+- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
+  - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
+  - each server gets at most 120 seconds per check;
+  - the search starts at the payment's own block;
+  - each step is logged.
+
+  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39 R39.5.5, R39.11.4h, R39.11.4i.
 - **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
 - **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
   later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
@@ -244,6 +268,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
   of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
   by node instead. More in ch.35 §35.1.F.
+- **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
+  back.** Confirmations, and the decision that a transaction has expired, are now counted against
+  the current tip, not against the highest one ever seen. A lagging server can now only make a wait
+  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
+- **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node checks its
+  `light_wallet_d_servers` against each other, a server listed twice, also under a different spelling
+  such as with or without `https://` or the default port, now counts once. Before, `[A, A, B]` let A
+  outvote B with only two real servers. Each dropped duplicate is logged. Detail: PR #113; CRD ch.39
+  R39.11.7b.
 - **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
   ignored and every listed server was connected; with `max_connected: 1` only one server is connected
   now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
@@ -472,6 +505,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
+
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
+  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
+  release.
 
 - [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
   [`tron-gasfree`](docs/plans/tron-gasfree.md),

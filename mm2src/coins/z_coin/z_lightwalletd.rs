@@ -24,10 +24,10 @@
 
 mod htlc_index;
 
-pub(crate) use htlc_index::{FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef, SentOutcome,
-                            SpendOutcome};
+pub(crate) use htlc_index::{DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef,
+                            SentOutcome, SpendOutcome};
 
-use super::z_coin_wallet_db::ZCoinShieldedHistory;
+use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
@@ -170,6 +170,9 @@ pub(crate) enum EndpointError {
     NotFound(String),
     /// A service-level broadcast failure (`SendResponse.errorCode != 0`).
     Rejected { code: i32, message: String },
+    /// The server's node answered an address read with its no-address-index message (R39.11.4i(e)). It
+    /// carries the status as received. Not a serve failure of one transaction (R39.11.4b(c)).
+    NoAddressIndex(String),
 }
 
 impl fmt::Display for EndpointError {
@@ -177,8 +180,17 @@ impl fmt::Display for EndpointError {
         match self {
             EndpointError::Transport(m) | EndpointError::Service(m) | EndpointError::NotFound(m) => f.write_str(m),
             EndpointError::Rejected { code, message } => write!(f, "rejected ({}): {}", code, message),
+            EndpointError::NoAddressIndex(m) => write!(f, "the server's node keeps no address index: {}", m),
         }
     }
+}
+
+/// The node's message for a transparent-address read when it keeps no address index (R39.11.4i).
+/// Matched case-insensitively, whatever the status code it arrives under.
+pub(crate) const NO_ADDRESS_INDEX_MESSAGE: &str = "No information available for address";
+
+pub(crate) fn mentions_no_address_index(text: &str) -> bool {
+    text.to_lowercase().contains(&NO_ADDRESS_INDEX_MESSAGE.to_lowercase())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -811,6 +823,18 @@ pub(crate) struct WindowError {
     pub message: String,
 }
 
+impl From<&EndpointError> for WindowError {
+    /// Only a service answer or a "not found" is the node failing to serve a transaction of the
+    /// window. A transport failure, and the node's no-address-index answer (R39.11.4i(e)), end the
+    /// read instead of bisecting it.
+    fn from(error: &EndpointError) -> Self {
+        WindowError {
+            serve_failure: matches!(error, EndpointError::Service(_) | EndpointError::NotFound(_)),
+            message: error.to_string(),
+        }
+    }
+}
+
 /// The wire to one endpoint. A trait so the logic above it can be driven without a network.
 #[async_trait]
 pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
@@ -848,6 +872,9 @@ fn mined_height(raw: u64) -> Option<u64> {
 
 fn status_error(status: tonic::Status) -> EndpointError {
     let message = format!("{}: {}", status.code(), status.message());
+    if mentions_no_address_index(status.message()) {
+        return EndpointError::NoAddressIndex(message);
+    }
     match status.code() {
         Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Aborted | Code::ResourceExhausted => {
             EndpointError::Transport(message)
@@ -1028,16 +1055,13 @@ impl LightwalletdTransport for GrpcTransport {
         let mut stream = match Self::timed(client.get_taddress_txids(filter), "GetTaddressTxids").await {
             Ok(stream) => stream,
             Err(e) => {
-                let serve_failure = matches!(e, EndpointError::Service(_) | EndpointError::NotFound(_));
-                if !serve_failure {
+                let error = WindowError::from(&e);
+                if !error.serve_failure {
                     self.clients.lock().remove(server);
                 }
                 return WindowRead {
                     txs: Vec::new(),
-                    error: Some(WindowError {
-                        serve_failure,
-                        message: e.to_string(),
-                    }),
+                    error: Some(error),
                 };
             },
         };
@@ -1062,14 +1086,9 @@ impl LightwalletdTransport for GrpcTransport {
                 Ok(Some(Err(status))) => {
                     // The stream ends on the first transaction the node cannot serve; the
                     // transactions delivered before it are kept (R39.11.4b(e)).
-                    let error = status_error(status);
-                    let serve_failure = matches!(error, EndpointError::Service(_) | EndpointError::NotFound(_));
                     return WindowRead {
                         txs,
-                        error: Some(WindowError {
-                            serve_failure,
-                            message: error.to_string(),
-                        }),
+                        error: Some(WindowError::from(&status_error(status))),
                     };
                 },
             }
@@ -1125,6 +1144,11 @@ pub(crate) struct HistoryRead {
     /// A failure that ended the read before `to`. The transactions delivered before it are kept.
     pub failure: Option<String>,
     pub highest_received_height: Option<u64>,
+    /// The number of window requests the read made (R39.11.4h).
+    pub requests: usize,
+    /// The read ended under the unservable-heights limit of R39.11.4h(b): its gaps are artifacts of an
+    /// endpoint that refuses requests, not transactions the node cannot serve.
+    pub stopped_on_unservable_heights: bool,
 }
 
 impl HistoryRead {
@@ -1139,6 +1163,39 @@ impl HistoryRead {
 /// as a multiple of the base window. See [`read_history`].
 const HISTORY_MAX_WIDEN_FACTOR: u64 = 16;
 
+/// R39.11.4h(b): a window holding more than this many heights the endpoint could not serve ends the
+/// read. Bisection assumes a serve failure belongs to one transaction; this many failing heights in
+/// one window says it does not.
+pub(crate) const HTLC_HISTORY_MAX_UNSERVABLE_HEIGHTS: usize = 4;
+
+/// R39.11.4h(b): a read ends with a named failure after this many requests.
+pub(crate) const HTLC_HISTORY_MAX_REQUESTS: usize = 1_024;
+
+/// R39.11.4h(c): the time one endpoint may take per HTLC detection, both address forms together.
+pub(crate) const HTLC_DETECTION_ENDPOINT_BUDGET: Duration = Duration::from_secs(120);
+
+/// The limits that end a [`read_history`] with a named failure.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HistoryLimits {
+    /// The read ends once one window holds more than this many unservable heights.
+    pub max_unservable_heights_per_window: usize,
+    /// The read ends after this many requests.
+    pub max_requests: usize,
+}
+
+impl HistoryLimits {
+    /// No limit: the reader's behaviour of R39.11.4b alone.
+    pub(crate) const UNBOUNDED: HistoryLimits = HistoryLimits {
+        max_unservable_heights_per_window: usize::MAX,
+        max_requests: usize::MAX,
+    };
+    /// The limits of an HTLC detection (R39.11.4h(b)).
+    pub(crate) const HTLC: HistoryLimits = HistoryLimits {
+        max_unservable_heights_per_window: HTLC_HISTORY_MAX_UNSERVABLE_HEIGHTS,
+        max_requests: HTLC_HISTORY_MAX_REQUESTS,
+    };
+}
+
 /// Reads `from..=to` of an address's transparent history in bounded windows.
 ///
 /// * Every request is bounded by `window` (or a bounded widening of it) and both its bounds are at
@@ -1152,6 +1209,11 @@ const HISTORY_MAX_WIDEN_FACTOR: u64 = 16;
 ///   be delivered by a window that also contains a later group.
 /// * Whatever a failing stream delivered is retained.
 ///
+/// * `limits` end the read with a named failure (R39.11.4h(b)): bisection assumes a serve failure
+///   belongs to one transaction, so a window with more unservable heights than the limit, or a read
+///   that has made the permitted number of requests, stops instead of walking the range one height
+///   at a time. What was delivered so far is retained and the read is not clean.
+///
 /// Two residues cannot be repaired from here, because the service never delivers the data: the
 /// newest height group of the whole range, and a group isolated from any later group by more than
 /// the widest window. Neither is an answer; a caller that needs the newest group has to corroborate
@@ -1161,6 +1223,7 @@ pub(crate) async fn read_history<F, Fut>(
     from: u64,
     to: u64,
     window: u64,
+    limits: HistoryLimits,
     mut fetch: F,
 ) -> Result<HistoryRead, LightwalletdError>
 where
@@ -1189,8 +1252,17 @@ where
         let window_end = cursor.saturating_add(width - 1).min(to);
         let mut window_highest: Option<u64> = None;
         let mut window_gap_max: Option<u64> = None;
+        let mut window_unservable: usize = 0;
         let mut pending = vec![(cursor, window_end)];
         while let Some((start, end)) = pending.pop() {
+            if out.requests >= limits.max_requests {
+                out.failure = Some(format!(
+                    "the read made {} requests without completing the range {}..={}; stopped at {}..={}",
+                    out.requests, from, to, start, end
+                ));
+                return Ok(out);
+            }
+            out.requests += 1;
             let read = fetch(start, end).await;
             for tx in read.txs {
                 if let Some(height) = tx.height {
@@ -1208,6 +1280,16 @@ where
                     if start == end {
                         out.gaps.push(start);
                         window_gap_max = Some(window_gap_max.map_or(start, |g| g.max(start)));
+                        window_unservable += 1;
+                        if window_unservable > limits.max_unservable_heights_per_window {
+                            out.stopped_on_unservable_heights = true;
+                            out.failure = Some(format!(
+                                "could not serve {} heights of window {}..={} (last error: {}); the failure is not \
+                                 confined to single transactions",
+                                window_unservable, cursor, window_end, error.message
+                            ));
+                            return Ok(out);
+                        }
                     } else {
                         let mid = start + (end - start) / 2;
                         // Lower half first.
@@ -1259,6 +1341,11 @@ impl FreshTip {
     /// The height the coin reports and scans towards: never lower than one already observed
     /// (R39.11.10).
     pub(crate) fn monotonic(&self) -> u64 { self.read.max(self.highest_before) }
+
+    /// The height confirmations and expiry are judged against: the tip just read, not the highest
+    /// ever observed (R39.11.10a). A lagging or reorganized endpoint then delays those decisions
+    /// instead of overcounting a payment's confirmations.
+    pub(crate) fn confirmation_height(&self) -> u64 { self.read }
 }
 
 /// The target height every shielded construction path hands its builder (R39.11.11): the
@@ -1315,6 +1402,13 @@ pub(crate) struct LightwalletdBackend {
     cached: Mutex<Option<CachedAdmission>>,
     evaluating: AsyncMutex<()>,
     highest_tip: AtomicU64,
+    /// The time one endpoint may take per HTLC detection (R39.11.4h(c)).
+    endpoint_budget: Duration,
+    /// Endpoints whose node keeps no address index, with the node's message (R39.11.4i). Kept for
+    /// the life of this backend; admission re-evaluation does not clear it.
+    no_address_index: Mutex<HashMap<String, String>>,
+    /// What the HTLC detection in flight for a redeem-script hash read last (R39.5.5).
+    detection_progress: Mutex<HashMap<[u8; 20], String>>,
 }
 
 impl fmt::Debug for LightwalletdBackend {
@@ -1332,6 +1426,15 @@ impl LightwalletdBackend {
         policy: AdmissionPolicy,
         addressing: HtlcAddressing,
     ) -> Self {
+        // Every construction path ends here, so each endpoint votes once everywhere (R39.11.7b).
+        let (servers, duplicates) = dedupe_lightwalletd_endpoints(servers);
+        for (dropped, kept) in &duplicates {
+            common::log::warn!(
+                "lightwalletd endpoint {} names the same endpoint as {} and is ignored",
+                dropped,
+                kept
+            );
+        }
         LightwalletdBackend {
             transport,
             servers,
@@ -1342,7 +1445,16 @@ impl LightwalletdBackend {
             cached: Mutex::new(None),
             evaluating: AsyncMutex::new(()),
             highest_tip: AtomicU64::new(0),
+            endpoint_budget: HTLC_DETECTION_ENDPOINT_BUDGET,
+            no_address_index: Mutex::new(HashMap::new()),
+            detection_progress: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_budget(mut self, budget: Duration) -> Self {
+        self.endpoint_budget = budget;
+        self
     }
 
     pub(crate) fn bind_wallet(&self, store: Arc<dyn WalletBranchStore>) {
@@ -1504,6 +1616,12 @@ impl LightwalletdBackend {
         self.fresh_tip().await.map(|tip| tip.monotonic())
     }
 
+    /// The tip confirmations and expiry are judged against: the fresh read, never the monotonic
+    /// height (R39.11.10a).
+    pub(crate) async fn confirmation_tip(&self) -> Result<u64, LightwalletdError> {
+        self.fresh_tip().await.map(|tip| tip.confirmation_height())
+    }
+
     /// What `GetLightdInfo` reports, from the first admitted endpoint that answers.
     pub(crate) async fn server_info(&self) -> Result<ServerInfo, LightwalletdError> {
         self.call("GetLightdInfo", |t, s| async move { t.light_info(&s).await }.boxed())
@@ -1663,7 +1781,7 @@ impl LightwalletdClient {
             }
 
             match self.raw_transaction(&tx_hash).await {
-                Ok(raw) => match self.0.chain_tip().await {
+                Ok(raw) => match self.0.confirmation_tip().await {
                     Ok(tip) => {
                         let depth = confirmation_depth(tip, raw.height);
                         if depth >= u64::from(confirmations) {
@@ -1680,7 +1798,7 @@ impl LightwalletdClient {
                 },
                 Err(fetch_error) => {
                     if expiry_height > 0 {
-                        match self.0.chain_tip().await {
+                        match self.0.confirmation_tip().await {
                             Ok(tip) if tip > u64::from(expiry_height) => {
                                 return Err(match fetch_error {
                                     LightwalletdError::NoSuchTransaction(_) => {
@@ -1902,7 +2020,11 @@ impl UtxoRpcClientOps for LightwalletdClient {
                     return ERR!("HTLC spend detection over lightwalletd searches from a height, not a block hash")
                 },
             };
-            match this.0.detect_output_spend(&output, from).await {
+            let log = DetectionLog {
+                coin: "an unnamed coin",
+                polling: false,
+            };
+            match this.0.detect_output_spend(&output, from, &log).await {
                 Ok(SpendOutcome::NotSpent(_)) => Ok(None),
                 Ok(SpendOutcome::Spent(spend)) => {
                     // The shared UTXO transaction type cannot read version 5 or 6, so a ZHTLC coin's

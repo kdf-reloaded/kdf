@@ -330,6 +330,49 @@ another swap still hits the hard stop; its message prints the transaction id
 in display order and says both keys were tried. A UTXO-coin case shows
 recovery unchanged there.
 
+R39.5.5 *Recovery returns within a bound and names its stage.*
+`recover_funds_of_swap` shall return within 10 minutes, for every coin and
+on both the maker and the taker side. Recovery keeps track of the stage it is
+in and logs one line at `info` as each stage starts, naming the coin and the
+payment. The stages are:
+
+- resolving the HTLC key for a payment (R39.5.4);
+- checking whether this node's own payment was sent;
+- searching for a spend of a payment;
+- spending the counterparty's payment;
+- refunding this node's payment.
+
+When the bound is reached, the work in flight is dropped and the call
+returns an error naming the stage and the coin. If the stage was a shielded
+coin's HTLC detection, the error also names the endpoint and address form
+that detection was reading last (R39.11.4h). If the stage was a spend or a
+refund, the error also says that the transaction may already have been
+broadcast, so the chain has to be checked before the outcome is assumed.
+
+A shielded coin's HTLC spend and refund log their own steps at `info`: the
+builder's target height, the build, and the broadcast with the transaction
+id. Shielded spend detection is bounded per endpoint by R39.11.4h, so on a
+shielded coin this bound is a backstop. The response of a successful call
+keeps its shape (R39.5.4).
+
+> **Provenance and reason (2026-10-28).** Clean-room original; this is a
+> Reloaded defect, not a reference question. A field test of R39.5.4
+> recovered a September shielded swap: the key-match line was logged, and
+> then the call never returned while the process sat idle. Nothing after the
+> key match had a total bound or progress output, so there was no way to
+> tell which stage was waiting.
+
+T39.5.5 *Bounded recovery.* With a deliberately short bound, tests shall show
+that:
+
+- a recovery whose spend search never completes returns the error naming
+  the search stage and the coin; on a shielded coin it also names the
+  endpoint and address form read last;
+- a recovery that stalls while refunding names the refund stage and says the
+  transaction may already have been broadcast;
+- a recovery that completes within the bound returns the same response as
+  before.
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -646,8 +689,16 @@ no Ironwood height anywhere shall keep constructing version 4 at every height.
   exception is a failed timestamp search once the server has itself reported Ironwood:
   the exact height then refines only *past* heights, and costs nothing about a new
   transaction's version.
-- (e) **Native mode** has no lightwalletd and therefore no discovery; it builds version 6
-  only from a configured height.
+- (e) **Native mode** builds nothing in this release: its activation is refused
+  (R39.11.1a), so no native-mode transaction reaches the builder and no version is ever
+  chosen for one. Native mode returns in v0.4.0 together with discovery of the
+  activation from its own daemon (`docs/plans/arrr-native-and-ironwood-pool.md`).
+
+  > **Provenance of (e) (2026-10-28).** Clean-room original Reloaded policy, decided by
+  > the maintainer. A Pirate Chain developer reported that native mode kept building
+  > version 4 when no Ironwood height was configured. The fix chosen for this release is
+  > the refusal of R39.11.1a, not discovery. The earlier text allowed version 6 only from
+  > a configured height.
 - (f) **Build capability.** With (a)-(d) in place `IRONWOOD_V6_SUPPORTED` is true, which
   makes R39.6.4b and R39.6.4c inert by their own terms.
 
@@ -3177,6 +3228,30 @@ definition -- and are fixed by that specification, not by this project.
 > one caller that needs bytes and height (`validate_fee`) reads them from
 > `GetTransaction`. Notarized depth: see R39.11.4e.
 
+R39.11.1a **Native mode is refused in this release.** An activation request for a
+shielded coin with `mode.rpc` `Native` shall fail before any shielded work begins.
+It fails as a configuration error naming the coin, in the same error shape the
+activation already uses for an empty `light_wallet_d_servers` list. The message
+says native mode is not supported in this release and that light mode should be
+used. No backend, wallet database, or scan is created for the refused request.
+Light mode is unaffected. The native-mode text elsewhere in this chapter describes
+code that stays in the tree for a later release. It binds nothing that a node can
+reach while this rule stands.
+
+> **Provenance and reason (2026-10-28).** Clean-room original Reloaded policy,
+> decided by the maintainer. In this repository the native path cannot build a
+> working wallet for a fresh activation, because a full node's blocks do not feed
+> the compact-block cache (the status update under R39.8.0f). It also could not tell which transaction
+> version to build after Ironwood. Native mode, the Ironwood pool, and the
+> daemon-side activation discovery are planned for v0.4.0 in
+> `docs/plans/arrr-native-and-ironwood-pool.md`. The reference accepts native
+> mode; the divergence is listed in `docs/GLEEC_COMPATIBILITY.md`.
+
+T39.11.1a *Native mode refused.* An activation request with `mode.rpc` `Native`
+fails with the configuration error naming the coin and the light-mode advice,
+and leaves no backend, wallet database or scan state behind. A Light-mode request
+for the same coin still activates.
+
 R39.11.2 **Unconfirmed evidence remains asymmetric, and shall stay so even
 though one service now answers both sides.** The *only* source of mempool
 membership for a shielded transaction is the streaming mempool method
@@ -3596,6 +3671,143 @@ swap helpers reach it through the trait.
 > `estimate_fee_sat`, `get_relay_fee`, `find_output_spend`) return an explicit typed
 > unsupported error, never a zero or empty stand-in.
 
+R39.11.4h **HTLC detection is bounded per endpoint and reports its progress.**
+Spend detection and already-sent detection (R39.11.4d) read the transparent
+history through the windowed reader of R39.11.4b. That reader's bisection
+(R39.11.4b(c)) assumes that a serve failure belongs to one transaction. An
+endpoint whose failure is not tied to one transaction breaks that assumption,
+for example a server whose node has no address index and refuses every history
+request. Such an endpoint would be bisected down to every single height of the
+range, at about two requests per block and without a word: tens of thousands
+of requests for a swap a few weeks old. The implementation shall therefore:
+
+- (a) start the spend-detection window at the funding transaction's mined
+  height when the endpoint reports one, never below the Sapling floor. A spend
+  cannot precede its funding, so a caller's search start below that height is
+  not read. When the funding height is not known, the caller's start applies
+  as before.
+- (b) end a history read with a named failure, instead of bisecting further,
+  once one window holds more than 4 heights the endpoint could not serve. The
+  failure states how many heights of which window could not be served, carries
+  the endpoint's last error text as received, and says that the failure is not
+  confined to single transactions. A read also ends
+  with a named failure after 1,024 requests. Either failure leaves that
+  endpoint's answer undetermined for this detection (R39.11.4b(f)), and the
+  next admitted endpoint is tried. A read answered with the node's
+  no-address-index message never reaches this bound: it ends at its first
+  request (R39.11.4i(e)).
+- (c) give each endpoint a time budget of 120 seconds per detection, covering
+  both address forms. An endpoint that exceeds it counts as failed for this
+  detection, with an error naming the endpoint, the address form and the read
+  it was in. The next admitted endpoint is tried.
+- (d) log one line at `info` for each of these:
+  - the start of a detection: the coin, the funding transaction and its state,
+    the height range, and the number of admitted endpoints;
+  - each endpoint and address form: transactions and unspent rows found, gaps,
+    requests made, elapsed time, and the failure if the read stopped;
+  - the decision, or the failure of every endpoint.
+
+  A detection run by a polling wait (waiting for the counterparty to spend)
+  repeats every few seconds, so it logs these lines at `debug`.
+
+None of this changes when a decision may be negative. An endpoint stopped under
+(b) or (c) is undetermined, never "not spent" or "not sent".
+
+> **Provenance and reason (2026-10-28).** Clean-room original; this is a
+> Reloaded defect, not a reference question. Recovery of a September shielded
+> swap logged its key match and then did not return, with the process idle
+> (R39.5.5). The windowed reader had no bound on its number of requests and
+> produced no progress output. On that day, two endpoints of the coin's
+> published server list answered every transparent-history and UTXO request,
+> for both address forms, with status Unknown and the node's message "-5: No
+> information available for address": their node keeps no address index. They
+> pass admission, because server information and transaction lookup work. Each
+> refusal was read as a serve failure and bisected, so a range of about 33,500
+> blocks cost about 67,000 requests per address form on each of them. That is
+> roughly 40 minutes per endpoint, with nothing logged. Under (b), such an
+> endpoint stops after about 20 requests. The other reachable endpoints of the
+> list served the same reads over the HTLC of another September swap fast and
+> clean: both address forms, the funding and the refund delivered in one
+> window, and each 1,000-block window answered in under a fifth of a second.
+> That probe also saw the newest height group delivered, which R39.11.4b's
+> status update had left unmeasured. The detection still does not depend on it.
+
+T39.11.4h *Bounded HTLC detection.* Against scripted endpoints, tests shall show
+that:
+
+- an endpoint that answers every history request with a serve failure is
+  stopped after a small, asserted number of requests over a range of 30,000
+  blocks, with the named failure. A second endpoint that answers cleanly then
+  decides the detection;
+- a read that keeps advancing one height per request stops after 1,024
+  requests, with the named failure;
+- an endpoint that exceeds its time budget counts as failed, with an error
+  naming the endpoint and the address form, and the next endpoint decides;
+- a funding transaction mined far above, and one far below, the caller's
+  search start is read from its own height, and a spend after it is found;
+- an endpoint stopped under (b) or (c), with no other endpoint, leaves the
+  detection undetermined, never "not spent".
+
+R39.11.4i **An endpoint without an address index is marked and skipped.** An
+endpoint keeps no address index if it answers a transparent-history or UTXO read
+of an HTLC detection with the node's message "No information available for
+address", and no HTLC detection can succeed on it. The implementation shall
+mark such an endpoint "no address index" for the rest of the coin's activation:
+
+- (a) the first time, it logs one line at `warn` naming the endpoint and
+  carrying the node's message;
+- (b) every later detection skips the endpoint without sending it a request.
+  When a detection is left undetermined, its error text lists the endpoint as
+  skipped for having no address index;
+- (c) when every admitted endpoint is marked, a detection fails at once. The
+  error names those endpoints and says that HTLC detection needs a server
+  whose node keeps an address index (R39.11.17);
+- (d) the mark is cleared only when the coin is activated again. Re-evaluating
+  admission (R39.11.7a(g)) does not clear it, because a server-information read
+  cannot show whether the index exists;
+- (e) a transparent-history or UTXO read answered with that message ends at
+  once. It is not a serve failure of R39.11.4b(c): the window is not bisected
+  and no height is recorded as a gap. Its failure says that the server's node
+  keeps no address index and carries the node's message. It is never explained
+  as a missing transaction index, because the node's transaction index has
+  nothing to do with it.
+
+A marked endpoint is undetermined, as in R39.11.4h. The mark never makes a
+detection negative, and it does not affect any other use of the endpoint: tip,
+transactions, compact blocks and broadcast.
+
+> **Provenance and reason (2026-10-28).** Clean-room original. The endpoints
+> described under R39.11.4h refuse every address read in the same way, so under
+> R39.11.4h alone each detection would still spend a few requests and a log line
+> on them. Detection runs on every poll of a live swap.
+>
+> **Amendment (2026-10-28), item (e).** A fresh swap's already-sent check reads
+> a range of one block. A refusal there produced a single gap, below the stop
+> of R39.11.4h(b), so the gap was reported with the transaction-index
+> explanation of R39.11.4b. An operator whose node runs with its transaction
+> index on, and without the address index, saw a maker payment fail with that
+> explanation, which pointed at the wrong setting.
+
+T39.11.4i *No address index.* Against scripted endpoints, tests shall show
+that:
+
+- an endpoint answering the address reads with that message is marked during
+  the first detection, and the next endpoint decides;
+- a second detection sends the marked endpoint no request;
+- with every admitted endpoint marked, a detection fails at once with the
+  named error and sends no request;
+- a backend built anew (a new activation) starts with no endpoint marked;
+- the marked endpoint still serves the tip and transaction lookups;
+- (e) a one-block history read and a UTXO read answered with that message
+  each cost one request and record no gap. The detection's error says that the
+  server's node keeps no address index, carries the node's message, and does
+  not mention a transaction index;
+- (e) over a range of many windows, the same refusal ends the read after its
+  first request;
+- a genuine per-transaction serve failure, one not carrying that message,
+  is still bisected and reported as a gap with the transaction-index
+  explanation.
+
 ### 39.11.2 What activation requires of the backend
 
 R39.11.5 **A non-empty `light_wallet_d_servers` list is mandatory for Light mode;
@@ -3826,6 +4038,33 @@ precise opposite of the intent. The rule shall therefore be:
 > against a stale-cache endpoint has not been done (the criterion was evaluated against the
 > real endpoint set with the monitor script's readings, not with the daemon).
 
+R39.11.7b **Each endpoint votes once.** Before admission (R39.11.7a), the
+configured `light_wallet_d_servers` list shall be normalized and
+de-duplicated, keeping the configured order and the first spelling of each
+endpoint. Two entries name the same endpoint when they agree after
+normalization: scheme (an entry without one takes the scheme the client would
+use), lowercase host, port (the scheme's default when none is given), and no
+trailing slash. Each dropped duplicate is logged once as a warning naming
+both spellings. The branch vote, the "at least two endpoints" condition, and
+every other count in admission then see each endpoint once, so the list
+`[A, A, B]` is two endpoints and cannot produce a 2-to-1 majority. An empty
+list after de-duplication is refused as an empty list is today.
+
+Normalization cannot recognize one server published under two different host
+names, or behind two addresses. Such a server still votes twice; the
+configuration is responsible for listing independent endpoints.
+
+> **Provenance (2026-10-26).** Clean-room original Reloaded policy, written
+> from this repository's code and a report by a Pirate Chain developer; no
+> forbidden-corpus input. It adds to R39.11.7a without editing its gated
+> text.
+
+T39.11.7b *Duplicate endpoints.* `[A, A, B]` with A and B on different
+branches fails admission with no majority (one vote each), not a 2-to-1 win
+for A. `[https://a.example:443/, a.example, B]` keeps two endpoints, in
+configured order. A list made only of one endpoint's spellings is a single
+endpoint and is treated as one.
+
 ### 39.11.3 Chain-height authority
 
 R39.11.8 **Every consumer of the chain height.** The admitted backend's tip is
@@ -3924,6 +4163,36 @@ a lower tip from an honest endpoint. Therefore:
 > scanner's only rewind trigger remains the hash-link rule of R39.8.0n). No lag
 > threshold constant exists. The test covers the monotonic floor; the hash-link
 > half is covered by the existing R39.8.0n tests.
+
+R39.11.10a **Confirmations and expiry are judged against a fresh tip.** The
+monotonic height of R39.11.10 serves reporting, scanning and the builder
+target height (R39.11.11) only. Two decisions shall instead use the tip just
+read from an admitted endpoint (the fresh read, not the highest height ever
+observed):
+
+- the confirmation count of a transaction (`tip + 1 - mined height`, zero
+  when the height is above that tip), and so every wait for a number of
+  confirmations;
+- the decision that a transaction has expired because the tip has passed its
+  expiry height.
+
+A lagging endpoint then delays both decisions, which is the safe direction:
+a payment is never counted as confirmed, and a transaction never declared
+expired, on the strength of a height the chain no longer has. Under the
+monotonic height, a reorganization that lowered the tip would overcount a
+payment's confirmations by the difference.
+
+> **Provenance (2026-10-26).** Clean-room original Reloaded policy, written
+> from this repository's code and a report by a Pirate Chain developer; no
+> forbidden-corpus input. It refines R39.11.10 without editing its gated
+> text.
+
+T39.11.10a *Fresh tip for confirmations.* With a highest observed tip of 110
+and a fresh read of 105, a transaction mined at 105 has 1 confirmation, not 6.
+A wait for 2 confirmations does not finish until a fresh read reaches 106.
+A transaction with expiry height 107 is not declared expired while the fresh
+read is 105, although the highest observed tip is 110. The reported height
+stays 110.
 
 R39.11.11 **Every shielded transaction construction path shall take its builder
 target height from the one authority of R39.11.9.** *(Retained unchanged in
@@ -4632,6 +4901,13 @@ different cause. At least one live endpoint was observed in this state on
   HTLC script with the swap's own per-swap key, so a refunded payment is
   reported as refunded, a spent one yields its secret, and an expired one is
   refunded (T39.5.4).
+- Bounded recovery (§39.5, R39.5.5; R39.11.4h): `recover_funds_of_swap`
+  returns within 10 minutes and names the stage it stopped in. Shielded HTLC
+  detection stops an endpoint that cannot serve the history, after a few
+  requests or 120 seconds, tries the next endpoint, and logs each endpoint and
+  address form it read. An endpoint whose node keeps no address index is
+  marked and skipped for the rest of the activation (T39.5.5, T39.11.4h,
+  T39.11.4i).
 - History order and unmined sends (§39.8.5.1): by default an own shielded send
   is served from broadcast on, ahead of every mined row, with its final
   amounts, and moves to its block's position once mined (R39.8.9i, decided in
