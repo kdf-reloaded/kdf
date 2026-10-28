@@ -389,7 +389,10 @@ is honored only for topics in this node's own mesh; a relay that
 subscribes to no orderbook topic therefore neither announces nor
 requests message ids for them. Peer scoring stays off (R14), so reaching
 any of these limits penalises nobody. The per-peer caps are
-post-baseline hardening carried by the pinned fork (V5).
+post-baseline hardening carried by the pinned fork (V5). The send queue
+that carries these exchanges is bounded separately by §28.9B RQ1:
+IHAVE and IWANT are control RPCs there, while messages sent in reply to
+IWANT count as data.
 
 **R14.** The substrate MUST NOT enable the peer-scoring / reputation
 extension present in the standard gossipsub implementation. Abusive-peer
@@ -720,6 +723,38 @@ queue per connection of the RPCs waiting to be written to that peer.
 7. **Settings.** The two limits and the 60-second period are fixed
    values of the vendored gossipsub crate. Its configuration builder
    MAY override them, for tests. They are not an `MM2.json` setting.
+8. **Pressure signal** *(amendment, maintainer decision AO,
+   2026-10-28).* The handler reports a pressure level to the application
+   for each connection:
+   - *raised* when the data queue reaches 256 RPCs, or a period at the
+     cap of item 5 starts;
+   - *cleared* when the data queue has drained to 64 RPCs or fewer and no
+     period at the cap is running.
+
+   Each change is reported once. A closed connection counts as cleared.
+   The handler also makes available, for metrics, its data-queue length
+   and its count of dropped data RPCs. The application uses the signal
+   for the maker publication budget of
+   [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP2 and the counts
+   for R-MP5. The thresholds are fixed values of the vendored crate,
+   which its configuration builder MAY override for tests.
+9. **Priority lane** *(amendment, maintainer decision AO option C,
+   2026-10-28).* A published or forwarded message the application marks
+   as *priority* is queued in a separate first-in-first-out lane of the
+   same connection. The handler writes every RPC in the priority lane
+   before any RPC of the queue of items 1 to 4.
+   - **Marking.** The application marks priority when it publishes and
+     when it lets a validated message propagate. Gossipsub does not tell
+     message kinds apart itself. Which messages are priority is bound by
+     [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP1 item 2.
+   - **Never dropped.** A priority RPC does not count toward the cap of
+     item 2 and is never dropped under item 4.
+   - **Own cap.** When the priority lane already holds 256 RPCs and
+     another would be queued, the node closes that connection, as under
+     item 5, and logs it as in item 6. Such a peer is not reading at all.
+   - **Order across lanes.** A priority message may reach the peer before
+     a non-priority message published earlier. Messages within one lane
+     keep their order.
 
 *Rationale.* A peer that stops reading the gossip stream, or reads more
 slowly than messages arrive, stalls the outbound stream at the
@@ -797,6 +832,14 @@ the keep-alive synchronization.
   before the period ends is not.
 - **T-RQ1.7** *Rate-limited logging.* The drop warning appears once; later
   drops log at most one summary line per period.
+- **T-RQ1.8** *Pressure signal.* Filling a paused peer's queue to 256 data
+  RPCs raises the signal once. Draining to 64 clears it once. A period at
+  the cap raises it, and closing the connection clears it.
+- **T-RQ1.9** *Priority lane.*
+  - With the data queue at its cap toward a paused peer, a priority
+    message is not dropped, and after resume it arrives before the queued
+    data messages.
+  - A 257th queued priority RPC closes the connection.
 
 ## 28.10 Tests (test invariants)
 

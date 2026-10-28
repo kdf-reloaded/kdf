@@ -2017,6 +2017,30 @@ pub(crate) fn electrum_client_over_stub(
     })
 }
 
+/// An Electrum client over several loopback stub servers, ranked in the given order, with the default pool settings
+/// (read spreading on). Returns once every server is in the maintained set.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_server::StubServer]) -> ElectrumClient {
+    let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    for server in servers {
+        client.add_server(&server.request()).expect("a stub is a usable server");
+    }
+    let client = Arc::new(client);
+    client
+        .activation_probe()
+        .await
+        .expect("the stubs accept the connection");
+    let started = std::time::Instant::now();
+    while client.count_connected().await < servers.len() {
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the stubs did not all join the maintained set"
+        );
+        common::executor::Timer::sleep(0.01).await;
+    }
+    ElectrumClient(client)
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod p2pk_batch_tests {
     use super::*;

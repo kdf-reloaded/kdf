@@ -68,6 +68,19 @@ fn pool_client_ordered(
     timings: ElectrumPoolTimings,
     order: ServerOrder,
 ) -> Arc<ElectrumClientImpl> {
+    // These tests are about the priority order; the spreading has its own tests.
+    pool_client_configured(requests, min_connected, max_connected, timings, order, false)
+}
+
+/// Like [`pool_client_ordered`], with `electrum_spread_reads` (R38.6.4a item 5) set as given.
+fn pool_client_configured(
+    requests: Vec<ElectrumRpcRequest>,
+    min_connected: usize,
+    max_connected: Option<usize>,
+    timings: ElectrumPoolTimings,
+    order: ServerOrder,
+    spread_reads: bool,
+) -> Arc<ElectrumClientImpl> {
     let mut client = ElectrumClientImpl::new(TICKER.into(), vec![]);
     client.configure_pool(ElectrumPoolOptions {
         min_connected,
@@ -75,21 +88,24 @@ fn pool_client_ordered(
         client_name: Some(CLIENT_NAME.into()),
         timings,
         order,
+        spread_reads,
     });
     // A server that cannot be used stays in the pool as removed; the tests look at the snapshot.
     let _ = client.add_servers(&requests);
     Arc::new(client)
 }
 
-fn rpc(method: &str, params: Vec<Json>) -> JsonRpcRequestEnum {
+fn rpc_item(method: &str, params: Vec<Json>) -> JsonRpcRequest {
     static IDS: TestCounter = TestCounter::new(1_000_000);
-    JsonRpcRequestEnum::Single(JsonRpcRequest {
+    JsonRpcRequest {
         jsonrpc: "2.0".into(),
         id: format!("t{}", IDS.fetch_add(1, AtomicOrdering::Relaxed)),
         method: method.into(),
         params,
-    })
+    }
 }
+
+fn rpc(method: &str, params: Vec<Json>) -> JsonRpcRequestEnum { JsonRpcRequestEnum::Single(rpc_item(method, params)) }
 
 async fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
     let started = Instant::now();
@@ -1436,4 +1452,284 @@ fn t38_6_4_13_r_each_server_comes_first_about_equally_often() {
             "server {server} came first {count} times of 900: {first:?}"
         );
     }
+}
+
+// ---- CRD ch.38 R38.6.4a: spreading read-only queries over the maintained sessions ------------------------------------
+
+/// Three answering servers ranked in the listed order, all in the maintained set, with spreading as given.
+async fn three_maintained(spread_reads: bool) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    let servers = three_answering().await;
+    let client = pool_client_configured(
+        servers.iter().map(|server| server.request()).collect(),
+        1,
+        None,
+        test_timings(),
+        ServerOrder::Listed,
+        spread_reads,
+    );
+    client.pool.run_pass().await;
+    assert_eq!(maintained(&client), vec![0, 1, 2]);
+    (servers, client)
+}
+
+/// Routes `request` and returns the address of the server that answered.
+async fn route_to(client: &ElectrumClientImpl, request: JsonRpcRequestEnum) -> Result<String, String> {
+    let budget = client.pool.timings.call_budget;
+    client.pool.route(request, budget).await.map(|(addr, _)| addr.0)
+}
+
+fn batch_of(methods: &[&str]) -> JsonRpcRequestEnum {
+    JsonRpcRequestEnum::new_batch(methods.iter().map(|m| rpc_item(m, vec![json!("aa")])).collect())
+}
+
+/// How many request messages each server got that are not the connection's own traffic.
+fn messages_per_server(servers: &[StubServer; 3]) -> Vec<usize> {
+    servers.iter().map(|server| server.request_messages().len()).collect()
+}
+
+/// Every method this client sends that is a read-only query in the sense of R38.6.4a item 1 is on the list, and
+/// nothing else is: a broadcast, every subscription but the one-shot tip read, the ping and the negotiation.
+#[test]
+fn t38_6_4_14_the_read_only_methods_are_the_closed_list_of_the_chapter() {
+    use super::electrum_pool::is_read_only;
+    for method in [
+        "blockchain.scripthash.get_balance",
+        "blockchain.scripthash.listunspent",
+        "blockchain.scripthash.get_history",
+        "blockchain.block.header",
+        "blockchain.block.headers",
+        "blockchain.headers.subscribe",
+        "blockchain.transaction.get",
+        "blockchain.estimatefee",
+        "blockchain.relayfee",
+    ] {
+        assert!(is_read_only(&rpc(method, vec![])), "{method}");
+    }
+    for method in [
+        "blockchain.transaction.broadcast",
+        "blockchain.scripthash.subscribe",
+        "blockchain.contract.event.subscribe",
+        "server.ping",
+        "server.version",
+        "blockchain.transaction.get_merkle",
+        "blockchain.contract.call",
+        "not.a.method",
+    ] {
+        assert!(!is_read_only(&rpc(method, vec![])), "{method}");
+    }
+    // A batch is read-only only if every element is.
+    assert!(is_read_only(&batch_of(&[
+        "blockchain.scripthash.get_balance",
+        "blockchain.scripthash.listunspent"
+    ])));
+    assert!(!is_read_only(&batch_of(&[
+        "blockchain.scripthash.get_balance",
+        "blockchain.transaction.broadcast"
+    ])));
+    assert!(!is_read_only(&batch_of(&[])));
+}
+
+#[test]
+fn t38_6_4_14_reads_go_round_the_maintained_sessions_in_turn() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        let mut answered = Vec::new();
+        for _ in 0..7 {
+            answered.push(ask(&client, "blockchain.block.header").await.unwrap());
+        }
+        let addr = |i: usize| servers[i].addr();
+        assert_eq!(answered, vec![
+            addr(0),
+            addr(1),
+            addr(2),
+            addr(0),
+            addr(1),
+            addr(2),
+            addr(0)
+        ]);
+        assert_eq!(messages_per_server(&servers), vec![3, 2, 2]);
+    });
+}
+
+#[test]
+fn t38_6_4_14_the_other_read_methods_spread_too() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        for method in [
+            "blockchain.scripthash.get_balance",
+            "blockchain.scripthash.listunspent",
+            "blockchain.scripthash.get_history",
+            "blockchain.headers.subscribe",
+            "blockchain.transaction.get",
+            "blockchain.estimatefee",
+        ] {
+            let answered = ask(&client, method).await.unwrap();
+            let turn = (0..3).find(|i| servers[*i].addr() == answered).unwrap();
+            assert_eq!(servers[turn].requests(method), 1, "{method}");
+        }
+        // Six reads over three sessions: two each.
+        assert_eq!(messages_per_server(&servers), vec![2, 2, 2]);
+    });
+}
+
+#[test]
+fn t38_6_4_14_a_broadcast_a_subscription_and_a_ping_keep_the_priority_routing() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        let first = servers[0].addr();
+        // A read first, so that the turn has moved on; the others must not follow it.
+        assert_eq!(ask(&client, "blockchain.block.header").await.unwrap(), first);
+        for _ in 0..3 {
+            assert_eq!(ask(&client, "blockchain.transaction.broadcast").await.unwrap(), first);
+            assert_eq!(
+                route_to(&client, rpc("blockchain.scripthash.subscribe", vec![json!("aa")]))
+                    .await
+                    .unwrap(),
+                first
+            );
+            assert_eq!(
+                route_to(&client, rpc("blockchain.contract.event.subscribe", vec![]))
+                    .await
+                    .unwrap(),
+                first
+            );
+        }
+        assert_eq!(servers[0].requests("blockchain.transaction.broadcast"), 3);
+        assert_eq!(servers[0].requests("blockchain.scripthash.subscribe"), 3);
+        assert_eq!(servers[1].ordinary_requests() + servers[2].ordinary_requests(), 0);
+
+        // The ping goes over every maintained session at once, as before.
+        assert_eq!(ask(&client, "server.ping").await.unwrap(), first);
+        assert!(servers.iter().all(|server| server.requests("server.ping") == 1));
+
+        // Those did not move the turn: the next read is the second server's.
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[1].addr()
+        );
+    });
+}
+
+#[test]
+fn t38_6_4_14_a_batch_of_reads_spreads_and_a_batch_with_a_non_read_does_not() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        let reads = ["blockchain.scripthash.get_balance", "blockchain.scripthash.listunspent"];
+        let mut answered = Vec::new();
+        for _ in 0..3 {
+            answered.push(route_to(&client, batch_of(&reads)).await.unwrap());
+        }
+        assert_eq!(answered, servers.iter().map(StubServer::addr).collect::<Vec<_>>());
+
+        // A batch with one broadcast in it keeps the priority routing, three times over.
+        let mixed = ["blockchain.scripthash.get_balance", "blockchain.transaction.broadcast"];
+        for _ in 0..3 {
+            assert_eq!(route_to(&client, batch_of(&mixed)).await.unwrap(), servers[0].addr());
+        }
+        assert_eq!(messages_per_server(&servers), vec![4, 1, 1]);
+    });
+}
+
+#[test]
+fn t38_6_4_14_a_read_whose_session_fails_falls_back_to_the_other_sessions() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[0].addr()
+        );
+
+        // The second session is next in turn and never answers: the read goes on to the third.
+        servers[1].set_behavior(StubBehavior::BlackHoleRequests).await;
+        let started = Instant::now();
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[2].addr()
+        );
+        assert!(started.elapsed() < ms(3_000), "{:?}", started.elapsed());
+        assert_eq!(servers[1].requests("blockchain.block.header"), 1);
+        assert!(!snap(&client, 1).maintained, "the failed session is closed and demoted");
+    });
+    block_on(async {
+        // The turn is the second session's, and the second and the third are dead: the read comes round to
+        // the first, one attempt at a time, within the call budget (R38.6.4j keeps its arithmetic).
+        let (servers, client) = three_maintained(true).await;
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[0].addr()
+        );
+        servers[1].set_behavior(StubBehavior::BlackHoleRequests).await;
+        servers[2].set_behavior(StubBehavior::BlackHoleRequests).await;
+        let started = Instant::now();
+        let answered = ask(&client, "blockchain.block.header").await.unwrap();
+        assert_eq!(answered, servers[0].addr());
+        assert!(
+            started.elapsed() < client.pool.timings.call_budget,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(servers[1].requests("blockchain.block.header"), 1);
+        assert_eq!(servers[2].requests("blockchain.block.header"), 1);
+    });
+}
+
+#[test]
+fn t38_6_4_14_with_spreading_off_every_read_goes_to_the_first_ranked_server() {
+    block_on(async {
+        let (servers, client) = three_maintained(false).await;
+        for _ in 0..6 {
+            assert_eq!(
+                ask(&client, "blockchain.block.header").await.unwrap(),
+                servers[0].addr()
+            );
+        }
+        assert_eq!(
+            route_to(&client, batch_of(&["blockchain.scripthash.get_balance"]))
+                .await
+                .unwrap(),
+            servers[0].addr()
+        );
+        assert_eq!(messages_per_server(&servers), vec![7, 0, 0]);
+    });
+}
+
+#[test]
+fn t38_6_4_14_a_directed_request_is_not_affected() {
+    block_on(async {
+        let (servers, client) = three_maintained(true).await;
+        for _ in 0..3 {
+            let (addr, _) = client
+                .pool
+                .route_directed(rpc("blockchain.block.header", vec![]), &servers[2].addr())
+                .await
+                .unwrap();
+            assert_eq!(addr.0, servers[2].addr());
+        }
+        assert_eq!(messages_per_server(&servers), vec![0, 0, 3]);
+        // Nor did it use the turn of the spread reads.
+        assert_eq!(
+            ask(&client, "blockchain.block.header").await.unwrap(),
+            servers[0].addr()
+        );
+    });
+}
+
+#[test]
+fn t38_6_4_14_the_switch_in_mm2_json_defaults_to_on_and_false_turns_it_off() {
+    use super::electrum_pool::parse_spread_reads;
+    assert_eq!(parse_spread_reads(&json!({})), (true, None));
+    assert_eq!(
+        parse_spread_reads(&json!({"electrum_spread_reads": true})),
+        (true, None)
+    );
+    assert_eq!(
+        parse_spread_reads(&json!({"electrum_spread_reads": false})),
+        (false, None)
+    );
+    // Not a boolean: spreading stays on and one warning names the key.
+    let (spread, warning) = parse_spread_reads(&json!({"electrum_spread_reads": "false"}));
+    assert!(spread);
+    assert!(warning.unwrap().contains("electrum_spread_reads"));
+    // The pool option defaults to on.
+    assert!(ElectrumPoolOptions::default().spread_reads);
 }

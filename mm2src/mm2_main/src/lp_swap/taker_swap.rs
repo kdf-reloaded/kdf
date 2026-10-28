@@ -2566,7 +2566,8 @@ pub async fn max_taker_vol_v2(
     ctx: MmArc,
     req: MaxTakerVolV2Request,
 ) -> MmResult<TradingVolumeResponse, TradingRpcError> {
-    with_request_fee_scope(max_taker_vol_v2_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, max_taker_vol_v2_impl(ctx, req)).await
 }
 
 async fn max_taker_vol_v2_impl(
@@ -2608,7 +2609,8 @@ pub async fn min_trading_vol_v2(
 }
 
 pub async fn max_taker_vol(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(max_taker_vol_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, max_taker_vol_impl(ctx, req)).await
 }
 
 async fn max_taker_vol_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
