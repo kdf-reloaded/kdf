@@ -95,6 +95,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "lp_swap/dex_fee.rs"] mod dex_fee;
 pub(crate) use recovery_bound::{recover_within, HtlcDetectionParams, RecoveryStage, RecoveryStages,
                                 RECOVER_FUNDS_TOTAL_BOUND};
+pub(crate) use refund_retry::{retried_refund_rejection, NON_FINAL_REFUND_RETRY_SECS};
 
 #[allow(unused_imports)]
 pub use dex_fee::{compute_dex_fee, compute_dex_fee_with_taker_pubkey, dex_fee_amount, dex_fee_amount_from_taker_coin};
@@ -106,6 +107,7 @@ pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee
 #[path = "lp_swap/pubkey_banning.rs"] mod pubkey_banning;
 #[path = "lp_swap/recovery_bound.rs"] mod recovery_bound;
 #[path = "lp_swap/recreate_swap_data.rs"] mod recreate_swap_data;
+#[path = "lp_swap/refund_retry.rs"] mod refund_retry;
 #[path = "lp_swap/saved_swap.rs"] mod saved_swap;
 #[path = "lp_swap/swap_events.rs"] pub(crate) mod swap_events;
 #[path = "lp_swap/swap_lock.rs"] mod swap_lock;

@@ -516,7 +516,7 @@ R39.5.12 **Refund gate and refund transaction of a shielded leg.** *(binding, pa
 > **Reloaded change: R39.5.13 (maintainer Decision AP).**
 
 R39.5.13 **Median-time-past-aware shielded refund.** *(binding, Reloaded-original;
-maintainer Decision AP, 2026-10-28; not yet implemented. Supersedes R39.5.12(a) and (c) for
+maintainer Decision AP, 2026-10-28; implemented, see the status update below. Supersedes R39.5.12(a) and (c) for
 this project while keeping (b) and (d) wire-identical.)* The shielded
 leg's refund gate shall require both that the wall clock has passed the HTLC locktime and
 that the chain's median-time-past (computed from the `time` field of the last 11 compact
@@ -526,6 +526,20 @@ broadcast rejection whose node text indicates non-finality shall be retried on t
 pass rather than terminating the swap, until the leg's refund deadline (locktime + 3700 s,
 ch. 51 R18/R30); other rejections keep R39.5.12(c). `recover_funds_of_swap` shall apply the
 same gate and report a "too early" error naming the earliest permitted instant.
+
+> **Status update (reloaded, 2026-10-28).** Implemented. The gate is `z_refund_gate::refund_gate`,
+> reached through `SwapOps::can_refund_htlc` of the shielded coin (`z_swap_ops.rs`): wall clock first
+> (no chain read while it has not passed the lock time), then the median time past of
+> `get_current_mtp` (the admitted backend's tip and its compact-block times, R39.11.4f and R39.11.8),
+> every wait capped at 3600 s through the UTXO coins' `capped_refund_wait`, a read failure an `Err`.
+> The retry is the coin's `SwapOps::retriable_refund_rejection` (the shielded coin answers for a
+> rejection text containing "non-final", any case; every other coin keeps the default `None`) used by
+> `refund_maker_payment` and `refund_taker_payment` through `retried_refund_rejection` until
+> locktime + 3700 s; a retried rejection is logged once at warn level and not published on the P2P
+> transaction-helper topic. Recovery asks `SwapOps::refund_gate_closed_note` after its own deadline
+> check, in the stage "checking whether the chain allows the refund yet"; the default answers `None`
+> without a read. The Native path (refused at activation in this release) reads its node's headers
+> through the same `get_current_mtp`; WASM, which cannot build a shielded swap, is unchanged.
 
 > **Divergence (informative).** Against the reference behavior of R39.5.12, three things
 > change: the refund of a shielded leg is broadcast once median time past, not only the wall
