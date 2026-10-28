@@ -69,7 +69,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   follows a deposit or spend within about 30 seconds instead of 10, and a freshly posted order
   is checked against the balance read while it was created. An order restored at start or converted
   from a timed-out taker order is re-checked once, 30 seconds after the node starts watching its coin.
-  Detail: PR #TBD; CRD ch.60 R60.4.5, R60.4.6.
+  Detail: PR #116; CRD ch.60 R60.4.5, R60.4.6.
 
 - **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
   shows that a node's copy of the maker's orders differs, the node asks another node for an update.

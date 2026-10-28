@@ -258,7 +258,7 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
    baseline behavior (V60.2); items 1–4 are post-baseline.
 
 > **As-built note (2026-10-28, clean-side record).** R60.4.5 and R60.4.6
-> items 1–4 are implemented (PR #TBD); item 5 is the unchanged baseline path.
+> items 1–4 are implemented (PR #116); item 5 is the unchanged baseline path.
 > The per-coin 10 s balance loop that coin registration used to spawn is
 > removed. The watch registry lives in the maker-order store of the
 > order-matching context, next to the per-base-coin order counts: the last
