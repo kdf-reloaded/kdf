@@ -5,6 +5,7 @@ use super::test_support::*;
 use super::*;
 use crate::eth::alloy_compat::provider::provider_from_transport;
 use crate::eth::alloy_compat::KdfProvider;
+use crate::eth::node_url::listed_nodes;
 use alloy::providers::Provider;
 use common::block_on;
 use serde_json::Value as Json;
@@ -263,9 +264,10 @@ fn t35_27_with_four_hanging_nodes_the_request_fails_after_the_sum_of_the_cutoffs
 fn the_production_bounds_are_ten_seconds_for_failover_and_thirty_for_a_direct_node() {
     assert_eq!(NODE_CUTOFF_S, 10.);
     assert_eq!(DIRECT_NODE_TIMEOUT_S, 30.);
-    let failover = AlloyTransport::with_event_handlers(vec![A.to_owned(), B.to_owned()], vec![]).unwrap();
+    let failover =
+        AlloyTransport::with_event_handlers(listed_nodes("TEST", vec![A.to_owned(), B.to_owned()]), vec![]).unwrap();
     assert_eq!(failover.inner.cutoff_s, NODE_CUTOFF_S);
-    let direct = AlloyTransport::direct(A.to_owned(), vec![]).unwrap();
+    let direct = AlloyTransport::direct(listed_nodes("TEST", vec![A.to_owned()]).remove(0), vec![]).unwrap();
     assert_eq!(direct.inner.cutoff_s, DIRECT_NODE_TIMEOUT_S);
 }
 
@@ -334,8 +336,8 @@ fn t35_28_nothing_secret_reaches_a_returned_text_or_a_log_line() {
     if capturing {
         assert!(
             lines.iter().any(|line| line
-                == "WARN EVM RPC https://rpc.example.org:8545 answered eth_call with error 3: execution reverted at \
-                    https://rpc.example.org:8545"),
+                == "WARN [TEST] EVM RPC https://rpc.example.org:8545 (node 1 of 1) answered eth_call with error 3: \
+                    execution reverted at https://rpc.example.org:8545"),
             "{lines:?}"
         );
     }
@@ -423,4 +425,178 @@ fn an_empty_node_list_is_an_error_not_a_panic() {
     let (transport, _) = stub_transport(&[], CUTOFF, |_| Reply::Hang);
     let provider = provider_from_transport(transport);
     assert!(eth_call(&provider).is_err());
+}
+
+// ---- T35.34: coin and list position in node log lines (CRD ch.35 R35.1.16) ----
+
+/// Four nodes of the coin `ticker` on one host, different paths, in the order the request gave them.
+fn four_nodes_of(ticker: &str) -> Vec<ListedNode> {
+    listed_nodes(
+        ticker,
+        (1..=4).map(|i| format!("http://same.test/path{i}/KEY{i}")).collect(),
+    )
+}
+
+/// The captured lines that carry `ticker`'s prefix.
+fn lines_of(ticker: &str) -> Vec<String> {
+    let prefix = format!("[{ticker}] ");
+    captured_log_lines()
+        .into_iter()
+        .filter(|line| line.contains(&prefix))
+        .collect()
+}
+
+#[test]
+fn t35_34_the_warn_and_the_debug_line_have_the_exact_form() {
+    let nodes = four_nodes_of("ETC");
+    let (transport, _) = stub_transport_of_nodes(vec![nodes[1].clone()], CUTOFF, vec![], |_| Reply::Hang);
+    let node = &transport.inner.nodes[0];
+    let payload = ErrorPayload {
+        code: 3,
+        message: "execution reverted".into(),
+        data: None,
+    };
+    assert_eq!(
+        answered_with_error_line(node, "eth_call", &payload),
+        "[ETC] EVM RPC http://same.test (node 2 of 4) answered eth_call with error 3: execution reverted"
+    );
+    assert_eq!(
+        attempt_failed_line(node, "eth_call", &NodeFailure::Transport("HTTP 502".to_owned()), CUTOFF),
+        "[ETC] EVM RPC http://same.test (node 2 of 4) failed eth_call: HTTP 502"
+    );
+    assert_eq!(
+        attempt_failed_line(node, "eth_call", &NodeFailure::Cutoff, 10.),
+        "[ETC] EVM RPC http://same.test (node 2 of 4) failed eth_call: no answer within 10 s"
+    );
+}
+
+#[test]
+fn t35_34_the_failover_path_logs_the_coins_ticker_and_the_configured_position() {
+    let capturing = install_log_capture();
+    // Node 3 of the request answers with an error, node 1 fails on the wire; the request is given in the order
+    // 3, 1, 2, 4 (as a shuffle could have drawn it) and each node keeps its configured position.
+    let nodes = four_nodes_of("T3534FAIL");
+    let drawn = vec![nodes[2].clone(), nodes[0].clone(), nodes[1].clone(), nodes[3].clone()];
+    let (transport, _) = stub_transport_of_nodes(drawn, CUTOFF, vec![], |call| {
+        if call.uri.contains("path3") {
+            Reply::Body(error_body(&call.request, 3, "execution reverted"))
+        } else if call.uri.contains("path1") {
+            Reply::Fail("HTTP 502".to_owned())
+        } else {
+            Reply::Body(result_body(&call.request, r#""0x01""#))
+        }
+    });
+    eth_call(&provider_from_transport(transport)).unwrap();
+    if !capturing {
+        return;
+    }
+    let lines = lines_of("T3534FAIL");
+    let has = |text: &str| lines.iter().any(|l| l.ends_with(text));
+    assert!(
+        has("[T3534FAIL] EVM RPC http://same.test (node 3 of 4) answered eth_call with error 3: execution reverted"),
+        "{lines:?}"
+    );
+    assert!(
+        has("[T3534FAIL] EVM RPC http://same.test (node 1 of 4) failed eth_call: HTTP 502"),
+        "{lines:?}"
+    );
+    // The returned texts are unchanged: no ticker, no position.
+    let (failing, _) = stub_provider(&[A], CUTOFF, |call| {
+        Reply::Body(error_body(&call.request, 3, "reverted"))
+    });
+    assert!(
+        eth_call(&failing)
+            .unwrap_err()
+            .to_string()
+            .ends_with("reverted (node http://a.test)"),
+        "the R35.1.15 suffix is unchanged"
+    );
+}
+
+#[test]
+fn t35_34_a_direct_single_node_transport_reports_the_nodes_place_in_the_coins_list() {
+    let nodes = four_nodes_of("XPL");
+    let direct = AlloyTransport::direct(nodes[2].clone(), vec![]).unwrap();
+    assert_eq!(
+        direct
+            .first_node_line("Error x when getting nonce for addr y from node ", "")
+            .unwrap(),
+        "[XPL] Error x when getting nonce for addr y from node http://same.test (node 3 of 4)"
+    );
+    let provider = provider_from_transport(direct);
+    assert_eq!(
+        crate::eth::alloy_compat::provider::direct_node_line(&provider, "n ", ", z").unwrap(),
+        "[XPL] n http://same.test (node 3 of 4), z"
+    );
+}
+
+#[test]
+fn t35_34_a_direct_transport_logs_a_failure_with_the_list_position_not_one_of_one() {
+    let capturing = install_log_capture();
+    let nodes = four_nodes_of("T3534DIRECT");
+    let (transport, _) = stub_transport_of_nodes(vec![nodes[1].clone()], DIRECT_NODE_TIMEOUT_S, vec![], |call| {
+        Reply::Body(error_body(&call.request, -32000, "nonce too low"))
+    });
+    assert!(eth_call(&provider_from_transport(transport)).is_err());
+    if capturing {
+        let lines = lines_of("T3534DIRECT");
+        assert!(
+            lines.iter().any(|l| l.ends_with(
+                "[T3534DIRECT] EVM RPC http://same.test (node 2 of 4) answered eth_call with error -32000: nonce too low"
+            )),
+            "{lines:?}"
+        );
+        assert!(lines.iter().all(|l| !l.contains("1 of 1")), "{lines:?}");
+    }
+}
+
+#[test]
+fn t35_34_a_copy_with_its_own_order_keeps_the_ticker_and_the_positions() {
+    let capturing = install_log_capture();
+    let nodes = four_nodes_of("T3534OWN");
+    let drawn = vec![nodes[3].clone(), nodes[1].clone()];
+    let (transport, _) = stub_transport_of_nodes(drawn, CUTOFF, vec![], |call| {
+        if call.uri.contains("path4") {
+            Reply::Fail("HTTP 502".to_owned())
+        } else {
+            Reply::Body(result_body(&call.request, r#""0x01""#))
+        }
+    });
+    let copy = transport.with_own_order();
+    eth_call(&provider_from_transport(copy)).unwrap();
+    if capturing {
+        let lines = lines_of("T3534OWN");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.ends_with("[T3534OWN] EVM RPC http://same.test (node 4 of 4) failed eth_call: HTTP 502")),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn t35_34_two_coins_on_one_host_differ_in_the_ticker_and_two_nodes_of_a_coin_in_the_position() {
+    let capturing = install_log_capture();
+    for ticker in ["T3534ONE", "T3534TWO"] {
+        let nodes = four_nodes_of(ticker);
+        let (transport, _) = stub_transport_of_nodes(nodes[..2].to_vec(), CUTOFF, vec![], |_| {
+            Reply::Fail("HTTP 502".to_owned())
+        });
+        assert!(eth_call(&provider_from_transport(transport)).is_err());
+    }
+    if capturing {
+        for ticker in ["T3534ONE", "T3534TWO"] {
+            let lines = lines_of(ticker);
+            for position in [1, 2] {
+                let wanted =
+                    format!("[{ticker}] EVM RPC http://same.test (node {position} of 4) failed eth_call: HTTP 502");
+                assert_eq!(
+                    lines.iter().filter(|l| l.ends_with(&wanted)).count(),
+                    1,
+                    "{wanted}: {lines:?}"
+                );
+            }
+        }
+    }
 }

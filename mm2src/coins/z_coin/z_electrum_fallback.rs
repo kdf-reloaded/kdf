@@ -26,6 +26,7 @@
 use super::z_lightwalletd::{p2sh_hash_of, txid_internal_to_display, DetectionLog, LightwalletdBackend, OutputRef,
                             ADMISSION_REEVALUATION_INTERVAL};
 use super::z_tx_read::{read_tx, txid_display};
+use crate::coin_conf;
 use crate::utxo::rpc_clients::electrum_pool::round_budget;
 use crate::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumPoolTimings, ElectrumRpcRequest};
 use crate::utxo::utxo_builder::build_electrum_client;
@@ -34,9 +35,11 @@ use async_trait::async_trait;
 use futures::compat::Future01CompatExt;
 use futures::lock::Mutex as AsyncMutex;
 use kdf_crypto::dhash256;
+use keys::Address;
 use mm2_core::mm_ctx::{MmArc, MmWeak};
 use parking_lot::Mutex;
 use rpc::v1::types::H256 as H256Json;
+use script::Builder;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -135,6 +138,7 @@ impl ElectrumClientReads {
         let client = build_electrum_client(
             &ctx,
             &self.ticker,
+            &coin_conf(&ctx, &self.ticker),
             ElectrumBuilderArgs::default(),
             self.servers.clone(),
             None,
@@ -577,19 +581,61 @@ impl ElectrumFallback {
         })
     }
 
-    /// The first Electrum server that passes vetting (R39.11.25(a), (b)), or the conditions that stopped
-    /// each. This is the capability "can any Electrum server be used for this coin's address questions":
-    /// the taker refusal of R39.11.28 builds on it by also asking the server for a script history.
-    #[allow(dead_code)] // The consumer is the taker refusal of R39.11.28, a later step.
+    /// The first Electrum server that passes vetting (R39.11.25(a), (b)) and then answers one script-history
+    /// read, of `probe_script`, or the conditions that stopped each. This is the capability "can any Electrum
+    /// server be used for this coin's address questions" of the taker refusal (R39.11.28). The content of
+    /// the history is irrelevant: an empty one is an answer.
     pub(crate) async fn first_usable_server(
         &self,
         lightwalletd: &LightwalletdBackend,
+        probe_script: &[u8],
     ) -> Result<String, FallbackError> {
         let mut walk = self.walk(lightwalletd).await?;
-        match walk.next_usable().await {
-            Some((server, _)) => Ok(server),
-            None => Err(FallbackError::Undetermined(walk.conditions)),
+        let script_hash = hex::encode(electrum_script_hash(probe_script));
+        while let Some((server, deadline)) = walk.next_usable().await {
+            match bounded(
+                deadline,
+                "the script history read",
+                self.reads.history(&server, &script_hash),
+            )
+            .await
+            {
+                Ok(_) => return Ok(server),
+                Err(condition) => walk.conditions.push(format!("{}: {}", server, condition)),
+            }
         }
+        Err(FallbackError::Undetermined(walk.conditions))
+    }
+
+    /// The taker refusal's capability check (R39.11.28): at least one source can answer the swap's address
+    /// questions, that is, an admitted lightwalletd endpoint answers a transparent-address read of
+    /// `own_address` without the no-address-index rejection (marking an endpoint that answers with it), or
+    /// else an Electrum server passes R39.11.25 (a) and (b) and answers a script-history read of the same
+    /// address. lightwalletd is asked first; Electrum only when it cannot answer. `Ok` names the source;
+    /// `Err` is the refusal text, naming the coin, every lightwalletd endpoint with its condition and every
+    /// Electrum server with its condition.
+    pub(crate) async fn ensure_watch_source(
+        &self,
+        lightwalletd: &LightwalletdBackend,
+        own_address: &Address,
+    ) -> Result<String, String> {
+        let lightwalletd_conditions = match lightwalletd.probe_address_read(own_address).await {
+            Ok(server) => return Ok(format!("lightwalletd {}", server)),
+            Err(conditions) => conditions,
+        };
+        let own_script = Builder::build_p2pkh(&own_address.hash).to_bytes();
+        let electrum_conditions = match self.first_usable_server(lightwalletd, &own_script).await {
+            Ok(server) => return Ok(format!("Electrum {}", server)),
+            Err(FallbackError::NotConfigured) => "no server is listed in the activation's electrum_servers".to_owned(),
+            Err(FallbackError::Undetermined(conditions)) => conditions.join("; "),
+        };
+        Err(format!(
+            "{}: the taker could not watch its payment for the maker's spend, because no source can answer an \
+             address read. lightwalletd endpoints: {}. Electrum servers: {}",
+            self.ticker,
+            lightwalletd_conditions.join("; "),
+            electrum_conditions
+        ))
     }
 
     /// Already-sent (R39.11.18) from the Electrum servers: "sent" with a history transaction that has an

@@ -764,7 +764,8 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   taker on the legacy generation cannot read the pair at all; the legacy
   `best_orders` silently omits the same order. The mmrpc-2.0 generation of
   both methods is correct (order listed with `{"address_type":"Shielded"}`).
-  Reproduced in the swap lab on 2026-10-26.
+  Reproduced in the swap lab on 2026-10-26, and again on 2026-10-28 with the
+  3.0.0-beta release binary, where a taker had to take an ARRR order by uuid.
 - [x] This is parity with a **reference defect**: at both designations the
   legacy generation routes through a coin-generic resolver with no shielded
   outcome and aborts (orderbook) or omits (best_orders). Reloaded deliberately

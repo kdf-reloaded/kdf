@@ -442,12 +442,29 @@ pub(crate) async fn process_p2p_message(
 
 fn process_p2p_request(
     ctx: MmArc,
-    _peer_id: PeerId,
+    peer_id: PeerId,
     request: Vec<u8>,
     response_channel: AdexResponseChannel,
 ) -> P2PRequestResult<()> {
+    // Sends the answer through the response channel. A synchronization request may be parked, and then
+    // the answer is sent later from another task (CRD ch.32 R-Q5b), so the channel travels in a closure.
+    let reply_ctx = ctx.clone();
+    let reply: lp_ordermatch::SyncAnswerReply = Box::new(move |res| {
+        let cmd = AdexBehaviourCmd::SendResponse { res, response_channel };
+        let p2p_ctx = P2PContext::fetch_from_mm_arc(&reply_ctx);
+        let sent = p2p_ctx.cmd_tx.lock().try_send(cmd).map_err(|e| e.to_string());
+        sent
+    });
+
     let mut decode_error = None;
     let res = match decode_message::<P2PRequest>(&request) {
+        Ok(P2PRequest::Ordermatch(lp_ordermatch::OrdermatchRequest::SyncPubkeyOrderbookState {
+            pubkey,
+            trie_roots,
+        })) => {
+            return lp_ordermatch::answer_sync_request(&ctx, peer_id, pubkey, trie_roots, reply)
+                .map_to_mm(P2PRequestError::SendError);
+        },
         Ok(request) => {
             let result = match request {
                 P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),
@@ -467,13 +484,7 @@ fn process_p2p_request(
         },
     };
 
-    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
-    let cmd = AdexBehaviourCmd::SendResponse { res, response_channel };
-    p2p_ctx
-        .cmd_tx
-        .lock()
-        .try_send(cmd)
-        .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
+    reply(res).map_to_mm(P2PRequestError::SendError)?;
 
     if let Some(error) = decode_error {
         return MmError::err(P2PRequestError::DecodeError(error));
