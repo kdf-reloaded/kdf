@@ -428,7 +428,11 @@ pub(crate) fn relay_connection_closed(ctx: &MmArc) {
         .load(std::sync::atomic::Ordering::Relaxed);
     let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
     if close_is_signal(outboxes.has_pending(), Some(last_release), now) {
-        outboxes.signal(now, SignalKind::Close);
+        // The line that enters degraded mode is logged at once (R-MP2 item 5).
+        outboxes
+            .signal(now, SignalKind::Close)
+            .into_iter()
+            .for_each(log_outbox_rate);
         ordermatch_ctx
             .maker_outbox
             .close_signals

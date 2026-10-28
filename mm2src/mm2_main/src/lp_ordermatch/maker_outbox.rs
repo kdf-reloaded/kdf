@@ -170,6 +170,9 @@ struct Budget {
     /// Whether the rate, the degraded state or a signal came since the last log line.
     dirty: bool,
     unlogged_signal: Option<SignalKind>,
+    /// The outbox entered degraded mode and the line that says so is not logged yet. That line is never held back by
+    /// the limit of one line a minute (R-MP2 item 5).
+    entry_line_due: bool,
     last_log_ms: Option<u64>,
 }
 
@@ -186,6 +189,7 @@ impl Budget {
             next_raise_ms: None,
             dirty: false,
             unlogged_signal: None,
+            entry_line_due: false,
             last_log_ms: None,
         }
     }
@@ -224,6 +228,7 @@ impl Budget {
             self.tokens = self.tokens.min(self.capacity());
             self.dirty = true;
             self.unlogged_signal = Some(kind);
+            self.entry_line_due = true;
         }
         self.last_signal_ms = Some(now_ms);
     }
@@ -281,16 +286,20 @@ impl Budget {
         self.tokens = self.tokens.min(self.capacity());
     }
 
-    /// The log line due now, if any: at most one per minute, carrying the state at that time.
+    /// The log line due now, if any, carrying the state at that time. The line that enters degraded mode is due at once;
+    /// every other line is held to one per minute, and the entry line counts as the minute's line for them.
     fn take_log(&mut self, now_ms: u64, pubkey: &str) -> Option<RateLog> {
         if !self.dirty {
             return None;
         }
-        if let Some(last) = self.last_log_ms {
-            if now_ms.saturating_sub(last) < LOG_INTERVAL_MS {
-                return None;
+        if !self.entry_line_due {
+            if let Some(last) = self.last_log_ms {
+                if now_ms.saturating_sub(last) < LOG_INTERVAL_MS {
+                    return None;
+                }
             }
         }
+        self.entry_line_due = false;
         self.dirty = false;
         self.last_log_ms = Some(now_ms);
         Some(RateLog {
@@ -445,12 +454,16 @@ impl MakerOutboxes {
         (released, log)
     }
 
-    /// A signal at `now_ms`: every outbox drops to the floor in degraded mode (R-MP2 item 3).
-    pub(crate) fn signal(&mut self, now_ms: u64, kind: SignalKind) {
+    /// A signal at `now_ms`: every outbox drops to the floor in degraded mode (R-MP2 item 3). The lines that enter
+    /// degraded mode are returned to be logged at once (R-MP2 item 5).
+    pub(crate) fn signal(&mut self, now_ms: u64, kind: SignalKind) -> Vec<RateLog> {
         self.last_signal = Some((now_ms, kind));
-        for outbox in self.by_pubkey.values_mut() {
+        let mut lines = Vec::new();
+        for (pubkey, outbox) in self.by_pubkey.iter_mut() {
             outbox.budget.signal(now_ms, kind);
+            lines.extend(outbox.budget.take_log(now_ms, pubkey));
         }
+        lines
     }
 
     /// The periodic step: adapts every pubkey's rate and releases what the budget allows.
@@ -824,7 +837,9 @@ mod tests {
             assert_eq!(outboxes.rate_of(PK, CEILING), 10.0);
             assert!(!outboxes.is_degraded(PK));
             match kind {
-                SignalKind::Close => outboxes.signal(t0 + 1_000, kind),
+                SignalKind::Close => {
+                    let _ = outboxes.signal(t0 + 1_000, kind);
+                },
                 SignalKind::Queue => {
                     outboxes.tick(t0 + 1_000, true, CEILING);
                 },
@@ -971,33 +986,80 @@ mod tests {
         assert!(outboxes.is_degraded("03bb"));
     }
 
+    // R-MP2 item 5: the line that enters degraded mode is logged at once, whatever came before, and names the signal
+    // kind; the other lines are held to one a minute, and the entry line counts as the minute's line for them.
     #[test]
-    fn log_lines_are_limited_to_one_per_minute_and_name_the_signal() {
+    fn the_line_that_enters_degraded_mode_is_logged_at_once() {
         let mut outboxes = MakerOutboxes::default();
         let t0 = 1_000_000;
         let uuid = Uuid::new_v4();
         enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
-        outboxes.signal(t0 + 1_000, SignalKind::Close);
-        let mut lines = Vec::new();
-        for s in 1..=700 {
-            let (_, logs) = outboxes.tick(t0 + 1_000 + s * 1_000, false, CEILING);
-            for log in logs {
-                lines.push((s, log));
-            }
+
+        // The signal returns its line at once: a warning-level state (degraded) naming the kind.
+        let entry = outboxes.signal(t0 + 1_000, SignalKind::Close);
+        assert_eq!(entry.len(), 1);
+        assert!(entry[0].degraded);
+        assert_eq!(entry[0].signal, Some(SignalKind::Close));
+        assert_eq!(entry[0].rate, 0.5);
+        assert_eq!(entry[0].pubkey, PK);
+        // A second signal while degraded is no entry: no new line.
+        assert!(outboxes.signal(t0 + 2_000, SignalKind::Close).is_empty());
+
+        // Leaving degraded mode is a plain line, 5 min after the last signal.
+        let mut info = Vec::new();
+        for s in 0..=300 {
+            let (_, logs) = outboxes.tick(t0 + 2_000 + s * 1_000, false, CEILING);
+            info.extend(logs.into_iter().map(|log| (s, log)));
         }
-        // The signal (first line), leaving degraded mode 5 min later (second line), and the first rises are folded
-        // into one line a minute.
-        assert_eq!(lines[0].0, 1);
-        assert_eq!(lines[0].1.signal, Some(SignalKind::Close));
-        assert!(lines[0].1.degraded);
-        assert_eq!(lines[0].1.rate, 0.5);
-        assert_eq!(lines[1].0, 300);
-        assert!(!lines[1].1.degraded);
-        assert_eq!(lines[1].1.signal, None);
+        assert_eq!(info.len(), 1, "{:?}", info);
+        assert_eq!(info[0].0, 300);
+        assert!(!info[0].1.degraded);
+        assert_eq!(info[0].1.signal, None);
+        let info_at = t0 + 2_000 + 300_000;
+
+        // A signal 10 s after that info line: its line is not held back by the minute limit.
+        let entry = outboxes.signal(info_at + 10_000, SignalKind::Queue);
+        assert_eq!(entry.len(), 1, "an entry line is never delayed");
+        assert!(entry[0].degraded);
+        assert_eq!(entry[0].signal, Some(SignalKind::Queue));
+        assert_eq!(entry[0].rate, 0.5);
+
+        // The entry line counted as the minute's line: a change that comes 20 s later waits for the minute.
+        let mut held = Vec::new();
+        let mut now = info_at + 10_000;
+        while now < info_at + 10_000 + 70_000 {
+            now += 1_000;
+            // The ceiling falls, a rate change the outbox would log.
+            let (_, logs) = outboxes.tick(now, false, 0.25);
+            held.extend(logs.into_iter().map(|log| (now - (info_at + 10_000), log)));
+        }
+        assert_eq!(held.len(), 1, "{:?}", held);
+        assert!(
+            held[0].0 >= 60_000,
+            "the change was logged {} ms after the entry line",
+            held[0].0
+        );
+        // The signal kind of a line is the last one since the previous line.
+        assert_eq!(held[0].1.signal, None);
+    }
+
+    #[test]
+    fn log_lines_without_a_signal_are_limited_to_one_per_minute() {
+        let mut outboxes = MakerOutboxes::default();
+        let t0 = 1_000_000;
+        let uuid = Uuid::new_v4();
+        enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
+        let _ = outboxes.signal(t0, SignalKind::Close);
+        // The climb back up changes the rate every minute: one line each time, never faster.
+        let mut lines = Vec::new();
+        for s in 0..=1_200 {
+            let (_, logs) = outboxes.tick(t0 + s * 1_000, false, CEILING);
+            lines.extend(logs.into_iter().map(|log| (s, log)));
+        }
+        assert!(lines.len() >= 5, "{:?}", lines);
         for pair in lines.windows(2) {
             assert!(pair[1].0 - pair[0].0 >= 60, "{:?}", lines);
         }
-        assert_eq!(lines[0].1.pubkey, PK);
     }
 
     #[test]
