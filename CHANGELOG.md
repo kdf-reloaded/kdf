@@ -364,7 +364,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   it stayed silent whenever a shielded coin was involved. The summary leaves out both parties' public
   keys (the sender's own key too, when the swap used a one-off key), and a statistics node now fills
   in only the key of the party that sent the report. More in
-  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #TBD.
+  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #108.
 - **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
   sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
   now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree

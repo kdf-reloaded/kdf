@@ -865,7 +865,7 @@ else. Its complete contract:
 > published Reloaded record and a received reference record are stored
 > by the same rule.
 
-> **As built (2026-10-28, PR #TBD).** The three points above are closed:
+> **As built (2026-10-28, PR #108).** The three points above are closed:
 > the report is made on every legacy termination with no privacy-coin
 > condition; the redaction zeroes exactly the start-event fields of item
 > 3 on top of Reloaded's two HTLC private-key fields (the negotiation
