@@ -865,6 +865,20 @@ else. Its complete contract:
 > published Reloaded record and a received reference record are stored
 > by the same rule.
 
+> **As built (2026-10-28, PR #108).** The three points above are closed:
+> the report is made on every legacy termination with no privacy-coin
+> condition; the redaction zeroes exactly the start-event fields of item
+> 3 on top of Reloaded's two HTLC private-key fields (the negotiation
+> event is untouched); the statistics fill and the state-15 backfill set
+> only the record's own-role key column, and leave it unset (not an
+> all-zero value) when the own key is zero or absent. Open: for a swap
+> identifier that is already present, Reloaded sets the own-role key
+> column only; the fiat price, GUI and version columns of item 5 are
+> still not refreshed from the later report. State 15 is already applied
+> on existing databases, so their stored key columns keep the old
+> both-parties values until a later migration corrects them. Tests:
+> T26–T28 in `mm2src/mm2_main/src/lp_swap/terminal_report_tests.rs`.
+
 > **Code-quality finding (informative; trigger: a contradiction between
 > two things read side by side).** At both reference rows the redaction
 > of item 3 removes the counterparty's persistent public key from the

@@ -366,7 +366,6 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
     subscribe_to_topic(&ctx, swap_topic(&swap.uuid));
     let mut status = ctx.log.status_handle();
     let uuid = swap.uuid.to_string();
-    let to_broadcast = !(swap.maker_coin.is_privacy() || swap.taker_coin.is_privacy());
     let running_swap = Arc::new(swap);
     let swap_ctx = SwapsContext::from_ctx(&ctx).unwrap();
     swap_ctx.init_msg_store(running_swap.uuid, running_swap.maker);
@@ -416,10 +415,9 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
                         command = c;
                     },
                     None => {
-                        if to_broadcast {
-                            if let Err(e) = broadcast_my_swap_status(&ctx, running_swap.uuid).await {
-                                log!("!broadcast_my_swap_status(" (uuid) "): " (e));
-                            }
+                        // R50A item 1: the terminal report is made for every swap, privacy coins included.
+                        if let Err(e) = broadcast_my_swap_status(&ctx, running_swap.uuid).await {
+                            log!("!broadcast_my_swap_status(" (uuid) "): " (e));
                         }
                         break;
                     },

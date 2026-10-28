@@ -404,6 +404,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
   The MM2.json boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
   refusal. Detail: PR #28; CRD ch.35 R35.2.5.
+- **Swaps with a shielded coin such as ARRR now report their outcome to the network like every other
+  swap, and the report no longer names the traders.** When an older-style swap ends, whatever the
+  outcome, the node publishes the usual `swapstatus` summary that statistics nodes collect; before,
+  it stayed silent whenever a shielded coin was involved. The summary leaves out both parties' public
+  keys (the sender's own key too, when the swap used a one-off key), and a statistics node now fills
+  in only the key of the party that sent the report. More in
+  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #108.
 - **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
   sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
   now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree
