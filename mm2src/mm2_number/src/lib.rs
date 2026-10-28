@@ -6,6 +6,10 @@
 //! denominator) and can be serialized to/from decimal strings, rational
 //! pairs, or [`Fraction`] objects.
 
+mod decimal_memo;
+
+pub use decimal_memo::{DecimalMemo, RenderedDecimal};
+
 use core::ops::{Add, AddAssign, Div, Mul, Sub};
 use num_traits::{Pow, Zero};
 use serde::de;
@@ -13,6 +17,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 pub use bigdecimal::BigDecimal;
 pub use num_bigint::{self, BigInt, BigUint, ParseBigIntError, Sign};
@@ -147,6 +152,9 @@ pub fn rational_to_dec(r: &BigRational) -> BigDecimal {
 // Keep the old names as aliases for backward compatibility with code that uses them.
 pub use dec_to_rational as from_dec_to_ratio;
 pub use rational_to_dec as from_ratio_to_dec;
+
+static GLOBAL_DECIMAL_MEMO: LazyLock<DecimalMemo> =
+    LazyLock::new(|| DecimalMemo::with_capacity(decimal_memo::GLOBAL_DECIMAL_MEMO_CAPACITY));
 
 // ---------------------------------------------------------------------------
 // MmNumber — the core high-precision numeric type
@@ -317,6 +325,16 @@ impl MmNumber {
 
     /// Decimal approximation.
     pub fn to_decimal(&self) -> BigDecimal { rational_to_dec(&self.0) }
+
+    /// The same decimal as [`MmNumber::to_decimal`] with its printed form, taken from a process-wide bounded
+    /// memo keyed by the exact numerator and denominator when this rational was converted before.
+    ///
+    /// Meant for RPC rendering of long-lived values (own orders) that are converted again on every call.
+    /// Arithmetic paths keep using [`MmNumber::to_decimal`], which touches no shared state.
+    pub fn to_rendered_decimal(&self) -> RenderedDecimal { GLOBAL_DECIMAL_MEMO.get_or_compute(&self.0) }
+
+    /// The underlying rational, borrowed.
+    pub fn as_ratio(&self) -> &BigRational { &self.0 }
 
     pub fn numer(&self) -> &BigInt { self.0.numer() }
     pub fn denom(&self) -> &BigInt { self.0.denom() }
