@@ -3693,7 +3693,9 @@ of requests for a swap a few weeks old. The implementation shall therefore:
   confined to single transactions. A read also ends
   with a named failure after 1,024 requests. Either failure leaves that
   endpoint's answer undetermined for this detection (R39.11.4b(f)), and the
-  next admitted endpoint is tried.
+  next admitted endpoint is tried. A read answered with the node's
+  no-address-index message never reaches this bound: it ends at its first
+  request (R39.11.4i(e)).
 - (c) give each endpoint a time budget of 120 seconds per detection, covering
   both address forms. An endpoint that exceeds it counts as failed for this
   detection, with an error naming the endpoint, the address form and the read
@@ -3762,7 +3764,13 @@ mark such an endpoint "no address index" for the rest of the coin's activation:
   whose node keeps an address index (R39.11.17);
 - (d) the mark is cleared only when the coin is activated again. Re-evaluating
   admission (R39.11.7a(g)) does not clear it, because a server-information read
-  cannot show whether the index exists.
+  cannot show whether the index exists;
+- (e) a transparent-history or UTXO read answered with that message ends at
+  once. It is not a serve failure of R39.11.4b(c): the window is not bisected
+  and no height is recorded as a gap. Its failure says that the server's node
+  keeps no address index and carries the node's message. It is never explained
+  as a missing transaction index, because the node's transaction index has
+  nothing to do with it.
 
 A marked endpoint is undetermined, as in R39.11.4h. The mark never makes a
 detection negative, and it does not affect any other use of the endpoint: tip,
@@ -3772,6 +3780,13 @@ transactions, compact blocks and broadcast.
 > described under R39.11.4h refuse every address read in the same way, so under
 > R39.11.4h alone each detection would still spend a few requests and a log line
 > on them. Detection runs on every poll of a live swap.
+>
+> **Amendment (2026-10-28), item (e).** A fresh swap's already-sent check reads
+> a range of one block. A refusal there produced a single gap, below the stop
+> of R39.11.4h(b), so the gap was reported with the transaction-index
+> explanation of R39.11.4b. An operator whose node runs with its transaction
+> index on, and without the address index, saw a maker payment fail with that
+> explanation, which pointed at the wrong setting.
 
 T39.11.4i *No address index.* Against scripted endpoints, tests shall show
 that:
@@ -3782,7 +3797,16 @@ that:
 - with every admitted endpoint marked, a detection fails at once with the
   named error and sends no request;
 - a backend built anew (a new activation) starts with no endpoint marked;
-- the marked endpoint still serves the tip and transaction lookups.
+- the marked endpoint still serves the tip and transaction lookups;
+- (e) a one-block history read and a UTXO read answered with that message
+  each cost one request and record no gap. The detection's error says that the
+  server's node keeps no address index, carries the node's message, and does
+  not mention a transaction index;
+- (e) over a range of many windows, the same refusal ends the read after its
+  first request;
+- a genuine per-transaction serve failure, one not carrying that message,
+  is still bisected and reported as a gap with the transaction-index
+  explanation.
 
 ### 39.11.2 What activation requires of the backend
 
