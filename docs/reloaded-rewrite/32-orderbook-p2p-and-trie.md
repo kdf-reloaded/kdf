@@ -726,8 +726,8 @@ where they correspond to wire/trie content (R29/R31).
 > *Authored by the KDF Spec Reader 2026-10-28 from the rows
 > `v2.6.0-beta` and `v3.0.0-beta` of
 > [Chapter 02](02-baseline-state.md) §2.15A, identical at both, during
-> the hotfix pass prompted by a live incident (Reloaded makers
-> overloading public seed nodes). **Passed the KDF Dirty Gate on
+> the hotfix pass prompted by a live incident (public seed nodes
+> overloaded while Reloaded makers ran). **Passed the KDF Dirty Gate on
 > 2026-10-28** (PASS, no leaks; extent, method and measure in §32.13).*
 > The request and response shapes are dictated (R-Q1, R-Q2a). The
 > trigger, the root the request names, and the responder's reading of
@@ -1435,9 +1435,11 @@ that per-pair independence is what the shape exists to guarantee.
 > *correction re-checked by the KDF Dirty Gate on 2026-10-28*). With one
 > single-entry message per
 > pair the same maker costs K requests of one pair each at most, and a
-> failure is confined to its pair. The aggregated form is what the
-> public seed nodes were observed to be overloaded by; conforming to
-> R-K2a is the fix, and nothing in the receiving side of Reloaded
+> failure is confined to its pair. The aggregated form was present on
+> the network while the public seed nodes were overloaded; the swaplab
+> control showed no growth attributable to the aggregated shape alone
+> (*softened 2026-10-28, see §32.13*). Conforming to R-K2a removes its
+> cost, and nothing in the receiving side of Reloaded
 > depends on the aggregated form (T-K4 checks that the receiver ends in
 > the same state either way).
 
@@ -2114,3 +2116,11 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   every backticked token and hexadecimal fragment from the added lines); the
   mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
   threshold. The clearance is complete and not pending.
+- *Clean-side correction (2026-10-28), Reloaded's own observation claim, no
+  reference input and no gate needed:* the R-K2a divergence note and the
+  authorship line of §32.7.3 no longer say that the aggregated keep-alive
+  shape overloaded the public seed nodes. They now record only that it was
+  present on the network while those nodes were overloaded: the swaplab
+  control on the build before the fix showed no growth attributable to the
+  aggregated shape alone. The gated content -- the two shapes and what each
+  costs a receiver -- is unchanged.

@@ -822,8 +822,9 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   forwarded the K copies at the gossip layer — ch. 32 R-F3a — so the
   failure does not un-forward them; it leaves every downstream peer that
   asks the relay at the placeholder failure of R-Q5a.)*
-  Observed live on 2026-10-28 as public seed nodes overloaded by Reloaded
-  makers. Fix: conform to R-K2a (sender side only; the receiver needs no
+  Present on the network on 2026-10-28 while public seed nodes were
+  overloaded; the swaplab control showed no growth attributable to the
+  aggregated shape alone. Fix: conform to R-K2a (sender side only; the receiver needs no
   change).
 - [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
   longer refuses while its trie worker lags (amended R-T3b item 2); it answers
