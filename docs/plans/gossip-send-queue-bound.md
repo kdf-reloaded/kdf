@@ -159,3 +159,63 @@ All of this sits in the gossipsub connection handler we already vendor
   allocator. That is its own decision.
 - **Retained state, the incident's main suspect:** the trie store, the delta
   history and per-message tasks are tracked with the seed-growth work.
+
+## Follow-ups (Decision AO, pending)
+
+**Problem.** A lab run on 2026-10-28 put our maker at more than 90 order
+updates/s on a CPU-saturated host. The traffic from the maker to the seed
+nearly stopped, and the maker's keep-alives no longer arrived. After 90 s
+without a keep-alive, the reference nodes dropped the maker's whole order book.
+It came back only after a reconnect.
+
+**Model.** A discrete model of one connection, run over 600 s: 90 updates/s plus
+K keep-alives every 30 s (K = 1 or 20), toward a reader taking 1, 0.63 or
+0.13 messages/s. It was run in two cases:
+- the writer is the bottleneck, so the multiplexer window is empty;
+- the reader is the bottleneck, so the window is full with about 256 earlier
+  messages.
+
+An in-process measurement against our production node is to confirm these
+numbers.
+
+| Queue discipline | Keep-alives delivered |
+|---|---|
+| Newest first, unbounded (dev before this plan) | 0 in every case. Each keep-alive is buried by the next update within 11 ms. |
+| Oldest first, unbounded (the GPLv2 baseline's order) | latency grows without limit, about 450 s, so effectively none within 90 s |
+| This plan: oldest first, capped, drop the oldest | at most 2 of 400. At the front of the queue a keep-alive is dropped by an incoming update far more often than it is sent. The 60 s close does not help under a constant slow reader, because the queue refills about 23 s after reconnecting. |
+| Priority lane for keep-alives | writer-limited: 20 of 20 at 1–2 s (K = 1), 400 of 400 at about 11 s (K = 20). Reader-limited: 256–430 s latency, because the keep-alive still waits behind the window of earlier messages the reader has not taken. |
+
+This plan does not get keep-alives through such a backlog. It bounds memory, and
+its 60 s close forces a reconnect, which in the lab is what restored the flow.
+
+**Where newest-first came from.** It is ours. The GPLv2 baseline's in-tree
+gossipsub sent oldest first. Newest first arrived with the libp2p modernization
+of chapter 28: the vendored crate matches gossipsub 0.45.0, whose handler pops
+from the end. Whether the reference's gossipsub shares it is unverified.
+
+**Options for the maintainer:**
+
+1. **Priority lane for keep-alives and cancellations.**
+   - The application marks the priority, both when it publishes and when it
+     propagates a relayed message. Gossipsub cannot tell a keep-alive from an
+     update, because they share the pair's topic.
+   - The handler keeps a separate lane ahead of the data queue. It is never
+     dropped and is capped by count only.
+   - Cancellations belong there because a lost cancellation leaves a phantom
+     order.
+   - Limitation: it helps only when our writer is the bottleneck. When the
+     reader is slow, earlier messages already fill its window, and nothing on
+     our side can move ahead of them.
+2. **Maker-side rate control.**
+   - Coalesce per order: the latest value wins, keyed by the order's uuid.
+   - Flush at a bounded rate. The rate comes either from a backpressure signal
+     out of the handler, such as the data queue's depth or the stuck flag, or
+     from a fixed budget per pubkey.
+   - This works in both cases, because it never puts more into the connection
+     than drains.
+   - It changes maker semantics: peers see an order's latest value later, and
+     not every intermediate value.
+
+How to tell the two cases apart in the lab: during a stall, look at the send
+queue of the maker-to-seed socket. A full send queue means the reader is the
+bottleneck; an empty one means our writer is.
