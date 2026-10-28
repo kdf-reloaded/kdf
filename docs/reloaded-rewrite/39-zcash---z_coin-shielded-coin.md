@@ -4833,10 +4833,20 @@ any server is asked, the already-sent question shall consult the wallet database
 record of this wallet's own sends. That record is written when the backend accepts
 the broadcast (§39.8.0.7) and survives a restart. A recorded send counts when its
 transaction has an output of exactly the HTLC script and it is mined, or unmined
-and not past its expiry height against the single height authority. Such a send
-answers "sent": the transaction is returned and no server is asked. An unmined
-record past its expiry is disregarded. Without a counting record, the question
-goes to the servers as before. The local record never answers "not sent".
+and not past its expiry height against the fresh tip read (R39.11.10a). Such a send
+answers "sent": the transaction is returned and no address or transaction query
+is made. A mined record needs no request at all; judging an unmined record's
+expiry takes one tip read. An unmined record past its expiry is disregarded.
+Without a counting record, the question goes to the servers as before, and so it
+does when the record or the tip cannot be read. The local record never answers
+"not sent".
+
+Any recorded transaction that pays exactly the HTLC script counts, without a
+separate check that it spends this wallet's notes: the script is unique to the
+swap (a random per-swap key and a fresh secret hash, R39.5.4), so only this
+wallet's own payment can carry it. A mined record is trusted as the wallet
+database records it; a reorganization that the database's rewind handles clears
+its mined height.
 
 R39.11.27 **A fresh swap skips the already-sent question for a shielded coin's own
 payment.** *(binding; Reloaded-original, maintainer Decision AK of 2026-10-28;
