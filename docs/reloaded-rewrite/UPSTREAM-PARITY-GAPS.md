@@ -785,7 +785,7 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   skips that uuid with a warning. Not covered by R-F6c, which is about address
   derivation; a Reloaded-internal inconsistency, not a reference-parity item.
 
-## #18 — Statistics store: an existing row is not refreshed from a later terminal report — **OPEN (small, post-beta follow-up)**
+## #19 — Statistics store: an existing row is not refreshed from a later terminal report — **OPEN (small, post-beta follow-up)**
 
 CRD reference: [`51-legacy-v1-swap-state-machine.md`](./51-legacy-v1-swap-state-machine.md)
 R50A item 5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
