@@ -501,6 +501,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   pair). The metrics now also show the node store's size and entry count, the number of stored change
   histories and changes, tracked pubkeys, and queued trie updates. More in
   [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
+- **A seed or relay on Linux now also returns freed order-book memory to the system.** After the memory
+  fix above the node's own data shrank back after a burst of order updates, but the system's memory
+  allocator (glibc) kept the freed pages in the process, so the memory shown by the operating system
+  stayed high (about 160 to 210 MB in a test where the data itself was 1 MB). After each ten-minute
+  clean-up the node now asks the allocator to hand the unused pages back (30 MB in the same test)
+  and writes the memory use before and after to the debug log. Other systems are unchanged. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #TBD.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through

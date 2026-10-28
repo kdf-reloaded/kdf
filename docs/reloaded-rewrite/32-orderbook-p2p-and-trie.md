@@ -1503,7 +1503,9 @@ to touch it, and that nothing leaks when a slice is cleared:
    add bookkeeping: each key has one expiry-queue element, and a queue element
    whose entry was refreshed is re-queued at its true expiry when it is reached.
 3. *Node store.* After each ten-minute purge the node store releases the spare
-   capacity of its table.
+   capacity of its table. Where the allocator keeps freed pages in the
+   process (glibc), the node also asks it to return them to the system, outside
+   every lock, and logs the resident size before and after at debug level.
 4. *Clearing releases nodes.* Clearing a `(pubkey, pair)` slice, and removing a
    pubkey, dereferences the nodes of the cleared tries, so that the purge
    reclaims them. A node still referenced by another trie stays (the store
