@@ -27,7 +27,7 @@ mod htlc_index;
 pub(crate) use htlc_index::{DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef,
                             SentOutcome, SpendOutcome};
 
-use super::z_coin_wallet_db::ZCoinShieldedHistory;
+use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
@@ -170,6 +170,9 @@ pub(crate) enum EndpointError {
     NotFound(String),
     /// A service-level broadcast failure (`SendResponse.errorCode != 0`).
     Rejected { code: i32, message: String },
+    /// The server's node answered an address read with its no-address-index message (R39.11.4i(e)). It
+    /// carries the status as received. Not a serve failure of one transaction (R39.11.4b(c)).
+    NoAddressIndex(String),
 }
 
 impl fmt::Display for EndpointError {
@@ -177,8 +180,17 @@ impl fmt::Display for EndpointError {
         match self {
             EndpointError::Transport(m) | EndpointError::Service(m) | EndpointError::NotFound(m) => f.write_str(m),
             EndpointError::Rejected { code, message } => write!(f, "rejected ({}): {}", code, message),
+            EndpointError::NoAddressIndex(m) => write!(f, "the server's node keeps no address index: {}", m),
         }
     }
+}
+
+/// The node's message for a transparent-address read when it keeps no address index (R39.11.4i).
+/// Matched case-insensitively, whatever the status code it arrives under.
+pub(crate) const NO_ADDRESS_INDEX_MESSAGE: &str = "No information available for address";
+
+pub(crate) fn mentions_no_address_index(text: &str) -> bool {
+    text.to_lowercase().contains(&NO_ADDRESS_INDEX_MESSAGE.to_lowercase())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -811,6 +823,18 @@ pub(crate) struct WindowError {
     pub message: String,
 }
 
+impl From<&EndpointError> for WindowError {
+    /// Only a service answer or a "not found" is the node failing to serve a transaction of the
+    /// window. A transport failure, and the node's no-address-index answer (R39.11.4i(e)), end the
+    /// read instead of bisecting it.
+    fn from(error: &EndpointError) -> Self {
+        WindowError {
+            serve_failure: matches!(error, EndpointError::Service(_) | EndpointError::NotFound(_)),
+            message: error.to_string(),
+        }
+    }
+}
+
 /// The wire to one endpoint. A trait so the logic above it can be driven without a network.
 #[async_trait]
 pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
@@ -848,6 +872,9 @@ fn mined_height(raw: u64) -> Option<u64> {
 
 fn status_error(status: tonic::Status) -> EndpointError {
     let message = format!("{}: {}", status.code(), status.message());
+    if mentions_no_address_index(status.message()) {
+        return EndpointError::NoAddressIndex(message);
+    }
     match status.code() {
         Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Aborted | Code::ResourceExhausted => {
             EndpointError::Transport(message)
@@ -1028,16 +1055,13 @@ impl LightwalletdTransport for GrpcTransport {
         let mut stream = match Self::timed(client.get_taddress_txids(filter), "GetTaddressTxids").await {
             Ok(stream) => stream,
             Err(e) => {
-                let serve_failure = matches!(e, EndpointError::Service(_) | EndpointError::NotFound(_));
-                if !serve_failure {
+                let error = WindowError::from(&e);
+                if !error.serve_failure {
                     self.clients.lock().remove(server);
                 }
                 return WindowRead {
                     txs: Vec::new(),
-                    error: Some(WindowError {
-                        serve_failure,
-                        message: e.to_string(),
-                    }),
+                    error: Some(error),
                 };
             },
         };
@@ -1062,14 +1086,9 @@ impl LightwalletdTransport for GrpcTransport {
                 Ok(Some(Err(status))) => {
                     // The stream ends on the first transaction the node cannot serve; the
                     // transactions delivered before it are kept (R39.11.4b(e)).
-                    let error = status_error(status);
-                    let serve_failure = matches!(error, EndpointError::Service(_) | EndpointError::NotFound(_));
                     return WindowRead {
                         txs,
-                        error: Some(WindowError {
-                            serve_failure,
-                            message: error.to_string(),
-                        }),
+                        error: Some(WindowError::from(&status_error(status))),
                     };
                 },
             }
@@ -1407,6 +1426,15 @@ impl LightwalletdBackend {
         policy: AdmissionPolicy,
         addressing: HtlcAddressing,
     ) -> Self {
+        // Every construction path ends here, so each endpoint votes once everywhere (R39.11.7b).
+        let (servers, duplicates) = dedupe_lightwalletd_endpoints(servers);
+        for (dropped, kept) in &duplicates {
+            common::log::warn!(
+                "lightwalletd endpoint {} names the same endpoint as {} and is ignored",
+                dropped,
+                kept
+            );
+        }
         LightwalletdBackend {
             transport,
             servers,

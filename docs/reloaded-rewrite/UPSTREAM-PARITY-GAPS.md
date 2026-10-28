@@ -817,9 +817,14 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   topic. The reference publishes K messages that each carry one root, each
   on its own pair's topic. Against reference relays the aggregated form
   costs up to K K-pair synchronization requests and K² full snapshots per
-  maker per tick, and one unanswerable pair fails and un-forwards all K.
-  Observed live on 2026-10-28 as public seed nodes overloaded by Reloaded
-  makers. Fix: conform to R-K2a (sender side only; the receiver needs no
+  maker per tick, and one unanswerable pair fails all K. *(Corrected
+  2026-10-28, second pass, passed the KDF Dirty Gate on 2026-10-28: a relay has already
+  forwarded the K copies at the gossip layer — ch. 32 R-F3a — so the
+  failure does not un-forward them; it leaves every downstream peer that
+  asks the relay at the placeholder failure of R-Q5a.)*
+  Present on the network on 2026-10-28 while public seed nodes were
+  overloaded; the swaplab control showed no growth attributable to the
+  aggregated shape alone. Fix: conform to R-K2a (sender side only; the receiver needs no
   change).
 - [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
   longer refuses while its trie worker lags (amended R-T3b item 2); it answers
@@ -831,6 +836,37 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 - [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
   in-flight synchronization de-duplication, orphan-node release, inbound
   task cap. Deferred, none bound.
+
+---
+
+## #19 — Relay forwards before it handles; unbounded per-peer outbound queue; orphaned trie nodes — **PARITY (reference facts authored 2026-10-28, second pass; passed the KDF Dirty Gate 2026-10-28)**
+
+CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
+§32.8 R-F3a/R-F3b (rewritten), §32.7.3 R-Q5a, §32.9A R-B1–R-B3, V5;
+[`28-libp2p-modernization.md`](./28-libp2p-modernization.md) R11a, R13a,
+D7, T11, V5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
+(agree); the baseline anchor differs (V5 in both chapters).
+
+- [ ] Not a gap but a corrected description: a relay forwards every gossip
+  message at the gossip layer immediately on receipt and again on the
+  application's success; the first-pass claim that a relay withholds a
+  keep-alive until its own synchronization succeeds was wrong for the
+  reference and for Reloaded alike. Downstream requests therefore race the
+  relay's own handling, and the three failure classes of R-Q5a are the
+  expected result at a rate set by keep-alive messages per second times
+  downstream requesters. A non-relay forwards nothing it received, so only
+  relays and the publishing maker are ever asked (ch. 32 R-F3b). Nothing to
+  implement; chapters corrected.
+- [ ] Reference bound inventory (R-B1): unbounded are the trie node store
+  (nodes of a cleared slice are never released), the mutation queue, the
+  per-message task count and the substrate's per-peer outbound queue; a
+  pubkey that keeps sending keep-alives never expires. Reloaded shares the
+  profile (R-B2 parity). Hardening candidates: ch. 32 D6 and ch. 28 D7
+  (per-peer outbound queue bound; forward once instead of twice). Deferred,
+  none bound; each is a divergence to record when adopted.
+- [ ] The message-id encoding mismatch (ch. 28 R13, closed on dev) never
+  involved seeds: a relay that subscribes to no orderbook topic neither
+  announces nor requests message ids for them (R13a). No action.
 
 ---
 

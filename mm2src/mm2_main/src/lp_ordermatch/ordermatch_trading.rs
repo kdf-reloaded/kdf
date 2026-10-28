@@ -717,81 +717,84 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
             }
         }
 
-        {
-            let mut missing_uuids = Vec::new();
-            let mut to_cancel = Vec::new();
-            {
-                let orderbook = ordermatch_ctx.orderbook.lock();
-                for (uuid, _) in ordermatch_ctx.maker_orders_ctx.lock().iter() {
-                    if !orderbook.order_set.contains_key(uuid) {
-                        missing_uuids.push(*uuid);
-                    }
-                }
-            }
-
-            for uuid in missing_uuids {
-                let order_mutex = match ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid) {
-                    Some(o) => o.clone(),
-                    None => continue,
-                };
-
-                let mut order = order_mutex.lock().await;
-                let (base, rel) = match find_pair(&ctx, &order.base, &order.rel).await {
-                    Ok(Some(pair)) => pair,
-                    _ => continue,
-                };
-                let current_balance = match base.my_spendable_balance().compat().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
-                        to_cancel.push(uuid);
-                        continue;
-                    },
-                };
-                let max_vol = match calc_max_maker_vol(&ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await
-                {
-                    Ok(info) => info.volume,
-                    Err(e) => {
-                        log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
-                        to_cancel.push(uuid);
-                        continue;
-                    },
-                };
-                if max_vol < order.available_amount() {
-                    order.max_base_vol = order.reserved_amount() + max_vol;
-                }
-                if order.available_amount() < order.min_base_vol {
-                    log::info!("Insufficient volume available for order {}, cancelling", uuid);
-                    to_cancel.push(uuid);
-                    continue;
-                }
-
-                let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
-
-                // notify other nodes only if maker order is still there keeping maker_orders locked during the operation
-                if maker_orders.contains_key(&uuid) {
-                    reannounce_missing_own_order(&ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
-                }
-            }
-
-            for uuid in to_cancel {
-                let removed_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().remove_order(&uuid);
-                // This checks that the order hasn't been removed by another process
-                if let Some(order_mutex) = removed_order_mutex {
-                    let order = order_mutex.lock().await;
-                    delete_my_maker_order(
-                        ctx.clone(),
-                        order.clone(),
-                        MakerOrderCancellationReason::InsufficientBalance,
-                    )
-                    .compat()
-                    .await
-                    .ok();
-                }
-            }
-        }
+        reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx).await;
 
         Timer::sleep(0.777).await;
+    }
+}
+
+/// The maintenance step for the own maker orders that are absent from the local orderbook (CRD ch.60 R60.4.6
+/// item 5, ch.59 R59.6.7): reconcile each with a fresh balance read, then re-announce it or cancel it.
+pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
+    let mut missing_uuids = Vec::new();
+    let mut to_cancel = Vec::new();
+    {
+        let orderbook = ordermatch_ctx.orderbook.lock();
+        for (uuid, _) in ordermatch_ctx.maker_orders_ctx.lock().iter() {
+            if !orderbook.order_set.contains_key(uuid) {
+                missing_uuids.push(*uuid);
+            }
+        }
+    }
+
+    for uuid in missing_uuids {
+        let order_mutex = match ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid) {
+            Some(o) => o.clone(),
+            None => continue,
+        };
+
+        let mut order = order_mutex.lock().await;
+        let (base, rel) = match find_pair(ctx, &order.base, &order.rel).await {
+            Ok(Some(pair)) => pair,
+            _ => continue,
+        };
+        let current_balance = match base.my_spendable_balance().compat().await {
+            Ok(b) => b,
+            Err(e) => {
+                log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
+                to_cancel.push(uuid);
+                continue;
+            },
+        };
+        let max_vol = match calc_max_maker_vol(ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await {
+            Ok(info) => info.volume,
+            Err(e) => {
+                log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
+                to_cancel.push(uuid);
+                continue;
+            },
+        };
+        if max_vol < order.available_amount() {
+            order.max_base_vol = order.reserved_amount() + max_vol;
+        }
+        if order.available_amount() < order.min_base_vol {
+            log::info!("Insufficient volume available for order {}, cancelling", uuid);
+            to_cancel.push(uuid);
+            continue;
+        }
+
+        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+
+        // notify other nodes only if maker order is still there keeping maker_orders locked during the operation
+        if maker_orders.contains_key(&uuid) {
+            reannounce_missing_own_order(ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
+        }
+    }
+
+    for uuid in to_cancel {
+        let removed_order_mutex = ordermatch_ctx.maker_orders_ctx.lock().remove_order(&uuid);
+        // This checks that the order hasn't been removed by another process
+        if let Some(order_mutex) = removed_order_mutex {
+            let order = order_mutex.lock().await;
+            delete_my_maker_order(
+                ctx.clone(),
+                order.clone(),
+                MakerOrderCancellationReason::InsufficientBalance,
+            )
+            .compat()
+            .await
+            .ok();
+        }
     }
 }
 
@@ -853,6 +856,8 @@ pub(crate) async fn handle_timed_out_taker_orders(ctx: MmArc, ordermatch_ctx: &O
                 .lock()
                 .add_order(&maker_order, order_arc);
         }
+        // CRD ch.60 R60.4.6 item 4: the watch of the base coin starts unseeded, no balance is read here.
+        start_maker_balance_watch(&ctx, ordermatch_ctx, &maker_order.base, None);
 
         storage
             .save_new_active_maker_order(&maker_order)
@@ -1829,6 +1834,17 @@ pub(crate) async fn get_max_volume(
     my_coin: &MmCoinEnum,
     other_coin: &MmCoinEnum,
 ) -> Result<MmNumber, String> {
+    get_max_volume_and_balance(ctx, my_coin, other_coin)
+        .await
+        .map(|(volume, _balance)| volume)
+}
+
+/// The maximum maker volume together with the spendable balance of `my_coin` that it was computed from.
+async fn get_max_volume_and_balance(
+    ctx: &MmArc,
+    my_coin: &MmCoinEnum,
+    other_coin: &MmCoinEnum,
+) -> Result<(MmNumber, BigDecimal), String> {
     let my_balance = try_s!(my_coin.my_spendable_balance().compat().await);
     // first check if `rel_coin` balance is sufficient
     let other_coin_trade_fee = try_s!(
@@ -1841,7 +1857,7 @@ pub(crate) async fn get_max_volume(
     // calculate max maker volume
     // note the `calc_max_maker_vol` returns [`CheckBalanceError::NotSufficientBalance`] error if the balance of `base_coin` is not sufficient
     let info = try_s!(calc_max_maker_vol(ctx, my_coin, &my_balance, FeeApproxStage::OrderIssue).await);
-    Ok(info.volume)
+    Ok((info.volume, my_balance))
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
@@ -1880,14 +1896,16 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         );
     }
 
-    let volume = if req.max {
+    // The spendable balance of the base coin that the checks above read seeds the balance watch (CRD ch.60
+    // R60.4.6 item 3); it is the quantity the watch polls.
+    let (volume, base_balance_read) = if req.max {
         try_s!(
-            get_max_volume(ctx, &base_coin, &rel_coin)
+            get_max_volume_and_balance(ctx, &base_coin, &rel_coin)
                 .or_else(|e| cancel_orders_on_error(ctx, &req, e))
                 .await
         )
     } else {
-        try_s!(
+        let base_balance = try_s!(
             check_balance_for_maker_swap(
                 ctx,
                 &base_coin,
@@ -1900,7 +1918,7 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
             .or_else(|e| cancel_orders_on_error(ctx, &req, e))
             .await
         );
-        req.volume.clone()
+        (req.volume.clone(), base_balance)
     };
 
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
@@ -1951,6 +1969,7 @@ async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerO
         let order_arc = Arc::new(AsyncMutex::new(new_order.clone()));
         ordermatch_ctx.maker_orders_ctx.lock().add_order(&new_order, order_arc);
     }
+    start_maker_balance_watch(ctx, &ordermatch_ctx, &new_order.base, Some(base_balance_read));
     Ok(new_order)
 }
 
@@ -2677,6 +2696,8 @@ pub async fn orders_kick_start(ctx: &MmArc) -> Result<HashSet<String>, String> {
         coins.insert(order.rel.clone());
         let order_arc = Arc::new(AsyncMutex::new(order.clone()));
         ordermatch_ctx.maker_orders_ctx.lock().add_order(&order, order_arc);
+        // CRD ch.60 R60.4.6 item 4: the watch of the base coin starts unseeded, no balance is read here.
+        start_maker_balance_watch(ctx, &ordermatch_ctx, &order.base, None);
     }
 
     let mut taker_orders = ordermatch_ctx.my_taker_orders.lock().await;

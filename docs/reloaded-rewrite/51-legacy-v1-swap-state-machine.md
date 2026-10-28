@@ -279,10 +279,13 @@ same stage that produced it (R19), which is what makes the
 re-entrant replay of R7 safe here.
 
 **R17.** *Send maker payment and await taker payment.*
-`STAGE-SEND-MAKER-PAYMENT` MUST search the chain for a maker payment it
-may already have broadcast before constructing a new one, then broadcast
-the maker payment and emit `MakerPaymentSent`, transitioning to
-`STAGE-AWAIT-TAKER-PAYMENT`. Failure to construct or broadcast MUST emit
+`STAGE-SEND-MAKER-PAYMENT` MUST first search the chain for a maker payment
+it may already have broadcast, and adopt one it finds without a second
+broadcast. Only if none is found MUST it check that the swap start time
+plus one third of the lock duration has not passed, then construct and
+broadcast the maker payment; either way it emits `MakerPaymentSent`,
+transitioning to `STAGE-AWAIT-TAKER-PAYMENT`. Failure of the search, a
+passed deadline, or failure to construct or broadcast MUST emit
 `MakerPaymentTransactionFailed` and transition to `STAGE-FINISH` — this
 is the last maker failure that terminates without a refund, because no
 maker funds are yet committed. `STAGE-AWAIT-TAKER-PAYMENT` MUST then, in
@@ -464,7 +467,9 @@ has committed only the dex fee, and there is nothing to refund.
 **R29.** *Send taker payment.* `STAGE-SEND-TAKER-PAYMENT` MUST first
 search the chain for a taker payment it may already have broadcast. Only
 if none is found MUST it check that the maker-payment wait deadline has
-not passed. Failure of the search or a passed deadline MUST emit
+not passed: the swap's stored `maker_payment_wait`, the swap start time
+plus two fifths of the lock duration, the same deadline the taker's wait
+for the maker payment's confirmations uses. Failure of the search or a passed deadline MUST emit
 `TakerPaymentTransactionFailed` and transition to `STAGE-FINISH`. On
 success it MUST emit `TakerPaymentSent`. This search-before-deadline
 ordering is required by R7: a replayed stage must not refuse to continue

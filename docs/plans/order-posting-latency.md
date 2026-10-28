@@ -28,6 +28,9 @@
 - **Decision R.** Do all of F1–F5, in the order below.
 - **Decision P.** The pre-trade check runs on create and on volume or `max` changes. It is skipped on
   price-only, minimum-volume and confirmation updates. Its fee-rate reading is reused by the same request.
+- **Balance watch on shared EVM RPC endpoints (maintainer, 2026-10-28).** F2 is parity: a base coin with maker
+  orders costs one balance read per 30 s against its node or RPC endpoint, as the reference does (ch.60 R60.4.5,
+  R60.4.6). Several such coins on one shared EVM endpoint each cost that one read; no change is planned.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 
@@ -38,6 +41,6 @@
 | 0 | CRD branch `crd/order-post-latency` (PR #95) | all of the above | merged 2026-10-27 |
 | 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | implemented (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs`; F5 read spreading `electrum_spread_reads` | R38.6.6j items 2–4, R57.2.6, R38.6.4a | after pass 1 |
-| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | ready; after pass 1 |
+| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | implemented (PR #116) |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.

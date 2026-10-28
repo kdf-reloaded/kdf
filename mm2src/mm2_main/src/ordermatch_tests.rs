@@ -6681,3 +6681,639 @@ mod sync_request_root_tests {
         );
     }
 }
+
+/// CRD ch.60 T60.7 (R60.4.5, R60.4.6): the balance watch of the node's own maker orders. Time is driven by a
+/// sleeper that the test passes to the watch task; it logs every pause and every balance read in one list, so
+/// "sleep first, then one read per 30 s" is read off the order of the entries, and no test waits.
+#[cfg(not(target_arch = "wasm32"))]
+mod t60_7_maker_balance_watch_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::maker_balance_watch::{run_maker_balance_watch, start_maker_balance_watch,
+                                                         BalanceObservation, MAKER_BALANCE_WATCH_INTERVAL_SECS};
+    use async_trait::async_trait;
+    use coins::{register_balance_update_handler, BalanceError, CoinBalance, CoinsContext, MarketCoinOps, MmCoinEnum,
+                TradeFee};
+    use std::collections::VecDeque;
+    use std::str::FromStr;
+
+    fn bd(s: &str) -> BigDecimal { BigDecimal::from_str(s).unwrap() }
+
+    /// The shared log and the scripted balance of the mocked coins.
+    #[derive(Clone)]
+    struct Probe {
+        log: Arc<Mutex<Vec<String>>>,
+        script: Arc<Mutex<VecDeque<Option<BigDecimal>>>>,
+        steady: Arc<Mutex<BigDecimal>>,
+    }
+
+    impl Probe {
+        /// Installs the coin mocks: `my_balance` answers the scripted readings (`None` is a failed read), then the
+        /// steady balance; the fee mocks make `calc_max_maker_vol` a pure function of the balance.
+        fn install(steady: &str) -> Probe {
+            let probe = Probe {
+                log: Arc::new(Mutex::new(Vec::new())),
+                script: Arc::new(Mutex::new(VecDeque::new())),
+                steady: Arc::new(Mutex::new(bd(steady))),
+            };
+            let reader = probe.clone();
+            TestCoin::my_balance.mock_safe(move |coin| {
+                let ticker = coin.ticker().to_owned();
+                reader.log.lock().unwrap().push(format!("read {}", ticker));
+                let reading = match reader.script.lock().unwrap().pop_front() {
+                    Some(scripted) => scripted,
+                    None => Some(reader.steady.lock().unwrap().clone()),
+                };
+                let result = match reading {
+                    Some(spendable) => Ok(CoinBalance::new(spendable)),
+                    None => MmError::err(BalanceError::Transport("down".to_owned())),
+                };
+                MockResult::Return(Box::new(futures01::future::result(result)))
+            });
+            TestCoin::get_sender_trade_fee.mock_safe(|coin, _value, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from("0.1"),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::pin(async move { Ok(fee) }))
+            });
+            TestCoin::get_receiver_trade_fee.mock_safe(|coin, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from("0.1"),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::new(futures01::future::ok(fee)))
+            });
+            TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(bd("0")));
+            probe
+        }
+
+        fn script(&self, readings: &[Option<&str>]) {
+            *self.script.lock().unwrap() = readings.iter().map(|r| r.map(bd)).collect();
+        }
+
+        fn entries(&self) -> Vec<String> { self.log.lock().unwrap().clone() }
+
+        fn count(&self, entry: &str) -> usize { self.entries().iter().filter(|e| *e == entry).count() }
+    }
+
+    /// A balance handler that only records the recomputations it is asked for.
+    struct Recorder(Probe);
+
+    #[async_trait]
+    impl coins::BalanceTradeFeeUpdatedHandler for Recorder {
+        async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
+            self.0
+                .log
+                .lock()
+                .unwrap()
+                .push(format!("recompute {} {}", coin.ticker(), new_balance));
+        }
+    }
+
+    fn ctx_with_coins(probe: &Probe) -> MmArc {
+        // An unrelated configuration member must not change the interval (T60.7 (a)).
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }, { "coin": "OTHER" }],
+                "balance_watch_interval": 1,
+                "balance_update_interval": 1
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL", "OTHER"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        block_on(register_balance_update_handler(
+            ctx.clone(),
+            Box::new(Recorder(probe.clone())),
+        ));
+        ctx
+    }
+
+    fn own_order(base: &str, rel: &str, max: &str, min: &str) -> MakerOrder {
+        MakerOrder {
+            uuid: Uuid::new_v4(),
+            base: base.into(),
+            rel: rel.into(),
+            created_at: now_ms(),
+            updated_at: Some(now_ms()),
+            matches: HashMap::new(),
+            max_base_vol: MmNumber::from(bd(max)),
+            min_base_vol: MmNumber::from(bd(min)),
+            price: 1.into(),
+            started_swaps: vec![],
+            conf_settings: Some(OrderConfirmationsSettings::default()),
+            changes_history: None,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+            timeout_in_minutes: None,
+            swap_version: SwapVersion::default(),
+        }
+    }
+
+    fn store(ctx: &MmArc, order: &MakerOrder) {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let order_arc = Arc::new(AsyncMutex::new(order.clone()));
+        ordermatch_ctx.maker_orders_ctx.lock().add_order(order, order_arc);
+    }
+
+    fn remove(ctx: &MmArc, order: &MakerOrder) {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        ordermatch_ctx.maker_orders_ctx.lock().remove_order(&order.uuid);
+    }
+
+    /// Registers the watch of `ticker` the way the order paths do, without spawning its task.
+    fn begin(ctx: &MmArc, ticker: &str, seed: Option<&str>) -> Option<u64> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let generation = ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .begin_balance_watch(ticker, seed.map(bd));
+        generation
+    }
+
+    /// Runs the watch task of `ticker` to its end. Every pause is logged and numbered from 1; `on_sleep` may
+    /// change the world at that point (move the balance, remove an order).
+    fn drive(ctx: &MmArc, probe: &Probe, ticker: &str, generation: u64, on_sleep: impl Fn(usize)) {
+        let calls = std::cell::Cell::new(0usize);
+        let log = probe.log.clone();
+        let sleeper = |secs: f64| {
+            calls.set(calls.get() + 1);
+            log.lock().unwrap().push(format!("sleep {}", secs));
+            on_sleep(calls.get());
+            std::future::ready(())
+        };
+        block_on(run_maker_balance_watch(
+            ctx.weak(),
+            ticker.to_owned(),
+            generation,
+            sleeper,
+        ));
+    }
+
+    /// (a) With one maker order on base coin BASE and a balance that does not change, exactly one balance read of
+    /// BASE occurs per 30 s and none within the first 30 s after the watch starts; the interval is unaffected by
+    /// any configuration member.
+    #[test]
+    fn t60_7_a_one_read_per_thirty_seconds_sleep_first() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+        let generation = begin(&ctx, "BASE", Some("10")).expect("the first base order starts the watch");
+
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 4 {
+                remove(&ctx, &order);
+            }
+        });
+
+        assert_eq!(MAKER_BALANCE_WATCH_INTERVAL_SECS, 30.);
+        // Sleep first; one read after each of the first three pauses; the order is gone after the fourth pause, so
+        // the poll that follows it reads nothing and the task ends. The balance never moved, so no recomputation.
+        assert_eq!(probe.entries(), vec![
+            "sleep 30",
+            "read BASE",
+            "sleep 30",
+            "read BASE",
+            "sleep 30",
+            "read BASE",
+            "sleep 30"
+        ]);
+    }
+
+    /// (b) A watch seeded at creation with balance b performs no recomputation on a first poll reading b, and
+    /// exactly one on a first poll reading b' != b.
+    #[test]
+    fn t60_7_b_seeded_watch_recomputes_only_when_the_balance_moved() {
+        // First poll reads the seed.
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 2 {
+                remove(&ctx, &order);
+            }
+        });
+        assert_eq!(probe.entries(), vec!["sleep 30", "read BASE", "sleep 30"]);
+
+        // First poll reads another value: exactly one recomputation, then none while it stays.
+        let probe = Probe::install("11");
+        let ctx = ctx_with_coins(&probe);
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 3 {
+                remove(&ctx, &order);
+            }
+        });
+        assert_eq!(probe.entries(), vec![
+            "sleep 30",
+            "read BASE",
+            "recompute BASE 11",
+            "sleep 30",
+            "read BASE",
+            "sleep 30"
+        ]);
+    }
+
+    /// (c), the watch half: a restored order starts the watch without a seed and without a read; its first poll
+    /// at +30 s runs one recomputation although the balance equals the maintenance pass's reading, and that
+    /// recomputation (the real order-matching handler) changes no order and sends no message.
+    #[test]
+    fn t60_7_c_restored_order_unseeded_watch_recomputes_once_without_effect() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-balance-watch-restart-{}", Uuid::new_v4()));
+        let probe = Probe::install("20");
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                "dbdir": dbdir.to_str().unwrap()
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+        let order = own_order("BASE", "REL", "10", "1");
+        block_on(save_my_new_maker_order(ctx.clone(), &order)).unwrap();
+
+        // The restart: the order is loaded, the watch exists without a seed, and no balance was read.
+        block_on(orders_kick_start(&ctx)).unwrap();
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let generation = {
+            let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+            assert!(!maker_orders.has_balance_watch("REL"));
+            assert_eq!(maker_orders.balance_watch_last_seen("BASE"), None);
+            maker_orders
+                .balance_watch_generation("BASE")
+                .expect("the restored order started the watch")
+        };
+        assert_eq!(probe.entries(), Vec::<String>::new());
+
+        // The coins are activated and the first maintenance pass runs: one read, the order is re-announced.
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        block_on(register_balance_update_handler(
+            ctx.clone(),
+            Box::new(Recorder(probe.clone())),
+        ));
+        block_on(register_balance_update_handler(
+            ctx.clone(),
+            Box::new(BalanceUpdateOrdermatchHandler::new(ctx.clone())),
+        ));
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+        assert_eq!(probe.entries(), vec!["read BASE"]);
+        let mut announced = 0;
+        while let Ok(cmd) = p2p_rx.try_recv() {
+            if matches!(
+                cmd,
+                AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+            ) {
+                announced += 1;
+            }
+        }
+        assert!(announced >= 1, "the restored order is re-announced");
+        let max_after_pass = block_on(
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .get_order(&order.uuid)
+                .unwrap()
+                .lock(),
+        )
+        .max_base_vol
+        .clone();
+
+        // The watch's first poll, 30 s after the start: the balance equals the pass's reading, yet one recomputation.
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 2 {
+                remove(&ctx, &order);
+            }
+        });
+        assert_eq!(probe.entries(), vec![
+            "read BASE",
+            "sleep 30",
+            "read BASE",
+            "recompute BASE 20",
+            "sleep 30"
+        ]);
+        // The real handler ran inside that recomputation and found nothing to lower: nothing was sent.
+        assert!(
+            p2p_rx.try_recv().is_err(),
+            "the first poll's recomputation sends no message"
+        );
+        assert_eq!(max_after_pass, MmNumber::from("10"));
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    /// (d) A poll whose read fails leaves the last-seen value and every order untouched, and the next poll occurs
+    /// 30 s later.
+    #[test]
+    fn t60_7_d_failed_read_changes_nothing() {
+        let probe = Probe::install("12");
+        let ctx = ctx_with_coins(&probe);
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        // Reads: 11 (moved), failure, failure, 11 (the kept last-seen value), then the steady 12.
+        probe.script(&[Some("11"), None, None, Some("11")]);
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 6 {
+                remove(&ctx, &order);
+            }
+        });
+        assert_eq!(probe.entries(), vec![
+            "sleep 30",
+            "read BASE",
+            "recompute BASE 11",
+            "sleep 30",
+            "read BASE", // fails: nothing recomputed, last-seen stays 11
+            "sleep 30",
+            "read BASE", // fails again
+            "sleep 30",
+            "read BASE", // 11 equals the last-seen value: nothing recomputed
+            "sleep 30",
+            "read BASE",
+            "recompute BASE 12",
+            "sleep 30",
+        ]);
+    }
+
+    /// (e) A restored order whose live balance supports less than its available amount is announced with its
+    /// maximum volume lowered to the reserved amount plus the supported maximum; one whose supported maximum is
+    /// below its minimum volume is cancelled with the insufficient-balance reason and not announced.
+    #[test]
+    fn t60_7_e_restored_order_is_reconciled_with_the_live_balance() {
+        let probe = Probe::install("5");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let cancelled = Arc::new(Mutex::new(Vec::<String>::new()));
+        let cancelled_log = cancelled.clone();
+        delete_my_maker_order.mock_safe(move |_, order, reason| {
+            cancelled_log.lock().unwrap().push(format!("{} {}", order.uuid, reason));
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let published = |rx: &mut mpsc::Receiver<AdexBehaviourCmd>| {
+            let mut n = 0;
+            while let Ok(cmd) = rx.try_recv() {
+                if matches!(
+                    cmd,
+                    AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+                ) {
+                    n += 1;
+                }
+            }
+            n
+        };
+
+        // Balance 5, fee 0.1: the supported maximum is 4.9, below the available 10 and above the minimum 1.
+        let lowered = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &lowered);
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+        let max_vol = block_on(
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .get_order(&lowered.uuid)
+                .unwrap()
+                .lock(),
+        )
+        .max_base_vol
+        .clone();
+        assert_eq!(max_vol, MmNumber::from("4.9"));
+        assert!(published(&mut p2p_rx) >= 1, "the lowered order is announced");
+        assert!(cancelled.lock().unwrap().is_empty());
+        remove(&ctx, &lowered);
+
+        // Balance 0.5: the supported maximum 0.4 is below the minimum 1: cancelled, not announced.
+        probe.script(&[Some("0.5")]);
+        let too_small = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &too_small);
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+        assert_eq!(published(&mut p2p_rx), 0, "a cancelled order is not announced");
+        assert_eq!(*cancelled.lock().unwrap(), vec![format!(
+            "{} {}",
+            too_small.uuid,
+            MakerOrderCancellationReason::InsufficientBalance
+        )]);
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&too_small.uuid));
+
+        // A balance read that fails cancels the order as well.
+        probe.script(&[None]);
+        let unreadable = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &unreadable);
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&unreadable.uuid));
+        assert_eq!(published(&mut p2p_rx), 0);
+    }
+
+    /// A coin that is only activated, or only appears as rel, is never polled.
+    #[test]
+    fn a_coin_that_is_only_activated_or_only_rel_is_never_polled() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+
+        assert_eq!(begin(&ctx, "REL", Some("10")), None, "rel only: no watch");
+        assert_eq!(begin(&ctx, "OTHER", None), None, "activated only: no watch");
+        // The entry point the order paths use spawns nothing for them either.
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        start_maker_balance_watch(&ctx, &ordermatch_ctx, "REL", None);
+        start_maker_balance_watch(&ctx, &ordermatch_ctx, "OTHER", None);
+        {
+            let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+            assert!(!maker_orders.has_balance_watch("REL"));
+            assert!(!maker_orders.has_balance_watch("OTHER"));
+        }
+
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        drive(&ctx, &probe, "BASE", generation, |n| {
+            if n == 3 {
+                remove(&ctx, &order);
+            }
+        });
+        assert_eq!(probe.count("read REL"), 0);
+        assert_eq!(probe.count("read OTHER"), 0);
+        assert_eq!(probe.count("read BASE"), 2);
+    }
+
+    /// The watch stops when the last base order goes, and a second order on the same base does not start a
+    /// second watch.
+    #[test]
+    fn the_watch_stops_with_the_last_base_order_and_is_not_doubled() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let first = own_order("BASE", "REL", "5", "1");
+        let second = own_order("BASE", "OTHER", "5", "1");
+        store(&ctx, &first);
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        store(&ctx, &second);
+        assert_eq!(begin(&ctx, "BASE", Some("99")), None, "one watch per coin");
+        assert_eq!(
+            ordermatch_ctx.maker_orders_ctx.lock().balance_watch_last_seen("BASE"),
+            Some(bd("10")),
+            "the running watch keeps its own last-seen value"
+        );
+
+        remove(&ctx, &first);
+        assert!(ordermatch_ctx.maker_orders_ctx.lock().has_balance_watch("BASE"));
+        remove(&ctx, &second);
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().has_balance_watch("BASE"));
+
+        // The task of the ended watch finds it gone after its pause and reads nothing.
+        drive(&ctx, &probe, "BASE", generation, |_| {});
+        assert_eq!(probe.entries(), vec!["sleep 30"]);
+
+        // A later order starts a new watch; the old one's generation is not live.
+        let third = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &third);
+        let renewed = begin(&ctx, "BASE", None).unwrap();
+        assert_ne!(renewed, generation);
+        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+        assert!(maker_orders.balance_watch_is_live("BASE", renewed));
+        assert!(!maker_orders.balance_watch_is_live("BASE", generation));
+    }
+
+    /// A change observed after the last order went does not recompute: the observation is stale.
+    #[test]
+    fn an_observation_without_a_base_order_is_stale() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let order = own_order("BASE", "REL", "5", "1");
+        store(&ctx, &order);
+        let generation = begin(&ctx, "BASE", Some("10")).unwrap();
+        let mut maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+        assert_eq!(
+            maker_orders.observe_balance("BASE", generation, &bd("10")),
+            BalanceObservation::Unchanged
+        );
+        assert_eq!(
+            maker_orders.observe_balance("BASE", generation, &bd("11")),
+            BalanceObservation::Changed
+        );
+        maker_orders.remove_order(&order.uuid);
+        assert_eq!(
+            maker_orders.observe_balance("BASE", generation, &bd("12")),
+            BalanceObservation::Stale
+        );
+    }
+
+    /// A taker order converted to a maker order (CRD ch.59 R59.4.1) starts an unseeded watch and reads no balance.
+    #[test]
+    fn a_converted_taker_order_starts_an_unseeded_watch() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-balance-watch-convert-{}", Uuid::new_v4()));
+        let probe = Probe::install("10");
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                "dbdir": dbdir.to_str().unwrap()
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let (tx, _p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        std::fs::create_dir_all(my_taker_orders_dir(&ctx)).unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+        delete_my_taker_order.mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let taker = TakerOrder {
+            request: TakerRequest {
+                base: "BASE".into(),
+                rel: "REL".into(),
+                uuid: Uuid::new_v4(),
+                dest_pub_key: H256Json::default(),
+                sender_pubkey: H256Json::default(),
+                base_amount: 10.into(),
+                rel_amount: 10.into(),
+                action: TakerAction::Sell,
+                match_by: MatchBy::Any,
+                conf_settings: Some(OrderConfirmationsSettings::default()),
+                base_protocol_info: None,
+                rel_protocol_info: None,
+                swap_version: SwapVersion::default(),
+            },
+            matches: HashMap::new(),
+            created_at: now_ms() - 60_000,
+            order_type: OrderType::GoodTillCancelled,
+            min_volume: 0.into(),
+            timeout: 30,
+            save_in_history: false,
+            base_orderbook_ticker: None,
+            rel_orderbook_ticker: None,
+            p2p_privkey: None,
+        };
+        let uuid = taker.request.uuid;
+        block_on(ordermatch_ctx.my_taker_orders.lock()).insert(uuid, taker);
+
+        block_on(handle_timed_out_taker_orders(ctx.clone(), &ordermatch_ctx));
+
+        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+        assert!(maker_orders.contains_key(&uuid), "the taker order became a maker order");
+        assert!(maker_orders.has_balance_watch("BASE"));
+        assert!(!maker_orders.has_balance_watch("REL"));
+        assert_eq!(maker_orders.balance_watch_last_seen("BASE"), None);
+        assert_eq!(probe.entries(), Vec::<String>::new(), "no balance read at insertion");
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    /// An order created by `setprice` seeds the watch with the balance the creation read, the quantity the poll
+    /// compares, and the creation reads the base balance once.
+    #[test]
+    fn setprice_seeds_the_watch_with_the_balance_it_read() {
+        let dbdir = std::env::temp_dir().join(format!("kdf-balance-watch-setprice-{}", Uuid::new_v4()));
+        let probe = Probe::install("42");
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({
+                "coins": [{ "coin": "BASE" }, { "coin": "REL" }],
+                "dbdir": dbdir.to_str().unwrap()
+            }))
+            .with_secp256k1_key_pair(key_pair_from_seed("passphrase").unwrap())
+            .into_mm_arc();
+        let (tx, _p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for ticker in ["BASE", "REL"] {
+            block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+        }
+
+        for max in [false, true] {
+            let req: SetPriceReq = json::from_value(json!({
+                "base": "BASE", "rel": "REL", "price": 1, "volume": 3, "max": max, "save_in_history": false
+            }))
+            .unwrap();
+            let order = block_on(create_maker_order(&ctx, req)).unwrap();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+            assert!(maker_orders.contains_key(&order.uuid));
+            assert_eq!(maker_orders.balance_watch_last_seen("BASE"), Some(bd("42")));
+            assert!(!maker_orders.has_balance_watch("REL"));
+            drop(maker_orders);
+            // One read of the base balance per creation: the one the checks made, which is the seed.
+            assert_eq!(probe.count("read BASE"), 1);
+            probe.log.lock().unwrap().clear();
+        }
+        std::fs::remove_dir_all(&dbdir).ok();
+    }
+}

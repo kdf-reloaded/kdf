@@ -368,6 +368,32 @@ fn branch_identifiers_parse_as_the_service_sends_them() {
     assert_eq!(parse_branch_id("1ffffffff"), None);
 }
 
+/// R39.11.4i(e): the node's no-address-index answer is its own condition, whatever the status code;
+/// any other service answer stays a serve failure.
+#[test]
+fn status_error_classifies_the_no_address_index_message_apart_from_a_service_error() {
+    let refused = status_error(tonic::Status::unknown("-5: No information available for address"));
+    assert_eq!(
+        refused,
+        EndpointError::NoAddressIndex("Unknown error: -5: No information available for address".to_owned())
+    );
+    assert_eq!(
+        refused.to_string(),
+        "the server's node keeps no address index: Unknown error: -5: No information available for address"
+    );
+    assert_eq!(
+        status_error(tonic::Status::internal("-5: NO INFORMATION AVAILABLE FOR ADDRESS")),
+        EndpointError::NoAddressIndex("Internal error: -5: NO INFORMATION AVAILABLE FOR ADDRESS".to_owned())
+    );
+    assert!(matches!(
+        status_error(tonic::Status::unknown("something else")),
+        EndpointError::Service(_)
+    ));
+    // It ends a read instead of being bisected; a service error is bisected.
+    assert!(!WindowError::from(&refused).serve_failure);
+    assert!(WindowError::from(&status_error(tonic::Status::unknown("something else"))).serve_failure);
+}
+
 // ---------------------------------------------------------------------------------------------
 // A scripted transport
 // ---------------------------------------------------------------------------------------------
@@ -1287,7 +1313,7 @@ fn refusing_every_request(calls: Arc<Mutex<usize>>) -> impl FnMut(u64, u64) -> f
             txs: Vec::new(),
             error: Some(WindowError {
                 serve_failure: true,
-                message: "Unknown error: -5: No information available for address".to_owned(),
+                message: "Internal error: the node could not serve a transaction".to_owned(),
             }),
         })
     }
@@ -1327,7 +1353,7 @@ async fn a_refusing_endpoint_costs_about_sixty_thousand_requests_unbounded_and_e
     assert_eq!(read.requests, 18);
     let failure = read.failure.clone().expect("named failure");
     assert!(
-        failure.starts_with("could not serve 5 heights of window 4137700..=4138699 (last error: Unknown error: -5: No information available for address); the failure is not confined to single transactions"),
+        failure.starts_with("could not serve 5 heights of window 4137700..=4138699 (last error: Internal error: the node could not serve a transaction); the failure is not confined to single transactions"),
         "{failure}"
     );
     assert!(!read.is_clean());
@@ -1849,4 +1875,79 @@ async fn the_backend_probes_the_cache_and_never_uses_a_stale_cache_endpoint() {
     let excluded = backend.excluded_endpoints();
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0].0, "mathnodes");
+}
+
+/// T39.11.7b / R39.11.7b: `[A, A, B]` with A and B on different branches is two endpoints with one
+/// vote each, so a fresh wallet fails with no majority instead of admitting A 2-to-1.
+#[tokio::test]
+async fn admission_counts_duplicate_endpoint_once() {
+    let transport = Arc::new(FakeTransport::default());
+    transport.serve("a", healthy(&[ARRR_TIP]));
+    let mut other_branch = healthy(&[ARRR_TIP]);
+    other_branch.info = Some(Ok(info(SAPLING_BRANCH, ARRR_TIP)));
+    transport.serve("b", other_branch);
+    let backend = backend_over(&transport, &["a", "a", "b"]);
+
+    assert_eq!(backend.servers, vec!["a".to_owned(), "b".to_owned()]);
+    match backend.admitted().await.unwrap_err() {
+        LightwalletdError::NoBranchMajority(observed) => assert!(
+            observed.contains("37a5165b x1") && observed.contains("76b809bb x1"),
+            "{observed}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(transport.called("a", "info"), 1);
+}
+
+/// T39.11.7b: spellings of one endpoint collapse to the first one, in configured order.
+#[test]
+fn endpoint_spellings_normalize_to_one() {
+    let (kept, dropped) = dedupe_lightwalletd_endpoints(vec![
+        "https://a.example:443/".to_owned(),
+        "a.example".to_owned(),
+        "B".to_owned(),
+    ]);
+    assert_eq!(kept, vec!["https://a.example:443/".to_owned(), "B".to_owned()]);
+    assert_eq!(dropped, vec![(
+        "a.example".to_owned(),
+        "https://a.example:443/".to_owned()
+    )]);
+
+    // Host case, an explicit default port and a trailing slash do not make a different endpoint;
+    // another port, another scheme or another host does.
+    let (kept, dropped) = dedupe_lightwalletd_endpoints(
+        [
+            "https://lightd.example",
+            "https://LIGHTD.EXAMPLE:443/",
+            "lightd.example:9067",
+            "http://lightd.example",
+            "lightd2.example",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect(),
+    );
+    assert_eq!(kept, vec![
+        "https://lightd.example".to_owned(),
+        "lightd.example:9067".to_owned(),
+        "http://lightd.example".to_owned(),
+        "lightd2.example".to_owned(),
+    ]);
+    assert_eq!(dropped.len(), 1);
+}
+
+/// T39.11.7b: a list made only of one endpoint's spellings is a single endpoint, and admission
+/// treats it as it treats any single endpoint (a fresh wallet has no majority of one).
+#[tokio::test]
+async fn only_duplicates_is_one_endpoint() {
+    let transport = Arc::new(FakeTransport::default());
+    transport.serve("a", healthy(&[ARRR_TIP]));
+    let backend = backend_over(&transport, &["a", "a"]);
+
+    assert_eq!(backend.servers, vec!["a".to_owned()]);
+    match backend.admitted().await.unwrap_err() {
+        LightwalletdError::NoBranchMajority(observed) => assert!(observed.contains("37a5165b x1"), "{observed}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(transport.called("a", "info"), 1);
 }
