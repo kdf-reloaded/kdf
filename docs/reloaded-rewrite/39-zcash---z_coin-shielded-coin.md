@@ -1379,7 +1379,8 @@ never sufficient evidence for reuse. The cache is deleted, not kept as a backup:
 it holds only blocks the backend can serve again, and a failure that repeats on
 every background pass (R39.8.0aa) would otherwise leave one more copy behind each
 time. Wallet-database backups of the rebuild paths (R39.8.0x, R39.8.0al) are
-unaffected.
+unaffected; a wallet database that has not scanned a block yet is deleted like the
+cache when it is replaced (R39.8.0ax).
 
 The dictated Pirate compact-block protobuf does not carry the modern optional
 `ChainMetadata` field. Before handing a bounded batch to a scanner that requires
@@ -2097,7 +2098,10 @@ birthday, scans the new chain, and leaves exactly one wallet backup and no
 compact-cache backup; (e) a wallet with no recorded sync start, or a backend that
 cannot supply the rebuild anchor, fails the pass and leaves the wallet unmodified;
 (f) an unchanged chain keeps the anchor; (g) a compact cache that fails validation
-is deleted, not renamed to a backup.
+is deleted, not renamed to a backup; (h) passes that keep failing after a rebuild,
+and a restarted interrupted first scan, add no wallet backup beyond the rebuild's
+own one, while a wallet that has scanned blocks is refused and left untouched
+(R39.8.0ax).
 
 T39.8.0g Pending-receipt tests shall use a mempool fixture to prove that a
 wallet-owned unconfirmed shielded output is reported in the non-spendable balance
@@ -2650,6 +2654,25 @@ shall keep no backup of the compact cache (R39.8.0n).
 
 The divergence shall be reported with both the stored and the reported block
 hash, in display byte order, so the two can be distinguished and looked up.
+
+R39.8.0ax **A wallet database that has not scanned a block shall be replaced
+without a backup.** *(binding; Reloaded-original -- it bounds the backup files
+of Reloaded's own rebuild paths.)* A wallet database can
+hold its account and nothing else: after the rebuild of R39.8.0al, and after a
+process stopped between importing the account and scanning the first block. The
+anchor check of R39.8.0al replaces such a database with a fresh one before it
+fetches the checkpoint again, and does so on every pass until a scan succeeds. The
+replaced database holds nothing the wallet cannot recreate -- no scanned block, no
+transaction and therefore no note, only an account derived from the wallet's
+viewing key -- so it shall be deleted together with its SQLite sidecar files, not
+kept as a backup. Keeping one per pass grows without bound while the scans keep
+failing, the same growth R39.8.0n removed for the compact cache. The check that
+the database holds no scanned block and no transaction shall be made under the
+same per-database guard as the replacement (R39.8.0ad), so a concurrent scan
+cannot add data between the check and the delete; a database that fails the
+check shall be left untouched and the pass shall fail. A rebuild's own backup of
+the previous, scanned wallet database (R39.8.0al) is unaffected and stays the only
+backup a rebuild leaves.
 
 R39.8.0ak The Sapling commitment tree carried by a lightwalletd `TreeState`
 shall be validated before it is accepted as the wallet's sync anchor. The
