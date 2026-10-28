@@ -38,7 +38,10 @@ This chapter binds, by behaviour and public/dictated interface:
 - the public, cross-boundary entry points the libp2p ingestion,
   swap, and RPC layers call into the subsystem (§32.8);
 - the lifecycle, keep-alive, and expiry semantics that govern
-  all of the above (§32.9).
+  all of the above (§32.9);
+- the bounded and unbounded state of the subsystem and of the
+  substrate beneath it, as facts of the reference every peer relies
+  on (§32.9A).
 
 > **Binding scope (R36).** Throughout this chapter, requirements
 > bind observable *behaviour*, the *public* cross-crate
@@ -600,9 +603,13 @@ events as separate single-event batches.
    item 3. Without it, a worker that has not yet applied an operation this
    node completed makes the held root look older than it is, and the
    receiver sends a request a caught-up store would not have needed. The
-   reference applies its trie updates without a separate worker, so its
-   comparison never sees a lagging store; this item keeps Reloaded's
-   comparison equivalent and is not a divergence.
+   reference also applies its trie updates on a separate worker task fed
+   by an unbounded queue (§32.10 D6; *corrected 2026-10-28, second pass,
+   passed the KDF Dirty Gate on 2026-10-28 — the first wording of this item said it did not*)
+   and performs no such wait, so its comparison can see a lagging store;
+   this item makes Reloaded's comparison strictly less likely to request
+   needlessly and is a Reloaded-original refinement, not a wire-visible
+   divergence.
 
 > **Measurement (informative).** On this project's own code, a cancelled order
 > was still advertised in the pair's trie root, and could still be listed in a
@@ -627,13 +634,15 @@ events as separate single-event batches.
 > applied every completed index operation. The network consequence,
 > stated from the requester's side under §32.7.3 R-Q5/R-Q6 and §32.8
 > R-F3a: a requesting relay that receives an error keeps the all-zero
-> placeholder it holds for the pair, does **not** forward the keep-alive
-> that triggered the request, and asks again only when the next
-> keep-alive arrives (30 s later) — so one refusal by a busy Reloaded
-> seed delays every downstream peer of that relay by at least one
-> advertisement interval, and repeated refusals under load cascade into
-> a mesh in which the maker's orders never propagate past the first
-> relay. A reference requester has no retry on the request itself
+> placeholder it holds for the pair, withholds its application-level
+> forward (R-F3b; its gossip-layer forward has already happened, R-F3a —
+> *corrected in the second pass of 2026-10-28, passed the KDF Dirty Gate, which
+> found the first pass's "does not forward" wrong*), and asks again only
+> when the next keep-alive arrives (30 s later) — so one refusal by a busy
+> Reloaded seed leaves every downstream peer that asks that relay with the
+> placeholder failure of R-Q5 item 3 for at least one advertisement
+> interval, and repeated refusals under load keep the maker's orders out
+> of every peer behind that relay. A reference requester has no retry on the request itself
 > (R-Q6). **Resolved 2026-10-28:** the maintainer adopted the
 > alternative of §32.10 D5, and R-T3b item 2 now answers from the store
 > as it stands, without refusing; this note records why.
@@ -717,8 +726,8 @@ where they correspond to wire/trie content (R29/R31).
 > *Authored by the KDF Spec Reader 2026-10-28 from the rows
 > `v2.6.0-beta` and `v3.0.0-beta` of
 > [Chapter 02](02-baseline-state.md) §2.15A, identical at both, during
-> the hotfix pass prompted by a live incident (Reloaded makers
-> overloading public seed nodes). **Passed the KDF Dirty Gate on
+> the hotfix pass prompted by a live incident (public seed nodes
+> overloaded while Reloaded makers ran). **Passed the KDF Dirty Gate on
 > 2026-10-28** (PASS, no leaks; extent, method and measure in §32.13).*
 > The request and response shapes are dictated (R-Q1, R-Q2a). The
 > trigger, the root the request names, and the responder's reading of
@@ -839,6 +848,46 @@ synchronously, on the task that received the request (the reference
 does so on its inbound networking event loop; §32.6 R-T7 lets Reloaded
 place it elsewhere but R-T3b item 3 forbids waiting there).
 
+**R-Q5a (how the responder's entries come and go; the three failure
+classes).** *(Authored by the KDF Spec Reader 2026-10-28, second pass,
+from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+[Chapter 02](02-baseline-state.md) §2.15A, identical at both.
+**Passed the KDF Dirty Gate on 2026-10-28**, measure 0.02; §32.13.)* The outcomes of R-Q5 follow from how a node's
+held state is created and removed:
+
+1. a node creates a pubkey's record at the first trie insertion for that
+   pubkey (an order-created message, or the application of an answer) or
+   at the first keep-alive it handles from that pubkey — a non-relay
+   creates the record too, before deciding whether any advertised pair is
+   in its recorded subscriptions — and the record lives until the
+   eviction of §32.9 R-K3;
+2. a pair's held-root entry is created by an insertion, a removal or the
+   placeholder of R-Q4 item 3, and is **removed** when a full snapshot for
+   that pair is applied (the application first clears the slice) and when
+   the record is evicted; it is **not** removed when the pair's last order
+   is removed (the empty-trie root stays);
+3. consequently a full snapshot that lists **no** orders — the
+   responder's own current root for the pair was the empty-trie root when
+   it answered, as after a maker cancelled everything on the pair between
+   its keep-alive and the request — leaves the applying node with a record
+   for the pubkey and **no entry for the pair**, and a later request to
+   that node for that pair fails with the missing-pair error of item 2
+   rather than succeeding with an empty answer.
+
+The three failure classes a requester can meet are therefore: *no data*
+(the responder holds no record for the pubkey: it has not yet handled any
+message from it); *missing pair* (record present, entry absent: the
+responder has not yet handled the keep-alive that advertised the pair, or
+has applied a zero-order snapshot for it — the responder being always a
+relay or the publishing maker, since a non-relay forwards nothing,
+R-F3b; *correction re-checked by the KDF Dirty Gate on 2026-10-28*: a first wording also listed an
+unsubscribed pair on a forwarding non-relay, which cannot occur);
+*placeholder root* (entry present with all zeros: the responder's own
+request for the pair is pending, has failed, or has not yet been applied
+by its worker). A requester logs all three as a request error and retries
+none (R-Q6). Reloaded's responder and applier behave the same:
+**parity**.
+
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
 exchange with F: it times out after **10 seconds** with no answer; there
@@ -847,7 +896,8 @@ keep-alive from P is the only thing that can trigger another; there is
 **no de-duplication** of concurrent in-flight requests for the same
 `(P, pair)` (two keep-alives processed concurrently produce two
 requests); and there is **no rate limiting** of requests on either side.
-What the requester does with each outcome is bound by §32.8 R-F3a.
+What the requester does with each outcome is bound by §32.8 R-F3b
+(its gossip-layer forward, on a relay, has already happened: R-F3a).
 Reloaded today has the same four properties (parity); the hardening
 candidates that would change them are recorded under §32.10 D6 and
 are not bound here.
@@ -877,6 +927,15 @@ naming X's current root yields a full snapshot of X; a request for X and
 an untracked pair Z fails as a whole and names Z; a request for an
 unknown pubkey yields the "no data" outcome; a request for a pair whose
 held root is the all-zero placeholder fails as a whole.
+
+**T-Q5a** *Entries come and go (R-Q5a).* Applying a full snapshot with no
+orders for (P, X) to a node holding orders for (P, X) leaves P's record
+and removes X's entry; a following request for (P, X) fails and names X.
+Removing the last order of (P, Y) one at a time leaves Y's entry at the
+empty-trie root, and a following request for (P, Y) yields an empty full
+snapshot. A keep-alive handled on a non-relay for a pubkey never seen
+creates the record even when no advertised pair is in its recorded
+subscriptions.
 
 **T-Q6** *No retry, no de-duplication (R-Q6).* With the responder
 silenced, one keep-alive produces exactly one request and nothing more
@@ -921,8 +980,11 @@ expose, as the public ingestion surface the libp2p layer of
 
 - a **gossip-message entry point** that accepts an inbound
   message (peer, raw bytes, relay flag) and returns whether the
-  message advanced local state — the boolean drives gossip-relay
-  (advance ⇒ relay, otherwise drop);
+  message advanced local state — the boolean drives the
+  application-level forward of R-F3b (on a relay a second copy, whose
+  first copy has already left at the gossip layer, R-F3a; on a
+  non-relay no forward at all, R-F3b — *correction re-checked by the
+  KDF Dirty Gate on 2026-10-28*);
 - the **peer-request dispatcher** of §32.7.
 
 Internally these fan out to per-message handlers (keep-alive
@@ -931,40 +993,79 @@ state) each likewise reporting "did this advance our state?";
 those handlers are internal and their signatures are
 discretionary (R36).
 
-**R-F3a (relay forwarding of a keep-alive).** *(Authored by the KDF
-Spec Reader 2026-10-28 from the rows `v2.6.0-beta` and `v3.0.0-beta`
-of [Chapter 02](02-baseline-state.md) §2.15A, identical at both.
-Passed the KDF Dirty Gate on 2026-10-28; see §32.13.)* The boolean of R-F3 is
-bound for the keep-alive message as follows. The receiver's own
-handling (§32.7.3 R-Q4) "advanced local state", and a relay MUST
-forward the keep-alive to the mesh, exactly when either no
-synchronization request was needed (every advertised pair was skipped
-or already matched) or the request was answered within the timeout
-with a usable answer — a decoded response whose per-pair order sets the
-receiver has turned into index mutations and queued for the trie
-worker (§32.6 R-T7). The forward does not wait for the worker: at the
-moment of forwarding the held root for the pair may still be the
-all-zero placeholder. On a timeout, a "no data" outcome, a transport
-error or an error answer, the receiver MUST NOT forward the keep-alive
-and MUST leave its held root for each requested pair as it was
-(normally the all-zero placeholder of R-Q4 item 3); nothing is retried
-(R-Q6), and the placeholder stays until either the next keep-alive
-from that pubkey repeats the cycle or the pubkey's state expires
-(§32.9 R-K3; 90 s by default). A non-relay never forwards, whatever
-the outcome. Reloaded forwards and withholds on the same conditions:
-**parity**.
+**R-F3a (a relay's gossip-layer forward precedes its own handling).**
+*(Authored by the KDF Spec Reader 2026-10-28, second pass, from the
+rows `v2.6.0-beta` and `v3.0.0-beta` of
+[Chapter 02](02-baseline-state.md) §2.15A, identical at both, compared
+with the baseline anchor (V5). **Passed the KDF Dirty Gate on 2026-10-28**,
+measure 0.02; §32.13. Supersedes the
+R-F3a cleared earlier the same day, which stated that a relay forwards a
+keep-alive only after its own synchronization succeeded; that statement
+was wrong for the reference and for Reloaded alike.)* On a node running
+as a relay ([Chapter 28](28-libp2p-modernization.md) R12), the gossip
+substrate forwards every message it accepts — a keep-alive included —
+to the downstream topic peers that included this relay in their relay
+mesh and to the relays of its own relay mesh (ch. 28 R10, R11a; *correction
+re-checked by the KDF Dirty Gate on 2026-10-28*) **immediately on receipt, before the message is
+delivered to the application** and independently of what the
+application later decides. A relay therefore cannot withhold a
+keep-alive, and nothing in this subsystem's handling of the message
+delays its first hop. The behavior is post-baseline: the baseline's
+substrate forwarded only on the application's report when manual
+propagation was configured (V5). Reloaded's vendored substrate behaves
+identically under the same relay flag: **parity**.
 
-> **Consequence for the mesh (informative).** Because forwarding is
-> conditional on the forwarding relay's own synchronization succeeding,
-> every relay on the path between the maker and a reader must obtain a
-> usable answer from its own upstream peer before the keep-alive travels
-> one hop further. An answer that fails for the whole request (R-Q5
-> item 2), a refusal (withdrawn for Reloaded by the D5 decision of
-> 2026-10-28), or a
-> request too large to be answered within 10 s (K-pair requests against
-> K full tries, §32.9 R-K2a) therefore stops the maker's advertisement
-> at that relay for a full advertisement interval, for every peer
-> behind it.
+**R-F3b (the application-level forward).** The boolean of R-F3 is bound
+for the keep-alive as follows. The receiver's own handling (§32.7.3
+R-Q4) "advanced local state" exactly when either no synchronization
+request was needed (every advertised pair was skipped or already
+matched) or the request was answered within the timeout with a usable
+answer — a decoded response whose per-pair order sets the receiver has
+turned into index mutations and queued for the trie worker (§32.6
+R-T7). The forward does not wait for the worker: at the moment of
+forwarding the held root for the pair may still be the all-zero
+placeholder. On a timeout, a "no data" outcome, a transport error or an
+error answer the boolean is false, and the receiver MUST leave its held
+root for each requested pair as it was (normally the all-zero
+placeholder of R-Q4 item 3); nothing is retried (R-Q6), and the
+placeholder stays until either the next keep-alive from that pubkey
+repeats the cycle or the pubkey's state expires (§32.9 R-K3; 90 s by
+default — a pubkey whose keep-alives keep arriving does not expire,
+§32.9A R-B1 row 1). When the boolean is true, a relay forwards the
+message **a second time** (the substrate de-duplicates none of its own
+outbound copies; downstream peers drop the second copy by their
+duplicate cache). A **non-relay forwards nothing it received, whatever
+the boolean**: the application issues the forward only on a relay, and
+the substrate under manual validation does not forward for a non-relay
+either (ch. 28 R11a); on a non-relay the boolean's only effect is the
+state update it reports. *(Correction re-checked by the KDF Dirty Gate on 2026-10-28: this
+replaces a first wording that had a non-relay forward once, on success,
+to its mesh peers.)* A keep-alive therefore reaches a peer only from a
+relay or from the maker that published it, and those are the only
+responders a synchronization request can be addressed to. Reloaded
+forwards and withholds on the same conditions, with the same relay-only
+gate in its dispatch: **parity**.
+
+> **Consequence for the mesh (informative; rewritten in the second
+> pass).** Because a relay's first forward precedes its own handling, a
+> downstream peer that receives a keep-alive from relay S and finds a
+> divergent root asks S (R-Q4: the peer the message arrived from)
+> **while S may not yet have handled the same message**. S then answers
+> with one of the three outcomes of R-Q5a, all of which the asking peer
+> logs as a request error and none of which it retries (R-Q6): *no data*
+> when S holds no record for the pubkey yet; *missing pair* when S holds
+> a record but has not yet installed — or has just removed — the pair's
+> entry; *placeholder root* when S has installed the placeholder but has
+> not yet applied a usable answer of its own. The rate of these failures
+> scales with the number of keep-alive messages per second times the
+> number of downstream peers asking each relay, and the asking peers
+> converge only on a later keep-alive. The two outbound copies per
+> message per downstream peer double the relay's outbound load (§32.9A
+> R-B1 row 17). An answer that fails for the whole request (R-Q5 item 2)
+> or a request too large to be answered within 10 s (K-pair requests
+> against K full tries, §32.9 R-K2a) leaves the asking peer at the
+> placeholder for a full advertisement interval; the keep-alive itself
+> has travelled on regardless.
 
 **R-F4 (own-side mutation and queries).** The subsystem MUST
 support, as internal surface: inserting/updating an order;
@@ -1327,12 +1428,18 @@ that per-pair independence is what the shape exists to guarantee.
 > decoded and applied by the requester. A single pair the responder
 > cannot answer (R-Q5 items 2 and 3, a placeholder root on the
 > responder, or the 10 s timeout on a large answer) fails **all** K
-> pairs of the request and stops the forwarding of that message
-> (R-F3a), for every downstream peer. With one single-entry message per
+> pairs of the request; on a relay the K copies have already been
+> forwarded at the gossip layer (R-F3a), so every downstream peer sends
+> its own K-pair requests to that relay and meets the same placeholders
+> (R-Q5a); a non-relay forwards nothing it received in any case (R-F3b;
+> *correction re-checked by the KDF Dirty Gate on 2026-10-28*). With one
+> single-entry message per
 > pair the same maker costs K requests of one pair each at most, and a
-> failure is confined to its pair. The aggregated form is what the
-> public seed nodes were observed to be overloaded by; conforming to
-> R-K2a is the fix, and nothing in the receiving side of Reloaded
+> failure is confined to its pair. The aggregated form was present on
+> the network while the public seed nodes were overloaded; the swaplab
+> control showed no growth attributable to the aggregated shape alone
+> (*softened 2026-10-28, see §32.13*). Conforming to R-K2a removes its
+> cost, and nothing in the receiving side of Reloaded
 > depends on the aggregated form (T-K4 checks that the receiver ends in
 > the same state either way).
 
@@ -1379,6 +1486,85 @@ today (ch. 59 R59.6.5), so this subsystem can currently evict a
 pubkey the node itself makes orders under and drop those orders
 from its own read index.
 
+## 32.9A Bounded and Unbounded State
+
+*(Authored by the KDF Spec Reader 2026-10-28, second pass, from the rows
+`v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+§2.15A, identical at both, and from the public gossipsub library both
+rows and Reloaded pin; prompted by the memory growth of public seed
+nodes under a Reloaded maker. **Passed the KDF Dirty Gate on 2026-10-28**,
+measure 0.02; §32.13.)*
+
+**R-B1 (reference bound inventory).** The following table binds, as
+facts of the reference that every peer on the mesh relies on, which
+state of this subsystem and of the substrate beneath it
+([Chapter 28](28-libp2p-modernization.md)) grows with traffic from
+other peers, and how each is bounded. "Receipt time" is the receiver's
+own clock (§32.4 R-P3).
+
+| # | State | Grows with | Created by | Removed or expired by | Bound |
+| --- | --- | --- | --- | --- | --- |
+| 1 | per-pubkey record (§32.4 R-P1) | pubkeys heard | first insertion for the pubkey or first keep-alive handled (R-Q5a item 1) | the sweep of §32.9 R-K3: receipt time older than the liveness window (90 s default), own pubkeys exempt | pubkeys heard within the window; **a pubkey whose keep-alives keep arriving never expires**, whatever its roots hold |
+| 2 | per-pair held-root entry | pairs per pubkey | insertion, removal, placeholder (R-Q4 item 3) | snapshot application (the clear), record eviction; not by the last removal | pubkeys × advertised pairs |
+| 3 | per-(pubkey, pair) delta history (§32.4 R-P5) | order changes | an insertion or removal whose predecessor root is non-zero | each delta 5 min after it was recorded; the pair's history 4 h after its last change; both swept on insertion and ignored once expired; removed by a clear | changes within the last 5 min per slice, each holding a full order record |
+| 4 | cancellation guard (§32.3 R-C5, §32.9 R-K1) | cancel messages | every cancel message, known order or not | 120 s, swept on insertion | cancels within the last 120 s |
+| 5 | read index (§32.3 R-C1) | live orders | insertion | removal, eviction | live orders (the reverse pair indices of R-C3 never shrink) |
+| 6 | trie node store | every trie mutation | insertion, snapshot | the ten-minute purge releases nodes nothing references; **a cleared slice's nodes keep their references for the life of the process** | **unbounded**, monotone in the number of snapshot applications times the previous trie's size |
+| 7 | mutation-event queue (§32.6 R-T7) | inbound order messages and answers | every index mutation | drained by the single worker under the store lock | **unbounded** |
+| 8 | tasks handling inbound gossip messages | message rate | one task per delivered message | end of handling; a keep-alive's task awaits one request of up to 10 s | **no cap** on tasks in flight |
+| 9 | outbound synchronization requests (R-Q6) | keep-alive copies with a divergent root | one per copy, no de-duplication, no rate limit | answer, error or the 10 s timeout | copies within the last 10 s |
+| 10 | pending-request table | row 9 | request sent | answer or error; a sweep every few seconds against the 10 s timeout | requests within the last 10 s |
+| 11 | channels between application and substrate | commands, events | — | capacity 8192 each; an item that finds its channel full is **dropped** with a diagnostic (a dropped gossip event is a keep-alive this node never handles, though a relay has already forwarded it, R-F3a) | 8192 |
+| 12 | substrate message cache | messages accepted | every accepted message | shifted every heartbeat (1 s); kept five heartbeats, announced for three | 5 s of traffic |
+| 13 | substrate duplicate cache | messages accepted | every accepted message id | 60 s, swept on insertion | 60 s of traffic |
+| 14 | substrate IHAVE/IWANT bookkeeping (ch. 28 R13a) | announcements | per heartbeat | cleared every heartbeat | at most 10 IHAVE and 5000 requested ids per peer per heartbeat |
+| 15 | per-message retransmission counts (inside row 12) | IWANT received | IWANT for a cached message | dropped with the message | at most 3 per message per peer |
+| 16 | substrate peer-topic maps, mesh, fanout, backoffs | connected peers × topics | subscription announcements | disconnect, unsubscribe, backoff expiry | peers × topics |
+| 17 | **per-peer outbound queue of the substrate's connection handler** (ch. 28 R11a, D7) | every forward, publish, IWANT answer or control message to that peer | push on send; each forward is serialized once and cloned per recipient; a relay sends every message twice (R-F3a, R-F3b) | popped only when that peer's outbound stream is writable; freed by disconnection | **unbounded**; the only row whose growth rate a *remote* peer sets, by reading slowly |
+| 18 | connected relays, relay mesh (ch. 28 R10, R11) | relays | connection with relay advertisement | the 30 s maintenance trims connected relays above twice the high watermark and keeps the mesh within the watermarks | at most 24 relays on a relay node; mesh at most 12 |
+| 19 | peer-exchange known peers (ch. 28 R8) | peers learned | exchange rounds | capped | 100 |
+
+A relay subscribes to no orderbook topic of its own, so rows 12 to 15
+hold for it only through forwarding, and it neither announces nor
+requests message ids for those topics (ch. 28 R13a).
+
+**R-B2 (Reloaded is at least as bounded).** For every row of R-B1 that
+names a bound, Reloaded MUST keep a bound no weaker; it MAY be tighter.
+For rows 6, 7, 8 and 17 Reloaded today shares the reference's lack of a
+bound (**parity**); the Reloaded-original candidates that would add one
+are recorded under §32.10 D6 and ch. 28 D7 and are not bound here.
+Adopting any of them is a divergence to record in the operator-facing
+compatibility documents; none changes a wire shape.
+
+**R-B3 (two growth modes an operator can tell apart).** Rows 6 and 7
+grow with what *this* node applies: every synchronization answer in the
+reference's advertised-root form is a full snapshot (R-Q4a note), so a
+maker whose roots change at every advertisement makes every relay that
+hears it orphan one trie per pair per advertisement interval — squared
+with the number of pairs under the aggregated shape of the R-K2a
+divergence note. Row 17 grows with what a *remote* peer fails to read,
+at that peer's share of the forwarded traffic, and is released when the
+peer disconnects (the ping disconnect of ch. 28 R9 fires only when the
+peer stops answering pings altogether). Nothing else releases either.
+
+**T-B1** *Orphaned nodes (R-B1 row 6).* On one node, apply N successive
+full snapshots for one (pubkey, pair), each listing the same two orders;
+the node store grows by about N times the size of one two-leaf trie and
+does not shrink after the ten-minute purge. Applying N successive deltas
+instead grows it by at most the size of the live trie plus the nodes the
+next purge releases.
+
+**T-B2** *Slow peer (R-B1 row 17).* A relay forwarding a steady message
+stream to a peer whose inbound is throttled accumulates queued outbound
+data for that peer in proportion to the shortfall; disconnecting the
+peer releases it; a second, unthrottled peer on the same relay is
+unaffected.
+
+**T-B3** *Record lifetime (R-B1 row 1).* A pubkey that sends only
+keep-alives advertising a root the node cannot synchronize (every
+request fails) keeps its record and placeholders for as long as the
+keep-alives arrive, and loses them 90 s after they stop.
+
 ## 32.10 Deferred Work
 
 D1. **Module split.** The subsystem is a single large module.
@@ -1414,7 +1600,11 @@ D5. **The synchronization answer under a lagging worker (R-T3b item 2;
     synchronization request, while R-T3b item 2 makes Reloaded's
     responder return a retryable error when its trie worker lags,
     and that a refusal stops the asking relay's forwarding for an
-    advertisement interval (§32.8 R-F3a). The alternative wording,
+    advertisement interval (§32.8 R-F3a — *as corrected in the second
+    pass of 2026-10-28, a relay's gossip-layer forward has already
+    happened; a refusal withholds only the application-level forward of
+    R-F3b and leaves the asking peers at the placeholder of R-Q5a*). The
+    alternative wording,
     as prepared for the maintainer's decision (kept for the record):
 
     > *R-T3b item 2 (alternative).* A keep-alive advertisement MUST NOT
@@ -1466,8 +1656,13 @@ D6. **Reference unboundedness, and Reloaded-original hardening
     change, each delta after 5 minutes), the two channels between the
     application and the libp2p swarm (8192 entries each; an event that
     finds the channel full is dropped), and the gossip library's
-    message cache (library defaults). Reloaded inherits the same
-    profile (R-T3b's measurement already notes the unbounded queue).
+    message cache (library defaults). The inventory of §32.9A R-B1
+    (second pass of 2026-10-28, passed the KDF Dirty Gate) restates these with
+    their values and adds the one this list omitted: the substrate's
+    per-peer outbound queue has no bound either (R-B1 row 17,
+    [Chapter 28](28-libp2p-modernization.md) D7). Reloaded inherits the
+    same profile (R-T3b's measurement already notes the unbounded
+    queue).
     Candidates, all Reloaded-original and none bound here:
 
     - a **bounded or coalescing mutation queue** — Reloaded already has
@@ -1481,7 +1676,7 @@ D6. **Reference unboundedness, and Reloaded-original hardening
       keep-alive that arrives while one is pending recorded as handled
       without a second request (its forwarding decision then follows
       the pending request's outcome, or is made as "no request needed"
-      — to be decided together with R-F3a);
+      — to be decided together with R-F3b);
     - **orphan release** — dereferencing a cleared slice's nodes so the
       periodic purge reclaims them, or rebuilding the node store from
       the live roots at purge time;
@@ -1534,6 +1729,14 @@ V3. **Cancellation guard.** Insert an order on A; on B, deliver
 V4. **Wire/in-memory split is lossless.** Round-trip an order
     through the projection to its wire form plus side-channel
     maps and back, and confirm field-wise equality.
+
+V5. **Relay forward ordering at the baseline.** Confirm against the
+    baseline anchor that its in-tree gossip substrate forwards a
+    received message, when manual propagation is configured, only on
+    the application's report; a relay's immediate forward on receipt
+    (§32.8 R-F3a) and the per-peer announcement caps of
+    [Chapter 28](28-libp2p-modernization.md) R13a are post-baseline,
+    present at both reference rows through the pinned libp2p fork.
 
 ## 32.13 Provenance Footer
 
@@ -1850,3 +2053,74 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   topic copies produced K requests); and the maintainer's decisions on D5 and
   R-Q4a. The reference facts these items rely on are the gated ones of the
   scoped addition above; nothing else from the reference was used.
+- *Scoped addition (2026-10-28, second pass) -- relay forward ordering,
+  failure classes and the bound inventory: the rewritten R-F3a, the new
+  R-F3b and the rewritten consequence note in §32.8; the amended R-F3
+  bullet; R-Q5a and T-Q5a in §32.7.3; the corrected last sentence of
+  §32.6 R-T3b item 4 and the corrected sentence of the open-decision note
+  under R-T3b; the corrected sentence of the R-K2a divergence note; the new
+  §32.9A (R-B1, R-B2, R-B3, T-B1 to T-B3); the pointer appended to D6; V5.
+  Dirty Gate: PASS on 2026-10-28, recorded below.* Prompted by the continued memory growth of public
+  seed nodes under a Reloaded maker after the first pass. *Inputs:* this
+  repository's own gossip dispatch, propagation call, keep-alive producer
+  and receiver, request-response wrapper and vendored gossip substrate
+  (every Reloaded parity statement rests on these); the public gossipsub
+  library of the libp2p fork both reference rows and Reloaded pin, for
+  the substrate rows of R-B1 and for R-F3a's forwarding order (a
+  permitted sibling source, not forbidden-class material); the baseline
+  anchor's in-tree gossip substrate (V5); and the forbidden corpus,
+  consulted at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  [Chapter 02](02-baseline-state.md) §2.15A, which agree in every respect
+  taken, **only** to establish: that the reference's application forwards
+  a second copy on success and never withholds the substrate's first copy
+  (R-F3a, R-F3b); the creation and removal of pubkey records and per-pair
+  entries, the zero-order snapshot removing the entry, and the three
+  failure classes with their requester-side logging (R-Q5a); that the
+  reference's trie updates run on a separate worker fed by an unbounded
+  queue (the R-T3b item 4 correction); and the per-row bounds of R-B1
+  rows 1 to 11, 18 and 19 (90 s, 5 min, 4 h, 120 s, 10 min, 10 s, 8192,
+  the relay-count trim at twice the high watermark, the known-peer cap of
+  100), the absence of a bound for rows 6 to 8 and the per-message task
+  spawn, and that a reference seed subscribes to no orderbook topic. What
+  crosses into this chapter is behavior and numeric values a peer can
+  observe in timing or in the wire; no function, type or field name
+  outside the dictated wire members, no helper decomposition, no
+  control-flow transcription, no error, log or comment text was
+  reproduced. The failure-class names of R-Q5a are this chapter's own
+  vocabulary; the invalid-state-root error it refers to is the trie
+  library's public variant. R-B2, R-B3, T-B1 to T-B3 and T-Q5a are
+  Reloaded-original. The earlier clearance positions recorded above are
+  untouched by this addition, except that the first-pass R-F3a and its
+  consequence note are superseded and the first-pass wording of R-T3b
+  item 4's last sentence is withdrawn.
+- *Dirty Gate clearance for the 2026-10-28 second-pass addition (chapter 01
+  T1, R40):* PASS on 2026-10-28, measure 0.02, no leaks; every reference fact
+  confirmed at both rows. The non-relay-forwarding corrections marked in the
+  text were re-checked the same day: PASS, measure 0.02, nothing held.
+  *Extent:* the order-matching subsystem's keep-alive receiver,
+  synchronization requester and responder, trie store, trie worker, periodic
+  expiry sweep and memory purge; the network dispatch loop and command/event
+  plumbing; the composed p2p behaviour's configuration, channel sizing and
+  relay-connection maintenance; the request-response wrapper's pending table
+  and timeout sweep; peer-exchange capacity; and the daemon start-up
+  subscriptions -- at the rows `v2.6.0-beta` and `v3.0.0-beta` (nine source
+  files at each row, identical in every respect taken); also compared, as
+  permitted sibling and own-tree input, the MIT-licensed gossipsub crate both
+  rows pin (in Reloaded's vendored copy, compared with the pinned fork) and
+  the baseline anchor's in-tree gossipsub (V5). The re-check covered the
+  dispatch loop's forwarding decision and the gossipsub configuration at both
+  rows, the vendored crate's forwarding, propagate, validation gating, IHAVE
+  emission and IWANT service, and Reloaded's own dispatch gate. *Method:*
+  reading of the compared regions, plus mechanical comparison (inter-row diff,
+  recursive diff of the vendored crate against the pinned fork, extraction of
+  every backticked token and hexadecimal fragment from the added lines); the
+  mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
+  threshold. The clearance is complete and not pending.
+- *Clean-side correction (2026-10-28), Reloaded's own observation claim, no
+  reference input and no gate needed:* the R-K2a divergence note and the
+  authorship line of §32.7.3 no longer say that the aggregated keep-alive
+  shape overloaded the public seed nodes. They now record only that it was
+  present on the network while those nodes were overloaded: the swaplab
+  control on the build before the fix showed no growth attributable to the
+  aggregated shape alone. The gated content -- the two shapes and what each
+  costs a receiver -- is unchanged.
