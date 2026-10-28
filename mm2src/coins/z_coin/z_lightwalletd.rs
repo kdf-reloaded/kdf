@@ -27,7 +27,7 @@ mod htlc_index;
 pub(crate) use htlc_index::{FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef, SentOutcome,
                             SpendOutcome};
 
-use super::z_coin_wallet_db::ZCoinShieldedHistory;
+use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
@@ -1332,6 +1332,15 @@ impl LightwalletdBackend {
         policy: AdmissionPolicy,
         addressing: HtlcAddressing,
     ) -> Self {
+        // Every construction path ends here, so each endpoint votes once everywhere (R39.11.7b).
+        let (servers, duplicates) = dedupe_lightwalletd_endpoints(servers);
+        for (dropped, kept) in &duplicates {
+            common::log::warn!(
+                "lightwalletd endpoint {} names the same endpoint as {} and is ignored",
+                dropped,
+                kept
+            );
+        }
         LightwalletdBackend {
             transport,
             servers,
