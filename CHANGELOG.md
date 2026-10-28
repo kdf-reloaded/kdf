@@ -262,7 +262,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   payment by that public key, then built the refund with the saved private key, which produced a different
   script, and the transaction builder rejected it. Recovery now always signs with the private key that
   belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
-  key, the error now says so, naming the key. Detail: CRD ch.39 R39.5.4.
+  key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
