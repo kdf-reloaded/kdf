@@ -139,7 +139,8 @@ pub async fn max_maker_vol(
     ctx: MmArc,
     req: MaxMakerVolRequest,
 ) -> Result<MaxMakerVolResponse, MmError<MaxMakerVolRpcError>> {
-    with_request_fee_scope(max_maker_vol_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, max_maker_vol_impl(ctx, req)).await
 }
 
 async fn max_maker_vol_impl(

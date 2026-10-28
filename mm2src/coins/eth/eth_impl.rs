@@ -1394,6 +1394,9 @@ impl EthCoin {
         let gas_limit = EthGasLimit::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
         let gas_limit_v2 =
             EthGasLimitV2::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
+        // CRD ch.38 R38.6.6k item 1: the token's own `fee_estimate_cache_secs`, else the platform coin's.
+        crate::request_fee_scope::per_coin_fee_estimate_cache_secs(&[&conf, &crate::coin_conf(&ctx, &self.ticker)])
+            .map_to_mm(Erc20BuildError::InvalidConfig)?;
         let decimals = match conf["decimals"].as_u64() {
             Some(d) if d > 0 && d <= 19 => d as u8,
             None | Some(0) => get_token_decimals(&self.web3, token_addr)
@@ -3161,13 +3164,24 @@ impl EthCoin {
     /// concurrently and the maximum of the sources that produced a value wins.
     /// CRD ch.57 R57.2.6: inside an order-posting request the resolved value is shared by every consumer of
     /// that request ([`crate::request_fee_scope`]); outside such a request it is always resolved afresh.
+    /// CRD ch.57 R57.2.7: the reading is shared by the platform coin and all its tokens.
     pub(crate) fn get_gas_price(&self) -> Web3RpcFut<U256> {
         let coin = self.clone();
         let fut = async move {
-            let ticker = coin.ticker.clone();
-            crate::request_fee_scope::memoize(
+            // Any per-coin scaling (R57.2.4 `legacy_price_mult`, not implemented) belongs to the value this
+            // returns, per coin; the shared reading is the resolved price before it.
+            // R57.2.7: a platform coin and its tokens read the gas price from the same sources, so the chain
+            // has one reading, keyed by the platform coin. How long it may be reused is the asking coin's
+            // lifetime (R38.6.6k).
+            let chain = match &coin.coin_type {
+                EthCoinType::Erc20 { platform, .. } | EthCoinType::Trc20 { platform, .. } => platform.clone(),
+                EthCoinType::Eth | EthCoinType::Tron => coin.ticker.clone(),
+            };
+            let asking = coin.ticker.clone();
+            crate::request_fee_scope::memoize_shared(
                 crate::request_fee_scope::FeeReadKind::EvmGasPrice,
-                &ticker,
+                &chain,
+                &asking,
                 coin.resolve_gas_price(),
             )
             .await

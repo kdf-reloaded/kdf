@@ -283,7 +283,9 @@ impl BalanceUpdateOrdermatchHandler {
 #[async_trait]
 impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
-        with_request_fee_scope(self.balance_updated_impl(coin, new_balance)).await
+        // The scope belongs to the node; a node that is gone has nothing to update (as in the implementation).
+        let Some(ctx) = MmArc::from_weak(&self.ctx) else { return };
+        with_request_fee_scope(&ctx, self.balance_updated_impl(coin, new_balance)).await
     }
 }
 
@@ -1407,7 +1409,8 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
 }
 
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(buy_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, buy_impl(ctx, req)).await
 }
 
 async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1446,7 +1449,8 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
 }
 
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(sell_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, sell_impl(ctx, req)).await
 }
 
 async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1845,7 +1849,7 @@ pub(crate) async fn get_max_volume(
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(create_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, create_maker_order_impl(ctx, req)).await
 }
 
 async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
@@ -1996,7 +2000,7 @@ pub(crate) async fn cancel_previous_maker_orders(
 }
 
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(update_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, update_maker_order_impl(ctx, req)).await
 }
 
 async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
@@ -2059,17 +2063,15 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
-    // CRD ch.60 R60.6.7 item 3 and its Amendment: on an update the order as updated must still be spendable on
-    // both legs only when the update changes the volume (a volume delta, or `max`). A price-only, minimum-volume
-    // or confirmation-only update is not re-checked. The minimum volume checked is the requested one, else the
-    // one the order already carries.
-    if req.volume_delta.is_some() || req.max.unwrap_or(false) {
-        let min_volume_after_update = req
-            .min_volume
-            .clone()
-            .or_else(|| Some(order_before_update.min_base_vol.clone()));
-        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
-    }
+    // CRD ch.60 R60.6.7 item 3 and its Amendment (Decision AC): the order as updated must still be spendable on
+    // both legs, whatever the update changes. The fee-rate input may come from the short cache (ch.38 R38.6.6j
+    // item 2, R38.6.6k), so within its lifetime the check makes no node request. The minimum volume checked is
+    // the requested one, else the one the order already carries.
+    let min_volume_after_update = req
+        .min_volume
+        .clone()
+        .or_else(|| Some(order_before_update.min_base_vol.clone()));
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {

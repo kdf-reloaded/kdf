@@ -4445,7 +4445,7 @@ mod t60_6_pre_trade_spend_check_tests {
             uuid: order.uuid,
             new_price: None,
             max: None,
-            // R60.6.7 Amendment: only an update that changes the volume is re-checked.
+            // R60.6.7 Amendment (Decision AC): every update is re-checked; this one also changes the volume.
             volume_delta: Some(MmNumber::from("0.5")),
             min_volume: Some(units_8(10_000)),
             base_confs: None,
@@ -4495,9 +4495,9 @@ mod t60_6_pre_trade_spend_check_tests {
         );
     }
 
-    /// CRD ch.60 R60.6.7 Amendment: only an update that changes the volume re-checks the order. The mock counts
-    /// the safe-amount reads and reports a safe amount no order can meet, so a read that happens shows as the
-    /// typed refusal and a read that does not happen shows as none.
+    /// CRD ch.60 R60.6.7 Amendment (Decision AC): every update re-checks the order, whatever it changes. The mock
+    /// counts the safe-amount reads and reports a safe amount no order can meet, so a check that happens shows as
+    /// the typed refusal.
     mod update_maker_order_check_scope {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4563,27 +4563,27 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn price_only_update_is_not_rechecked() {
+        fn price_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.new_price = Some(MmNumber::from("2")));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn min_volume_only_update_is_not_rechecked() {
+        fn min_volume_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.min_volume = Some(units_8(12_000)));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn confirmations_only_update_is_not_rechecked() {
+        fn confirmations_only_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.base_confs = Some(3);
                 req.rel_nota = Some(true);
             });
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
@@ -4601,12 +4601,81 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn max_false_is_not_a_volume_change() {
+        fn max_false_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.max = Some(false);
                 req.new_price = Some(MmNumber::from("2"));
             });
-            assert_eq!(reads, 0, "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
+        }
+
+        /// Two price-only updates of the order, each refused under the conditions of (a). The safe amount of a
+        /// coin is read through the request scope like the coin layer does, from a dynamic-fee estimate that the
+        /// mock counts. Returns the refusals and the number of estimate fetches.
+        fn two_price_only_updates(conf: Json) -> (Vec<String>, usize) {
+            use coins::request_fee_scope::{memoize, FeeReadKind};
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let counted = fetches.clone();
+            TestCoin::spend_safe_amount.mock_safe(move |coin| {
+                let (fetches, ticker) = (counted.clone(), coin.ticker().to_owned());
+                MockResult::Return(Box::pin(async move {
+                    let counted = fetches.clone();
+                    memoize::<u64, (), _>(FeeReadKind::UtxoFeeEstimate, &ticker, async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Ok(7)
+                    })
+                    .await
+                    .unwrap();
+                    Ok(Some(MmNumber::from(1_000)))
+                }))
+            });
+            let ctx = ctx_with(conf, &["DYN", "KMD"]);
+            let (base, rel) = pair("DYN", "KMD");
+            let order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(1.into())
+                .with_min_base_vol(Some(units_8(11_000)))
+                .with_price(1.into())
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .build_unchecked();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+            let refusals = ["2", "3"]
+                .iter()
+                .map(|price| {
+                    let req = update_request(order.uuid, |req| req.new_price = Some(MmNumber::from(*price)));
+                    match block_on(update_maker_order(&ctx, req)) {
+                        Err(e) => e,
+                        Ok(_) => panic!("the update must be refused"),
+                    }
+                })
+                .collect();
+            (refusals, fetches.load(Ordering::SeqCst))
+        }
+
+        /// T60.6 (g): a price-only update is re-checked and refused under the conditions of (a), and while the
+        /// fee reading is young enough it makes no fee request: the two updates cost one estimate fetch.
+        #[test]
+        fn t60_6_g_a_price_only_update_is_rechecked_and_served_from_the_cache() {
+            let (refusals, fetches) = two_price_only_updates(json!({}));
+            for refusal in &refusals {
+                assert!(refusal.contains("is too low, required at least"), "{refusal}");
+            }
+            // The check refuses at the first leg it finds short (the base coin), so it reads that coin's
+            // estimate once; the second update reads nothing.
+            assert_eq!(fetches, 1, "one fetch for the two updates");
+        }
+
+        /// With the cache off, each of the same two updates reads the estimate.
+        #[test]
+        fn t60_6_g_with_the_cache_off_every_update_reads_the_estimate() {
+            let (refusals, fetches) = two_price_only_updates(json!({"fee_estimate_cache_secs": 0}));
+            assert!(refusals.iter().all(|r| r.contains("is too low, required at least")));
+            assert_eq!(fetches, 2);
         }
     }
 

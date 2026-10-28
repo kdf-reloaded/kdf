@@ -21,7 +21,8 @@ pub async fn trade_preimage_rpc(
     ctx: MmArc,
     req: TradePreimageRequest,
 ) -> TradePreimageRpcResult<TradePreimageResponse> {
-    with_request_fee_scope(trade_preimage_rpc_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, trade_preimage_rpc_impl(ctx, req)).await
 }
 
 async fn trade_preimage_rpc_impl(
