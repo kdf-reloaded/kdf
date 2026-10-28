@@ -54,23 +54,30 @@ naming one that does not exist.
 KDF Reloaded serves a Light-mode shielded (ZHTLC) coin from `lightwalletd` alone
 (CRD ch.39 §39.11). The Electrum support GLEEC KDF uses for the coin's transparent
 side -- chain tip, transactions, balance, history, UTXOs and broadcast -- is
-**removed**, not deprecated and not kept behind a switch. An opt-back would restore a
-path that cannot be used: as of 2026-10-11 no host published for Pirate Chain (ARRR)
-runs an ElectrumX service at all, and the two that did were serving a fork that
-stopped at the first block of the Ironwood upgrade containing transactions. It would
-also re-arm the two defects the new design closes: the wallet following an off-branch
-endpoint's chain, and HTLC spends and refunds built from a different chain height than
-ordinary sends, which are then born expired.
+**removed** as the coin's backend, not deprecated and not kept behind a switch. On
+2026-10-11 no host published for Pirate Chain (ARRR) ran a working ElectrumX: the two
+that existed were serving a fork that stopped at the first block of the Ironwood upgrade
+containing transactions. An opt-back would also re-arm the two defects the new design
+closes: the wallet following an off-branch endpoint's chain, and HTLC spends and refunds
+built from a different chain height than ordinary sends, which are then born expired.
+
+One use of Electrum comes back (CRD ch.39 R39.11.25, decided 2026-10-28; not yet
+implemented). On 2026-10-28 one published ARRR ElectrumX served the chain's tip, on
+the same chain as the `lightwalletd` endpoints. Reloaded asks the `electrum_servers`
+only when no `lightwalletd` endpoint can answer three swap questions: "was my payment
+already sent", "was this payment spent", and the wait for the counterparty's spend. A
+server is used only after its block hash at a recent height matches the `lightwalletd`
+endpoints', and never for heights, broadcast or the wallet.
 
 What an integrator observes:
 
 - `light_wallet_d_servers` is **mandatory and must be non-empty** in the Light-mode
   `rpc_data`. An empty or absent list fails activation as a configuration error naming
   the coin (it no longer fails later as a scan error).
-- `electrum_servers`, `min_connected` and `max_connected` are still **accepted and
-  ignored**, so a payload written for GLEEC KDF activates unchanged. Absent, empty, or
-  populated with unreachable servers all behave identically. A caller supplying a
-  working Electrum list today is, in fact, supplying a list that no longer works.
+- `electrum_servers`, `min_connected` and `max_connected` are still **accepted**, so a
+  payload written for GLEEC KDF activates unchanged. `electrum_servers` is optional and
+  used only for the fallback above; activation never connects to it, so absent, empty,
+  or unreachable servers activate identically. The two connection counts are ignored.
 - Every configured `light_wallet_d_servers` entry is **admitted before use**: its
   `GetLightdInfo` network name and Sapling activation height must match the coin, and
   its consensus branch must be the one the wallet already follows (or, for a fresh
@@ -98,6 +105,24 @@ What an integrator observes:
   therefore waits, or stops with an explicit error, instead. No opt-out exists, because the
   alternative is a "not spent" that can be wrong. Wallet functions -- balance, history,
   receiving, sending, withdrawing -- are unaffected.
+- Those two questions need the **address index** of the node behind a `lightwalletd`
+  server; the wallet does not. A server whose node keeps no address index answers them with
+  "No information available for address". It is skipped for them for the rest of the
+  activation (CRD ch.39 R39.11.4i, R39.11.20); the question then goes to the Electrum
+  fallback. Only when neither source can answer does the payment step of a swap fail
+  before anything is broadcast (R39.11.19). GLEEC KDF never asks `lightwalletd` these
+  questions, so its swaps do not depend on that index. Reloaded's
+  "already sent" answer also checks that the transaction it found pays the HTLC script; GLEEC
+  KDF takes the first entry of the address history without that check (ch.39 §39.11.5).
+- Two further Reloaded-only rules for a shielded coin's own swap payment (ch.39 R39.11.26 --
+  R39.11.28, decided 2026-10-28, not yet implemented):
+  - "Already sent" is answered first from the wallet's own record of the payments it
+    broadcast.
+  - A swap started fresh, with no earlier payment, does not ask "already sent" at all.
+  - A taker paying with ARRR is refused at the start of the swap, before its fee is sent,
+    when no `lightwalletd` endpoint and no Electrum server can watch its payment for the
+    maker's spend. Without that watch a taker could not learn the secret and would lose
+    its payment. GLEEC KDF has no such refusal.
 
 **Compatibility:** GLEEC KDF has no equivalent of the endpoint admission check or of
 the single builder-height authority; both are additive for a deployment whose endpoints

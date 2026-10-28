@@ -3185,7 +3185,9 @@ R39.11.1 A Light-mode shielded coin is served by **exactly one** backend: the
 configured `light_wallet_d_servers` endpoints, speaking the lightwalletd gRPC
 compact-transaction-streamer service. Every function below shall be obtained
 from that service. No function of a ZHTLC coin is served by an Electrum server,
-and no Electrum connection shall be opened on behalf of a ZHTLC coin.
+and no Electrum connection shall be opened on behalf of a ZHTLC coin, with one
+exception: the fallback of R39.11.25 for three swap-path questions, which opens an
+Electrum connection only on its first use and serves nothing else.
 
 The method names in the second column are dictated interop -- the lightwalletd
 service contract, which this repository already carries as the generated service
@@ -3693,7 +3695,9 @@ of requests for a swap a few weeks old. The implementation shall therefore:
   confined to single transactions. A read also ends
   with a named failure after 1,024 requests. Either failure leaves that
   endpoint's answer undetermined for this detection (R39.11.4b(f)), and the
-  next admitted endpoint is tried.
+  next admitted endpoint is tried. A read answered with the node's
+  no-address-index message never reaches this bound: it ends at its first
+  request (R39.11.4i(e)).
 - (c) give each endpoint a time budget of 120 seconds per detection, covering
   both address forms. An endpoint that exceeds it counts as failed for this
   detection, with an error naming the endpoint, the address form and the read
@@ -3762,7 +3766,13 @@ mark such an endpoint "no address index" for the rest of the coin's activation:
   whose node keeps an address index (R39.11.17);
 - (d) the mark is cleared only when the coin is activated again. Re-evaluating
   admission (R39.11.7a(g)) does not clear it, because a server-information read
-  cannot show whether the index exists.
+  cannot show whether the index exists;
+- (e) a transparent-history or UTXO read answered with that message ends at
+  once. It is not a serve failure of R39.11.4b(c): the window is not bisected
+  and no height is recorded as a gap. Its failure says that the server's node
+  keeps no address index and carries the node's message. It is never explained
+  as a missing transaction index, because the node's transaction index has
+  nothing to do with it.
 
 A marked endpoint is undetermined, as in R39.11.4h. The mark never makes a
 detection negative, and it does not affect any other use of the endpoint: tip,
@@ -3772,6 +3782,13 @@ transactions, compact blocks and broadcast.
 > described under R39.11.4h refuse every address read in the same way, so under
 > R39.11.4h alone each detection would still spend a few requests and a log line
 > on them. Detection runs on every poll of a live swap.
+>
+> **Amendment (2026-10-28), item (e).** A fresh swap's already-sent check reads
+> a range of one block. A refusal there produced a single gap, below the stop
+> of R39.11.4h(b), so the gap was reported with the transaction-index
+> explanation of R39.11.4b. An operator whose node runs with its transaction
+> index on, and without the address index, saw a maker payment fail with that
+> explanation, which pointed at the wrong setting.
 
 T39.11.4i *No address index.* Against scripted endpoints, tests shall show
 that:
@@ -3782,7 +3799,16 @@ that:
 - with every admitted endpoint marked, a detection fails at once with the
   named error and sends no request;
 - a backend built anew (a new activation) starts with no endpoint marked;
-- the marked endpoint still serves the tip and transaction lookups.
+- the marked endpoint still serves the tip and transaction lookups;
+- (e) a one-block history read and a UTXO read answered with that message
+  each cost one request and record no gap. The detection's error says that the
+  server's node keeps no address index, carries the node's message, and does
+  not mention a transaction index;
+- (e) over a range of many windows, the same refusal ends the read after its
+  first request;
+- a genuine per-transaction serve failure, one not carrying that message,
+  is still bisected and reported as a gap with the transaction-index
+  explanation.
 
 ### 39.11.2 What activation requires of the backend
 
@@ -3795,15 +3821,19 @@ which made the Electrum list mandatory.)*
   shall fail activation at coin construction, before any shielded work begins,
   reported as a configuration error naming the coin -- not as a transient
   backend failure.
-- `electrum_servers` shall remain **accepted and ignored**. It is not required,
-  its contents are not used, an empty array is accepted, and its absence is
-  accepted. Deployed KDF-family wallets send it unconditionally and a parse
-  rejection would break every one of them, so the field shall stay in the
-  accepted wire shape with no effect. The same applies to any Electrum
-  connection-count members the activation wire accepts alongside it.
+- `electrum_servers` shall remain **accepted and optional**. It is not required,
+  an empty array is accepted, and its absence is accepted. Deployed KDF-family
+  wallets send it unconditionally and a parse rejection would break every one of
+  them, so the field stays in the accepted wire shape. Its servers are used for
+  one thing only: the fallback of R39.11.25. The Electrum connection-count members
+  the activation wire accepts alongside it are accepted and ignored.
 - Activation shall not open, attempt, probe, or report on any Electrum
   connection for a ZHTLC coin, and shall not fail for any Electrum-related
-  reason.
+  reason. The fallback connects on its first use.
+
+> **Amendment (2026-10-28, maintainer Decision AK).** The first bullet's "accepted and
+> ignored" became "accepted and optional, used only by the fallback of R39.11.25".
+> Not yet implemented; until it is, the status update below describes the code.
 
 > **Status update (reloaded, Step C).** Implemented and tested (T39.11.b): an empty
 > `light_wallet_d_servers` is a `CoinCreationError` naming the coin, raised before
@@ -4240,14 +4270,18 @@ terminal outcome.** *(Retained; restated for one backend.)* Specifically:
 >    `docs/COMPAT_SWITCHES.md` a deliberate divergence normally ships with a
 >    scoped opt-back mechanism; **there is none to offer here, and the
 >    documentation shall say so plainly rather than name a switch that does not
->    exist.** The removed path has no working provider: as of 2026-10-11 no host
->    published for this chain runs an ElectrumX service at all, and the two that
+>    exist.** On 2026-10-11 the removed path had no working provider: no host
+>    published for this chain ran an ElectrumX service at all, and the two that
 >    did were serving a fork that stopped at the first post-upgrade block
->    containing transactions. An opt-back switch would restore a path that cannot
->    be used, and would re-arm the chain-capture and born-expired defects this
->    subsection exists to close. The observable change for a caller is that
->    `electrum_servers` stops mattering; a caller supplying a working list today
->    is, in fact, supplying a list that no longer works.
+>    containing transactions. An opt-back switch would re-arm the chain-capture
+>    and born-expired defects this subsection exists to close. On 2026-10-28 one
+>    published host served the chain's tip, and its block hashes matched the
+>    lightwalletd endpoints' at the Ironwood activation height and near the tip.
+>    The maintainer therefore restored Electrum (Decision AK) for three
+>    swap-path questions only, as a fallback behind a chain-identity check
+>    (R39.11.25), never for heights, broadcast or the wallet. The observable
+>    change for a caller is that `electrum_servers` matters only for that
+>    fallback.
 > 2. **Endpoint admission and single-authority height discipline**
 >    (R39.11.7a, R39.11.9--R39.11.12) have no GLEEC equivalent: that contract
 >    performs no server-information admission check, excludes no endpoint for
@@ -4565,6 +4599,309 @@ rather than as a generic RPC failure.
 > behaviour for the transparent side: nothing on this coin's path asks the backend to
 > decode a transaction.
 
+### 39.11.5 Swap-path transparent queries: reference contract and the Light-mode failure policy
+
+> **Derivation record (sanitized).** This subsection was authored by the KDF Spec
+> Reader from the reference behaviour of the `v2.6.0-beta` and `v3.0.0-beta`
+> releases, which are identical for everything stated here, and from public
+> network-configuration data. It carries the observable swap contract, dictated
+> protocol method names, public event names of the saved-swap format, and
+> public-network facts; no private implementation expression. The KDF Dirty
+> Gate passed it on 2026-10-28 (PASS, measure 0.02; the clearance item in §39.9
+> records the extent). *binding* rules bind this project's code; *informative*
+> statements record facts about the reference or third parties and bind nothing.
+> A **parity** rule restates the observable contract of `v2.6.0-beta` (identical
+> in `v3.0.0-beta`) that netid 8762 behaviour must keep; a **Reloaded-original**
+> rule has no reference counterpart and says so.
+
+R39.11.18 **An already-sent query precedes every HTLC payment, and its three
+outcomes are fixed.** *(binding; parity.)* Before the maker constructs its payment,
+and before the taker constructs its payment, the swap shall ask the paying coin
+whether a payment to the HTLC of this swap already exists on chain (R39.11.27
+records the one Reloaded exception, for a shielded coin in a fresh swap). The
+question is defined entirely by the swap's own data: the HTLC time lock, the secret hash,
+the wallet's own swap-derived HTLC public key and the counterparty's, from which
+the redeem script, its hash and the P2SH output script follow; the swap start
+block and the amount are available to the coin as hints. The answer is one of
+three, and the swap acts on each as follows:
+
+- **sent** — the coin returns the payment transaction; the swap adopts it as its
+  payment and does **not** broadcast a second one. (The reference adopts the
+  returned transaction without re-validating it; R39.11.4d's already-sent rule
+  already requires this project to return only a transaction that carries an output
+  of exactly the HTLC script, which is a strict tightening with no observable
+  difference in normal operation.)
+- **not sent** — the swap checks that the step's send deadline has not passed
+  (maker: one third of the lock duration after the swap started; taker: the
+  maker-payment wait deadline) and then constructs and broadcasts the payment.
+- **undetermined** (the coin returned an error) — R39.11.19.
+
+For a shielded coin the HTLC is a transparent P2SH output, so the query is a
+transparent-address question; which backend answers it is §39.11.1 (lightwalletd,
+R39.11.4d; the wallet's own send record first, R39.11.26; Electrum as the fallback,
+R39.11.25) and the reference's answer to the same question is recorded in the
+*Upstream divergence* note below.
+
+R39.11.19 **An undetermined already-sent answer fails the payment step closed.**
+*(binding; parity.)* When the already-sent query returns an error, the payment step
+shall end with the payment-failed event of the role (`MakerPaymentTransactionFailed`
+for the maker, `TakerPaymentTransactionFailed` for the taker), the swap shall
+finish, and **nothing shall be broadcast**. The step shall not retry the query
+internally, shall not fall back to "not sent", and shall not substitute another
+source silently. The coin's error text is carried in the event. (For the taker the
+DEX fee is already spent at this point; that is the reference's behaviour too and
+is not changed here.)
+
+R39.11.20 **Over lightwalletd, the already-sent query shall classify an
+address-index-less backend as undetermined, never as "not sent", and shall try
+every admitted endpoint before concluding.** *(binding; Reloaded-original — the
+reference never asks lightwalletd an address question, so it has no counterpart;
+see the divergence note.)* The serving node's address-index methods, which the
+transparent-address gRPC methods of R39.11.1 are served by, reject every request
+with a "no information available for the address" class of error when the node
+runs without its address index; lightwalletd relays it as a failed call. The
+implementation shall:
+
+- (a) recognise that rejection as a distinct **index-unavailable** condition of the
+  endpoint, separate from an unreachable endpoint, a stream that ended in failure
+  (R39.11.4b) and the index-coverage failure of R39.11.4d(d); R39.11.4i is that
+  recognition (the endpoint is marked "no address index");
+- (b) on index-unavailable, move to the next admitted endpoint (R39.11.3) and
+  remember the condition per endpoint as R39.11.4i(d) binds it (until the coin is
+  activated again), so that the swap path does not re-ask an endpoint known to lack
+  the index while wallet use of the endpoint is unaffected;
+- (c) when every admitted endpoint is index-unavailable, ask the Electrum
+  fallback of R39.11.25; only when that cannot answer either, return
+  **undetermined** with the named conditions of both sources (so that R39.11.19
+  fails the step), and write them to the sync-error channel of R39.8.0au;
+- (d) never return "not sent" from an index-unavailable endpoint, from an empty
+  answer of such an endpoint, or from a mixture of index-unavailable and
+  unreachable endpoints.
+
+The wallet's own send record is asked first (R39.11.26, which D39.11.h proposed and
+the maintainer adopted); (a)–(d) govern the index query that follows it.
+
+R39.11.21 **The spend watch tolerates per-iteration failures until its deadline and
+never ends early on an error.** *(binding; parity, with a Reloaded-original
+reporting addition.)* The taker's wait for the maker's spend of the taker payment
+shall poll the paying coin for a spender of the payment's HTLC output at its check
+interval (10 s) until the taker payment lock time; a failed poll is logged and the
+next poll proceeds; the wait ends only with a spender found (then the secret is
+extracted from the spender's input script, and an extraction failure finishes the
+swap with the wait-failed event) or with the deadline reached (`TakerPaymentWaitForSpendFailed`,
+followed by the refund path). An error shall not shorten the wait. Over
+lightwalletd each failed poll is classified per R39.11.4b, R39.11.4d and
+R39.11.20(a) and the named conditions are written once to the sync-error channel
+per change of condition rather than per poll; an index-unavailable condition on
+every admitted endpoint is reported at once but, per the first sentence, does not
+end the wait, because an endpoint may recover before the deadline. (This is the
+contract R39.11.16a's status note records as carve-out (4); it is normative here.)
+
+R39.11.22 **Recovery queries are one-shot and fail closed.** *(binding; parity, with
+a Reloaded-original reporting addition.)* In the manual recover-funds path, when the
+saved swap carries no record of the wallet's own payment, the already-sent query of
+R39.11.18 is run once: an error is returned to the caller as the recovery error,
+"not sent" is returned as a not-recoverable error, and only "sent" lets recovery
+continue. The spend searches of recovery (own payment, counterparty payment) are
+likewise one-shot: an error aborts recovery with an error; "spent" or "refunded"
+abort it with that reason; only "not spent" lets it proceed to spend or refund.
+Nothing is retried inside the call and nothing is broadcast on an error. Over
+lightwalletd the returned error shall name the condition (index-unavailable,
+index-coverage failure, incomplete stream, unreachable) so that the operator can
+change endpoint and re-invoke.
+
+R39.11.23 **Reference lightwalletd method surface, for comparison.** *(informative;
+reference fact.)* Over the whole swap lifecycle, activation included, the reference
+calls four methods of the compact-transaction-streamer service: the tip method (as a
+health probe before every client use, for the activation tip and at the start of
+every sync pass), the tree-state method (once, at activation), the block-range
+method (every sync pass), and the transaction-lookup method with the hash selector
+(only as a post-broadcast existence poll of six attempts thirty seconds apart;
+each failed attempt is logged, and the poll has no effect on the swap or its
+status). None of the four needs the serving node's address index;
+the lookup inherits the node's transaction-index limitation (R39.11.4c) but its
+failure has no swap effect in the reference. The reference calls no other method of
+the service: not the submission method, not the three transparent-address methods,
+not the mempool, server-information or single-block methods. Every transparent
+function of the reference's shielded coin — already-sent, spend search, spend
+watch, confirmations, fee-transaction validation, block count and **every
+broadcast** including the HTLC payment, the DEX fee and the HTLC spend
+and refund — is served by the Electrum protocol (`blockchain.scripthash.get_history`,
+`blockchain.transaction.get` plain and verbose, `blockchain.transaction.broadcast`,
+`blockchain.headers.subscribe`) or, in Native mode, by
+the node's wallet RPCs. The reference's shielded-coin swap path therefore has no
+dependency on the serving node's address index at all; this project's single-backend
+design (R39.11.1) acquires that dependency, which is why R39.11.4d and R39.11.20
+exist. A lightwalletd outage affects the reference's swaps only indirectly: every
+shielded send first waits for the shielded sync loop to hand over, so while all
+endpoints fail the send blocks until the step's deadline fails it; the HTLC spend
+and refund do not pass that gate.
+
+R39.11.24 **Published ARRR endpoint list and the reference's endpoint semantics.**
+*(informative; public data and reference fact.)* The reference binary ships no
+default list; endpoints arrive in the activation request's `light_wallet_d_servers`
+and wallet applications take them from the public coins repository, whose
+`light_wallet_d/ARRR` file (master at its head dated 2026-03-05,
+fetched 2026-03-07) lists, in order:
+`https://lightd1.pirate.black:443`, `https://piratelightd1.cryptoforge.cc:443`,
+`https://piratelightd2.cryptoforge.cc:443`, `https://piratelightd3.cryptoforge.cc:443`,
+`https://piratelightd4.cryptoforge.cc:443`, `https://electrum1.cipig.net:9447`,
+`https://electrum2.cipig.net:9447`, `https://electrum3.cipig.net:9447`. The
+reference requires **any one** endpoint: at activation each URL is connected and a
+URL that cannot be parsed, configured for TLS or connected is skipped, activation
+failing only when none connected (an empty list is a distinct configuration error;
+the WASM build connects lazily); per operation the list is walked in its current
+order with a tip read as the probe, the first endpoint that answers is used and
+moved to the front, and an operation fails only when none answers. The reference
+performs no server-information read, no network, branch or height admission, and
+no exclusion. This project's admission (R39.11.7a) and its strict-majority
+requirement for a fresh wallet are the recorded divergence (Compatibility note,
+item 2, §39.11.3); R39.11.3's try-in-order-fail-when-all-fail rule is the
+behaviour the two have in common. *(Editor's note, public data, 2026-10-28:* the
+same file at the repository head dated 2026-10-26 lists nine entries:
+`https://lightwalletd1.cryptoforge.cc:443`, `https://lightwalletd2.cryptoforge.cc:443`,
+`https://pirate.mathnodes.com:443`, `https://arrr.qortal.link:443`,
+`https://arrr2.qortal.link:443`, `https://arrr3.qortal.link:443`,
+`https://lightd1.pirate.black:443`, `https://electrum1.cipig.net:9447`,
+`https://electrum2.cipig.net:9447`. On 2026-10-28 the last two answered every
+transparent-address request with the index-unavailable rejection of R39.11.20.*)*
+
+> **Upstream divergence (informative) — which backend answers the swap-path
+> transparent questions.** For a Light-mode shielded coin the reference answers
+> already-sent, spend search, spend watch, confirmations, fee validation and every
+> broadcast from its Electrum servers, and never asks lightwalletd a transparent
+> question. Reloaded answers them from lightwalletd (R39.11.1, R39.11.4,
+> R39.11.4d), because Electrum was removed as the coin's backend (§39.11.3,
+> Compatibility note item 1, and `docs/GLEEC_COMPATIBILITY.md`). For already-sent,
+> spend search and spend watch it falls back to the activation's Electrum servers
+> when no admitted lightwalletd endpoint can answer (R39.11.25), and for
+> already-sent it first consults its own send record (R39.11.26). Observable
+> consequences:
+>
+> 1. The address-index-less-node failure mode of R39.11.20 stops a payment step
+>    only when neither source can answer; in the reference the same lightwalletd
+>    configuration fails nothing, because the question is never asked of it.
+> 2. Reloaded's already-sent answer verifies the returned transaction's output
+>    script; the reference's does not.
+> 3. For a shielded coin's own payment in a swap started fresh, Reloaded skips the
+>    already-sent question (R39.11.27), and a taker whose own payment is such a
+>    coin is refused at start when no source can answer (R39.11.28).
+>
+> None of these changes the swap wire. Item 3 ends a taker swap earlier than the
+> reference would, and only when the taker could not have learned the secret. All
+> three are recorded in `docs/GLEEC_COMPATIBILITY.md` under the existing
+> Electrum-removal entry.
+
+> **Code-quality finding (informative) — the reference's already-sent check does
+> not verify what it found.** In the reference the transaction returned as the
+> wallet's own payment is whichever appears first in the HTLC address's history;
+> its outputs are not compared with the expected script or amount. The history is
+> height-ordered with unconfirmed entries last, so the first entry is normally the
+> funding transaction, but nothing enforces it. *Proposed handling:* keep
+> R39.11.4d's requirement that the already-sent answer carry an output of exactly
+> the HTLC script, and add the output-script assertion to T39.11.l. *(Trigger:
+> apparent with little extra effort — the check was read side by side with the
+> spend search, which does verify the script.)*
+
+> **Code-quality finding (informative) — the reference's Native-mode already-sent
+> check depends on an import made at send time.** The reference imports the HTLC
+> address into the node wallet only when it sends the HTLC, and answers "not sent"
+> whenever the node wallet does not know the address. A rebuilt node wallet, or a
+> different node, therefore answers "not sent" for a payment that exists, and the
+> swap funds a second HTLC. Native mode is secondary for this chapter; this
+> project's Native-mode shielded coin should either prove the import before
+> answering or answer undetermined when the address is unknown and the swap start
+> block is below the node wallet's import height. *(Trigger: apparent — the import
+> at send time and the unknown-address rule are in the two functions read
+> together.)* Left as D39.11.j.
+
+R39.11.25 **Electrum is the fallback for three swap-path questions of a Light-mode
+shielded coin.** *(binding; Reloaded-original, maintainer Decision AK of
+2026-10-28.)* Already-sent (R39.11.18), the one-shot spend search (R39.11.22) and each
+poll of the spend watch (R39.11.21) are asked of the admitted lightwalletd endpoints
+first, under R39.11.4d, R39.11.4h, R39.11.4i and R39.11.20. When none of them gives
+an answer, the question shall be asked of the servers in the activation's
+`electrum_servers`, in the order and under the time budget of chapter 38 R38.6.4.
+Nothing else of the coin uses them: tip, confirmations, the builder height,
+broadcast and the whole wallet half stay on lightwalletd (R39.11.9--R39.11.11).
+
+- (a) **Chain identity first.** Before an Electrum server answers any of the three
+  questions, the implementation reads its block header at the height of the
+  single height authority's fresh tip minus 10. It computes the block hash as the
+  double SHA-256 of the full header, and compares it with the hash an admitted
+  lightwalletd endpoint reports for that height. A server whose hash differs,
+  or which cannot serve the header, is not used, with a named reason. The check
+  is repeated after each admission re-evaluation interval (R39.11.7a(g)).
+- (b) **Tip lag.** A server whose tip is more than 10 blocks below the fresh tip
+  of the single height authority is not used for that question.
+- (c) **Reads.** The script history of the HTLC's P2SH output script and the
+  transactions it names are read and decoded with the Zcash reader
+  (R39.11.16a), never with the shared UTXO parser. Already-sent answers "sent"
+  only with a transaction that has an output of exactly the HTLC script. A
+  spend is a history transaction that spends the HTLC output; it is classified
+  by the shared rule. "Not spent" needs the server's unspent listing for the
+  script to list the HTLC output, and "not sent" needs a complete, empty script
+  history, each from a server that passed (a) and (b).
+- (d) **Failures.** A failed connection, a failed read or an undecodable
+  transaction is undetermined, never a negative answer. When neither
+  lightwalletd nor Electrum gives an answer, the question is undetermined with
+  the named conditions of both sources (R39.11.19, R39.11.20(c)).
+- (e) **Activation and logging.** Activation never opens, probes or fails for an
+  Electrum server (R39.11.5). The first use of each server logs one line at
+  `info` with its identity result; each answer from the fallback is logged at the
+  level of the detection that asked (R39.11.4h(d)).
+
+R39.11.26 **The wallet's own send record answers "sent" first.** *(binding;
+Reloaded-original, maintainer Decision AK of 2026-10-28; D39.11.h adopted.)* Before
+any server is asked, the already-sent question shall consult the wallet database's
+record of this wallet's own sends. That record is written when the backend accepts
+the broadcast (§39.8.0.7) and survives a restart. A recorded send counts when its
+transaction has an output of exactly the HTLC script and it is mined, or unmined
+and not past its expiry height against the fresh tip read (R39.11.10a). Such a send
+answers "sent": the transaction is returned and no address or transaction query
+is made. A mined record needs no request at all; judging an unmined record's
+expiry takes one tip read. An unmined record past its expiry is disregarded.
+Without a counting record, the question goes to the servers as before, and so it
+does when the record or the tip cannot be read. The local record never answers
+"not sent".
+
+Any recorded transaction that pays exactly the HTLC script counts, without a
+separate check that it spends this wallet's notes: the script is unique to the
+swap (a random per-swap key and a fresh secret hash, R39.5.4), so only this
+wallet's own payment can carry it. A mined record is trusted as the wallet
+database records it; a reorganization that the database's rewind handles clears
+its mined height.
+
+R39.11.27 **A fresh swap skips the already-sent question for a shielded coin's own
+payment.** *(binding; Reloaded-original, maintainer Decision AK of 2026-10-28;
+a divergence from R39.11.18's parity contract.)* When the paying coin is a shielded
+coin, the payment step of a swap that this process started skips the already-sent
+question and goes straight to the step's deadline check and the send. That is a
+swap not restored from its saved log, whose log holds no payment event of this role.
+A shielded coin's HTLC key is random per swap (R39.5.4) and the secret hash is
+fresh, so no payment to that script can exist unless this swap sent it, and a swap
+started in this process cannot have sent it before this step. A restored swap
+always asks the question. Every other coin keeps R39.11.18 unchanged.
+
+R39.11.28 **A taker whose own payment is a Light-mode shielded coin is refused at
+start when no source can watch its payment.** *(binding; Reloaded-original,
+maintainer Decision AK of 2026-10-28.)* The spend watch (R39.11.21) is the taker's
+only way to learn the secret. A taker that pays while no source can see the
+maker's spend loses its payment, and the maker later refunds its own. Before the
+taker fee is sent, such a swap shall therefore establish that at least one source
+can answer the swap's address questions:
+
+- an admitted lightwalletd endpoint, not marked "no address index" (R39.11.4i),
+  that answers a transparent-address read without that rejection; or
+- an Electrum server that passes (a) and (b) of R39.11.25 and answers a
+  script-history read.
+
+If none can, the swap fails at start with `StartFailed`, and nothing is sent. The
+event's error names the coin, each lightwalletd endpoint with its condition and each
+Electrum server with its condition, and says that the taker could not watch its
+payment for the maker's spend. A maker, and a taker paying with any other coin,
+are not affected.
+
 #### Tests
 
 > **Status update (reloaded, Step C).** T39.11.a--T39.11.d, T39.11.f and
@@ -4721,6 +5058,67 @@ structure; that a multi-address request is issued as one call; and that an
 invalid-address-list rejection is reported as a request-or-index condition rather
 than as "these addresses are invalid".
 
+T39.11.l An already-sent-before-payment test shall prove, for both roles over a
+scripted lightwalletd transport (R39.11.18, R39.11.19): that the payment step
+issues the already-sent query before any construction; that a "sent" answer
+carrying a transaction with an output of exactly the HTLC script is adopted and
+nothing is broadcast; that a candidate transaction without such an output is not
+adopted as "sent"; that a "not sent" answer past the step's deadline fails the step
+without broadcasting; and that an error answer ends the step with the role's
+payment-failed event with nothing broadcast and no second query.
+
+T39.11.m An index-unavailable test shall prove (R39.11.20): that a transparent
+address method failing with the node's address-index-disabled rejection is
+classified as index-unavailable and distinguished from unreachable, from an
+incomplete stream and from the index-coverage failure; that the next admitted
+endpoint is tried; that the condition is remembered per endpoint for the
+re-evaluation interval and does not affect the wallet half's use of the endpoint;
+that with every admitted endpoint index-unavailable the answer is undetermined with
+the named condition and is written to the sync-error channel; and that no
+combination of index-unavailable and unreachable endpoints yields "not sent".
+
+T39.11.n A spend-watch tolerance test shall prove (R39.11.21): that transient poll
+failures do not end the wait; that a spender delivered after failed polls is
+returned; that reaching the deadline yields the wait-failed outcome; that an
+all-endpoints index-unavailable condition is reported once per change and the wait
+still runs to its deadline; and that a spender found after such a condition is
+still returned.
+
+T39.11.o A recovery test shall prove (R39.11.22): that with no own-payment record
+the already-sent query runs exactly once; that an error is returned as the recovery
+error with nothing broadcast; that "not sent" is a not-recoverable error; and that
+over lightwalletd the error names the condition.
+
+
+T39.11.p An Electrum-fallback test shall prove (R39.11.25), against scripted
+lightwalletd and Electrum transports: that with a lightwalletd endpoint that
+answers, Electrum is never asked; that with every endpoint marked "no address index",
+already-sent, the spend search and a spend-watch poll are answered from Electrum;
+that a server whose header hash differs, or whose tip lags by more than 10 blocks, is
+not used and the reason is named; that a spend found through Electrum yields the
+secret; that "not spent" needs the unspent listing and "not sent" a complete empty
+history; that every failure is undetermined, never negative; that a version-6
+transaction is read with the Zcash reader; and that activation with only
+unreachable Electrum servers succeeds.
+
+T39.11.q A local-record test shall prove (R39.11.26): that a recorded own send
+paying exactly the HTLC script answers "sent" with no server request; that a mined
+record counts; that an unmined record past its expiry is disregarded and the servers
+are asked; that a recorded send without the HTLC output is disregarded; and that the
+record never answers "not sent".
+
+T39.11.r A fresh-swap test shall prove (R39.11.27): that a swap started in this
+process with no payment event sends a shielded coin's payment without the
+already-sent question; that a restored swap asks it; and that a transparent coin
+asks it in both cases.
+
+T39.11.s A taker-refusal test shall prove (R39.11.28): that a taker whose own
+payment is a Light-mode shielded coin, with every lightwalletd endpoint marked and
+no usable Electrum server, fails at start with `StartFailed`, the named error and no
+taker fee sent; that one capable lightwalletd endpoint, or one identity-checked
+Electrum server, lets the swap proceed; and that a maker, and a taker paying another
+coin, are not affected.
+
 #### Deferred Work
 
 D39.11.a **Resolved 2026-10-11.** Shielded-backend-only Light operation, recorded
@@ -4781,8 +5179,9 @@ this service, so a notarized depth would be fabricated from plain confirmation
 depth -- and requires that it not be silently satisfied. Which observable form
 the refusal takes is a policy choice: refusing the activation request that
 asserts it, refusing only at the point a notarized depth would be required, or
-reporting the coin as not notarization-capable. No published configuration sets
-it for the only shipped ZHTLC coin, so no deployment is affected today, and this
+reporting the coin as not notarization-capable. The published ARRR entry at the
+head dated 2026-10-26 does not set it, but earlier published revisions did
+(D39.11.i), so a deployment that ships or caches such a revision is affected; this
 chapter specifies the prohibition without choosing the form.
 
 D39.11.g **The serving node's transaction index is an unverifiable operational
@@ -4798,6 +5197,38 @@ wallet use, and whether a coin with no endpoint that can serve this shape should
 refuse to enter swaps -- a refusal of the shape R39.6.4b already provides for a
 different cause. At least one live endpoint was observed in this state on
 2026-10-11, so this is not a theoretical configuration.
+
+D39.11.h **Decided 2026-10-28 (maintainer Decision AK): adopted as R39.11.26.** The
+proposal is kept below as the record. *(Reloaded-original proposal.)* This project records every
+shielded send it makes (the in-flight record of §39.8.0.7 persists each sent
+transaction's identifier and expiry across restart). A locally recorded send whose
+transaction carries an output of exactly the HTLC script, and which is mined or not
+yet past its expiry height against the single height authority, is proof of "sent"
+that needs no address index; an expired, unmined record is disregarded. Adopting it
+would let a restarted wallet answer R39.11.18 against an index-less endpoint set,
+with the index query of R39.11.4d as corroboration rather than sole source; a
+locally unknown payment would still need the index and would fall under
+R39.11.20(c). The reference has no local source (R39.11.23), so this is a
+divergence to record if adopted. The risk if **not** adopted: against the
+address-index-less endpoints observed in the field, every shielded swap fails at the
+payment step by R39.11.19, which is the safe but unusable outcome.
+
+D39.11.i **D39.11.f's premise depends on the coins-file revision.** The published
+ARRR `coins` entry at the head dated 2026-03-05 (fetched 2026-03-07) sets
+`requires_notarization: true` and `required_confirmations: 2`. The head dated
+2026-10-26 sets `requires_notarization: false` and `required_confirmations: 5`,
+as it has since 2026-09-21; between those dates the published value changed more
+than once. D39.11.f's "no published configuration sets it" holds for the current
+head only, and a wallet that ships or caches an older coins file asserts it. The reference honours the flag through the node's notarized confirmation count
+relayed in the verbose transaction answer of its transparent backend; this project
+has no notarized-depth source (R39.11.4e). The maintainer decision D39.11.f asks for
+therefore affects every ARRR activation configured from such a revision, not a
+hypothetical one; D39.11.f is amended accordingly (2026-10-28).
+
+D39.11.j **Native-mode already-sent on a node wallet that did not make the import.**
+See the second code-quality finding above. Decide between proving the import
+before answering and answering undetermined for an unknown address whose swap start
+block predates the import.
 
 ## 39.7 Acceptance criteria (chapter)
 
@@ -4884,6 +5315,12 @@ different cause. At least one live endpoint was observed in this state on
   address form it read. An endpoint whose node keeps no address index is
   marked and skipped for the rest of the activation (T39.5.5, T39.11.4h,
   T39.11.4i).
+- Swap-path transparent questions of a Light-mode shielded coin (§39.11.5):
+  already-sent consults the wallet's own send record first. Already-sent, spend
+  search and spend watch fall back to identity-checked Electrum servers when no
+  lightwalletd endpoint can answer. A fresh swap skips already-sent for a shielded
+  coin's own payment, and a taker paying such a coin is refused at start when no
+  source can watch its payment (T39.11.l--T39.11.s).
 - History order and unmined sends (§39.8.5.1): by default an own shielded send
   is served from broadcast on, ahead of every mined row, with its final
   amounts, and moves to its block's position once mined (R39.8.9i, decided in
@@ -4974,7 +5411,11 @@ different cause. At least one live endpoint was observed in this state on
   for the consensus rule that pins the on-chain redeem-script reveal and its
   fixed shape (the informative note under R39.11.4d); and the maintainer's
   recorded design decision of 2026-10-11
-  (`docs/plans/arrr-ironwood-compatibility.md` §10).
+  (`docs/plans/arrr-ironwood-compatibility.md` §10); and, for R39.11.24, D39.11.i
+  and D39.11.f, the public coins repository's `light_wallet_d/ARRR` file and ARRR
+  `coins` entry (master at its head dated 2026-03-05, fetched 2026-03-07, and at
+  its head dated 2026-10-26, read 2026-10-28), together with public-network probes
+  of the published ARRR endpoints on 2026-10-28.
 - *Permitted-input classes used:* baseline/as-built source (the shipped
   ZCoin type, activation flow, and history method, for the T-DOC parts);
   external public specification (the published KDF API documentation, the
@@ -5030,7 +5471,12 @@ different cause. At least one live endpoint was observed in this state on
   R39.11.7a(i), are original to this design (like R39.11.7a(h)'s branch admission
   they have no counterpart in the reference): they derive from no forbidden-class
   input, only from the lightwalletd gRPC contract, public-network observation of
-  the endpoints (2026-10-23) and this repository's code.
+  the endpoints (2026-10-23) and this repository's code. Also consulted, under
+  the reference versions `v2.6.0-beta` and `v3.0.0-beta` (identical for that
+  subsection), for §39.11.5: for the reference's swap-path transparent-query
+  contract, its lightwalletd method surface and its endpoint-list semantics only;
+  the Light-mode failure policy of R39.11.20--R39.11.22's lightwalletd clauses and
+  D39.11.h are independent work.
 - *Dirty Gate clearance (chapter 01 T1, R40, R43) for R39.8.0av:* the
   forbidden-class-sourced material this item covers is exactly what the
   derivation record above R39.8.0av names -- that rule, the two informative
@@ -5151,3 +5597,19 @@ different cause. At least one live endpoint was observed in this state on
   rewording of the finding must carry it forward. The parity-position note under
   R39.8.0an depends on the same finding and inherits the same marking, so it is
   re-checked whenever the finding is touched.
+
+- *Dirty Gate clearance for §39.11.5 (2026-10-28):* PASS, measure 0.02 (threshold
+  0.10), no leak items. *Extent* -- the shielded-coin subsystem (swap operations,
+  HTLC send, spend and refund, the lightwalletd client, the sync loop, activation
+  and the Light-mode payload schema), the shared UTXO swap helpers and the
+  Electrum and native RPC-client layer, and the legacy maker and taker state
+  machines (payment step, spend wait, recovery) with the swap timing constants, at
+  both clean-room rows: ten files per row, the inter-row diff, and a mechanical scan
+  of the whole shielded module for every gRPC call. *Method* -- reading plus that
+  mechanical scan; the gate script was not run, because the candidate is prose.
+  *Public data* -- the coins repository's ARRR and ZOMBIE lightwalletd lists and its
+  ARRR entry. The gate's fact check contradicted one statement of the candidate,
+  the median-time-past and block-headers items of R39.11.23, which were removed
+  before the text entered this chapter. A clean editor applied the gate's editor
+  list; its public-data item on the ARRR notarization setting was found to depend
+  on the coins-file revision and is recorded so in D39.11.i rather than as written.

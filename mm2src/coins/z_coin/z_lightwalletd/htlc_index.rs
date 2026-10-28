@@ -448,14 +448,6 @@ impl DetectionLog<'_> {
     }
 }
 
-/// The node's message for a transparent-address read when it keeps no address index (R39.11.4i).
-/// Matched case-insensitively, whatever the status code it arrives under.
-pub(crate) const NO_ADDRESS_INDEX_MESSAGE: &str = "No information available for address";
-
-fn mentions_no_address_index(text: &str) -> bool {
-    text.to_lowercase().contains(&NO_ADDRESS_INDEX_MESSAGE.to_lowercase())
-}
-
 /// Evidence standing in for an endpoint that is skipped for having no address index: a failure, so the
 /// endpoint is undetermined and the undetermined error lists it (R39.11.4i(b)).
 fn skipped_no_address_index(server: &str, node_message: &str) -> FormEvidence {
