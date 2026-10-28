@@ -565,6 +565,23 @@ estimation** before the limit is used. Its complete contract:
 > Reloaded; it is left unscaled here, as the chapter's scope intends. The `approve_token`
 > RPC is a non-swap call and is unscaled too.
 
+> **Operator guidance (informative; Reloaded-original, 2026-10-28, Decision AF).**
+> `estimate_gas_mult` reaches the legacy ERC-20 `approve` only (items 5-6). Every other
+> swap transaction (the taker fee, the payments, the spends, the refunds, and all
+> version-two calls) uses a fixed limit, so the means of changing one is the `gas_limit`
+> / `gas_limit_v2` block (R57.5.1, R57.6.1), set per chain on the platform coin's entry,
+> from which its tokens inherit (R57.5.3). On a chain that charges the gas *limit* rather
+> than the gas used (Monad does), every unit of limit above the real use is paid, so the
+> limits of such a chain should be set close to measured use, with a margin; on a chain
+> that refunds unused gas a generous limit costs only the up-front balance. A token
+> operation costs on such a chain a multiple of its Ethereum figure (measured 2026-10-28
+> on the same USDC code: `transfer` 1.3 to 1.6 times, `approve` 1.55 times, Base against
+> Monad), so Ethereum-tuned defaults may be too low for a token payment there. The
+> measurements and the reasoning are in
+> [`docs/plans/evm-swap-gas-multiplier.md`](../plans/evm-swap-gas-multiplier.md).
+> Nothing here changes behavior; whether the multiplier should ever scale the fixed
+> limits is open and is not decided by this paragraph.
+
 **R57.5.4** *Implementation status (gap).* Reloaded reads neither
 `gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
 constants inherited from the pre-anchor baseline, and they differ from
