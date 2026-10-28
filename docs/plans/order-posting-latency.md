@@ -44,10 +44,19 @@ per coin before each order. On the implementation before this plan the full loop
   update, price-only included, and its fee-rate input may come from the fee cache (ch.60 R60.6.7 amendment).
   It lands in pass 2, together with the cache.
 - **Decision AD (2026-10-28).** `fee_estimate_cache_secs` can be overridden per coin in the coins
-  configuration, and a coin with an `avg_blocktime` defaults to that block time, bounded to 2–600 s. There
-  is no unbounded mode. An explicit top-level `MM2.json` value ranks above the block time, so a top-level
-  `0` still restores GLEEC KDF behaviour in one switch (ch.38 R38.6.6k). EVM gas-price readings are
-  shared per chain, not per token (ch.57 R57.2.7).
+  configuration (0–600 s), and an explicit top-level `MM2.json` value (0–30 s) ranks next. A top-level `0`
+  therefore still restores GLEEC KDF behaviour in one switch. There is no unbounded mode. EVM gas-price
+  readings are shared per chain, not per token (ch.57 R57.2.7).
+- **Decision AI (2026-10-28).** A coin with neither a per-coin value nor an explicit top-level value gets an
+  adaptive lifetime. It starts at the coin's `avg_blocktime` (2–600 s; 15 s without one), doubles each time a
+  fresh reading repeats the previous one, caps at 600 s and resets on a change. A chain with a fixed gas
+  floor therefore converges to one reading per 10 minutes without configuration (ch.38 R38.6.6k).
+- **Relay fee and block count (2026-10-28).** The forced minimum relay fee is cached across requests like
+  the fee estimate. `blockchain.headers.subscribe`, this client's block-count read, spreads like the other
+  reads. An invalid `electrum_spread_reads` warns and is taken as `true`.
+- **Lock scope (2026-10-28).** The reconciliation of own orders missing from the orderbook reads the
+  balance and the maximum volume without holding the order's lock, and locks only to apply the result.
+  The other lock holds across file and database writes are Decision AM, open with the maintainer.
 - **F6 (operator, no code).** Raise the per-session limits on the operator's own Electrum servers for the
   market maker. This gives relief until the code lands.
 
