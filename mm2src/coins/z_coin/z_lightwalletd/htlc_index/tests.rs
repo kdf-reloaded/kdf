@@ -553,16 +553,40 @@ struct Endpoint {
     /// Heights whose window fails with a serve failure.
     unservable: Vec<u64>,
     tips: VecDeque<u64>,
-    /// Every history and UTXO request fails with this node message under a service-class status, while
-    /// the transaction lookup, the tip and the server information still answer: a node with no address
-    /// index (R39.11.4i).
+    /// Every history and UTXO request fails with this node message under an Unknown status, classified by
+    /// the transport's own `status_error`, while the transaction lookup, the tip and the server
+    /// information still answer: a node with no address index (R39.11.4i).
     refuse_index: Option<String>,
+    /// Every history and UTXO request fails with this message under an Internal status: a refusal that
+    /// is not the no-address-index message, so it is a serve failure of R39.11.4b(c).
+    refuse_generic: Option<String>,
     /// Every history request is answered only after this long.
     history_delay: Option<Duration>,
 }
 
-/// The node's own reason, as the field report has it.
+/// The node's own reason, as the field report has it: the status message, and the status text the
+/// wallet builds from it.
+const NO_INDEX_STATUS_MESSAGE: &str = "-5: No information available for address";
 const NO_INDEX_NODE_MESSAGE: &str = "Unknown error: -5: No information available for address";
+const GENERIC_STATUS_MESSAGE: &str = "node trouble";
+/// What a generic refusal reads like after the wallet's classification.
+const GENERIC_REFUSAL_TEXT: &str = "Internal error: node trouble";
+
+/// The error the real transport builds for an answer with this status.
+fn classified(status: tonic::Status) -> EndpointError { status_error(status) }
+
+fn refusal_of(endpoint: &Endpoint) -> Option<EndpointError> {
+    endpoint
+        .refuse_index
+        .as_deref()
+        .map(|message| classified(tonic::Status::unknown(message)))
+        .or_else(|| {
+            endpoint
+                .refuse_generic
+                .as_deref()
+                .map(|message| classified(tonic::Status::internal(message)))
+        })
+}
 
 #[derive(Debug, Default)]
 struct Scripted {
@@ -641,18 +665,15 @@ impl LightwalletdTransport for Scripted {
             .endpoints
             .lock()
             .get(server)
-            .map(|e| (e.history_delay, e.refuse_index.clone()))
+            .map(|e| (e.history_delay, refusal_of(e)))
             .unwrap_or_default();
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
-        if let Some(message) = refusal {
+        if let Some(refusal) = refusal {
             return WindowRead {
                 txs: Vec::new(),
-                error: Some(WindowError {
-                    serve_failure: true,
-                    message,
-                }),
+                error: Some(WindowError::from(&refusal)),
             };
         }
         let endpoints = self.endpoints.lock();
@@ -695,11 +716,10 @@ impl LightwalletdTransport for Scripted {
             .lock()
             .push((server.to_owned(), "utxos".to_owned(), address.to_owned()));
         let endpoints = self.endpoints.lock();
+        if let Some(refusal) = endpoints.get(server).and_then(refusal_of) {
+            return Err(refusal);
+        }
         match endpoints.get(server) {
-            Some(Endpoint {
-                refuse_index: Some(message),
-                ..
-            }) => Err(EndpointError::Service(message.clone())),
             Some(e) if e.index_ok => Ok(e.utxos.get(address).cloned().unwrap_or_default()),
             _ => Err(EndpointError::Service("502 Bad Gateway".to_owned())),
         }
@@ -987,12 +1007,23 @@ fn endpoint_without_address_index(funding_height: u64) -> Endpoint {
     Endpoint {
         index_ok: true,
         funding_lookup: Some(Ok(raw(funding_bytes(), funding_height))),
-        refuse_index: Some(NO_INDEX_NODE_MESSAGE.to_owned()),
+        refuse_index: Some(NO_INDEX_STATUS_MESSAGE.to_owned()),
         ..Endpoint::default()
     }
 }
 
-/// An endpoint that answers every history and UTXO request with the node's refusal is stopped after 18
+/// An endpoint that refuses every history and UTXO request with a generic service error, one that is not
+/// the no-address-index message: the storm of R39.11.4h(b).
+fn endpoint_refusing_every_read(funding_height: u64) -> Endpoint {
+    Endpoint {
+        index_ok: true,
+        funding_lookup: Some(Ok(raw(funding_bytes(), funding_height))),
+        refuse_generic: Some(GENERIC_STATUS_MESSAGE.to_owned()),
+        ..Endpoint::default()
+    }
+}
+
+/// An endpoint that answers every history and UTXO request with a generic service error is stopped after 18
 /// history requests per address form: the first window of 1,000 blocks is bisected down one level at a
 /// time to height 1 (11 requests: 1,000 wide, then 500, 250, 125, 63, 32, 16, 8, 4, 2, 1), and the
 /// fifth unservable height ends the read after 7 more (2, 3-4, 3, 4, 5-8, 5-6, 5). The range is 30,000
@@ -1000,7 +1031,7 @@ fn endpoint_without_address_index(funding_height: u64) -> Endpoint {
 #[tokio::test]
 async fn every_history_request_failing_is_stopped_after_few_requests() {
     let transport = Arc::new(Scripted::default());
-    transport.serve("a", endpoint_without_address_index(FAR_FUNDING_HEIGHT));
+    transport.serve("a", endpoint_refusing_every_read(FAR_FUNDING_HEIGHT));
     transport.serve("b", clean_endpoint_with_spend(FAR_FUNDING_HEIGHT));
     let backend = backend(&transport, &["a", "b"]);
 
@@ -1022,7 +1053,7 @@ async fn every_history_request_failing_is_stopped_after_few_requests() {
 #[tokio::test]
 async fn the_named_failure_carries_the_nodes_last_error_text_verbatim() {
     let transport = Arc::new(Scripted::default());
-    transport.serve("a", endpoint_without_address_index(FAR_FUNDING_HEIGHT));
+    transport.serve("a", endpoint_refusing_every_read(FAR_FUNDING_HEIGHT));
     let backend = backend(&transport, &["a"]);
     let evidence = backend.form_evidence("a", hash(), FAR_FUNDING_HEIGHT, TIP, &LOG).await;
     assert_eq!(evidence.len(), 2);
@@ -1036,24 +1067,24 @@ async fn the_named_failure_carries_the_nodes_last_error_text_verbatim() {
     );
     assert!(
         failure.contains(&format!(
-            "(last error: {NO_INDEX_NODE_MESSAGE}); the failure is not confined to single transactions"
+            "(last error: {GENERIC_REFUSAL_TEXT}); the failure is not confined to single transactions"
         )),
         "{failure}"
     );
-    assert!(evidence[0].utxos.as_ref().unwrap_err().contains(NO_INDEX_NODE_MESSAGE));
+    assert!(evidence[0].utxos.as_ref().unwrap_err().contains(GENERIC_REFUSAL_TEXT));
 }
 
 /// An endpoint stopped under the limits, with no other endpoint, is undetermined and never "not spent".
 #[tokio::test]
 async fn a_stopped_endpoint_alone_leaves_the_detection_undetermined() {
     let transport = Arc::new(Scripted::default());
-    transport.serve("a", endpoint_without_address_index(FAR_FUNDING_HEIGHT));
+    transport.serve("a", endpoint_refusing_every_read(FAR_FUNDING_HEIGHT));
     let backend = backend(&transport, &["a"]);
     let error = backend.detect_output_spend(&output(), 0, &LOG).await.unwrap_err();
     match error {
         HtlcIndexError::Incomplete(message) => {
             assert!(message.contains("could not serve 5 heights of window"), "{message}");
-            assert!(message.contains(NO_INDEX_NODE_MESSAGE), "{message}");
+            assert!(message.contains(GENERIC_REFUSAL_TEXT), "{message}");
             // The skipped heights are artifacts of the refusal: no pointer at the transaction index.
             assert!(!message.contains("transaction index"), "{message}");
             assert!(!message.contains("skipped height"), "{message}");
@@ -1296,6 +1327,100 @@ async fn a_marked_endpoint_still_serves_the_tip_and_transaction_lookups_and_re_a
     assert_eq!(backend.chain_tip().await.unwrap(), TIP);
     let tx = backend.transaction(output().txid).await.unwrap();
     assert_eq!(tx.height, Some(FUNDING_HEIGHT));
+}
+
+/// R39.11.4i(e): a fresh swap's already-sent check reads one block. The refusal ends each read at its
+/// first request, records no gap, and is explained as a missing address index, never a transaction index.
+#[tokio::test]
+async fn a_one_block_read_refused_for_no_address_index_costs_one_request_and_no_gap() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", endpoint_without_address_index(TIP));
+    let backend = backend(&transport, &["a"]);
+
+    let evidence = backend.form_evidence("a", hash(), TIP, TIP, &LOG).await;
+    assert_eq!(evidence.len(), 2);
+    for form in &evidence {
+        let read = form.history.as_ref().expect("the read itself returned");
+        assert!(read.gaps.is_empty(), "{read:?}");
+        assert_eq!(read.requests, 1);
+        assert!(!read.stopped_on_unservable_heights);
+        let failure = read.failure.as_deref().expect("the read's failure is set");
+        assert!(failure.contains("keeps no address index"), "{failure}");
+        assert!(failure.contains(NO_INDEX_NODE_MESSAGE), "{failure}");
+        assert!(!failure.contains("transaction index"), "{failure}");
+        let utxos = form.utxos.as_ref().unwrap_err();
+        assert!(utxos.contains("keeps no address index"), "{utxos}");
+        assert!(utxos.contains(NO_INDEX_NODE_MESSAGE), "{utxos}");
+        assert!(!utxos.contains("transaction index"), "{utxos}");
+    }
+    assert_eq!(transport.asked("a", "history").len(), 2, "one history request per form");
+    assert_eq!(transport.asked("a", "utxos").len(), 2, "one UTXO request per form");
+
+    // The same through the detection: its error names the missing address index.
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", endpoint_without_address_index(TIP));
+    let backend = self::backend(&transport, &["a"]);
+    let error = backend.detect_funding(&htlc_script(), TIP, &LOG).await.unwrap_err();
+    let text = error.to_string();
+    assert!(matches!(error, HtlcIndexError::Incomplete(_)), "{text}");
+    assert!(text.contains("keeps no address index"), "{text}");
+    assert!(text.contains(NO_INDEX_NODE_MESSAGE), "{text}");
+    assert!(!text.contains("transaction index"), "{text}");
+    assert!(!text.contains("skipped height"), "{text}");
+    assert_eq!(transport.asked("a", "history").len(), 2);
+    assert_eq!(transport.asked("a", "utxos").len(), 2);
+}
+
+#[tokio::test]
+async fn a_no_address_index_refusal_ends_a_long_read_after_its_first_request() {
+    let transport = Arc::new(Scripted::default());
+    transport.serve("a", endpoint_without_address_index(FAR_FUNDING_HEIGHT));
+    let backend = backend(&transport, &["a"]);
+    let evidence = backend.form_evidence("a", hash(), FAR_FUNDING_HEIGHT, TIP, &LOG).await;
+    for form in &evidence {
+        let read = form.history.as_ref().expect("the read itself returned");
+        assert_eq!(read.requests, 1);
+        assert!(read.gaps.is_empty(), "{read:?}");
+        assert!(read
+            .failure
+            .as_deref()
+            .unwrap_or_default()
+            .contains("keeps no address index"));
+    }
+    assert_eq!(
+        transport.asked("a", "history").len(),
+        2,
+        "one history request per address form over 30,000 blocks"
+    );
+}
+
+/// A refusal without the node's message stays a serve failure: bisected, its gaps recorded, and the
+/// transaction-index explanation kept.
+#[tokio::test]
+async fn a_genuine_serve_failure_is_still_bisected_and_explained_as_a_transaction_index_gap() {
+    let transport = Arc::new(Scripted::default());
+    let mut endpoint = healthy_endpoint();
+    endpoint.funding_lookup = Some(Ok(raw(funding_bytes(), FUNDING_HEIGHT)));
+    endpoint.unservable = vec![FUNDING_HEIGHT + 10];
+    transport.serve("a", endpoint);
+    let backend = backend(&transport, &["a"]);
+
+    let evidence = backend
+        .form_evidence("a", hash(), FUNDING_HEIGHT, FUNDING_HEIGHT + 100, &LOG)
+        .await;
+    let read = evidence[0].history.as_ref().expect("the read itself returned");
+    assert_eq!(read.gaps, vec![FUNDING_HEIGHT + 10]);
+    assert!(read.requests > 1, "the window was bisected");
+    assert!(!read.stopped_on_unservable_heights);
+
+    let error = backend
+        .detect_funding(&htlc_script(), FUNDING_HEIGHT, &LOG)
+        .await
+        .unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("history skipped height(s)"), "{text}");
+    assert!(text.contains("transaction index"), "{text}");
+    assert!(!text.contains("keeps no address index"), "{text}");
 }
 
 // ---------------------------------------------------------------------------------------------
