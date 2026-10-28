@@ -540,7 +540,8 @@ fn build_trezor_coin(
     signer: EthSigner,
     derivation_method: DerivationMethod<Address, EthHDWallet>,
 ) -> EthCoin {
-    let web3 = crate::eth::alloy_compat::build_provider(vec![url], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes("TEST", vec![url]), vec![])
+        .unwrap();
     EthCoin(Arc::new(EthCoinImpl {
         coin_type,
         decimals: 18,

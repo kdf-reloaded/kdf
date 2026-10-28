@@ -830,20 +830,40 @@ async fn the_progress_record_names_the_electrum_read_in_flight() {
     );
 }
 
-/// The capability the taker refusal of R39.11.28 builds on: the first server that passes the vetting.
+/// The capability the taker refusal of R39.11.28 builds on: the first server that passes the vetting and
+/// answers one script-history read.
 #[tokio::test]
-async fn the_first_usable_server_is_the_first_that_passes_the_vetting() {
-    let rig = Rig::new(&["lagging", "good"]);
+async fn the_first_usable_server_is_the_first_that_passes_the_vetting_and_answers_a_history_read() {
+    let rig = Rig::new(&["lagging", "silent", "good"]);
     rig.electrum.edit("lagging", |s| s.tip = Some(Ok(TIP - 50)));
+    rig.electrum.edit("good", |s| s.history = Some(Ok(Vec::new())));
 
     assert_eq!(
-        rig.fallback.first_usable_server(rig.lwd.backend()).await.unwrap(),
+        rig.fallback
+            .first_usable_server(rig.lwd.backend(), &htlc_script())
+            .await
+            .unwrap(),
         "good"
+    );
+    assert_eq!(
+        rig.electrum.asked("lagging", "history"),
+        0,
+        "a server that fails vetting is not asked"
+    );
+    assert_eq!(
+        rig.electrum.asked("silent", "history"),
+        1,
+        "a vetted server is asked once"
     );
 
     rig.electrum.edit("good", |s| s.tip = Some(Ok(TIP - 50)));
-    let reasons = conditions(rig.fallback.first_usable_server(rig.lwd.backend()).await);
-    assert_eq!(reasons.len(), 2, "{reasons:?}");
+    let reasons = conditions(
+        rig.fallback
+            .first_usable_server(rig.lwd.backend(), &htlc_script())
+            .await,
+    );
+    assert_eq!(reasons.len(), 3, "{reasons:?}");
+    assert!(reasons[1].starts_with("silent: "), "{reasons:?}");
 }
 
 /// The fresh tip is the single height authority's read: when lightwalletd cannot give it, no server is
@@ -1044,4 +1064,151 @@ async fn a_real_arrr_header_with_one_byte_flipped_fails_the_identity_check() {
         "the reported hash is shown in display order: {reasons:?}"
     );
     assert_eq!(rig.electrum.asked("a", "history"), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// T39.11.s -- the taker refusal's capability check (R39.11.28)
+// ---------------------------------------------------------------------------------------------
+
+/// The wallet's own transparent address the probes read.
+fn own_address() -> Address {
+    test_addressing().address(crate::z_coin::z_lightwalletd::IndexEncoding::PubkeyHash, [9; 20])
+}
+
+fn no_index() -> EndpointError {
+    EndpointError::NoAddressIndex("Unknown: No information available for address".to_owned())
+}
+
+impl Rig {
+    async fn watch_source(&self) -> Result<String, String> {
+        self.fallback
+            .ensure_watch_source(self.lwd.backend(), &own_address())
+            .await
+    }
+
+    /// Changes what one scripted lightwalletd endpoint answers.
+    fn edit_endpoint(&self, server: &str, change: impl FnOnce(&mut Script)) {
+        change(
+            self.transport
+                .scripts
+                .lock()
+                .get_mut(server)
+                .expect("a scripted endpoint"),
+        );
+    }
+}
+
+/// An endpoint that answers the address read is the source; neither the second endpoint nor Electrum is
+/// asked.
+#[tokio::test]
+async fn an_endpoint_that_answers_an_address_read_is_the_watch_source() {
+    let rig = Rig::new(&["e"]);
+
+    assert_eq!(rig.watch_source().await.unwrap(), "lightwalletd lwd1");
+
+    assert_eq!(rig.transport.called("lwd1", "utxos"), 1);
+    assert_eq!(
+        rig.transport.called("lwd2", "utxos"),
+        0,
+        "the first capable endpoint ends the probe"
+    );
+    assert!(
+        rig.electrum.calls().is_empty(),
+        "Electrum is not asked when lightwalletd can answer"
+    );
+}
+
+/// One capable endpoint is enough: the one without the index is marked, and the other answers.
+#[tokio::test]
+async fn one_capable_endpoint_among_marked_ones_lets_the_swap_proceed() {
+    let rig = Rig::new(&[]);
+    rig.edit_endpoint("lwd1", |s| s.address_error = Some(no_index()));
+
+    assert_eq!(rig.watch_source().await.unwrap(), "lightwalletd lwd2");
+
+    // The mark is kept: the second probe does not send the marked endpoint a request again.
+    assert_eq!(rig.watch_source().await.unwrap(), "lightwalletd lwd2");
+    assert_eq!(rig.transport.called("lwd1", "utxos"), 1);
+    assert_eq!(rig.transport.called("lwd2", "utxos"), 2);
+}
+
+/// Every endpoint marked and no Electrum server listed: refused with the named error, which names the coin,
+/// every endpoint with its condition and the Electrum state, and says the taker could not watch.
+#[tokio::test]
+async fn every_endpoint_marked_and_no_electrum_server_is_refused_with_the_named_error() {
+    let rig = Rig::new(&[]);
+    rig.edit_lwd(|s| s.address_error = Some(no_index()));
+
+    let error = rig.watch_source().await.unwrap_err();
+
+    assert_eq!(
+        error,
+        "ARRR: the taker could not watch its payment for the maker's spend, because no source can answer an \
+         address read. lightwalletd endpoints: lwd1: no address index (node message: Unknown: No information \
+         available for address); lwd2: no address index (node message: Unknown: No information available for \
+         address). Electrum servers: no server is listed in the activation's electrum_servers"
+    );
+    // The marks outlive the probe: a second refusal reads the marks and sends the endpoints nothing.
+    let again = rig.watch_source().await.unwrap_err();
+    assert!(again.contains("lwd1: no address index, skipped"), "{again}");
+    assert_eq!(rig.transport.called("lwd1", "utxos"), 1);
+    assert_eq!(rig.transport.called("lwd2", "utxos"), 1);
+}
+
+/// An endpoint that fails the read some other way is a named condition and is not marked: it is asked again.
+#[tokio::test]
+async fn an_endpoint_that_fails_the_read_otherwise_is_named_and_not_marked() {
+    let rig = Rig::new(&[]);
+    rig.edit_lwd(|s| s.address_error = Some(EndpointError::Transport("connection reset".to_owned())));
+
+    let error = rig.watch_source().await.unwrap_err();
+    assert!(
+        error.contains("lwd1: the address read failed: connection reset"),
+        "{error}"
+    );
+    assert!(
+        error.contains("lwd2: the address read failed: connection reset"),
+        "{error}"
+    );
+
+    let _ = rig.watch_source().await;
+    assert_eq!(
+        rig.transport.called("lwd1", "utxos"),
+        2,
+        "a failure that is not the rejection is no mark"
+    );
+}
+
+/// With every endpoint marked, one identity-checked Electrum server that answers a script-history read lets
+/// the swap proceed.
+#[tokio::test]
+async fn one_identity_checked_electrum_server_lets_the_swap_proceed() {
+    let rig = Rig::new(&["lagging", "good"]);
+    rig.edit_lwd(|s| s.address_error = Some(no_index()));
+    rig.electrum.edit("lagging", |s| s.tip = Some(Ok(TIP - 50)));
+    rig.electrum.edit("good", |s| s.history = Some(Ok(Vec::new())));
+
+    assert_eq!(rig.watch_source().await.unwrap(), "Electrum good");
+    assert_eq!(rig.electrum.asked("good", "history"), 1);
+}
+
+/// Electrum servers that fail vetting or the history read are each named, next to every endpoint.
+#[tokio::test]
+async fn electrum_servers_that_cannot_answer_are_each_named_in_the_refusal() {
+    let rig = Rig::new(&["lagging", "silent", "foreign"]);
+    rig.edit_lwd(|s| s.address_error = Some(no_index()));
+    rig.electrum.edit("lagging", |s| s.tip = Some(Ok(TIP - 50)));
+    rig.electrum.edit("foreign", |s| s.header = Some(Ok(vec![1, 2, 3])));
+
+    let error = rig.watch_source().await.unwrap_err();
+
+    assert!(
+        error.starts_with("ARRR: the taker could not watch its payment for the maker's spend"),
+        "{error}"
+    );
+    assert!(error.contains("lwd1: no address index"), "{error}");
+    assert!(error.contains("lwd2: no address index"), "{error}");
+    assert!(error.contains("lagging: its tip"), "{error}");
+    assert!(error.contains("silent: not scripted"), "{error}");
+    assert!(error.contains("foreign: it is not on this coin's chain"), "{error}");
 }

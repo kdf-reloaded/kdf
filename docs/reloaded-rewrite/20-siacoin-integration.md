@@ -424,6 +424,54 @@ activation request -- no URL is embedded in the module:
 | `GET /api/txpool/transactions` | Mempool inspection |
 | `POST /api/txpool/broadcast` | Broadcast a signed transaction |
 
+**R-N1 (host-only naming of the walletd server; Reloaded; clean-room
+original; maintainer decision 2026-10-26; no switch).** Every log line, error
+text and status message the Sia coin layer emits that names the walletd
+server shall name it in the host-only form of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14: scheme, host and, when
+present, port of `client_conf.server_url` (ch. 46 R46.1.2). This covers the
+activation failure of the construction-time probe, the errors of every
+endpoint call of the table above, the history path's errors (ch. 53 §53.4),
+and any text of the external Sia library or of its HTTP client that such a
+text embeds. A full URL arriving from a lower layer is replaced by its
+host-only form before the text is logged or returned.
+
+**R-N2 (credentials in renderings; Reloaded; clean-room original;
+maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.17 applies to
+the Sia coin layer. No rendering of the activation request, of the client
+configuration, of the client, or of a value that holds any of them shall print
+the walletd password, the `Authorization` header value built from it, or the
+value of any header the browser build's `client_conf.headers` supplies. The
+server URL appears in host-only form only. The scope limit of R35.1.17 for the
+RPC wire dump applies.
+
+Both rules bind the texts and renderings Reloaded emits, including those that
+come from the external Sia library's own error and configuration types once
+Reloaded renders them. Neither has an opt-back switch, for the reason
+R35.1.14 gives: the walletd server is the operator's own and no peer observes
+it, so by the second arm of the default-side rule (`docs/COMPAT_SWITCHES.md`)
+the Reloaded form is the default. Both are recorded in
+`docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+> **Status (2026-10-28).** Not implemented (D10). In the bound revision of the
+> external Sia library, the native client configuration derives a debug form
+> that prints the password, and the client's request errors carry the HTTP
+> client's text, which includes the full request URL. Reloaded's activation
+> request holds that configuration and derives its own debug form over it.
+
+**T-N1.** Activate SC against a closed port with a `server_url` that carries a
+path and a query string and with a `password` set. The activation error and
+every captured log line contain the URL's host-only form and none of the path,
+the query or the password. The debug forms of the parsed activation request
+and of the coin's client configuration contain neither the password nor its
+encoded header value (R-N1, R-N2).
+
+**T-N2.** With a walletd stub that answers the probe and then fails a balance
+read with a transport error, the `Transport` error text of ch. 46 R46.5.4
+names the server in host-only form only. The same holds for the `RpcError`
+text and the error sync state of the history path when walletd fails during a
+pass (R-N1; ch. 53 R53.4.8).
+
 ## 20.9 Withdraw (Value Transfer) Behaviour
 
 The module provides a withdraw path producing a signed,
@@ -905,6 +953,24 @@ rather than defects. None is a correctness claim.
   family and is therefore out of scope for a Sia change. Left open
   deliberately rather than worked around locally.
 
+- **D10 -- walletd naming and credentials need the Sia library.** *Resolved
+  2026-10-28, maintainer decision: Reloaded's boundary first, the library
+  later.* R-N1 and R-N2 bind Reloaded's emitted texts and renderings,
+  but the configuration type and the request errors they constrain are
+  defined in the external Sia library (`sia-rust`, a tolerated sidecar fork
+  this project maintains). The clean way to satisfy them is a change there --
+  a debug form of the client configuration that hides the password, and
+  request errors that carry the server's host-only form instead of the full
+  URL -- followed by a bump of the revision this workspace pins. Until that
+  lands, Reloaded can meet the rules only at its own boundary: by its own debug
+  form for the types that hold the configuration, and by rewriting the
+  library's error texts before it logs or returns them. Which of the two is
+  done first was a maintainer choice. He chose Reloaded's boundary now and the
+  change in the library later; once the library carries its own redaction,
+  the boundary rewriting can be retired. The library's errors also quote the
+  response body of a non-success answer; whether that is allowed is chapter
+  36 D36.3.
+
 ## 20.11 Baseline Verifications
 
 The following are verifiable from the baseline state defined in
@@ -1038,3 +1104,11 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   to the historical lineage is governed by the R35 gate and the
   R36 binding-scope notes that head every code-bearing section of
   this chapter.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):* R-N1,
+  R-N2 with their status note, T-N1, T-N2 and D10 are Reloaded-original. They
+  rest on the maintainer decision of 2026-10-26 (host-only node naming
+  everywhere, except the RPC wire dump, which keeps its own secrets switch),
+  on his decision of 2026-10-28 on D10, on this repository's own code and on
+  the bound revision of the external Sia
+  library, read as a permitted sibling source. They take no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.
