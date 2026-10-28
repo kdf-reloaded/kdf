@@ -789,7 +789,9 @@ on.
 > **As-built note (2026-10-28).** Reloaded implements R38.6.4b–R38.6.4k and the
 > spreading of read-only queries in R38.6.4a (PR #128). The "Closed divergence
 > (2026-10-27)" note after R38.6.4k records what the tree did before. R38.6.4j
-> is a Reloaded-original rule and is marked so.
+> is a Reloaded-original rule and is marked so. R38.6.4l, the measured server
+> order, is implemented: `mixed` and `measured` are recognized, and the default
+> stays `random` (D38.6.4l.1).
 >
 > The spreading is a rotating start index over the maintained connections in
 > `route_inner` of the pool, applied to read-only requests only. Each such
@@ -859,10 +861,10 @@ maintainer decision 2026-10-28; amends R38.6.4b item 1 for Reloaded).**
 2. The order is held only in the running coin instance. It is not persisted,
    and a re-activation draws a fresh order. A token or coin that reuses a
    platform's Electrum client reuses that client's order.
-3. Two further values, `mixed` and `measured`, are reserved for the measured
-   server order planned as a follow-up (`docs/plans/electrum-measured-server-order.md`).
-   Until that follow-up lands, they fall back to `random` as unrecognized
-   values do.
+3. Two further values, `mixed` and `measured`, select the measured server
+   order of R38.6.4l and are recognized values like `random` and `listed`;
+   the fallback of item 1 applies to every other value. R38.6.4l does not
+   change the default, which stays `random`.
 
 *Rationale.* Every wallet ships the same coins file, so ranking by list
 position sends every user to the same first server and leaves the later
@@ -1135,6 +1137,166 @@ failure, naming each server, from the activation itself.
 >   observable discriminant is `Transport` either way). Implementing R38.6.4f
 >   item 2 removes the need for it: the block-height query connects the pool.
 
+R38.6.4l **Measured server order (Reloaded-original, maintainer design
+approval 2026-10-28; binds the `mixed` and `measured` values of R38.6.4b-R
+item 3).**
+1. *Values.* With `electrum_server_order` set to `mixed`, the rank is a
+   weighted random draw that favors well-measured servers (item 5). With
+   `measured`, the rank follows measured quality alone (item 5). Under
+   `random` and `listed` nothing in this rule applies: no measurement
+   request is sent and no trigger runs. The default stays `random`
+   (R38.6.4b-R item 1) until a field run on RIN with `mixed` has passed;
+   `mixed`, the intended default, then becomes the default in a separate
+   change (D38.6.4l.1).
+2. *Measurements.* The header request below is the Electrum protocol method
+   `blockchain.headers.subscribe`. Its answer is the server's tip header with
+   its `height`, and the session then receives a header notification for
+   each new tip. A server's *latency* is the time from sending a request to
+   receiving its answer. Measurements happen on three occasions only:
+   - *Activation round.* The activation probe (R38.6.4k-R) sends one header
+     request over each connection right after its version negotiation. The
+     round trip is the server's latency in the round, and the answered
+     `height` is its height. The header request is part of the server's
+     probe attempt, so the probe ends when every attempt, header request
+     included, has ended, or when *B* is spent (R38.6.4k-R item 2); the build
+     still returns on the first successful establishment. A server whose
+     establishment or header request did not complete during the probe has no
+     measurement in the round.
+   - *While running.* For each maintained connection, the round trip of
+     every ordinary request and of every `server.ping` (R38.6.4e item 4) is a
+     sample of its *smoothed latency*. The first sample after the connection
+     joins the set starts the average, and every later sample *s* updates it
+     to 0.2 · *s* + 0.8 · the previous value. The height of each header
+     notification is the connection's current height. Apart from the header
+     request a connection sends when it joins (item 6), nothing is sent for
+     this.
+   - *Re-measure round* (item 7). Each server in the pool that is not
+     maintained, not suspended and not removed (R38.6.4d) is connected under
+     R38.6.4e item 1 and sent one header request, as at activation. Its
+     connection is then released (R38.6.4d item 1), except for the server
+     that item 7 chooses as the replacement. Whether these connections are
+     made one at a time or in parallel is not bound.
+3. *What measuring never does.*
+   - It never sends an address-history, balance, unspent-list or other
+     script-hash query, and never a fee estimate.
+   - A connection opened only to measure carries version negotiation and the
+     header request alone. No script-hash subscription is placed on it unless
+     it joins the maintained set.
+   - Nothing measures on a schedule. Beyond the running samples of item 2,
+     servers are measured only in the activation round and in re-measure
+     rounds, and a coin starts a re-measure round at most once per 5 minutes.
+4. *Eligibility and quality.* For one measurement round:
+   - the *best tip* is the highest height measured in the round or currently
+     reported by a maintained connection (D38.6.4l.3);
+   - the *best latency* is the lowest latency measured in the round.
+
+   A server is *eligible* when all of these hold:
+   - it was measured in the round;
+   - it is not removed (R38.6.4d item 3) and not poor-demoted (item 7), and
+     it was not suspended when it was measured. The release that follows a
+     measurement, and the release of R38.6.4k-R item 3, suspend the server
+     under R38.6.4d item 1 but do not make it ineligible in that round
+     (D38.6.4l.8);
+   - its height is at most 1 block below the best tip;
+   - its latency is at most the larger of 4 × the best latency and 300 ms.
+
+   The *quality* of an eligible server is *q* = best latency / its latency,
+   so the fastest eligible server has *q* = 1.
+5. *The rank.*
+   - `mixed`: the eligible servers are ranked by a weighted random draw
+     without replacement. Each server's weight is *w* = 0.5 · *q* / Σ*q* +
+     0.5 / *n*, computed once over the *n* eligible servers. Each place goes
+     to one of the servers not yet placed, drawn with probability
+     proportional to its weight.
+   - `measured`: the eligible servers are ranked by descending *q*. Servers
+     of equal *q* are ordered by a uniform random draw.
+   - Under both values, the non-eligible servers follow in a uniform random
+     order. They stay in the pool for the retry over every server (R38.6.4f
+     item 2) and as candidates that can fill the floor (R38.6.4c).
+
+   The result is the coin's rank wherever R38.6.4b – R38.6.4k-R speak of
+   priority or rank: the maintained set and displacement (R38.6.4c), routing
+   and the retry's visiting order (R38.6.4f), and the probe's offer rule
+   (R38.6.4k-R item 3). The rank from the activation round takes effect when
+   the probe ends; until then the uniform draw of R38.6.4b-R item 1 serves as
+   the rank (D38.6.4l.2). After that the rank changes only by a replacement
+   (item 7). The spreading of read-only queries (R38.6.4a) is unchanged.
+   R38.6.4b-R item 2 holds for the measured order and its measurements: they
+   are not persisted, a re-activation measures afresh, and a token that
+   reuses a platform's Electrum client shares that client's rank,
+   measurements and re-measure limit.
+6. *A poor connection.* A maintained connection is *poor* when one of these
+   holds:
+   - *P1 stale, two or more maintained connections:* on two consecutive
+     header notifications over this connection, its height is 2 or more
+     blocks below the highest height any maintained connection has reported.
+   - *P1 stale, one maintained connection:* no header notification has
+     arrived over it for longer than the larger of 3 × the coin's
+     `avg_blocktime` and 10 minutes, counted from its joining or from its
+     last notification. A coin without `avg_blocktime`, or with one that is
+     not a positive number, uses 10 minutes. For RIN, with an `avg_blocktime`
+     of 60 s, the limit is 10 minutes.
+   - *P2 slow:* after at least 5 samples since joining, its smoothed latency
+     exceeds all three of: 4 × its own reference latency; 2 × the best
+     latency of the activation round; and 1 s. Its reference latency is its
+     latency in the activation round, or, without one, its latency in the
+     re-measure round in which it was drawn. A connection with neither is
+     not judged by P2 (D38.6.4l.5).
+
+   A connection that joins the maintained set without a header request sent
+   over it, for example one that joined through an ordinary maintenance pass,
+   sends one header request right after it joins. Its answer is the
+   connection's current height, and the connection then receives header
+   notifications like one that joined from a measurement (D38.6.4l.4). P1
+   judges only connections whose header request has been answered, and
+   counts only those connections. A failing connection is not
+   poor: R38.6.4d item 1 and R38.6.4f item 1 already close it and suspend its
+   server.
+7. *Replacing a poor connection.* On P1 or P2:
+   1. The server is marked *poor-demoted* for 15 minutes from the trigger; a
+      further trigger restarts the 15 minutes. The mark is not a suspension:
+      the server stays in the maintained set and keeps serving, but it is
+      not eligible while marked.
+   2. The coin starts a re-measure round (item 2). If its last re-measure
+      round started less than 5 minutes ago, the round waits until 5 minutes
+      have passed, and the poor server stays meanwhile (D38.6.4l.6).
+   3. One replacement is chosen from the round's eligible servers: under
+      `mixed`, drawn with the weights of item 5 computed over them; under
+      `measured`, the one of highest *q*, with equal *q* settled by a uniform
+      random draw. The replacement takes the poor server's place in the
+      rank, and the poor server moves to the end of the rank; the other
+      servers keep their order (D38.6.4l.7). The replacement joins over the
+      connection it was measured on, by the join-and-demote rule of R38.6.4c
+      item 2, and the poor server is demoted (R38.6.4c item 5).
+   4. If the round has no eligible server, the poor server stays maintained
+      and the rank is unchanged. The trigger stays armed: while the condition
+      still holds, this item runs again under the 5-minute limit of step 2.
+
+   A trigger never reorders the other servers and never redraws the rank.
+
+*Rationale.* A uniform draw spreads users but ignores whether a server is
+slow or behind the chain. Measuring through the header request costs one
+small request per server at activation, carries no user data, and goes
+through the server's own index, so it measures the server and not only the
+route; its answer also shows how far behind the server is. `mixed` keeps half
+of each weight uniform so that nodes in one region do not all pick the same
+fastest server, overload it and then move together to the next one. That
+herding is why `measured` is opt-in. The thresholds, the 5-sample minimum,
+the 15-minute mark and the 5-minute limit keep one bad sample from moving a
+node, and the absence of scheduled probes keeps the load on volunteer-run
+public servers where it was.
+
+> **Reloaded divergence (informative).** The reference ranks by list position.
+> Measuring adds one header request per listed server at activation and one
+> connection per candidate at a re-measure. It has no wire effect and no peer
+> observes it: it changes only which of the operator's own configured servers
+> a node uses. By the second arm of the default-side rule of
+> `docs/COMPAT_SWITCHES.md`, a Reloaded variant is the default; until the
+> field run of D38.6.4l.1 has passed, that variant is `random`.
+>
+> **Compatibility:** for behavior matching GLEEC KDF, set
+> `electrum_server_order` to `listed`.
+
 T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
 Electrum test server set with `min_connected` 0, with `min_connected` above
 `max_connected`, and with `max_connected` above the list length, and assert
@@ -1230,12 +1392,178 @@ Each of these settings shall parse as stated:
 - an absent switch means `random`;
 - `random` means `random`;
 - `listed` means `listed`;
-- any other value, including `mixed`, `measured`, a different letter case or
-  a non-string, means `random` with one warning.
+- `mixed` and `measured` parse as T38.6.4l.1 states;
+- any other value, including a different letter case or a non-string, means
+  `random` with one warning.
 
 Two activations shall draw independently of each other. Over many draws with
 the real random source, each server shall come first roughly equally often,
 within generous bounds (R38.6.4b-R).
+
+The tests of R38.6.4l run in-process against the stub Electrum server of
+`mm2src/coins/utxo/rpc_clients/electrum_stub_server.rs`, with the per-method
+reply delay, settable tip height and pushed header notifications that the
+plan adds to it, an injected random source, and an injected clock or
+shortened pool timings. Latencies are set in milliseconds.
+
+T38.6.4l.1 *Switch values.* `mixed` and `measured` shall parse as themselves,
+without a warning; an absent switch, `random`, `listed` and every other value
+shall parse as T38.6.4.13-R states. Under `random` and `listed`, no stub shall
+receive a header request during the activation probe, and no re-measure round
+shall run (R38.6.4l item 1).
+
+T38.6.4l.2 *Activation measurement.* Under `mixed` with three stubs, each stub
+shall receive exactly one header request during the probe, right after
+`server.version`. The latencies and heights the rank is computed from shall be
+the stubs' reply delays and tip heights. A silent stub shall have no
+measurement (R38.6.4l item 2).
+
+T38.6.4l.3 *Eligibility.* With tips at *H*, *H* − 1 and *H* − 2, the third
+server shall not be eligible. With a best latency of 50 ms, 300 ms shall be
+eligible and 301 ms not; with a best latency of 100 ms, 400 ms shall be
+eligible and 401 ms not. A removed, a poor-demoted and an unmeasured server
+shall not be eligible, and a server released after its measurement shall
+stay eligible in that round. The non-eligible servers shall be ranked after
+every eligible one (R38.6.4l items 4–5).
+
+T38.6.4l.4 *`mixed` weights and draw.* With three eligible servers at 50, 100
+and 150 ms, the weights shall be 29/66, 20/66 and 17/66 (about 0.44, 0.30
+and 0.26, within 0.0001),
+and an injected random source shall yield the order the weighted draw
+without replacement gives. Over 2,000 draws with the real random source,
+each server's share of first places shall lie within 0.05 of its weight
+(R38.6.4l item 5).
+
+T38.6.4l.5 *`measured` order.* With eligible servers at 50, 100, 100 and
+150 ms, the server at 50 ms shall rank first and the one at 150 ms last. Two
+injected random sources shall order the two 100 ms servers both ways
+(R38.6.4l item 5).
+
+T38.6.4l.6 *The rank in use.* With one stub answering its header request
+after the others but within *B*, the build shall return on the first
+establishment and the probe shall end only after that answer. The rank shall
+be the uniform draw of R38.6.4b-R until the probe ends, and the measured rank
+afterwards. The maintained set, routing, the retry's visiting order and
+displacement shall then follow the measured rank. A re-activation shall
+measure again (R38.6.4l item 5).
+
+T38.6.4l.7 *P1 with two or more maintained connections.* With two maintained
+stubs, one at height *H* and one at *H* − 2, one notification of the lagging
+stub shall not trigger, and two consecutive ones shall trigger. A stub at
+*H* − 1 shall never trigger (R38.6.4l item 6).
+
+T38.6.4l.8 *P1 with one maintained connection.* With `max_connected` 1 and no
+header notification, a RIN-like coin with `avg_blocktime` 60 shall trigger
+after 10 minutes and not before. A coin with `avg_blocktime` 600 shall
+trigger after 30 minutes, and one without `avg_blocktime` after 10 minutes.
+A notification shall restart the count. A maintained connection over which no
+header notification can arrive shall never trigger P1 (R38.6.4l item 6).
+
+T38.6.4l.9 *P2.* With an activation latency of 50 ms for the server and a best
+activation latency of 40 ms:
+- four samples of 2,000 ms shall not trigger, and the fifth shall;
+- after four samples of 50 ms, samples of 2,000 ms shall give smoothed
+  latencies of 440, 752 and 1,001.6 ms, and only the third of them shall
+  trigger;
+- the same three samples shall not trigger for a server whose activation
+  latency was 400 ms;
+- a connection with no reference latency shall never trigger P2
+(R38.6.4l item 6).
+
+T38.6.4l.10 *Poor-demotion.* A triggered server shall stay maintained and keep
+answering. A re-measure round 14 minutes after the trigger shall not choose
+it even if it is the fastest, and a round after 15 minutes may. A second
+trigger shall restart the 15 minutes (R38.6.4l item 7 step 1).
+
+T38.6.4l.11 *Re-measure limit.* Two triggers 1 minute apart shall start their
+rounds at least 5 minutes apart. Each candidate stub shall accept at most one
+measuring connection per 5 minutes. Over 6 hours of clock time with no
+trigger, no stub outside the maintained set shall receive a header request
+(R38.6.4l items 3, 7 step 2).
+
+T38.6.4l.12 *Single-slot replacement.* With `max_connected` 2, rank *A*, *B*,
+*C*, *D*, *A* and *B* maintained, and *B* triggered, an injected draw choosing
+*D* shall leave *A* and *D* maintained and the rank *A*, *D*, *C*, *B*. *D*
+shall have joined over its measuring connection without a second connection,
+and *C*'s measuring connection shall have been released. Under `measured`, the
+candidate of highest quality shall be chosen (R38.6.4l item 7 step 3).
+
+T38.6.4l.13 *No eligible candidate.* With every candidate at least 2 blocks
+behind, a triggered server shall stay maintained, the rank shall be unchanged,
+and the next round shall start no earlier than 5 minutes later while the
+condition holds (R38.6.4l item 7 step 4).
+
+T38.6.4l.14 *Nothing private while measuring.* With a watched script hash and
+every trigger above exercised, a stub that was measured but did not join
+shall have received only `server.version` and the header request. No stub
+shall have received a script-hash method, `blockchain.estimatefee` or
+`blockchain.relayfee` over a measuring connection (R38.6.4l item 3).
+
+T38.6.4l.15 *Header request on joining.* Under `mixed`, a server that joins
+the maintained set through an ordinary maintenance pass, with no measuring
+connection, shall receive exactly one header request right after joining. A
+later notification 2 or more blocks below the other maintained connections, on
+two consecutive notifications, shall trigger P1 for it. Under `random`, the
+same join shall send no header request (R38.6.4l items 1 and 6).
+
+D38.6.4l.1 *(Resolved 2026-10-28, maintainer decision.)* *When `mixed`
+becomes the default.* The plan intends `mixed` as the default and left the
+moment to the maintainer: with the implementation, or after a field run on a
+few coins, RIN first. The maintainer chose the field run. The default stays
+`random` until a field run on RIN with `mixed` has passed; the switch to
+`mixed` is then a separate change.
+
+D38.6.4l.2 *The rank during the probe.* The probe offers servers to the set as
+they connect (R38.6.4k-R item 3), before the activation round's measurements
+are complete. This rule keeps the uniform draw until the probe ends, so the
+first maintained set follows that draw, and the measured rank reaches the set
+through later maintenance passes. The rule also counts the header request
+as part of each probe attempt, which can lengthen the probe, not the build,
+within *B*. Open: whether the probe should hold its connections until the
+round ends so that the first set follows the measured rank.
+
+D38.6.4l.3 *The best tip of a re-measure round.* The plan says "any server
+reported in the current measurement round". This rule also counts the heights
+of the maintained connections, so a candidate behind a server already in use
+is never eligible. Open: confirm, or count the round's measurements only.
+
+D38.6.4l.4 *(Resolved 2026-10-28, maintainer decision.)* *Header
+notifications on every maintained connection.* A connection receives header
+notifications only if a header request was sent over it. That holds for one
+that joined from a measurement; one that joined through an ordinary
+maintenance pass would receive none, never trigger P1 and not count for the
+comparison. The maintainer decided that each connection joining under `mixed`
+or `measured` without a header request sends one, so P1 covers every
+maintained connection (item 6, T38.6.4l.15). The cost is one small request per
+joining connection, over a connection that is in use anyway.
+
+D38.6.4l.5 *The reference figures of P2.* The plan names the server's
+"activation latency" and the pool's "best activation latency". This rule
+reads them literally, uses the re-measure latency only for a server not
+measured at activation, and does not judge a server with neither. The
+smoothed latency starts at the first sample after joining, not at the
+measurement. Open: confirm, or use the latest round's figures.
+
+D38.6.4l.6 *A trigger within 5 minutes of a round.* The plan does not say what
+happens then. This rule waits for the limit and does not reuse the earlier
+round's measurements. Open: confirm.
+
+D38.6.4l.7 *Where the poor server goes.* The plan says the replacement takes
+"that one slot" and the rest keeps its place. This rule moves the poor server
+to the end of the rank, so that a later maintenance pass does not bring it
+back ahead of the other candidates. Open: confirm, or swap the two places.
+
+D38.6.4l.8 *Suspension by release.* Releasing a measured connection suspends
+its server (R38.6.4d item 1), and the plan makes a suspended server
+ineligible. Read together, no released server could ever be chosen. This
+rule applies the suspension test to the server's state when it was measured.
+Open: confirm.
+
+D38.6.4l.9 *A warning for an absent switch.* The plan's sentence "An absent
+switch, or an unrecognized value, means the default and logs one warning
+naming the value" can be read as a warning for an absent switch too. This
+rule keeps R38.6.4b-R item 1: no warning when the switch is absent. Open:
+confirm.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -1617,6 +1945,90 @@ back to an error path that skips transaction-history processing.
 > **Status: as-built on dev (verified 2026-10-26).** The verbose-transaction
 > parser reads the `cryptocondition` script label.
 
+### 38.6.9 Node naming and credentials in texts (Electrum servers and the native daemon)
+
+These rules apply the host-only node naming of
+[chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14 and the credentials rule
+of R35.1.17 to the two backends of a UTXO coin. They bind no wire shape.
+
+R38.6.9a **Electrum servers are named by host and port only (Reloaded;
+clean-room original; maintainer decision 2026-10-26; no switch).** Every log
+line, error text and status message the UTXO coin layer emits that names an
+Electrum server shall name it as `host:port`, the form R38.6.4i already uses
+for failure reports. It shall carry nothing else of the configured address: no
+userinfo, path, query or fragment, and no URL built from the address. The
+protocol (`TCP`, `SSL`, `WS`, `WSS`) may be named next to it. This holds on
+the native build, where an address is a host and port, and on the browser
+build, where the configured address of a `WS` or `WSS` server can carry more.
+In particular:
+
+1. A server address that cannot be reduced to a host and a port (one removed
+   under R38.6.4d item 3) is named by a fixed placeholder and its position in
+   the activation request's server list, never by the configured string.
+2. The WebSocket URL the browser build connects to, and any lower-layer text
+   (WebSocket, TLS, DNS) embedded in an emitted text, appear in the
+   `host:port` form only.
+3. The activation log line for a server that will not be used names the
+   server as item 1 or the main rule says.
+
+R35.1.17 applies to the Electrum client, its pool and per-server entries, and
+the server entries of the activation request: no rendering of them prints
+more of an address than `host:port`.
+
+R38.6.9b **The native daemon (Reloaded; clean-room original; maintainer
+decision 2026-10-26; no switch).** A UTXO coin in native mode talks to a local
+coin daemon over JSON-RPC with HTTP Basic authentication, built from the RPC
+port, user name and password in the daemon's configuration file.
+
+1. Every log line and error text that names the daemon shall name it in the
+   host-only form of R35.1.14 (`http://127.0.0.1:<port>`), including a
+   lower-layer text embedded in it.
+2. No rendering (R35.1.17) of the native client, of a value that holds it, or
+   of any value that holds the daemon credentials shall print the RPC user
+   name, the RPC password or the `Authorization` header value, whole, in part
+   or encoded (D38.6.9a).
+3. An error about reading the daemon's configuration file may name the file
+   and a missing key, never the value of a key.
+
+Neither rule has an opt-back switch, for the reason R35.1.14 gives: the
+backend is the operator's own and no peer observes it, so by the second arm
+of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the
+default. The scope limit of R35.1.17 for the RPC wire dump applies. Both are
+recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+> **Status (2026-10-28).** Not implemented yet. In this repository a native
+> build already names a parsed Electrum server as `host:port`, but the errors
+> for an address that cannot be parsed echo the configured string, and so
+> does the activation log line for a server that is not used. The browser
+> build names a server by its configured string and builds its WebSocket URL
+> from it. The native client derives a debug form that prints the
+> `Authorization` header value; the daemon itself is already named
+> `http://127.0.0.1:<port>`.
+
+T38.6.9.1 *Electrum naming.* On the native build, an activation lists a server
+whose address carries userinfo (`user:secret@host:50002`) and a valid server
+that refuses connections. Every log line, the removal error and the
+activation failure contain `host:port` or the placeholder with the list
+position, and none contains `user` or `secret`. The debug forms of the client,
+its pool and the parsed request contain neither. On the browser build, once a
+browser test harness exists, the same holds for a `WSS` address with a path
+and a query string.
+
+T38.6.9.2 *Native daemon credentials.* Build a native client from a
+configuration file with a known user name and password. Its debug form, and
+the debug form of the coin's RPC client, contain neither of them nor the
+encoded header value. A request to a closed port fails with an error that
+names `http://127.0.0.1:<port>` and nothing more of the endpoint.
+
+D38.6.9a *(Open -- conservative reading taken; 2026-10-28.)* *Is the RPC user
+name a credential?* R38.6.9b item 2 treats it as one, because it is half of
+the Basic-authentication pair. To be confirmed by the maintainer.
+
+D38.6.9b *(Open; 2026-10-28.)* *Response bodies in native-daemon errors.* A
+request the daemon answers with a non-success HTTP status yields an error that
+quotes the request and the response body. These rules do not bind it; the
+question is shared with chapter 36 D36.3.
+
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
 > **Status of §38.8:** required port. The reloaded UTXO HD path can only obtain
@@ -1736,7 +2148,7 @@ R38.8.6 **Tests (two-direction, observable).**
 - KMD reward computation follows R38.4.1–R38.4.1B on every surface of
   R38.4.1A, and the exact-value tests of R38.4.3 pass (issue #11 vector:
   3,488 base units, not 1,744,260).
-- Each Part-B item (R38.6.1--R38.6.8) is implemented with the acceptance test
+- Each Part-B item (R38.6.1--R38.6.9) is implemented with the acceptance test
   stated inline, and its coins-config keys / RPC field additions are documented
   alongside the implementation. For §38.6.6 that means the values of
   R38.6.6h and chapter 60 T60.1–T60.2, with every item of R38.6.6i closed.
@@ -2004,3 +2416,20 @@ R38.8.6 **Tests (two-direction, observable).**
   and AI of 2026-10-28, his relay-fee decision of the same day and a market
   maker's field report. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Reloaded-original addition (2026-10-28), clean side.* R38.6.4l with its
+  rationale and divergence note, T38.6.4l.1–T38.6.4l.15, D38.6.4l.1–D38.6.4l.9,
+  the amendment of R38.6.4b-R item 3, the matching line of T38.6.4.13-R and
+  the sentence on R38.6.4l in the as-built note were written by a session that
+  never read the corpus. They rest on the maintainer's design approval of
+  2026-10-28 (`docs/plans/electrum-measured-server-order.md`), his decisions
+  of the same day on D38.6.4l.1 and D38.6.4l.4, the public Electrum protocol
+  and this repository's own code. No reference input: it
+  takes no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required.
+- *Reloaded-original addition (2026-10-28), clean side.* §38.6.9 (R38.6.9a,
+  R38.6.9b, the status note, T38.6.9.1, T38.6.9.2, D38.6.9a and D38.6.9b) was
+  written by a session that never read the corpus, from the maintainer
+  decision of 2026-10-26 (host-only node naming everywhere, except the RPC
+  wire dump, which keeps its own secrets switch) and this repository's own
+  code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.

@@ -35,9 +35,10 @@ introduce a new coin.
 > public-key recovery. The human-readable `error` text, `error_path` and
 > `error_trace` are **not** bound, except that the two Reloaded-only rules
 > R35.1.14 and R35.1.15 constrain what an `error` text or log line may say
-> about a node. Private Rust types, helper decomposition, and
-> internal module structure are informative and are **not** bound by this
-> chapter.
+> about a node, and the Reloaded-only rule R35.1.17 constrains what any
+> rendering of a value may print of a credential. Private Rust types, helper
+> decomposition, and internal module structure are informative and are
+> **not** bound by this chapter.
 
 > **Sources of truth (binding order).**
 > 1. The public Komodo DeFi Framework API reference
@@ -478,7 +479,7 @@ URLs at activation (deviation 2 in the note closing §35.1.E), so the
 WebSocket parts of the rules below bind Reloaded only if a WebSocket
 transport is added.
 The two reference rows agree on every rule below unless a rule says
-otherwise; the Reloaded-only rules R35.1.14 and R35.1.15 are marked as such.
+otherwise; the Reloaded-only rules R35.1.14 -- R35.1.17 are marked as such.
 The labels (a) -- (e) used below are the five questions settled by the
 2026-10-26 pass: (a) batch responses, (b) execution errors, (c) the scope of
 stickiness, (d) the scope of the cutoff, (e) re-sending a signed transaction.
@@ -673,6 +674,18 @@ clean-room original; maintainer decision 2026-10-26; no switch, for the same
 reason). This sentence binds only Reloaded's own texts and states nothing
 about the reference's.
 
+> **Pointer (2026-10-28).** The maintainer decision of 2026-10-26 extends
+> host-only naming to every node family. The host-only form defined above is
+> the form those rules use: TRON ([chapter 21](21-tron-integration.md) §21.9
+> R-N1), Tendermint ([chapter 36](36-tendermint-v2-activation-rpcs.md)
+> §36.5A), Electrum servers and the native UTXO daemon
+> ([chapter 38](38-utxo-coin-maintenance-and-features.md) §38.6.9),
+> lightwalletd ([chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.6),
+> Solana ([chapter 40](40-solana-coin.md) §40.5A) and the Sia wallet daemon
+> ([chapter 20](20-siacoin-integration.md) §20.8). R35.1.17 adds the rule on
+> credentials in renderings, and the scope limit for the RPC wire dump that
+> all of these rules share.
+
 R35.1.15 **Naming the node that answered with a JSON-RPC error (Reloaded;
 clean-room original).** When a node answers a request with a JSON-RPC error
 object (R35.1.8 last bullet), the coin layer shall log one line at **warn**
@@ -685,6 +698,41 @@ R35.1.11, the error message returned to the caller shall end with
 by one of several nodes can be attributed. The appended fragment is part of
 the human-readable message only; it changes no `error_type`, `error_data`
 shape or HTTP status.
+
+R35.1.16 **Coin and list position in node log lines (Reloaded; clean-room
+original; maintainer instruction 2026-10-28).** Every log line of the
+R35.1.14 scope that names an EVM node shall also say which coin's node it is
+and where that node stands in the coin's list:
+
+1. **Coin.** The line starts with `[<ticker>]`, the ticker of the coin whose
+   activation request supplied the node list (`nodes` of the v2 route, `urls`
+   of the legacy `enable` route). An ERC-20 token activated on its platform
+   has no node list of its own: a line about a request it makes names the
+   platform, because the platform's list is the one the node belongs to.
+2. **Position.** Right after the host-only form of R35.1.14 the line carries
+   ` (node <i> of <n>)`, where `<n>` is the length of that list and `<i>` the
+   node's 1-based position in it **as the request gave it**, not its place in
+   the order drawn at activation (R35.1.7) or in the current rotation
+   (R35.1.9). Two nodes on one host with different paths, which R35.1.14
+   renders alike, are told apart by their positions.
+
+This covers the activation-time probe's per-node lines, the per-node failure
+and cutoff lines of R35.1.8 and R35.1.10, the warn line of R35.1.15 and the
+per-node lines of the nonce gathering and the broadcast of R35.1.12; a
+per-node line of R35.1.12 that so far named no node shall name it in this
+form. Examples:
+
+- `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), <reason>`
+- `[ETC] EVM RPC https://rpc.example.org (node 2 of 4) answered <method> with error <code>: <message>`
+
+The rule binds log lines only. The texts returned to a caller -- the
+all-failed error of R35.1.11 and the ` (node <host>)` suffix of R35.1.15 --
+are unchanged, because the request that receives them already names the
+coin. The RPC wire dump, which has its own switch, is outside this rule.
+TRON, which is off in this beta, is not bound by it; where TRON code shares
+the EVM transport, its lines take the same form. A log line is not
+peer-visible and no wire shape changes, so no switch exists, for the reason
+given in R35.1.14.
 
 > **Closed divergence (2026-10-26).** The gaps described below are closed:
 > Reloaded now follows R35.1.8 -- R35.1.12 and R35.1.14 -- R35.1.15, with the
@@ -719,6 +767,56 @@ shape or HTTP status.
 > every configured URL together with that node's failure text. R35.1.14
 > resolves the contradiction in favor of the comment, and the rewritten
 > module now keeps to it.
+
+R35.1.17 **Credentials are never rendered (Reloaded; clean-room original;
+maintainer decision 2026-10-26; no switch).** No rendering of a value shall
+print a credential. A rendering is the value's debug form, its display form,
+and any log line, error text or status message built from either. A credential
+is:
+
+- a password, API key or token held in a configuration value, a client or a
+  node entry;
+- the value of an HTTP `Authorization` header, or of any other request header
+  that the configuration supplies;
+- the userinfo, path, query or fragment of a node URL or a service URL.
+
+A URL inside a rendering appears in the host-only form of R35.1.14. A
+rendering may say that a secret is set (for example `password: <set>`), but it
+shall show no part of it. The rule binds every type that holds such a value --
+a transport, a node entry, an activation request, a configuration object --
+whether or not anything renders that type today. It covers a type defined by a
+dependency as soon as Reloaded renders that type or a value that contains it.
+For the EVM coin layer this means the node list, the transport that holds it,
+and the fee-estimation service URLs of R35.1.14's second paragraph.
+
+*Scope shared with R35.1.14 and the rules that point to it.* These rules do
+not govern the RPC wire dump (`docs/DEV_BUILD.md` §4.1). The dump is a
+debugging build feature, off by default, and keeps its own secrets switch
+(`MM2_RPC_WIRE_DUMP_SECRETS`); what it redacts is that feature's own
+contract (maintainer decision 2026-10-26). No other output is exempt.
+
+*URLs in the redacted wire dump (maintainer decision 2026-10-28, D35.10).* In
+the dump's redacted mode, the default whenever the dump is on, every URL with
+a scheme and a host inside a dumped string value -- a whole value or a URL
+inside a longer text -- shall keep its scheme, host and port. Its userinfo,
+path, query and fragment shall each be replaced by the fixed marker
+`<redacted>`, so the dump still shows which of these parts the URL had. A path
+of `/` alone is kept. Nothing else in the dump changes for this rule: every
+other member, such as the coin ticker, the method, amounts and flags, is
+dumped as before, and so is a server address without a scheme (an Electrum
+`host:port`). With `MM2_RPC_WIRE_DUMP_SECRETS=1` the dump shows URLs in full.
+
+The divergence has no opt-back switch, for the reason R35.1.14 gives: it
+reaches no peer and only protects the operator's credentials, so by the
+second arm of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded
+form is the default, and an opt-in to print credentials would be an opt-in to
+weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
+"none -- no switch exists".
+
+> **Status (2026-10-28).** Not implemented yet. In this repository the node
+> entry of the EVM transport derives a debug form that prints the configured
+> URL, and so does the transport that holds the list. The TRON client already
+> hides its node list in its debug form.
 
 ---
 
@@ -1937,6 +2035,35 @@ that only checks an internal variant does not satisfy these rules.
   `decimals()` call with a JSON-RPC error and a second node that answers
   correctly returns the second node's values (binding for Reloaded, which
   takes the R35.1.13 choice per D35.8 (iv)).
+- **T35.34** *Coin and list position in node log lines (R35.1.16).* A coin
+  `ETC` with four configured nodes, of which the second as given fails the
+  activation probe: the probe's line for it starts with `[ETC]` and carries
+  the host-only form followed by `(node 2 of 4)`, whatever order activation
+  drew. A per-node failure and a JSON-RPC error answer logged by the
+  failover path, and a failing node of the nonce gathering, carry the same
+  prefix and position. Two coins with nodes on one host and different paths
+  produce lines that differ in the ticker; two nodes of one coin on one host
+  produce lines that differ in the position. The returned texts of R35.1.11
+  and R35.1.15 are unchanged.
+- **T35.35** *URLs in the redacted wire dump (the rule after R35.1.17,
+  D35.10).* Feed the dump's redaction an activation request for RIN and one for
+  an EVM coin, whose server and node entries carry: a URL with userinfo, a path and a
+  query; a URL with a path only; a URL whose path is `/`; an Electrum
+  `host:port`; and, in another member, an error text that embeds a URL with a
+  query. The redacted output keeps the ticker and every other member
+  unchanged. Each URL keeps its scheme, host and port, shows `<redacted>` in
+  place of each part it had, and contains none of the original userinfo,
+  path or query. The `/` path and the `host:port` entry are unchanged. With
+  the secrets switch on, the output equals the input.
+- **T35.36** *Credentials in renderings (R35.1.17).* Build the EVM transport
+  from a node URL carrying userinfo, a path segment and a query string (the
+  URL of T35.28), and configure a `gas_station_url` and a gas-API provider URL
+  that each carry a key in the path and in the query. The debug form of the
+  transport, of each node entry and of the parsed activation request contains
+  each URL's host-only form and contains none of the userinfo, path or query
+  parts; the same holds for the display form of every error the activation
+  and a failing request return. A node entry or request that carries no
+  secret renders as before. Applies to the TRON client too (ch. 21 §21.9).
 
 ## 35.8B Foreign-transaction decoding tests (binding)
 
@@ -2147,6 +2274,20 @@ waiting. Any bound is a Reloaded divergence, not peer-visible. Nothing is
 implemented; the evaluation belongs to the swap and transaction-path hardening
 plan (`docs/plans/swap-transaction-path-hardening.md`).
 
+**D35.10** *(Resolved 2026-10-28, maintainer decision.)* *Node URLs in the
+redacted RPC wire dump.* R35.1.17 leaves the RPC wire dump to its own switch.
+In its default, redacted mode the dump redacted members whose key names a
+secret, and a node `url` member is not one of them, so an activation request
+in the dump showed each node URL in full. The maintainer decided that the
+redacted mode strips URLs to the host, with the condition that nothing which
+is useful and not secret is stripped. The rule after R35.1.17 therefore
+rewrites URLs only: it keeps scheme, host and port, marks each removed part
+instead of dropping it silently, and leaves every other member as it was. A
+URL's path is removed even though it is often harmless, because hosted
+providers put the API key there and the dump cannot tell the two apart. The
+change is to the dump's own redaction, not to R35.1.14 or R35.1.17. T35.35
+tests it.
+
 ## 35.9 Provenance Footer
 
 - *Inputs:* the published Komodo DeFi Framework API reference (the
@@ -2262,3 +2403,22 @@ plan (`docs/plans/swap-transaction-path-hardening.md`).
   nonce-agreement fact in the divergence note and the `wss://` condition in
   T35.28) were written by a context that never read the forbidden corpus and
   rest on this repository's own code.
+- *Clean-side addition (2026-10-28), R35.1.16 and T35.34:* written by a
+  context that never read the forbidden corpus, from an operator's report
+  that a node failure line did not say which coin it belonged to and from
+  the maintainer's instruction to keep host-only naming and add the coin
+  ticker and the node's position in its list. They rest on this
+  repository's own code and consulted no corpus, so chapter 01 R38 is not
+  engaged. The §35.1.F wording now naming R35.1.14 -- R35.1.16 as the
+  Reloaded-only rules is part of the same edit. The Dirty Gate clearance at
+  the head of §35.1.F does not cover them.
+- *Clean-context additions, node naming and credentials (2026-10-28, forbidden
+  corpus not consulted):* R35.1.17 with its scope sentence and status note,
+  the pointer after R35.1.14, the R35.1.17 mentions in the binding-scope note
+  and the §35.1.F lead-in, the wire-dump rule after R35.1.17, T35.36, T35.35
+  and D35.10 are Reloaded-original. They rest on the maintainer decision of
+  2026-10-26 (host-only node naming everywhere, including fee-service URLs,
+  except the RPC wire dump, which keeps its own secrets switch), his decision
+  of 2026-10-28 on D35.10 and this repository's own code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

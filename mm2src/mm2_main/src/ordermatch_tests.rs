@@ -5422,6 +5422,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         trie_store: Arc::new(parking_lot::Mutex::new(TrieStore::default())),
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
+        sync_answer_deferral: Default::default(),
         pending_maker_reserved: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
@@ -6097,9 +6098,10 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
+            0,
         ));
         worker.join().unwrap();
-        assert!(request.is_none(), "{:?}", request);
+        assert!(request.is_none(), "the caught-up store matches the advertised root");
         assert!(peer.trie_store.lock().pubkeys_state[PK].last_keep_alive >= before);
 
         // The worker stays behind past the bound: the store as it stands is compared and a request
@@ -6112,10 +6114,11 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             SHORT_WAIT_MS,
+            0,
         ));
         assert!(matches!(
             request,
-            Some(OrdermatchRequest::SyncPubkeyOrderbookState { .. })
+            Some((OrdermatchRequest::SyncPubkeyOrderbookState { .. }, None))
         ));
     }
 
@@ -6144,6 +6147,7 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
+            0,
         ));
         let returned = std::time::Instant::now();
         let seen = first_seen.join().unwrap().expect("the receipt is recorded");
@@ -6864,7 +6868,7 @@ mod trie_store_memory_retention {
             (1, 1),
             "one list element per pair history after 20000 refreshes"
         );
-        let bytes_before = octx.trie_store.lock().snapshot().memory_db_bytes;
+        let bytes_before = octx.trie_store.lock().snapshot(true).memory_db_bytes.unwrap();
 
         std::thread::sleep(PAST_TTL);
         // Nothing wrote to the pair, so nothing has reclaimed the expired diffs yet.
@@ -6892,18 +6896,19 @@ mod trie_store_memory_retention {
         run_trie_store_maintenance(&ref_ctx, &ref_octx, true);
         assert_eq!(roots(&octx), roots(&ref_octx));
 
-        let live = octx.trie_store.lock().snapshot();
-        let reference = ref_octx.trie_store.lock().snapshot();
+        let live = octx.trie_store.lock().snapshot(true);
+        let reference = ref_octx.trie_store.lock().snapshot(true);
+        let (live_bytes, reference_bytes) = (live.memory_db_bytes.unwrap(), reference.memory_db_bytes.unwrap());
         assert_eq!(live.memory_db_entries, reference.memory_db_entries);
         assert!(
-            live.memory_db_bytes <= 2 * reference.memory_db_bytes,
+            live_bytes <= 2 * reference_bytes,
             "memory_db holds {} B for {} live nodes, a fresh one {} B",
-            live.memory_db_bytes,
-            live.memory_db_entries,
-            reference.memory_db_bytes
+            live_bytes,
+            live.memory_db_entries.unwrap(),
+            reference_bytes
         );
         assert!(
-            bytes_before > 2 * reference.memory_db_bytes,
+            bytes_before > 2 * reference_bytes,
             "the burst did not fill memory_db ({bytes_before} B), the test shows nothing"
         );
     }
@@ -7004,20 +7009,33 @@ mod trie_store_memory_retention {
         let orders = seed(&ctx, &octx, 10);
         burst(&ctx, &octx, &orders, 50);
 
-        run_trie_store_maintenance(&ctx, &octx, true);
+        // A tick without purge reports the four per-tick gauges and leaves `memory_db` alone.
+        run_trie_store_maintenance(&ctx, &octx, false);
         let reported = gauges(&ctx);
-        let snapshot = octx.trie_store.lock().snapshot();
         assert_eq!(reported["orderbook.pubkeys"], 1);
         assert_eq!(reported["orderbook.history.pairs"], 1);
         // the 50 updates, and the 9 inserts after the first of the 10 orders (the first one has no previous root)
         assert_eq!(reported["orderbook.history.deltas"], 59);
         assert_eq!(reported["orderbook.trie_ops.pending"], 0);
-        assert_eq!(
-            reported["orderbook.memory_db.entries"],
-            snapshot.memory_db_entries as i64
-        );
-        assert!(snapshot.memory_db_entries >= 10, "at least a leaf per order");
-        assert_eq!(reported["orderbook.memory_db"], snapshot.memory_db_bytes as i64);
+        assert!(!reported.contains_key("orderbook.memory_db.entries"));
+        assert!(!reported.contains_key("orderbook.memory_db"));
+        let light = octx.trie_store.lock().snapshot(false);
+        assert!(light.memory_db_entries.is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(light.memory_db_bytes.is_none());
+
+        // A purge tick adds the two node-store gauges, measured after the purge.
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let reported = gauges(&ctx);
+        assert_eq!(reported["orderbook.pubkeys"], 1);
+        assert_eq!(reported["orderbook.history.deltas"], 59);
+        let snapshot = octx.trie_store.lock().snapshot(true);
+        let entries = snapshot.memory_db_entries.unwrap();
+        let bytes = snapshot.memory_db_bytes.unwrap();
+        assert_eq!(reported["orderbook.memory_db.entries"], entries as i64);
+        assert!(entries >= 10, "at least a leaf per order");
+        assert_eq!(live_nodes(&mut octx.trie_store.lock()), entries);
+        assert_eq!(reported["orderbook.memory_db"], bytes as i64);
         assert!(reported["orderbook.memory_db"] > 0);
 
         // batches queued and not applied yet
@@ -8922,5 +8940,634 @@ mod order_message_liveness {
             let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
             assert_eq!(order_messages_refresh_liveness(&ctx), expected);
         }
+    }
+}
+
+/// CRD ch.32 R-Q5b, T-Q5b: a request for a pair the node is still synchronizing is parked and answered
+/// when the node's own synchronization lands.
+mod sync_answer_deferral_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS, MAX_PARKED_PER_PEER,
+                                                          MAX_PARKED_TOTAL};
+    use futures::channel::oneshot;
+    use mm2_p2p::atomicdex_behaviour::AdexResponse;
+    use std::sync::mpsc as std_mpsc;
+    use std::thread::JoinHandle;
+    use std::time::Instant;
+
+    const MAKER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PAIR: &str = "C1:C2";
+    const OTHER_PAIR: &str = "C3:C4";
+    const ORDERS: usize = 5;
+    /// A bound no test is meant to reach, unless it is the one that tests the bound.
+    const LONG_BOUND_MS: u64 = 5000;
+
+    type OwnResponseTx = oneshot::Sender<Vec<(PeerId, AdexResponse)>>;
+    type Answers = std_mpsc::Sender<(usize, AdexResponse)>;
+
+    fn node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.init_metrics().unwrap();
+        let (tx, rx) = mpsc::channel(1024);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, rx)
+    }
+
+    fn next_cmd(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> AdexBehaviourCmd {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.try_recv() {
+                Ok(cmd) => return cmd,
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no command was sent");
+                    std::thread::sleep(Duration::from_millis(1));
+                },
+            }
+        }
+    }
+
+    fn octx(ctx: &MmArc) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(ctx).unwrap() }
+
+    /// The tables of the node are empty (the in-flight record ends on a task of its own, so wait for it).
+    fn assert_tables_empty(ctx: &MmArc) {
+        let deferral = octx(ctx).sync_answer_deferral.clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && (deferral.parked_len() != 0 || deferral.in_flight_len() != 0) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(deferral.parked_len(), 0, "parked table");
+        assert_eq!(deferral.in_flight_len(), 0, "in-flight table");
+    }
+
+    /// The uuids of the maker's orders in the node's read index.
+    fn maker_book(ctx: &MmArc) -> HashSet<Uuid> {
+        octx(ctx)
+            .orderbook
+            .lock()
+            .order_set
+            .values()
+            .filter(|o| o.pubkey == MAKER)
+            .map(|o| o.uuid)
+            .collect()
+    }
+
+    /// The all-zero placeholder entry that the keep-alive path creates, without any request behind it.
+    fn add_placeholder(ctx: &MmArc, pubkey: &str, pair: &str) {
+        let octx = octx(ctx);
+        let mut trie_store = octx.trie_store.lock();
+        let state = pubkey_state_mut(&mut trie_store.pubkeys_state, pubkey);
+        order_pair_root_mut(&mut state.trie_roots, pair);
+    }
+
+    /// The eviction of `lp_ordermatch_loop` for the maker (after 90 s without a keep-alive).
+    fn wipe_maker(ctx: &MmArc) {
+        let octx = octx(ctx);
+        octx.trie_store
+            .lock()
+            .pubkeys_state
+            .get_mut(MAKER)
+            .unwrap()
+            .last_keep_alive = 0;
+        let (uuids, pubkeys) = {
+            let trie_store = octx.trie_store.lock();
+            stale_pubkeys(&trie_store.pubkeys_state, "own", &HashSet::new(), 90, now_ms() / 1000)
+        };
+        assert_eq!(pubkeys, vec![MAKER.to_owned()]);
+        let mut ops = Vec::new();
+        let mut orderbook = octx.orderbook.lock();
+        for uuid in uuids {
+            ops.extend(orderbook.index_remove(uuid).map(|(_, op)| op));
+        }
+        ops.push(TrieOp::RemovePubkey {
+            pubkey: MAKER.to_owned(),
+        });
+        orderbook.queue_trie_ops(&octx.trie_ops_tx, ops);
+        drop(orderbook);
+        flush_trie(ctx);
+    }
+
+    /// Ask `relay` for `pairs` of `pubkey` as the peer `peer` does; the answer lands in `answers` under `id`.
+    fn ask(
+        relay: &MmArc,
+        peer: PeerId,
+        id: usize,
+        pubkey: &str,
+        pairs: &[&str],
+        answers: &Answers,
+    ) -> Result<(), String> {
+        let roots: HashMap<String, H64> = pairs.iter().map(|p| (p.to_string(), H64::default())).collect();
+        let answers = answers.clone();
+        let reply: SyncAnswerReply = Box::new(move |res| answers.send((id, res)).map_err(|e| e.to_string()));
+        answer_sync_request(relay, peer, pubkey.to_owned(), roots, reply)
+    }
+
+    fn full_set_len(res: &AdexResponse) -> usize {
+        let response = match res {
+            AdexResponse::Ok { response } => response,
+            other => panic!("expected an answer, got {:?}", other),
+        };
+        let mut answer: SyncPubkeyOrderbookStateRes = decode_message(response).unwrap();
+        match answer.pair_orders_diff.remove(PAIR).expect("the pair is answered") {
+            DeltaOrFullTrie::FullTrie(orders) => orders.len(),
+            DeltaOrFullTrie::Delta(_) => panic!("expected a full snapshot"),
+        }
+    }
+
+    fn assert_placeholder_error(res: &AdexResponse) {
+        match res {
+            AdexResponse::Err { error } => assert!(error.contains("InvalidStateRoot"), "{}", error),
+            other => panic!("expected the placeholder error, got {:?}", other),
+        }
+    }
+
+    /// The relay's own keep-alive-driven request, started and held: the test decides how it ends.
+    struct OwnSync {
+        keep_alive_task: JoinHandle<bool>,
+        request: Vec<u8>,
+        response_tx: Option<OwnResponseTx>,
+    }
+
+    impl OwnSync {
+        /// The request is answered by `maker`.
+        fn answer(&mut self, maker: &MmArc) {
+            let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&self.request).unwrap() {
+                P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                    (pubkey, trie_roots)
+                },
+                other => panic!("unexpected request {:?}", other),
+            };
+            let answer = process_sync_pubkey_orderbook_state(maker.clone(), pubkey, trie_roots)
+                .unwrap()
+                .unwrap();
+            let res = AdexResponse::Ok {
+                response: encode_message(&answer).unwrap(),
+            };
+            self.response_tx
+                .take()
+                .unwrap()
+                .send(vec![(PeerId::random(), res)])
+                .unwrap();
+        }
+
+        /// The request fails (the transport drops the response channel).
+        fn fail(&mut self) { drop(self.response_tx.take()); }
+
+        /// The keep-alive task ends; whether it reported success (the forward of R-F3b).
+        fn finish(self) -> bool { self.keep_alive_task.join().unwrap() }
+    }
+
+    struct Fixture {
+        relay: MmArc,
+        relay_cmds: mpsc::Receiver<AdexBehaviourCmd>,
+        maker: MmArc,
+        uuids: HashSet<Uuid>,
+    }
+
+    impl Fixture {
+        /// A relay with the given config and a maker node holding `ORDERS` orders for `PAIR`.
+        fn new(conf: Json) -> Self {
+            let (relay, relay_cmds) = node(conf);
+            let (maker, _maker_cmds) = node(json!({}));
+            let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), ORDERS);
+            let uuids = orders.iter().map(|o| o.uuid).collect();
+            for order in orders {
+                insert_or_update_order(&maker, order);
+            }
+            flush_trie(&maker);
+            Fixture {
+                relay,
+                relay_cmds,
+                maker,
+                uuids,
+            }
+        }
+
+        /// What the maker advertises now.
+        fn keep_alive(&self) -> PubkeyKeepAlive {
+            let roots = octx(&self.maker)
+                .trie_store
+                .lock()
+                .pubkeys_state
+                .get(MAKER)
+                .map(|s| s.trie_roots.clone())
+                .unwrap_or_default();
+            PubkeyKeepAlive {
+                trie_roots: advertisable_roots(&roots),
+                timestamp: now_ms() / 1000,
+            }
+        }
+
+        /// The maker's keep-alive reaches the relay, which sends its own request and waits for the answer.
+        fn start_own_sync(&mut self) -> OwnSync {
+            let relay = self.relay.clone();
+            let keep_alive = self.keep_alive();
+            let keep_alive_task = std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    relay,
+                    "forwarding-peer".to_owned(),
+                    MAKER.to_owned(),
+                    keep_alive,
+                    true,
+                ))
+            });
+            match next_cmd(&mut self.relay_cmds) {
+                AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => OwnSync {
+                    keep_alive_task,
+                    request: req,
+                    response_tx: Some(response_tx),
+                },
+                other => panic!("unexpected command {:?}", other),
+            }
+        }
+    }
+
+    fn peer() -> PeerId { PeerId::random() }
+
+    fn answered(answers: &std_mpsc::Receiver<(usize, AdexResponse)>, within_ms: u64) -> (usize, AdexResponse) {
+        answers
+            .recv_timeout(Duration::from_millis(within_ms))
+            .expect("the request was not answered in time")
+    }
+
+    #[test]
+    fn parked_request_is_answered_with_the_full_set_once_the_own_answer_is_applied() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err(), "the request is parked, not answered");
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.answer(&f.maker);
+        let (id, res) = answered(&answers, 2000);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert_eq!(id, 1);
+        assert_eq!(full_set_len(&res), ORDERS);
+        assert!(own.finish());
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn parked_request_gets_the_placeholder_error_when_the_own_request_fails() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+
+        let started = Instant::now();
+        own.fail();
+        let (_, res) = answered(&answers, 2000);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert_placeholder_error(&res);
+        assert!(!own.finish(), "a failed request is not forwarded");
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn parked_request_gets_the_placeholder_error_when_the_bound_expires() {
+        const BOUND_MS: u64 = 300;
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": BOUND_MS }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        // The own request never answers during the test.
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        let (_, res) = answered(&answers, 3000);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(BOUND_MS - 50),
+            "answered after {:?}",
+            waited
+        );
+        assert!(
+            waited < Duration::from_millis(BOUND_MS * 5),
+            "answered after {:?}",
+            waited
+        );
+        assert_placeholder_error(&res);
+        // The parked slot is free; the own request is still in flight, as it has not ended.
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.fail();
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn requests_that_are_not_deferrable_are_answered_at_once() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        // A placeholder with no own request in flight.
+        add_placeholder(&f.relay, MAKER, PAIR);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+
+        // A pair the relay does not track.
+        ask(&f.relay, peer(), 2, MAKER, &["C9:C8"], &answers_tx).unwrap();
+        match answers.try_recv().expect("answered at once").1 {
+            AdexResponse::Err { error } => assert!(error.contains("No pair trie root for C9:C8"), "{}", error),
+            other => panic!("unexpected answer {:?}", other),
+        }
+
+        // A pubkey the relay has no data for.
+        ask(&f.relay, peer(), 3, "03unknown", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().expect("answered at once").1, AdexResponse::None);
+
+        assert!(answers.try_recv().is_err());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn request_with_a_non_deferrable_pair_is_answered_at_once_with_the_placeholder_error() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        // The pair of the own request is waited for; this one has a placeholder and no own request.
+        add_placeholder(&f.relay, MAKER, OTHER_PAIR);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR, OTHER_PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+        // The same with a pair the relay does not track.
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR, "C9:C8"], &answers_tx).unwrap();
+        assert!(matches!(
+            answers.try_recv().expect("answered at once").1,
+            AdexResponse::Err { .. }
+        ));
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+        // The own request is unaffected and a request for its pair alone is still parked.
+        ask(&f.relay, peer(), 3, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        own.answer(&f.maker);
+        assert_eq!(full_set_len(&answered(&answers, 2000).1), ORDERS);
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn at_most_eight_requests_per_peer_are_parked() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let greedy = peer();
+        for id in 0..MAX_PARKED_PER_PEER {
+            ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert!(answers.try_recv().is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+
+        // The ninth of that peer is answered at once; another peer is still served by parking.
+        ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 100);
+        assert_placeholder_error(&res);
+        ask(&f.relay, peer(), 101, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        assert_eq!(
+            octx(&f.relay).sync_answer_deferral.parked_len(),
+            MAX_PARKED_PER_PEER + 1
+        );
+
+        own.answer(&f.maker);
+        let mut ids: Vec<usize> = (0..MAX_PARKED_PER_PEER + 1)
+            .map(|_| {
+                let (id, res) = answered(&answers, 3000);
+                assert_eq!(full_set_len(&res), ORDERS);
+                id
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..MAX_PARKED_PER_PEER).chain(iter::once(101)).collect::<Vec<_>>());
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn at_most_256_requests_are_parked_in_total() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        for id in 0..MAX_PARKED_TOTAL {
+            // Eight requests per peer, so only the total limit can stop the last one.
+            ask(&f.relay, peer(), id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert!(answers.try_recv().is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+
+        ask(&f.relay, peer(), 1000, MAKER, &[PAIR], &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 1000);
+        assert_placeholder_error(&res);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+
+        own.answer(&f.maker);
+        for _ in 0..MAX_PARKED_TOTAL {
+            assert_eq!(full_set_len(&answered(&answers, 5000).1), ORDERS);
+        }
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn the_per_peer_limit_is_the_same_for_a_peer_across_pairs_and_requests() {
+        // A request for two tracked pairs counts once, whatever its size.
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        let p = peer();
+        for id in 0..MAX_PARKED_PER_PEER {
+            ask(&f.relay, p, id, MAKER, &[PAIR, PAIR], &answers_tx).unwrap();
+        }
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+        own.fail();
+        for _ in 0..MAX_PARKED_PER_PEER {
+            assert_placeholder_error(&answered(&answers, 3000).1);
+        }
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn zero_turns_deferral_off() {
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": 0 }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        // Nothing is tracked while deferral is off.
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 0);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+        own.answer(&f.maker);
+        assert!(own.finish());
+        flush_trie(&f.relay);
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_eq!(full_set_len(&answers.try_recv().expect("answered at once").1), ORDERS);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn only_a_non_negative_integer_sets_the_bound() {
+        for (conf, expected) in [
+            (json!({}), DEFAULT_SYNC_ANSWER_DEFERRAL_MS),
+            (json!({ "sync_answer_deferral_ms": 0 }), 0),
+            (json!({ "sync_answer_deferral_ms": 1200 }), 1200),
+            (
+                json!({ "sync_answer_deferral_ms": "0" }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": false }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": -1 }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": 2.5 }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(sync_answer_deferral_ms(&ctx), expected);
+        }
+        assert_eq!(DEFAULT_SYNC_ANSWER_DEFERRAL_MS, 5000);
+        assert_eq!((MAX_PARKED_PER_PEER, MAX_PARKED_TOTAL), (8, 256));
+    }
+
+    #[test]
+    fn the_inbound_handler_returns_without_waiting() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        let handler_time = started.elapsed();
+        assert!(
+            handler_time < Duration::from_millis(LONG_BOUND_MS / 10),
+            "the handler took {:?} with the request parked for up to {} ms",
+            handler_time,
+            LONG_BOUND_MS
+        );
+        assert!(answers.try_recv().is_err());
+
+        own.fail();
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn a_cancelled_keep_alive_task_does_not_leave_the_record_behind() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let keep_alive = f.keep_alive();
+        let relay = f.relay.clone();
+        // The task is polled until it has sent its request, then dropped without ever finishing.
+        let mut task = Box::pin(process_orders_keep_alive(
+            relay,
+            "forwarding-peer".to_owned(),
+            MAKER.to_owned(),
+            keep_alive,
+            true,
+        ));
+        let mut cmds = f.relay_cmds;
+        block_on(async {
+            let sent = async { cmds.next().await };
+            futures::pin_mut!(sent);
+            match futures::future::select(task.as_mut(), sent).await {
+                futures::future::Either::Right((Some(AdexBehaviourCmd::RequestPeers { .. }), _)) => (),
+                _ => panic!("the request should have been sent first"),
+            }
+        });
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+
+        drop(task);
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert_tables_empty(&f.relay);
+    }
+
+    /// S2 of the wipe-recovery plan: a relay wiped for a maker gets the first keep-alive after the stall;
+    /// its subscriber, which received the same keep-alive from the relay's gossip-layer forward, asks
+    /// the relay while the relay's own request is in flight.
+    #[test]
+    fn s2_a_wiped_relay_serves_its_subscriber_when_its_own_sync_lands() {
+        let mut f = Fixture::new(json!({}));
+
+        // The relay held the maker's book, and the sweep wiped it after the stall.
+        let mut own = f.start_own_sync();
+        own.answer(&f.maker);
+        assert!(own.finish());
+        flush_trie(&f.relay);
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        wipe_maker(&f.relay);
+        assert!(maker_book(&f.relay).is_empty());
+        assert_tables_empty(&f.relay);
+
+        // The first keep-alive after the stall reaches the relay and, forwarded at once, its subscriber.
+        let (subscriber, mut subscriber_cmds) = node(json!({}));
+        let started = Instant::now();
+        let mut relay_own = f.start_own_sync();
+        let keep_alive = f.keep_alive();
+        let subscriber_task = {
+            let subscriber = subscriber.clone();
+            std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    subscriber,
+                    "relay".to_owned(),
+                    MAKER.to_owned(),
+                    keep_alive,
+                    true,
+                ))
+            })
+        };
+
+        // The subscriber's request travels to the relay, whose own request is still in flight.
+        let (request, response_tx) = match next_cmd(&mut subscriber_cmds) {
+            AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => (req, response_tx),
+            other => panic!("unexpected command {:?}", other),
+        };
+        let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&request).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                (pubkey, trie_roots)
+            },
+            other => panic!("unexpected request {:?}", other),
+        };
+        let relay_peer = peer();
+        let reply: SyncAnswerReply = Box::new(move |res| {
+            response_tx
+                .send(vec![(relay_peer, res)])
+                .map_err(|_| "the subscriber is gone".to_owned())
+        });
+        answer_sync_request(&f.relay, peer(), pubkey, trie_roots, reply).unwrap();
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert!(maker_book(&subscriber).is_empty());
+
+        // The relay's own answer arrives and lands; the subscriber is answered right after it.
+        relay_own.answer(&f.maker);
+        assert!(subscriber_task.join().unwrap(), "the subscriber's sync succeeded");
+        flush_trie(&subscriber);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert!(relay_own.finish());
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_eq!(maker_book(&subscriber), f.uuids);
+        assert_tables_empty(&f.relay);
+        assert_tables_empty(&subscriber);
     }
 }

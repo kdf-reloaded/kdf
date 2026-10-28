@@ -750,12 +750,54 @@ pub(crate) fn run_trie_store_maintenance(ctx: &MmArc, ordermatch_ctx: &Ordermatc
         if purge {
             trie_store.purge_memory_db();
         }
-        trie_store.snapshot()
+        // `memory_db` is measured on purge ticks only, right after the purge, where the table is small.
+        trie_store.snapshot(purge)
     };
     // Read after `applied_batches` (see `collect_trie_store_metrics`).
     let enqueued_batches = ordermatch_ctx.orderbook.lock().trie_ops_enqueued;
     collect_trie_store_metrics(ctx, &snapshot, enqueued_batches);
+    if purge {
+        // Both locks are released here: `malloc_trim` can take milliseconds and must not delay the trie worker.
+        release_freed_heap();
+    }
 }
+
+/// Parses the resident set size in bytes out of the content of `/proc/self/statm` (the second field is the
+/// number of resident pages).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn parse_statm_rss_bytes(statm: &str, page_size: u64) -> Option<u64> {
+    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    resident_pages.checked_mul(page_size)
+}
+
+/// The resident set size of this process in bytes, or `None` when it cannot be read.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn current_rss_bytes() -> Option<u64> {
+    // SAFETY: `sysconf` has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok().filter(|size| *size > 0)?;
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    parse_statm_rss_bytes(&statm, page_size)
+}
+
+/// After the purge the freed memory of the trie store is still held in the glibc arenas and counted in the
+/// resident set of the process: hand it back to the system. The line with the resident set before and after is
+/// logged when the resident set can be read.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_freed_heap() {
+    let rss_before = current_rss_bytes();
+    // SAFETY: `malloc_trim` has no preconditions, it may be called at any time from any thread.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    if let (Some(before), Some(after)) = (rss_before, current_rss_bytes()) {
+        log::debug!("malloc_trim after trie store purge: rss {} -> {} bytes", before, after);
+    }
+}
+
+/// Only glibc has `malloc_trim`: nothing to do elsewhere.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_freed_heap() {}
 
 /// The maintenance step for the own maker orders that are absent from the local orderbook (CRD ch.60 R60.4.6
 /// item 5, ch.59 R59.6.7): reconcile each with a fresh balance read, then re-announce it or cancel it.
@@ -2978,4 +3020,30 @@ pub async fn cancel_all_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec
     Response::builder()
         .body(json::to_vec(&res).expect("Serialization failed"))
         .map_err(|e| ERRL!("{}", e))
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod heap_release_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_statm_rss_bytes() {
+        // size resident shared text lib data dt
+        assert_eq!(
+            parse_statm_rss_bytes("5000 1234 300 10 0 900 0\n", 4096),
+            Some(1234 * 4096)
+        );
+        assert_eq!(parse_statm_rss_bytes("5000 0 0 0 0 0 0", 4096), Some(0));
+        assert_eq!(parse_statm_rss_bytes("", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 abc 1", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 -3 1", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 18446744073709551615 1", 4096), None);
+    }
+
+    #[test]
+    fn test_current_rss_bytes_is_readable_and_release_freed_heap_does_not_panic() {
+        assert!(current_rss_bytes().is_some_and(|rss| rss > 0));
+        release_freed_heap();
+    }
 }
