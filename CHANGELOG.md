@@ -99,6 +99,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
+  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
+  not supported in this release and that light mode should be used. Native mode could not build a
+  working wallet for a fresh activation, and after Ironwood it could build transactions the network
+  rejects. Light mode is unchanged. Native mode returns in a later release, see
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
@@ -211,6 +218,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
+  - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
+  - each server gets at most 120 seconds per check;
+  - the search starts at the payment's own block;
+  - each step is logged.
+
+  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39 R39.5.5, R39.11.4h, R39.11.4i.
 - **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
 - **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
   later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
@@ -490,6 +504,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
+
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
+  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
+  release.
 
 - [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
   [`tron-gasfree`](docs/plans/tron-gasfree.md),
