@@ -8723,3 +8723,204 @@ mod t12_7_order_lock_io_tests {
         assert!(orders.removed_gates.is_empty());
     }
 }
+
+/// CRD ch.59 R59.6.1a (T12): maker-order messages count as liveness for a public key the node already
+/// holds a record for. Messages go through `process_msg` signed with a real key, so the signature
+/// verification and the key form the store uses are exercised; the passage of time is simulated by
+/// moving `last_keep_alive` into the past and by the `now` argument of `stale_pubkeys`.
+mod order_message_liveness {
+    use super::*;
+
+    const WINDOW: u64 = 90;
+
+    fn node(conf: Json) -> (MmArc, String) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("passphrase").unwrap())
+            .unwrap();
+        let own_pubkey = hex::encode(&**ctx.secp256k1_key_pair().public());
+        (ctx, own_pubkey)
+    }
+
+    fn created(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCreated {
+            uuid: uuid.into(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            price: BigRational::from_integer(1.into()),
+            max_volume: BigRational::from_integer(2.into()),
+            min_volume: BigRational::from_integer(0.into()),
+            conf_settings: OrderConfirmationsSettings::default(),
+            created_at: now_ms() / 1000,
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+            base_protocol_info: vec![],
+            rel_protocol_info: vec![],
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCreated(msg), secret).unwrap()
+    }
+
+    fn updated(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let mut msg = MakerOrderUpdated::new(uuid);
+        msg.with_new_price(BigRational::new(3.into(), 2.into()));
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderUpdated(msg), secret).unwrap()
+    }
+
+    fn cancelled(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCancelled {
+            uuid: uuid.into(),
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCancelled(msg), secret).unwrap()
+    }
+
+    fn receive(ctx: &MmArc, msg: &[u8]) -> bool {
+        let accepted = block_on(process_msg(ctx.clone(), vec![], "peer".to_owned(), msg, false));
+        flush_trie(ctx);
+        accepted
+    }
+
+    fn last_keep_alive(ctx: &MmArc, pubkey: &str) -> Option<u64> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        trie_store.pubkeys_state.get(pubkey).map(|s| s.last_keep_alive)
+    }
+
+    /// Simulate `secs` passing since the last liveness instant of the record.
+    fn age_record(ctx: &MmArc, pubkey: &str, secs: u64) {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let mut trie_store = ordermatch_ctx.trie_store.lock();
+        let state = trie_store.pubkeys_state.get_mut(pubkey).unwrap();
+        state.last_keep_alive -= secs;
+    }
+
+    fn swept(ctx: &MmArc, own_pubkey: &str, now: u64) -> Vec<String> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let my_p2p_pubkeys = ordermatch_ctx.orderbook.lock().my_p2p_pubkeys.clone();
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        stale_pubkeys(&trie_store.pubkeys_state, own_pubkey, &my_p2p_pubkeys, WINDOW, now).1
+    }
+
+    /// A node that holds a record and one order for the maker `P` (created through `process_msg`).
+    fn node_knowing_maker(conf: Json) -> (MmArc, String, String, [u8; 32], Uuid) {
+        let (ctx, own_pubkey) = node(conf);
+        let (maker, secret) = pubkey_and_secret_for_test("order-message-liveness-maker");
+        let uuid = Uuid::new_v4();
+        assert!(receive(&ctx, &created(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).is_some());
+        (ctx, own_pubkey, maker, secret, uuid)
+    }
+
+    #[test]
+    fn t12_updated_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_cancelled_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &cancelled(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_created_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, _uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &created(&secret, Uuid::new_v4())));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_updated_and_cancelled_messages_of_an_unknown_maker_create_no_record() {
+        let (ctx, _own) = node(json!({}));
+        let (maker, secret) = pubkey_and_secret_for_test("order-message-liveness-unknown-maker");
+        let uuid = Uuid::new_v4();
+        receive(&ctx, &updated(&secret, uuid));
+        receive(&ctx, &cancelled(&secret, uuid));
+        assert_eq!(last_keep_alive(&ctx, &maker), None);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(!ordermatch_ctx.trie_store.lock().pubkeys_state.contains_key(&maker));
+    }
+
+    #[test]
+    fn t12_updated_message_for_an_unknown_order_is_ignored_and_does_not_refresh() {
+        let (ctx, _own, maker, secret, _uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        // A validly signed update from the known maker, naming an order it never had.
+        assert!(!receive(&ctx, &updated(&secret, Uuid::new_v4())));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+    }
+
+    #[test]
+    fn t12_a_message_of_another_key_does_not_refresh_the_maker() {
+        let (ctx, _own, maker, _secret, _uuid) = node_knowing_maker(json!({}));
+        let (_other, other_secret) = pubkey_and_secret_for_test("order-message-liveness-other-maker");
+        age_record(&ctx, &maker, 80);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        receive(&ctx, &updated(&other_secret, Uuid::new_v4()));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+    }
+
+    #[test]
+    fn t12_updates_every_few_seconds_keep_the_maker_for_150_seconds_without_keep_alives() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        let update = updated(&secret, uuid);
+        for _ in 0..30 {
+            // Five seconds pass; the record is never older than the window at the sweep.
+            age_record(&ctx, &maker, 5);
+            let now = now_ms() / 1000;
+            assert!(swept(&ctx, &own, now).is_empty());
+            assert!(receive(&ctx, &update));
+        }
+        // 150 simulated seconds have passed with no keep-alive; the orders are still in the index.
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(ordermatch_ctx.orderbook.lock().order_set.contains_key(&uuid));
+        let last = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(swept(&ctx, &own, last + WINDOW - 1).is_empty());
+    }
+
+    #[test]
+    fn t12_a_maker_silent_past_the_window_is_selected() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        let last = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(swept(&ctx, &own, last + WINDOW - 1).is_empty());
+        assert_eq!(swept(&ctx, &own, last + WINDOW), vec![maker]);
+    }
+
+    #[test]
+    fn t12_switch_off_leaves_liveness_to_keep_alives() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({ "order_messages_refresh_liveness": false }));
+        age_record(&ctx, &maker, 60);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        assert!(receive(&ctx, &created(&secret, Uuid::new_v4())));
+        assert!(receive(&ctx, &cancelled(&secret, uuid)));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+        assert_eq!(swept(&ctx, &own, aged + WINDOW), vec![maker]);
+    }
+
+    #[test]
+    fn t12_only_a_json_false_turns_the_switch_off() {
+        for (conf, expected) in [
+            (json!({}), true),
+            (json!({ "order_messages_refresh_liveness": true }), true),
+            (json!({ "order_messages_refresh_liveness": "false" }), true),
+            (json!({ "order_messages_refresh_liveness": 0 }), true),
+            (json!({ "order_messages_refresh_liveness": false }), false),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(order_messages_refresh_liveness(&ctx), expected);
+        }
+    }
+}

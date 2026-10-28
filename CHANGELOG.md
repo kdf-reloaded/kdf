@@ -257,6 +257,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #TBD; CRD ch.12 R7a, R7b.
 
+- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
+  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
+  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
+  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
+  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
+  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
+  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
+  CRD ch.59 R59.6.1a.
+
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
@@ -644,6 +653,11 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
   spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
   order's file and database writes leave the order's lock (Decision AM) in PR #TBD.
+
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
+  transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
+  decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
+  Detail: PR #123.
 
 ### Known limitations
 

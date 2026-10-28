@@ -463,6 +463,26 @@ pub(crate) fn mm2_internal_pubkey_hex(ctx: &MmArc) -> Result<Option<String>, Str
     }
 }
 
+/// CRD ch.59 R59.6.1a: an accepted order message from `pubkey` (the key its signature verified for,
+/// in the hex form the trie store keys its records by) counts as liveness, exactly as a keep-alive
+/// does (R59.6.1). It only refreshes a record the node already holds; it never creates one.
+fn refresh_liveness_from_order_message(ctx: &MmArc, pubkey: &str) {
+    if !order_messages_refresh_liveness(ctx) {
+        return;
+    }
+    let ordermatch_ctx = match OrdermatchContext::from_ctx(ctx) {
+        Ok(ordermatch_ctx) => ordermatch_ctx,
+        Err(e) => {
+            log::warn!("Cannot refresh the liveness of pubkey {}: {}", pubkey, e);
+            return;
+        },
+    };
+    let mut trie_store = ordermatch_ctx.trie_store.lock();
+    if let Some(state) = trie_store.pubkeys_state.get_mut(pubkey) {
+        state.last_keep_alive = now_ms() / 1000;
+    }
+}
+
 /// Attempts to decode a message and process it returning whether the message is valid and worth rebroadcasting
 pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, msg: &[u8], i_am_relay: bool) -> bool {
     match decode_signed::<new_protocol::OrdermatchMessage>(msg) {
@@ -475,6 +495,7 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 new_protocol::OrdermatchMessage::MakerOrderCreated(created_msg) => {
                     let order: OrderbookItem = (created_msg, hex::encode(pubkey.to_bytes().as_slice())).into();
                     insert_or_update_order(&ctx, order);
+                    refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
                     true
                 },
                 new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
@@ -501,10 +522,15 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 },
                 new_protocol::OrdermatchMessage::MakerOrderCancelled(cancelled_msg) => {
                     delete_order(&ctx, &pubkey.to_hex(), cancelled_msg.uuid.into());
+                    refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
                     true
                 },
                 new_protocol::OrdermatchMessage::MakerOrderUpdated(updated_msg) => {
-                    process_maker_order_updated(ctx, pubkey.to_hex(), updated_msg)
+                    let accepted = process_maker_order_updated(ctx.clone(), pubkey.to_hex(), updated_msg);
+                    if accepted {
+                        refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
+                    }
+                    accepted
                 },
             }
         },

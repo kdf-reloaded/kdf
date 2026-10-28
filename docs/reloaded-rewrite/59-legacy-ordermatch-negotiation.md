@@ -338,6 +338,42 @@ have them evicted on arrival by advertising a past one. The reference
 also records local receipt time, so R59.6.1 is a parity **fix** and not a
 divergence.
 
+**R59.6.1a** *Order messages also count as liveness.* *Reloaded-original
+(2026-10-28, Decision AN); no forbidden-class input; outside the clearance
+of this section's reference-sourced material.* When a node accepts a
+maker-order created, updated or cancelled message whose signature verifies
+for public key P, and the node already holds a record for P, it MUST record
+its own local receipt time as P's liveness instant, exactly as R59.6.1 does
+for a keep-alive. The rules that create a record are unchanged: a created
+message creates P's record as before, and an updated or cancelled message for
+a P the node holds no record for creates nothing. An updated message that
+names an order the node does not hold is ignored as before (it is not
+accepted) and refreshes nothing; a created or cancelled message is always
+accepted. The eviction of R59.6.4
+then removes P only when neither a keep-alive nor an order message from P has
+arrived within the window.
+
+The top-level `MM2.json` boolean `order_messages_refresh_liveness` (default
+`true`) selects the rule; only a JSON `false` turns it off, and the liveness
+instant is then the last keep-alive alone, as in the reference.
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `order_messages_refresh_liveness` to `false`.
+
+> **Reloaded divergence (2026-10-28).** The reference takes the liveness
+> instant from keep-alives alone. A maker whose keep-alives stop arriving
+> while its order updates still do — the case a backlogged, newest-first
+> gossip send queue produces — therefore loses its whole book on every
+> reference node after 90 s, and every later update is unknown there. Under
+> this rule a Reloaded relay keeps such a maker's book, and the reference
+> subscribers that wiped it are answered with the full set by that relay at
+> their next keep-alive (chapter 32 §32.7.3). A maker that has really stopped
+> sends neither, so the dead-row defence of this section is unchanged. A
+> peer could re-publish an old signed order message of P after the gossip
+> duplicate window to keep a stopped P alive; the same is already possible
+> with an old signed keep-alive, whose timestamp the receiver ignores
+> (R59.6.2), so the rule adds no new exposure. Nothing on the wire changes.
+
 **R59.6.2** *The wire timestamp is carried, ignored, and unvalidated.*
 The keep-alive message carries two members: `trie_roots`, a map from
 alphabetically-ordered pair to the sender's trie root for that pair,
@@ -410,7 +446,8 @@ merged into this project's integration branch (status as of
 receipt clock. R59.6.5's per-order half is unimplemented. R59.6.7 is
 unimplemented: the re-announcement path subscribes to the topic without
 recording the subscription state (its divergence note). R59.6.3 is a
-conclusion and carries no implementation.
+conclusion and carries no implementation. R59.6.1a (added 2026-10-28) is
+implemented (2026-10-28).
 
 **R59.6.7** *Re-announcement records the pair subscription.* (Authored
 by the KDF Spec Reader 2026-10-27 from the rows `v2.6.0-beta` and
@@ -518,6 +555,17 @@ message; the second publishes one maker-order updated message on the
 pair's topic. A price given as an equal fraction written differently
 (2/4 for 1/2) counts as unchanged. With `suppress_unchanged_order_updates`
 set to `false`, both updates publish a message.
+
+**T12.** *Order messages keep a maker alive (R59.6.1a).* A node holds a
+record and orders for public key P. For 150 s it receives order-updated
+messages from P every few seconds and no keep-alive: P is not evicted, and its
+orders stay in the read index throughout. When P then falls silent
+altogether, P is evicted one window (90 s by default) after its last message,
+within one maintenance sweep. An order-updated message from a P the node holds
+no record for creates no record, and one that names an order of P the node does
+not hold leaves P's liveness instant unchanged. With `order_messages_refresh_liveness` set to
+`false`, P is evicted 90 s after its last keep-alive although its updates keep
+arriving.
 
 ## 59.8 Deferred Work
 
@@ -849,3 +897,11 @@ its gating is not.*
   No reference input of any kind: the forbidden corpus was not consulted
   for this item, and the rule states no reference behavior (its
   compatibility note says so). It needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-10-28, Decision AN): R59.6.1a, its
+  divergence note, the R59.6.6 status sentence and T12.* Order messages count
+  as liveness, with the opt-back setting. *Inputs:* this repository's own
+  maintenance sweep and gossip handlers; a lab run of reference binaries as
+  black boxes (a public-network observation: a reference seed and its
+  subscribers dropped a maker's whole book 90 s after its keep-alives stopped
+  arriving); and the maintainer's decision. No reference implementation was
+  consulted for this item, and it needs no Dirty Gate pass.
