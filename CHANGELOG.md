@@ -136,6 +136,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **EVM log lines about a node say which coin it is and where it stands in the coin's list.** A line
+  such as `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...`
+  starts with the ticker and gives the node's position in the list as you configured it, so two coins
+  that use one provider with different paths, or two nodes of one coin on one host, can be told
+  apart. The host-only naming is unchanged, and so are the error texts a request returns. Detail:
+  PR #133; CRD ch.35 R35.1.16.
 - **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
   shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
   not supported in this release and that light mode should be used. Native mode could not build a
@@ -254,6 +260,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   configuration). Detail: PR #64.
 
 ### Fixed
+
+- **A node that relays the order book now answers other nodes' sync requests for a maker it is still
+  catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
+  while the relay was itself fetching them (the usual case right after a stall or a restart) got an
+  error at once and waited for the maker's next keep-alive, 30 seconds later, for each relay hop. The
+  relay now holds such a request for at most 5 seconds and answers it when its own sync lands, so
+  the nodes behind it rebuild the maker's orders in seconds. If the relay's own sync fails or takes
+  longer than that, the asking node gets the same error as before. At most 8 requests per peer and 256
+  in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
+  restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: CRD ch.32
+  R-Q5b.
+
+- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
+  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
+  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
+  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
+  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
+  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
+  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
+  CRD ch.59 R59.6.1a.
 
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
@@ -516,6 +542,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   clean-up the node now asks the allocator to hand the unused pages back (30 MB in the same test)
   and writes the memory use before and after to the debug log. Other systems are unchanged. More in
   [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #137.
+  pair). The metrics now also show the number of stored change histories and changes, tracked pubkeys, and
+  queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
+  sync for more than five minutes now receives a full snapshot instead of a delta (as it already
+  did after a write to the pair); within five minutes nothing changes. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131, PR #134.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
@@ -648,6 +679,11 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
   spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
+  transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
+  decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
+  Detail: PR #123.
 
 ### Known limitations
 

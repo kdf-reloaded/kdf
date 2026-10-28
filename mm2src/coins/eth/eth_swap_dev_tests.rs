@@ -36,7 +36,11 @@ fn addr_hex(addr: Address) -> String { format!("0x{:x}", addr) }
 fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) -> (MmArc, EthCoin) {
     let key_pair = test_key_pair();
     let my_addr = key_pair.address();
-    let web3 = crate::eth::alloy_compat::build_provider(vec![node.rpc_url.clone()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec![node.rpc_url.clone()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let ticker = match &coin_type {
         EthCoinType::Erc20 { .. } => "TEST".to_string(),
