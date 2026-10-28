@@ -212,7 +212,7 @@ makes its node queries one after another, contrary to R57.2.1.
 > once per coin, through the same request scope as chapter 38 R38.6.6j.
 >
 > **As-built note (2026-10-28, clean-side record).** The short cache is
-> implemented (PR #TBD) in the same cache as the UTXO fee estimate, under the
+> implemented (PR #128) in the same cache as the UTXO fee estimate, under the
 > same `fee_estimate_cache_secs` key, validation and rules; see chapter 38
 > R38.6.6j's as-built note. The resolved legacy gas price is stored after a
 > successful resolution, with the time the resolution finished, and an
@@ -246,7 +246,7 @@ requests while the reading is young enough for each of them. A coin of
 another chain resolves its own.
 
 > **As-built note (2026-10-28, clean-side record).** R57.2.7 is implemented
-> (PR #TBD). `EthCoin::get_gas_price` takes its reading through the request
+> (PR #128). `EthCoin::get_gas_price` takes its reading through the request
 > scope under the key of the chain, which is the platform coin's ticker (the
 > `platform` of an ERC-20 or TRC-20 token, the coin's own ticker for a platform
 > coin), and asks on behalf of the calling coin, so the age of a cached reading

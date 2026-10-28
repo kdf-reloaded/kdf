@@ -784,7 +784,7 @@ on.
 > `electrum_spread_reads` to `false`.
 
 > **As-built note (2026-10-28).** Reloaded implements R38.6.4b–R38.6.4k and the
-> spreading of read-only queries in R38.6.4a (PR #TBD). The "Closed divergence
+> spreading of read-only queries in R38.6.4a (PR #128). The "Closed divergence
 > (2026-10-27)" note after R38.6.4k records what the tree did before. R38.6.4j
 > is a Reloaded-original rule and is marked so.
 >
@@ -1462,7 +1462,7 @@ same estimate up to three times in sequence.
 > work spawned outside it reads fresh.
 >
 > **As-built note (2026-10-28, clean-side record).** Items 2–4 are implemented
-> (PR #TBD). The cache belongs to the node (it lives in the coins context of the
+> (PR #128). The cache belongs to the node (it lives in the coins context of the
 > node's `MmCtx`) and is reached only through a request scope, which each entry
 > point now opens with the node's context: code outside a scope neither reads
 > from it nor writes to it, so every swap path reads fresh (item 3). Its key is
@@ -1552,7 +1552,7 @@ minimum relay fee follows the same lifetimes.
 > `fee_estimate_cache_secs`.
 
 > **As-built note (2026-10-28, clean-side record).** R38.6.6k is implemented
-> (PR #TBD), including the adaptive default (Decision AI) and the cached relay
+> (PR #128), including the adaptive default (Decision AI) and the cached relay
 > fee. What is stored where:
 > - *The kind of lifetime* is not stored on the coin: the cache asks for it, for
 >   the coin that is asking, whenever it reads or stores, and resolves it from

@@ -68,14 +68,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   extra requests. A swap's own transactions never use the reuse and always read a fresh value. Set
   `fee_estimate_cache_secs` to `0` in `MM2.json`, and set none per coin, to restore GLEEC KDF
   behavior most closely: a request then still reads each value once, but nothing is reused between
-  requests. Detail: PR #TBD; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
+  requests. Detail: PR #128; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
 - **Read-only Electrum queries are spread over the connected servers.** With the `MM2.json` boolean
   `electrum_spread_reads` at its default `true`, each balance, unspent-list, history, header,
   block-count, transaction and fee query of a coin goes to the next connected server in turn instead
   of always to the first, so an order-posting burst can use the request budget of every connected
   server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
   moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
-  every query goes to the highest-ranked connected server first. Detail: PR #TBD; CRD ch.38 R38.6.4a.
+  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
@@ -255,7 +255,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #TBD; CRD ch.60 R60.4.6 item 5.
+- **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
@@ -613,7 +613,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   checked live on an uncongested transaction pool (2026-10-26).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
   the Electrum servers' per-session limit of about one request per second. The rules for batching,
-  fee reuse, read spreading and balance polling are written (PR #95).
+  fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
+  read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
+  with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
 
 ### Known limitations
 

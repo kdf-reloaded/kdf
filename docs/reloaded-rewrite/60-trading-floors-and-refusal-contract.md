@@ -595,7 +595,7 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
 > R38.6.6j.
 
 > **As-built note (2026-10-28, clean-side record).** The rewritten Amendment
-> (Decision AC) is implemented in PR #TBD. `update_maker_order` runs the check on
+> (Decision AC) is implemented in PR #128. `update_maker_order` runs the check on
 > every update again, as it did before PR #114, and the tests that asserted a
 > price-only, minimum-volume-only, confirmation-only or `max: false` update was
 > not re-checked now assert that it is. The check's fee-rate reading is served
