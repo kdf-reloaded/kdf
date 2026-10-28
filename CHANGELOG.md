@@ -255,6 +255,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #TBD; CRD ch.12 R7a, R7b.
+
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
@@ -640,7 +642,8 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
   read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
-  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
+  order's file and database writes leave the order's lock (Decision AM) in PR #TBD.
 
 ### Known limitations
 
