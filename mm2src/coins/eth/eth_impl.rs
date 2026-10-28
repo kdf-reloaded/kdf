@@ -773,7 +773,7 @@ pub(crate) async fn build_evm_withdraw_plan(
             let gas_price = coin.get_gas_price().compat().await.mm_err(Into::into)?;
             // covering edge case by deducting the standard transfer fee when we want to max withdraw ETH
             let eth_value_for_estimate = if req.max && coin.coin_type == EthCoinType::Eth {
-                eth_value - gas_price * U256::from(21000)
+                eth_value - gas_price * U256::from(coin.gas_limit.eth_send_coins)
             } else {
                 eth_value
             };
@@ -1390,6 +1390,10 @@ impl EthCoin {
         let ctx = MmArc::from_weak(&self.ctx)
             .or_mm_err(|| Erc20BuildError::Internal("MM context has been dropped".to_owned()))?;
         let conf = crate::coin_conf(&ctx, &ticker);
+        // The token's own gas-limit blocks, else the platform coin's (CRD R57.5.3), each block as a whole.
+        let gas_limit = EthGasLimit::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
+        let gas_limit_v2 =
+            EthGasLimitV2::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
         let decimals = match conf["decimals"].as_u64() {
             Some(d) if d > 0 && d <= 19 => d as u8,
             None | Some(0) => get_token_decimals(&self.web3, token_addr)
@@ -1402,7 +1406,17 @@ impl EthCoin {
                 )))
             },
         };
-        Ok(self.erc20_token_from_decimals(ticker, token_addr, required_confirmations, decimals, custom_token))
+        Ok(self.erc20_token_from_decimals(
+            ticker,
+            token_addr,
+            required_confirmations,
+            decimals,
+            custom_token,
+            (
+                gas_limit.unwrap_or_else(|| self.gas_limit.clone()),
+                gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone()),
+            ),
+        ))
     }
 
     fn erc20_token_from_decimals(
@@ -1412,6 +1426,7 @@ impl EthCoin {
         required_confirmations: u64,
         decimals: u8,
         custom_token: bool,
+        (gas_limit, gas_limit_v2): (EthGasLimit, EthGasLimitV2),
     ) -> EthCoin {
         let token_impl = EthCoinImpl {
             signer: self.signer.clone(),
@@ -1437,7 +1452,8 @@ impl EthCoin {
             logs_block_range: self.logs_block_range,
             derivation_method: DerivationMethod::Iguana(self.my_address),
             swap_v2_contracts: self.swap_v2_contracts,
-            gas_limit_v2: self.gas_limit_v2.clone(),
+            gas_limit,
+            gas_limit_v2,
             tron_api: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
@@ -2262,7 +2278,12 @@ impl EthCoin {
 
     pub fn send_to_address(&self, address: Address, value: U256) -> EthTxFut {
         match &self.coin_type {
-            EthCoinType::Eth => self.sign_and_send_transaction(value, Action::Call(address), vec![], U256::from(21000)),
+            EthCoinType::Eth => self.sign_and_send_transaction(
+                value,
+                Action::Call(address),
+                vec![],
+                U256::from(self.gas_limit.eth_send_coins),
+            ),
             EthCoinType::Erc20 {
                 platform: _,
                 token_addr,
@@ -2270,7 +2291,12 @@ impl EthCoin {
                 let abi = try_tx_fus!(Contract::load(ERC20_ABI.as_bytes()));
                 let function = try_tx_fus!(abi.function("transfer"));
                 let data = try_tx_fus!(function.encode_input(&[Token::Address(address), Token::Uint(value)]));
-                self.sign_and_send_transaction(0.into(), Action::Call(*token_addr), data, U256::from(210_000))
+                self.sign_and_send_transaction(
+                    0.into(),
+                    Action::Call(*token_addr),
+                    data,
+                    U256::from(self.gas_limit.eth_send_erc20),
+                )
             },
             // TRON has its own transfer pipeline (build TransactionRaw,
             // sign with SHA-256+secp256k1, broadcast via TronApiClient).
@@ -2299,7 +2325,12 @@ impl EthCoin {
                     Token::FixedBytes(secret_hash.to_vec()),
                     Token::Uint(U256::from(time_lock))
                 ]));
-                self.sign_and_send_transaction(value, Action::Call(swap_contract_address), data, U256::from(150_000))
+                self.sign_and_send_transaction(
+                    value,
+                    Action::Call(swap_contract_address),
+                    data,
+                    U256::from(self.gas_limit.eth_payment),
+                )
             },
             EthCoinType::Erc20 {
                 platform: _,
@@ -2320,6 +2351,7 @@ impl EthCoin {
                 ]));
 
                 let arc = self.clone();
+                let gas_limit = U256::from(self.gas_limit.erc20_payment);
                 Box::new(allowance_fut.and_then(move |allowed| -> EthTxFut {
                     if allowed < value {
                         Box::new(
@@ -2329,7 +2361,7 @@ impl EthCoin {
                                         0.into(),
                                         Action::Call(swap_contract_address),
                                         data,
-                                        U256::from(150_000),
+                                        gas_limit,
                                     )
                                 }),
                         )
@@ -2338,7 +2370,7 @@ impl EthCoin {
                             0.into(),
                             Action::Call(swap_contract_address),
                             data,
-                            U256::from(150_000),
+                            gas_limit,
                         ))
                     }
                 }))
@@ -2392,7 +2424,7 @@ impl EthCoin {
                                 0.into(),
                                 Action::Call(swap_contract_address),
                                 data,
-                                U256::from(150_000),
+                                U256::from(clone.gas_limit.eth_receiver_spend),
                             )
                         }),
                 )
@@ -2428,7 +2460,7 @@ impl EthCoin {
                                 0.into(),
                                 Action::Call(swap_contract_address),
                                 data,
-                                U256::from(150_000),
+                                U256::from(clone.gas_limit.erc20_receiver_spend),
                             )
                         }),
                 )
@@ -2479,7 +2511,7 @@ impl EthCoin {
                                 0.into(),
                                 Action::Call(swap_contract_address),
                                 data,
-                                U256::from(150_000),
+                                U256::from(clone.gas_limit.eth_sender_refund),
                             )
                         }),
                 )
@@ -2515,7 +2547,7 @@ impl EthCoin {
                                 0.into(),
                                 Action::Call(swap_contract_address),
                                 data,
-                                U256::from(150_000),
+                                U256::from(clone.gas_limit.erc20_sender_refund),
                             )
                         }),
                 )
@@ -2594,6 +2626,18 @@ impl EthCoin {
             };
             coin.estimate_gas(estimate_gas_req)
         }))
+    }
+
+    /// The gas figure of an ERC-20 `approve` call, estimated by the node. The one place every `approve`
+    /// gas figure comes from: the `approve` transaction (V1 payment and the V2 allowance step) and the
+    /// sender-side token trade preimage.
+    ///
+    /// SEAM (CRD D3, not implemented here): a later change applies the per-coin `estimate_gas_mult`
+    /// multiplier in this function, to this estimated value only. A configured limit (`gas_limit`,
+    /// `gas_limit_v2`, including `approve_payment`) never passes through here and is never scaled
+    /// (R57.5.3a).
+    pub(crate) fn approve_gas_estimate(&self, token_addr: Address, approve_data: Bytes) -> Web3RpcFut<U256> {
+        self.estimate_gas_for_contract_call(token_addr, approve_data)
     }
 
     pub(crate) fn eth_balance(&self) -> BalanceFut<U256> {
@@ -2687,7 +2731,7 @@ impl EthCoin {
             let data = try_tx_s!(function.encode_input(&[Token::Address(spender), Token::Uint(amount)]));
 
             let gas_limit = try_tx_s!(
-                coin.estimate_gas_for_contract_call(token_addr, Bytes::from(data.clone()))
+                coin.approve_gas_estimate(token_addr, Bytes::from(data.clone()))
                     .compat()
                     .await
             );

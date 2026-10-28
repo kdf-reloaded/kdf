@@ -125,6 +125,7 @@ pub(super) fn eth_coin_for_test_with_providers(
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     }));
     (ctx, eth_coin)
@@ -219,6 +220,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
             gap_limit: 20,
         }),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     }));
     (ctx, eth_coin, selected_addr)
@@ -393,6 +395,7 @@ fn test_wait_for_payment_spend_timeout() {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     };
 
@@ -562,6 +565,7 @@ mod search_for_swap_tx_spend_scripted {
             logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
             derivation_method: DerivationMethod::Iguana(my_addr),
             swap_v2_contracts: None,
+            gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
         }));
         (ctx, coin)
@@ -928,9 +932,10 @@ fn test_trade_preimage_stage_is_single_proportional_increase() {
 
 #[test]
 fn get_sender_trade_preimage() {
-    /// Trade fee for the ETH coin is `2 * 150_000 * gas_price` always.
+    /// Trade fee for the ETH coin is `(eth_payment + eth_sender_refund) * gas_price` always: 65_000 + 100_000
+    /// (CRD R57.5.2; the baseline constant was 300_000).
     fn expected_fee(gas_price: u64) -> TradeFee {
-        let amount = u256_to_big_decimal((2 * 150_000 * gas_price).into(), 18).expect("!u256_to_big_decimal");
+        let amount = u256_to_big_decimal(((65_000 + 100_000) * gas_price).into(), 18).expect("!u256_to_big_decimal");
         TradeFee {
             coin: "ETH".to_owned(),
             amount: amount.into(),
@@ -1057,7 +1062,8 @@ fn get_receiver_trade_preimage() {
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
 
     let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
-    let amount = u256_to_big_decimal((150_000 * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
+    // `eth_receiver_spend` default (CRD R57.5.2); the baseline constant was 150_000.
+    let amount = u256_to_big_decimal((65_000 * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
     let expected_fee = TradeFee {
         coin: "ETH".to_owned(),
         amount: amount.into(),
@@ -1437,6 +1443,7 @@ fn test_message_hash() {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     }));
 
@@ -1485,6 +1492,7 @@ fn test_sign_verify_message() {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     }));
 
@@ -1677,6 +1685,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(address),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
     }));
     (ctx, eth_coin)
@@ -2264,6 +2273,7 @@ mod swap_send_path_wire_form {
             logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
             derivation_method: DerivationMethod::Iguana(my_address),
             swap_v2_contracts: None,
+            gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
         }));
         (ctx, coin)

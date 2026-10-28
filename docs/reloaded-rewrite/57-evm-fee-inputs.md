@@ -482,6 +482,22 @@ sender-side preimage consolidation (one 300000 constant becoming
 This gap is also recorded in
 [`UPSTREAM-PARITY-GAPS.md`](UPSTREAM-PARITY-GAPS.md).
 
+> **As built (2026-10-28, PR #105) -- R57.5.4 closed.** The `gas_limit` block is read
+> at coin activation (token entry first, then its platform coin's whole block, R57.5.3),
+> the defaults of R57.5.2 replace the baseline constants, and every V1 call site uses
+> the coin's value: native and token sends, the maximum-native-withdrawal deduction and
+> the insufficient-funds threshold (`eth_send_coins`, `eth_send_erc20`), the platform and
+> token payment, receiver spend and sender refund calls, the flat trade fee
+> (`eth_max_trade_gas`) and the sender-side and receiver-side trade preimages. A member
+> that is not a non-negative integer fails activation naming the key, and a configured
+> value is used verbatim (R57.5.3a). The single 300000 sender-preimage constant is now
+> the payment limit plus the refund limit. **Deviation:** the fee-approximation stages
+> have no upper-bound variants yet (D1), so every stage reserves the refund leg; the
+> platform-coin sender preimage is therefore 165000 by default (the reference's payment-only
+> figure would be 65000 outside the upper-bound stages), and the token figure is 300000 as
+> before. This never under-funds the refund. The approve gas estimate goes through one
+> function, the seam for the per-coin estimate multiplier of D3 (not applied).
+
 ## 57.6 The `gas_limit_v2` configuration block
 
 > **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
@@ -550,6 +566,11 @@ the reference's sit at 65000, 150000, 100000 and 115000 — and it carries
 no `nft_maker` sub-object as a configurable unit. Closing this adopts
 R57.6.2's values along with the override reading, on the same
 one-change rule as R57.5.4.
+
+> **As built (2026-10-28, PR #105) -- R57.6.4 closed.** The `gas_limit_v2` block is read
+> with the sub-object and member names of R57.6.2 (`maker`, `taker`, `nft_maker`), inherited
+> by a token as a whole block from its platform coin, and the V2 defaults are the table of
+> R57.6.2. A V2 `approve_payment` is used as configured, with no estimate.
 
 ---
 
