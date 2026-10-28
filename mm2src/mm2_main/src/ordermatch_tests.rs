@@ -4445,7 +4445,7 @@ mod t60_6_pre_trade_spend_check_tests {
             uuid: order.uuid,
             new_price: None,
             max: None,
-            // R60.6.7 Amendment: only an update that changes the volume is re-checked.
+            // R60.6.7 Amendment (Decision AC): every update is re-checked; this one also changes the volume.
             volume_delta: Some(MmNumber::from("0.5")),
             min_volume: Some(units_8(10_000)),
             base_confs: None,
@@ -4495,9 +4495,9 @@ mod t60_6_pre_trade_spend_check_tests {
         );
     }
 
-    /// CRD ch.60 R60.6.7 Amendment: only an update that changes the volume re-checks the order. The mock counts
-    /// the safe-amount reads and reports a safe amount no order can meet, so a read that happens shows as the
-    /// typed refusal and a read that does not happen shows as none.
+    /// CRD ch.60 R60.6.7 Amendment (Decision AC): every update re-checks the order, whatever it changes. The mock
+    /// counts the safe-amount reads and reports a safe amount no order can meet, so a check that happens shows as
+    /// the typed refusal.
     mod update_maker_order_check_scope {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4563,27 +4563,27 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn price_only_update_is_not_rechecked() {
+        fn price_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.new_price = Some(MmNumber::from("2")));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn min_volume_only_update_is_not_rechecked() {
+        fn min_volume_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.min_volume = Some(units_8(12_000)));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn confirmations_only_update_is_not_rechecked() {
+        fn confirmations_only_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.base_confs = Some(3);
                 req.rel_nota = Some(true);
             });
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
@@ -4601,12 +4601,81 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn max_false_is_not_a_volume_change() {
+        fn max_false_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.max = Some(false);
                 req.new_price = Some(MmNumber::from("2"));
             });
-            assert_eq!(reads, 0, "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
+        }
+
+        /// Two price-only updates of the order, each refused under the conditions of (a). The safe amount of a
+        /// coin is read through the request scope like the coin layer does, from a dynamic-fee estimate that the
+        /// mock counts. Returns the refusals and the number of estimate fetches.
+        fn two_price_only_updates(conf: Json) -> (Vec<String>, usize) {
+            use coins::request_fee_scope::{memoize, FeeReadKind};
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let counted = fetches.clone();
+            TestCoin::spend_safe_amount.mock_safe(move |coin| {
+                let (fetches, ticker) = (counted.clone(), coin.ticker().to_owned());
+                MockResult::Return(Box::pin(async move {
+                    let counted = fetches.clone();
+                    memoize::<u64, (), _>(FeeReadKind::UtxoFeeEstimate, &ticker, async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Ok(7)
+                    })
+                    .await
+                    .unwrap();
+                    Ok(Some(MmNumber::from(1_000)))
+                }))
+            });
+            let ctx = ctx_with(conf, &["DYN", "KMD"]);
+            let (base, rel) = pair("DYN", "KMD");
+            let order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(1.into())
+                .with_min_base_vol(Some(units_8(11_000)))
+                .with_price(1.into())
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .build_unchecked();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+            let refusals = ["2", "3"]
+                .iter()
+                .map(|price| {
+                    let req = update_request(order.uuid, |req| req.new_price = Some(MmNumber::from(*price)));
+                    match block_on(update_maker_order(&ctx, req)) {
+                        Err(e) => e,
+                        Ok(_) => panic!("the update must be refused"),
+                    }
+                })
+                .collect();
+            (refusals, fetches.load(Ordering::SeqCst))
+        }
+
+        /// T60.6 (g): a price-only update is re-checked and refused under the conditions of (a), and while the
+        /// fee reading is young enough it makes no fee request: the two updates cost one estimate fetch.
+        #[test]
+        fn t60_6_g_a_price_only_update_is_rechecked_and_served_from_the_cache() {
+            let (refusals, fetches) = two_price_only_updates(json!({}));
+            for refusal in &refusals {
+                assert!(refusal.contains("is too low, required at least"), "{refusal}");
+            }
+            // The check refuses at the first leg it finds short (the base coin), so it reads that coin's
+            // estimate once; the second update reads nothing.
+            assert_eq!(fetches, 1, "one fetch for the two updates");
+        }
+
+        /// With the cache off, each of the same two updates reads the estimate.
+        #[test]
+        fn t60_6_g_with_the_cache_off_every_update_reads_the_estimate() {
+            let (refusals, fetches) = two_price_only_updates(json!({"fee_estimate_cache_secs": 0}));
+            assert!(refusals.iter().all(|r| r.contains("is too low, required at least")));
+            assert_eq!(fetches, 2);
         }
     }
 
@@ -7315,5 +7384,154 @@ mod t60_7_maker_balance_watch_tests {
             probe.log.lock().unwrap().clear();
         }
         std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    // ---- R60.4.6 item 5: the maintenance reads hold no order lock -------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn publishes(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> usize {
+        let mut n = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(
+                cmd,
+                AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+            ) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn order_mutex(ctx: &MmArc, order: &MakerOrder) -> Arc<AsyncMutex<MakerOrder>> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let order_mutex = ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .get_order(&order.uuid)
+            .unwrap()
+            .clone();
+        order_mutex
+    }
+
+    /// The balance read and the fee read of the maintenance pass try to take the order's lock when they are
+    /// reached. They succeed only if the pass does not hold the lock across its network reads. Returns the number
+    /// of reads that found the lock taken.
+    fn mock_reads_that_try_the_lock(
+        order_mutex: Arc<AsyncMutex<MakerOrder>>,
+        spendable: &'static str,
+        on_balance_read: impl Fn() + 'static,
+    ) -> Arc<AtomicUsize> {
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let (balance_guard, fee_guard) = (blocked.clone(), blocked.clone());
+        let balance_order = order_mutex.clone();
+        TestCoin::my_balance.mock_safe(move |_| {
+            if balance_order.try_lock().is_none() {
+                balance_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            on_balance_read();
+            MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(bd(spendable)))))
+        });
+        TestCoin::get_sender_trade_fee.mock_safe(move |coin, _value, _stage| {
+            if order_mutex.try_lock().is_none() {
+                fee_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let fee = TradeFee {
+                coin: coin.ticker().to_owned(),
+                amount: MmNumber::from("0.1"),
+                paid_from_trading_vol: false,
+            };
+            MockResult::Return(Box::pin(async move { Ok(fee) }))
+        });
+        blocked
+    }
+
+    /// The order's lock is free while the pass reads the base coin's balance and the fee, so a call that awaits
+    /// the order (`my_orders`, `update_maker_order`, `cancel`) does not wait for those round trips. The pass
+    /// still applies its result: the order is lowered and re-announced.
+    #[test]
+    fn t60_7_g_the_reconciliation_holds_no_order_lock_across_its_reads() {
+        let probe = Probe::install("5");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let order = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &order);
+        let mutex = order_mutex(&ctx, &order);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let blocked = mock_reads_that_try_the_lock(mutex.clone(), "5", move || {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "the balance was read");
+        assert_eq!(
+            blocked.load(AtomicOrdering::SeqCst),
+            0,
+            "a read found the order's lock taken"
+        );
+        assert_eq!(block_on(mutex.lock()).max_base_vol, MmNumber::from("4.9"));
+        assert!(publishes(&mut p2p_rx) >= 1, "and the order is re-announced");
+    }
+
+    /// Several missing orders on one base coin share one balance read per pass; another base coin reads its own.
+    #[test]
+    fn t60_7_g_missing_orders_on_one_base_coin_share_one_balance_read() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        for (base, rel) in [("BASE", "REL"), ("BASE", "OTHER"), ("BASE", "REL"), ("OTHER", "REL")] {
+            store(&ctx, &own_order(base, rel, "5", "1"));
+        }
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(probe.count("read BASE"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.count("read OTHER"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.entries().len(), 2);
+        assert!(publishes(&mut p2p_rx) >= 4, "every order is re-announced");
+    }
+
+    /// An order that went away between the read and the apply is neither touched nor announced.
+    #[test]
+    fn t60_7_g_an_order_removed_between_the_read_and_the_apply_is_left_alone() {
+        let probe = Probe::install("2");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_count = cancelled.clone();
+        delete_my_maker_order.mock_safe(move |_, _, _| {
+            cancelled_count.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let gone = own_order("BASE", "REL", "5", "1");
+        let kept = own_order("OTHER", "REL", "5", "1");
+        store(&ctx, &gone);
+        store(&ctx, &kept);
+        let gone_mutex = order_mutex(&ctx, &gone);
+        // The balance of BASE is 2, so a lowering would show: the supported maximum 1.9 is below the available 5.
+        let remover = ctx.clone();
+        let removed = gone.clone();
+        mock_reads_that_try_the_lock(gone_mutex.clone(), "2", move || remove(&remover, &removed));
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(
+            block_on(gone_mutex.lock()).max_base_vol,
+            MmNumber::from("5"),
+            "not touched"
+        );
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&gone.uuid));
+        assert_eq!(cancelled.load(AtomicOrdering::SeqCst), 0, "not cancelled either");
+        // Only the order that stayed was announced (the mock is the same for both bases, so it was lowered too).
+        assert_eq!(publishes(&mut p2p_rx), 1);
+        assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&kept.uuid));
     }
 }

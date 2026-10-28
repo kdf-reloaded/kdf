@@ -289,6 +289,21 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > such coins on one shared EVM endpoint each cost that one read, as at the
 > reference designations R60.4.6 names (maintainer, 2026-10-28: no change).
 
+> **As-built note (2026-10-28, clean-side record).** The reconciliation of item 5
+> (`reconcile_missing_own_maker_orders`) reads without holding the order's lock
+> and applies under it. It copies the order's tickers under the lock and
+> releases it; then, with no order lock held, it looks up the pair, reads the
+> base coin's spendable balance and computes the maximum maker volume (which
+> reads a fee), once per base coin and pass, so several missing orders on one
+> base coin share the one read; then it locks each order again, skips it if it
+> is no longer in the maker-order store, and applies what item 5 binds with the
+> reserved amount as it stands at that moment. Before, the order's lock was held
+> across the balance and fee round trips, and a call that awaits the order
+> (`my_orders`, `update_maker_order`, `cancel`) waited for them. What an outside
+> observer sees is unchanged: the lowering, the cancellation reasons and the
+> re-announcement are the same. Tests: T60.7 (g) in the same module, whose coin
+> mocks try the order's lock during the reads.
+
 ## 60.5 Refusal and failure map — what a peer observes
 
 This section answers whether a floor is a wire parameter. It is, in two
@@ -532,18 +547,16 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    order's price at least the rel coin's `S`, for each leg whose coin is
    covered.
 
-   **Amendment (Reloaded-original, maintainer Decision P of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).**
-   Item 3 applies when an order is created (`setprice`, `buy`, `sell`)
-   and in `trade_preimage`. On `update_maker_order` it applies only when
-   the update changes the order's volume (a volume delta, or `max`). An
-   update that changes only the price, the minimum volume or the
-   confirmation settings is not re-checked. *Accepted cost:* such an update
-   can leave the smallest trade below `S` without a refusal, in the same way
-   as item 5's long-lived order whose fees rose after it was placed.
-   *Rationale:* a price-only update needs no server call otherwise. Each
-   Electrum session is served about one request message per second once its
-   burst is spent (chapter 38 R38.6.3a), so every fee-rate read the check
-   adds costs a market maker about a second per update.
+   **Amendment (Reloaded-original, maintainer Decision AC of 2026-10-28;
+   written on the clean side, no forbidden-class input; supersedes the
+   amendment of Decision P of 2026-10-27).** Item 3 applies to every order
+   creation (`setprice`, `buy`, `sell`), to every `update_maker_order`,
+   whatever the update changes, and to `trade_preimage`. The fee-rate input
+   of `S` may come from the short cache of chapter 38 R38.6.6j item 2 and
+   R38.6.6k. While that reading is young enough, a check costs no node
+   request. *History:* from 2026-10-27 to 2026-10-28, an update that
+   changed only the price, the minimum volume or the confirmation settings
+   was not re-checked. That skip was accepted only until the cache existed.
 4. *Refusal.* A request that fails item 3 is refused with the same typed
    volume-too-low refusal the floors produce (R60.4.2), naming the coin
    and carrying `S` as the threshold; `trade_preimage` reports the same
@@ -577,9 +590,22 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
 
 > **As-built note (2026-10-27, clean-side record).** The Amendment under item 3
 > and item 8 are implemented in PR #114. `update_maker_order` runs the check
-> only for a volume delta or `max`. The check's fee reading is shared with the
+> only for a volume delta or `max` (superseded by the note below). The check's fee reading is shared with the
 > request's trade-fee calculation through the request scope of chapter 38
 > R38.6.6j.
+
+> **As-built note (2026-10-28, clean-side record).** The rewritten Amendment
+> (Decision AC) is implemented in PR #128. `update_maker_order` runs the check on
+> every update again, as it did before PR #114, and the tests that asserted a
+> price-only, minimum-volume-only, confirmation-only or `max: false` update was
+> not re-checked now assert that it is. The check's fee-rate reading is served
+> from the short cache of chapter 38 R38.6.6j and R38.6.6k: T60.6 (g) counts the
+> estimate fetches of two price-only updates and finds one in all, and the
+> same two updates with `fee_estimate_cache_secs` at 0 find one each. Every
+> reading the check makes is cached across requests: the dynamic-fee estimate,
+> and, by the maintainer's decision of 2026-10-28, the forced minimum relay fee
+> of a coin that forces it, under the same lifetime. Within the lifetime a check
+> therefore makes no node request for such a coin either.
 
 > **As-built note (2026-10-25, clean-side record).** R60.6.4 and R60.6.7
 > are implemented in PR #73, together with T60.5 and T60.6. The UTXO
@@ -632,7 +658,10 @@ floor of 0.0001 is accepted (`S` = 496 + 1,000 base units);
 (d) `trade_preimage` reports the refusal of (a) with the same threshold;
 (e) with `pre_trade_spend_check` set to `false`, the order of (a) is
 accepted; (f) an incoming order or taker request below `S` is handled
-exactly as without the rule.
+exactly as without the rule; (g) an `update_maker_order` that changes only
+the price is re-checked and refused under the conditions of (a), and while
+the fee reading is young enough under chapter 38 R38.6.6k it makes no
+fee request.
 
 **T60.7** *R60.4.6.* (a) With one maker order on base coin X and a
 balance that does not change, exactly one balance read of X occurs per
@@ -981,3 +1010,9 @@ the bound value satisfies.
   mechanical regex scan of every added line against private identifiers,
   literals and distinctive phrases; the mechanical gate tool was not run
   (prose). *Measure:* 0.02 against the 0.10 threshold.
+- *Reloaded-original addition (2026-10-28), clean side.* The rewritten R60.6.7
+  amendment (Decision AC) and T60.6 (g) were written by a session that never
+  read the corpus, from the maintainer's Decision AC of 2026-10-28. They take
+  no forbidden-class input, so chapter 01 R38 is not engaged and no gate pass
+  is required. They supersede the 2026-10-27 amendment of Decision P; item 8
+  is unchanged.

@@ -283,7 +283,9 @@ impl BalanceUpdateOrdermatchHandler {
 #[async_trait]
 impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
-        with_request_fee_scope(self.balance_updated_impl(coin, new_balance)).await
+        // The scope belongs to the node; a node that is gone has nothing to update (as in the implementation).
+        let Some(ctx) = MmArc::from_weak(&self.ctx) else { return };
+        with_request_fee_scope(&ctx, self.balance_updated_impl(coin, new_balance)).await
     }
 }
 
@@ -725,6 +727,11 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
 
 /// The maintenance step for the own maker orders that are absent from the local orderbook (CRD ch.60 R60.4.6
 /// item 5, ch.59 R59.6.7): reconcile each with a fresh balance read, then re-announce it or cancel it.
+///
+/// The reads (the pair lookup, the base coin's spendable balance and the maximum maker volume, which reads a
+/// fee) take network round trips, so no order's lock is held across them: the lock is taken briefly to copy the
+/// tickers, and again to apply the result. The balance of a base coin is read once per pass, however many missing
+/// orders it has.
 pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
     let mut missing_uuids = Vec::new();
     let mut to_cancel = Vec::new();
@@ -737,33 +744,63 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
         }
     }
 
+    // What the reads need from each missing order, copied under its lock, which is released at once.
+    let mut missing_orders = Vec::new();
     for uuid in missing_uuids {
         let order_mutex = match ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid) {
             Some(o) => o.clone(),
             None => continue,
         };
+        let (base_ticker, rel_ticker) = {
+            let order = order_mutex.lock().await;
+            (order.base.clone(), order.rel.clone())
+        };
+        missing_orders.push((uuid, order_mutex, base_ticker, rel_ticker));
+    }
 
-        let mut order = order_mutex.lock().await;
-        let (base, rel) = match find_pair(ctx, &order.base, &order.rel).await {
+    // The maximum maker volume of each base coin, or why it could not be had: the balance and the fee are read
+    // once per base coin and pass, with no order lock held.
+    let mut max_vols: HashMap<String, Result<MmNumber, String>> = HashMap::new();
+    let mut reads = Vec::new();
+    for (uuid, order_mutex, base_ticker, rel_ticker) in missing_orders {
+        let (base, rel) = match find_pair(ctx, &base_ticker, &rel_ticker).await {
             Ok(Some(pair)) => pair,
             _ => continue,
         };
-        let current_balance = match base.my_spendable_balance().compat().await {
-            Ok(b) => b,
-            Err(e) => {
+        if !max_vols.contains_key(&base_ticker) {
+            let max_vol = match base.my_spendable_balance().compat().await {
+                Ok(current_balance) => {
+                    match calc_max_maker_vol(ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await {
+                        Ok(info) => Ok(info.volume),
+                        Err(e) => Err(e.to_string()),
+                    }
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            max_vols.insert(base_ticker.clone(), max_vol);
+        }
+        reads.push((uuid, order_mutex, base_ticker, base, rel));
+    }
+
+    // Apply under the order's lock, to an order that is still there.
+    for (uuid, order_mutex, base_ticker, base, rel) in reads {
+        let max_vol = match max_vols.get(&base_ticker) {
+            Some(Ok(max_vol)) => max_vol.clone(),
+            Some(Err(e)) => {
                 log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
                 to_cancel.push(uuid);
                 continue;
             },
+            None => continue,
         };
-        let max_vol = match calc_max_maker_vol(ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await {
-            Ok(info) => info.volume,
-            Err(e) => {
-                log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
-                to_cancel.push(uuid);
-                continue;
-            },
-        };
+
+        let mut order = order_mutex.lock().await;
+        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+        // The order may have been cancelled or filled since it was read: then it is left alone and not announced.
+        if !maker_orders.contains_key(&uuid) {
+            continue;
+        }
+
         if max_vol < order.available_amount() {
             order.max_base_vol = order.reserved_amount() + max_vol;
         }
@@ -773,12 +810,8 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
             continue;
         }
 
-        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
-
         // notify other nodes only if maker order is still there keeping maker_orders locked during the operation
-        if maker_orders.contains_key(&uuid) {
-            reannounce_missing_own_order(ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
-        }
+        reannounce_missing_own_order(ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
     }
 
     for uuid in to_cancel {
@@ -1412,7 +1445,8 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
 }
 
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(buy_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, buy_impl(ctx, req)).await
 }
 
 async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1451,7 +1485,8 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
 }
 
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(sell_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, sell_impl(ctx, req)).await
 }
 
 async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1861,7 +1896,7 @@ async fn get_max_volume_and_balance(
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(create_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, create_maker_order_impl(ctx, req)).await
 }
 
 async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
@@ -2015,7 +2050,7 @@ pub(crate) async fn cancel_previous_maker_orders(
 }
 
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(update_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, update_maker_order_impl(ctx, req)).await
 }
 
 async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
@@ -2078,17 +2113,15 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
-    // CRD ch.60 R60.6.7 item 3 and its Amendment: on an update the order as updated must still be spendable on
-    // both legs only when the update changes the volume (a volume delta, or `max`). A price-only, minimum-volume
-    // or confirmation-only update is not re-checked. The minimum volume checked is the requested one, else the
-    // one the order already carries.
-    if req.volume_delta.is_some() || req.max.unwrap_or(false) {
-        let min_volume_after_update = req
-            .min_volume
-            .clone()
-            .or_else(|| Some(order_before_update.min_base_vol.clone()));
-        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
-    }
+    // CRD ch.60 R60.6.7 item 3 and its Amendment (Decision AC): the order as updated must still be spendable on
+    // both legs, whatever the update changes. The fee-rate input may come from the short cache (ch.38 R38.6.6j
+    // item 2, R38.6.6k), so within its lifetime the check makes no node request. The minimum volume checked is
+    // the requested one, else the one the order already carries.
+    let min_volume_after_update = req
+        .min_volume
+        .clone()
+        .or_else(|| Some(order_before_update.min_base_vol.clone()));
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {

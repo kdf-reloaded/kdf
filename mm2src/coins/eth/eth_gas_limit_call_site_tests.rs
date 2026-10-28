@@ -616,6 +616,62 @@ fn t9_the_activation_builder_rejects_an_unusable_member_naming_the_key() {
     }
 }
 
+/// CRD ch.38 R38.6.6k item 1: a per-coin `fee_estimate_cache_secs` outside 0 to 600 fails the coin's activation,
+/// naming the key, before any node is contacted; a token reads its own entry, else its platform coin's.
+#[test]
+fn t10_an_unusable_fee_estimate_cache_secs_fails_the_activation_naming_the_key() {
+    let params = EthCoinActivationParams {
+        urls: vec!["http://dummy.dummy".to_owned()],
+        swap_contract_address: Some(Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
+        ..Default::default()
+    };
+    let activate = |ctx: &MmArc, ticker: &str, conf: &Json, protocol: CoinProtocol| {
+        block_on(eth_coin_from_params_with_priv_key(
+            ctx, ticker, conf, &params, &[1u8; 32], protocol,
+        ))
+    };
+    let platform_conf =
+        |secs: Json| json!({"coin": "ETH", "protocol": {"type": "ETH"}, "fee_estimate_cache_secs": secs});
+    let token_conf = json!({"coin": "JST", "mm2": 1, "decimals": 18, "protocol": {"type": "ERC20",
+        "protocol_data": {"platform": "ETH", "contract_address": format!("0x{TOKEN_ADDR}")}}});
+    let erc20 = || CoinProtocol::ERC20 {
+        platform: "ETH".to_owned(),
+        contract_address: format!("0x{TOKEN_ADDR}"),
+    };
+    for bad in [json!(601), json!(-1), json!("5"), json!(1.5)] {
+        let conf = platform_conf(bad.clone());
+        let ctx = MmCtxBuilder::new()
+            .with_conf(
+                json!({"netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [conf.clone(), token_conf.clone()]}),
+            )
+            .into_mm_arc();
+        // The platform coin's own entry.
+        let err = activate(&ctx, "ETH", &conf, CoinProtocol::ETH { chain_id: None }).unwrap_err();
+        match err.get_inner() {
+            EthCoinBuildError::InvalidConfig(message) => {
+                assert!(message.contains("fee_estimate_cache_secs"), "{bad}: {message}")
+            },
+            other => panic!("expected InvalidConfig for {bad}, got {other:?}"),
+        }
+        // A token with no value of its own reads the platform's.
+        let err = activate(&ctx, "JST", &token_conf, erc20()).unwrap_err();
+        match err.get_inner() {
+            EthCoinBuildError::InvalidConfig(message) => {
+                assert!(message.contains("fee_estimate_cache_secs"), "{bad}: {message}")
+            },
+            other => panic!("expected InvalidConfig for the token over {bad}, got {other:?}"),
+        }
+    }
+    // A usable value does not fail on the key (the activation then goes on to its nodes, which are unreachable).
+    let conf = platform_conf(json!(600));
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({"netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [conf.clone()]}))
+        .into_mm_arc();
+    if let Err(err) = activate(&ctx, "ETH", &conf, CoinProtocol::ETH { chain_id: None }) {
+        assert!(!err.to_string().contains("fee_estimate_cache_secs"), "{err}");
+    }
+}
+
 // ─── T13: the gas-estimate multiplier (R57.5.3b) ────────────────────────────────────────────────────
 
 /// The node's `eth_estimateGas` answers `estimate` to everything and the gas price is one.

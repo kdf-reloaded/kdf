@@ -2917,6 +2917,57 @@ mod gas_price_resolution {
         assert!(matches!(err.into_inner(), Web3RpcError::Internal(m) if m == "All requests failed"));
     }
 
+    /// R57.2.7: the platform coin and a token of it share one gas-price reading, within a request and across
+    /// requests of the node; outside a request each resolves afresh.
+    #[test]
+    fn a_platform_and_its_token_share_one_gas_price_reading() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let platform = coin_on(&node);
+        let token = eth_coin_for_test(
+            EthCoinType::Erc20 {
+                platform: "ETH".to_owned(),
+                token_addr: Address::from_slice(&[7; 20]),
+            },
+            vec![node.url.clone()],
+            None,
+        )
+        .1;
+        assert_eq!((platform.ticker.as_str(), token.ticker.as_str()), ("ETH", "JST"));
+        // The node whose cache is used: its coins file lists the token under its platform.
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new()
+            .with_conf(json!({"coins": [
+                {"coin": "ETH", "protocol": {"type": "ETH"}},
+                {"coin": "JST", "protocol": {"type": "ERC20", "protocol_data": {"platform": "ETH"}}},
+            ]}))
+            .into_mm_arc();
+
+        // Within one request the token asks first, then the platform.
+        let (from_token, from_platform) = block_on(with_request_fee_scope(&ctx, async {
+            let token_price = token.get_gas_price().compat().await.unwrap();
+            let platform_price = platform.get_gas_price().compat().await.unwrap();
+            (token_price, platform_price)
+        }));
+        assert_eq!((from_token, from_platform), (fee_history_price(), fee_history_price()));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+
+        // A later request, platform first this time: the same reading.
+        block_on(with_request_fee_scope(&ctx, async {
+            platform.get_gas_price().compat().await.unwrap();
+            token.get_gas_price().compat().await.unwrap();
+        }));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+
+        // Outside a request (swap execution) every coin resolves afresh.
+        block_on(async {
+            token.get_gas_price().compat().await.unwrap();
+            platform.get_gas_price().compat().await.unwrap();
+        });
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 3);
+    }
+
     /// R57.2.6 item 1: inside one order-posting request the sender fee, the receiver fee and the maximum volume
     /// resolve the gas price once; outside a request (swap execution) every consumer resolves it afresh.
     #[test]
@@ -2925,12 +2976,15 @@ mod gas_price_resolution {
         let node = node(calls.clone(), &[]);
         let coin = coin_on(&node);
 
-        let prices = block_on(with_request_fee_scope(async {
-            let sender = coin.get_gas_price().compat().await.unwrap();
-            let receiver = coin.get_gas_price().compat().await.unwrap();
-            let max_volume = coin.get_gas_price().compat().await.unwrap();
-            (sender, receiver, max_volume)
-        }));
+        let prices = block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                let sender = coin.get_gas_price().compat().await.unwrap();
+                let receiver = coin.get_gas_price().compat().await.unwrap();
+                let max_volume = coin.get_gas_price().compat().await.unwrap();
+                (sender, receiver, max_volume)
+            },
+        ));
         assert_eq!(prices, (fee_history_price(), fee_history_price(), fee_history_price()));
         assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
         assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);

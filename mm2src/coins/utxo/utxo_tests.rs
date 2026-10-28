@@ -8556,14 +8556,10 @@ mod order_posting_latency {
         server.set_result("blockchain.relayfee", json!(0.00002));
     }
 
-    /// A coin on a scripted Electrum server. Returns the coin and the stub server, which has recorded the request messages.
-    fn coin_on_scripted_electrum(
-        segwit: bool,
-        fee: TxFee,
-        force_min_relay_fee: bool,
-    ) -> (UtxoStandardCoin, StubServer) {
-        // The scripted server needs the coin's script hashes, which depend on the seed's key. Build the coin
-        // twice: once to learn its address and key, once with the client that answers for them.
+    /// The P2PKH and P2PK script hashes of the test coin's address. The scripted server needs them, and they depend
+    /// on the seed's key; the coin is built once here to learn its address and key, and again with the client that
+    /// answers for them.
+    fn script_hashes_of_test_coin(segwit: bool) -> (String, String) {
         let probe = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, segwit);
         let address = match &probe.derivation_method {
             DerivationMethod::Iguana(address) => address.clone(),
@@ -8571,10 +8567,19 @@ mod order_posting_latency {
         };
         let p2pkh = output_script(&address, ScriptType::P2PKH);
         let p2pk = Builder::build_p2pk(probe.priv_key_policy.key_pair().unwrap().public());
-        let (p2pkh_hash, p2pk_hash) = (
+        (
             hex::encode(electrum_script_hash(&p2pkh)),
             hex::encode(electrum_script_hash(&p2pk)),
-        );
+        )
+    }
+
+    /// A coin on a scripted Electrum server. Returns the coin and the stub server, which has recorded the request messages.
+    fn coin_on_scripted_electrum(
+        segwit: bool,
+        fee: TxFee,
+        force_min_relay_fee: bool,
+    ) -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(segwit);
         let (client, server) = electrum_client_over_stub(|server| script_electrum(server, &p2pkh_hash, &p2pk_hash));
         let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, segwit);
         fields.tx_fee = fee;
@@ -8674,25 +8679,28 @@ mod order_posting_latency {
     #[test]
     fn dynamic_fee_estimate_is_read_once_per_order_posting_request() {
         let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), false);
-        let (spend_safe, receiver_fee) = block_on(with_request_fee_scope(async {
-            let first = coin.spend_safe_amount().await.unwrap();
-            let sender = coin
-                .get_sender_trade_fee(
-                    TradePreimageValue::Exact("0.001".parse().unwrap()),
-                    FeeApproxStage::OrderIssue,
-                )
-                .await
-                .unwrap();
-            assert!(sender.amount.to_decimal() > BigDecimal::from(0));
-            let receiver = coin
-                .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
-                .compat()
-                .await
-                .unwrap();
-            let second = coin.spend_safe_amount().await.unwrap();
-            assert_eq!(first, second);
-            (first, receiver)
-        }));
+        let (spend_safe, receiver_fee) = block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                let first = coin.spend_safe_amount().await.unwrap();
+                let sender = coin
+                    .get_sender_trade_fee(
+                        TradePreimageValue::Exact("0.001".parse().unwrap()),
+                        FeeApproxStage::OrderIssue,
+                    )
+                    .await
+                    .unwrap();
+                assert!(sender.amount.to_decimal() > BigDecimal::from(0));
+                let receiver = coin
+                    .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                    .compat()
+                    .await
+                    .unwrap();
+                let second = coin.spend_safe_amount().await.unwrap();
+                assert_eq!(first, second);
+                (first, receiver)
+            },
+        ));
         assert!(spend_safe.is_some());
         // 0.0001 coin/kB over the 496 byte HTLC spend.
         assert_eq!(
@@ -8722,14 +8730,17 @@ mod order_posting_latency {
     #[test]
     fn forced_min_relay_fee_is_read_once_per_order_posting_request() {
         let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), true);
-        block_on(with_request_fee_scope(async {
-            coin.spend_safe_amount().await.unwrap();
-            coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
-                .compat()
-                .await
-                .unwrap();
-            coin.spend_safe_amount().await.unwrap();
-        }));
+        block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                coin.spend_safe_amount().await.unwrap();
+                coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                    .compat()
+                    .await
+                    .unwrap();
+                coin.spend_safe_amount().await.unwrap();
+            },
+        ));
         assert_eq!(count_requests(&server, "blockchain.relayfee"), 1);
         assert_eq!(count_requests(&server, "blockchain.estimatefee"), 1);
 
@@ -8741,13 +8752,87 @@ mod order_posting_latency {
         assert_eq!(count_requests(&server, "blockchain.estimatefee"), 3);
     }
 
+    /// CRD ch.38 R38.6.4a item 4: the recently-spent-output cache shields a read that follows this node's own
+    /// broadcast from a session that has not seen it yet, whichever session answers. The broadcast goes to the
+    /// first server, the next unspent-list read is answered by the second, which still lists the spent output, and
+    /// so is the one after it by the third; the spent output stays out and its replacement is in.
+    #[test]
+    fn a_spent_output_stays_excluded_when_another_session_answers_the_read() {
+        use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stubs;
+        use crate::utxo::rpc_clients::UnspentInfo;
+        use chain::TransactionOutput;
+
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let servers = block_on(async {
+            [
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+            ]
+        });
+        for server in &servers {
+            // None of them has seen the broadcast: every one still lists the output the broadcast spends.
+            script_electrum(server, &p2pkh_hash, &p2pk_hash);
+            server.set_result("blockchain.transaction.broadcast", json!("ab".repeat(32)));
+        }
+        let client = block_on(electrum_client_over_stubs(&[&servers[0], &servers[1], &servers[2]]));
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Electrum(client),
+            None,
+            false,
+        ));
+        let address = my_address(&coin);
+
+        // The first read (the first server's turn) shows the output the node is about to spend.
+        let (unspents, guard) = block_on(get_all_unspent_ordered_list(&coin, &address)).unwrap();
+        drop(guard);
+        let spent: UnspentInfo = unspents.iter().find(|u| u.value == 900_000).cloned().unwrap();
+
+        // The node broadcasts a spend of it (priority routing: the first server), and records it as sent.
+        block_on(
+            coin.as_ref()
+                .rpc_client
+                .send_raw_transaction(vec![1, 2, 3].into())
+                .compat(),
+        )
+        .unwrap();
+        let change_script = output_script(&address, ScriptType::P2PKH).to_bytes();
+        block_on(async {
+            coin.as_ref().recently_spent_outpoints.lock().await.add_spent(
+                vec![spent.clone()],
+                H256::from([9; 32]),
+                vec![TransactionOutput {
+                    value: 800_000,
+                    script_pubkey: change_script,
+                }],
+            );
+        });
+
+        // The next two reads are answered by the second and the third server, which know nothing of the spend.
+        for _ in 0..2 {
+            let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &address)).unwrap();
+            let mut values: Vec<_> = unspents.iter().map(|u| u.value).collect();
+            values.sort();
+            assert_eq!(values, vec![100_000, 800_000], "the spent 900_000 is excluded");
+            assert!(unspents.iter().all(|u| u.outpoint != spent.outpoint));
+        }
+        let listed = |server: &StubServer| count_requests(server, "blockchain.scripthash.listunspent");
+        assert_eq!(count_requests(&servers[0], "blockchain.transaction.broadcast"), 1);
+        assert_eq!(count_requests(&servers[1], "blockchain.transaction.broadcast"), 0);
+        // Two lookups (P2PKH and P2PK) per read: the first server answered one read, the others one each.
+        assert_eq!([listed(&servers[0]), listed(&servers[1]), listed(&servers[2])], [
+            2, 2, 2
+        ]);
+    }
+
     /// A fixed-fee coin has nothing to read, in or out of a request.
     #[test]
     fn fixed_fee_coin_reads_nothing() {
         let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
-        block_on(with_request_fee_scope(async {
-            coin.spend_safe_amount().await.unwrap()
-        }));
+        block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async { coin.spend_safe_amount().await.unwrap() },
+        ));
         assert!(lookups(&server).is_empty());
     }
 }
