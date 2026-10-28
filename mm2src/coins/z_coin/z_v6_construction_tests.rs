@@ -27,7 +27,7 @@ const IRONWOOD_HEIGHT: u32 = 297;
 const V6_HEADER: [u8; 12] = [0x06, 0x00, 0x00, 0x80, 0x98, 0xb6, 0x84, 0xd8, 0x5b, 0x16, 0xa5, 0x37];
 
 /// Parameters shaped like Pirate's own test chain: mainnet address prefixes, Sapling at 61.
-fn params(ironwood_height: Option<u32>) -> ZcoinConsensusParams {
+pub(super) fn params(ironwood_height: Option<u32>) -> ZcoinConsensusParams {
     let mut cfg = json!({
         "overwinter_activation_height": 61,
         "sapling_activation_height": 61,
@@ -47,7 +47,7 @@ fn params(ironwood_height: Option<u32>) -> ZcoinConsensusParams {
     serde_json::from_value(cfg).unwrap()
 }
 
-fn standard_config(sapling_anchor: Option<sapling::Anchor>) -> BuildConfig {
+pub(super) fn standard_config(sapling_anchor: Option<sapling::Anchor>) -> BuildConfig {
     BuildConfig::Standard {
         sapling_anchor,
         orchard_anchor: None,
@@ -86,7 +86,7 @@ fn build_transparent_only(params: &ZcoinConsensusParams, height: u32) -> ZTransa
 }
 
 /// A prover for builds that contain no Sapling bundle, which must never be asked for a proof.
-struct NoProver;
+pub(super) struct NoProver;
 
 impl sapling::prover::SpendProver for NoProver {
     type Proof = ();

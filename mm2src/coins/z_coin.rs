@@ -1,7 +1,9 @@
+use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawInProgressStatus, WithdrawTaskHandle};
 use crate::utxo::rpc_clients::{ElectrumRpcRequest, UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps, UtxoRpcError,
                                UtxoRpcFut, UtxoRpcResult};
+use crate::utxo::utxo_builder::derive_activated_hd_secret;
 use crate::utxo::utxo_builder::{UtxoCoinBuildError, UtxoCoinBuildResult, UtxoCoinBuilderCommonOps,
                                 UtxoCoinWithIguanaPrivKeyBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
@@ -86,6 +88,8 @@ use zcash_client_sqlite::WalletDb;
 use zcash_proofs::prover::LocalTxProver;
 
 #[cfg(not(target_arch = "wasm32"))] mod z_htlc;
+mod z_htlc_key;
+pub use z_htlc_key::derive_swap_htlc_key_pair;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_htlc_live_probe;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1733,12 +1737,13 @@ pub async fn z_coin_from_conf_and_params(
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
     let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, &protocol_info)?;
+    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key)?;
     z_coin_from_conf_and_params_with_z_key(
         ctx,
         ticker,
         conf,
         params,
-        secp_priv_key,
+        &transparent_secret,
         #[cfg(not(target_arch = "wasm32"))]
         ctx.dbdir(),
         #[cfg(not(target_arch = "wasm32"))]
@@ -1748,6 +1753,43 @@ pub async fn z_coin_from_conf_and_params(
         backend,
     )
     .await
+}
+
+/// Selects the coin's transparent secp256k1 secret according to the active key policy
+/// (R39.6.4, "Transparent key under HD"; CRD ch.39 D39.5.a):
+///
+/// - **Iguana / legacy passphrase:** the coin's iguana secret, as before.
+/// - **HD (BIP39) wallet:** the key the UTXO builder activates for a UTXO coin's default
+///   address, `m/<derivation_path>/0'/0/0` of the coins-file `derivation_path`; the
+///   activation request cannot change it (its `account` selects only the Sapling account).
+///
+/// This secret is the coin's transparent key for every transparent use, and so the base key of
+/// the per-swap HTLC key (R39.5.9).
+///
+/// # Errors
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or
+/// when the HD policy is active and the coin entry has no usable `derivation_path`.
+pub(crate) fn transparent_secret_for_policy(
+    ctx: &MmArc,
+    conf: &Json,
+    secp_priv_key: &[u8],
+) -> Result<Vec<u8>, MmError<ZCoinBuildError>> {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+    match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::Iguana => Ok(secp_priv_key.to_vec()),
+        KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
+            if conf["derivation_path"].is_null() {
+                return MmError::err(ZCoinBuildError::HdDerivationError(
+                    "derivation_path is required for the HD-derived transparent key of a shielded coin".to_owned(),
+                ));
+            }
+            let derivation_path: HDPathToCoin = serde_json::from_value(conf["derivation_path"].clone())
+                .map_to_mm(|e| ZCoinBuildError::HdDerivationError(format!("invalid derivation_path: {e}")))?;
+            let secret = derive_activated_hd_secret(hd_ctx, &derivation_path, &PathToAddress::default())
+                .mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+            Ok(secret.as_slice().to_vec())
+        },
+    }
 }
 
 /// Selects the shielded (Sapling ZIP32) spending key according to the active key

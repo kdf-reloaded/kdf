@@ -400,7 +400,15 @@ impl SwapOps for ZCoin {
         Ok(None)
     }
 
-    fn get_htlc_key_pair(&self) -> Option<KeyPair> { Some(KeyPair::random_compressed()) }
+    // The shielded leg's HTLC key is derived per swap, never random (CRD ch.39 R39.5.6): see
+    // `derive_swap_htlc_key_pair`. The swap machines ask for it there, so this key-less answer is not used.
+    fn get_htlc_key_pair(&self) -> Option<KeyPair> { None }
+
+    fn derives_swap_htlc_key(&self) -> bool { true }
+
+    fn derive_swap_htlc_key_pair(&self, swap_unique_input: &[u8]) -> Result<KeyPair, String> {
+        self.derived_htlc_key_pair(swap_unique_input)
+    }
 }
 
 #[async_trait]
