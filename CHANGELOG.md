@@ -218,6 +218,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: CRD ch.51 R17, R29, T21.
 - **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
   - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
   - each server gets at most 120 seconds per check;
