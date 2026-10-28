@@ -471,8 +471,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
   shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
   clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
-  pair). The metrics now also show the node store's size and entry count, the number of stored change
-  histories and changes, tracked pubkeys, and queued trie updates. More in
+  pair). The metrics now also show the number of stored change histories and changes, tracked pubkeys, and
+  queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
+  sync for more than five minutes now receives a full snapshot instead of a delta (as it already
+  did after a write to the pair); within five minutes nothing changes. More in
   [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
