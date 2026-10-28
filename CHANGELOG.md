@@ -59,6 +59,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
   server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
   one connects; if none does, the error names each server. More in ch.38 §38.6.4.
+
+- **A node now reads a coin's balance only while it has a maker order selling that coin.** It used to
+  read the balance of every activated coin every 10 seconds, whether or not any order needed it, and
+  those reads competed with order posting for the same throttled Electrum session. Now the balance of
+  a coin is read every 30 seconds, and only while at least one of your maker orders has that coin as
+  its base; a coin that is only activated, or only the other side of your orders, is not read at all.
+  The interval is fixed and cannot be changed. For a market maker this means an order's volume
+  follows a deposit or spend within about 30 seconds instead of 10, and a freshly posted order
+  is checked against the balance read while it was created. An order restored at start or converted
+  from a timed-out taker order is re-checked once, 30 seconds after the node starts watching its coin.
+  Detail: PR #TBD; CRD ch.60 R60.4.5, R60.4.6.
+
 - **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
   shows that a node's copy of the maker's orders differs, the node asks another node for an update.
   It used to describe its copy by the maker's advertised state instead of its own, so while the maker
