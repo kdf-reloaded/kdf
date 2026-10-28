@@ -42,8 +42,8 @@ use libp2p_identity::PeerId;
 use libp2p_swarm::{
     behaviour::{AddressChange, ConnectionClosed, ConnectionEstablished, FromSwarm},
     dial_opts::DialOpts,
-    ConnectionDenied, ConnectionId, NetworkBehaviour, NotifyHandler, PollParameters, THandler,
-    THandlerInEvent, THandlerOutEvent, ToSwarm,
+    CloseConnection, ConnectionDenied, ConnectionId, NetworkBehaviour, NotifyHandler,
+    PollParameters, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use smallvec::SmallVec;
 
@@ -3719,36 +3719,48 @@ where
     fn handle_established_inbound_connection(
         &mut self,
         _: ConnectionId,
-        _: PeerId,
+        peer_id: PeerId,
         _: &Multiaddr,
         _: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         Ok(Handler::new(
             self.config.protocol_config(),
             self.config.idle_timeout(),
+            peer_id,
+            self.config.send_queue_config(),
         ))
     }
 
     fn handle_established_outbound_connection(
         &mut self,
         _: ConnectionId,
-        _: PeerId,
+        peer_id: PeerId,
         _: &Multiaddr,
         _: Endpoint,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         Ok(Handler::new(
             self.config.protocol_config(),
             self.config.idle_timeout(),
+            peer_id,
+            self.config.send_queue_config(),
         ))
     }
 
     fn on_connection_handler_event(
         &mut self,
         propagation_source: PeerId,
-        _connection_id: ConnectionId,
+        connection_id: ConnectionId,
         handler_event: THandlerOutEvent<Self>,
     ) {
         match handler_event {
+            HandlerEvent::SendQueueStuck => {
+                // The peer has not drained its send queue for the whole stuck period: close this
+                // connection. It may reconnect and resynchronize.
+                self.events.push_back(ToSwarm::CloseConnection {
+                    peer_id: propagation_source,
+                    connection: CloseConnection::One(connection_id),
+                });
+            }
             HandlerEvent::PeerKind(kind) => {
                 // We have identified the protocol this peer is using
 
