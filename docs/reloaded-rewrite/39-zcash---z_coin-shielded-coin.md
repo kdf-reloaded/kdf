@@ -3836,6 +3836,13 @@ which made the Electrum list mandatory.)*
 > Implemented: the list is kept and handed to the fallback, and activation still never
 > connects to it (the status update below describes the rest unchanged).
 
+> **Reference behavior (informative, black box, 2026-10-28).** The reference's 3.0.0-beta
+> release binary rejects a Light-mode request without `electrum_servers` as a parse error
+> naming the missing field, in line with the "required in Light" row of the §39.10 table.
+> Reloaded accepts both shapes, so a request that carries the field activates on either
+> implementation and one without it on Reloaded only. `docs/GLEEC_COMPATIBILITY.md`
+> ("ZHTLC backend") tells operators.
+
 > **Status update (reloaded, Step C).** Implemented and tested (T39.11.b): an empty
 > `light_wallet_d_servers` is a `CoinCreationError` naming the coin, raised before
 > the coin is built; `electrum_servers` and the connection counts are accepted, may
