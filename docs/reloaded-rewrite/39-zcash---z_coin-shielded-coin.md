@@ -4014,6 +4014,33 @@ precise opposite of the intent. The rule shall therefore be:
 > against a stale-cache endpoint has not been done (the criterion was evaluated against the
 > real endpoint set with the monitor script's readings, not with the daemon).
 
+R39.11.7b **Each endpoint votes once.** Before admission (R39.11.7a), the
+configured `light_wallet_d_servers` list shall be normalized and
+de-duplicated, keeping the configured order and the first spelling of each
+endpoint. Two entries name the same endpoint when they agree after
+normalization: scheme (an entry without one takes the scheme the client would
+use), lowercase host, port (the scheme's default when none is given), and no
+trailing slash. Each dropped duplicate is logged once as a warning naming
+both spellings. The branch vote, the "at least two endpoints" condition, and
+every other count in admission then see each endpoint once, so the list
+`[A, A, B]` is two endpoints and cannot produce a 2-to-1 majority. An empty
+list after de-duplication is refused as an empty list is today.
+
+Normalization cannot recognize one server published under two different host
+names, or behind two addresses. Such a server still votes twice; the
+configuration is responsible for listing independent endpoints.
+
+> **Provenance (2026-10-26).** Clean-room original Reloaded policy, written
+> from this repository's code and a report by a Pirate Chain developer; no
+> forbidden-corpus input. It adds to R39.11.7a without editing its gated
+> text.
+
+T39.11.7b *Duplicate endpoints.* `[A, A, B]` with A and B on different
+branches fails admission with no majority (one vote each), not a 2-to-1 win
+for A. `[https://a.example:443/, a.example, B]` keeps two endpoints, in
+configured order. A list made only of one endpoint's spellings is a single
+endpoint and is treated as one.
+
 ### 39.11.3 Chain-height authority
 
 R39.11.8 **Every consumer of the chain height.** The admitted backend's tip is

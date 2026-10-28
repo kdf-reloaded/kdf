@@ -1850,3 +1850,78 @@ async fn the_backend_probes_the_cache_and_never_uses_a_stale_cache_endpoint() {
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0].0, "mathnodes");
 }
+
+/// T39.11.7b / R39.11.7b: `[A, A, B]` with A and B on different branches is two endpoints with one
+/// vote each, so a fresh wallet fails with no majority instead of admitting A 2-to-1.
+#[tokio::test]
+async fn admission_counts_duplicate_endpoint_once() {
+    let transport = Arc::new(FakeTransport::default());
+    transport.serve("a", healthy(&[ARRR_TIP]));
+    let mut other_branch = healthy(&[ARRR_TIP]);
+    other_branch.info = Some(Ok(info(SAPLING_BRANCH, ARRR_TIP)));
+    transport.serve("b", other_branch);
+    let backend = backend_over(&transport, &["a", "a", "b"]);
+
+    assert_eq!(backend.servers, vec!["a".to_owned(), "b".to_owned()]);
+    match backend.admitted().await.unwrap_err() {
+        LightwalletdError::NoBranchMajority(observed) => assert!(
+            observed.contains("37a5165b x1") && observed.contains("76b809bb x1"),
+            "{observed}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(transport.called("a", "info"), 1);
+}
+
+/// T39.11.7b: spellings of one endpoint collapse to the first one, in configured order.
+#[test]
+fn endpoint_spellings_normalize_to_one() {
+    let (kept, dropped) = dedupe_lightwalletd_endpoints(vec![
+        "https://a.example:443/".to_owned(),
+        "a.example".to_owned(),
+        "B".to_owned(),
+    ]);
+    assert_eq!(kept, vec!["https://a.example:443/".to_owned(), "B".to_owned()]);
+    assert_eq!(dropped, vec![(
+        "a.example".to_owned(),
+        "https://a.example:443/".to_owned()
+    )]);
+
+    // Host case, an explicit default port and a trailing slash do not make a different endpoint;
+    // another port, another scheme or another host does.
+    let (kept, dropped) = dedupe_lightwalletd_endpoints(
+        [
+            "https://lightd.example",
+            "https://LIGHTD.EXAMPLE:443/",
+            "lightd.example:9067",
+            "http://lightd.example",
+            "lightd2.example",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect(),
+    );
+    assert_eq!(kept, vec![
+        "https://lightd.example".to_owned(),
+        "lightd.example:9067".to_owned(),
+        "http://lightd.example".to_owned(),
+        "lightd2.example".to_owned(),
+    ]);
+    assert_eq!(dropped.len(), 1);
+}
+
+/// T39.11.7b: a list made only of one endpoint's spellings is a single endpoint, and admission
+/// treats it as it treats any single endpoint (a fresh wallet has no majority of one).
+#[tokio::test]
+async fn only_duplicates_is_one_endpoint() {
+    let transport = Arc::new(FakeTransport::default());
+    transport.serve("a", healthy(&[ARRR_TIP]));
+    let backend = backend_over(&transport, &["a", "a"]);
+
+    assert_eq!(backend.servers, vec!["a".to_owned()]);
+    match backend.admitted().await.unwrap_err() {
+        LightwalletdError::NoBranchMajority(observed) => assert!(observed.contains("37a5165b x1"), "{observed}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(transport.called("a", "info"), 1);
+}

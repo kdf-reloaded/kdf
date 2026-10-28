@@ -271,6 +271,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   back.** Confirmations, and the decision that a transaction has expired, are now counted against
   the current tip, not against the highest one ever seen. A lagging server can now only make a wait
   longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
+- **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node checks its
+  `light_wallet_d_servers` against each other, a server listed twice, also under a different spelling
+  such as with or without `https://` or the default port, now counts once. Before, `[A, A, B]` let A
+  outvote B with only two real servers. Each dropped duplicate is logged. Detail: PR #113; CRD ch.39
+  R39.11.7b.
 - **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
   ignored and every listed server was connected; with `max_connected: 1` only one server is connected
   now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
