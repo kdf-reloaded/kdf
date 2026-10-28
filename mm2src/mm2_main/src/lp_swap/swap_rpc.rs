@@ -18,18 +18,24 @@ fn strip_platform_suffix(ticker: &str) -> &str { ticker.split('-').next().unwrap
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn fetch_completion_fiat_snapshot(swap: &SavedSwap) -> Option<FiatPriceSnapshot> {
-    let maker_coin = swap.maker_coin_ticker().ok()?;
-    let taker_coin = swap.taker_coin_ticker().ok()?;
-    let maker_coin = strip_platform_suffix(&maker_coin);
-    let taker_coin = strip_platform_suffix(&taker_coin);
-
     let (status, _, body) = slurp_url(PRICE_SERVICE_ENDPOINT).await.ok()?;
     if status != StatusCode::OK {
         return None;
     }
 
-    let response = std::str::from_utf8(&body).ok()?.trim();
-    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response).ok()?;
+    let response = std::str::from_utf8(&body).ok()?;
+    fiat_snapshot_from_price_response(swap, response)
+}
+
+/// Picks the reference prices of the two coins of `swap` out of a price-service response body.
+#[cfg(not(target_arch = "wasm32"))]
+fn fiat_snapshot_from_price_response(swap: &SavedSwap, response: &str) -> Option<FiatPriceSnapshot> {
+    let maker_coin = swap.maker_coin_ticker().ok()?;
+    let taker_coin = swap.taker_coin_ticker().ok()?;
+    let maker_coin = strip_platform_suffix(&maker_coin);
+    let taker_coin = strip_platform_suffix(&taker_coin);
+
+    let prices: HashMap<String, FiatTickerInfo> = serde_json::from_str(response.trim()).ok()?;
 
     let maker_coin_usd_price = prices.get(maker_coin)?.last_price.to_string();
     let taker_coin_usd_price = prices.get(taker_coin)?.last_price.to_string();
@@ -72,9 +78,18 @@ pub async fn insert_new_swap_to_db_with_type(
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn save_stats_swap(ctx: &MmArc, swap: &SavedSwap) -> Result<(), String> {
     let fiat_snapshot = fetch_completion_fiat_snapshot(swap).await;
+    save_stats_swap_with_snapshot(ctx, swap, fiat_snapshot.as_ref()).await
+}
 
+/// Stores the record in the statistics store with the given fiat reference prices.
+#[cfg(not(target_arch = "wasm32"))]
+async fn save_stats_swap_with_snapshot(
+    ctx: &MmArc,
+    swap: &SavedSwap,
+    fiat_snapshot: Option<&FiatPriceSnapshot>,
+) -> Result<(), String> {
     try_s!(swap.save_to_stats_db(ctx).await);
-    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, fiat_snapshot.as_ref());
+    crate::mm2::database::stats_swaps::add_swap_to_index(&ctx.sqlite_connection(), swap, fiat_snapshot);
     Ok(())
 }
 
@@ -196,23 +211,38 @@ pub(crate) struct SwapStatus {
     pub(crate) data: SavedSwap,
 }
 
-/// Broadcasts `my` swap status to P2P network
-pub(crate) async fn broadcast_my_swap_status(ctx: &MmArc, uuid: Uuid) -> Result<(), String> {
+/// Loads the node's own record of the swap and redacts it for the terminal report (CRD ch.51 R50A items 2-3).
+/// The stored record is not changed: only the loaded copy is redacted.
+async fn load_redacted_my_swap(ctx: &MmArc, uuid: Uuid) -> Result<SavedSwap, String> {
     let mut status = match try_s!(SavedSwap::load_my_swap_from_db(ctx, uuid).await) {
         Some(status) => status,
         None => return ERR!("swap data is not found"),
     };
     status.hide_secrets();
+    Ok(status)
+}
 
-    #[cfg(not(target_arch = "wasm32"))]
-    try_s!(save_stats_swap(ctx, &status).await);
-
+/// Publishes the redacted record as the unsigned `swapstatus` object on the swap topic (CRD ch.51 R48).
+fn publish_swap_status(ctx: &MmArc, status: SavedSwap) {
+    let uuid = *status.uuid();
     let status = SwapStatus {
         method: "swapstatus".into(),
         data: status,
     };
     let msg = json::to_vec(&status).expect("Swap status ser should never fail");
     broadcast_p2p_msg(ctx, vec![swap_topic(&uuid)], msg, None);
+}
+
+/// Makes the terminal swap-status report of the node's own swap (CRD ch.51 R48, R50A): loads and redacts the
+/// record, stores it in the node's own statistics store on a native build, then publishes it to the P2P network.
+/// The caller makes the report for every legacy swap termination, whatever the coins or the outcome.
+pub(crate) async fn broadcast_my_swap_status(ctx: &MmArc, uuid: Uuid) -> Result<(), String> {
+    let status = try_s!(load_redacted_my_swap(ctx, uuid).await);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    try_s!(save_stats_swap(ctx, &status).await);
+
+    publish_swap_status(ctx, status);
     Ok(())
 }
 
@@ -1148,3 +1178,7 @@ mod lp_swap_tests {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "terminal_report_tests.rs"]
+mod terminal_report_tests;

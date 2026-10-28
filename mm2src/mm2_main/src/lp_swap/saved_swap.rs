@@ -6,7 +6,7 @@ use coins::lp_coinfind;
 use derive_more::Display;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use rpc::v1::types::H256 as H256Json;
+use rpc::v1::types::{H256 as H256Json, H264 as H264Json};
 use uuid::Uuid;
 
 pub type SavedSwapResult<T> = Result<T, MmError<SavedSwapError>>;
@@ -117,12 +117,27 @@ impl SavedSwap {
         }
     }
 
+    /// Redacts the record for the terminal swap-status report (CRD ch.51 R48, R50, R50A item 3).
+    ///
+    /// Exactly the fields of the start event named below are altered; no other event and no other
+    /// start-event field is touched:
+    /// - maker record: the secret and the taker's public key are zeroed;
+    /// - taker record: the maker's public key is zeroed;
+    /// - both: when the swap signed its peer-to-peer traffic with a per-swap ephemeral key (the node's own coin
+    ///   is a privacy coin), the node's own persistent public key is zeroed, and in every case the ephemeral key
+    ///   and the two per-swap HTLC private keys are emptied.
+    ///
+    /// The record is modified in place: callers must pass a copy, never the node's own stored record.
     pub fn hide_secrets(&mut self) {
         match self {
             SavedSwap::Maker(swap) => {
                 if let Some(ref mut event) = swap.events.first_mut() {
                     if let MakerSwapEvent::Started(ref mut data) = event.event {
                         data.secret = H256Json::default();
+                        data.taker = H256Json::default();
+                        if data.p2p_privkey.is_some() {
+                            data.my_persistent_pub = H264Json::default();
+                        }
                         data.maker_coin_htlc_privkey = None;
                         data.taker_coin_htlc_privkey = None;
                         data.p2p_privkey = None;
@@ -132,6 +147,10 @@ impl SavedSwap {
             SavedSwap::Taker(swap) => {
                 if let Some(ref mut event) = swap.events.first_mut() {
                     if let TakerSwapEvent::Started(ref mut data) = event.event {
+                        data.maker = H256Json::default();
+                        if data.p2p_privkey.is_some() {
+                            data.my_persistent_pub = H264Json::default();
+                        }
                         data.maker_coin_htlc_privkey = None;
                         data.taker_coin_htlc_privkey = None;
                         data.p2p_privkey = None;
