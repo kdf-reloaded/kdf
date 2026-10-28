@@ -34,6 +34,11 @@ fn test_timings() -> ElectrumPoolTimings {
         call_budget: ms(3_000),
         budget_reserve: ms(100),
         round_floor: ms(100),
+        remeasure_limit: ms(600),
+        poor_demotion: ms(900),
+        stale_floor: ms(300),
+        latency_floor: ms(300),
+        slow_floor: ms(60),
     }
 }
 
@@ -89,6 +94,7 @@ fn pool_client_configured(
         timings,
         order,
         spread_reads,
+        block_interval: None,
     });
     // A server that cannot be used stays in the pool as removed; the tests look at the snapshot.
     let _ = client.add_servers(&requests);
@@ -1378,8 +1384,8 @@ fn t38_6_4_13_r_with_the_switch_at_listed_the_listed_order_is_kept() {
     });
 }
 
-/// R38.6.4b-R item 1: `random` is the default, `listed` keeps the listed order, anything else is `random` with
-/// one warning naming the switch and the value.
+/// R38.6.4b-R item 1: `random` is the default, `listed` keeps the listed order, `mixed` and `measured` are
+/// recognized (R38.6.4l), anything else is `random` with one warning naming the switch and the value.
 #[test]
 fn t38_6_4_13_r_the_switch_parses_as_stated() {
     let order_of = |conf: Json| parse_server_order(&conf);
@@ -1391,10 +1397,16 @@ fn t38_6_4_13_r_the_switch_parses_as_stated() {
     let (order, warning) = order_of(json!({ "electrum_server_order": "listed" }));
     assert!(matches!(order, ServerOrder::Listed));
     assert_eq!(warning, None);
+    // The measured values are recognized (R38.6.4b-R item 3, T38.6.4l.1).
+    let (order, warning) = order_of(json!({ "electrum_server_order": "mixed" }));
+    assert!(matches!(order, ServerOrder::Mixed));
+    assert_eq!(warning, None);
+    let (order, warning) = order_of(json!({ "electrum_server_order": "measured" }));
+    assert!(matches!(order, ServerOrder::Measured));
+    assert_eq!(warning, None);
 
     for (value, shown) in [
-        (json!("mixed"), "mixed"),
-        (json!("measured"), "measured"),
+        (json!("Mixed"), "Mixed"),
         (json!("Listed"), "Listed"),
         (json!(true), "true"),
         (json!(1), "1"),
@@ -1732,4 +1744,652 @@ fn t38_6_4_14_the_switch_in_mm2_json_defaults_to_on_and_false_turns_it_off() {
     assert!(warning.unwrap().contains("electrum_spread_reads"));
     // The pool option defaults to on.
     assert!(ElectrumPoolOptions::default().spread_reads);
+}
+
+// ---- CRD ch.38 R38.6.4l: the measured server order ---------------------------------------------------------------
+
+const HEADERS: &str = "blockchain.headers.subscribe";
+
+/// A random source for the pool: first `numbers`, then `fallback` for ever. A draw of 0.99 leaves a shuffle as
+/// it is, and a draw of 0 takes the first of the places left.
+fn script_draw(numbers: &[f64], fallback: f64) -> impl FnMut() -> f64 + Send + 'static {
+    let mut numbers = numbers.to_vec().into_iter();
+    move || numbers.next().unwrap_or(fallback)
+}
+
+/// The numbers that leave the first shuffle of `servers` servers in the listed order.
+fn identity(servers: usize) -> Vec<f64> { vec![0.99; servers.saturating_sub(1)] }
+
+/// A pool over `servers` with a measured (or other) `order`, whose random choices come from `draw`.
+fn measured_pool(
+    servers: &[&StubServer],
+    max_connected: Option<usize>,
+    order: ServerOrder,
+    timings: ElectrumPoolTimings,
+    block_interval: Option<Duration>,
+    draw: impl FnMut() -> f64 + Send + 'static,
+) -> Arc<ElectrumClientImpl> {
+    let mut client = ElectrumClientImpl::new(TICKER.into(), vec![]);
+    client.configure_pool(ElectrumPoolOptions {
+        min_connected: 1,
+        max_connected,
+        client_name: Some(CLIENT_NAME.into()),
+        timings,
+        order,
+        spread_reads: false,
+        block_interval,
+    });
+    client.pool.set_draw_for_test(draw);
+    let requests: Vec<ElectrumRpcRequest> = servers.iter().map(|server| server.request()).collect();
+    let _ = client.add_servers(&requests);
+    Arc::new(client)
+}
+
+/// Runs the activation probe of `client` to its end and starts the pool's background tasks.
+async fn activate_and_start(client: &Arc<ElectrumClientImpl>) {
+    client.activation_probe().await.unwrap();
+    wait_for_probe_end(client).await;
+    client.start_pool(false);
+}
+
+fn snap_of(client: &ElectrumClientImpl, server: &StubServer) -> ServerStateSnapshot {
+    client
+        .pool_snapshot()
+        .into_iter()
+        .find(|state| state.addr == server.addr())
+        .expect("the server is in the pool")
+}
+
+fn rank_of(client: &ElectrumClientImpl) -> Vec<String> { ranked_addrs(client) }
+
+/// The methods a stub received, in order, of every message.
+fn methods_received(server: &StubServer) -> Vec<String> {
+    server
+        .messages()
+        .iter()
+        .flat_map(|message| match message {
+            Json::Array(batch) => batch.clone(),
+            single => vec![single.clone()],
+        })
+        .map(|request| request["method"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// The test timings with a stale limit that never strikes: for the tests that are not about P1 of a lone
+/// connection, whose stub never pushes a header.
+fn quiet_timings() -> ElectrumPoolTimings {
+    ElectrumPoolTimings {
+        stale_floor: ms(60_000),
+        ..test_timings()
+    }
+}
+
+async fn stub_at(delay: u64, tip: u64) -> StubServer {
+    let server = StubServer::start(StubBehavior::Answer).await;
+    server.set_reply_delay(HEADERS, ms(delay));
+    server.set_tip(tip);
+    server
+}
+
+/// T38.6.4l.1: `mixed` and `measured` parse as themselves; under `random` and `listed` no stub gets a header
+/// request and no trigger runs.
+#[test]
+fn t38_6_4l_1_random_and_listed_measure_nothing() {
+    block_on(async {
+        for order in [ServerOrder::Random, ServerOrder::Listed] {
+            let servers = [stub_at(5, 100).await, stub_at(5, 100).await, stub_at(5, 100).await];
+            let client = measured_pool(
+                &[&servers[0], &servers[1], &servers[2]],
+                None,
+                order.clone(),
+                test_timings(),
+                None,
+                script_draw(&[], 0.5),
+            );
+            activate_and_start(&client).await;
+            // A slow request is not a sample, and a re-measure round does not run.
+            servers[0].set_reply_delay("blockchain.block.header", ms(150));
+            for _ in 0..6 {
+                ask(&client, "blockchain.block.header").await.unwrap();
+            }
+            client.pool.run_remeasure_round().await;
+            Timer::sleep(0.2).await;
+            for server in &servers {
+                assert_eq!(server.requests(HEADERS), 0, "{order:?}");
+            }
+            assert!(client.pool.remeasure_rounds().is_empty(), "{order:?}");
+            assert!(client
+                .pool_snapshot()
+                .iter()
+                .all(|state| state.samples == 0 && !state.poor));
+        }
+    });
+}
+
+/// T38.6.4l.2: each stub gets exactly one header request in the probe, right after `server.version`; the figures
+/// are the stubs' reply delays and tips; a stub that does not answer has no measurement.
+#[test]
+fn t38_6_4l_2_the_activation_round_measures_each_server_once() {
+    block_on(async {
+        let (a, b) = (stub_at(30, 100).await, stub_at(60, 100).await);
+        let c = StubServer::start(StubBehavior::BlackHoleRequests).await;
+        let client = measured_pool(
+            &[&a, &b, &c],
+            None,
+            ServerOrder::Mixed,
+            test_timings(),
+            None,
+            // The first shuffle leaves the listed order; the weighted draw then takes the first place left.
+            script_draw(&[0.99, 0.99, 0., 0., 0.], 0.),
+        );
+        client.activation_probe().await.unwrap();
+        wait_for_probe_end(&client).await;
+        for server in [&a, &b, &c] {
+            assert_eq!(server.requests(HEADERS), 1);
+            assert_eq!(methods_received(server)[..2], ["server.version", HEADERS]);
+        }
+        let (sa, sb, sc) = (snap_of(&client, &a), snap_of(&client, &b), snap_of(&client, &c));
+        let in_range = |ms_measured: Option<f64>, delay: f64| {
+            ms_measured.map_or(false, |measured| measured >= delay && measured < delay + 40.)
+        };
+        assert!(in_range(sa.activation_ms, 30.), "{sa:?}");
+        assert!(in_range(sb.activation_ms, 60.), "{sb:?}");
+        assert_eq!(sc.activation_ms, None, "{sc:?}");
+        assert_eq!((sa.height, sb.height), (Some(100), Some(100)));
+        // The rank: the measured servers first, the silent one after them.
+        assert_eq!(rank_of(&client), vec![a.addr(), b.addr(), c.addr()]);
+    });
+}
+
+/// T38.6.4l.3 and T38.6.4l.6: with tips at H, H - 1 and H - 2 the third server ranks last; the measured rank
+/// takes effect only when the probe ends, and the set, the routing and the displacement follow it afterwards.
+#[test]
+fn t38_6_4l_6_the_measured_rank_takes_effect_when_the_probe_ends() {
+    block_on(async {
+        // Listed: s0 answers its header request last (250 ms), s1 after 60 ms, s2 after 10 ms.
+        let servers = [stub_at(250, 100).await, stub_at(60, 100).await, stub_at(10, 100).await];
+        let client = measured_pool(
+            &[&servers[0], &servers[1], &servers[2]],
+            Some(1),
+            ServerOrder::Measured,
+            quiet_timings(),
+            None,
+            script_draw(&identity(3), 0.5),
+        );
+        let listed: Vec<String> = servers.iter().map(|server| server.addr()).collect();
+        let started = Instant::now();
+        client.activation_probe().await.unwrap();
+        // The build returns on the first establishment, long before the slowest header answer, and the rank is
+        // still the uniform draw.
+        assert!(started.elapsed() < ms(200), "{:?}", started.elapsed());
+        assert_eq!(rank_of(&client), listed);
+        assert_eq!(snap_of(&client, &servers[0]).activation_ms, None);
+
+        wait_for_probe_end(&client).await;
+        assert!(started.elapsed() >= ms(250), "the probe ended before the last answer");
+        let measured_rank = vec![servers[2].addr(), servers[1].addr(), servers[0].addr()];
+        assert_eq!(rank_of(&client), measured_rank);
+        // The probe kept the highest-ranked server of the uniform draw (s0); the measured rank reaches the
+        // set through the next pass, once the suspension of the released servers has lapsed.
+        assert_eq!(snap_of(&client, &servers[0]).maintained, true);
+        client.start_pool(false);
+        wait_until("the suspension of the best server to lapse", || {
+            snap_of(&client, &servers[2]).suspended_until.is_none()
+        })
+        .await;
+        client.pool.trigger();
+        wait_until("the best server displaces the first", || maintained(&client) == vec![0]).await;
+        assert_eq!(snap(&client, 0).addr, servers[2].addr());
+        assert_eq!(ask(&client, "server.ping").await.unwrap(), servers[2].addr());
+
+        // A re-activation measures again.
+        let again = measured_pool(
+            &[&servers[0], &servers[1], &servers[2]],
+            Some(1),
+            ServerOrder::Measured,
+            quiet_timings(),
+            None,
+            script_draw(&identity(3), 0.5),
+        );
+        again.activation_probe().await.unwrap();
+        wait_for_probe_end(&again).await;
+        // One request per server for each activation round; the best server also joined the first pool through
+        // a maintenance pass with no header request sent over it, so it sent one more on joining (T38.6.4l.15).
+        for (index, server) in servers.iter().enumerate() {
+            assert_eq!(
+                server.requests(HEADERS),
+                if index == 2 { 3 } else { 2 },
+                "server {index}"
+            );
+        }
+    });
+}
+
+/// T38.6.4l.3: a server two blocks behind ranks after every eligible one.
+#[test]
+fn t38_6_4l_3_a_server_two_blocks_behind_ranks_last() {
+    block_on(async {
+        // The lagging server is the fastest.
+        let servers = [stub_at(40, 100).await, stub_at(40, 99).await, stub_at(5, 98).await];
+        let client = measured_pool(
+            &[&servers[0], &servers[1], &servers[2]],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&identity(3), 0.5),
+        );
+        client.activation_probe().await.unwrap();
+        wait_for_probe_end(&client).await;
+        let rank = rank_of(&client);
+        assert_eq!(rank[2], servers[2].addr(), "{rank:?}");
+        assert!(rank[..2].contains(&servers[0].addr()) && rank[..2].contains(&servers[1].addr()));
+    });
+}
+
+/// T38.6.4l.7: with two maintained connections, a connection two blocks behind triggers on its second
+/// notification; one block behind never does.
+#[test]
+fn t38_6_4l_7_p1_with_two_maintained_connections() {
+    block_on(async {
+        let (a, b) = (stub_at(5, 100).await, stub_at(5, 100).await);
+        let client = measured_pool(
+            &[&a, &b],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&identity(2), 0.5),
+        );
+        activate_and_start(&client).await;
+        assert_eq!(maintained(&client).len(), 2);
+
+        // One block behind: never.
+        for _ in 0..4 {
+            b.push_header(99);
+        }
+        Timer::sleep(0.15).await;
+        assert!(!snap_of(&client, &b).poor);
+
+        // Two blocks behind: one notification does not trigger, two consecutive ones do.
+        b.push_header(98);
+        Timer::sleep(0.15).await;
+        assert!(!snap_of(&client, &b).poor);
+        b.push_header(98);
+        wait_until("the lagging connection to be marked poor", || snap_of(&client, &b).poor).await;
+        assert!(!snap_of(&client, &a).poor);
+        // It stays maintained and keeps answering.
+        assert_eq!(maintained(&client).len(), 2);
+    });
+}
+
+/// T38.6.4l.7: a notification that is not lagging resets the count of consecutive ones.
+#[test]
+fn t38_6_4l_7_a_notification_in_between_resets_the_count() {
+    block_on(async {
+        let (a, b) = (stub_at(5, 100).await, stub_at(5, 100).await);
+        let client = measured_pool(
+            &[&a, &b],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&identity(2), 0.5),
+        );
+        activate_and_start(&client).await;
+        for height in [98, 100, 98, 100, 98] {
+            b.push_header(height);
+            Timer::sleep(0.05).await;
+        }
+        Timer::sleep(0.1).await;
+        assert!(!snap_of(&client, &b).poor);
+    });
+}
+
+/// T38.6.4l.15: under `mixed` and `measured`, a server that joins through an ordinary maintenance pass, with no
+/// measuring connection, gets exactly one header request right after joining, and P1 then covers it; under
+/// `random` the same join sends none.
+#[test]
+fn t38_6_4l_15_a_connection_joining_through_a_pass_sends_a_header_request() {
+    block_on(async {
+        for order in [ServerOrder::Mixed, ServerOrder::Measured] {
+            let (a, b) = (stub_at(5, 100).await, stub_at(5, 100).await);
+            let client = measured_pool(
+                &[&a, &b],
+                None,
+                order.clone(),
+                test_timings(),
+                None,
+                script_draw(&identity(2), 0.5),
+            );
+            // No activation probe: both servers join through the first maintenance pass.
+            client.start_pool(false);
+            wait_until("both servers to join", || maintained(&client).len() == 2).await;
+            wait_until("both header requests to be answered", || {
+                snap_of(&client, &a).height == Some(100) && snap_of(&client, &b).height == Some(100)
+            })
+            .await;
+            // Exactly one, right after `server.version`, and no measuring connection.
+            Timer::sleep(0.2).await;
+            for server in [&a, &b] {
+                assert_eq!(server.requests(HEADERS), 1, "{order:?}");
+                assert_eq!(methods_received(server)[..2], ["server.version", HEADERS], "{order:?}");
+                assert_eq!(server.accepted(), 1, "{order:?}");
+            }
+            // The request is not a sample of the smoothed latency, and no re-measure round ran.
+            assert!(client.pool_snapshot().iter().all(|state| state.samples == 0));
+            assert!(client.pool.remeasure_rounds().is_empty());
+
+            // P1 covers the joined connection: two consecutive notifications 2 blocks behind trigger it.
+            b.push_header(98);
+            Timer::sleep(0.15).await;
+            assert!(!snap_of(&client, &b).poor, "{order:?}");
+            b.push_header(98);
+            wait_until("the lagging connection to be marked poor", || snap_of(&client, &b).poor).await;
+            assert!(!snap_of(&client, &a).poor, "{order:?}");
+        }
+
+        // Under `random` the same join sends no header request.
+        let (a, b) = (stub_at(5, 100).await, stub_at(5, 100).await);
+        let client = measured_pool(
+            &[&a, &b],
+            None,
+            ServerOrder::Random,
+            test_timings(),
+            None,
+            script_draw(&[], 0.5),
+        );
+        client.start_pool(false);
+        wait_until("both servers to join", || maintained(&client).len() == 2).await;
+        Timer::sleep(0.3).await;
+        assert_eq!(a.requests(HEADERS) + b.requests(HEADERS), 0);
+    });
+}
+
+/// T38.6.4l.8: with one maintained connection, no header notification for longer than the limit triggers; a
+/// notification restarts the count; the limit grows with the coin's block interval.
+#[test]
+fn t38_6_4l_8_p1_with_one_maintained_connection() {
+    block_on(async {
+        // No block interval: the floor (300 ms in this test).
+        let a = stub_at(5, 100).await;
+        let client = measured_pool(
+            &[&a],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&[], 0.5),
+        );
+        let started = Instant::now();
+        activate_and_start(&client).await;
+        Timer::sleep(0.12).await;
+        assert!(!snap_of(&client, &a).poor);
+        // A notification restarts the count.
+        let notified = Instant::now();
+        a.push_header(101);
+        Timer::sleep(0.2).await;
+        assert!(!snap_of(&client, &a).poor, "{:?}", started.elapsed());
+        wait_until("the lone connection to turn stale", || snap_of(&client, &a).poor).await;
+        assert!(notified.elapsed() >= ms(300), "{:?}", notified.elapsed());
+        assert_eq!(maintained(&client).len(), 1);
+
+        // A block interval of 200 ms makes the limit 600 ms.
+        let b = stub_at(5, 100).await;
+        let client = measured_pool(
+            &[&b],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            Some(ms(200)),
+            script_draw(&[], 0.5),
+        );
+        let started = Instant::now();
+        activate_and_start(&client).await;
+        Timer::sleep(0.45).await;
+        assert!(!snap_of(&client, &b).poor);
+        wait_until("the connection to turn stale", || snap_of(&client, &b).poor).await;
+        assert!(started.elapsed() >= ms(600), "{:?}", started.elapsed());
+    });
+}
+
+/// T38.6.4l.8: a maintained connection over which no header notification can arrive never triggers P1.
+#[test]
+fn t38_6_4l_8_a_connection_without_notifications_never_turns_stale() {
+    block_on(async {
+        // No tip: the header answer has no height, so nothing is measured and nothing is pushed.
+        let a = StubServer::start(StubBehavior::Answer).await;
+        let client = measured_pool(
+            &[&a],
+            None,
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&[], 0.5),
+        );
+        activate_and_start(&client).await;
+        Timer::sleep(1.0).await;
+        assert!(!snap_of(&client, &a).poor);
+        assert!(client.pool.remeasure_rounds().is_empty());
+    });
+}
+
+/// T38.6.4l.9 and T38.6.4l.10: P2 needs five samples; the connection stays maintained and keeps answering; a
+/// further trigger restarts the poor-demotion mark.
+#[test]
+fn t38_6_4l_9_p2_needs_five_slow_samples() {
+    block_on(async {
+        let a = stub_at(10, 100).await;
+        let client = measured_pool(
+            &[&a],
+            None,
+            ServerOrder::Measured,
+            quiet_timings(),
+            None,
+            script_draw(&[], 0.5),
+        );
+        activate_and_start(&client).await;
+        a.set_reply_delay("blockchain.block.header", ms(200));
+        for sample in 1..=4 {
+            ask(&client, "blockchain.block.header").await.unwrap();
+            Timer::sleep(0.03).await;
+            let state = snap_of(&client, &a);
+            assert_eq!(state.samples, sample);
+            assert!(!state.poor, "{state:?}");
+        }
+        ask(&client, "blockchain.block.header").await.unwrap();
+        wait_until("the slow connection to be marked poor", || snap_of(&client, &a).poor).await;
+        let first = snap_of(&client, &a);
+        assert!(first.smoothed_ms.unwrap() > 150.);
+
+        // It stays maintained and keeps answering (T38.6.4l.10); a further slow sample restarts the mark.
+        assert_eq!(maintained(&client), vec![0]);
+        ask(&client, "blockchain.block.header").await.unwrap();
+        wait_until("the mark to restart", || {
+            snap_of(&client, &a).poor_until > first.poor_until
+        })
+        .await;
+        assert_eq!(maintained(&client), vec![0]);
+    });
+}
+
+/// T38.6.4l.11: no stub outside the maintained set gets a header request while nothing triggers, however many
+/// maintenance passes run.
+#[test]
+fn t38_6_4l_11_nothing_measures_on_a_schedule() {
+    block_on(async {
+        let servers = [stub_at(5, 100).await, stub_at(10, 100).await, stub_at(15, 100).await];
+        let timings = ElectrumPoolTimings {
+            maintenance_interval: ms(80),
+            ..quiet_timings()
+        };
+        let client = measured_pool(
+            &[&servers[0], &servers[1], &servers[2]],
+            Some(1),
+            ServerOrder::Measured,
+            timings,
+            None,
+            script_draw(&identity(3), 0.5),
+        );
+        activate_and_start(&client).await;
+        let counts: Vec<usize> = servers.iter().map(|server| server.requests(HEADERS)).collect();
+        assert_eq!(counts, vec![1, 1, 1]);
+        Timer::sleep(1.5).await;
+        let after: Vec<usize> = servers.iter().map(|server| server.requests(HEADERS)).collect();
+        assert_eq!(after, counts);
+        assert!(client.pool.remeasure_rounds().is_empty());
+    });
+}
+
+/// Four servers answering their header request in 10, 20, 30 and 40 ms, ranked in that order, with the first
+/// two maintained (`max_connected` 2), the second made slow so that it is triggered.
+async fn replacement_scenario(order: ServerOrder, draw: Vec<f64>) -> ([StubServer; 4], Arc<ElectrumClientImpl>) {
+    let servers = [
+        stub_at(10, 100).await,
+        stub_at(20, 100).await,
+        stub_at(30, 100).await,
+        stub_at(40, 100).await,
+    ];
+    let client = measured_pool(
+        &[&servers[0], &servers[1], &servers[2], &servers[3]],
+        Some(2),
+        order,
+        test_timings(),
+        None,
+        script_draw(&draw, 0.99),
+    );
+    client.activation_probe().await.unwrap();
+    wait_for_probe_end(&client).await;
+    assert_eq!(maintained(&client), vec![0, 1]);
+    assert_eq!(
+        rank_of(&client),
+        servers.iter().map(|server| server.addr()).collect::<Vec<_>>()
+    );
+    wait_until("the released servers to leave their suspension", || {
+        client
+            .pool_snapshot()
+            .iter()
+            .all(|state| state.suspended_until.is_none())
+    })
+    .await;
+    client.start_pool(false);
+    (servers, client)
+}
+
+/// Makes the second server slow: five pings that take 200 ms each.
+async fn make_second_server_slow(servers: &[StubServer; 4], client: &Arc<ElectrumClientImpl>) {
+    servers[1].set_reply_delay("server.ping", ms(200));
+    for _ in 0..5 {
+        client.pool.ping_maintained().await;
+    }
+}
+
+/// T38.6.4l.12: with rank A, B, C, D, A and B maintained and B triggered, a draw choosing D leaves A and D
+/// maintained and the rank A, D, C, B; D joins over its measuring connection and C's is released.
+#[test]
+fn t38_6_4l_12_the_replacement_takes_the_poor_servers_place() {
+    block_on(async {
+        // The first shuffle leaves the order; the activation round takes the first place left each time; the
+        // replacement draw (0.99) chooses the last of the two candidates.
+        let (servers, client) =
+            replacement_scenario(ServerOrder::Mixed, vec![0.99, 0.99, 0.99, 0., 0., 0., 0., 0.99]).await;
+        // A watched script hash exists while the servers are measured (T38.6.4l.14).
+        ElectrumClient(client.clone())
+            .subscribe_scripthash("aa".to_owned())
+            .await
+            .unwrap();
+        make_second_server_slow(&servers, &client).await;
+
+        wait_until("the replacement to join", || snap_of(&client, &servers[3]).maintained).await;
+        wait_until("the poor server to leave", || !snap_of(&client, &servers[1]).maintained).await;
+        assert_eq!(rank_of(&client), vec![
+            servers[0].addr(),
+            servers[3].addr(),
+            servers[2].addr(),
+            servers[1].addr()
+        ]);
+        assert!(snap_of(&client, &servers[0]).maintained);
+        assert!(!snap_of(&client, &servers[2]).maintained);
+        // D joined over its measuring connection, without a second one; C's measuring connection is gone.
+        assert_eq!(servers[3].accepted(), 2);
+        assert_eq!(servers[3].open_connections(), 1);
+        assert_eq!(servers[2].accepted(), 2);
+        wait_until("the measuring connection of C to close", || {
+            servers[2].open_connections() == 0
+        })
+        .await;
+        assert_eq!(client.pool.remeasure_rounds().len(), 1);
+
+        // T38.6.4l.14: C was measured twice and did not join: version negotiation and the header request alone.
+        for method in methods_received(&servers[2]) {
+            assert!(method == "server.version" || method == HEADERS, "{method}");
+        }
+    });
+}
+
+/// T38.6.4l.12: under `measured` the candidate of highest quality is chosen.
+#[test]
+fn t38_6_4l_12_under_measured_the_best_candidate_is_chosen() {
+    block_on(async {
+        let (servers, client) = replacement_scenario(ServerOrder::Measured, identity(4)).await;
+        // In the round the last candidate answers fastest.
+        servers[3].set_reply_delay(HEADERS, ms(2));
+        servers[2].set_reply_delay(HEADERS, ms(40));
+        make_second_server_slow(&servers, &client).await;
+        wait_until("the replacement to join", || snap_of(&client, &servers[3]).maintained).await;
+        wait_until("the poor server to leave", || !snap_of(&client, &servers[1]).maintained).await;
+        assert_eq!(rank_of(&client), vec![
+            servers[0].addr(),
+            servers[3].addr(),
+            servers[2].addr(),
+            servers[1].addr()
+        ]);
+    });
+}
+
+/// T38.6.4l.13 and T38.6.4l.11: with every candidate two or more blocks behind, the poor server stays
+/// maintained, the rank is unchanged, and the next round starts no earlier than the limit later.
+#[test]
+fn t38_6_4l_13_without_an_eligible_candidate_the_poor_server_stays() {
+    block_on(async {
+        let a = stub_at(10, 100).await;
+        let (b, c) = (stub_at(10, 95).await, stub_at(10, 95).await);
+        let client = measured_pool(
+            &[&a, &b, &c],
+            Some(1),
+            ServerOrder::Measured,
+            test_timings(),
+            None,
+            script_draw(&identity(3), 0.5),
+        );
+        client.activation_probe().await.unwrap();
+        wait_for_probe_end(&client).await;
+        let rank = rank_of(&client);
+        assert_eq!(rank[0], a.addr());
+        wait_until("the released servers to leave their suspension", || {
+            snap_of(&client, &b).suspended_until.is_none() && snap_of(&client, &c).suspended_until.is_none()
+        })
+        .await;
+        client.start_pool(false);
+        a.set_reply_delay("blockchain.block.header", ms(200));
+        for _ in 0..5 {
+            ask(&client, "blockchain.block.header").await.unwrap();
+        }
+        wait_until("two rounds", || client.pool.remeasure_rounds().len() >= 2).await;
+        let rounds = client.pool.remeasure_rounds();
+        // Two triggers close together start their rounds at least the limit (600 ms) apart.
+        assert!(rounds[1] - rounds[0] >= 0.6 - 0.01, "{rounds:?}");
+        assert_eq!(rank_of(&client), rank);
+        assert_eq!(maintained(&client), vec![0]);
+        assert!(snap_of(&client, &a).poor);
+        // Each round makes one measuring connection per candidate, and no more.
+        assert_eq!(b.accepted(), 1 + rounds.len());
+        assert_eq!(c.accepted(), 1 + rounds.len());
+        // Nothing but the negotiation and the header request travelled over them.
+        for server in [&b, &c] {
+            for method in methods_received(server) {
+                assert!(method == "server.version" || method == HEADERS, "{method}");
+            }
+        }
+    });
 }

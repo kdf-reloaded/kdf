@@ -790,8 +790,8 @@ on.
 > spreading of read-only queries in R38.6.4a (PR #128). The "Closed divergence
 > (2026-10-27)" note after R38.6.4k records what the tree did before. R38.6.4j
 > is a Reloaded-original rule and is marked so. R38.6.4l, the measured server
-> order, is not implemented yet: `mixed` and `measured` still fall back to
-> `random` with one warning, as unrecognized values do.
+> order, is implemented: `mixed` and `measured` are recognized, and the default
+> stays `random` (D38.6.4l.1).
 >
 > The spreading is a rotating start index over the maintained connections in
 > `route_inner` of the pool, applied to read-only requests only. Each such
