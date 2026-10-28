@@ -255,6 +255,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A node that relays the order book now answers other nodes' sync requests for a maker it is still
+  catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
+  while the relay was itself fetching them (the usual case right after a stall or a restart) got an
+  error at once and waited for the maker's next keep-alive, 30 seconds later, for each relay hop. The
+  relay now holds such a request for at most 5 seconds and answers it when its own sync lands, so
+  the nodes behind it rebuild the maker's orders in seconds. If the relay's own sync fails or takes
+  longer than that, the asking node gets the same error as before. At most 8 requests per peer and 256
+  in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
+  restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: CRD ch.32
+  R-Q5b.
+
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
