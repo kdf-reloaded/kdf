@@ -640,6 +640,10 @@ impl LightwalletdTransport for Scripted {
 
     async fn block_time(&self, _server: &str, height: u64) -> Result<u32, EndpointError> { Ok(height as u32) }
 
+    async fn block_hash(&self, _server: &str, _height: u64) -> Result<[u8; 32], EndpointError> {
+        Err(EndpointError::Transport("not scripted".to_owned()))
+    }
+
     async fn transaction(&self, server: &str, _txid: [u8; 32]) -> Result<RawTx, EndpointError> {
         self.endpoints
             .lock()

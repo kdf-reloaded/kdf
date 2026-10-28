@@ -275,6 +275,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
 - **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
 - **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
+- **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An ARRR
+  swap asks three questions about its HTLC: was my payment already sent, was this payment spent, and
+  has the counterparty spent it yet. When no `lightwalletd` server can answer them, for example because
+  its node keeps no address index, the swap now asks the Electrum servers given in the activation's
+  `electrum_servers`, as other KDF nodes do. A server is used only if its block hash at a recent height
+  matches the `lightwalletd` servers' and its tip is at most 10 blocks behind; nothing else of the coin uses
+  Electrum. Activation never connects to these servers; the first question does. When neither source can
+  answer, the error names both. Detail: PR #130; CRD ch.39 R39.11.25.
 - **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending
   its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
   the wallet's own record of the transactions it broadcast. This works even when the configured

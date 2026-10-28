@@ -745,7 +745,10 @@ does not stall block-count discovery.
 > **Status update (reloaded, 2026-10-28).** The carve-out is **implemented** since
 > 2026-10-12: a Light-mode shielded coin's backend is `lightwalletd` alone, and no
 > Electrum connection is opened for it. The exception of chapter 39 R39.11.25
-> (maintainer Decision AK of 2026-10-28) is **specified, not yet implemented**.
+> (maintainer Decision AK of 2026-10-28) is **implemented**: the shielded coin
+> builds the shared client on the fallback's first use and asks one server at a time,
+> in this requirement's order and per-attempt budget. Read spreading (R38.6.4a) is not
+> applied to it.
 > Nothing about R38.6.4 itself changes either way.
 
 R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
