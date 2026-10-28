@@ -389,7 +389,10 @@ is honored only for topics in this node's own mesh; a relay that
 subscribes to no orderbook topic therefore neither announces nor
 requests message ids for them. Peer scoring stays off (R14), so reaching
 any of these limits penalises nobody. The per-peer caps are
-post-baseline hardening carried by the pinned fork (V5).
+post-baseline hardening carried by the pinned fork (V5). The send queue
+that carries these exchanges is bounded separately by §28.9B RQ1:
+IHAVE and IWANT are control RPCs there, while messages sent in reply to
+IWANT count as data.
 
 **R14.** The substrate MUST NOT enable the peer-scoring / reputation
 extension present in the standard gossipsub implementation. Abusive-peer
