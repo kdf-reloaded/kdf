@@ -23,7 +23,7 @@ pub async fn get_htlc_spend_fee<T: UtxoCommonOps>(coin: &T, tx_size: u64) -> Utx
     let coin_fee = coin.get_tx_fee().await?;
     let mut fee = coin_fee.fee_for_size(tx_size);
     if coin.as_ref().conf.force_min_relay_fee {
-        let relay_fee = coin.as_ref().rpc_client.get_relay_fee().compat().await?;
+        let relay_fee = get_min_relay_fee(coin.as_ref()).await?;
         let relay_rate = sat_from_big_decimal(&relay_fee, coin.as_ref().decimals).mm_err(Into::into)?;
         let relay_component = ActualTxFee::Dynamic(relay_rate).fee_for_size(tx_size);
         if fee < relay_component {

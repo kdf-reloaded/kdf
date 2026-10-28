@@ -227,6 +227,7 @@ pub mod hd_wallet_storage;
 pub mod my_tx_history_v2;
 pub mod nft;
 pub mod qrc20;
+pub mod request_fee_scope;
 pub mod rpc_command;
 #[doc(hidden)]
 #[cfg(test)]
