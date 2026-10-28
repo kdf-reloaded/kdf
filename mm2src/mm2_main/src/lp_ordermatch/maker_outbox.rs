@@ -11,7 +11,7 @@ use common::mm_number::MmNumber;
 use keys::KeyPair;
 use parking_lot::Mutex as PaMutex;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use uuid::Uuid;
 
 /// R-MP2 item 1: the default of `maker_update_rate_max`, messages per second per maker pubkey.
@@ -528,6 +528,9 @@ pub(crate) struct MakerOutbox {
     pub(crate) last_release_ms: AtomicU64,
     /// Close signals since start (R-MP5).
     pub(crate) close_signals: AtomicU64,
+    /// Messages the outbox released that are not yet handed to the swarm. The bounded wait of R-MP3 item 2 counts them as
+    /// pending: a keep-alive must not overtake a message that was released but is still being signed and queued.
+    pub(crate) in_flight: AtomicUsize,
 }
 
 #[cfg(test)]

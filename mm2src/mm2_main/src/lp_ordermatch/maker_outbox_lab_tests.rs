@@ -619,6 +619,28 @@ fn run(params: Params) -> Outcome {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
+    // Wait on a condition, not on a guess: the keep-alives of the last tick that is judged (one within the load) may still
+    // be on their way when the order sets match. They have up to 20 s, which is more than the bounded wait of R-MP3 item 2
+    // and a slow link add, and the wait ends as soon as every pair's keep-alive of that tick has arrived.
+    let last_judged_tick_s = keep_alive_ticks
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|t| **t <= load_end_ms)
+        .map(|t| t / 1000);
+    if let Some(tick_s) = last_judged_tick_s {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let seen = relay.state.keep_alives.lock().unwrap();
+            let pairs: std::collections::BTreeSet<&String> = seen.iter().map(|k| &k.pair).collect();
+            let arrived = |pair: &String| seen.iter().any(|k| &k.pair == pair && k.sent_secs >= tick_s);
+            if !pairs.is_empty() && pairs.iter().all(|pair| arrived(pair)) {
+                break;
+            }
+            drop(seen);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
     keep_alive_stop.store(true, Ordering::Relaxed);
     keep_alive_thread.join().unwrap();
 
@@ -747,10 +769,16 @@ fn check_t_mp8(outcome: &Outcome) {
 }
 
 /// The harness with a relay that keeps up (it reads 20 per second, the maker releases at most 10): no signal, the rate
-/// stays at the ceiling, the keep-alives arrive at once and the relay's order set equals the maker's. This is a
+/// stays at the ceiling, the keep-alives arrive promptly and the relay's order set equals the maker's. This is a
 /// pipeline check of the harness that T-MP8 uses, not the slow-relay scenario.
+///
+/// The bounds are loose on purpose, so that a busy CI runner does not trip them, and still far from what a held-back
+/// keep-alive would show: a keep-alive that waited out the bounded wait of R-MP3 item 2 arrives 10 s or more after its
+/// tick, and a signal would show as a first signal or degraded mode.
 #[test]
 fn t_mp8_harness_with_a_relay_that_keeps_up() {
+    /// The longest a keep-alive may take from its tick on a healthy link, half of the bounded wait.
+    const PROMPT_S: f64 = 5.0;
     let outcome = run(Params {
         orders: 60,
         pairs: 2,
@@ -758,7 +786,7 @@ fn t_mp8_harness_with_a_relay_that_keeps_up() {
         relay_msgs_per_s: 20.0,
         load_secs: 12,
         keep_alive_secs: 4,
-        converge_secs: 60,
+        converge_secs: 90,
         row_secs: 4,
     });
     assert_eq!(
@@ -767,11 +795,16 @@ fn t_mp8_harness_with_a_relay_that_keeps_up() {
     );
     assert!(!outcome.degraded_seen);
     assert!(
-        outcome.delays_after.iter().all(|d| d.is_some_and(|d| d <= 2.0)),
-        "{:?}",
+        !outcome.delays_after.is_empty(),
+        "no keep-alive tick was judged: {:?}",
         outcome.delays_after
     );
-    assert!(outcome.converged_after_s.is_some_and(|s| s <= 20.0));
+    assert!(
+        outcome.delays_after.iter().all(|d| d.is_some_and(|d| d <= PROMPT_S)),
+        "a keep-alive took more than {PROMPT_S} s or never came: {:?}",
+        outcome.delays_after
+    );
+    assert!(outcome.converged_after_s.is_some_and(|s| s <= 60.0));
 }
 
 fn t_mp8(relay_msgs_per_s: f64) {

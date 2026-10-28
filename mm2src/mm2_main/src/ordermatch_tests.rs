@@ -8452,6 +8452,35 @@ mod maker_publication_tests {
         );
     }
 
+    /// T-MP6 / R-MP3 item 3: a message the outbox released but has not yet handed to the swarm counts as pending, so the
+    /// bounded wait does not end, and the keep-alive does not overtake it.
+    #[test]
+    fn t_mp6_a_released_message_still_in_flight_holds_the_keep_alive_back() {
+        let (maker, _rx) = node(json!({}));
+        let octx = OrdermatchContext::from_ctx(&maker).unwrap();
+        let topics = vec![own_order("DOC", "MARTY").orderbook_topic()];
+        octx.maker_outbox
+            .in_flight
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let release = {
+            let octx = octx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(500));
+                octx.maker_outbox
+                    .in_flight
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+            })
+        };
+        let started = std::time::Instant::now();
+        block_on(wait_for_pairs_to_drain(&octx, &pubkey_of(&maker), &topics, 10_000));
+        let waited = started.elapsed();
+        release.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(450) && waited < Duration::from_secs(3),
+            "the wait lasted {waited:?}"
+        );
+    }
+
     /// T-MP6 (second part): with more pending than the budget releases in 10 s, the keep-alives leave 10 s after the
     /// tick, give or take a second, and no message leaves beyond the budget.
     #[test]

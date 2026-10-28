@@ -307,7 +307,11 @@ fn publish_released(ctx: &MmArc, releases: Vec<Release>) {
 
 /// Publishes what the outbox released, and remembers when it last released a created or updated message, which a
 /// relay close needs (CRD ch.32 R-MP2 item 2).
+///
+/// The releases were counted as in flight under the outbox lock that released them (`count_in_flight`); they stop being
+/// in flight here, once they are handed to the swarm, so that a keep-alive waits for them (CRD ch.32 R-MP3 items 2, 3).
 fn publish_outbox_releases(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext, releases: Vec<Release>) {
+    let count = releases.len();
     if releases
         .iter()
         .any(|release| !matches!(release.message, OutboxMessage::Cancelled(_)))
@@ -318,6 +322,19 @@ fn publish_outbox_releases(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext, rele
             .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
     publish_released(ctx, releases);
+    ordermatch_ctx
+        .maker_outbox
+        .in_flight
+        .fetch_sub(count, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Counts `releases` as in flight. It is called while the outbox lock that released them is still held, so that no
+/// reader sees them neither pending nor in flight.
+fn count_in_flight(ordermatch_ctx: &OrdermatchContext, releases: &[Release]) {
+    ordermatch_ctx
+        .maker_outbox
+        .in_flight
+        .fetch_add(releases.len(), std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The log line of a signal, a rate change or a change of the degraded mode (CRD ch.32 R-MP2 item 5). No order
@@ -378,16 +395,21 @@ pub(crate) fn publish_maker_order_message(
     };
 
     let pubkey = maker_pubkey_hex(ctx, key_pair);
-    let (releases, log_line) = ordermatch_ctx.maker_outbox.outboxes.lock().enqueue(
-        now_ms(),
-        relay_queue_signal(ctx),
-        maker_update_rate_max(ctx),
-        &pubkey,
-        key_pair.copied(),
-        uuid,
-        topic,
-        message,
-    );
+    let (releases, log_line) = {
+        let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+        let (releases, log_line) = outboxes.enqueue(
+            now_ms(),
+            relay_queue_signal(ctx),
+            maker_update_rate_max(ctx),
+            &pubkey,
+            key_pair.copied(),
+            uuid,
+            topic,
+            message,
+        );
+        count_in_flight(&ordermatch_ctx, &releases);
+        (releases, log_line)
+    };
     log_line.into_iter().for_each(log_outbox_rate);
     publish_outbox_releases(ctx, &ordermatch_ctx, releases);
 }
@@ -425,6 +447,7 @@ pub(crate) fn pump_maker_outbox(ctx: &MmArc) {
     let (releases, log_lines, metrics) = {
         let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
         let (releases, log_lines) = outboxes.tick(now_ms(), queue_signal, ceiling);
+        count_in_flight(&ordermatch_ctx, &releases);
         (releases, log_lines, outboxes.metrics(ceiling))
     };
     log_lines.into_iter().for_each(log_outbox_rate);
@@ -610,7 +633,7 @@ const KEEP_ALIVE_MAX_WAIT_MS: u64 = 10_000;
 /// Waits until the pending outbox messages of the pairs `topics` of `pubkey` have been released within the budget, for
 /// at most `max_wait_ms`, or until the outbox is degraded (CRD ch.32 §32.9B R-MP3 item 2). The pump does the
 /// releasing; the wait never releases anything itself.
-async fn wait_for_pairs_to_drain(
+pub(crate) async fn wait_for_pairs_to_drain(
     ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     topics: &[String],
@@ -618,10 +641,16 @@ async fn wait_for_pairs_to_drain(
 ) {
     let started = now_ms();
     loop {
+        // A released message that is still being handed to the swarm counts as pending: the keep-alive must not
+        // overtake it (R-MP3 item 3).
         let (pending, degraded) = {
             let outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+            let in_flight = ordermatch_ctx
+                .maker_outbox
+                .in_flight
+                .load(std::sync::atomic::Ordering::SeqCst);
             (
-                outboxes.pending_for_topics(pubkey, topics),
+                outboxes.pending_for_topics(pubkey, topics) + in_flight,
                 outboxes.is_degraded(pubkey),
             )
         };
@@ -666,7 +695,11 @@ pub(crate) async fn broadcast_keep_alive_for_pub(
         .collect();
     let must_wait = {
         let outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
-        outboxes.pending_for_topics(pubkey, &topics) > 0 && !outboxes.is_degraded(pubkey)
+        let in_flight = ordermatch_ctx
+            .maker_outbox
+            .in_flight
+            .load(std::sync::atomic::Ordering::SeqCst);
+        outboxes.pending_for_topics(pubkey, &topics) + in_flight > 0 && !outboxes.is_degraded(pubkey)
     };
     if must_wait {
         wait_for_pairs_to_drain(ordermatch_ctx, pubkey, &topics, KEEP_ALIVE_MAX_WAIT_MS).await;
