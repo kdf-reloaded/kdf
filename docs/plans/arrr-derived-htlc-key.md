@@ -24,6 +24,9 @@
    - Swaps already in flight keep their saved key and keep working.
 4. **Bit-exact check (T39.5.a).** A vector from a reference-made ARRR swap on a throwaway
    non-HD test wallet. The code from step 3 is not merged before this passes.
+   - The `Negotiated` events' `taker_pubkey` / `maker_pubkey` are 33 zero bytes in both
+     implementations. Reloaded parses that value and uses the HTLC public keys instead, so a
+     vector needs only the `Started` and `Negotiated` HTLC public keys.
 5. **Field recovery** of the September swap with the operator, once step 4 passes.
 6. **Refund timing** (R39.5.13, maintainer Decision AP, 2026-10-28). The shielded refund waits
    until the chain's median time past has passed the lock time, and a refund rejected as
