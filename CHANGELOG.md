@@ -271,7 +271,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
   the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
   fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
-  in progress keep their saved key. Detail: CRD ch.39 R39.5.6–R39.5.11.
+  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
