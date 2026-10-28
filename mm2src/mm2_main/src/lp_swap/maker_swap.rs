@@ -8,8 +8,9 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             MySwapInfo, NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction,
             SavedSwap, SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
-use super::{derive_htlc_pubkeys, resolve_recovery_htlc_key, select_secret_hash_algo, validate_wire_pubkey,
-            PaymentOwner, RecoveryKeyRequest};
+use super::{derive_htlc_pubkeys, recover_within, resolve_recovery_htlc_key, select_secret_hash_algo,
+            validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryKeyRequest, RecoveryStage,
+            RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
 use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MakerOrderBuilder,
@@ -1238,8 +1239,22 @@ impl MakerSwap {
         Ok((swap, command))
     }
 
+    /// Recovers the swap's funds within [`RECOVER_FUNDS_TOTAL_BOUND`] (CRD ch.39 R39.5.5).
     pub async fn recover_funds(&self) -> Result<RecoveredSwap, String> {
-        async fn try_spend_taker_payment(selfi: &MakerSwap, secret_hash: &[u8]) -> Result<TransactionEnum, String> {
+        self.recover_funds_within(RECOVER_FUNDS_TOTAL_BOUND).await
+    }
+
+    /// [`MakerSwap::recover_funds`] with the total bound given, so a test can shorten it.
+    pub(crate) async fn recover_funds_within(&self, bound: std::time::Duration) -> Result<RecoveredSwap, String> {
+        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await }).await
+    }
+
+    async fn recover_funds_tracked(&self, stages: &RecoveryStages) -> Result<RecoveredSwap, String> {
+        async fn try_spend_taker_payment(
+            selfi: &MakerSwap,
+            secret_hash: &[u8],
+            stages: &RecoveryStages,
+        ) -> Result<TransactionEnum, String> {
             let taker_payment_hex = &selfi
                 .r()
                 .taker_payment
@@ -1271,11 +1286,23 @@ impl MakerSwap {
                 time_lock: timelock,
                 secret_hash,
                 payment_tx: taker_payment_hex,
+                stages,
             })
             .await?;
             let taker_coin_htlc_priv = taker_key.keypair.private().secret;
 
             // check if the taker payment is not spent yet
+            stages.enter(
+                RecoveryStage::SearchSpend,
+                &selfi.taker_coin,
+                Some(taker_payment_hex),
+                Some(HtlcDetectionParams {
+                    time_lock: timelock,
+                    first_pub: other_taker_coin_htlc_pub.to_vec(),
+                    second_pub: taker_key.pubkey.to_vec(),
+                    secret_hash: secret_hash.to_vec(),
+                }),
+            );
             match selfi
                 .taker_coin
                 .search_for_swap_tx_spend_other(
@@ -1309,6 +1336,12 @@ impl MakerSwap {
                 Ok(None) => (), // payment is not spent, continue
             }
 
+            stages.enter(
+                RecoveryStage::SpendOtherPayment,
+                &selfi.taker_coin,
+                Some(taker_payment_hex),
+                None,
+            );
             selfi
                 .taker_coin
                 .send_maker_spends_taker_payment(
@@ -1356,6 +1389,17 @@ impl MakerSwap {
         let maker_payment = match maybe_maker_payment {
             Some(tx) => tx.tx_hex.0.clone(),
             None => {
+                stages.enter(
+                    RecoveryStage::CheckPaymentSent,
+                    &self.maker_coin,
+                    None,
+                    Some(HtlcDetectionParams {
+                        time_lock: maker_payment_lock,
+                        first_pub: my_maker_coin_htlc_pub.to_vec(),
+                        second_pub: other_maker_coin_htlc_pub.to_vec(),
+                        secret_hash: secret_hash.0.to_vec(),
+                    }),
+                );
                 let maybe_maker_payment = try_s!(
                     self.maker_coin
                         .check_if_my_payment_sent(
@@ -1388,10 +1432,22 @@ impl MakerSwap {
                 time_lock: maker_payment_lock,
                 secret_hash: &secret_hash.0,
                 payment_tx: &maker_payment,
+                stages,
             })
             .await
         );
         // validate that maker payment is not spent
+        stages.enter(
+            RecoveryStage::SearchSpend,
+            &self.maker_coin,
+            Some(&maker_payment),
+            Some(HtlcDetectionParams {
+                time_lock: maker_payment_lock,
+                first_pub: maker_key.pubkey.to_vec(),
+                second_pub: other_maker_coin_htlc_pub.to_vec(),
+                secret_hash: secret_hash.0.to_vec(),
+            }),
+        );
         match self
             .maker_coin
             .search_for_swap_tx_spend_my(
@@ -1407,7 +1463,7 @@ impl MakerSwap {
         {
             Ok(Some(FoundSwapTxSpend::Spent(_))) => {
                 log!("Warning: MakerPayment spent, but TakerPayment is not yet. Trying to spend TakerPayment");
-                let transaction = try_s!(try_spend_taker_payment(self, &secret_hash.0).await);
+                let transaction = try_s!(try_spend_taker_payment(self, &secret_hash.0, stages).await);
 
                 Ok(RecoveredSwap {
                     action: RecoveredSwapAction::SpentOtherPayment,
@@ -1432,6 +1488,12 @@ impl MakerSwap {
                         maker_key.kind.label()
                     );
                 }
+                stages.enter(
+                    RecoveryStage::RefundMyPayment,
+                    &self.maker_coin,
+                    Some(&maker_payment),
+                    None,
+                );
                 let fut = self.maker_coin.send_maker_refunds_payment(
                     &maker_payment,
                     maker_payment_lock,
@@ -2683,6 +2745,65 @@ mod maker_swap_tests {
             err.contains("both the swap's per-swap key and the persistent key were tried"),
             "{err}"
         );
+    }
+
+    /// CRD ch.39 R39.5.5 (T39.5.5 bullet 1), maker side: a spend search that never completes ends the
+    /// recovery with the error naming the stage and the coin, and what a shielded coin's HTLC detection
+    /// read last. A search is not a spend, so the error does not claim a transaction may have been sent.
+    #[test]
+    fn test_recover_funds_maker_swap_names_the_search_stage_when_the_search_never_completes() {
+        let (maker_swap, _, _) = maker_swap_with_saved_htlc_key();
+        TestCoin::tx_enum_from_bytes.mock_safe(|_, _| MockResult::Return(Ok(eth_tx_for_test().into())));
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::pending())));
+        TestCoin::htlc_detection_progress.mock_safe(|_, _, _, _, _| {
+            MockResult::Return(Some("a, PubkeyHash form, history of RPexample blocks 5..=9".to_owned()))
+        });
+
+        let err = block_on(maker_swap.recover_funds_within(std::time::Duration::from_millis(300))).unwrap_err();
+        assert!(err.contains("searching for a spend of the payment"), "{err}");
+        assert!(err.contains("coin ticker"), "{err}");
+        assert!(err.contains(&format!("{:02x}", eth_tx_for_test().tx_hash())), "{err}");
+        assert!(
+            err.contains("the HTLC detection was reading last: a, PubkeyHash form, history of RPexample blocks 5..=9"),
+            "{err}"
+        );
+        assert!(!err.contains("may already have been broadcast"), "{err}");
+    }
+
+    /// R39.5.5 (T39.5.5 bullet 2), maker side: a refund that stalls names the refund stage and says the
+    /// transaction may already have been broadcast.
+    #[test]
+    fn test_recover_funds_maker_swap_names_the_refund_stage_when_the_refund_stalls() {
+        let (maker_swap, _, _) = maker_swap_with_saved_htlc_key();
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::send_maker_refunds_payment
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::empty())));
+
+        let err = block_on(maker_swap.recover_funds_within(std::time::Duration::from_millis(300))).unwrap_err();
+        assert!(err.contains("refunding this node's payment"), "{err}");
+        assert!(err.contains("coin ticker"), "{err}");
+        assert!(err.contains("may already have been broadcast"), "{err}");
+    }
+
+    /// R39.5.5 (T39.5.5 bullet 3), maker side: a recovery that completes within the bound returns what it
+    /// returned before the bound existed.
+    #[test]
+    fn test_recover_funds_maker_swap_within_the_bound_returns_the_same_response() {
+        let (maker_swap, _, _) = maker_swap_with_saved_htlc_key();
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(maker_swap.recover_funds_within(std::time::Duration::from_secs(600))).unwrap();
+        assert_eq!(actual, RecoveredSwap {
+            action: RecoveredSwapAction::RefundedMyPayment,
+            coin: "ticker".to_string(),
+            transaction: eth_tx_for_test().into(),
+        });
     }
 
     #[test]

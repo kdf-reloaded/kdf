@@ -390,6 +390,8 @@ pub(crate) struct Script {
     pub(crate) balance: Option<Result<i64, EndpointError>>,
     /// The transparent-history rows every address query answers with, those mined inside the asked window.
     pub(crate) history: Vec<RawTx>,
+    /// How long a transparent-history request takes to be answered.
+    pub(crate) history_delay: Option<std::time::Duration>,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -516,6 +518,10 @@ impl LightwalletdTransport for FakeTransport {
 
     async fn taddr_txids(&self, server: &str, _address: &str, start: u64, end: u64) -> WindowRead {
         self.record(server, "history");
+        let delay = self.scripts.lock().get(server).and_then(|s| s.history_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
         let txs = self
             .scripts
             .lock()
@@ -1040,9 +1046,15 @@ fn history_server(
 async fn a_failing_stream_is_not_no_history_and_its_deliveries_are_retained() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let chain = vec![tx_at(10, 1), tx_at(20, 2), tx_at(30, 3), tx_at(40, 4)];
-    let read = read_history(1, 100, 100, history_server(chain, Some(30), requests))
-        .await
-        .unwrap();
+    let read = read_history(
+        1,
+        100,
+        100,
+        HistoryLimits::UNBOUNDED,
+        history_server(chain, Some(30), requests),
+    )
+    .await
+    .unwrap();
     assert!(!read.is_clean());
     assert_eq!(read.gaps, vec![30]);
     assert!(read.transactions.iter().any(|tx| tx.height == Some(10)));
@@ -1060,9 +1072,15 @@ async fn the_failing_window_is_bisected_and_the_offending_height_skipped_and_rec
         tx_at(45, 5),
         tx_at(90, 9),
     ];
-    let read = read_history(1, 100, 100, history_server(chain, Some(30), requests.clone()))
-        .await
-        .unwrap();
+    let read = read_history(
+        1,
+        100,
+        100,
+        HistoryLimits::UNBOUNDED,
+        history_server(chain, Some(30), requests.clone()),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         read.gaps,
         vec![30],
@@ -1086,9 +1104,15 @@ async fn resumption_starts_at_the_last_received_height_and_duplicates_are_suppre
     // Windows of 50: the first window's last group (height 45) is dropped by the server, so the
     // next window has to start at the last *received* height (20), not at 51.
     let chain = vec![tx_at(10, 1), tx_at(20, 2), tx_at(45, 3), tx_at(70, 4), tx_at(95, 5)];
-    let read = read_history(1, 100, 50, history_server(chain, None, requests.clone()))
-        .await
-        .unwrap();
+    let read = read_history(
+        1,
+        100,
+        50,
+        HistoryLimits::UNBOUNDED,
+        history_server(chain, None, requests.clone()),
+    )
+    .await
+    .unwrap();
     let starts: Vec<u64> = requests.lock().iter().map(|(s, _)| *s).collect();
     assert_eq!(starts[0], 1);
     assert_eq!(
@@ -1107,9 +1131,15 @@ async fn resumption_starts_at_the_last_received_height_and_duplicates_are_suppre
 async fn no_request_is_open_ended_or_below_one() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let chain = vec![tx_at(5, 1), tx_at(2_500, 2)];
-    read_history(0, 3_000, 1_000, history_server(chain, None, requests.clone()))
-        .await
-        .unwrap();
+    read_history(
+        0,
+        3_000,
+        1_000,
+        HistoryLimits::UNBOUNDED,
+        history_server(chain, None, requests.clone()),
+    )
+    .await
+    .unwrap();
     let requests = requests.lock();
     assert!(!requests.is_empty());
     for (start, end) in requests.iter() {
@@ -1121,14 +1151,17 @@ async fn no_request_is_open_ended_or_below_one() {
     }
 
     assert!(matches!(
-        read_history(10, 5, 100, |_, _| futures::future::ready(WindowRead::default())).await,
+        read_history(10, 5, 100, HistoryLimits::UNBOUNDED, |_, _| futures::future::ready(
+            WindowRead::default()
+        ))
+        .await,
         Err(LightwalletdError::InvalidRequest(_))
     ));
 }
 
 #[tokio::test]
 async fn a_transport_failure_ends_the_read_without_claiming_a_clean_answer() {
-    let read = read_history(1, 100, 100, |_, _| {
+    let read = read_history(1, 100, 100, HistoryLimits::UNBOUNDED, |_, _| {
         futures::future::ready(WindowRead {
             txs: vec![tx_at(3, 1)],
             error: Some(WindowError {
@@ -1146,11 +1179,117 @@ async fn a_transport_failure_ends_the_read_without_claiming_a_clean_answer() {
 
 #[tokio::test]
 async fn a_complete_read_with_no_gap_is_clean_even_when_it_finds_nothing() {
-    let read = read_history(1, 100, 100, |_, _| futures::future::ready(WindowRead::default()))
-        .await
-        .unwrap();
+    let read = read_history(1, 100, 100, HistoryLimits::UNBOUNDED, |_, _| {
+        futures::future::ready(WindowRead::default())
+    })
+    .await
+    .unwrap();
     assert!(read.is_clean());
     assert!(read.transactions.is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// R39.11.4h -- limits on a history read
+// ---------------------------------------------------------------------------------------------
+
+fn refusing_every_request(calls: Arc<Mutex<usize>>) -> impl FnMut(u64, u64) -> futures::future::Ready<WindowRead> {
+    move |_, _| {
+        *calls.lock() += 1;
+        futures::future::ready(WindowRead {
+            txs: Vec::new(),
+            error: Some(WindowError {
+                serve_failure: true,
+                message: "Unknown error: -5: No information available for address".to_owned(),
+            }),
+        })
+    }
+}
+
+/// The same script, with and without the limits of R39.11.4h(b), over 30,001 blocks: the unbounded
+/// reader bisects every 1,000-block window down to single heights (2 * 1,000 - 1 requests each, and one
+/// request for the last window of a single block).
+#[tokio::test]
+async fn a_refusing_endpoint_costs_about_sixty_thousand_requests_unbounded_and_eighteen_bounded() {
+    let (from, to) = (4_137_700, 4_167_700);
+    let unbounded_calls = Arc::new(Mutex::new(0));
+    let read = read_history(
+        from,
+        to,
+        1_000,
+        HistoryLimits::UNBOUNDED,
+        refusing_every_request(unbounded_calls.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*unbounded_calls.lock(), 30 * 1_999 + 1);
+    assert_eq!(read.gaps.len(), 30_001);
+    assert!(read.failure.is_none(), "the unbounded reader never says why");
+
+    let bounded_calls = Arc::new(Mutex::new(0));
+    let read = read_history(
+        from,
+        to,
+        1_000,
+        HistoryLimits::HTLC,
+        refusing_every_request(bounded_calls.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(*bounded_calls.lock(), 18);
+    assert_eq!(read.requests, 18);
+    let failure = read.failure.clone().expect("named failure");
+    assert!(
+        failure.starts_with("could not serve 5 heights of window 4137700..=4138699 (last error: Unknown error: -5: No information available for address); the failure is not confined to single transactions"),
+        "{failure}"
+    );
+    assert!(!read.is_clean());
+}
+
+/// A window with exactly four unservable heights is still bisected; the fifth ends the read.
+#[tokio::test]
+async fn four_unservable_heights_in_a_window_are_tolerated_and_a_fifth_is_not() {
+    for (unservable, stopped) in [(vec![3, 5, 7, 9], false), (vec![3, 5, 7, 9, 11], true)] {
+        let read = read_history(1, 100, 100, HistoryLimits::HTLC, move |start, end| {
+            let failing = unservable.iter().any(|h| (start..=end).contains(h));
+            futures::future::ready(WindowRead {
+                txs: Vec::new(),
+                error: failing.then(|| WindowError {
+                    serve_failure: true,
+                    message: "no such mempool or blockchain transaction".to_owned(),
+                }),
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(read.failure.is_some(), stopped, "{read:?}");
+        assert_eq!(read.gaps.len(), if stopped { 5 } else { 4 });
+    }
+}
+
+#[tokio::test]
+async fn a_read_is_capped_at_1024_requests() {
+    let calls = Arc::new(Mutex::new(0usize));
+    let counter = calls.clone();
+    // Every window delivers one transaction one height above its start, so the read advances one
+    // height per request and never completes the range.
+    let read = read_history(1, 1_000_000, 1_000, HistoryLimits::HTLC, move |start, _end| {
+        *counter.lock() += 1;
+        futures::future::ready(WindowRead {
+            txs: vec![RawTx {
+                data: start.to_le_bytes().to_vec(),
+                height: Some(start + 1),
+            }],
+            error: None,
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(*calls.lock(), 1_024);
+    assert_eq!(read.requests, 1_024);
+    let failure = read.failure.clone().expect("named failure");
+    assert!(failure.contains("1024 requests"), "{failure}");
+    assert!(!read.is_clean());
+    assert!(!read.transactions.is_empty(), "what was delivered is kept");
 }
 
 // ---------------------------------------------------------------------------------------------

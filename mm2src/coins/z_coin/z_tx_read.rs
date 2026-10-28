@@ -12,7 +12,8 @@
 //! helper's rule has a part that does not depend on the parser (secret extraction, the spend search,
 //! the wait loop) that part is the shared one, called with the facts this module read.
 
-use super::z_lightwalletd::{FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome, SpendOutcome};
+use super::z_lightwalletd::{DetectionLog, FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome,
+                            SpendOutcome};
 use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcClientOps};
 use crate::utxo::utxo_common::{self, classify_swap_spend, ensure_payment_pays_htlc, payment_script, PaymentOutputs,
@@ -192,14 +193,20 @@ fn watched_output(tx: &ZTransaction, vout: usize) -> Result<OutputRef, String> {
 
 /// Looks for the spend of `output` over lightwalletd and returns it as the Zcash transaction it is.
 /// `None` is the index's own positive statement that the output is unspent; anything it could not
-/// determine is an error.
+/// determine is an error. `polling` is set by the wait loop, whose detections repeat every few seconds
+/// and so log at `debug` (R39.11.4h(d)).
 async fn find_spend_over_lightwalletd(
     coin: &ZCoin,
     client: &LightwalletdClient,
     output: &OutputRef,
     from_block: u64,
+    polling: bool,
 ) -> Result<Option<(ZTransaction, usize)>, String> {
-    match client.0.detect_output_spend(output, from_block).await {
+    let log = DetectionLog {
+        coin: &coin.as_ref().conf.ticker,
+        polling,
+    };
+    match client.0.detect_output_spend(output, from_block, &log).await {
         Ok(SpendOutcome::NotSpent(_)) => Ok(None),
         Ok(SpendOutcome::Spent(spend)) => Ok(Some((read_tx(&spend.tx)?, spend.input_index))),
         Err(e) => Err(report_undetermined(coin, e)),
@@ -214,7 +221,7 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         let (coin, client, tx_debug) = (coin.clone(), client.clone(), format!("{:?}", tx));
         let fut = async move {
             loop {
-                match find_spend_over_lightwalletd(&coin, &client, &output, from_block).await {
+                match find_spend_over_lightwalletd(&coin, &client, &output, from_block, true).await {
                     Ok(Some((spend, _))) => return Ok(TransactionEnum::from(spend)),
                     Ok(None) => (),
                     // Undetermined is not a spend and not an answer: keep waiting, say why.
@@ -243,6 +250,29 @@ pub(crate) fn wait_for_tx_spend(coin: &ZCoin, tx_bytes: &[u8], from_block: u64, 
         from_block,
         wait_until,
     )
+}
+
+/// What the HTLC detection in flight for the payment script built from these parameters read last, or
+/// `None` when there is none, the keys are not keys, or the coin is not served over lightwalletd.
+pub(crate) fn htlc_detection_progress(
+    coin: &ZCoin,
+    time_lock: u32,
+    first_pub: &[u8],
+    second_pub: &[u8],
+    secret_hash: &[u8],
+) -> Option<String> {
+    let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client else {
+        return None;
+    };
+    let (first, second) = (
+        Public::from_slice(first_pub).ok()?,
+        Public::from_slice(second_pub).ok()?,
+    );
+    let hash: [u8; 20] = dhash160(&payment_script(time_lock, secret_hash, &first, &second))
+        .as_slice()
+        .try_into()
+        .ok()?;
+    client.0.detection_progress(&hash)
 }
 
 /// `check_payment_pays_htlc` for a ZHTLC coin: the payment is read with the Zcash reader and checked by the
@@ -301,7 +331,7 @@ pub(crate) async fn search_for_swap_tx_spend(
     if let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client {
         ensure_payment_pays_htlc(time_lock, first_pub, second_pub, secret_hash, &payment)?;
         let output = watched_output(&tx, DEFAULT_SWAP_VOUT)?;
-        return match find_spend_over_lightwalletd(coin, client, &output, search_from_block).await? {
+        return match find_spend_over_lightwalletd(coin, client, &output, search_from_block, false).await? {
             None => Ok(None),
             Some((spend, input_index)) => classify_spend(spend, input_index).map(Some),
         };
@@ -360,9 +390,13 @@ pub(crate) fn check_if_my_payment_sent(
             // less is an error, because an empty answer here would double-fund the payment.
             UtxoRpcClientEnum::LightWalletD(client) => {
                 let script_pubkey = Builder::build_p2sh(&hash.into()).to_bytes();
+                let log = DetectionLog {
+                    coin: &coin.as_ref().conf.ticker,
+                    polling: false,
+                };
                 let outcome = client
                     .0
-                    .detect_funding(&script_pubkey, search_from_block)
+                    .detect_funding(&script_pubkey, search_from_block, &log)
                     .await
                     .map_err(|e| report_undetermined(&coin, e))?;
                 match outcome {

@@ -24,8 +24,8 @@
 
 mod htlc_index;
 
-pub(crate) use htlc_index::{FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef, SentOutcome,
-                            SpendOutcome};
+pub(crate) use htlc_index::{DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef,
+                            SentOutcome, SpendOutcome};
 
 use super::z_coin_wallet_db::ZCoinShieldedHistory;
 use super::z_rpc::z_coin_grpc;
@@ -1125,6 +1125,11 @@ pub(crate) struct HistoryRead {
     /// A failure that ended the read before `to`. The transactions delivered before it are kept.
     pub failure: Option<String>,
     pub highest_received_height: Option<u64>,
+    /// The number of window requests the read made (R39.11.4h).
+    pub requests: usize,
+    /// The read ended under the unservable-heights limit of R39.11.4h(b): its gaps are artifacts of an
+    /// endpoint that refuses requests, not transactions the node cannot serve.
+    pub stopped_on_unservable_heights: bool,
 }
 
 impl HistoryRead {
@@ -1139,6 +1144,39 @@ impl HistoryRead {
 /// as a multiple of the base window. See [`read_history`].
 const HISTORY_MAX_WIDEN_FACTOR: u64 = 16;
 
+/// R39.11.4h(b): a window holding more than this many heights the endpoint could not serve ends the
+/// read. Bisection assumes a serve failure belongs to one transaction; this many failing heights in
+/// one window says it does not.
+pub(crate) const HTLC_HISTORY_MAX_UNSERVABLE_HEIGHTS: usize = 4;
+
+/// R39.11.4h(b): a read ends with a named failure after this many requests.
+pub(crate) const HTLC_HISTORY_MAX_REQUESTS: usize = 1_024;
+
+/// R39.11.4h(c): the time one endpoint may take per HTLC detection, both address forms together.
+pub(crate) const HTLC_DETECTION_ENDPOINT_BUDGET: Duration = Duration::from_secs(120);
+
+/// The limits that end a [`read_history`] with a named failure.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HistoryLimits {
+    /// The read ends once one window holds more than this many unservable heights.
+    pub max_unservable_heights_per_window: usize,
+    /// The read ends after this many requests.
+    pub max_requests: usize,
+}
+
+impl HistoryLimits {
+    /// No limit: the reader's behaviour of R39.11.4b alone.
+    pub(crate) const UNBOUNDED: HistoryLimits = HistoryLimits {
+        max_unservable_heights_per_window: usize::MAX,
+        max_requests: usize::MAX,
+    };
+    /// The limits of an HTLC detection (R39.11.4h(b)).
+    pub(crate) const HTLC: HistoryLimits = HistoryLimits {
+        max_unservable_heights_per_window: HTLC_HISTORY_MAX_UNSERVABLE_HEIGHTS,
+        max_requests: HTLC_HISTORY_MAX_REQUESTS,
+    };
+}
+
 /// Reads `from..=to` of an address's transparent history in bounded windows.
 ///
 /// * Every request is bounded by `window` (or a bounded widening of it) and both its bounds are at
@@ -1152,6 +1190,11 @@ const HISTORY_MAX_WIDEN_FACTOR: u64 = 16;
 ///   be delivered by a window that also contains a later group.
 /// * Whatever a failing stream delivered is retained.
 ///
+/// * `limits` end the read with a named failure (R39.11.4h(b)): bisection assumes a serve failure
+///   belongs to one transaction, so a window with more unservable heights than the limit, or a read
+///   that has made the permitted number of requests, stops instead of walking the range one height
+///   at a time. What was delivered so far is retained and the read is not clean.
+///
 /// Two residues cannot be repaired from here, because the service never delivers the data: the
 /// newest height group of the whole range, and a group isolated from any later group by more than
 /// the widest window. Neither is an answer; a caller that needs the newest group has to corroborate
@@ -1161,6 +1204,7 @@ pub(crate) async fn read_history<F, Fut>(
     from: u64,
     to: u64,
     window: u64,
+    limits: HistoryLimits,
     mut fetch: F,
 ) -> Result<HistoryRead, LightwalletdError>
 where
@@ -1189,8 +1233,17 @@ where
         let window_end = cursor.saturating_add(width - 1).min(to);
         let mut window_highest: Option<u64> = None;
         let mut window_gap_max: Option<u64> = None;
+        let mut window_unservable: usize = 0;
         let mut pending = vec![(cursor, window_end)];
         while let Some((start, end)) = pending.pop() {
+            if out.requests >= limits.max_requests {
+                out.failure = Some(format!(
+                    "the read made {} requests without completing the range {}..={}; stopped at {}..={}",
+                    out.requests, from, to, start, end
+                ));
+                return Ok(out);
+            }
+            out.requests += 1;
             let read = fetch(start, end).await;
             for tx in read.txs {
                 if let Some(height) = tx.height {
@@ -1208,6 +1261,16 @@ where
                     if start == end {
                         out.gaps.push(start);
                         window_gap_max = Some(window_gap_max.map_or(start, |g| g.max(start)));
+                        window_unservable += 1;
+                        if window_unservable > limits.max_unservable_heights_per_window {
+                            out.stopped_on_unservable_heights = true;
+                            out.failure = Some(format!(
+                                "could not serve {} heights of window {}..={} (last error: {}); the failure is not \
+                                 confined to single transactions",
+                                window_unservable, cursor, window_end, error.message
+                            ));
+                            return Ok(out);
+                        }
                     } else {
                         let mid = start + (end - start) / 2;
                         // Lower half first.
@@ -1315,6 +1378,13 @@ pub(crate) struct LightwalletdBackend {
     cached: Mutex<Option<CachedAdmission>>,
     evaluating: AsyncMutex<()>,
     highest_tip: AtomicU64,
+    /// The time one endpoint may take per HTLC detection (R39.11.4h(c)).
+    endpoint_budget: Duration,
+    /// Endpoints whose node keeps no address index, with the node's message (R39.11.4i). Kept for
+    /// the life of this backend; admission re-evaluation does not clear it.
+    no_address_index: Mutex<HashMap<String, String>>,
+    /// What the HTLC detection in flight for a redeem-script hash read last (R39.5.5).
+    detection_progress: Mutex<HashMap<[u8; 20], String>>,
 }
 
 impl fmt::Debug for LightwalletdBackend {
@@ -1342,7 +1412,16 @@ impl LightwalletdBackend {
             cached: Mutex::new(None),
             evaluating: AsyncMutex::new(()),
             highest_tip: AtomicU64::new(0),
+            endpoint_budget: HTLC_DETECTION_ENDPOINT_BUDGET,
+            no_address_index: Mutex::new(HashMap::new()),
+            detection_progress: Mutex::new(HashMap::new()),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_endpoint_budget(mut self, budget: Duration) -> Self {
+        self.endpoint_budget = budget;
+        self
     }
 
     pub(crate) fn bind_wallet(&self, store: Arc<dyn WalletBranchStore>) {
@@ -1902,7 +1981,11 @@ impl UtxoRpcClientOps for LightwalletdClient {
                     return ERR!("HTLC spend detection over lightwalletd searches from a height, not a block hash")
                 },
             };
-            match this.0.detect_output_spend(&output, from).await {
+            let log = DetectionLog {
+                coin: "an unnamed coin",
+                polling: false,
+            };
+            match this.0.detect_output_spend(&output, from, &log).await {
                 Ok(SpendOutcome::NotSpent(_)) => Ok(None),
                 Ok(SpendOutcome::Spent(spend)) => {
                     // The shared UTXO transaction type cannot read version 5 or 6, so a ZHTLC coin's

@@ -1272,6 +1272,54 @@ mod per_swap_htlc_key_recovery {
         assert_is_the_live_refund(other);
     }
 
+    /// R39.5.5: a spend search that a deadline drops while an endpoint is slow leaves the endpoint and
+    /// address form it was reading, for the coin to report; a search of another HTLC has nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_spend_search_dropped_by_a_deadline_reports_the_endpoint_and_form_it_read_last() {
+        let Some(fixture) = coin_with_refunded_payment() else {
+            return;
+        };
+        for script in fixture.transport.scripts.lock().values_mut() {
+            script.history_delay = Some(std::time::Duration::from_secs(600));
+        }
+        let (taker, maker, secret_hash) = (bytes(TAKER_KEY), bytes(MAKER_KEY), bytes(SECRET_HASH));
+        assert_eq!(
+            fixture
+                .coin
+                .htlc_detection_progress(TIME_LOCK, &taker, &maker, &secret_hash),
+            None,
+            "nothing is in flight before the search"
+        );
+        let payment = bytes(PAYMENT_HEX);
+        let search = fixture.coin.search_for_swap_tx_spend_my(
+            TIME_LOCK,
+            &taker,
+            &maker,
+            &secret_hash,
+            &payment,
+            SEARCH_FROM,
+            &None,
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), search)
+                .await
+                .is_err(),
+            "the search is stalled on the slow history"
+        );
+        let progress = fixture
+            .coin
+            .htlc_detection_progress(TIME_LOCK, &taker, &maker, &secret_hash)
+            .expect("the last read is reported");
+        assert!(progress.contains("PubkeyHash form, history of"), "{progress}");
+        // Another HTLC (here: the keys the other way round) has no detection in flight.
+        assert_eq!(
+            fixture
+                .coin
+                .htlc_detection_progress(TIME_LOCK, &maker, &taker, &secret_hash),
+            None
+        );
+    }
+
     /// The trait method recovery asks to pick the HTLC key (R39.5.4) answers over the live payment.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_coin_tells_which_key_rebuilds_the_script_a_payment_pays() {

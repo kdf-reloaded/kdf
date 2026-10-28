@@ -9,8 +9,9 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction, SavedSwap,
             SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, SWAP_WIRE_SECRET_HASH_MIN_LEN, WAIT_CONFIRM_INTERVAL};
-use super::{derive_htlc_pubkeys, resolve_recovery_htlc_key, validate_wire_field_len, validate_wire_pubkey,
-            PaymentOwner, RecoveryHtlcKey, RecoveryKeyRequest};
+use super::{derive_htlc_pubkeys, recover_within, resolve_recovery_htlc_key, validate_wire_field_len,
+            validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryHtlcKey, RecoveryKeyRequest,
+            RecoveryStage, RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
 use crate::mm2::lp_network::subscribe_to_topic;
 use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MatchBy,
                                 OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
@@ -1897,7 +1898,11 @@ impl TakerSwap {
     }
 
     /// The HTLC key recovery uses for the maker payment, which the maker sent (CRD ch.39 R39.5.4).
-    async fn recovery_maker_coin_key(&self, maker_payment: &[u8]) -> Result<RecoveryHtlcKey, String> {
+    async fn recovery_maker_coin_key(
+        &self,
+        maker_payment: &[u8],
+        stages: &RecoveryStages,
+    ) -> Result<RecoveryHtlcKey, String> {
         let (per_swap_pubkey, per_swap_keypair, other_pubkey, secret_hash) = {
             let r = self.r();
             (
@@ -1917,12 +1922,17 @@ impl TakerSwap {
             time_lock: self.maker_payment_lock.load(Ordering::Relaxed) as u32,
             secret_hash: &secret_hash,
             payment_tx: maker_payment,
+            stages,
         })
         .await
     }
 
     /// The HTLC key recovery uses for the taker payment, which this node sent (CRD ch.39 R39.5.4).
-    async fn recovery_taker_coin_key(&self, taker_payment: &[u8]) -> Result<RecoveryHtlcKey, String> {
+    async fn recovery_taker_coin_key(
+        &self,
+        taker_payment: &[u8],
+        stages: &RecoveryStages,
+    ) -> Result<RecoveryHtlcKey, String> {
         let (per_swap_pubkey, per_swap_keypair, other_pubkey, secret_hash, time_lock) = {
             let r = self.r();
             (
@@ -1943,11 +1953,22 @@ impl TakerSwap {
             time_lock,
             secret_hash: &secret_hash,
             payment_tx: taker_payment,
+            stages,
         })
         .await
     }
 
+    /// Recovers the swap's funds within [`RECOVER_FUNDS_TOTAL_BOUND`] (CRD ch.39 R39.5.5).
     pub async fn recover_funds(&self) -> Result<RecoveredSwap, String> {
+        self.recover_funds_within(RECOVER_FUNDS_TOTAL_BOUND).await
+    }
+
+    /// [`TakerSwap::recover_funds`] with the total bound given, so a test can shorten it.
+    pub(crate) async fn recover_funds_within(&self, bound: std::time::Duration) -> Result<RecoveredSwap, String> {
+        recover_within(bound, |stages| async move { self.recover_funds_tracked(&stages).await }).await
+    }
+
+    async fn recover_funds_tracked(&self, stages: &RecoveryStages) -> Result<RecoveredSwap, String> {
         if self.finished_at.load(Ordering::Relaxed) == 0 {
             return ERR!("Swap must be finished before recover funds attempt");
         }
@@ -1982,13 +2003,24 @@ impl TakerSwap {
         // the swap's own key, else the persistent key (CRD ch.39 R39.5.4).
         macro_rules! maker_payment_key {
             () => {
-                try_s!(self.recovery_maker_coin_key(&maker_payment).await)
+                try_s!(self.recovery_maker_coin_key(&maker_payment, stages).await)
             };
         }
 
         macro_rules! check_maker_payment_is_not_spent {
             // validate that maker payment is not spent
             ($maker_key:expr) => {
+                stages.enter(
+                    RecoveryStage::SearchSpend,
+                    &self.maker_coin,
+                    Some(&maker_payment),
+                    Some(HtlcDetectionParams {
+                        time_lock: self.maker_payment_lock.load(Ordering::Relaxed) as u32,
+                        first_pub: other_maker_coin_htlc_pub.to_vec(),
+                        second_pub: $maker_key.pubkey.to_vec(),
+                        secret_hash: secret_hash.to_vec(),
+                    }),
+                );
                 match self
                     .maker_coin
                     .search_for_swap_tx_spend_other(
@@ -2028,6 +2060,17 @@ impl TakerSwap {
         let taker_payment = match maybe_taker_payment {
             Some(tx) => tx.tx_hex.0.clone(),
             None => {
+                stages.enter(
+                    RecoveryStage::CheckPaymentSent,
+                    &self.taker_coin,
+                    None,
+                    Some(HtlcDetectionParams {
+                        time_lock: taker_payment_lock as u32,
+                        first_pub: my_taker_coin_htlc_pub.to_vec(),
+                        second_pub: other_taker_coin_htlc_pub.to_vec(),
+                        secret_hash: secret_hash.to_vec(),
+                    }),
+                );
                 let maybe_sent = try_s!(
                     self.taker_coin
                         .check_if_my_payment_sent(
@@ -2057,6 +2100,12 @@ impl TakerSwap {
             let secret = self.r().secret.0;
             let maker_coin_swap_contract_address = self.r().data.maker_coin_swap_contract_address.clone();
 
+            stages.enter(
+                RecoveryStage::SpendOtherPayment,
+                &self.maker_coin,
+                Some(&maker_payment),
+                None,
+            );
             let fut = self.maker_coin.send_taker_spends_maker_payment(
                 &maker_payment,
                 self.maker_payment_lock.load(Ordering::Relaxed) as u32,
@@ -2089,7 +2138,18 @@ impl TakerSwap {
             });
         }
 
-        let taker_key = try_s!(self.recovery_taker_coin_key(&taker_payment).await);
+        let taker_key = try_s!(self.recovery_taker_coin_key(&taker_payment, stages).await);
+        stages.enter(
+            RecoveryStage::SearchSpend,
+            &self.taker_coin,
+            Some(&taker_payment),
+            Some(HtlcDetectionParams {
+                time_lock: taker_payment_lock as u32,
+                first_pub: taker_key.pubkey.to_vec(),
+                second_pub: other_taker_coin_htlc_pub.to_vec(),
+                secret_hash: secret_hash.to_vec(),
+            }),
+        );
         let taker_payment_spend = try_s!(
             self.taker_coin
                 .search_for_swap_tx_spend_my(
@@ -2111,6 +2171,12 @@ impl TakerSwap {
                     check_maker_payment_is_not_spent!(maker_key);
                     let secret = try_s!(self.taker_coin.extract_secret(&self.r().secret_hash.0, &tx.tx_hex()));
 
+                    stages.enter(
+                        RecoveryStage::SpendOtherPayment,
+                        &self.maker_coin,
+                        Some(&maker_payment),
+                        None,
+                    );
                     let fut = self.maker_coin.send_taker_spends_maker_payment(
                         &maker_payment,
                         self.maker_payment_lock.load(Ordering::Relaxed) as u32,
@@ -2157,6 +2223,12 @@ impl TakerSwap {
                     );
                 }
 
+                stages.enter(
+                    RecoveryStage::RefundMyPayment,
+                    &self.taker_coin,
+                    Some(&taker_payment),
+                    None,
+                );
                 let fut = self.taker_coin.send_taker_refunds_payment(
                     &taker_payment,
                     taker_payment_lock as u32,
@@ -2946,6 +3018,65 @@ mod taker_swap_tests {
             *REFUND_PRIVKEY.lock().unwrap(),
             per_swap_key_pair.private().secret.to_vec()
         );
+    }
+
+    /// CRD ch.39 R39.5.5 (T39.5.5 bullet 1), taker side: a spend search that never completes ends the
+    /// recovery with the error naming the stage and the coin, and what a shielded coin's HTLC detection
+    /// read last. A search is not a spend, so the error does not claim a transaction may have been sent.
+    #[test]
+    fn test_recover_funds_taker_swap_names_the_search_stage_when_the_search_never_completes() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        TestCoin::tx_enum_from_bytes.mock_safe(|_, _| MockResult::Return(Ok(eth_tx_for_test().into())));
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::pending())));
+        TestCoin::htlc_detection_progress.mock_safe(|_, _, _, _, _| {
+            MockResult::Return(Some("a, PubkeyHash form, history of RPexample blocks 5..=9".to_owned()))
+        });
+
+        let err = block_on(taker_swap.recover_funds_within(std::time::Duration::from_millis(300))).unwrap_err();
+        assert!(err.contains("searching for a spend of the payment"), "{err}");
+        assert!(err.contains("coin ticker"), "{err}");
+        assert!(err.contains(&format!("{:02x}", eth_tx_for_test().tx_hash())), "{err}");
+        assert!(
+            err.contains("the HTLC detection was reading last: a, PubkeyHash form, history of RPexample blocks 5..=9"),
+            "{err}"
+        );
+        assert!(!err.contains("may already have been broadcast"), "{err}");
+    }
+
+    /// R39.5.5 (T39.5.5 bullet 2), taker side: a refund that stalls names the refund stage and says the
+    /// transaction may already have been broadcast.
+    #[test]
+    fn test_recover_funds_taker_swap_names_the_refund_stage_when_the_refund_stalls() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::send_taker_refunds_payment
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::empty())));
+
+        let err = block_on(taker_swap.recover_funds_within(std::time::Duration::from_millis(300))).unwrap_err();
+        assert!(err.contains("refunding this node's payment"), "{err}");
+        assert!(err.contains("coin ticker"), "{err}");
+        assert!(err.contains("may already have been broadcast"), "{err}");
+    }
+
+    /// R39.5.5 (T39.5.5 bullet 3), taker side: a recovery that completes within the bound returns what it
+    /// returned before the bound existed.
+    #[test]
+    fn test_recover_funds_taker_swap_within_the_bound_returns_the_same_response() {
+        let (taker_swap, _, _) = taker_swap_with_saved_htlc_key();
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+        TestCoin::send_taker_refunds_payment.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(taker_swap.recover_funds_within(std::time::Duration::from_secs(600))).unwrap();
+        assert_eq!(actual, RecoveredSwap {
+            action: RecoveredSwapAction::RefundedMyPayment,
+            coin: "ticker".to_string(),
+            transaction: eth_tx_for_test().into(),
+        });
     }
 
     /// R39.5.4: a payment that pays neither rebuilt script is the hard stop; it names the payment by its

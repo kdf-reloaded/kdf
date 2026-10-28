@@ -93,6 +93,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[path = "lp_swap/check_balance.rs"] mod check_balance;
 #[path = "lp_swap/dex_fee.rs"] mod dex_fee;
+pub(crate) use recovery_bound::{recover_within, HtlcDetectionParams, RecoveryStage, RecoveryStages,
+                                RECOVER_FUNDS_TOTAL_BOUND};
+
 #[allow(unused_imports)]
 pub use dex_fee::{compute_dex_fee, compute_dex_fee_with_taker_pubkey, dex_fee_amount, dex_fee_amount_from_taker_coin};
 pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee_rate, dex_fee_threshold};
@@ -101,6 +104,7 @@ pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee
 #[path = "lp_swap/max_maker_vol_rpc.rs"] mod max_maker_vol_rpc;
 #[path = "lp_swap/my_swaps_storage.rs"] mod my_swaps_storage;
 #[path = "lp_swap/pubkey_banning.rs"] mod pubkey_banning;
+#[path = "lp_swap/recovery_bound.rs"] mod recovery_bound;
 #[path = "lp_swap/recreate_swap_data.rs"] mod recreate_swap_data;
 #[path = "lp_swap/saved_swap.rs"] mod saved_swap;
 #[path = "lp_swap/swap_events.rs"] pub(crate) mod swap_events;
@@ -1081,12 +1085,16 @@ pub(crate) struct RecoveryKeyRequest<'a> {
     pub(crate) time_lock: u32,
     pub(crate) secret_hash: &'a [u8],
     pub(crate) payment_tx: &'a [u8],
+    /// The stage tracker of the recovery this key is resolved for (R39.5.5).
+    pub(crate) stages: &'a RecoveryStages,
 }
 
 /// Picks the HTLC key a recovery uses for a payment (CRD ch.39 R39.5.4): the swap's own key first, then the
 /// coin's persistent key, whichever first rebuilds the script the payment pays. The persistent key is a
 /// candidate only when it differs from the swap's key. A payment that matches neither is a hard stop.
 pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Result<RecoveryHtlcKey, String> {
+    req.stages
+        .enter(RecoveryStage::ResolveHtlcKey, req.coin, Some(req.payment_tx), None);
     let persistent_keypair = req.ctx.secp256k1_key_pair();
     let persistent = RecoveryHtlcKey {
         kind: RecoveryHtlcKeyKind::Persistent,
