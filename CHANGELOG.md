@@ -88,7 +88,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   working wallet for a fresh activation, and after Ironwood it could build transactions the network
   rejects. Light mode is unchanged. Native mode returns in a later release, see
   [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
-  native mode. Detail: CRD ch.39 R39.11.1a.
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
