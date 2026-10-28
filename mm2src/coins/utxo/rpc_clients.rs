@@ -78,9 +78,21 @@ pub use native_rpc_client::*;
 pub(crate) mod electrum_types;
 pub use electrum_types::*;
 
+#[path = "rpc_clients/electrum_pool.rs"]
+pub(crate) mod electrum_pool;
+pub use electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
+
 #[path = "rpc_clients/electrum_rpc_client.rs"]
 pub(crate) mod electrum_rpc_client;
 pub use electrum_rpc_client::*;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc_clients/electrum_stub_server.rs"]
+pub(crate) mod electrum_stub_server;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc_clients/electrum_pool_tests.rs"]
+mod electrum_pool_tests;
 
 type ElectrumScriptHash = String;
 type ScriptHashUnspents = Vec<ElectrumUnspent>;

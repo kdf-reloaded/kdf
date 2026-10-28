@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
+  random once when the coin is enabled, so users spread across the listed servers (set
+  `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
+  used again; a server that keeps failing is skipped for a growing
+  time (20 s doubling up to 12 h); if every connected server fails, every listed server is tried;
+  connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
+  server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
+  one connects; if none does, the error names each server. More in ch.38 §38.6.4.
 - **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
   shows that a node's copy of the maker's orders differs, the node asks another node for an update.
   It used to describe its copy by the maker's advertised state instead of its own, so while the maker
@@ -194,6 +202,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
+  later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
+- **Electrum change notifications are no longer dropped.** A server's message that an address or the
+  chain tip changed was read as an answer to no request and discarded, so balance streaming and
+  history refresh never saw it; it now reaches the waiting watcher, also after the connection that
+  carried the subscription was replaced. More in ch.38 §38.6.4 and §38.6.5.
 - **A market maker's keep-alive is now sent once per trading pair, as other nodes expect.** A maker
   with orders on several pairs used to send, every 30 seconds, one message per pair that each listed
   every pair, so each node that relays the order book asked for every pair once per copy. Seed nodes

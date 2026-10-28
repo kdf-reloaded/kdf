@@ -1661,7 +1661,9 @@ fn test_electrum_rpc_client_error() {
     let debug_actual = format!("{:?}", err);
 
     assert!(actual.contains("JsonRpcError { client_info: coin: DOC"));
-    assert!(actual.contains("request: blockchain.transaction.get id=1 params=2"));
+    // The pool draws its request ids (the version negotiation included) from one counter, so the id is not 1.
+    assert!(actual.contains("request: blockchain.transaction.get id="));
+    assert!(actual.contains(" params=2"));
     assert!(actual.contains("response from electrum1.cipig.net:10060"));
     assert!(actual.contains("No such mempool or blockchain transaction"));
     assert!(!actual.contains("params: [String("));
@@ -2159,8 +2161,13 @@ fn test_network_info_negative_time_offset() {
     let _info: NetworkInfo = json::from_str(&info_str).unwrap();
 }
 
+/// A server that answers a protocol version outside the client's range is removed from the pool; with no other
+/// server the activation probe fails (CRD ch.38 R38.6.4e item 1, R38.6.4k-R item 5), naming the server.
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn test_unavailable_electrum_proto_version() {
+    use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
+
     ElectrumClientImpl::new.mock_safe(|coin_ticker, event_handlers| {
         MockResult::Return(ElectrumClientImpl::with_protocol_version(
             coin_ticker,
@@ -2169,21 +2176,31 @@ fn test_unavailable_electrum_proto_version() {
         ))
     });
 
+    let server = block_on(StubServer::start(StubBehavior::Answer));
     let conf = json!({"coin":"DOC","asset":"DOC","rpcport":62415});
     let req = json!({
          "method": "electrum",
-         "servers": [{"url":"doc.electrum1.cipig.net:10020"}],
+         "servers": [{"url": server.addr()}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+    let started = std::time::Instant::now();
     let error = block_on(utxo_standard_coin_with_priv_key(
         &ctx, "DOC", &conf, &params, &[1u8; 32],
     ))
     .err()
     .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let error = error.to_string();
     log!("Error: "(error));
-    assert!(error.contains("There are no Electrums with the required protocol version"));
+    assert!(error.contains("DOC"), "{error}");
+    assert!(error.contains(&server.addr()), "{error}");
+    assert!(error.contains("unsupported protocol version 1.4"), "{error}");
 }
 
 #[test]
@@ -8166,6 +8183,19 @@ mod legacy_electrum_connection_settings {
 
     const SERVERS: [&str; 2] = ["127.0.0.1:1", "127.0.0.1:2"];
 
+    /// The probe returns on the first connection and the rest connect in the background (CRD ch.38
+    /// R38.6.4k-R), so the maintained set is waited for.
+    fn wait_for_maintained(client: &ElectrumClient, count: usize) {
+        let started = std::time::Instant::now();
+        while block_on(client.count_connected()) != count {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "no {count} maintained connections"
+            );
+            block_on(Timer::sleep(0.02));
+        }
+    }
+
     fn request(extra: Json) -> Json {
         let mut req = json!({
             "method": "electrum",
@@ -8314,7 +8344,7 @@ mod legacy_electrum_connection_settings {
         );
     }
 
-    /// Two loopback servers, `max_connected: 1`: the client builder plans and opens a single connection.
+    /// Two loopback servers, `max_connected: 1`: the client builder opens a single connection in the background.
     /// With the default maximum it opens one per server.
     #[test]
     fn the_client_builder_honors_max_connected() {
@@ -8353,11 +8383,122 @@ mod legacy_electrum_connection_settings {
             block_on(builder.electrum_client(args, servers, min_connected, max_connected)).unwrap()
         };
 
+        // The pool is made of both servers, but the maintained set stays at the ceiling.
         let limited = build(json!({ "max_connected": 1 }));
-        assert_eq!(block_on(limited.count_connections()), 1);
+        assert_eq!(block_on(limited.count_connections()), 2);
+        wait_for_maintained(&limited, 1);
+        block_on(Timer::sleep(0.3));
         assert_eq!(block_on(limited.count_connected()), 1);
 
         let unlimited = build(json!({}));
         assert_eq!(block_on(unlimited.count_connections()), 2);
+        wait_for_maintained(&unlimited, 2);
+    }
+}
+
+/// The client builder against scripted Electrum servers (CRD ch.38 R38.6.4k-R, T38.6.4.12-R). The builder
+/// uses the production timings, so these tests keep every server fast or refusing.
+#[cfg(not(target_arch = "wasm32"))]
+mod electrum_pool_activation {
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
+    use std::time::{Duration, Instant};
+
+    fn build_client(servers: &[&StubServer]) -> crate::utxo::utxo_builder::UtxoCoinBuildResult<ElectrumClient> {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let servers: Vec<_> = servers.iter().map(|server| json!({ "url": server.addr() })).collect();
+        let req = json!({ "method": "electrum", "servers": servers });
+        let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+        let builder = UtxoArcBuilder::new(
+            &ctx,
+            TEST_COIN_NAME,
+            &Json::Null,
+            &params,
+            PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::default()),
+            UtxoStandardCoin::from,
+        );
+        let args = ElectrumBuilderArgs {
+            spawn_ping: false,
+            negotiate_version: true,
+            collect_metrics: false,
+        };
+        let servers = match params.mode.clone() {
+            UtxoRpcMode::Electrum { servers, .. } => servers,
+            UtxoRpcMode::Native => unreachable!(),
+        };
+        block_on(builder.electrum_client(args, servers, None, None))
+    }
+
+    /// T38.6.4.12-R: the build waits for the first connection and no longer, and the block-height query that
+    /// follows is answered over it.
+    #[test]
+    fn the_build_waits_for_the_first_connection_and_the_height_is_then_answered() {
+        let servers = block_on(async {
+            let servers = [
+                StubServer::start(StubBehavior::Answer).await,
+                StubServer::start(StubBehavior::Answer).await,
+            ];
+            for server in &servers {
+                server.set_accept_delay(Duration::from_millis(300));
+                server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
+            }
+            servers
+        });
+
+        let started = Instant::now();
+        let client = build_client(&[&servers[0], &servers[1]]).unwrap();
+        let built_after = started.elapsed();
+        assert!(built_after >= Duration::from_millis(250), "{built_after:?}");
+        assert!(built_after < Duration::from_secs(5), "{built_after:?}");
+        assert!(block_on(client.count_connected()) >= 1);
+
+        assert_eq!(block_on(client.get_block_count().compat()).unwrap(), 777);
+    }
+
+    /// T38.6.4.12-R: with no server reachable the build fails at once, naming the coin and every server; the
+    /// activation reports it as `Transport` (CRD ch.55 R55.5.14, tested in `coins_activation`).
+    #[test]
+    fn an_unreachable_server_set_fails_the_build_naming_each_server() {
+        let servers = block_on(async {
+            [
+                StubServer::start(StubBehavior::Down).await,
+                StubServer::start(StubBehavior::Down).await,
+            ]
+        });
+        let started = Instant::now();
+        let error = build_client(&[&servers[0], &servers[1]]).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        let crate::utxo::utxo_builder::UtxoCoinBuildError::FailedToConnectToElectrums(failure) = error.into_inner()
+        else {
+            panic!("an unreachable server set is a connection failure");
+        };
+        for server in &servers {
+            assert!(failure.contains(&server.addr()), "{failure}");
+        }
+        assert!(failure.contains(TEST_COIN_NAME), "{failure}");
+    }
+
+    /// The wallet maintainer's case: the first listed servers are down or silent, a later one is up. The coin is
+    /// enabled in the time of the live server's connection, not after the silent server's 20 s, and its
+    /// block-height query is answered.
+    #[test]
+    fn dead_servers_first_and_a_live_one_last_do_not_stall_the_activation() {
+        let servers = block_on(async {
+            let servers = [
+                StubServer::start(StubBehavior::Down).await,
+                StubServer::start(StubBehavior::Silent).await,
+                StubServer::start(StubBehavior::Answer).await,
+            ];
+            servers[2].set_result("blockchain.headers.subscribe", json!({"height": 4242, "hex": "00"}));
+            servers
+        });
+        let started = Instant::now();
+        let client = build_client(&[&servers[0], &servers[1], &servers[2]]).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(block_on(client.count_connected()), 1);
+        let height = block_on(client.get_block_count().compat()).unwrap();
+        assert_eq!(height, 4242);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 }
