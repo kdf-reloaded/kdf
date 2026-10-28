@@ -289,6 +289,21 @@ authored by the KDF Spec Reader 2026-10-27, passed the KDF Dirty Gate on 2026-10
 > such coins on one shared EVM endpoint each cost that one read, as at the
 > reference designations R60.4.6 names (maintainer, 2026-10-28: no change).
 
+> **As-built note (2026-10-28, clean-side record).** The reconciliation of item 5
+> (`reconcile_missing_own_maker_orders`) reads without holding the order's lock
+> and applies under it. It copies the order's tickers under the lock and
+> releases it; then, with no order lock held, it looks up the pair, reads the
+> base coin's spendable balance and computes the maximum maker volume (which
+> reads a fee), once per base coin and pass, so several missing orders on one
+> base coin share the one read; then it locks each order again, skips it if it
+> is no longer in the maker-order store, and applies what item 5 binds with the
+> reserved amount as it stands at that moment. Before, the order's lock was held
+> across the balance and fee round trips, and a call that awaits the order
+> (`my_orders`, `update_maker_order`, `cancel`) waited for them. What an outside
+> observer sees is unchanged: the lowering, the cancellation reasons and the
+> re-announcement are the same. Tests: T60.7 (g) in the same module, whose coin
+> mocks try the order's lock during the reads.
+
 ## 60.5 Refusal and failure map — what a peer observes
 
 This section answers whether a floor is a wire parameter. It is, in two

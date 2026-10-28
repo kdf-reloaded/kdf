@@ -7385,4 +7385,153 @@ mod t60_7_maker_balance_watch_tests {
         }
         std::fs::remove_dir_all(&dbdir).ok();
     }
+
+    // ---- R60.4.6 item 5: the maintenance reads hold no order lock -------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn publishes(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> usize {
+        let mut n = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(
+                cmd,
+                AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+            ) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn order_mutex(ctx: &MmArc, order: &MakerOrder) -> Arc<AsyncMutex<MakerOrder>> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let order_mutex = ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .get_order(&order.uuid)
+            .unwrap()
+            .clone();
+        order_mutex
+    }
+
+    /// The balance read and the fee read of the maintenance pass try to take the order's lock when they are
+    /// reached. They succeed only if the pass does not hold the lock across its network reads. Returns the number
+    /// of reads that found the lock taken.
+    fn mock_reads_that_try_the_lock(
+        order_mutex: Arc<AsyncMutex<MakerOrder>>,
+        spendable: &'static str,
+        on_balance_read: impl Fn() + 'static,
+    ) -> Arc<AtomicUsize> {
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let (balance_guard, fee_guard) = (blocked.clone(), blocked.clone());
+        let balance_order = order_mutex.clone();
+        TestCoin::my_balance.mock_safe(move |_| {
+            if balance_order.try_lock().is_none() {
+                balance_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            on_balance_read();
+            MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(bd(spendable)))))
+        });
+        TestCoin::get_sender_trade_fee.mock_safe(move |coin, _value, _stage| {
+            if order_mutex.try_lock().is_none() {
+                fee_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let fee = TradeFee {
+                coin: coin.ticker().to_owned(),
+                amount: MmNumber::from("0.1"),
+                paid_from_trading_vol: false,
+            };
+            MockResult::Return(Box::pin(async move { Ok(fee) }))
+        });
+        blocked
+    }
+
+    /// The order's lock is free while the pass reads the base coin's balance and the fee, so a call that awaits
+    /// the order (`my_orders`, `update_maker_order`, `cancel`) does not wait for those round trips. The pass
+    /// still applies its result: the order is lowered and re-announced.
+    #[test]
+    fn t60_7_g_the_reconciliation_holds_no_order_lock_across_its_reads() {
+        let probe = Probe::install("5");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let order = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &order);
+        let mutex = order_mutex(&ctx, &order);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let blocked = mock_reads_that_try_the_lock(mutex.clone(), "5", move || {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "the balance was read");
+        assert_eq!(
+            blocked.load(AtomicOrdering::SeqCst),
+            0,
+            "a read found the order's lock taken"
+        );
+        assert_eq!(block_on(mutex.lock()).max_base_vol, MmNumber::from("4.9"));
+        assert!(publishes(&mut p2p_rx) >= 1, "and the order is re-announced");
+    }
+
+    /// Several missing orders on one base coin share one balance read per pass; another base coin reads its own.
+    #[test]
+    fn t60_7_g_missing_orders_on_one_base_coin_share_one_balance_read() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        for (base, rel) in [("BASE", "REL"), ("BASE", "OTHER"), ("BASE", "REL"), ("OTHER", "REL")] {
+            store(&ctx, &own_order(base, rel, "5", "1"));
+        }
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(probe.count("read BASE"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.count("read OTHER"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.entries().len(), 2);
+        assert!(publishes(&mut p2p_rx) >= 4, "every order is re-announced");
+    }
+
+    /// An order that went away between the read and the apply is neither touched nor announced.
+    #[test]
+    fn t60_7_g_an_order_removed_between_the_read_and_the_apply_is_left_alone() {
+        let probe = Probe::install("2");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_count = cancelled.clone();
+        delete_my_maker_order.mock_safe(move |_, _, _| {
+            cancelled_count.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let gone = own_order("BASE", "REL", "5", "1");
+        let kept = own_order("OTHER", "REL", "5", "1");
+        store(&ctx, &gone);
+        store(&ctx, &kept);
+        let gone_mutex = order_mutex(&ctx, &gone);
+        // The balance of BASE is 2, so a lowering would show: the supported maximum 1.9 is below the available 5.
+        let remover = ctx.clone();
+        let removed = gone.clone();
+        mock_reads_that_try_the_lock(gone_mutex.clone(), "2", move || remove(&remover, &removed));
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(
+            block_on(gone_mutex.lock()).max_base_vol,
+            MmNumber::from("5"),
+            "not touched"
+        );
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&gone.uuid));
+        assert_eq!(cancelled.load(AtomicOrdering::SeqCst), 0, "not cancelled either");
+        // Only the order that stayed was announced (the mock is the same for both bases, so it was lowered too).
+        assert_eq!(publishes(&mut p2p_rx), 1);
+        assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&kept.uuid));
+    }
 }
