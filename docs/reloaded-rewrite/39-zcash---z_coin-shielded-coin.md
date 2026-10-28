@@ -3925,6 +3925,36 @@ a lower tip from an honest endpoint. Therefore:
 > threshold constant exists. The test covers the monotonic floor; the hash-link
 > half is covered by the existing R39.8.0n tests.
 
+R39.11.10a **Confirmations and expiry are judged against a fresh tip.** The
+monotonic height of R39.11.10 serves reporting, scanning and the builder
+target height (R39.11.11) only. Two decisions shall instead use the tip just
+read from an admitted endpoint (the fresh read, not the highest height ever
+observed):
+
+- the confirmation count of a transaction (`tip + 1 - mined height`, zero
+  when the height is above that tip), and so every wait for a number of
+  confirmations;
+- the decision that a transaction has expired because the tip has passed its
+  expiry height.
+
+A lagging endpoint then delays both decisions, which is the safe direction:
+a payment is never counted as confirmed, and a transaction never declared
+expired, on the strength of a height the chain no longer has. Under the
+monotonic height, a reorganization that lowered the tip would overcount a
+payment's confirmations by the difference.
+
+> **Provenance (2026-10-26).** Clean-room original Reloaded policy, written
+> from this repository's code and a report by a Pirate Chain developer; no
+> forbidden-corpus input. It refines R39.11.10 without editing its gated
+> text.
+
+T39.11.10a *Fresh tip for confirmations.* With a highest observed tip of 110
+and a fresh read of 105, a transaction mined at 105 has 1 confirmation, not 6.
+A wait for 2 confirmations does not finish until a fresh read reaches 106.
+A transaction with expiry height 107 is not declared expired while the fresh
+read is 105, although the highest observed tip is 110. The reported height
+stays 110.
+
 R39.11.11 **Every shielded transaction construction path shall take its builder
 target height from the one authority of R39.11.9.** *(Retained unchanged in
 substance; it is the requirement that fixes the live refund defect, and the
