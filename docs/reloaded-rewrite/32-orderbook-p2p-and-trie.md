@@ -1486,6 +1486,39 @@ today (ch. 59 R59.6.5), so this subsystem can currently evict a
 pubkey the node itself makes orders under and drop those orders
 from its own read index.
 
+**R-K4 (memory maintenance of the synchronization state; Reloaded-original,
+2026-10-28).** The delta history of R-P5 and R-T4 and the node store of R-T1
+stay as they are on the wire and in their answers. What this rule adds is that
+the memory they hold is released when it is due, not only when traffic happens
+to touch it, and that nothing leaks when a slice is cleared:
+
+1. *Expiry on a timer.* Every 30 seconds, independently of any traffic, each
+   pubkey state drops the expired entries of its per-pair history cache (the
+   4-hour bound) and of each pair's delta history (the 5-minute bound), and
+   releases the spare capacity of those tables. Which entries are expired does
+   not change: an entry whose expiry was refreshed is not dropped, and a delta
+   answer for a root inside its window is unchanged by a sweep. A pair's history
+   is removed only by its own 4-hour bound, never because its deltas expired.
+2. *Refreshing an expiry is free.* Refreshing a cache entry's expiry does not
+   add bookkeeping: each key has one expiry-queue element, and a queue element
+   whose entry was refreshed is re-queued at its true expiry when it is reached.
+3. *Node store.* After each ten-minute purge the node store releases the spare
+   capacity of its table.
+4. *Clearing releases nodes.* Clearing a `(pubkey, pair)` slice, and removing a
+   pubkey, dereferences the nodes of the cleared tries, so that the purge
+   reclaims them. A node still referenced by another trie stays (the store
+   counts references). This adopts the "orphan release" candidate of D6.
+5. *Gauges.* The node reports, besides `orderbook.len`, the size in bytes and
+   entry count of the node store, the number of pair histories and of stored
+   deltas, the number of tracked pubkeys and the number of queued trie-operation
+   batches not yet applied (`orderbook.memory_db`, `orderbook.memory_db.entries`,
+   `orderbook.history.pairs`, `orderbook.history.deltas`, `orderbook.pubkeys`,
+   `orderbook.trie_ops.pending`).
+
+No item changes a wire shape. The tests are those of the implementing change
+(in-process counts and capacities after a burst, the timer sweep, the clear and
+the shared-subtree case, the gauges).
+
 ## 32.9A Bounded and Unbounded State
 
 *(Authored by the KDF Spec Reader 2026-10-28, second pass, from the rows
@@ -1535,6 +1568,10 @@ bound (**parity**); the Reloaded-original candidates that would add one
 are recorded under §32.10 D6 and ch. 28 D7 and are not bound here.
 Adopting any of them is a divergence to record in the operator-facing
 compatibility documents; none changes a wire shape.
+Since R-K4 (item 4) the cleared-slice part of row 6 is no longer
+parity: Reloaded releases the nodes of a cleared slice, and row 3 and
+the nodes of replaced leaves are released on a timer (R-K4 items 1 and
+3).
 
 **R-B3 (two growth modes an operator can tell apart).** Rows 6 and 7
 grow with what *this* node applies: every synchronization answer in the
@@ -1552,7 +1589,8 @@ full snapshots for one (pubkey, pair), each listing the same two orders;
 the node store grows by about N times the size of one two-leaf trie and
 does not shrink after the ten-minute purge. Applying N successive deltas
 instead grows it by at most the size of the live trie plus the nodes the
-next purge releases.
+next purge releases. *(Reloaded, since R-K4 item 4: after the purge the
+node store is back to the live trie in both cases.)*
 
 **T-B2** *Slow peer (R-B1 row 17).* A relay forwarding a steady message
 stream to a peer whose inbound is throttled accumulates queued outbound
@@ -1564,6 +1602,196 @@ unaffected.
 keep-alives advertising a root the node cannot synchronize (every
 request fails) keeps its record and placeholders for as long as the
 keep-alives arrive, and loses them 90 s after they stop.
+
+## 32.9B Maker Publication Rate (Reloaded-original)
+
+*Reloaded-original (maintainer decision AO, option C, 2026-10-28); no forbidden-class
+input. The plan behind it is `docs/plans/maker-gossip-rate-control.md`.*
+
+**R-MP1 (maker outbox).** The order messages a node publishes for its own
+maker orders go through one *outbox* per maker pubkey: the persistent one
+and each per-order one. These are the maker-order created, updated and
+cancelled messages, including the re-announcement of an own order missing
+from the index ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7).
+
+1. **One pending message per order.** The outbox holds at most one pending
+   message per order uuid. A new message for an order that already has one
+   pending merges with it:
+
+   | Pending | New | Result |
+   |---|---|---|
+   | none | any | the new message |
+   | created | updated | created, carrying the updated values |
+   | updated | updated | updated, field by field: each field takes its latest value set in either message |
+   | created or updated | cancelled | cancelled; the pending message is discarded |
+   | cancelled | any | cancelled; a cancellation is terminal and never merged away |
+
+2. **Not held back:**
+   - A cancelled message is published at once and is not counted against
+     the budget of R-MP2.
+   - The swap-negotiation messages (taker request, maker reserved, taker
+     connect, maker connected) do not go through the outbox at all.
+   - Both are published with **priority** under
+     [Chapter 28](28-libp2p-modernization.md) §28.9B RQ1 item 9, both when
+     the node publishes them and when it lets a received one propagate.
+   - No other ordermatch message is priority. Keep-alives in particular
+     are not (R-MP3 item 3).
+   - A cancellation that overtakes an earlier message for the same order
+     is safe: the receiver's cancellation guard (§32.3 R-C5, §32.9 R-K1)
+     suppresses a creation that arrives after it, and an update for an
+     order the receiver no longer holds is ignored.
+3. **Local state is not delayed.** The maker's own order record, its trie
+   ([§32.6](#326-patricia-trie-substrate-and-delta-sync)) and the result
+   of the request that changed the order are updated at once, as without
+   the outbox. Only the gossip message waits.
+4. **Order of release.** Pending messages are released oldest first,
+   counted from when the order's slot was first filled, so that no order
+   waits behind newer ones.
+5. **Switch.** The top-level `MM2.json` boolean `maker_update_coalescing`
+   (default `true`) selects this rule. Only a JSON `false` turns it off,
+   and every message is then published at once, as without the outbox.
+
+**R-MP2 (release budget).** The outbox releases created and updated
+messages at no more than the pubkey's current *rate*.
+
+1. **Ceiling.** The rate never exceeds `maker_update_rate_max` messages
+   per second per maker pubkey (top-level `MM2.json` number, default 10),
+   with a burst of 10 × that value (default 100).
+2. **Pressure.** The node is *under pressure* while the send-queue
+   pressure signal of [Chapter 28](28-libp2p-modernization.md) §28.9B
+   RQ1 item 8 is raised for any connection to a relay.
+3. **Adaptation:**
+   - while under pressure, the rate is halved every 5 seconds, down to a
+     floor of 0.5 messages per second;
+   - once the node has been out of pressure for 30 seconds, the rate rises
+     by 1 message per second every 5 seconds, up to the ceiling.
+4. **Degraded mode.** While under pressure at the floor, the outbox stops
+   releasing created and updated messages, and the item 2 flush of R-MP3
+   is skipped. Peers then learn the changes through the keep-alive
+   synchronization of §32.7.3. Cancellations are still released at once.
+5. **Logging.** Entering and leaving degraded mode, and each change of
+   the rate, are logged at most once per minute per pubkey, with the
+   rate. Order content is never logged.
+
+**R-MP3 (keep-alive ordering).** The keep-alive of R-K2/R-K2a is never
+held back by the budget, and it is ordered after its pair's changes.
+
+1. **Not budgeted.** The keep-alive leaves on its tick whatever the state
+   of the budget.
+2. **Flush first.** Before the keep-alive for pair P is published, every
+   pending outbox message for an order on P is released, without regard
+   to the budget. The keep-alive is then published after them. Because
+   each order holds at most one pending message, this adds at most one
+   message per order per tick.
+3. **No overtaking.** A keep-alive is never queued ahead of order
+   messages it accounts for, in the outbox or in any send-queue lane.
+
+**R-MP4 (keep-alive after reconnect).** When a connection to a relay is
+established and that relay has joined the relay mesh (§28.6 of
+[Chapter 28](28-libp2p-modernization.md)), the node publishes, within 5
+seconds, one keep-alive per pair per maker pubkey as on a tick. Each is
+preceded by the item 2 flush of R-MP3, which is skipped in degraded mode.
+This round is in addition to the regular ticks and does not move them.
+
+**R-MP5 (metrics).** The metrics the node reports carry these aggregate
+values, with no peer identity and no content:
+- `p2p.send_queue.len`: queued data RPCs, summed over connections;
+- `p2p.send_queue.max_per_peer`: the largest single connection's count;
+- `p2p.send_queue.dropped.count`: data RPCs dropped under §28.9B RQ1
+  item 4 since start;
+- `p2p.outbox.pending`: pending outbox messages, summed over pubkeys;
+- `p2p.outbox.rate`: the current rate of R-MP2, the lowest over pubkeys;
+- `p2p.outbox.pressure`: 1 while under pressure, else 0.
+
+*Rationale.* A relay can drain anything from more than 190 to fewer
+than 0.2 messages per second, depending on its host's load. Toward a
+slow reader, a sender cannot move a message ahead of those it has
+already sent.
+- An in-process measurement on 2026-10-28 published 90 updates per
+  second toward a reader taking about one per second. It delivered 0 of
+  10 keep-alives, both with a newest-first queue and with the capped queue
+  of §28.9B.
+- Every node drops a maker 90 seconds after its last keep-alive (R59.6.4).
+  So a maker that publishes faster than its relay drains loses its whole
+  book on every node.
+
+The outbox makes the rate a choice of the maker rather than of the
+bot driving it. The budget follows the relay's actual capacity, and the
+keep-alive is never queued behind messages that need not exist.
+
+R-MP3 item 2 keeps the advertised root reachable. A keep-alive that
+overtook its own pair's updates would advertise a root no receiver can
+reach yet, and every receiver would then request a synchronization.
+
+R-MP4 replaces what a closing connection loses. Data still in the
+multiplexer's window when a connection closes is lost; §28.9B RQ1 item 5
+and the ping safeguard can both close a connection. The round restarts
+each relay's 90-second window and starts its synchronization, without
+waiting up to 30 seconds for the next tick.
+
+> **Reloaded divergence (informative).** The reference publishes every
+> maker-order message at once. Under R-MP1 and R-MP2 a peer may receive an
+> order's update up to about 1/rate seconds later, or, in degraded mode,
+> only through the next keep-alive synchronization. It may never see an
+> intermediate value of an order that changes quickly. Cancellations are
+> not delayed, and may arrive ahead of messages published before it (the
+> priority lane of §28.9B RQ1 item 9). R-MP4 publishes keep-alives beyond
+> the ticks of R-K2a. Every
+> keep-alive has the shape R-K2a binds, and a receiver processes each one
+> on its own. No message format changes.
+>
+> Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this is arm 3.
+> The project team decided that Reloaded's variant is the default (decision
+> AO, 2026-10-28). **Compatibility:** to publish every order message at
+> once, set `maker_update_coalescing` to `false`. R-MP3 and R-MP4 are not
+> switched: they only order and add keep-alives of the bound shape.
+>
+> **Provenance.** Reloaded-original. Inputs: our own code, the in-process
+> measurements of 2026-10-28 (`docs/plans/gossip-send-queue-bound.md`), a
+> lab run of our maker against reference nodes run as black boxes, and the
+> gated facts already in §32.9A and R59.6.4 (the 90-second liveness window).
+
+**Tests (R-MP1–R-MP5).**
+
+- **T-MP1** *Merging.* Each row of the R-MP1 item 1 table produces the
+  stated pending message.
+- **T-MP2** *Cancellation.* A cancelled message is never merged away, is
+  released at once when the budget is exhausted, and leaves the
+  node in degraded mode too.
+- **T-MP3** *Swap messages bypass.* The four swap-negotiation messages are
+  published at once, with the outbox full and the budget exhausted.
+- **T-MP4** *Budget.* With an injected clock:
+  - the ceiling and the burst are respected;
+  - under pressure the rate halves every 5 s down to 0.5/s;
+  - after 30 s out of pressure it rises by 1/s every 5 s;
+  - at the floor under pressure no created or updated message is released.
+- **T-MP5** *Pressure signal.* Covered by §28.9B T-RQ1.8.
+- **T-MP6** *Keep-alive ordering.* A pair's pending messages are published
+  before its keep-alive. A receiver that applies them in order holds the
+  advertised root and sends no synchronization request.
+- **T-MP7** *Reconnect round.* After a forced close and a reconnect, one
+  keep-alive per pair leaves within 5 s of the relay rejoining the mesh.
+- **T-MP8** *Slow relay, in process.* A maker with 600 orders changes
+  them at 90 updates per second, toward a relay that reads about one
+  message per second, for at least 300 s.
+  - Every keep-alive reaches the relay within 30 s of its tick.
+  - No gap between delivered keep-alives exceeds 90 s.
+  - After the load stops, the relay's order set for the maker converges
+    to the maker's.
+- **T-MP9** *Healthy relay.* Below the ceiling, every update is published
+  as soon as it is made. A relay that keeps up receives every update, and
+  no merging is visible.
+- **T-MP10** *Metrics.* The R-MP5 values are present and reflect a
+  queued backlog, drops, pending outbox messages, the rate and the
+  pressure state.
+- **T-MP11** *Switch.* With `maker_update_coalescing` set to `false`,
+  every order message is published at once.
+- **T-MP12** *Priority marking.*
+  - A cancellation and each swap-negotiation message are published with
+    priority, and so is one propagated by a relay.
+  - A created, updated or keep-alive message is not.
+  - Toward a paused relay with a full data queue, a cancellation arrives
+    first after resume.
 
 ## 32.10 Deferred Work
 
@@ -1679,7 +1907,7 @@ D6. **Reference unboundedness, and Reloaded-original hardening
       — to be decided together with R-F3b);
     - **orphan release** — dereferencing a cleared slice's nodes so the
       periodic purge reclaims them, or rebuilding the node store from
-      the live roots at purge time;
+      the live roots at purge time (adopted: R-K4 item 4);
     - a **cap on concurrently handled inbound gossip messages** per
       peer or per topic, applied before the per-message task is spawned.
 
@@ -2124,3 +2352,15 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   control on the build before the fix showed no growth attributable to the
   aggregated shape alone. The gated content -- the two shapes and what each
   costs a receiver -- is unchanged.
+- *Reloaded-original addition (2026-10-28), no forbidden-class input:* R-K4
+  (timer-driven expiry and capacity release of the delta histories, free expiry
+  refresh, node-store capacity release, node release on clear, gauges). *Inputs:*
+  this repository's own history, node-store and metrics code, and an in-process
+  measurement of it with a counting allocator (a 120,480-update burst for 30
+  orders of one pubkey retained about 1,240 bytes per update, 54 % in the delta
+  history, 28 % in unreferenced nodes, 14 % in table capacity, 4 % in
+  expiry-queue elements; the history caches expire only when touched; a
+  full-snapshot clear leaked about 6 KB per 30-order pair). The reference facts
+  it relies on are the gated ones of D6 and of §32.9A R-B1 rows 3 and 6 (bounds,
+  purge period, nodes of a cleared slice never released); nothing else from the
+  reference was used.

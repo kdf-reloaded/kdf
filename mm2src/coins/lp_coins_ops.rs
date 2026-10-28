@@ -234,6 +234,7 @@ pub async fn lp_register_coin(
     if coins.contains_key(&ticker) {
         return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() });
     }
+    cctx.fee_estimate_cache.forget_coin(&ticker);
     coins.insert(ticker.clone(), coin.clone());
     if tx_history {
         lp_spawn_tx_history(ctx.clone(), coin).map_to_mm(RegisterCoinError::Internal)?;
@@ -692,7 +693,10 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(_) => Ok(()),
+        Some(_) => {
+            coins_ctx.fee_estimate_cache.forget_coin(ticker);
+            Ok(())
+        },
         None => ERR!("{} is disabled already", ticker),
     }
 }

@@ -633,6 +633,13 @@ pub(crate) async fn build_eth_coin(
     // The per-coin gas-limit blocks (CRD R57.5, R57.6) are read before any node is contacted: an unusable
     // member fails the activation, naming the key. A token falls back to its platform coin's entry (R57.5.3).
     let (gas_limit, gas_limit_v2) = coin_gas_limits(ctx, conf, &protocol)?;
+    // CRD ch.38 R38.6.6k item 1: the coin's own `fee_estimate_cache_secs`, else (for a token) its platform's.
+    let platform_conf = match &protocol {
+        CoinProtocol::ERC20 { platform, .. } => crate::coin_conf(ctx, platform),
+        _ => Json::Null,
+    };
+    crate::request_fee_scope::per_coin_fee_estimate_cache_secs(&[conf, &platform_conf])
+        .map_to_mm(EthCoinBuildError::InvalidConfig)?;
     // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
     let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,

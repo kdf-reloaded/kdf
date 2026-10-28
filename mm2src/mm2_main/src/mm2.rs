@@ -254,6 +254,38 @@ fn maybe_warn_unsafe_rpc_wire_dump_enabled() {
     }
 }
 
+/// Refuses a node setting that the node cannot run with, naming the key (the node does not start).
+///
+/// `fee_estimate_cache_secs` is an integer from 0 to 30 (CRD ch.38 R38.6.6j item 2).
+fn validate_node_settings(conf: &Json) -> Result<(), String> {
+    coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf).map(|_| ())
+}
+
+#[cfg(test)]
+mod node_settings_tests {
+    use super::*;
+    use common::block_on;
+    use serde_json::json;
+
+    #[test]
+    fn fee_estimate_cache_secs_is_optional_and_accepts_zero_to_thirty() {
+        validate_node_settings(&json!({})).unwrap();
+        for secs in [0, 15, 30] {
+            validate_node_settings(&json!({ "fee_estimate_cache_secs": secs })).unwrap();
+        }
+    }
+
+    /// The start itself fails, before any context is built, with an error that names the key.
+    #[test]
+    fn a_bad_fee_estimate_cache_secs_fails_the_node_start() {
+        for bad in [json!(31), json!(-1), json!("15"), json!(15.5)] {
+            let params = LpMainParams::with_conf(json!({ "fee_estimate_cache_secs": bad }));
+            let err = block_on(lp_main(params, &|_| ())).unwrap_err();
+            assert!(err.contains("fee_estimate_cache_secs"), "{bad}: {err}");
+        }
+    }
+}
+
 /// * `ctx_cb` - callback used to share the `MmCtx` ID with the call site.
 pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), String> {
     let log_filter = params.filter.unwrap_or_default();
@@ -283,6 +315,8 @@ pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), S
             }
         }
     }
+
+    try_s!(validate_node_settings(&conf));
 
     #[cfg(feature = "custom-swap-locktime")]
     initialize_payment_locktime(&conf);

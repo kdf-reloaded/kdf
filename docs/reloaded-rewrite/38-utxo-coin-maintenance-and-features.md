@@ -786,11 +786,39 @@ on.
 > **Compatibility:** for behaviour matching GLEEC KDF, set
 > `electrum_spread_reads` to `false`.
 
-> **As-built note (2026-10-27).** Reloaded implements R38.6.4b–R38.6.4k. The
-> spreading of read-only queries in R38.6.4a is not implemented yet; it belongs
-> to the order-posting work. The "Closed divergence (2026-10-27)" note after
-> R38.6.4k records what the tree did before. R38.6.4j is a Reloaded-original
-> rule and is marked so.
+> **As-built note (2026-10-28).** Reloaded implements R38.6.4b–R38.6.4k and the
+> spreading of read-only queries in R38.6.4a (PR #128). The "Closed divergence
+> (2026-10-27)" note after R38.6.4k records what the tree did before. R38.6.4j
+> is a Reloaded-original rule and is marked so.
+>
+> The spreading is a rotating start index over the maintained connections in
+> `route_inner` of the pool, applied to read-only requests only. Each such
+> request takes the next value of a per-coin counter, modulo the size of the
+> maintained set, and tries the connections from there round the set; a
+> request that fails on its connection continues with the next one in that
+> order and then with the all-servers retry of R38.6.4f item 2, exactly as
+> before. The number of rounds still to make, which R38.6.4j item 2 divides the
+> remaining budget by, is counted over the rotated order, so the budget
+> arithmetic is unchanged. Directed requests (R38.6.4g) do not use the counter.
+> The classification is by the Electrum method name of the request, closed and
+> exact: `blockchain.scripthash.get_balance`, `.listunspent` and `.get_history`
+> (balance, unspent-list, history), `blockchain.block.header` and `.headers`
+> (header), `blockchain.transaction.get`, `blockchain.estimatefee` and
+> `blockchain.relayfee`, and `blockchain.headers.subscribe`. The last is the
+> block-count query: this client reads the chain tip only through that request,
+> uses its answer once and relies on no subscription it places, so it is
+> classified as the read it is (the maintainer confirmed this on 2026-10-28). A
+> batch is read-only only if every element is.
+> Every other method keeps its routing, among them `blockchain.transaction.broadcast`,
+> `blockchain.scripthash.subscribe`, `blockchain.contract.event.subscribe`,
+> `server.ping`, `server.version`, `blockchain.transaction.get_merkle` and the
+> Qtum contract queries (these last two are not on the list of item 1). Item 4
+> holds without further code: the recently-spent-output cache is applied to the
+> unspent list in the coin layer, after the read, and does not depend on which
+> session answered; a test lets the broadcast go to the first server and the
+> next two reads be answered by the second and third, which still list the spent
+> output. `electrum_spread_reads` is read at coin activation; a value that is not
+> a boolean is taken as `true` with one warning (the chapter is silent on it).
 
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
@@ -1434,8 +1462,145 @@ same estimate up to three times in sequence.
 > #114. A scope entered by each order-posting entry point and by the maker
 > balance-update handler shares one reading per coin, for the fee estimate and
 > the forced minimum relay fee alike. The scope ends with the request, and
-> work spawned outside it reads fresh. Items 2–4 (the cache and its key) are
-> not implemented yet.
+> work spawned outside it reads fresh.
+>
+> **As-built note (2026-10-28, clean-side record).** Items 2–4 are implemented
+> (PR #128). The cache belongs to the node (it lives in the coins context of the
+> node's `MmCtx`) and is reached only through a request scope, which each entry
+> point now opens with the node's context: code outside a scope neither reads
+> from it nor writes to it, so every swap path reads fresh (item 3). Its key is
+> the kind of reading and the coin's ticker (the platform coin's, for the gas
+> price of an EVM chain); an entry holds the value and the time at which the
+> fetch finished, and is reusable while it is younger than the lifetime of the
+> coin that asks (R38.6.6k below; a clock that steps back makes it too old,
+> never too young). A failed fetch is not stored. The cached value is the value the
+> fetch returned, handed to R38.6.6b–e unchanged (item 4). The first consumer of
+> a request takes a young entry instead of fetching, and later consumers of the
+> same request reuse that value as in item 1, also with the cache at 0.
+> The top-level `fee_estimate_cache_secs` is validated at node start; a value
+> that is not an integer from 0 to 30 ends the start with an error naming the key. Disabling a
+> coin, and registering a coin, drop that coin's entries, so a new instance never
+> reads what the previous one cached; a request still running on the old
+> instance can store one more value afterwards, which the lifetime bounds.
+>
+> *The minimum relay fee.* Item 1 says the one-reading rule applies to the
+> minimum relay fee of a coin that forces it; item 2 speaks of "a fee estimate".
+> The first pass read item 2 literally and cached only the estimate across
+> requests. The maintainer decided on 2026-10-28 that the forced relay fee is
+> cached across requests too, under the same lifetime as the estimate
+> (R38.6.6k); it is implemented that way, as a reading of its own kind with its
+> own entry and its own adaptive state.
+
+R38.6.6k *Per-coin cache lifetime (Reloaded-original, maintainer Decisions AD
+and AI of 2026-10-28; written on the clean side from those decisions and a
+market maker's field report, no forbidden-class input).* The lifetime of a
+reading cached under R38.6.6j item 2 (and chapter 57 R57.2.6), for a given
+coin, is the first of these that applies:
+1. *Per-coin override.* The coin's configuration entry carries
+   `fee_estimate_cache_secs`, an integer from 0 to 600; 0 disables the cache
+   for that coin. For a token the key is read from the token's own entry, and
+   when absent there from its platform coin's entry. A value that is not an
+   integer from 0 to 600 fails the coin's activation with an error naming the
+   key.
+2. *Explicit node setting.* The top-level `MM2.json` key
+   `fee_estimate_cache_secs` of R38.6.6j item 2 is present: its value applies
+   to every coin without a per-coin override.
+3. *Adaptive default.* Otherwise the lifetime adapts to how often the value
+   actually changes:
+   - It starts at the *start value*. That is the coin's `avg_blocktime` in
+     whole seconds (for a token: its own entry's, else its platform coin's),
+     raised to at least 2 and lowered to at most 600. A coin with no
+     `avg_blocktime`, or one that is not a positive number, starts at
+     15 seconds.
+   - Each time a fresh reading (one fetched because no reading was young
+     enough) equals the previous fresh reading of the same entry, the
+     lifetime doubles, up to 600 seconds.
+   - When a fresh reading differs from the previous one, the lifetime returns
+     to the start value.
+   - A failed fetch changes neither the lifetime nor the previous reading.
+   - The adaptive state belongs to the cached entry: per coin, and per chain
+     for the shared gas-price reading of chapter 57 R57.2.7, whose start value
+     comes from the platform coin's entry.
+
+*The forced minimum relay fee (maintainer decision of 2026-10-28).* The
+minimum relay fee of a coin that forces it (R38.6.6j item 1) is cached across
+order-posting requests like the fee estimate, under the same lifetime.
+
+No source makes a reading live longer than 600 seconds, and none makes it
+live forever. R38.6.6j items 3 and 4 hold for every lifetime: a swap's own
+transactions always read fresh, and the arithmetic is unchanged.
+
+*Rationale.* A fee estimate or a gas price changes with blocks. A market
+maker that re-posts hundreds of orders against one coin within one block
+needs one reading, not one per order. A chain with a nominally fixed fee,
+such as a validator-set gas floor, reaches the 600-second cap by itself, so
+it converges to one reading per 10 minutes without configuration. A changed
+value resets the lifetime at once. An explicit node setting ranks above the
+adaptive default so that one top-level switch still restores the reference
+behaviour.
+
+*Acceptance.* With no top-level key and no per-coin override, the first
+lifetime is as follows: up to 600 s for a coin with `avg_blocktime` 600, up
+to 2 s for one with `avg_blocktime` 1, and up to 15 s for one without
+`avg_blocktime`. A coin starting at 15 s whose fresh readings keep returning
+the same value reaches lifetimes of 30, 60, 120, 240, 480 and then 600 s, and
+stays at 600 s. Its first differing reading brings it back to 15 s. With
+top-level `fee_estimate_cache_secs: 0`, no coin without a per-coin override
+reuses a reading across requests. A per-coin override wins over both and does
+not adapt. A per-coin value of 601 fails that coin's activation. The forced
+minimum relay fee follows the same lifetimes.
+
+> **Compatibility:** for behaviour matching GLEEC KDF most closely, set the
+> top-level `fee_estimate_cache_secs` to `0` and set no per-coin
+> `fee_estimate_cache_secs`.
+
+> **As-built note (2026-10-28, clean-side record).** R38.6.6k is implemented
+> (PR #128), including the adaptive default (Decision AI) and the cached relay
+> fee. What is stored where:
+> - *The kind of lifetime* is not stored on the coin: the cache asks for it, for
+>   the coin that is asking, whenever it reads or stores, and resolves it from
+>   the node's `MM2.json` and the coin's entry of its `coins` list by the order of
+>   the rule (`fee_estimate_lifetime_of`): a fixed number of seconds (the coin's
+>   own key, else the explicit top-level one) or the adaptive default. The
+>   platform of a token is the `protocol.protocol_data.platform` of its own
+>   entry, which is how the fall-back to the platform's entry of items 1 and 3 is
+>   found.
+> - *The adaptive state* is a field of the cache entry, which is keyed by the kind
+>   of reading and the key coin: the coin itself for a UTXO reading, the platform
+>   coin for the shared gas price. An entry holds the last fresh reading, when it
+>   was obtained and its current adaptive lifetime in seconds. A new entry starts
+>   at the start value of the key coin's entry (`avg_blocktime` truncated to whole
+>   seconds and clamped to 2 to 600, else 15; an `avg_blocktime` that is not a
+>   positive number is ignored, and for a token the platform's is then used).
+> - *A coin on the adaptive default* reuses a reading while it is younger than the
+>   entry's adaptive lifetime; a coin with a fixed lifetime judges age against that
+>   fixed lifetime and never adapts. A fixed 0 neither reads nor writes.
+> - *Equality* is exact equality of the fetched value (`u64` sat/kB, `U256` wei,
+>   `BigDecimal` relay fee).
+> - *A fixed coin's fetch* is stored in the entry too, and updates the adaptive
+>   state: otherwise a coin on the adaptive default would go on reusing a
+>   reading that a fixed-lifetime coin has already seen change. A differing value
+>   always resets the lifetime to the start value. An equal value doubles it only
+>   if the previous reading was at least as old as the entry's lifetime, that is
+>   if this really was a fetch that no young enough reading prevented; a fetch that
+>   a coin with a short fixed lifetime made earlier, and two concurrent fetches
+>   of the same moment, therefore do not count as evidence of stability. A clock
+>   that stepped back counts as no evidence either.
+> - *A failed fetch* stores nothing and changes neither the lifetime nor the
+>   previous reading.
+> - *Never on swap execution:* outside a request scope nothing is read or
+>   written, the adaptive state included.
+> - Disabling or registering a coin drops its entries and with them their
+>   adaptive state.
+>
+> A per-coin value is validated when the coin is activated: the UTXO configuration
+> builder, the EVM platform builder and the ERC-20 token builders (the token's own
+> entry, else its platform's) fail the activation with an error naming the key.
+> Not covered: a QRC20 or SLP token has no fee reading of its own (its fee is read
+> from the platform coin's client, keyed and judged by the platform coin), so its
+> own entry is neither validated nor consulted. An invalid value found when a
+> lifetime is asked for after activation (it cannot normally happen) is logged and
+> the coin reads afresh.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the
@@ -1834,3 +1999,8 @@ R38.8.6 **Tests (two-direction, observable).**
   *Method:* reading plus mechanical text search against both rows; the gate
   script was not run because there are no code blocks. *Measure:* 0.01
   against the 0.10 threshold.
+- *Reloaded-original addition (2026-10-28), clean side.* R38.6.6k was written
+  by a session that never read the corpus, from the maintainer's Decisions AD
+  and AI of 2026-10-28, his relay-fee decision of the same day and a market
+  maker's field report. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.

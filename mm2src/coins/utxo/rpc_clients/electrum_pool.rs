@@ -19,7 +19,7 @@ use futures::stream::FuturesUnordered;
 use mm2_core::mm_ctx::MmArc;
 use rand::seq::SliceRandom;
 use std::collections::HashSet;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Mutex as StdMutex, RwLock, Weak};
 
 /// Every duration the pool uses (CRD ch.38 R38.6.4c, R38.6.4d, R38.6.4e, R38.6.4j).
@@ -141,6 +141,66 @@ pub(crate) fn electrum_server_order(ctx: &MmArc) -> ServerOrder {
     order
 }
 
+/// Whether `conf` asks for read spreading, and the warning to log when its `electrum_spread_reads` is not a
+/// boolean. An absent key means `true`.
+pub(super) fn parse_spread_reads(conf: &Json) -> (bool, Option<String>) {
+    match &conf["electrum_spread_reads"] {
+        Json::Null => (true, None),
+        Json::Bool(spread) => (*spread, None),
+        other => (
+            true,
+            Some(format!(
+                "electrum_spread_reads {other} is not a boolean; using true (reads are spread)"
+            )),
+        ),
+    }
+}
+
+/// CRD ch.38 R38.6.4a item 5: the `MM2.json` boolean `electrum_spread_reads`, default `true`. With `true`, each
+/// read-only query of a coin starts on the next maintained connection in turn; with `false`, every query
+/// follows the priority order of R38.6.4. A value that is not a boolean is taken as `true` and one warning is
+/// logged.
+///
+/// **Compatibility:** for behaviour matching GLEEC KDF, set `electrum_spread_reads` to `false`.
+pub(crate) fn electrum_spread_reads(ctx: &MmArc) -> bool {
+    let (spread, warning) = parse_spread_reads(&ctx.conf);
+    if let Some(warning) = warning {
+        warn!("{warning}");
+    }
+    spread
+}
+
+/// The Electrum methods whose request is a read-only query in the sense of CRD ch.38 R38.6.4a item 1: balance,
+/// unspent-list, history, header, block-count, transaction-get, fee-estimate and relay-fee requests. The list
+/// is closed: a method that is not on it keeps the priority routing.
+///
+/// The block-count read of this client is the one-shot `blockchain.headers.subscribe` request (its answer is
+/// the chain tip and nothing relies on the subscription it places), so that method is the block-count entry.
+/// The other subscriptions (`blockchain.scripthash.subscribe`, `blockchain.contract.event.subscribe`) are not
+/// on the list.
+const READ_ONLY_METHODS: &[&str] = &[
+    "blockchain.scripthash.get_balance",
+    "blockchain.scripthash.listunspent",
+    "blockchain.scripthash.get_history",
+    "blockchain.block.header",
+    "blockchain.block.headers",
+    "blockchain.headers.subscribe",
+    "blockchain.transaction.get",
+    "blockchain.estimatefee",
+    "blockchain.relayfee",
+];
+
+/// Whether `request` is a read-only query: a single request whose method is on [`READ_ONLY_METHODS`], or a
+/// non-empty batch of which every element is (R38.6.4a item 1, R38.6.3a batches).
+pub(super) fn is_read_only(request: &JsonRpcRequestEnum) -> bool {
+    match request {
+        JsonRpcRequestEnum::Single(single) => READ_ONLY_METHODS.contains(&single.method.as_str()),
+        JsonRpcRequestEnum::Batch(batch) => {
+            !batch.is_empty() && batch.methods().all(|method| READ_ONLY_METHODS.contains(&method))
+        },
+    }
+}
+
 /// How a coin's pool is set up (CRD ch.38 R38.6.4b).
 #[derive(Clone, Debug)]
 pub struct ElectrumPoolOptions {
@@ -153,6 +213,9 @@ pub struct ElectrumPoolOptions {
     pub timings: ElectrumPoolTimings,
     /// How [`ElectrumClientImpl::add_servers`] ranks the listed servers.
     pub order: ServerOrder,
+    /// Whether read-only queries start on the maintained connections in turn (R38.6.4a); `false` keeps the
+    /// priority order for every query.
+    pub spread_reads: bool,
 }
 
 impl Default for ElectrumPoolOptions {
@@ -163,6 +226,7 @@ impl Default for ElectrumPoolOptions {
             client_name: None,
             timings: ElectrumPoolTimings::default(),
             order: ServerOrder::default(),
+            spread_reads: true,
         }
     }
 }
@@ -354,6 +418,11 @@ pub(super) struct PoolShared {
     pub(super) timings: ElectrumPoolTimings,
     client_name: Option<String>,
     order: ServerOrder,
+    /// R38.6.4a item 5.
+    spread_reads: bool,
+    /// The turn of the next spread read: the read starts on the maintained connection at this position,
+    /// counted modulo the size of the set.
+    read_cursor: AtomicUsize,
     protocol_version: OrdRange<f32>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     next_session_id: AtomicU64,
@@ -381,6 +450,8 @@ impl PoolShared {
             timings: options.timings,
             client_name: options.client_name,
             order: options.order,
+            spread_reads: options.spread_reads,
+            read_cursor: AtomicUsize::new(0),
             protocol_version,
             event_handlers,
             next_session_id: AtomicU64::new(1),
@@ -1012,6 +1083,20 @@ impl PoolShared {
         }
     }
 
+    /// The maintained connections in the order `request` tries them: the priority order, except that a
+    /// read-only query with `electrum_spread_reads` on starts at the next connection in turn (R38.6.4a items
+    /// 1 and 5). Everything else, and a set of one, keeps the priority order.
+    fn in_turn_for(&self, request: &JsonRpcRequestEnum, mut maintained: Vec<Arc<ServerSlot>>) -> Vec<Arc<ServerSlot>> {
+        if self.spread_reads && is_read_only(request) {
+            let turn = self.read_cursor.fetch_add(1, AtomicOrdering::Relaxed);
+            let size = maintained.len();
+            if size > 1 {
+                maintained.rotate_left(turn % size);
+            }
+        }
+        maintained
+    }
+
     async fn route_inner(
         self: &Arc<Self>,
         request: &JsonRpcRequestEnum,
@@ -1025,7 +1110,10 @@ impl PoolShared {
         let maintained = self.maintained_slots();
         let usable_at_start = self.usable_count();
 
-        // Item 1: the maintained connections, one at a time in priority order.
+        // Item 1: the maintained connections, one at a time in priority order. A read-only query with
+        // spreading on (R38.6.4a) starts at the connection whose turn it is and goes on round the set, so
+        // the connections still to try are counted as before.
+        let maintained = self.in_turn_for(request, maintained);
         let mut tried: Vec<usize> = Vec::new();
         for (i, slot) in maintained.iter().enumerate() {
             let remaining = secs_left(deadline);

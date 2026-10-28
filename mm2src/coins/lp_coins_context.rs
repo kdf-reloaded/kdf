@@ -1,4 +1,5 @@
 use super::*;
+use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -113,6 +114,8 @@ pub struct CoinsContext {
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
     pub(crate) scan_addresses_manager: ScanAddressesTaskManagerShared,
     pub(crate) account_balance_task_manager: AccountBalanceTaskManagerShared,
+    /// The fee estimates that order-posting requests obtained (CRD ch.38 R38.6.6j item 2).
+    pub(crate) fee_estimate_cache: Arc<FeeEstimateCache>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) tx_history_db: SharedDb<TxHistoryDb>,
     #[cfg(target_arch = "wasm32")]
@@ -132,6 +135,8 @@ impl CoinsContext {
     /// Obtains a reference to this crate context, creating it if necessary.
     pub fn from_ctx(ctx: &MmArc) -> Result<Arc<CoinsContext>, String> {
         Ok(try_s!(from_ctx(&ctx.coins_ctx, move || {
+            // A node whose top-level setting is invalid does not start; this only keeps the guard.
+            explicit_fee_estimate_cache_secs(&ctx.conf)?;
             Ok(CoinsContext {
                 coins: AsyncMutex::new(HashMap::new()),
                 balance_update_handlers: AsyncMutex::new(vec![]),
@@ -139,6 +144,7 @@ impl CoinsContext {
                 create_account_manager: CreateAccountTaskManager::new_shared(),
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),
                 account_balance_task_manager: AccountBalanceTaskManager::new_shared(),
+                fee_estimate_cache: Arc::new(FeeEstimateCache::for_node(ctx)),
                 #[cfg(target_arch = "wasm32")]
                 tx_history_db: ConstructibleDb::new_shared(ctx),
                 #[cfg(target_arch = "wasm32")]
@@ -157,6 +163,7 @@ impl CoinsContext {
             });
         }
 
+        self.fee_estimate_cache.forget_coin(coin.ticker());
         coins.insert(coin.ticker().into(), coin);
         Ok(())
     }
@@ -173,10 +180,12 @@ impl CoinsContext {
             });
         }
 
+        self.fee_estimate_cache.forget_coin(platform.ticker());
         coins.insert(platform.ticker().into(), platform);
 
         // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
         for token in tokens {
+            self.fee_estimate_cache.forget_coin(token.ticker());
             coins.insert(token.ticker().into(), token);
         }
         Ok(())
