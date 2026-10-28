@@ -6,8 +6,12 @@
 //! not a non-negative integer fails coin activation with a configuration error naming the key
 //! (R57.5.1, R57.6.1). A configured value is used verbatim: nothing here clamps it, compares it against
 //! a ceiling or ties one member to another (R57.5.3a).
+//!
+//! The same module reads the `estimate_gas_mult` member (R57.5.3b) and applies it with exact integer
+//! arithmetic ([`scale_gas_estimate`]).
 
 use super::*;
+use ethereum_types::U512;
 use json::Map;
 
 /// The V1 swap gas limits of one EVM coin (R57.5.2). Gas units, used verbatim.
@@ -254,6 +258,122 @@ pub fn gas_limits_from_confs(confs: &[&Json]) -> Result<(EthGasLimit, EthGasLimi
         }
     }
     Ok((v1.unwrap_or_default(), v2.unwrap_or_default()))
+}
+
+/// The key of the per-coin gas-estimate multiplier (CRD R57.5.3b).
+const ESTIMATE_GAS_MULT_KEY: &str = "estimate_gas_mult";
+
+/// An `estimate_gas_mult` member that is not a JSON number (CRD R57.5.3b item 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EstimateGasMultConfError {
+    /// What the member holds, as JSON text.
+    pub found: String,
+}
+
+impl fmt::Display for EstimateGasMultConfError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Invalid coin configuration: '{ESTIMATE_GAS_MULT_KEY}' must be a number, found {}",
+            self.found
+        )
+    }
+}
+
+/// The `estimate_gas_mult` of a coin: the first entry of `confs` that carries the member decides it (CRD
+/// R57.5.3b item 1). `confs` lists the coin's own entry first and, for a token, its platform coin's entry
+/// second; for a platform coin only its own entry is consulted. `Ok(None)` when no entry carries the member,
+/// which means no scaling. The value is stored as parsed: no range is checked here or at use (item 3).
+///
+/// # Errors
+///
+/// [`EstimateGasMultConfError`] when a consulted entry carries the member with a value that is not a JSON
+/// number (a string, boolean, `null`, array or object). The platform entry is consulted only when the token's
+/// own entry does not carry the member.
+pub fn estimate_gas_mult_from_confs(confs: &[&Json]) -> Result<Option<f64>, EstimateGasMultConfError> {
+    for conf in confs {
+        let Some(value) = conf.get(ESTIMATE_GAS_MULT_KEY) else {
+            continue;
+        };
+        return match value {
+            Json::Number(number) => Ok(number.as_f64()),
+            other => Err(EstimateGasMultConfError {
+                found: other.to_string(),
+            }),
+        };
+    }
+    Ok(None)
+}
+
+/// Why a gas estimate could not be scaled (CRD R57.5.3b item 3). Both outcomes fail the transaction at send
+/// time, never at activation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScaleGasError {
+    /// The multiplier is negative: the product cannot be represented as an unsigned gas quantity.
+    NegativeMultiplier,
+    /// The product does not fit a 256-bit gas quantity.
+    Overflow,
+}
+
+impl fmt::Display for ScaleGasError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScaleGasError::NegativeMultiplier => write!(
+                f,
+                "'{ESTIMATE_GAS_MULT_KEY}' is negative: the scaled gas limit cannot be represented as an unsigned quantity"
+            ),
+            ScaleGasError::Overflow => write!(f, "the gas limit scaled by '{ESTIMATE_GAS_MULT_KEY}' overflows"),
+        }
+    }
+}
+
+/// Scales a node's gas `estimate` by the coin's `estimate_gas_mult` (CRD R57.5.3b items 2-4).
+///
+/// `None` and a non-finite multiplier (not-a-number, positive or negative infinity) leave the estimate as
+/// returned; zero yields zero; a negative multiplier is an error. Otherwise the result is the exact product of
+/// the whole-number estimate and the exact binary value of the parsed double, truncated toward zero. The
+/// double is split into its integer mantissa and power-of-two exponent, so the product is formed in integer
+/// arithmetic and no floating-point rounding takes place: `0.7` applied to `10` gives `6`, because the
+/// double nearest `0.7` lies just below it.
+pub(crate) fn scale_gas_estimate(estimate: U256, mult: Option<f64>) -> Result<U256, ScaleGasError> {
+    let Some(mult) = mult.filter(|m| m.is_finite()) else {
+        return Ok(estimate);
+    };
+    if mult == 0.0 {
+        return Ok(U256::zero());
+    }
+    if mult < 0.0 {
+        return Err(ScaleGasError::NegativeMultiplier);
+    }
+    // mult = mantissa * 2^exponent exactly (positive, finite). A normal double has an implicit leading bit.
+    let bits = mult.to_bits();
+    let biased_exponent = ((bits >> 52) & 0x7ff) as i32;
+    let fraction = bits & ((1u64 << 52) - 1);
+    let (mantissa, exponent) = if biased_exponent == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1u64 << 52), biased_exponent - 1075)
+    };
+    // 256-bit estimate times a 53-bit mantissa fits 512 bits, so this product cannot overflow.
+    let product = U512::from(estimate) * U512::from(mantissa);
+    if product.is_zero() {
+        return Ok(U256::zero());
+    }
+    let scaled = if exponent >= 0 {
+        let shift = exponent as usize;
+        if product.bits() + shift > 256 {
+            return Err(ScaleGasError::Overflow);
+        }
+        product << shift
+    } else {
+        let shift = exponent.unsigned_abs() as usize;
+        if shift >= 512 {
+            U512::zero()
+        } else {
+            product >> shift
+        }
+    };
+    U256::try_from(scaled).map_err(|_| ScaleGasError::Overflow)
 }
 
 #[cfg(test)]
@@ -562,5 +682,108 @@ mod tests {
             gas_limits_from_confs(&[&silent, &platform]).unwrap_err().key,
             "gas_limit.eth_payment"
         );
+    }
+
+    #[test]
+    fn scale_follows_r5753b_item_4_with_exact_truncation() {
+        let scale = |e: u64, m: f64| scale_gas_estimate(U256::from(e), Some(m));
+        // The double nearest 1.3 is slightly above it: the exact product is just above 65000.
+        assert_eq!(scale(50_000, 1.3), Ok(U256::from(65_000u64)));
+        // The double nearest 0.7 is slightly below it: the exact product is just below 7.
+        assert_eq!(scale(10, 0.7), Ok(U256::from(6u64)));
+        assert_eq!(scale(12_345, 2.0), Ok(U256::from(24_690u64)));
+        assert_eq!(scale(12_345, 1.0), Ok(U256::from(12_345u64)));
+        assert_eq!(scale(12_345, 0.0), Ok(U256::zero()));
+        assert_eq!(scale(12_345, -0.0), Ok(U256::zero()));
+        assert_eq!(scale(3, 1.5), Ok(U256::from(4u64)));
+        assert_eq!(scale(0, 1.3), Ok(U256::zero()));
+        // Below one: truncation to zero, and a subnormal multiplier.
+        assert_eq!(scale(5, 0.1), Ok(U256::zero()));
+        assert_eq!(scale(u64::MAX, f64::MIN_POSITIVE / 2.0), Ok(U256::zero()));
+        assert_eq!(scale(u64::MAX, 5e-324), Ok(U256::zero()));
+    }
+
+    #[test]
+    fn scale_absent_or_non_finite_multiplier_is_identity() {
+        let e = U256::from(54_321u64);
+        assert_eq!(scale_gas_estimate(e, None), Ok(e));
+        assert_eq!(scale_gas_estimate(e, Some(f64::NAN)), Ok(e));
+        assert_eq!(scale_gas_estimate(e, Some(f64::INFINITY)), Ok(e));
+        assert_eq!(scale_gas_estimate(e, Some(f64::NEG_INFINITY)), Ok(e));
+    }
+
+    #[test]
+    fn scale_negative_multiplier_is_a_typed_error() {
+        let e = U256::from(54_321u64);
+        assert_eq!(
+            scale_gas_estimate(e, Some(-1.0)),
+            Err(ScaleGasError::NegativeMultiplier)
+        );
+        assert_eq!(
+            scale_gas_estimate(e, Some(-1e-300)),
+            Err(ScaleGasError::NegativeMultiplier)
+        );
+        assert_eq!(
+            scale_gas_estimate(e, Some(f64::MIN)),
+            Err(ScaleGasError::NegativeMultiplier)
+        );
+    }
+
+    #[test]
+    fn scale_of_a_very_large_estimate_does_not_overflow_or_panic() {
+        // u64::MAX x 1.3: the exact product of 18446744073709551615 and the double 1.3 truncated.
+        let exact = U256::from(u64::MAX) * U256::from(5_854_679_515_581_645u64) / U256::from(1u64 << 52);
+        assert_eq!(scale_gas_estimate(U256::from(u64::MAX), Some(1.3)), Ok(exact));
+        // A 256-bit estimate times 1.0 and 2.0 (the latter overflows by one bit at the top).
+        let big = U256::MAX >> 1;
+        assert_eq!(scale_gas_estimate(big, Some(1.0)), Ok(big));
+        assert_eq!(scale_gas_estimate(big, Some(2.0)), Ok(big << 1));
+        assert_eq!(scale_gas_estimate(U256::MAX, Some(2.0)), Err(ScaleGasError::Overflow));
+        assert_eq!(scale_gas_estimate(U256::MAX, Some(1.3)), Err(ScaleGasError::Overflow));
+        assert_eq!(
+            scale_gas_estimate(U256::from(1u64), Some(f64::MAX)),
+            Err(ScaleGasError::Overflow)
+        );
+        // 2^255 x 0.5 is exact.
+        assert_eq!(
+            scale_gas_estimate(U256::one() << 255, Some(0.5)),
+            Ok(U256::one() << 254)
+        );
+        assert_eq!(scale_gas_estimate(U256::MAX, Some(0.5)), Ok(U256::MAX >> 1));
+    }
+
+    #[test]
+    fn estimate_gas_mult_is_read_from_the_first_entry_that_carries_it() {
+        let own = json!({"estimate_gas_mult": 2.0});
+        let platform = json!({"estimate_gas_mult": 1.3});
+        let silent = json!({"coin": "JST"});
+        assert_eq!(estimate_gas_mult_from_confs(&[&own, &platform]), Ok(Some(2.0)));
+        assert_eq!(estimate_gas_mult_from_confs(&[&silent, &platform]), Ok(Some(1.3)));
+        assert_eq!(estimate_gas_mult_from_confs(&[&silent, &silent]), Ok(None));
+        assert_eq!(estimate_gas_mult_from_confs(&[&platform]), Ok(Some(1.3)));
+        // An integer is a JSON number too, and no range is checked.
+        assert_eq!(
+            estimate_gas_mult_from_confs(&[&json!({"estimate_gas_mult": 3})]),
+            Ok(Some(3.0))
+        );
+        assert_eq!(
+            estimate_gas_mult_from_confs(&[&json!({"estimate_gas_mult": -7.5})]),
+            Ok(Some(-7.5))
+        );
+        assert_eq!(
+            estimate_gas_mult_from_confs(&[&json!({"estimate_gas_mult": 0})]),
+            Ok(Some(0.0))
+        );
+    }
+
+    #[test]
+    fn estimate_gas_mult_that_is_not_a_number_is_an_error_naming_the_key() {
+        for bad in [json!("1.3"), json!(true), json!(null), json!([1.3]), json!({"a": 1})] {
+            let conf = json!({ "estimate_gas_mult": bad });
+            let err = estimate_gas_mult_from_confs(&[&conf]).unwrap_err();
+            assert!(err.to_string().contains("estimate_gas_mult"), "{err}");
+            // A malformed token member is not rescued by a valid platform member.
+            assert!(estimate_gas_mult_from_confs(&[&conf, &json!({"estimate_gas_mult": 1.3})]).is_err());
+        }
     }
 }

@@ -1394,6 +1394,10 @@ impl EthCoin {
         let gas_limit = EthGasLimit::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
         let gas_limit_v2 =
             EthGasLimitV2::from_conf(&conf).map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?;
+        // The token's own `estimate_gas_mult` member, else the platform coin's (CRD R57.5.3b item 1).
+        let estimate_gas_mult = estimate_gas_mult_from_confs(&[&conf])
+            .map_to_mm(|e| Erc20BuildError::InvalidConfig(e.to_string()))?
+            .or(self.estimate_gas_mult);
         let decimals = match conf["decimals"].as_u64() {
             Some(d) if d > 0 && d <= 19 => d as u8,
             None | Some(0) => get_token_decimals(&self.web3, token_addr)
@@ -1416,6 +1420,7 @@ impl EthCoin {
                 gas_limit.unwrap_or_else(|| self.gas_limit.clone()),
                 gas_limit_v2.unwrap_or_else(|| self.gas_limit_v2.clone()),
             ),
+            estimate_gas_mult,
         ))
     }
 
@@ -1427,6 +1432,7 @@ impl EthCoin {
         decimals: u8,
         custom_token: bool,
         (gas_limit, gas_limit_v2): (EthGasLimit, EthGasLimitV2),
+        estimate_gas_mult: Option<f64>,
     ) -> EthCoin {
         let token_impl = EthCoinImpl {
             signer: self.signer.clone(),
@@ -1454,6 +1460,7 @@ impl EthCoin {
             swap_v2_contracts: self.swap_v2_contracts,
             gas_limit,
             gas_limit_v2,
+            estimate_gas_mult,
             tron_api: None,
             nft_swap_v2_contract: self.nft_swap_v2_contract,
             swap_gas_fee_policy: Mutex::new(self.swap_gas_fee_policy()),
@@ -2355,7 +2362,7 @@ impl EthCoin {
                 Box::new(allowance_fut.and_then(move |allowed| -> EthTxFut {
                     if allowed < value {
                         Box::new(
-                            arc.approve(swap_contract_address, U256::max_value())
+                            arc.approve_for_v1_payment(swap_contract_address, U256::max_value())
                                 .and_then(move |_approved| {
                                     arc.sign_and_send_transaction(
                                         0.into(),
@@ -2628,14 +2635,13 @@ impl EthCoin {
         }))
     }
 
-    /// The gas figure of an ERC-20 `approve` call, estimated by the node. The one place every `approve`
-    /// gas figure comes from: the `approve` transaction (V1 payment and the V2 allowance step) and the
-    /// sender-side token trade preimage.
+    /// The RAW gas figure of an ERC-20 `approve` call, as estimated by the node. It is never scaled: the
+    /// sender-side token trade preimage adds exactly this figure (CRD R57.5.3b item 6), and the V2 allowance
+    /// step and the plain approve RPC use it unscaled (R57.5.3b item 5).
     ///
-    /// SEAM (CRD D3, not implemented here): a later change applies the per-coin `estimate_gas_mult`
-    /// multiplier in this function, to this estimated value only. A configured limit (`gas_limit`,
-    /// `gas_limit_v2`, including `approve_payment`) never passes through here and is never scaled
-    /// (R57.5.3a).
+    /// The per-coin `estimate_gas_mult` is applied in exactly one place, [`Self::approve_for_v1_payment`], to
+    /// the limit of the approve transaction it broadcasts. A configured limit (`gas_limit`, `gas_limit_v2`,
+    /// including `approve_payment`) never passes through here and is never scaled (R57.5.3a).
     pub(crate) fn approve_gas_estimate(&self, token_addr: Address, approve_data: Bytes) -> Web3RpcFut<U256> {
         self.estimate_gas_for_contract_call(token_addr, approve_data)
     }
@@ -2715,7 +2721,21 @@ impl EthCoin {
         Box::new(fut.boxed().compat())
     }
 
+    /// Broadcasts an ERC-20 `approve` with the node's RAW gas estimate as its limit. Used by the V2 allowance
+    /// step and the approve RPC, which the gas-estimate multiplier never reaches (CRD R57.5.3b item 5).
     pub(crate) fn approve(&self, spender: Address, amount: U256) -> EthTxFut {
+        self.approve_with_gas(spender, amount, false)
+    }
+
+    /// Broadcasts the legacy (V1) ERC-20 `approve` that precedes an ERC-20 HTLC payment when the allowance
+    /// is short. This is the one transaction whose estimated gas limit is scaled by the coin's
+    /// `estimate_gas_mult` (CRD R57.5.3b item 5): the limit is `trunc(estimate x multiplier)`, and a negative
+    /// multiplier fails the transaction here, at send time.
+    pub(crate) fn approve_for_v1_payment(&self, spender: Address, amount: U256) -> EthTxFut {
+        self.approve_with_gas(spender, amount, true)
+    }
+
+    fn approve_with_gas(&self, spender: Address, amount: U256, scale_estimate: bool) -> EthTxFut {
         let coin = self.clone();
         let fut = async move {
             let token_addr = match coin.coin_type {
@@ -2730,11 +2750,17 @@ impl EthCoin {
             let function = try_tx_s!(ERC20_CONTRACT.function("approve"));
             let data = try_tx_s!(function.encode_input(&[Token::Address(spender), Token::Uint(amount)]));
 
-            let gas_limit = try_tx_s!(
+            let estimate = try_tx_s!(
                 coin.approve_gas_estimate(token_addr, Bytes::from(data.clone()))
                     .compat()
                     .await
             );
+            let gas_limit = if scale_estimate {
+                scale_gas_estimate(estimate, coin.estimate_gas_mult)
+                    .map_err(|e| TransactionErr::Plain(ERRL!("{}", e)))?
+            } else {
+                estimate
+            };
 
             coin.sign_and_send_transaction(0.into(), Action::Call(token_addr), data, gas_limit)
                 .compat()

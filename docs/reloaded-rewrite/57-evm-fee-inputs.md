@@ -549,6 +549,22 @@ estimation** before the limit is used. Its complete contract:
 > limit on a chain, that is the `gas_limit` block itself (R57.5.1), not this
 > member.
 
+> **As built (2026-10-28, PR #TBD) -- R57.5.3b.** `estimate_gas_mult` is read as a JSON
+> number at every EVM activation path (the platform-coin build and both token routes, with
+> the token's own value winning and a silent token inheriting its platform coin's; an explicit
+> `1.0` on a token is a value, not an absence); any other JSON type fails activation naming
+> the key; there is no range check. It scales only the estimated limit of the legacy ERC-20
+> approve that precedes a V1 payment, as the exact product of the whole-number estimate and
+> the exact binary value of the double, truncated toward zero (1.3 x 50000 = 65000, 0.7 x 10
+> = 6; a non-finite factor is one, zero gives zero, a negative factor fails the transaction
+> at send time before anything is broadcast). The trade-preimage's approve estimate, every
+> fixed R57.5.2/R57.6.2 limit and withdraw stay unscaled. **Finding against item 5:** the
+> version-two allowance step (`handle_allowance`) also broadcasts an approve whose limit is
+> *estimated*, not fixed (the fixed `approve_payment` belongs to a different V2 call), so
+> item 5's "every version-two transaction supplies a fixed limit" does not hold for it in
+> Reloaded; it is left unscaled here, as the chapter's scope intends. The `approve_token`
+> RPC is a non-swap call and is unscaled too.
+
 **R57.5.4** *Implementation status (gap).* Reloaded reads neither
 `gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
 constants inherited from the pre-anchor baseline, and they differ from

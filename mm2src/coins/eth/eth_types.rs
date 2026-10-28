@@ -418,6 +418,10 @@ pub struct EthCoinImpl {
     /// Gas limits for V2 swap operations (CRD R57.6): the coin's `gas_limit_v2` block, else its platform
     /// coin's, else the defaults.
     pub(crate) gas_limit_v2: EthGasLimitV2,
+    /// The `estimate_gas_mult` of the coin's configuration entry, else its platform coin's (CRD R57.5.3b), as
+    /// parsed. `None` means no scaling. Applied only to the estimated gas limit of the legacy ERC-20 `approve`
+    /// that precedes a V1 HTLC payment.
+    pub(crate) estimate_gas_mult: Option<f64>,
     /// HTTP API client for TRON full nodes. Populated only when
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.

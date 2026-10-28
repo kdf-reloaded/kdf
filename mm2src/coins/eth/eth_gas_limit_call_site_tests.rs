@@ -1,4 +1,5 @@
-//! The per-coin gas-limit overrides of CRD ch. 57 §57.5 and §57.6 at the places that consume them (T5, T6, T9).
+//! The per-coin gas-limit overrides of CRD ch. 57 §57.5 and §57.6 at the places that consume them (T5, T6, T9),
+//! and the gas-estimate multiplier of R57.5.3b (T13).
 //!
 //! Every coin here is built the way activation builds it: the gas-limit blocks come from coins-file JSON
 //! through [`coin_gas_limits`], and the call sites run against mocks that capture the figure they were
@@ -47,6 +48,7 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
     };
     let entry = crate::coin_conf(&ctx, ticker);
     let (gas_limit, gas_limit_v2) = coin_gas_limits(&ctx, &entry, &protocol).map_err(|e| e.to_string())?;
+    let estimate_gas_mult = coin_estimate_gas_mult(&ctx, &entry, &protocol).map_err(|e| e.to_string())?;
 
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
@@ -82,9 +84,13 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_address),
-        swap_v2_contracts: None,
+        swap_v2_contracts: Some(SwapV2Contracts {
+            maker_swap_v2_contract: Address::from_str("5Bc1bBDD6A0a722fC9bffC49c921B685ECB84b95").unwrap(),
+            taker_swap_v2_contract: Address::from_str("6Bc1bBDD6A0a722fC9bffC49c921B685ECB84b96").unwrap(),
+        }),
         gas_limit,
         gas_limit_v2,
+        estimate_gas_mult,
     }));
     Ok((ctx, coin))
 }
@@ -204,7 +210,8 @@ fn t5_erc20_payment_after_an_approval_still_uses_erc20_payment() {
     // Allowance below the value: the payment follows an `approve`, which is mocked out here.
     EthCoin::allowance.mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(U256::zero()))));
     let approved = payment_tx(&token_coin(json!({}), json!({})));
-    EthCoin::approve.mock_safe(move |_, _, _| MockResult::Return(Box::new(futures01::future::ok(approved.clone()))));
+    EthCoin::approve_for_v1_payment
+        .mock_safe(move |_, _, _| MockResult::Return(Box::new(futures01::future::ok(approved.clone()))));
     let swap = Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap();
     let token = token_coin(json!({"gas_limit": {"erc20_payment": 234_567}}), json!({}));
     run(token.send_hash_time_locked_payment(vec![1; 32], U256::one(), 1_800_000_000, &[2; 20], swap, swap));
@@ -606,5 +613,371 @@ fn t9_the_activation_builder_rejects_an_unusable_member_naming_the_key() {
     match err.get_inner() {
         EthCoinBuildError::InvalidConfig(message) => assert!(message.contains("gas_limit.eth_payment"), "{message}"),
         other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+// ─── T13: the gas-estimate multiplier (R57.5.3b) ────────────────────────────────────────────────────
+
+/// The node's `eth_estimateGas` answers `estimate` to everything and the gas price is one.
+fn stub_node_estimate(estimate: u64) {
+    mock_gas_price_one();
+    EthCoinImpl::estimate_gas
+        .mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(U256::from(estimate)))));
+}
+
+/// Like [`capture_sent_gas`], but every send succeeds, so a payment that follows an approve is reached.
+fn capture_sent_gas_ok(tx: SignedEthTx) {
+    SENT_GAS.with(|gas| gas.borrow_mut().clear());
+    EthCoin::sign_and_send_transaction.mock_safe(move |_, _value, _action, _data, gas| {
+        SENT_GAS.with(|sent| sent.borrow_mut().push(gas));
+        MockResult::Return(Box::new(futures01::future::ok(tx.clone())))
+    });
+}
+
+fn mock_allowance(allowed: U256) {
+    EthCoin::allowance.mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(allowed))));
+}
+
+fn swap_contract() -> Address { Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap() }
+
+/// The gas figures of the legacy ERC-20 payment of `token` over a node estimating `estimate`, allowance short:
+/// the approve first, the payment second.
+fn v1_token_payment_gas(token: &EthCoin, estimate: u64) -> Vec<u64> {
+    stub_node_estimate(estimate);
+    mock_allowance(U256::zero());
+    capture_sent_gas_ok(payment_tx(token));
+    run(token.send_hash_time_locked_payment(
+        vec![1; 32],
+        U256::one(),
+        1_800_000_000,
+        &[2; 20],
+        swap_contract(),
+        swap_contract(),
+    ));
+    sent_gas()
+}
+
+#[test]
+fn t13a_a_token_inherits_the_platform_multiplier_and_the_approve_carries_the_truncated_product() {
+    let token = token_coin(json!({"estimate_gas_mult": 1.3}), json!({}));
+    assert_eq!(token.estimate_gas_mult, Some(1.3));
+    // 1.3 x 50000: the double nearest 1.3 is a little above it, so the exact product is just above 65000.
+    // The payment that follows carries `erc20_payment`, unchanged.
+    assert_eq!(v1_token_payment_gas(&token, 50_000), vec![65_000, 150_000]);
+}
+
+#[test]
+fn t13b_the_tokens_own_multiplier_wins_over_the_platforms() {
+    let token = token_coin(json!({"estimate_gas_mult": 1.3}), json!({"estimate_gas_mult": 2.0}));
+    assert_eq!(token.estimate_gas_mult, Some(2.0));
+    assert_eq!(v1_token_payment_gas(&token, 50_000), vec![100_000, 150_000]);
+    // The platform coin itself is not changed by what a token configures.
+    let platform = eth_coin(json!({"estimate_gas_mult": 1.3}));
+    assert_eq!(platform.estimate_gas_mult, Some(1.3));
+}
+
+#[test]
+fn t13b_an_own_multiplier_of_one_is_a_value_not_an_absence_and_overrides_the_platform() {
+    let token = token_coin(json!({"estimate_gas_mult": 1.3}), json!({"estimate_gas_mult": 1.0}));
+    assert_eq!(v1_token_payment_gas(&token, 50_000), vec![50_000, 150_000]);
+}
+
+#[test]
+fn t13c_neither_entry_setting_the_member_leaves_the_estimate_exactly() {
+    let token = token_coin(json!({}), json!({}));
+    assert_eq!(token.estimate_gas_mult, None);
+    assert_eq!(v1_token_payment_gas(&token, 50_001), vec![50_001, 150_000]);
+    // A platform coin consults only its own entry; a multiplier on a token never reaches the platform.
+    let (_ctx, platform) = coin_over_entries(EthCoinType::Eth, json!({}), json!({"estimate_gas_mult": 3.0})).unwrap();
+    assert_eq!(platform.estimate_gas_mult, None);
+}
+
+#[test]
+fn t13d_the_preimage_adds_the_raw_estimate_and_the_fixed_limits_do_not_move() {
+    let cfg = json!({"estimate_gas_mult": 1.3,
+                     "gas_limit": {"erc20_payment": 10_000, "erc20_sender_refund": 20_000}});
+    let token = token_coin(cfg, json!({}));
+    stub_node_estimate(50_000);
+    mock_allowance(U256::zero());
+    let fee = block_on(token.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
+        .unwrap();
+    // The RAW 50000, not 65000.
+    assert_eq!(fee, wei_amount(10_000 + 20_000 + 50_000));
+    // The broadcast approve is scaled and the payment after it is the configured `erc20_payment`.
+    assert_eq!(v1_token_payment_gas(&token, 50_000), vec![65_000, 10_000]);
+}
+
+#[test]
+fn t13d_a_v2_payment_and_its_allowance_step_are_not_scaled() {
+    // The V2 allowance step reaches the same estimation, and is not multiplied; the V2 payment carries its
+    // R57.6.2 limit.
+    let token = token_coin(json!({"estimate_gas_mult": 1.3}), json!({}));
+    stub_node_estimate(50_000);
+    mock_allowance(U256::zero());
+    EthCoin::wait_for_required_allowance
+        .mock_safe(|_, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+    capture_sent_gas_ok(payment_tx(&token));
+    let maker_pub = [3u8; 64];
+    let args = SendTakerFundingArgs {
+        funding_time_lock: 1_800_000_000,
+        payment_time_lock: 1_800_000_100,
+        taker_secret_hash: &[4; 32],
+        maker_secret_hash: &[5; 32],
+        maker_pub: &maker_pub,
+        dex_fee: &DexFee::NoFee,
+        premium_amount: 0.into(),
+        trading_amount: 1.into(),
+        swap_unique_data: &[],
+    };
+    block_on(token.send_taker_funding_impl(args)).unwrap();
+    assert_eq!(sent_gas(), vec![50_000, 150_000]);
+}
+
+#[test]
+fn t13d_the_v2_payment_follows_a_configured_v2_limit_when_the_member_is_set() {
+    let mut cfg = v2_config();
+    cfg["estimate_gas_mult"] = json!(9.5);
+    let token = token_coin(cfg, json!({}));
+    stub_node_estimate(50_000);
+    mock_allowance(U256::zero());
+    EthCoin::wait_for_required_allowance
+        .mock_safe(|_, _, _, _| MockResult::Return(Box::new(futures01::future::ok(()))));
+    capture_sent_gas_ok(payment_tx(&token));
+    let maker_pub = [3u8; 64];
+    let args = SendTakerFundingArgs {
+        funding_time_lock: 1_800_000_000,
+        payment_time_lock: 1_800_000_100,
+        taker_secret_hash: &[4; 32],
+        maker_secret_hash: &[5; 32],
+        maker_pub: &maker_pub,
+        dex_fee: &DexFee::NoFee,
+        premium_amount: 0.into(),
+        trading_amount: 1.into(),
+        swap_unique_data: &[],
+    };
+    block_on(token.send_taker_funding_impl(args)).unwrap();
+    // Raw approve estimate, then the configured taker `erc20_payment`.
+    assert_eq!(sent_gas(), vec![50_000, 202]);
+}
+
+#[test]
+fn t13e_a_value_that_is_not_a_number_fails_activation_naming_the_key() {
+    for bad in [json!("1.3"), json!(true), json!(null), json!([1.3]), json!({"x": 1.3})] {
+        let extra = json!({ "estimate_gas_mult": bad });
+        let err = coin_over_entries(EthCoinType::Eth, extra.clone(), json!({}))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("estimate_gas_mult"), "{err}");
+        // A token without a member of its own inherits the platform's entry, and with it the rejection.
+        let token_type = || EthCoinType::Erc20 {
+            platform: "ETH".to_owned(),
+            token_addr: token_address(),
+        };
+        let err = coin_over_entries(token_type(), extra.clone(), json!({}))
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("estimate_gas_mult"), "{err}");
+        // The token's own malformed member is rejected too.
+        let err = coin_over_entries(token_type(), json!({}), extra)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(err.contains("estimate_gas_mult"), "{err}");
+    }
+}
+
+#[test]
+fn t13e_a_malformed_platform_member_is_not_consulted_when_the_token_has_its_own() {
+    let token_type = EthCoinType::Erc20 {
+        platform: "ETH".to_owned(),
+        token_addr: token_address(),
+    };
+    let (_ctx, token) = coin_over_entries(
+        token_type,
+        json!({"estimate_gas_mult": "bad"}),
+        json!({"estimate_gas_mult": 2.0}),
+    )
+    .unwrap();
+    assert_eq!(token.estimate_gas_mult, Some(2.0));
+}
+
+/// The real activation entry point rejects a malformed member, before any node is contacted.
+#[test]
+fn t13e_the_activation_builder_rejects_a_string_member_naming_the_key() {
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({"netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": []}))
+        .into_mm_arc();
+    let conf = json!({"coin": "ETH", "protocol": {"type": "ETH"}, "estimate_gas_mult": "1.3"});
+    let params = EthCoinActivationParams {
+        urls: vec!["http://dummy.dummy".to_owned()],
+        swap_contract_address: Some(swap_contract()),
+        ..Default::default()
+    };
+    let err = block_on(eth_coin_from_params_with_priv_key(
+        &ctx,
+        "ETH",
+        &conf,
+        &params,
+        &[1u8; 32],
+        CoinProtocol::ETH { chain_id: None },
+    ))
+    .unwrap_err();
+    match err.get_inner() {
+        EthCoinBuildError::InvalidConfig(message) => assert!(message.contains("estimate_gas_mult"), "{message}"),
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+/// The token route of a platform coin (the one the legacy and the task token activations share) applies the
+/// same inheritance and rejection.
+#[test]
+fn t13_the_token_route_of_a_platform_coin_inherits_overrides_and_rejects() {
+    let build = |platform_extra: Json, jst_extra: Json| {
+        let (ctx, platform) = coin_over_entries(EthCoinType::Eth, platform_extra, jst_extra).unwrap();
+        let token = block_on(platform.erc20_token_from_conf_or_contract("JST".to_owned(), token_address(), 1, false));
+        drop(ctx);
+        token
+    };
+    let inherited = build(json!({"estimate_gas_mult": 1.3}), json!({})).unwrap();
+    assert_eq!(inherited.estimate_gas_mult, Some(1.3));
+    let own = build(json!({"estimate_gas_mult": 1.3}), json!({"estimate_gas_mult": 2.0})).unwrap();
+    assert_eq!(own.estimate_gas_mult, Some(2.0));
+    let none = build(json!({}), json!({})).unwrap();
+    assert_eq!(none.estimate_gas_mult, None);
+    let err = build(json!({}), json!({"estimate_gas_mult": "2.0"})).unwrap_err();
+    assert!(err.to_string().contains("estimate_gas_mult"), "{err}");
+}
+
+#[test]
+fn t13e_a_product_with_a_fractional_part_is_truncated_not_rounded() {
+    // 0.7 x 10: the double nearest 0.7 lies just below it, so the exact product is just below 7 and truncates
+    // to 6, one unit below the decimal arithmetic result.
+    let token = token_coin(json!({"estimate_gas_mult": 0.7}), json!({}));
+    assert_eq!(v1_token_payment_gas(&token, 10), vec![6, 150_000]);
+    // 1.5 x 3 = 4.5 truncates to 4 (a rounding implementation would give 5).
+    let token = token_coin(json!({"estimate_gas_mult": 1.5}), json!({}));
+    assert_eq!(v1_token_payment_gas(&token, 3), vec![4, 150_000]);
+}
+
+#[test]
+fn t13_a_negative_multiplier_activates_and_fails_the_approve_at_send_time() {
+    let token = token_coin(json!({"estimate_gas_mult": -1.5}), json!({}));
+    assert_eq!(token.estimate_gas_mult, Some(-1.5));
+    stub_node_estimate(50_000);
+    mock_allowance(U256::zero());
+    capture_sent_gas_ok(payment_tx(&token));
+    let err = block_on(
+        token
+            .send_hash_time_locked_payment(
+                vec![1; 32],
+                U256::one(),
+                1_800_000_000,
+                &[2; 20],
+                swap_contract(),
+                swap_contract(),
+            )
+            .compat(),
+    )
+    .unwrap_err();
+    assert!(err.get_plain_text_format().contains("negative"), "{err:?}");
+    // Nothing was broadcast: neither the approve nor the payment.
+    assert!(sent_gas().is_empty());
+}
+
+#[test]
+fn t13_a_zero_multiplier_gives_a_zero_approve_limit() {
+    let token = token_coin(json!({"estimate_gas_mult": 0.0}), json!({}));
+    assert_eq!(v1_token_payment_gas(&token, 50_000), vec![0, 150_000]);
+}
+
+/// The multiplier reaches no fixed limit: with a distinctive member set, every R57.5.2 and R57.6.2 limit
+/// equals its configured or default value at its call site.
+#[test]
+fn t13f_no_fixed_limit_changes_when_the_member_is_set() {
+    for (platform_extra, defaults) in [
+        // Defaults.
+        (json!({"estimate_gas_mult": 7.75}), true),
+        // Configured values.
+        (
+            {
+                let mut cfg = v2_config();
+                cfg["estimate_gas_mult"] = json!(7.75);
+                cfg["gas_limit"] = json!({"eth_send_coins": 31_111, "eth_send_erc20": 422_222, "eth_payment": 12_345,
+                    "erc20_payment": 234_567, "eth_receiver_spend": 13_579, "erc20_receiver_spend": 246_802,
+                    "eth_sender_refund": 98_765, "erc20_sender_refund": 187_654, "eth_max_trade_gas": 7_000});
+                cfg
+            },
+            false,
+        ),
+    ] {
+        let v = |configured: u64, default: u64| if defaults { default } else { configured };
+        let eth = eth_coin(platform_extra.clone());
+        let token = token_coin(platform_extra, json!({}));
+        assert_eq!(eth.estimate_gas_mult, Some(7.75));
+        assert_eq!(token.estimate_gas_mult, Some(7.75));
+
+        // Every V1 call site: sends, payments (following an approve for the token), spends, refunds.
+        stub_node_estimate(1_000);
+        mock_allowance(U256::zero());
+        mock_payment_sent();
+        capture_sent_gas_ok(payment_tx(&token));
+        run(eth.send_to_address(token_address(), U256::one()));
+        run(token.send_to_address(token_address(), U256::one()));
+        run(eth.send_hash_time_locked_payment(
+            vec![1; 32],
+            U256::one(),
+            1_800_000_000,
+            &[2; 20],
+            swap_contract(),
+            swap_contract(),
+        ));
+        run(token.send_hash_time_locked_payment(
+            vec![1; 32],
+            U256::one(),
+            1_800_000_000,
+            &[2; 20],
+            swap_contract(),
+            swap_contract(),
+        ));
+        run(eth.spend_hash_time_locked_payment(payment_tx(&eth), swap_contract(), &[5; 32]));
+        run(token.spend_hash_time_locked_payment(payment_tx(&token), swap_contract(), &[5; 32]));
+        run(eth.refund_hash_time_locked_payment(swap_contract(), payment_tx(&eth)));
+        run(token.refund_hash_time_locked_payment(swap_contract(), payment_tx(&token)));
+        assert_eq!(sent_gas(), vec![
+            v(31_111, 21_000),
+            v(422_222, 210_000),
+            v(12_345, 65_000),
+            // The token payment: the approve (1000 x 7.75) and then the payment itself.
+            7_750,
+            v(234_567, 150_000),
+            v(13_579, 65_000),
+            v(246_802, 150_000),
+            v(98_765, 100_000),
+            v(187_654, 150_000),
+        ]);
+
+        // The fee-quote figures.
+        assert_eq!(eth.get_trade_fee().wait().unwrap(), wei_amount(v(7_000, 150_000)));
+        assert_eq!(
+            eth.get_receiver_trade_fee(FeeApproxStage::WithoutApprox)
+                .wait()
+                .unwrap(),
+            wei_amount(v(13_579, 65_000))
+        );
+        mock_allowance(U256::max_value());
+        let fee = block_on(
+            token.get_sender_trade_fee(TradePreimageValue::UpperBound(1.into()), FeeApproxStage::WithoutApprox),
+        )
+        .unwrap();
+        assert_eq!(fee, wei_amount(v(234_567 + 187_654, 300_000)));
+
+        // The V2 limits, as resolved for the selection matrix.
+        let (maker_pay, taker_pay, approve) = if defaults {
+            (150_000, 150_000, 50_000)
+        } else {
+            (102, 202, 209)
+        };
+        assert_eq!(token.gas_limit_v2.maker.erc20_payment, maker_pay);
+        assert_eq!(token.gas_limit_v2.taker.erc20_payment, taker_pay);
+        assert_eq!(token.gas_limit_v2.taker.approve_payment, approve);
     }
 }
