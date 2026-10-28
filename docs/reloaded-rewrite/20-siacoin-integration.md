@@ -437,12 +437,12 @@ text embeds. A full URL arriving from a lower layer is replaced by its
 host-only form before the text is logged or returned.
 
 **R-N2 (credentials in renderings; Reloaded; clean-room original;
-maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.16 applies to
+maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.17 applies to
 the Sia coin layer. No rendering of the activation request, of the client
 configuration, of the client, or of a value that holds any of them shall print
 the walletd password, the `Authorization` header value built from it, or the
 value of any header the browser build's `client_conf.headers` supplies. The
-server URL appears in host-only form only. The scope limit of R35.1.16 for the
+server URL appears in host-only form only. The scope limit of R35.1.17 for the
 RPC wire dump applies.
 
 Both rules bind the texts and renderings Reloaded emits, including those that

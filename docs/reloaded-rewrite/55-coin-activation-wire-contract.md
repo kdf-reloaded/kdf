@@ -502,7 +502,7 @@ other row the public reference is silent and the reference release decides.
 > **Error texts (pointer, 2026-10-28).** The `error` text of these rows stays
 > unbound, but what it may say about a node is bound by the owning chapters:
 > nodes and servers are named in host-only form and no credential appears
-> (chapter 35 R35.1.14 and R35.1.16, chapter 21 §21.9, chapter 36 §36.5A,
+> (chapter 35 R35.1.14 and R35.1.17, chapter 21 §21.9, chapter 36 §36.5A,
 > chapter 38 §38.6.9, chapter 39 §39.11.6, chapter 40 §40.5A, chapter 20
 > §20.8). The lightwalletd suspension of chapter 39 R39.11.31 does not change
 > when the two `task::enable_z_coin` backend rows apply. None of this changes

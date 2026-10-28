@@ -1621,7 +1621,7 @@ back to an error path that skips transaction-history processing.
 
 These rules apply the host-only node naming of
 [chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14 and the credentials rule
-of R35.1.16 to the two backends of a UTXO coin. They bind no wire shape.
+of R35.1.17 to the two backends of a UTXO coin. They bind no wire shape.
 
 R38.6.9a **Electrum servers are named by host and port only (Reloaded;
 clean-room original; maintainer decision 2026-10-26; no switch).** Every log
@@ -1643,7 +1643,7 @@ In particular:
 3. The activation log line for a server that will not be used names the
    server as item 1 or the main rule says.
 
-R35.1.16 applies to the Electrum client, its pool and per-server entries, and
+R35.1.17 applies to the Electrum client, its pool and per-server entries, and
 the server entries of the activation request: no rendering of them prints
 more of an address than `host:port`.
 
@@ -1655,7 +1655,7 @@ port, user name and password in the daemon's configuration file.
 1. Every log line and error text that names the daemon shall name it in the
    host-only form of R35.1.14 (`http://127.0.0.1:<port>`), including a
    lower-layer text embedded in it.
-2. No rendering (R35.1.16) of the native client, of a value that holds it, or
+2. No rendering (R35.1.17) of the native client, of a value that holds it, or
    of any value that holds the daemon credentials shall print the RPC user
    name, the RPC password or the `Authorization` header value, whole, in part
    or encoded (D38.6.9a).
@@ -1665,7 +1665,7 @@ port, user name and password in the daemon's configuration file.
 Neither rule has an opt-back switch, for the reason R35.1.14 gives: the
 backend is the operator's own and no peer observes it, so by the second arm
 of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the
-default. The scope limit of R35.1.16 for the RPC wire dump applies. Both are
+default. The scope limit of R35.1.17 for the RPC wire dump applies. Both are
 recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 
 > **Status (2026-10-28).** Not implemented yet. In this repository a native

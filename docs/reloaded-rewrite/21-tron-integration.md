@@ -378,7 +378,7 @@ URLs in every log line and error text as well. It is a naming rule only:
 Tron requests do not go through the EVM node transport, so the ordering
 policy of this rule, including its stop on a non-retryable rejection, stays
 Tron's own and is not overridden by R35.1.8 there. The credentials rule of
-R35.1.16 applies to the Tron client and its node list in the same way, with
+R35.1.17 applies to the Tron client and its node list in the same way, with
 the same scope limit for the RPC wire dump (Reloaded-original; maintainer
 decision 2026-10-26; no switch). *Status (2026-10-28):* the Tron client's
 debug form already hides its node list.
@@ -556,7 +556,7 @@ V3. The address encoding, protobuf transaction/contract formats,
   the R35 gate and the R36 binding-scope notes that head every
   code-bearing section of this chapter.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
-  sentence in §21.9 R-N1 that applies chapter 35 R35.1.16 to the Tron client,
+  sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
   with its status remark, is Reloaded-original. It rests on the maintainer
   decision of 2026-10-26 (host-only node naming everywhere, except the RPC
-  wire dump) and on this repository's code; its test is chapter 35 T35.34.
+  wire dump) and on this repository's code; its test is chapter 35 T35.36.

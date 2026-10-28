@@ -4969,7 +4969,7 @@ R39.11.7b). This covers at least:
 
 An entry that cannot be parsed into a scheme and a host is named by a fixed
 placeholder and its position in the configured list, never by its raw string.
-Chapter 35 R35.1.16 applies to the lightwalletd backend, its transport and the
+Chapter 35 R35.1.17 applies to the lightwalletd backend, its transport and the
 endpoint list of the activation request, with the same scope limit for the RPC
 wire dump.
 

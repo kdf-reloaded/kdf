@@ -478,11 +478,11 @@ and fragment stripped. This covers at least:
 The rule applies to the native and the browser build alike.
 
 R36.5A.2 **Credentials in renderings (Reloaded; clean-room original;
-maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.16 applies to
+maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.17 applies to
 the Tendermint coin layer: the coin's node list, each per-node client, and the
 node entries of the activation request render a node URL in host-only form
 only, and no rendering prints a header value or other credential the
-configuration supplies. The scope limit of R35.1.16 for the RPC wire dump
+configuration supplies. The scope limit of R35.1.17 for the RPC wire dump
 applies here too.
 
 R36.5A.3 **Node response bodies are not logged (Reloaded; clean-room

@@ -261,7 +261,7 @@ present, port. This covers the node URLs of either activation surface (the
 §40.6 item 3), the health-check selection of R40.1.5, the "no healthy node"
 errors of R40.2.4 and R40.3.4, and any lower-layer text (HTTP client, TLS, DNS)
 embedded in an emitted text, which shall carry the host-only form in place of
-a full URL. Chapter 35 R35.1.16 applies to the Solana node clients, their pool
+a full URL. Chapter 35 R35.1.17 applies to the Solana node clients, their pool
 and the activation requests, with its scope limit for the RPC wire dump.
 
 The rule applies when Solana returns (D40.4). While `SOLANA_ACTIVATION_AVAILABLE`

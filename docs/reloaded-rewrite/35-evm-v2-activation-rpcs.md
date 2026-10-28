@@ -35,7 +35,7 @@ introduce a new coin.
 > public-key recovery. The human-readable `error` text, `error_path` and
 > `error_trace` are **not** bound, except that the two Reloaded-only rules
 > R35.1.14 and R35.1.15 constrain what an `error` text or log line may say
-> about a node, and the Reloaded-only rule R35.1.16 constrains what any
+> about a node, and the Reloaded-only rule R35.1.17 constrains what any
 > rendering of a value may print of a credential. Private Rust types, helper
 > decomposition, and internal module structure are informative and are
 > **not** bound by this chapter.
@@ -479,7 +479,7 @@ URLs at activation (deviation 2 in the note closing §35.1.E), so the
 WebSocket parts of the rules below bind Reloaded only if a WebSocket
 transport is added.
 The two reference rows agree on every rule below unless a rule says
-otherwise; the Reloaded-only rules R35.1.14 -- R35.1.16 are marked as such.
+otherwise; the Reloaded-only rules R35.1.14 -- R35.1.17 are marked as such.
 The labels (a) -- (e) used below are the five questions settled by the
 2026-10-26 pass: (a) batch responses, (b) execution errors, (c) the scope of
 stickiness, (d) the scope of the cutoff, (e) re-sending a signed transaction.
@@ -682,7 +682,7 @@ about the reference's.
 > ([chapter 38](38-utxo-coin-maintenance-and-features.md) §38.6.9),
 > lightwalletd ([chapter 39](39-zcash---z_coin-shielded-coin.md) §39.11.6),
 > Solana ([chapter 40](40-solana-coin.md) §40.5A) and the Sia wallet daemon
-> ([chapter 20](20-siacoin-integration.md) §20.8). R35.1.16 adds the rule on
+> ([chapter 20](20-siacoin-integration.md) §20.8). R35.1.17 adds the rule on
 > credentials in renderings, and the scope limit for the RPC wire dump that
 > all of these rules share.
 
@@ -733,7 +733,7 @@ shape or HTTP status.
 > resolves the contradiction in favor of the comment, and the rewritten
 > module now keeps to it.
 
-R35.1.16 **Credentials are never rendered (Reloaded; clean-room original;
+R35.1.17 **Credentials are never rendered (Reloaded; clean-room original;
 maintainer decision 2026-10-26; no switch).** No rendering of a value shall
 print a credential. A rendering is the value's debug form, its display form,
 and any log line, error text or status message built from either. A credential
@@ -2000,7 +2000,7 @@ that only checks an internal variant does not satisfy these rules.
   `decimals()` call with a JSON-RPC error and a second node that answers
   correctly returns the second node's values (binding for Reloaded, which
   takes the R35.1.13 choice per D35.8 (iv)).
-- **T35.34** *Credentials in renderings (R35.1.16).* Build the EVM transport
+- **T35.36** *Credentials in renderings (R35.1.17).* Build the EVM transport
   from a node URL carrying userinfo, a path segment and a query string (the
   URL of T35.28), and configure a `gas_station_url` and a gas-API provider URL
   that each carry a key in the path and in the query. The debug form of the
@@ -2009,7 +2009,7 @@ that only checks an internal variant does not satisfy these rules.
   parts; the same holds for the display form of every error the activation
   and a failing request return. A node entry or request that carries no
   secret renders as before. Applies to the TRON client too (ch. 21 §21.9).
-- **T35.35** *URLs in the redacted wire dump (the rule after R35.1.16,
+- **T35.35** *URLs in the redacted wire dump (the rule after R35.1.17,
   D35.10).* Feed the dump's redaction an activation request for RIN and one for
   an EVM coin, whose server and node entries carry: a URL with userinfo, a path and a
   query; a URL with a path only; a URL whose path is `/`; an Electrum
@@ -2230,17 +2230,17 @@ implemented; the evaluation belongs to the swap and transaction-path hardening
 plan (`docs/plans/swap-transaction-path-hardening.md`).
 
 **D35.10** *(Resolved 2026-10-28, maintainer decision.)* *Node URLs in the
-redacted RPC wire dump.* R35.1.16 leaves the RPC wire dump to its own switch.
+redacted RPC wire dump.* R35.1.17 leaves the RPC wire dump to its own switch.
 In its default, redacted mode the dump redacted members whose key names a
 secret, and a node `url` member is not one of them, so an activation request
 in the dump showed each node URL in full. The maintainer decided that the
 redacted mode strips URLs to the host, with the condition that nothing which
-is useful and not secret is stripped. The rule after R35.1.16 therefore
+is useful and not secret is stripped. The rule after R35.1.17 therefore
 rewrites URLs only: it keeps scheme, host and port, marks each removed part
 instead of dropping it silently, and leaves every other member as it was. A
 URL's path is removed even though it is often harmless, because hosted
 providers put the API key there and the dump cannot tell the two apart. The
-change is to the dump's own redaction, not to R35.1.14 or R35.1.16. T35.35
+change is to the dump's own redaction, not to R35.1.14 or R35.1.17. T35.35
 tests it.
 
 ## 35.9 Provenance Footer
@@ -2359,9 +2359,9 @@ tests it.
   T35.28) were written by a context that never read the forbidden corpus and
   rest on this repository's own code.
 - *Clean-context additions, node naming and credentials (2026-10-28, forbidden
-  corpus not consulted):* R35.1.16 with its scope sentence and status note,
-  the pointer after R35.1.14, the R35.1.16 mentions in the binding-scope note
-  and the §35.1.F lead-in, the wire-dump rule after R35.1.16, T35.34, T35.35
+  corpus not consulted):* R35.1.17 with its scope sentence and status note,
+  the pointer after R35.1.14, the R35.1.17 mentions in the binding-scope note
+  and the §35.1.F lead-in, the wire-dump rule after R35.1.17, T35.36, T35.35
   and D35.10 are Reloaded-original. They rest on the maintainer decision of
   2026-10-26 (host-only node naming everywhere, including fee-service URLs,
   except the RPC wire dump, which keeps its own secrets switch), his decision
