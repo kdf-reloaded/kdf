@@ -1920,3 +1920,141 @@ mod electrum_fallback {
         assert_eq!(electrum.asked(SERVER, "history"), 0);
     }
 }
+
+/// The refund gate of a shielded leg (CRD ch.39 R39.5.13, T39.5.f), over the scripted backend whose
+/// block at height `h` carries time `1000 + h`: with the tip at 100 the median time past of the last
+/// 11 blocks is 1095.
+mod refund_gate {
+    use super::*;
+    use crate::{CanRefundHtlc, SwapOps};
+
+    const TIP: u64 = 100;
+    const MTP_AT_TIP: u64 = 1_095;
+
+    fn script_tip(fixture: &LightCoinFixture, tip: Option<u64>) {
+        for script in fixture.transport.scripts.lock().values_mut() {
+            script.tips.clear();
+            script.tip_floor = tip;
+        }
+    }
+
+    fn reads(fixture: &LightCoinFixture, method: &'static str) -> usize {
+        SERVERS.iter().map(|s| fixture.transport.called(s, method)).sum()
+    }
+
+    async fn gate(fixture: &LightCoinFixture, locktime: u64) -> Result<CanRefundHtlc, String> {
+        fixture.coin.can_refund_htlc(locktime).compat().await
+    }
+
+    fn waits(answer: Result<CanRefundHtlc, String>) -> u64 {
+        match answer.expect("the gate answers") {
+            CanRefundHtlc::HaveToWait(secs) => secs,
+            CanRefundHtlc::CanRefundNow => panic!("the refund was permitted"),
+        }
+    }
+
+    /// While the wall clock has not passed the lock time the gate waits as it always did and reads
+    /// nothing from the chain.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wall_clock_wait_reads_no_chain_data() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        script_tip(&fixture, Some(TIP));
+        let in_a_while = common::now_ms() / 1000 + 1_000;
+
+        let secs = waits(gate(&fixture, in_a_while).await);
+
+        assert!((1_000..=1_002).contains(&secs), "{secs}");
+        assert_eq!(reads(&fixture, "tip"), 0);
+        assert_eq!(reads(&fixture, "time"), 0);
+        assert_eq!(
+            fixture
+                .coin
+                .refund_gate_closed_note(in_a_while)
+                .compat()
+                .await
+                .map(|n| n.is_some()),
+            Ok(true)
+        );
+        assert_eq!(reads(&fixture, "tip"), 0, "the recovery note reads nothing either");
+    }
+
+    /// The wall clock has passed the lock time but the median time past has not: the refund waits, by
+    /// the distance to the median and never more than an hour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_median_time_not_past_the_lock_time_waits_even_though_the_wall_clock_has_passed() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        script_tip(&fixture, Some(TIP));
+
+        assert_eq!(
+            waits(gate(&fixture, MTP_AT_TIP).await),
+            1,
+            "the median equals the lock time"
+        );
+        assert_eq!(waits(gate(&fixture, MTP_AT_TIP + 100).await), 101);
+        assert_eq!(
+            waits(gate(&fixture, 100_000).await),
+            3_600,
+            "a wait of {} s is capped",
+            100_000 - MTP_AT_TIP + 1
+        );
+        // The window is the 11 blocks ending at the tip, read from the one admitted tip.
+        assert_eq!(reads(&fixture, "time"), 3 * 11);
+        assert_eq!(reads(&fixture, "tip"), 3);
+    }
+
+    /// Once the median time past exceeds the lock time the refund is permitted; at the lock time itself it
+    /// is not, as a node judges a lock time final only when it is strictly below the median.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_median_time_past_the_lock_time_permits_the_refund() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        script_tip(&fixture, Some(TIP));
+
+        assert!(matches!(
+            gate(&fixture, MTP_AT_TIP - 1).await,
+            Ok(CanRefundHtlc::CanRefundNow)
+        ));
+        assert!(matches!(
+            gate(&fixture, MTP_AT_TIP).await,
+            Ok(CanRefundHtlc::HaveToWait(1))
+        ));
+        assert_eq!(
+            fixture.coin.refund_gate_closed_note(MTP_AT_TIP - 1).compat().await,
+            Ok(None),
+            "an open gate has nothing to report"
+        );
+    }
+
+    /// A chain that cannot be read is an error the stage retries, never an open gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chain_read_failure_is_an_error() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        script_tip(&fixture, None);
+
+        let err = match gate(&fixture, 1_000).await {
+            Err(e) => e,
+            Ok(_) => panic!("an unreadable chain opened the gate"),
+        };
+        assert!(err.contains("median time past"), "{err}");
+        let recovery_err = fixture.coin.refund_gate_closed_note(1_000).compat().await.unwrap_err();
+        assert!(recovery_err.contains("median time past"), "{recovery_err}");
+    }
+
+    /// `recover_funds_of_swap` before the gate opens is told the lock time and the median it is waiting for.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_recovery_note_names_the_lock_time_and_the_current_median() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        script_tip(&fixture, Some(TIP));
+
+        let note = fixture
+            .coin
+            .refund_gate_closed_note(MTP_AT_TIP + 100)
+            .compat()
+            .await
+            .unwrap()
+            .expect("the gate is closed");
+
+        assert!(note.contains(&(MTP_AT_TIP + 100).to_string()), "{note}");
+        assert!(note.contains(&MTP_AT_TIP.to_string()), "{note}");
+        assert!(note.contains("median time past"), "{note}");
+    }
+}

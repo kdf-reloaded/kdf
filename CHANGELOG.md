@@ -270,6 +270,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
+  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
+  times by) has passed the lock time, and a refund the network still rejects as not yet final is
+  retried until the refund deadline instead of ending the swap with its refund failed. Calling
+  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
+  PR #146; CRD ch.39 R39.5.13.
 - **A node that relays the order book now answers other nodes' sync requests for a maker it is still
   catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
   while the relay was itself fetching them (the usual case right after a stall or a restart) got an

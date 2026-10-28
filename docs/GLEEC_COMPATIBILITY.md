@@ -132,7 +132,7 @@ What an integrator observes:
     maker's spend. Without that watch a taker could not learn the secret and would lose
     its payment. GLEEC KDF has no such refusal.
 - A shielded coin's swap refund waits for the chain's clock (ch.39 R39.5.13, decided
-  2026-10-28, not yet implemented). Reloaded broadcasts the refund only once the chain's
+  2026-10-28). Reloaded broadcasts the refund only once the chain's
   median time past, not only the wall clock, has passed the payment's lock time. A refund
   the network rejects as not yet final is retried until the refund deadline, instead of
   ending the swap with its refund failed. `recover_funds_of_swap` called too early returns
