@@ -26,6 +26,7 @@
 use super::z_lightwalletd::{p2sh_hash_of, txid_internal_to_display, DetectionLog, LightwalletdBackend, OutputRef,
                             ADMISSION_REEVALUATION_INTERVAL};
 use super::z_tx_read::{read_tx, txid_display};
+use crate::coin_conf;
 use crate::utxo::rpc_clients::electrum_pool::round_budget;
 use crate::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumPoolTimings, ElectrumRpcRequest};
 use crate::utxo::utxo_builder::build_electrum_client;
@@ -137,6 +138,7 @@ impl ElectrumClientReads {
         let client = build_electrum_client(
             &ctx,
             &self.ticker,
+            &coin_conf(&ctx, &self.ticker),
             ElectrumBuilderArgs::default(),
             self.servers.clone(),
             None,
