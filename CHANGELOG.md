@@ -281,11 +281,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   answer an address question about it: a `lightwalletd` server, or an Electrum server that is on the same
   chain. If none can, the swap ends at once with `StartFailed`. The error names each server and what is
   wrong with it, and nothing is sent. Before, such a swap could reach the payment and lose it.
-  Detail: CRD ch.39 R39.11.28.
+  Detail: PR #136; CRD ch.39 R39.11.28.
 - **A fresh ARRR swap no longer asks whether it has already paid.** The "already sent" question exists
   for a swap that resumes after a restart. An ARRR payment goes to a script made with a key used for
   this one swap only, so a swap started in this run cannot have paid it yet. The question is now skipped
-  there. A resumed swap, and every other coin, still ask it. Detail: CRD ch.39 R39.11.27.
+  there. A resumed swap, and every other coin, still ask it. Detail: PR #136; CRD ch.39 R39.11.27.
 - **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An ARRR
   swap asks three questions about its HTLC: was my payment already sent, was this payment spent, and
   has the counterparty spent it yet. When no `lightwalletd` server can answer them, for example because
