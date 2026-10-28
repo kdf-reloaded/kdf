@@ -275,6 +275,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
 - **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
 - **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
+- **A taker paying with ARRR is refused at the start of the swap when nothing could watch its payment.**
+  A taker learns the swap secret only by seeing the maker spend the taker's payment. Before sending its
+  dex fee, a taker whose payment coin is ARRR in light mode now checks that at least one source can
+  answer an address question about it: a `lightwalletd` server, or an Electrum server that is on the same
+  chain. If none can, the swap ends at once with `StartFailed`. The error names each server and what is
+  wrong with it, and nothing is sent. Before, such a swap could reach the payment and lose it.
+  Detail: CRD ch.39 R39.11.28.
+- **A fresh ARRR swap no longer asks whether it has already paid.** The "already sent" question exists
+  for a swap that resumes after a restart. An ARRR payment goes to a script made with a key used for
+  this one swap only, so a swap started in this run cannot have paid it yet. The question is now skipped
+  there. A resumed swap, and every other coin, still ask it. Detail: CRD ch.39 R39.11.27.
 - **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An ARRR
   swap asks three questions about its HTLC: was my payment already sent, was this payment spent, and
   has the counterparty spent it yet. When no `lightwalletd` server can answer them, for example because
