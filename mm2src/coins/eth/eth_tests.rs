@@ -127,6 +127,7 @@ pub(super) fn eth_coin_for_test_with_providers(
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin)
 }
@@ -222,6 +223,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin, selected_addr)
 }
@@ -397,6 +399,7 @@ fn test_wait_for_payment_spend_timeout() {
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     };
 
     let coin = EthCoin(Arc::new(coin));
@@ -567,6 +570,7 @@ mod search_for_swap_tx_spend_scripted {
             swap_v2_contracts: None,
             gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
+            estimate_gas_mult: None,
         }));
         (ctx, coin)
     }
@@ -1445,6 +1449,7 @@ fn test_message_hash() {
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
 
     let message_hash = coin.sign_message_hash("test").unwrap();
@@ -1494,6 +1499,7 @@ fn test_sign_verify_message() {
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
 
     let message = "test";
@@ -1687,6 +1693,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         swap_v2_contracts: None,
         gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin)
 }
@@ -2275,6 +2282,7 @@ mod swap_send_path_wire_form {
             swap_v2_contracts: None,
             gas_limit: EthGasLimit::default(),
             gas_limit_v2: EthGasLimitV2::default(),
+            estimate_gas_mult: None,
         }));
         (ctx, coin)
     }

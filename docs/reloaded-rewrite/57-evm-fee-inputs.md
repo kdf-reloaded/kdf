@@ -24,7 +24,9 @@ layer. Reloaded ships part of each, so the chapter is split:
   (R57.2.4, R57.4.1).
 - **Part B (§57.5–§57.6), per-coin gas-limit overrides.** Required and
   **not** in reloaded: the configuration block is never read and every
-  gas limit is a compile-time constant.
+  gas limit is a compile-time constant. Since 2026-10-27 Part B also
+  binds the one per-coin key that scales an *estimated* (not configured)
+  gas limit, R57.5.3b, which reloaded likewise does not read.
 - **Part C (§57.7), the withdraw fee form.** Partly in reloaded: the
   legacy fee form is accepted, the EIP-1559 fee form is not, and the
   envelope-type derivation that follows from the resolved form is absent.
@@ -387,8 +389,8 @@ the key is absent:
 and, when absent there, from the entry of its platform coin. The same
 inheritance applies to `gas_limit_v2` (R57.6), `gas_price_adjust`
 (R57.2.4), the envelope-type cap, the swap gas-fee policy default, and
-the gas-estimate multiplier of D3. For a platform coin, only its own
-entry is consulted.
+the gas-estimate multiplier of R57.5.3b. For a platform coin, only its
+own entry is consulted.
 
 > **Dirty-side derivation record (sanitized).** R57.5.3a and T9 were
 > added after this section's 2026-10-24 clearance and are **not** covered by
@@ -427,8 +429,8 @@ for a ceiling:
 - the per-coin envelope-type cap (`max_eth_tx_type`,
   [Chapter 35](35-evm-v2-activation-rpcs.md) D35.7) caps the EIP-2718
   *transaction type*, never a gas limit, and the two are independent;
-- the gas-estimate multiplier (D3) scales a value **obtained from the node by
-  estimation**; it neither bounds nor scales a value read from the
+- the gas-estimate multiplier (R57.5.3b) scales a value **obtained from the
+  node by estimation**; it neither bounds nor scales a value read from the
   configuration. A configured limit bypasses estimation entirely at the call
   sites of R57.5.2;
 - the only rejection on this path is a **type** rejection. A member whose
@@ -446,6 +448,122 @@ limits — a divergence invisible to both operators — and would do so in the
 refund paths R57.5.2's call-out identifies as the worst place in the system to
 under-fund. Rejecting it would make a coins file that a reference node accepts
 refuse to activate here.
+
+> **Dirty-side derivation record (sanitized), R57.5.3b and T13.** Added
+> 2026-10-27 by the KDF Spec Reader under the chapter-01 two-team workflow
+> (§1.4A), from the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02
+> §2.15A, read at both and identical at both for every fact R57.5.3b
+> states; the Reloaded workspace was read for the divergence note; the
+> public coins-configuration file for the deployed values. Nothing else in
+> §57.5 changed. **Clearance (chapter 01 T1, R40): passed the KDF Dirty Gate on 2026-10-28** (PASS, measure 0.02, no leaks); the record is the
+> scoped-addition item of §57.12. The two earlier clearances of this section are untouched by it.
+
+**R57.5.3b** *The gas-estimate multiplier (`estimate_gas_mult`).* This rule
+closes former D3. A coin's configuration entry may carry a top-level
+`estimate_gas_mult` member, a JSON number read as a double-precision
+floating-point value, that scales a gas limit the node obtained **by
+estimation** before the limit is used. Its complete contract:
+
+1. *Reading and inheritance.* The member is read at coin activation, on the
+   legacy and the version-two activation paths alike, under the same
+   token-inheritance rule as `gas_limit` (R57.5.3): a token entry lacking the
+   member takes its platform coin's value; a platform coin consults only its
+   own entry. A member whose value is not a JSON number fails activation with
+   a configuration error naming the key, exactly as a malformed `gas_limit`
+   member does (R57.5.1).
+2. *Default.* An absent member means **no scaling**: the estimate is used as
+   returned. There is no built-in default other than this identity.
+3. *No range validation.* No bound is checked at activation or at use. A
+   value that has no finite decimal representation (not-a-number, positive or
+   negative infinity) degrades to a factor of one at the point of use; a
+   value of zero yields a zero gas limit; a negative value yields a product
+   that cannot be represented as an unsigned gas quantity and fails the
+   transaction at send time, not at activation. These are the observable
+   outcomes; an implementation MUST NOT add an activation-time range check,
+   because a coins file a reference node accepts must activate here.
+4. *Arithmetic.* The estimate (a whole number of gas units) is multiplied by
+   the configured value applied as the exact value of the parsed double, and
+   the product is **truncated toward zero to a whole number of gas units**
+   (no rounding up). The consequence an implementer must preserve: a decimal
+   that is not exactly representable in binary (for example `0.7`) can
+   produce a product one unit below the decimal arithmetic result; `1.3`
+   applied to an estimate of `50000` yields `65000`.
+5. *Scope — estimated limits only.* The multiplier applies to **exactly one
+   class of transaction**: one whose gas limit the node obtains from
+   `eth_estimateGas` because no fixed limit was supplied for it. At both
+   reference rows there is **exactly one** such transaction on the swap
+   path: the legacy (V1) ERC-20 `approve` the sender broadcasts before an
+   ERC-20 HTLC payment when the current allowance is below the traded value
+   (the `erc20_payment` row of R57.5.2 describes the payment this approve
+   precedes). Every V1 HTLC payment, receiver spend and sender refund,
+   every plain and token send, and every version-two transaction (fungible
+   and non-fungible) supplies a fixed limit from the blocks of R57.5.2 and
+   R57.6.2 and is **not** multiplied. **The multiplier never touches the
+   R57.5.2 / R57.6.2 limits**, whether those come from the configuration or
+   from the defaults (restating the third bullet of R57.5.3a from the other
+   side).
+6. *Not on the fee-quote path.* The `approve` gas estimate that the
+   sender-side trade preimage adds to `erc20_payment` when the allowance is
+   insufficient (R57.5.2) uses the **raw** estimate; the multiplier is not
+   applied to it. A fee quote for a token whose platform sets the member
+   therefore understates the gas the eventual approve transaction is
+   allowed by the configured factor. This asymmetry is a reference fact at
+   both rows and is bound as parity, not endorsed; see the code-quality
+   finding below.
+7. *Not on the withdraw path.* Withdrawals and the non-swap estimation
+   requests of §57.7 obtain their gas limit by a separate estimation that
+   never consults the member.
+8. *Deployed values.* The public coins-configuration file sets the member to
+   `1.3` on exactly two entries, both layer-two platform coins (an
+   Arbitrum entry and a Base entry, each carrying the member as a
+   top-level number); every ERC-20 token on those platforms inherits it by
+   item 1. No token entry sets its own value.
+
+> **Reloaded divergence (2026-10-27).** Reloaded reads neither
+> `estimate_gas_mult` nor the per-coin `gas_limit` blocks and uses
+> compile-time 150000-class constants for its V1 HTLC gas limits (R57.5.4,
+> V3). Its legacy ERC-20 approve already obtains its gas limit by
+> estimation (`mm2src/coins/eth/eth_impl.rs`, the approve constructor) and
+> its sender-side preimage already adds the raw approve estimate
+> (`mm2src/coins/eth/eth_mm_coin.rs`, the token preimage branch), so items
+> 5–7 hold today with a factor of one. What is missing is the member
+> itself: a Coder closing this rule adds the reading and inheritance of
+> items 1–3 and applies the factor of item 4 to the approve's estimate at
+> that one site — and nothing else, because R57.5.2 and R57.6.2 remain
+> fixed limits and the preimage addition stays raw (item 6).
+
+> **Code-quality finding (informative; trigger: a contradiction between two
+> things read side by side).** The reference's own description of the
+> multiplier's scope is wider than its behavior. Its documentation of the
+> swap-transaction send path says the gas limit is obtained from the node
+> when *either* no fixed limit is supplied *or* the multiplier is
+> configured; the behavior is that a supplied fixed limit always wins and
+> the multiplier is reached only when no fixed limit is supplied. An
+> operator reading the reference's description would expect `1.3` to
+> raise every swap transaction's limit on the two layer-two chains; it
+> raises the approve's only. R57.5.3b binds the behavior (items 5–6), not
+> the description. Proposed resolution for Reloaded: none in code — bind as
+> above and document the key behaviorally in the operator-facing
+> configuration reference, so that nobody sets it expecting R57.5.2 limits
+> to scale. If the maintainer ever wants a *configured* way to raise every
+> limit on a chain, that is the `gas_limit` block itself (R57.5.1), not this
+> member.
+
+> **As built (2026-10-28, PR #107) -- R57.5.3b.** `estimate_gas_mult` is read as a JSON
+> number at every EVM activation path (the platform-coin build and both token routes, with
+> the token's own value winning and a silent token inheriting its platform coin's; an explicit
+> `1.0` on a token is a value, not an absence); any other JSON type fails activation naming
+> the key; there is no range check. It scales only the estimated limit of the legacy ERC-20
+> approve that precedes a V1 payment, as the exact product of the whole-number estimate and
+> the exact binary value of the double, truncated toward zero (1.3 x 50000 = 65000, 0.7 x 10
+> = 6; a non-finite factor is one, zero gives zero, a negative factor fails the transaction
+> at send time before anything is broadcast). The trade-preimage's approve estimate, every
+> fixed R57.5.2/R57.6.2 limit and withdraw stay unscaled. **Finding against item 5:** the
+> version-two allowance step (`handle_allowance`) also broadcasts an approve whose limit is
+> *estimated*, not fixed (the fixed `approve_payment` belongs to a different V2 call), so
+> item 5's "every version-two transaction supplies a fixed limit" does not hold for it in
+> Reloaded; it is left unscaled here, as the chapter's scope intends. The `approve_token`
+> RPC is a non-swap call and is unscaled too.
 
 **R57.5.4** *Implementation status (gap).* Reloaded reads neither
 `gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
@@ -1000,6 +1118,24 @@ The test MUST fail if either path begins to read the trading-volume
 floor. *(Cleared with §57.7A — see the clearance statement at its head and
 the second scoped-addition item in §57.12.)*
 
+**T13.** *Gas-estimate multiplier (R57.5.3b).* Driven from JSON coin entries
+against a stubbed node whose `eth_estimateGas` answer is a known whole number
+`e`. (a) A platform coin entry setting `estimate_gas_mult` to `1.3` and a
+token entry on that platform **omitting** it: the token's legacy `approve`
+transaction carries gas limit `trunc(e × 1.3)`. (b) The same platform with
+the token entry setting its own value `2.0`: the token's approve carries
+`2e`, the platform's value is not used. (c) Neither entry sets it: the
+approve carries exactly `e`. (d) With the member set on the platform, the
+ERC-20 HTLC payment that follows the approve carries the `erc20_payment`
+limit of R57.5.2 unchanged, and the sender-side preimage figure adds the
+**raw** `e`, not `trunc(e × 1.3)`; a V2 payment on the same coin carries its
+R57.6.2 limit unchanged. (e) A member value that is a string fails
+activation with a configuration error naming the key; a member value whose
+product with `e` has a fractional part is truncated, not rounded. The test
+MUST fail if any R57.5.2 or R57.6.2 limit changes when the member is set.
+*(Added 2026-10-27 with R57.5.3b; passed the KDF Dirty Gate on 2026-10-28 — see the
+derivation record above R57.5.3b.)*
+
 > **As-built note (2026-10-25, PR #66) — R57.7A.3 and T12.** As built,
 > the DEX-fee pipeline's threshold is `max(net_cfg.dex_fee_min_threshold(),
 > min_tx_amount)`. The network-level value is zero by the trait's default,
@@ -1028,14 +1164,18 @@ defensible reasons (R57.2.2). If the reference later corrects this call
 site too, R57.2.2 must change with it and T3 must be inverted. Until
 then the asymmetry is intentional and documented, not an oversight.
 
-**D3.** *Gas-estimate multiplier.* The reference carries a further
-per-coin configuration key that scales a node's `eth_estimateGas` result
-before use, and the public coins configuration sets it to 1.3 for two
-layer-two platform coins. Reloaded does not read it. It is deferred
-because it belongs with the estimation surface rather than the
-fee-input surface, and because a multiplier applied to an estimate that
-already carries chain-specific slack needs its own parity check against
-a live node of each affected chain.
+**D3.** *Gas-estimate multiplier — resolved 2026-10-27, bound as
+R57.5.3b.* The reference carries a per-coin configuration key that scales a
+node's `eth_estimateGas` result before use, and the public coins
+configuration sets it to 1.3 for two layer-two platform coins. This entry
+deferred it on the ground that a multiplier on an estimate needed its own
+live-chain parity check. The verification that closed it found the scope far
+narrower than the entry assumed: at both reference rows the key reaches
+exactly one swap-path transaction (the legacy ERC-20 approve) and no fixed
+limit of R57.5.2 or R57.6.2, so no live-chain check of payment, spend or
+refund gas is implied by adopting it. R57.5.3b binds the complete contract;
+T13 drives it. This entry remains as the record of the deferral and its
+resolution.
 
 **D4.** *Removing the external gas-oracle source.* The finding under
 R57.2.3 proposes removing reloaded's third price source. It is deferred
@@ -1125,7 +1265,8 @@ clearance statement at its head and the second scoped-addition item in
 **V3.** *No per-coin fee-input key is read today.*
 
 - *Claim.* Reloaded reads none of `gas_limit`, `gas_limit_v2`,
-  `gas_price_adjust`, or the gas-estimate multiplier of D3.
+  `gas_price_adjust`, or the gas-estimate multiplier `estimate_gas_mult`
+  of R57.5.3b.
 - *Verification.* A search of `mm2src/` for each key name returns no
   configuration read; the V2 gas-limit set is constructed from its type's
   default at every construction site.
@@ -1170,7 +1311,9 @@ pre-anchor baseline code.*
   spend and sender refund members appear on Arbitrum, Binance-Smart-Chain,
   Polygon, Avalanche and Moonriver entries), the deployed
   `swap_gas_fee_policy` and envelope-type-cap values cited in R57.4.1,
-  and the absence of any `gas_price_adjust` entry.
+  the two layer-two platform entries that set `estimate_gas_mult` to
+  `1.3` (R57.5.3b item 8), and the absence of any `gas_price_adjust`
+  entry.
 - [Chapter 35 — EVM V2 Activation & Token RPC Surface](35-evm-v2-activation-rpcs.md)
   for the swap gas-fee policy (R35.6) and the envelope-type cap (D35.7).
 - [Chapter 56 — EVM EIP-1559 Fee-Per-Gas Estimation](56-evm-eip1559-fee-estimation.md)
@@ -1255,6 +1398,35 @@ pre-anchor baseline code.*
   reproduced. The numeric defaults and percentages are bound as parity
   data on the justification stated in §57.0 and are observable at the
   external boundary of any node of the reference lineage.
+- *Scoped addition of 2026-10-27 — R57.5.3b and T13 (passed the KDF Dirty Gate on 2026-10-28).*
+  **R57.5.3b and T13**, together with the resolution text of D3, the
+  R57.5.3b pointers substituted for "D3" in R57.5.3, R57.5.3a and V3, the
+  one-sentence additions to the Part B entry of §57.0 and the coins-file
+  item of §57.11, and this footer item, were authored by the KDF Spec
+  Reader under §1.4A from the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A, read at both and identical at both for every fact
+  stated. The facts taken from the forbidden class are: the key's
+  floating-point reading at every EVM activation path under the same
+  token-inheritance rule as `gas_limit`; the identity default; the absence
+  of any range validation and the degradation of a non-finite value to a
+  factor of one; the multiply-then-truncate arithmetic on the exact value
+  of the parsed double; that the factor reaches exactly one swap-path
+  transaction — the legacy ERC-20 approve whose limit is estimated — and
+  no transaction that supplies a fixed limit; that the preimage's approve
+  estimate is raw; that the withdraw path never consults it; and that the
+  reference's own description of the key's scope is wider than its
+  behavior (the code-quality finding). The deployed values are from the
+  public coins-configuration file (R4) and the divergence note from this
+  workspace. No private identifier, function body, control-flow
+  transcription, helper decomposition, log or error literal was
+  reproduced. **Dirty Gate clearance (chapter 01 T1, R40): PASS on 2026-10-28**, measure 0.02, no leaks; every
+  reference fact was confirmed at both rows. *Extent:* the EVM coin-activation configuration-reading
+  surface and the swap-transaction gas-limit and estimation surface, at `v2.6.0-beta` and `v3.0.0-beta`
+  (the compared regions identical), plus the public coins-configuration file (not corpus). *Method:*
+  reading of the candidate hunks against the reference regions at both rows, and a mechanical regex
+  comparison of every added line against identifier, literal, comment-phrase, path and
+  version-control-identifier lists; the mechanical gate tool was not run (prose). *Measure:* 0.02 against the
+  0.10 threshold. The two clearance items below are neither reopened nor re-dated by it.
 - *Scoped addition, and its Dirty Gate clearance (chapter 01 T1, R40, R43).*
   **R57.5.3a and T9** were added after the gate pass recorded below and are
   **not** covered by it: they bind that a configured per-coin gas limit carries
