@@ -97,17 +97,15 @@ pub(crate) async fn process_orders_keep_alive(
     i_am_relay: bool,
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
-    let to_request = {
-        let subscribed_topics: HashSet<String> = {
-            let subs = ordermatch_ctx.orderbook_subscriptions.read();
-            subs.keys().cloned().collect()
-        };
-
-        let mut trie_store = ordermatch_ctx.trie_store.lock();
-        trie_store.prepare_sync_request_for_keep_alive(&from_pubkey, keep_alive, i_am_relay, |topic: &str| {
-            subscribed_topics.contains(topic)
-        })
-    };
+    let to_request = keep_alive_sync_request(
+        &ordermatch_ctx,
+        &from_pubkey,
+        keep_alive,
+        i_am_relay,
+        SyncRequestRoot::configured(&ctx),
+        TRIE_CATCH_UP_BOUND_MS,
+    )
+    .await;
 
     let req = match to_request {
         Some(req) => req,
@@ -147,6 +145,67 @@ pub(crate) async fn process_orders_keep_alive(
     }
 
     true
+}
+
+/// The root a keep-alive synchronization request names for a diverged pair (CRD ch.32 R-Q4, R-Q4a).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SyncRequestRoot {
+    /// The root this node holds for the pair (R-Q4a, Reloaded's default).
+    Held,
+    /// The root the keep-alive advertised (R-Q4, the reference's form).
+    Advertised,
+}
+
+impl SyncRequestRoot {
+    /// The MM2.json boolean `orderbook_sync_names_held_root`, default `true`; only an explicit JSON
+    /// `false` selects the advertised root.
+    pub(crate) fn configured(ctx: &MmArc) -> Self {
+        if ctx.conf["orderbook_sync_names_held_root"].as_bool() == Some(false) {
+            SyncRequestRoot::Advertised
+        } else {
+            SyncRequestRoot::Held
+        }
+    }
+}
+
+/// The synchronization request (if any) a received keep-alive calls for (CRD ch.32 R-Q4). The
+/// receipt time is recorded first; the roots are then compared with a trie store that reflects
+/// every index operation completed before the keep-alive is handled (R-T3b item 4). This runs on
+/// the keep-alive's own task, so it may wait for the worker up to `catch_up_bound_ms`; past the
+/// bound the roots are compared with the store as it stands, which at worst costs a request a
+/// caught-up store would not have needed.
+pub(crate) async fn keep_alive_sync_request(
+    ordermatch_ctx: &OrdermatchContext,
+    from_pubkey: &str,
+    keep_alive: new_protocol::PubkeyKeepAlive,
+    i_am_relay: bool,
+    request_root: SyncRequestRoot,
+    catch_up_bound_ms: u64,
+) -> Option<OrdermatchRequest> {
+    // CRD ch.32 R-P3: the receiver's own clock, recorded before anything else.
+    pubkey_state_mut(&mut ordermatch_ctx.trie_store.lock().pubkeys_state, from_pubkey).last_keep_alive =
+        now_ms() / 1000;
+
+    if ordermatch_ctx
+        .with_consistent_state(catch_up_bound_ms, |_orderbook, _trie_store| ())
+        .await
+        .is_err()
+    {
+        log::debug!(
+            "Trie store is behind the orderbook index, comparing the keep-alive of pubkey {} with it anyway",
+            from_pubkey
+        );
+    }
+
+    let subscribed_topics: HashSet<String> = {
+        let subs = ordermatch_ctx.orderbook_subscriptions.read();
+        subs.keys().cloned().collect()
+    };
+
+    let mut trie_store = ordermatch_ctx.trie_store.lock();
+    trie_store.prepare_sync_request_for_keep_alive(from_pubkey, keep_alive, i_am_relay, request_root, |topic: &str| {
+        subscribed_topics.contains(topic)
+    })
 }
 
 pub(crate) fn process_maker_order_updated(
@@ -700,25 +759,38 @@ impl From<Box<trie_db::TrieError<H64, sp_trie::Error>>> for TrieDiffHistoryError
     }
 }
 
+/// What a full-trie read does with a key whose value the getter cannot supply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MissingValue {
+    /// The trie store and the read index have diverged with nothing queued to explain it: an error
+    /// (CRD ch.32 R-T5).
+    Fail,
+    /// The removal of the value is still queued for the trie worker: leave the key out (CRD ch.32
+    /// R-T3b item 2).
+    Skip,
+}
+
 pub(crate) fn get_full_trie<Key, Value>(
     trie_root: &H64,
     db: &MemoryDB<Blake2Hasher64>,
     getter: impl Fn(&Key) -> Option<Value>,
+    on_missing: MissingValue,
 ) -> Result<Vec<(Key, Value)>, TrieDiffHistoryError>
 where
     Key: Clone + Eq + std::hash::Hash + TryFromBytes,
 {
     let trie = TrieDB::<Layout>::new(db, trie_root)?;
-    let trie: Result<Vec<_>, TrieDiffHistoryError> = trie
-        .iter()?
-        .map(|key_value| {
-            let (key, _) = key_value?;
-            let key = TryFromBytes::try_from_bytes(key)?;
-            let val = getter(&key).ok_or(TrieDiffHistoryError::GetterNoneForKeyFromTrie)?;
-            Ok((key, val))
-        })
-        .collect();
-    trie
+    let mut values = Vec::new();
+    for key_value in trie.iter()? {
+        let (key, _) = key_value?;
+        let key = TryFromBytes::try_from_bytes(key)?;
+        match (getter(&key), on_missing) {
+            (Some(val), _) => values.push((key, val)),
+            (None, MissingValue::Skip) => (),
+            (None, MissingValue::Fail) => return Err(TrieDiffHistoryError::GetterNoneForKeyFromTrie),
+        }
+    }
+    Ok(values)
 }
 
 impl<Key: Clone + Eq + std::hash::Hash + TryFromBytes, Value: Clone> DeltaOrFullTrie<Key, Value> {
@@ -728,6 +800,7 @@ impl<Key: Clone + Eq + std::hash::Hash + TryFromBytes, Value: Clone> DeltaOrFull
         actual_trie_root: H64,
         db: &MemoryDB<Blake2Hasher64>,
         getter: impl Fn(&Key) -> Option<Value>,
+        on_missing: MissingValue,
     ) -> Result<DeltaOrFullTrie<Key, Value>, TrieDiffHistoryError> {
         if let Some(delta) = history.get(&from_hash) {
             let mut current_delta = delta;
@@ -748,7 +821,7 @@ impl<Key: Clone + Eq + std::hash::Hash + TryFromBytes, Value: Clone> DeltaOrFull
             );
         }
 
-        let trie = get_full_trie(&actual_trie_root, db, getter)?;
+        let trie = get_full_trie(&actual_trie_root, db, getter, on_missing)?;
         Ok(DeltaOrFullTrie::FullTrie(trie))
     }
 }
@@ -764,23 +837,25 @@ pub(crate) struct SyncPubkeyOrderbookStateRes {
     pub(crate) conf_infos: HashMap<Uuid, OrderConfirmationsSettings>,
 }
 
-/// CRD ch.32 R-T3b items 2 and 3: the answer is built only from a snapshot in which the trie store
-/// has applied every completed index operation. This runs inline on the inbound p2p event loop, so
-/// it checks once and never waits: if the worker lags it returns a retryable error.
+/// CRD ch.32 R-T3b items 2 and 3: the answer is built from the trie store as it stands, without
+/// waiting and without refusing. While the worker still has queued events, a full snapshot leaves
+/// out an order the read index no longer holds; once it has caught up, such an order is the
+/// divergence of R-T5 and fails the answer.
 pub(crate) fn process_sync_pubkey_orderbook_state(
     ctx: MmArc,
     pubkey: String,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
 ) -> Result<Option<SyncPubkeyOrderbookStateRes>, String> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-    let mut trie_roots = Some(trie_roots);
-    ordermatch_ctx
-        .with_consistent_state_now(&mut |orderbook, trie_store| {
-            // Runs at most once: only called when the snapshot is consistent.
-            let trie_roots = trie_roots.take().expect("snapshot closure runs once");
-            build_sync_pubkey_orderbook_state_answer(orderbook, trie_store, &pubkey, trie_roots)
-        })
-        .unwrap_or_else(|| Err("orderbook state is being updated, retry".to_string()))
+    // Lock order: `orderbook`, then `trie_store`.
+    let orderbook = ordermatch_ctx.orderbook.lock();
+    let trie_store = ordermatch_ctx.trie_store.lock();
+    let on_missing = if orderbook.trie_ops_enqueued == trie_store.applied_batches {
+        MissingValue::Fail
+    } else {
+        MissingValue::Skip
+    };
+    build_sync_pubkey_orderbook_state_answer(&orderbook, &trie_store, &pubkey, trie_roots, on_missing)
 }
 
 fn build_sync_pubkey_orderbook_state_answer(
@@ -788,6 +863,7 @@ fn build_sync_pubkey_orderbook_state_answer(
     trie_store: &TrieStore,
     pubkey: &str,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+    on_missing: MissingValue,
 ) -> Result<Option<SyncPubkeyOrderbookStateRes>, String> {
     let pubkey_state = match trie_store.pubkeys_state.get(pubkey) {
         Some(s) => s,
@@ -804,12 +880,16 @@ fn build_sync_pubkey_orderbook_state_answer(
                 .ok_or(ERRL!("No pair trie root for {}", pair))?;
 
             let delta_result = match pubkey_state.order_pairs_trie_state_history.get(&pair) {
-                Some(history) => {
-                    DeltaOrFullTrie::from_history(history, root, *actual_pair_root, &trie_store.memory_db, order_getter)
-                },
-                None => {
-                    get_full_trie(actual_pair_root, &trie_store.memory_db, order_getter).map(DeltaOrFullTrie::FullTrie)
-                },
+                Some(history) => DeltaOrFullTrie::from_history(
+                    history,
+                    root,
+                    *actual_pair_root,
+                    &trie_store.memory_db,
+                    order_getter,
+                    on_missing,
+                ),
+                None => get_full_trie(actual_pair_root, &trie_store.memory_db, order_getter, on_missing)
+                    .map(DeltaOrFullTrie::FullTrie),
             };
 
             let delta = try_s!(delta_result);
@@ -1278,6 +1358,7 @@ impl TrieStore {
         from_pubkey: &str,
         message: new_protocol::PubkeyKeepAlive,
         i_am_relay: bool,
+        request_root: SyncRequestRoot,
         is_subscribed: impl Fn(&str) -> bool,
     ) -> Option<OrdermatchRequest> {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, from_pubkey);
@@ -1304,7 +1385,14 @@ impl TrieStore {
 
             let actual_trie_root = order_pair_root_mut(&mut pubkey_state.trie_roots, &alb_pair);
             if *actual_trie_root != trie_root {
-                trie_roots_to_request.insert(alb_pair, trie_root);
+                let named_root = match request_root {
+                    // The responder answers with the changes since the root the request names
+                    // (`DeltaOrFullTrie::from_history`); the zero root of a pair not synchronized yet
+                    // is never a history key and gets the full set.
+                    SyncRequestRoot::Held => *actual_trie_root,
+                    SyncRequestRoot::Advertised => trie_root,
+                };
+                trie_roots_to_request.insert(alb_pair, named_root);
             }
         }
 
@@ -1358,8 +1446,10 @@ impl OrdermatchContext {
 
     /// Run `f` on a snapshot in which the trie store reflects every completed index operation
     /// (CRD ch.32 R-T3b item 2), waiting at most `bound_ms` with a timer (never while holding a
-    /// lock). Only for a caller on its own async task (the keep-alive producer): code on the inbound
-    /// networking path must not wait and uses [`Self::with_consistent_state_now`] (R-T3b item 3).
+    /// lock). Only for a caller on its own async task (the keep-alive producer, and the receiver of a
+    /// keep-alive, which runs on a task of its own per message, R-T3b item 4): code on the inbound
+    /// networking path (the answer to a peer request) must not wait; it answers from the store as it
+    /// stands (R-T3b items 2 and 3).
     pub(crate) async fn with_consistent_state<R>(
         &self,
         bound_ms: u64,

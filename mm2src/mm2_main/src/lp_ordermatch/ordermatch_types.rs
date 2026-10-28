@@ -182,6 +182,12 @@ pub(crate) fn pre_trade_spend_check_enabled(ctx: &MmArc) -> bool {
     ctx.conf["pre_trade_spend_check"].as_bool() != Some(false)
 }
 
+/// CRD ch.59 R59.4.6: the MM2.json boolean `suppress_unchanged_order_updates`, default `true`. Only an
+/// explicit JSON `false` makes `update_maker_order` broadcast an update that changes nothing.
+pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
+    ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
+}
+
 /// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
 #[derive(Debug, Display)]
 pub(crate) enum SpendSafetyError {
