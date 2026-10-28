@@ -1139,6 +1139,79 @@ pub(crate) fn collect_orderbook_metrics(ctx: &MmArc, orderbook: &Orderbook) {
     mm_gauge!(ctx.metrics, "orderbook.len", orderbook.order_set.len() as i64);
 }
 
+/// Remove the nodes of a pair trie from `memory_db`: every leaf is deleted from the trie the way
+/// `TrieStore::apply_remove` deletes one, so the reference count of each node the trie held drops by
+/// one. A node that another trie holds too (nodes are content addressed) stays readable for it; a
+/// node nobody refers to any more is reclaimed by the next `MemoryDB::purge`.
+///
+/// The zero root of a pair that was announced but never synchronized, and the root of an empty
+/// trie, hold no nodes.
+fn release_pair_trie(memory_db: &mut MemoryDB<Blake2Hasher64>, root: &H64) {
+    if *root == H64::default() || *root == hashed_null_node::<Layout>() {
+        return;
+    }
+    let keys = match collect_trie_keys(memory_db, root) {
+        Ok(keys) => keys,
+        Err(e) => {
+            log::error!("Failed to read the keys of the trie with root {:?}: {:?}", root, e);
+            return;
+        },
+    };
+    if let Err(e) =
+        delta_trie_root::<Layout, _, _, _, _, _>(memory_db, *root, keys.into_iter().map(|key| (key, None::<Vec<u8>>)))
+    {
+        log::error!("Failed to remove the nodes of the trie with root {:?}: {:?}", root, e);
+    }
+}
+
+fn collect_trie_keys(
+    memory_db: &MemoryDB<Blake2Hasher64>,
+    root: &H64,
+) -> Result<Vec<Vec<u8>>, Box<trie_db::TrieError<H64, sp_trie::Error>>> {
+    let trie = TrieDB::<Layout>::new(memory_db, root)?;
+    let mut keys = Vec::new();
+    for key_value in trie.iter()? {
+        let (key, _) = key_value?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// What the maintenance tick of the trie store reports (see [`TrieStore::snapshot`]).
+pub(crate) struct TrieStoreSnapshot {
+    pub(crate) applied_batches: u64,
+    /// Pubkeys the store tracks.
+    pub(crate) pubkeys: usize,
+    /// Pair histories over all pubkeys.
+    pub(crate) history_pairs: usize,
+    /// Diffs held by all pair histories.
+    pub(crate) history_deltas: usize,
+    /// Nodes of `memory_db` some trie refers to (nodes awaiting the next purge are not counted).
+    pub(crate) memory_db_entries: usize,
+    /// Heap size of `memory_db`, table capacity included. `malloc_size` is unusable on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) memory_db_bytes: usize,
+}
+
+/// Emit the gauges of the trie store and of the queue that feeds it; aggregates only, because a seed
+/// tracks many pubkeys.
+pub(crate) fn collect_trie_store_metrics(ctx: &MmArc, snapshot: &TrieStoreSnapshot, enqueued_batches: u64) {
+    // `applied_batches` is read before `enqueued_batches` and both only grow, so the difference does
+    // not go below zero; the saturation only guards the subtraction itself.
+    let pending = enqueued_batches.saturating_sub(snapshot.applied_batches);
+    mm_gauge!(ctx.metrics, "orderbook.trie_ops.pending", pending as i64);
+    mm_gauge!(ctx.metrics, "orderbook.pubkeys", snapshot.pubkeys as i64);
+    mm_gauge!(ctx.metrics, "orderbook.history.pairs", snapshot.history_pairs as i64);
+    mm_gauge!(ctx.metrics, "orderbook.history.deltas", snapshot.history_deltas as i64);
+    mm_gauge!(
+        ctx.metrics,
+        "orderbook.memory_db.entries",
+        snapshot.memory_db_entries as i64
+    );
+    #[cfg(not(target_arch = "wasm32"))]
+    mm_gauge!(ctx.metrics, "orderbook.memory_db", snapshot.memory_db_bytes as i64);
+}
+
 /// Trie-related state extracted from `Orderbook` to reduce contention on the main
 /// order index. All trie operations go through this store via the async TrieOp channel.
 #[derive(Default)]
@@ -1262,7 +1335,11 @@ impl TrieStore {
                             apply_group(self, &key.0, &key.1, g);
                         }
                     }
-                    self.pubkeys_state.remove(&pubkey);
+                    if let Some(state) = self.pubkeys_state.remove(&pubkey) {
+                        for root in state.trie_roots.values() {
+                            release_pair_trie(&mut self.memory_db, root);
+                        }
+                    }
                 },
                 #[cfg(test)]
                 TrieOp::Flush(done) => {
@@ -1347,7 +1424,54 @@ impl TrieStore {
         if let Some(pubkey_state) = self.pubkeys_state.get_mut(pubkey) {
             pubkey_state.order_pairs_trie_state_history.remove(alb_pair.into());
             pubkey_state.orders_uuids.retain(|(_uuid, pair)| pair != alb_pair);
-            pubkey_state.trie_roots.remove(alb_pair);
+            if let Some(root) = pubkey_state.trie_roots.remove(alb_pair) {
+                release_pair_trie(&mut self.memory_db, &root);
+            }
+        }
+    }
+
+    /// The periodic upkeep of the trie store: the histories drop what is past its time to live and
+    /// give back the room the burst that filled them left behind. Expiry otherwise happens only when
+    /// a pair receives its next update, and an idle pair would keep its whole history.
+    ///
+    /// A pair history is never removed because its diffs ran out: `apply_remove` records a diff only
+    /// while the pair history exists, so the pair histories leave by their own time to live only.
+    pub(crate) fn expire_histories(&mut self) {
+        for pubkey_state in self.pubkeys_state.values_mut() {
+            let pair_histories = &mut pubkey_state.order_pairs_trie_state_history;
+            pair_histories.remove_expired();
+            for history in pair_histories.values_mut() {
+                history.inner.remove_expired();
+                history.inner.shrink_if_sparse();
+            }
+            pair_histories.shrink_if_sparse();
+        }
+    }
+
+    /// Drop the nodes no trie refers to any more and shrink the table that held them.
+    pub(crate) fn purge_memory_db(&mut self) {
+        self.memory_db.purge();
+        self.memory_db.shrink_to_fit();
+    }
+
+    /// Aggregate counts for the gauges of the maintenance tick.
+    pub(crate) fn snapshot(&self) -> TrieStoreSnapshot {
+        let mut history_pairs = 0;
+        let mut history_deltas = 0;
+        for pubkey_state in self.pubkeys_state.values() {
+            for (_pair, history) in pubkey_state.order_pairs_trie_state_history.iter() {
+                history_pairs += 1;
+                history_deltas += history.get_element().len();
+            }
+        }
+        TrieStoreSnapshot {
+            applied_batches: self.applied_batches,
+            pubkeys: self.pubkeys_state.len(),
+            history_pairs,
+            history_deltas,
+            memory_db_entries: self.memory_db.keys().len(),
+            #[cfg(not(target_arch = "wasm32"))]
+            memory_db_bytes: parity_util_mem::malloc_size(&self.memory_db),
         }
     }
 

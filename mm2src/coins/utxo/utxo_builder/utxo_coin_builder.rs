@@ -1,7 +1,7 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::utxo::rpc_clients::electrum_pool::electrum_server_order;
+use crate::utxo::rpc_clients::electrum_pool::{electrum_server_order, electrum_spread_reads};
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
                                ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
@@ -653,6 +653,7 @@ pub trait UtxoCoinBuilderCommonOps {
             client_name,
             timings: ElectrumPoolTimings::default(),
             order: electrum_server_order(&ctx),
+            spread_reads: electrum_spread_reads(&ctx),
         });
         for (server, e) in client.add_servers(&servers) {
             log!("Error " (e) " using " [server] ". Address won't be used");

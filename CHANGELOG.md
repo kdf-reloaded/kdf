@@ -51,6 +51,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
+  `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
+  watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
+  that forces it, and the gas price of an EVM coin that an earlier request obtained. By default the
+  time a reading is reused adapts by itself. It starts at the coin's block time in seconds (at
+  least 2, at most 600; 15 seconds for a coin without one), doubles each time a fresh reading turns
+  out to be the same as the previous one, up to 10 minutes, and goes back to the start as soon as
+  the value changes. A chain with a fixed gas floor reaches one gas-price reading per 10 minutes
+  without any configuration; a changed value resets it at once. A platform coin and all its tokens
+  share one gas-price reading, so a maker with hundreds of token orders on one chain asks the node
+  once. To fix the time instead, set `fee_estimate_cache_secs` in a coin's configuration entry
+  (0 to 600; 0 turns the reuse off for that coin) or in `MM2.json` (0 to 30, for every coin without
+  its own value; a value outside the range stops the node from starting). This is also what lets
+  the pre-trade spend check run on every order update again, price-only ones included, without
+  extra requests. A swap's own transactions never use the reuse and always read a fresh value. Set
+  `fee_estimate_cache_secs` to `0` in `MM2.json`, and set none per coin, to restore GLEEC KDF
+  behavior most closely: a request then still reads each value once, but nothing is reused between
+  requests. Detail: PR #128; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
+- **Read-only Electrum queries are spread over the connected servers.** With the `MM2.json` boolean
+  `electrum_spread_reads` at its default `true`, each balance, unspent-list, history, header,
+  block-count, transaction and fee query of a coin goes to the next connected server in turn instead
+  of always to the first, so an order-posting burst can use the request budget of every connected
+  server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
+  moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
+  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
@@ -93,8 +118,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
   its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
   coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
-  update that changes only the price, the minimum volume or the confirmation settings skips the
-  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
+  update still runs the pre-trade spend check, whatever it changes, and while the fee reading is
+  recent enough the check makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
   ch.57 R57.2.6, ch.60 R60.6.7.
 
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
@@ -235,6 +260,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   configuration). Detail: PR #64.
 
 ### Fixed
+
+- **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
@@ -470,6 +497,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one whose cache answers with an error or whose height is more than 40 blocks behind the others.
   A failed admission now lists every excluded endpoint and why, and its message no longer claims
   that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
+- **A seed or relay now gives back the memory a burst of order updates used.** Every order update a node
+  applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and bookkeeping),
+  and none of it was released until the same order pair changed again, so a node that had seen
+  500 updates a second for a few minutes stayed about 150 MB larger afterward. The change history is
+  now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
+  shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
+  clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
+  pair). The metrics now also show the node store's size and entry count, the number of stored change
+  histories and changes, tracked pubkeys, and queued trie updates. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
@@ -598,7 +635,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   checked live on an uncongested transaction pool (2026-10-26).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
   the Electrum servers' per-session limit of about one request per second. The rules for batching,
-  fee reuse, read spreading and balance polling are written (PR #95).
+  fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
+  read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
+  with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
 
 ### Known limitations
 
