@@ -24,8 +24,8 @@
 
 mod htlc_index;
 
-pub(crate) use htlc_index::{DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding, OutputRef,
-                            SentOutcome, SpendOutcome};
+pub(crate) use htlc_index::{p2sh_hash_of, DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding,
+                            OutputRef, SentOutcome, SpendOutcome};
 
 use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
@@ -845,6 +845,9 @@ pub(crate) trait LightwalletdTransport: Send + Sync + fmt::Debug + 'static {
     async fn cache_height(&self, server: &str) -> Result<u64, EndpointError>;
     /// The compact block's block-time field (R39.11.4f).
     async fn block_time(&self, server: &str, height: u64) -> Result<u32, EndpointError>;
+    /// The compact block's block-hash field (`GetBlock`), the 32 bytes in the order the service returns
+    /// them, which is the order of the double SHA-256 of the full block header (R39.11.25(a)).
+    async fn block_hash(&self, server: &str, height: u64) -> Result<[u8; 32], EndpointError>;
     /// `txid` is in internal byte order (R39.11.4c).
     async fn transaction(&self, server: &str, txid: [u8; 32]) -> Result<RawTx, EndpointError>;
     async fn send_transaction(&self, server: &str, data: Vec<u8>) -> Result<(), EndpointError>;
@@ -965,6 +968,26 @@ impl LightwalletdTransport for GrpcTransport {
         let result = Self::timed(client.get_block(request), "GetBlock")
             .await
             .map(|block| block.time);
+        self.evict_on_transport_failure(server, result)
+    }
+
+    async fn block_hash(&self, server: &str, height: u64) -> Result<[u8; 32], EndpointError> {
+        let mut client = self.client(server).await?;
+        let request = z_coin_grpc::BlockId {
+            height,
+            hash: Vec::new(),
+        };
+        let result = Self::timed(client.get_block(request), "GetBlock")
+            .await
+            .and_then(|block| {
+                <[u8; 32]>::try_from(block.hash.as_slice()).map_err(|_| {
+                    EndpointError::Service(format!(
+                        "GetBlock of height {} returned a {}-byte block hash, not 32 bytes",
+                        height,
+                        block.hash.len()
+                    ))
+                })
+            });
         self.evict_on_transport_failure(server, result)
     }
 
@@ -1634,6 +1657,16 @@ impl LightwalletdBackend {
     pub(crate) async fn block_time(&self, height: u64) -> Result<u32, LightwalletdError> {
         self.call("GetBlock", move |t, s| {
             async move { t.block_time(&s, height).await }.boxed()
+        })
+        .await
+    }
+
+    /// The block hash `GetBlock` reports for `height`, from the first admitted endpoint that answers: the
+    /// reference the chain-identity check of the Electrum fallback compares a server's header with
+    /// (R39.11.25(a)).
+    pub(crate) async fn block_hash(&self, height: u64) -> Result<[u8; 32], LightwalletdError> {
+        self.call("GetBlock", move |t, s| {
+            async move { t.block_hash(&s, height).await }.boxed()
         })
         .await
     }

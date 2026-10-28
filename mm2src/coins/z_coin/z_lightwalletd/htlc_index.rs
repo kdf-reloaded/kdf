@@ -439,7 +439,7 @@ pub(crate) struct DetectionLog<'a> {
 }
 
 impl DetectionLog<'_> {
-    fn line(&self, message: String) {
+    pub(crate) fn line(&self, message: String) {
         if self.polling {
             common::log::debug!("{}", message);
         } else {
@@ -669,7 +669,12 @@ impl LightwalletdBackend {
 
     /// Records what the detection of the HTLC with redeem-script hash `hash` is reading, for the
     /// recovery bound's error (R39.5.5). Replaced on every read; removed when the detection ends.
-    fn note_progress(&self, hash: [u8; 20], what: String) { self.detection_progress.lock().insert(hash, what); }
+    pub(crate) fn note_progress(&self, hash: [u8; 20], what: String) {
+        self.detection_progress.lock().insert(hash, what);
+    }
+
+    /// Ends the progress record of the detection for `hash`: the detection ran to its end.
+    pub(crate) fn end_progress(&self, hash: &[u8; 20]) { self.detection_progress.lock().remove(hash); }
 
     /// What the detection in flight for the HTLC with this redeem-script hash read last. After a
     /// detection was dropped before it ended, this stays as it was (R39.5.5).

@@ -198,7 +198,7 @@ impl Suspension {
 /// The budget of one round of attempts (CRD ch.38 R38.6.4j item 2): the smaller of the per-attempt
 /// bound `attempt_cap` (establishment plus request) and an equal share of what remains of the call's
 /// budget after the reserve, for each of the `rounds_left` rounds still to make, never below the floor.
-pub(super) fn round_budget(
+pub(crate) fn round_budget(
     remaining: Duration,
     rounds_left: usize,
     attempt_cap: Duration,
@@ -442,6 +442,11 @@ impl PoolShared {
     }
 
     pub(super) fn usable_count(&self) -> usize { self.usable_slots().len() }
+
+    /// The addresses of the servers not removed from the pool, in priority order.
+    pub(super) fn usable_addrs(&self) -> Vec<String> {
+        self.usable_slots().into_iter().map(|slot| slot.addr.clone()).collect()
+    }
 
     /// The ceiling of the maintained set; a ceiling above the list length behaves as the list length.
     pub(super) fn ceiling(&self) -> usize {

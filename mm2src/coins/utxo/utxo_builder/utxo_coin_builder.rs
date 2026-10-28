@@ -452,6 +452,67 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     }
 }
 
+/// Builds the Electrum client of a coin: the shared pool of CRD ch.38 R38.6.4b--R38.6.4k, probed once so the build
+/// waits for the first connection, then maintained in the background. Both the activation of an
+/// Electrum-backed UTXO coin and the lazily built fallback client of a shielded coin (CRD ch.39 R39.11.25) come
+/// through here.
+pub(crate) async fn build_electrum_client(
+    ctx: &MmArc,
+    ticker: &str,
+    args: ElectrumBuilderArgs,
+    servers: Vec<ElectrumRpcRequest>,
+    min_connected: Option<usize>,
+    max_connected: Option<usize>,
+) -> UtxoCoinBuildResult<ElectrumClient> {
+    let mut event_handlers = vec![];
+    if args.collect_metrics {
+        event_handlers.push(
+            CoinTransportMetrics::new(ctx.metrics.weak(), ticker.to_owned(), RpcClientType::Electrum).into_shared(),
+        );
+    }
+
+    // Distinguish "nothing to try" from "everything we tried failed": an empty server
+    // list means the coin's `electrum` entry is missing.
+    if servers.is_empty() {
+        return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
+            ticker: ticker.to_owned(),
+        });
+    }
+
+    // The activation probe (CRD ch.38 R38.6.4k-R) connects every listed server at once and the build
+    // waits for the first connection; the pool then maintains its set in the background.
+    let client_name = args
+        .negotiate_version
+        .then(|| format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version()));
+    let mut client = ElectrumClientImpl::new(ticker.to_owned(), event_handlers);
+    client.configure_pool(ElectrumPoolOptions {
+        min_connected: min_connected.unwrap_or(1),
+        max_connected,
+        client_name,
+        timings: ElectrumPoolTimings::default(),
+        order: electrum_server_order(ctx),
+    });
+    for (server, e) in client.add_servers(&servers) {
+        log!("Error " (e) " using " [server] ". Address won't be used");
+    }
+    // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
+    // coin lands here) leaves the pool; with none left there is nothing to wait for.
+    if client.count_connections().await == 0 {
+        return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
+            ticker: ticker.to_owned(),
+        });
+    }
+
+    let client = Arc::new(client);
+    client
+        .activation_probe()
+        .await
+        .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
+    client.start_pool(args.spawn_ping);
+
+    Ok(ElectrumClient(client))
+}
+
 #[async_trait]
 pub trait UtxoCoinBuilderCommonOps {
     fn ctx(&self) -> &MmArc;
@@ -624,55 +685,7 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
-        let ticker = self.ticker().to_owned();
-        let ctx = self.ctx();
-        let mut event_handlers = vec![];
-        if args.collect_metrics {
-            event_handlers.push(
-                CoinTransportMetrics::new(ctx.metrics.weak(), ticker.clone(), RpcClientType::Electrum).into_shared(),
-            );
-        }
-
-        // Distinguish "nothing to try" from "everything we tried failed": an empty server
-        // list means the coin's `electrum` entry is missing.
-        if servers.is_empty() {
-            return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
-                ticker: self.ticker().to_owned(),
-            });
-        }
-
-        // The activation probe (CRD ch.38 R38.6.4k-R) connects every listed server at once and the build
-        // waits for the first connection; the pool then maintains its set in the background.
-        let client_name = args
-            .negotiate_version
-            .then(|| format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version()));
-        let mut client = ElectrumClientImpl::new(ticker, event_handlers);
-        client.configure_pool(ElectrumPoolOptions {
-            min_connected: min_connected.unwrap_or(1),
-            max_connected,
-            client_name,
-            timings: ElectrumPoolTimings::default(),
-            order: electrum_server_order(&ctx),
-        });
-        for (server, e) in client.add_servers(&servers) {
-            log!("Error " (e) " using " [server] ". Address won't be used");
-        }
-        // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
-        // coin lands here) leaves the pool; with none left there is nothing to wait for.
-        if client.count_connections().await == 0 {
-            return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
-                ticker: self.ticker().to_owned(),
-            });
-        }
-
-        let client = Arc::new(client);
-        client
-            .activation_probe()
-            .await
-            .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
-        client.start_pool(args.spawn_ping);
-
-        Ok(ElectrumClient(client))
+        build_electrum_client(self.ctx(), self.ticker(), args, servers, min_connected, max_connected).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
