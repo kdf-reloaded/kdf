@@ -590,7 +590,11 @@ events as separate single-event batches.
    while the worker lagged; that outcome is withdrawn.)*
 3. *Nobody else waits.* The producer of an index operation MUST NOT wait for
    the worker, and no wait of item 2 may happen on the inbound networking
-   path (R-T7).
+   path (R-T7). *(Amended 2026-10-28, Decision AN, Reloaded-original.)* A
+   synchronization request parked under §32.7.3 R-Q5b is not a wait on that
+   path: the inbound handler hands the request's response channel over to
+   the parked entry and returns at once; the answer is built and sent later
+   from another task.
 4. *The keep-alive receiver compares with a caught-up store.*
    *Reloaded-original (2026-10-28).* The comparison of an advertised root
    with the root this node holds (§32.7.3 R-Q4 steps 3 and 4) MUST use a
@@ -888,6 +892,56 @@ by its worker). A requester logs all three as a request error and retries
 none (R-Q6). Reloaded's responder and applier behave the same:
 **parity**.
 
+**R-Q5b (Reloaded: a pair still being synchronized is answered when its
+synchronization lands).** *Reloaded-original (2026-10-28, Decision AN); no
+forbidden-class input.* A relay forwards a keep-alive at the gossip layer
+before it handles it (§32.8 R-F3a), so its downstream peers ask it while its
+own request for the same pair is still in flight, and R-Q5a's
+placeholder-root failure is their certain outcome. To serve them instead,
+Reloaded's responder MUST treat a `SyncPubkeyOrderbookState { pubkey: P,
+trie_roots }` request as **deferrable** when, for every requested pair, the
+responder holds a root for (P, pair) and, for every requested pair whose held
+root is the all-zero placeholder, the responder's **own** keep-alive-driven
+synchronization request for (P, pair) is in flight. An own request is in
+flight from the moment it is sent until its answer's mutation events have
+been applied by the trie worker, or until it fails.
+
+1. A deferrable request is **parked**. It is answered as soon as every own
+   request it waits for has completed, or when its bound expires, whichever
+   comes first. The answer is the one R-Q5 gives at that moment — the same
+   outcomes, all-or-nothing as before. If an own request it waits for failed,
+   or the bound expired, the requester receives the error it would have
+   received at once.
+2. A request that is not deferrable is answered at once, as R-Q5 binds:
+   an unknown pubkey ("no data"), a missing pair, or a placeholder for which
+   no own request is in flight.
+3. The **bound** is the top-level `MM2.json` integer
+   `sync_answer_deferral_ms`, default `5000` (5 s), counted from the
+   request's arrival. It MUST stay well below the requester's 10 s timeout
+   (R-Q6). The value `0` turns deferral off: every request is answered at
+   once, as in the reference.
+4. **Limits.** At most 8 requests are parked per requesting peer and at most
+   256 in total; a request past either limit is answered at once. The limits
+   MUST stay below the number of concurrent inbound streams the
+   request-response layer allows, because a parked request holds its stream
+   open.
+5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
+   the one case in which the answer is not built on the task that received
+   the request (R-Q5's last paragraph).
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `sync_answer_deferral_ms` to `0`.
+
+> **Reloaded divergence (2026-10-28).** The reference answers every request
+> at once. Against a relay that has just forwarded a keep-alive and is still
+> synchronizing the pair, its subscribers fail, ask again only at the next
+> keep-alive (R-Q6), and so wait one advertisement interval (30 s) per relay
+> hop. Under this rule a Reloaded relay answers them within the bound, and on
+> a relay they forward on success (R-F3b), so the next hop is served in the
+> same round. The answer and its shape are unchanged; only its timing
+> differs, and only for a request that would otherwise fail. Reference and
+> Reloaded requesters alike accept a late answer within their timeout.
+
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
 exchange with F: it times out after **10 seconds** with no answer; there
@@ -900,7 +954,8 @@ What the requester does with each outcome is bound by §32.8 R-F3b
 (its gossip-layer forward, on a relay, has already happened: R-F3a).
 Reloaded today has the same four properties (parity); the hardening
 candidates that would change them are recorded under §32.10 D6 and
-are not bound here.
+are not bound here. As a responder, Reloaded answers a request for a pair
+it is still synchronizing later rather than at once (R-Q5b).
 
 **T-Q4** *Request content and target (R-Q4).* A keep-alive for P with a
 single pair entry whose root differs from the held one, delivered as if
@@ -936,6 +991,23 @@ empty-trie root, and a following request for (P, Y) yields an empty full
 snapshot. A keep-alive handled on a non-relay for a pubkey never seen
 creates the record even when no advertised pair is in its recorded
 subscriptions.
+
+**T-Q5b** *A pair still being synchronized is answered when its
+synchronization lands (R-Q5b).* A relay holds the all-zero placeholder for
+(P, X) and has its own request for (P, X) in flight. A request for (P, X) is
+parked and the inbound handler returns without waiting; once the relay's own
+answer is applied, the parked request is answered with the full set, well
+within the bound. The same with the relay's own request failing: the parked
+request receives the placeholder error, within the bound. With the relay's own
+request never answering: the parked request receives the placeholder error
+when the bound expires. A request for (P, Y) whose placeholder has no own
+request in flight, a request naming a pair the relay does not track, and a
+request for an unknown pubkey are each answered at once, as R-Q5 binds; a
+request for (P, X) and (P, Y) together is answered at once with the
+placeholder error. Past 8 parked requests from one peer, or 256 in all, a
+further request is answered at once. With `sync_answer_deferral_ms` set to
+`0`, every request is answered at once. After every path the parked table is
+empty.
 
 **T-Q6** *No retry, no de-duplication (R-Q6).* With the responder
 silenced, one keep-alive produces exactly one request and nothing more
@@ -2364,3 +2436,15 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it relies on are the gated ones of D6 and of §32.9A R-B1 rows 3 and 6 (bounds,
   purge period, nodes of a cleared slice never released); nothing else from the
   reference was used.
+- *Reloaded-original addition (2026-10-28, Decision AN): R-Q5b, its
+  divergence note, the amendment of R-T3b item 3, the sentence appended to
+  R-Q6, and T-Q5b.* A relay answers a request for a pair it is still
+  synchronizing when that synchronization lands, within a bound, with the
+  opt-back setting. *Inputs:* this repository's own keep-alive receiver,
+  synchronization requester and responder and inbound request dispatch; the
+  gated rules of this chapter as merged (R-F3a, R-Q5, R-Q5a, R-Q6), on which
+  the rule builds without adding any reference fact; a lab run of reference
+  binaries as black boxes (subscribers of a reference seed failed with the
+  placeholder error at the first keep-alive after a wipe and were rebuilt
+  about a minute later); and the maintainer's decision. No reference
+  implementation was consulted for this item, and it needs no Dirty Gate pass.
