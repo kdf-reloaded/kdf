@@ -801,10 +801,9 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   Observed live on 2026-10-28 as public seed nodes overloaded by Reloaded
   makers. Fix: conform to R-K2a (sender side only; the receiver needs no
   change).
-- [ ] Decided 2026-10-28 (ch. 32 D5): Reloaded's synchronization responder no
+- [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
   longer refuses while its trie worker lags (amended R-T3b item 2); it answers
-  from the store as it stands, as the reference does. Closed when the code
-  lands.
+  from the store as it stands, as the reference does.
 - [ ] Decided 2026-10-28 (ch. 32 R-Q4a): Reloaded names its own held root in
   the synchronization request by default; wire-compatible, yields usable
   deltas; a deliberate divergence with the opt-back switch

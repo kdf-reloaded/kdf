@@ -3207,6 +3207,7 @@ fn test_orderbook_sync_trie_diff_time_cache() {
             *bob_root,
             &trie_store_bob.memory_db,
             |uuid: &Uuid| orderbook_bob.order_set.get(uuid).cloned(),
+            MissingValue::Fail,
         )
         .unwrap()
     };
@@ -3277,6 +3278,7 @@ fn test_orderbook_sync_trie_diff_time_cache() {
             *bob_root,
             &trie_store_bob.memory_db,
             |uuid: &Uuid| orderbook_bob.order_set.get(uuid).cloned(),
+            MissingValue::Fail,
         )
         .unwrap()
     };
@@ -5033,15 +5035,20 @@ fn test_reads_never_run_ahead_of_trie_cancel() {
     assert_eq!(payload.unwrap().unwrap().get(&pair), Some(&old_root));
     assert!(sync_answer(&ctx, &pubkey, &pair, old_root).is_ok());
 
-    // Cancel in the index while the worker is held back.
+    // Cancel in the index while the worker is held back: no keep-alive, but the sync answer is
+    // served from the store as it stands, without waiting (R-T3b items 2 and 3). The full snapshot
+    // (request at the current trie root) leaves the cancelled order out; the delta (request at the
+    // older root) ends at the trie's current root.
     index_remove_and_queue(&octx, cancelled);
     assert!(block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS)).is_err());
     for root in [old_root, older_root] {
         let started = std::time::Instant::now();
-        let err = sync_answer(&ctx, &pubkey, &pair, root).expect_err("must be the retryable error");
-        assert!(err.contains("retry"), "{}", err);
-        // The inbound path never waits for the worker (R-T3b item 3).
+        let mut res = sync_answer(&ctx, &pubkey, &pair, root)
+            .expect("the answer never refuses")
+            .unwrap();
         assert!(started.elapsed() < Duration::from_millis(SYNC_NO_WAIT_LIMIT_MS));
+        let listed = sync_answer_order(&mut res, &pair, cancelled);
+        assert!(listed.is_none(), "{:?}", listed);
     }
 
     // The worker catches up.
@@ -5077,9 +5084,14 @@ fn test_reads_never_run_ahead_of_trie_price_change() {
     let new_price = changed.price.clone();
     index_insert_and_queue(&octx, changed.clone());
     assert!(block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS)).is_err());
-    assert!(sync_answer(&ctx, &pubkey, &pair, old_root)
-        .expect_err("retryable")
-        .contains("retry"));
+    // The full snapshot lists the changed order with the price the index holds (R-T3b item 2).
+    let mut res = sync_answer(&ctx, &pubkey, &pair, old_root)
+        .expect("the answer never refuses")
+        .unwrap();
+    assert_eq!(
+        sync_answer_order(&mut res, &pair, changed.uuid),
+        Some(Some(new_price.clone()))
+    );
 
     drain_trie_queue(&octx, &mut rx);
     let roots = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
@@ -5524,5 +5536,144 @@ mod keep_alive_shape_tests {
         assert_eq!(roots, advertised);
         assert_eq!(book, aggregated_book);
         assert_eq!(book.len(), 6);
+    }
+}
+
+/// CRD ch.32 R-T3b item 2 and R-T5: once the worker has caught up, an order the trie holds but the
+/// index does not is a divergence and fails the answer; while its removal is still queued it is
+/// left out.
+#[test]
+fn test_sync_answer_missing_value_fails_only_without_queued_events() {
+    let (ctx, pubkey, secret) = make_ctx_for_tests();
+    let (octx, mut rx) = ordermatch_ctx_without_worker();
+    let octx2 = octx.clone();
+    OrdermatchContext::from_ctx.mock_safe(move |_| MockResult::Return(Ok(octx2.clone())));
+    let pair = alb_ordered_pair("C1", "C2");
+    let orders = make_random_orders(pubkey.clone(), &secret, "C1".into(), "C2".into(), 2);
+    let gone = orders[0].uuid;
+    for o in orders {
+        index_insert_and_queue(&octx, o);
+    }
+    drain_trie_queue(&octx, &mut rx);
+    let root = pair_trie_root_by_pub_ctx(&octx, &pubkey, &pair);
+
+    // Removed from the index with nothing queued: the stores have diverged.
+    octx.orderbook.lock().index_remove(gone);
+    let err = sync_answer(&ctx, &pubkey, &pair, root).expect_err("a divergence fails the answer");
+    assert!(err.contains("GetterNoneForKeyFromTrie"), "{}", err);
+
+    // The same state with an event still queued: the order is left out.
+    let other = make_random_orders(pubkey.clone(), &secret, "C3".into(), "C4".into(), 1).remove(0);
+    index_insert_and_queue(&octx, other);
+    let mut res = sync_answer(&ctx, &pubkey, &pair, root).unwrap().unwrap();
+    assert_eq!(sync_answer_order(&mut res, &pair, gone), None);
+}
+
+/// CRD ch.32 R-T3b item 4, T-T5: the keep-alive receiver records its receipt time, then compares with
+/// a caught-up trie store, waiting for the worker within the bound; past the bound it compares with
+/// the store as it stands.
+mod keep_alive_receiver_catch_up_tests {
+    use super::*;
+
+    const PK: &str = "pubkey";
+
+    fn keep_alive_for(pair: &str, root: H64) -> PubkeyKeepAlive {
+        PubkeyKeepAlive {
+            trie_roots: HashMap::from([(pair.to_owned(), root)]),
+            timestamp: 0,
+        }
+    }
+
+    /// A worker-less context holding `orders`, all applied to the trie, and then `extra` in the index
+    /// only (its trie event queued).
+    fn lagging_node(
+        orders: &[OrderbookItem],
+        extra: &OrderbookItem,
+    ) -> (Arc<OrdermatchContext>, mpsc::UnboundedReceiver<Vec<TrieOp>>) {
+        let (octx, mut rx) = ordermatch_ctx_without_worker();
+        for o in orders.iter().cloned() {
+            index_insert_and_queue(&octx, o);
+        }
+        drain_trie_queue(&octx, &mut rx);
+        index_insert_and_queue(&octx, extra.clone());
+        (octx, rx)
+    }
+
+    #[test]
+    fn comparison_waits_for_the_trie_worker() {
+        let orders = make_random_orders(PK.to_owned(), &[0; 32], "C1".into(), "C2".into(), 3);
+        let extra = make_random_orders(PK.to_owned(), &[0; 32], "C1".into(), "C2".into(), 1).remove(0);
+        // The maker's root, with the extra order applied.
+        let (maker, mut maker_rx) = lagging_node(&orders, &extra);
+        drain_trie_queue(&maker, &mut maker_rx);
+        let advertised = pair_trie_root_by_pub_ctx(&maker, PK, "C1:C2");
+
+        // The worker catches up within the bound: no request.
+        let (peer, mut rx) = lagging_node(&orders, &extra);
+        let worker_peer = peer.clone();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drain_trie_queue(&worker_peer, &mut rx);
+        });
+        let before = now_ms() / 1000;
+        let request = block_on(keep_alive_sync_request(
+            &peer,
+            PK,
+            keep_alive_for("C1:C2", advertised),
+            true,
+            TRIE_CATCH_UP_BOUND_MS,
+        ));
+        worker.join().unwrap();
+        assert!(request.is_none(), "{:?}", request);
+        assert!(peer.trie_store.lock().pubkeys_state[PK].last_keep_alive >= before);
+
+        // The worker stays behind past the bound: the store as it stands is compared and a request
+        // results.
+        let (peer, _rx) = lagging_node(&orders, &extra);
+        let request = block_on(keep_alive_sync_request(
+            &peer,
+            PK,
+            keep_alive_for("C1:C2", advertised),
+            true,
+            SHORT_WAIT_MS,
+        ));
+        assert!(matches!(
+            request,
+            Some(OrdermatchRequest::SyncPubkeyOrderbookState { .. })
+        ));
+    }
+
+    /// The receipt time is recorded before the wait, for a pubkey the node did not know yet: it is
+    /// visible well before the call returns, not only when the roots are compared at its end.
+    #[test]
+    fn receipt_time_is_recorded_before_the_wait() {
+        let orders = make_random_orders("other".to_owned(), &[0; 32], "C1".into(), "C2".into(), 1);
+        let extra = make_random_orders("other".to_owned(), &[0; 32], "C1".into(), "C2".into(), 1).remove(0);
+        let (peer, _rx) = lagging_node(&orders, &extra);
+        let observer = peer.clone();
+        let first_seen = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if observer.trie_store.lock().pubkeys_state.contains_key(PK) {
+                    return Some(std::time::Instant::now());
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            None
+        });
+        let _ = block_on(keep_alive_sync_request(
+            &peer,
+            PK,
+            keep_alive_for("C1:C2", [7; 8]),
+            true,
+            TRIE_CATCH_UP_BOUND_MS,
+        ));
+        let returned = std::time::Instant::now();
+        let seen = first_seen.join().unwrap().expect("the receipt is recorded");
+        assert!(
+            returned.duration_since(seen) >= Duration::from_millis(TRIE_CATCH_UP_BOUND_MS / 2),
+            "recorded only {:?} before the call returned",
+            returned.duration_since(seen)
+        );
     }
 }
