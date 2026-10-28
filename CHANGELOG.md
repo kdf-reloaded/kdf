@@ -532,6 +532,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
   shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
   clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
+  pair). The metrics now also show the node store's size and entry count, the number of stored change
+  histories and changes, tracked pubkeys, and queued trie updates. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
+- **A seed or relay on Linux now also returns freed order-book memory to the system.** After the memory
+  fix above the node's own data shrank back after a burst of order updates, but the system's memory
+  allocator (glibc) kept the freed pages in the process, so the memory shown by the operating system
+  stayed high (about 160 to 210 MB in a test where the data itself was 1 MB). After each ten-minute
+  clean-up the node now asks the allocator to hand the unused pages back (30 MB in the same test)
+  and writes the memory use before and after to the debug log. Other systems are unchanged. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #137.
   pair). The metrics now also show the number of stored change histories and changes, tracked pubkeys, and
   queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
   sync for more than five minutes now receives a full snapshot instead of a delta (as it already
