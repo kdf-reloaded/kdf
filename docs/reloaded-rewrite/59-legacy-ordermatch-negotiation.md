@@ -346,7 +346,10 @@ for public key P, and the node already holds a record for P, it MUST record
 its own local receipt time as P's liveness instant, exactly as R59.6.1 does
 for a keep-alive. The rules that create a record are unchanged: a created
 message creates P's record as before, and an updated or cancelled message for
-a P the node holds no record for creates nothing. The eviction of R59.6.4
+a P the node holds no record for creates nothing. An updated message that
+names an order the node does not hold is ignored as before (it is not
+accepted) and refreshes nothing; a created or cancelled message is always
+accepted. The eviction of R59.6.4
 then removes P only when neither a keep-alive nor an order message from P has
 arrived within the window.
 
@@ -444,7 +447,7 @@ receipt clock. R59.6.5's per-order half is unimplemented. R59.6.7 is
 unimplemented: the re-announcement path subscribes to the topic without
 recording the subscription state (its divergence note). R59.6.3 is a
 conclusion and carries no implementation. R59.6.1a (added 2026-10-28) is
-unimplemented.
+implemented (2026-10-28).
 
 **R59.6.7** *Re-announcement records the pair subscription.* (Authored
 by the KDF Spec Reader 2026-10-27 from the rows `v2.6.0-beta` and
@@ -559,7 +562,8 @@ messages from P every few seconds and no keep-alive: P is not evicted, and its
 orders stay in the read index throughout. When P then falls silent
 altogether, P is evicted one window (90 s by default) after its last message,
 within one maintenance sweep. An order-updated message from a P the node holds
-no record for creates no record. With `order_messages_refresh_liveness` set to
+no record for creates no record, and one that names an order of P the node does
+not hold leaves P's liveness instant unchanged. With `order_messages_refresh_liveness` set to
 `false`, P is evicted 90 s after its last keep-alive although its updates keep
 arriving.
 

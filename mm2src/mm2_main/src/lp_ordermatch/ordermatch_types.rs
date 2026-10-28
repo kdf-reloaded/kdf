@@ -188,6 +188,13 @@ pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
     ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
 }
 
+/// CRD ch.59 R59.6.1a: the MM2.json boolean `order_messages_refresh_liveness`, default `true`. Only an
+/// explicit JSON `false` makes a maker's liveness instant depend on its keep-alives alone, which is the
+/// reference behaviour.
+pub(crate) fn order_messages_refresh_liveness(ctx: &MmArc) -> bool {
+    ctx.conf["order_messages_refresh_liveness"].as_bool() != Some(false)
+}
+
 /// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
 #[derive(Debug, Display)]
 pub(crate) enum SpendSafetyError {

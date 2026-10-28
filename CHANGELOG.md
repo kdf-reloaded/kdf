@@ -255,6 +255,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
+  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
+  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
+  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
+  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
+  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
+  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
+  CRD ch.59 R59.6.1a.
+
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
