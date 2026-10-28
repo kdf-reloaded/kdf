@@ -255,6 +255,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
+  test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
+  reused the coin the first had just spent, because the Electrum servers had not yet caught up with
+  that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
+  and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
+  Test-only; the node itself is unchanged.
+
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
