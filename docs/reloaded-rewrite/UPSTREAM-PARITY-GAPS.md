@@ -388,11 +388,14 @@ chain's fee quote needs at least the first two closed before it matches.
   chain the shared defaults misprice, and the alternative a Coder would
   otherwise be tempted to hard-code.
 
-Three smaller items on the same surface are recorded as deferred rather than
-tracked here: the three additional fee-approximation stages (ch. 57 D1), the
-per-coin gas-estimate multiplier the configuration sets to 1.3 for two
-layer-two platform coins (ch. 57 D3), and the removal of reloaded's inert
-third (external gas-oracle) price source (ch. 57 D4).
+Two smaller items on the same surface are recorded as deferred rather than
+tracked here: the three additional fee-approximation stages (ch. 57 D1) and
+the removal of reloaded's inert third (external gas-oracle) price source
+(ch. 57 D4). The per-coin gas-estimate multiplier the configuration sets to
+1.3 for two layer-two platform coins, formerly ch. 57 D3, is bound since
+2026-10-27 as ch. 57 R57.5.3b (it scales only the legacy ERC-20 approve's
+estimated limit, never a configured or default limit) and is part of the
+`gas_limit` item above: reloaded reads neither.
 
 ---
 
