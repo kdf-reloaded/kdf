@@ -1567,7 +1567,7 @@ keep-alives arrive, and loses them 90 s after they stop.
 
 ## 32.9B Maker Publication Rate (Reloaded-original)
 
-*Reloaded-original (maintainer decision AO, 2026-10-28); no forbidden-class
+*Reloaded-original (maintainer decision AO, option C, 2026-10-28); no forbidden-class
 input. The plan behind it is `docs/plans/maker-gossip-rate-control.md`.*
 
 **R-MP1 (maker outbox).** The order messages a node publishes for its own
@@ -1593,6 +1593,15 @@ from the index ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7).
      the budget of R-MP2.
    - The swap-negotiation messages (taker request, maker reserved, taker
      connect, maker connected) do not go through the outbox at all.
+   - Both are published with **priority** under
+     [Chapter 28](28-libp2p-modernization.md) §28.9B RQ1 item 9, both when
+     the node publishes them and when it lets a received one propagate.
+   - No other ordermatch message is priority. Keep-alives in particular
+     are not (R-MP3 item 3).
+   - A cancellation that overtakes an earlier message for the same order
+     is safe: the receiver's cancellation guard (§32.3 R-C5, §32.9 R-K1)
+     suppresses a creation that arrives after it, and an update for an
+     order the receiver no longer holds is ignored.
 3. **Local state is not delayed.** The maker's own order record, its trie
    ([§32.6](#326-patricia-trie-substrate-and-delta-sync)) and the result
    of the request that changed the order are updated at once, as without
@@ -1687,7 +1696,9 @@ waiting up to 30 seconds for the next tick.
 > order's update up to about 1/rate seconds later, or, in degraded mode,
 > only through the next keep-alive synchronization. It may never see an
 > intermediate value of an order that changes quickly. Cancellations are
-> not delayed. R-MP4 publishes keep-alives beyond the ticks of R-K2a. Every
+> not delayed, and may arrive ahead of messages published before it (the
+> priority lane of §28.9B RQ1 item 9). R-MP4 publishes keep-alives beyond
+> the ticks of R-K2a. Every
 > keep-alive has the shape R-K2a binds, and a receiver processes each one
 > on its own. No message format changes.
 >
@@ -1737,6 +1748,12 @@ waiting up to 30 seconds for the next tick.
   pressure state.
 - **T-MP11** *Switch.* With `maker_update_coalescing` set to `false`,
   every order message is published at once.
+- **T-MP12** *Priority marking.*
+  - A cancellation and each swap-negotiation message are published with
+    priority, and so is one propagated by a relay.
+  - A created, updated or keep-alive message is not.
+  - Toward a paused relay with a full data queue, a cancellation arrives
+    first after resume.
 
 ## 32.10 Deferred Work
 

@@ -30,15 +30,18 @@ The maintainer adopted option A as written below:
 - the ping safeguard unchanged.
 
 The exact-parity switch `maker_update_coalescing` is kept because it costs
-one branch. The priority lane is left as a follow-up: the outbox already
-releases cancellations at once and keeps swap messages out of it, so a
-send-queue lane would add nothing until a measurement shows queueing behind
-our own updates.
+one branch.
+
+The maintainer then chose **option C: A plus the priority lane of (f)**,
+for cancellations and swap-negotiation messages only, never for
+keep-alives. It is marked by the application, on publish and on relay
+propagation, and capped at 256 RPCs per connection; past that cap the
+connection is closed.
 
 The change also adds aggregate send-queue and outbox metrics (R-MP5).
 
-The binding rules are CRD ch.32 §32.9B (R-MP1–R-MP5, T-MP1–T-MP11) and
-ch.28 §28.9B RQ1 item 8 (T-RQ1.8).
+The binding rules are CRD ch.32 §32.9B (R-MP1–R-MP5, T-MP1–T-MP12) and
+ch.28 §28.9B RQ1 items 8 and 9 (T-RQ1.8, T-RQ1.9).
 
 ## The one-page summary for the maintainer
 
