@@ -1379,6 +1379,39 @@ today (ch. 59 R59.6.5), so this subsystem can currently evict a
 pubkey the node itself makes orders under and drop those orders
 from its own read index.
 
+**R-K4 (memory maintenance of the synchronization state; Reloaded-original,
+2026-10-28).** The delta history of R-P5 and R-T4 and the node store of R-T1
+stay as they are on the wire and in their answers. What this rule adds is that
+the memory they hold is released when it is due, not only when traffic happens
+to touch it, and that nothing leaks when a slice is cleared:
+
+1. *Expiry on a timer.* Every 30 seconds, independently of any traffic, each
+   pubkey state drops the expired entries of its per-pair history cache (the
+   4-hour bound) and of each pair's delta history (the 5-minute bound), and
+   releases the spare capacity of those tables. Which entries are expired does
+   not change: an entry whose expiry was refreshed is not dropped, and a delta
+   answer for a root inside its window is unchanged by a sweep. A pair's history
+   is removed only by its own 4-hour bound, never because its deltas expired.
+2. *Refreshing an expiry is free.* Refreshing a cache entry's expiry does not
+   add bookkeeping: each key has one expiry-queue element, and a queue element
+   whose entry was refreshed is re-queued at its true expiry when it is reached.
+3. *Node store.* After each ten-minute purge the node store releases the spare
+   capacity of its table.
+4. *Clearing releases nodes.* Clearing a `(pubkey, pair)` slice, and removing a
+   pubkey, dereferences the nodes of the cleared tries, so that the purge
+   reclaims them. A node still referenced by another trie stays (the store
+   counts references). This adopts the "orphan release" candidate of D6.
+5. *Gauges.* The node reports, besides `orderbook.len`, the size in bytes and
+   entry count of the node store, the number of pair histories and of stored
+   deltas, the number of tracked pubkeys and the number of queued trie-operation
+   batches not yet applied (`orderbook.memory_db`, `orderbook.memory_db.entries`,
+   `orderbook.history.pairs`, `orderbook.history.deltas`, `orderbook.pubkeys`,
+   `orderbook.trie_ops.pending`).
+
+No item changes a wire shape. The tests are those of the implementing change
+(in-process counts and capacities after a burst, the timer sweep, the clear and
+the shared-subtree case, the gauges).
+
 ## 32.10 Deferred Work
 
 D1. **Module split.** The subsystem is a single large module.
@@ -1484,7 +1517,7 @@ D6. **Reference unboundedness, and Reloaded-original hardening
       — to be decided together with R-F3a);
     - **orphan release** — dereferencing a cleared slice's nodes so the
       periodic purge reclaims them, or rebuilding the node store from
-      the live roots at purge time;
+      the live roots at purge time (adopted: R-K4 item 4);
     - a **cap on concurrently handled inbound gossip messages** per
       peer or per topic, applied before the per-message task is spawned.
 
@@ -1850,3 +1883,14 @@ V4. **Wire/in-memory split is lossless.** Round-trip an order
   topic copies produced K requests); and the maintainer's decisions on D5 and
   R-Q4a. The reference facts these items rely on are the gated ones of the
   scoped addition above; nothing else from the reference was used.
+- *Reloaded-original addition (2026-10-28), no forbidden-class input:* R-K4
+  (timer-driven expiry and capacity release of the delta histories, free expiry
+  refresh, node-store capacity release, node release on clear, gauges). *Inputs:*
+  this repository's own history, node-store and metrics code, and an in-process
+  measurement of it with a counting allocator (a 120,480-update burst for 30
+  orders of one pubkey retained about 1,240 bytes per update, 54 % in the delta
+  history, 28 % in unreferenced nodes, 14 % in table capacity, 4 % in
+  expiry-queue elements; the history caches expire only when touched; a
+  full-snapshot clear leaked about 6 KB per 30-order pair). The reference facts
+  it relies on are the gated ones of D6 (bounds, purge period, nodes of a cleared
+  slice never released); nothing else from the reference was used.
