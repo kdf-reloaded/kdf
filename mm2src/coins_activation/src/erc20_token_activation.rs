@@ -267,6 +267,8 @@ pub(crate) enum Erc20TokenError {
     /// The nodes gave no usable answer while the decimals were read from the contract (CRD R35.1.6).
     Transport(String),
     UnsupportedDecimals(String),
+    /// The token's coin-configuration entry holds an unusable `gas_limit` / `gas_limit_v2` member (CRD R57.5.1).
+    InvalidConfig(String),
     Internal(String),
 }
 
@@ -275,6 +277,7 @@ impl From<Erc20TokenError> for EnableTokenError {
         match err {
             Erc20TokenError::Custom(e) => EnableTokenError::CustomTokenError(e),
             Erc20TokenError::Transport(e) => EnableTokenError::Transport(e),
+            Erc20TokenError::InvalidConfig(e) => EnableTokenError::InvalidConfig(e),
             Erc20TokenError::UnsupportedDecimals(e) | Erc20TokenError::Internal(e) => EnableTokenError::Internal(e),
         }
     }
@@ -285,9 +288,9 @@ impl From<Erc20TokenError> for InitTokensAsMmCoinsError {
         match err {
             Erc20TokenError::Custom(e) => InitTokensAsMmCoinsError::CustomTokenError(e),
             Erc20TokenError::Transport(e) => InitTokensAsMmCoinsError::Transport(e),
-            Erc20TokenError::UnsupportedDecimals(e) | Erc20TokenError::Internal(e) => {
-                InitTokensAsMmCoinsError::InvalidPubkey(e)
-            },
+            Erc20TokenError::UnsupportedDecimals(e)
+            | Erc20TokenError::InvalidConfig(e)
+            | Erc20TokenError::Internal(e) => InitTokensAsMmCoinsError::InvalidPubkey(e),
         }
     }
 }
@@ -299,7 +302,7 @@ impl From<Erc20TokenError> for InitTokenError {
             // An unusable configuration is an invalid-payload class failure of the construction, which the
             // token task reports as `Transport` (CRD R35.3A.6).
             Erc20TokenError::Transport(e) | Erc20TokenError::UnsupportedDecimals(e) => InitTokenError::Transport(e),
-            Erc20TokenError::Internal(e) => InitTokenError::Internal(e),
+            Erc20TokenError::InvalidConfig(e) | Erc20TokenError::Internal(e) => InitTokenError::Internal(e),
         }
     }
 }
@@ -342,6 +345,7 @@ pub(crate) async fn build_erc20_token(
         .mm_err(|e| match e {
             Erc20BuildError::Transport(e) => Erc20TokenError::Transport(e),
             Erc20BuildError::UnsupportedDecimals(e) => Erc20TokenError::UnsupportedDecimals(e),
+            Erc20BuildError::InvalidConfig(e) => Erc20TokenError::InvalidConfig(e),
             Erc20BuildError::Internal(e) => Erc20TokenError::Internal(e),
         })
 }

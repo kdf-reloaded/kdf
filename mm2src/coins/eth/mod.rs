@@ -17,6 +17,7 @@
 //
 //  Split into sub-modules for maintainability:
 //    eth_types      – constants, ABIs, structs, enums, error conversions
+//    eth_gas_limit  – per-coin `gas_limit` / `gas_limit_v2` overrides (CRD ch. 57)
 //    eth_impl       – EthCoinImpl methods, transaction helpers, utility fns
 //    eth_swap_ops   – SwapOps + WatcherOps trait impls
 //    eth_market_ops – MarketCoinOps trait impl
@@ -93,6 +94,7 @@ pub mod nft_swap_v2 {
 }
 
 mod eth_activation;
+mod eth_gas_limit;
 mod eth_impl;
 mod eth_market_ops;
 mod eth_mm_coin;
@@ -110,6 +112,7 @@ pub mod wc_integration;
 mod wire_types;
 // Re-export split module contents for backward-compatible access paths
 pub use eth_activation::*;
+pub use eth_gas_limit::*;
 pub use eth_impl::*;
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
@@ -139,6 +142,7 @@ pub(crate) use abi::{AbiError, Contract, Function, Token};
 
 #[cfg(test)] mod abi_golden_tests;
 #[cfg(test)] mod eth_failover_tests;
+#[cfg(test)] mod eth_gas_limit_call_site_tests;
 #[cfg(test)] mod eth_tests;
 #[cfg(test)] mod fee_service_url_tests;
 #[cfg(test)] mod typed_tx_vector_tests;

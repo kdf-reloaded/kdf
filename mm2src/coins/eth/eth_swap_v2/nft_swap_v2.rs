@@ -1094,16 +1094,16 @@ mod tests {
     #[test]
     fn nft_gas_limit_dispatches_per_kind_and_method() {
         let g = EthGasLimitV2::default();
-        // Defaults defined in EthGasLimitV2::default(): 200k for ERC-721,
-        // 220k for ERC-1155, across all four maker-side methods.
-        for method in [
-            PaymentMethod::Send,
-            PaymentMethod::Spend,
-            PaymentMethod::RefundTimelock,
-            PaymentMethod::RefundSecret,
+        // The defaults of CRD R57.6.2 (`nft_maker`): 130k for the payment call of both token
+        // standards, 100k for spend and both refunds.
+        for (method, expected) in [
+            (PaymentMethod::Send, 130_000),
+            (PaymentMethod::Spend, 100_000),
+            (PaymentMethod::RefundTimelock, 100_000),
+            (PaymentMethod::RefundSecret, 100_000),
         ] {
-            assert_eq!(g.nft_gas_limit(NftKind::Erc721, method), 200_000);
-            assert_eq!(g.nft_gas_limit(NftKind::Erc1155, method), 220_000);
+            assert_eq!(g.nft_gas_limit(NftKind::Erc721, method), expected);
+            assert_eq!(g.nft_gas_limit(NftKind::Erc1155, method), expected);
         }
     }
 
@@ -1120,7 +1120,7 @@ mod tests {
         assert_eq!(g.nft_gas_limit(NftKind::Erc721, PaymentMethod::RefundTimelock), 3);
         assert_eq!(g.nft_gas_limit(NftKind::Erc721, PaymentMethod::RefundSecret), 4);
         // ERC-1155 row untouched.
-        assert_eq!(g.nft_gas_limit(NftKind::Erc1155, PaymentMethod::Send), 220_000);
+        assert_eq!(g.nft_gas_limit(NftKind::Erc1155, PaymentMethod::Send), 130_000);
     }
 
     // P10.3.7.c — call builder tests
