@@ -741,7 +741,8 @@ pub(crate) fn run_trie_store_maintenance(ctx: &MmArc, ordermatch_ctx: &Ordermatc
         if purge {
             trie_store.purge_memory_db();
         }
-        trie_store.snapshot()
+        // `memory_db` is measured on purge ticks only, right after the purge, where the table is small.
+        trie_store.snapshot(purge)
     };
     // Read after `applied_batches` (see `collect_trie_store_metrics`).
     let enqueued_batches = ordermatch_ctx.orderbook.lock().trie_ops_enqueued;

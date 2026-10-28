@@ -1586,12 +1586,14 @@ to touch it, and that nothing leaks when a slice is cleared:
    pubkey, dereferences the nodes of the cleared tries, so that the purge
    reclaims them. A node still referenced by another trie stays (the store
    counts references). This adopts the "orphan release" candidate of D6.
-5. *Gauges.* The node reports, besides `orderbook.len`, the size in bytes and
-   entry count of the node store, the number of pair histories and of stored
-   deltas, the number of tracked pubkeys and the number of queued trie-operation
-   batches not yet applied (`orderbook.memory_db`, `orderbook.memory_db.entries`,
-   `orderbook.history.pairs`, `orderbook.history.deltas`, `orderbook.pubkeys`,
-   `orderbook.trie_ops.pending`).
+5. *Gauges.* The node reports, besides `orderbook.len`, the number of pair
+   histories and of stored deltas, the number of tracked pubkeys and the number
+   of queued trie-operation batches not yet applied (`orderbook.history.pairs`,
+   `orderbook.history.deltas`, `orderbook.pubkeys`, `orderbook.trie_ops.pending`),
+   on every sweep; and the size in bytes and entry count of the node store
+   (`orderbook.memory_db`, `orderbook.memory_db.entries`), right after each
+   purge only, because measuring the store walks all of it while the store is
+   locked.
 
 No item changes a wire shape. The tests are those of the implementing change
 (in-process counts and capacities after a burst, the timer sweep, the clear and

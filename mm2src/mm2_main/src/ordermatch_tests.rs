@@ -6868,7 +6868,7 @@ mod trie_store_memory_retention {
             (1, 1),
             "one list element per pair history after 20000 refreshes"
         );
-        let bytes_before = octx.trie_store.lock().snapshot().memory_db_bytes;
+        let bytes_before = octx.trie_store.lock().snapshot(true).memory_db_bytes.unwrap();
 
         std::thread::sleep(PAST_TTL);
         // Nothing wrote to the pair, so nothing has reclaimed the expired diffs yet.
@@ -6896,18 +6896,19 @@ mod trie_store_memory_retention {
         run_trie_store_maintenance(&ref_ctx, &ref_octx, true);
         assert_eq!(roots(&octx), roots(&ref_octx));
 
-        let live = octx.trie_store.lock().snapshot();
-        let reference = ref_octx.trie_store.lock().snapshot();
+        let live = octx.trie_store.lock().snapshot(true);
+        let reference = ref_octx.trie_store.lock().snapshot(true);
+        let (live_bytes, reference_bytes) = (live.memory_db_bytes.unwrap(), reference.memory_db_bytes.unwrap());
         assert_eq!(live.memory_db_entries, reference.memory_db_entries);
         assert!(
-            live.memory_db_bytes <= 2 * reference.memory_db_bytes,
+            live_bytes <= 2 * reference_bytes,
             "memory_db holds {} B for {} live nodes, a fresh one {} B",
-            live.memory_db_bytes,
-            live.memory_db_entries,
-            reference.memory_db_bytes
+            live_bytes,
+            live.memory_db_entries.unwrap(),
+            reference_bytes
         );
         assert!(
-            bytes_before > 2 * reference.memory_db_bytes,
+            bytes_before > 2 * reference_bytes,
             "the burst did not fill memory_db ({bytes_before} B), the test shows nothing"
         );
     }
@@ -7008,20 +7009,33 @@ mod trie_store_memory_retention {
         let orders = seed(&ctx, &octx, 10);
         burst(&ctx, &octx, &orders, 50);
 
-        run_trie_store_maintenance(&ctx, &octx, true);
+        // A tick without purge reports the four per-tick gauges and leaves `memory_db` alone.
+        run_trie_store_maintenance(&ctx, &octx, false);
         let reported = gauges(&ctx);
-        let snapshot = octx.trie_store.lock().snapshot();
         assert_eq!(reported["orderbook.pubkeys"], 1);
         assert_eq!(reported["orderbook.history.pairs"], 1);
         // the 50 updates, and the 9 inserts after the first of the 10 orders (the first one has no previous root)
         assert_eq!(reported["orderbook.history.deltas"], 59);
         assert_eq!(reported["orderbook.trie_ops.pending"], 0);
-        assert_eq!(
-            reported["orderbook.memory_db.entries"],
-            snapshot.memory_db_entries as i64
-        );
-        assert!(snapshot.memory_db_entries >= 10, "at least a leaf per order");
-        assert_eq!(reported["orderbook.memory_db"], snapshot.memory_db_bytes as i64);
+        assert!(!reported.contains_key("orderbook.memory_db.entries"));
+        assert!(!reported.contains_key("orderbook.memory_db"));
+        let light = octx.trie_store.lock().snapshot(false);
+        assert!(light.memory_db_entries.is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(light.memory_db_bytes.is_none());
+
+        // A purge tick adds the two node-store gauges, measured after the purge.
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let reported = gauges(&ctx);
+        assert_eq!(reported["orderbook.pubkeys"], 1);
+        assert_eq!(reported["orderbook.history.deltas"], 59);
+        let snapshot = octx.trie_store.lock().snapshot(true);
+        let entries = snapshot.memory_db_entries.unwrap();
+        let bytes = snapshot.memory_db_bytes.unwrap();
+        assert_eq!(reported["orderbook.memory_db.entries"], entries as i64);
+        assert!(entries >= 10, "at least a leaf per order");
+        assert_eq!(live_nodes(&mut octx.trie_store.lock()), entries);
+        assert_eq!(reported["orderbook.memory_db"], bytes as i64);
         assert!(reported["orderbook.memory_db"] > 0);
 
         // batches queued and not applied yet

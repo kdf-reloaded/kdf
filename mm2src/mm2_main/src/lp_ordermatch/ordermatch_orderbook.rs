@@ -1243,10 +1243,12 @@ pub(crate) struct TrieStoreSnapshot {
     /// Diffs held by all pair histories.
     pub(crate) history_deltas: usize,
     /// Nodes of `memory_db` some trie refers to (nodes awaiting the next purge are not counted).
-    pub(crate) memory_db_entries: usize,
-    /// Heap size of `memory_db`, table capacity included. `malloc_size` is unusable on wasm32.
+    /// `None` unless the snapshot was asked to measure `memory_db`: counting is O(nodes).
+    pub(crate) memory_db_entries: Option<usize>,
+    /// Heap size of `memory_db`, table capacity included; `None` like `memory_db_entries`.
+    /// `malloc_size` is unusable on wasm32.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) memory_db_bytes: usize,
+    pub(crate) memory_db_bytes: Option<usize>,
 }
 
 /// Emit the gauges of the trie store and of the queue that feeds it; aggregates only, because a seed
@@ -1259,13 +1261,13 @@ pub(crate) fn collect_trie_store_metrics(ctx: &MmArc, snapshot: &TrieStoreSnapsh
     mm_gauge!(ctx.metrics, "orderbook.pubkeys", snapshot.pubkeys as i64);
     mm_gauge!(ctx.metrics, "orderbook.history.pairs", snapshot.history_pairs as i64);
     mm_gauge!(ctx.metrics, "orderbook.history.deltas", snapshot.history_deltas as i64);
-    mm_gauge!(
-        ctx.metrics,
-        "orderbook.memory_db.entries",
-        snapshot.memory_db_entries as i64
-    );
+    if let Some(entries) = snapshot.memory_db_entries {
+        mm_gauge!(ctx.metrics, "orderbook.memory_db.entries", entries as i64);
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    mm_gauge!(ctx.metrics, "orderbook.memory_db", snapshot.memory_db_bytes as i64);
+    if let Some(bytes) = snapshot.memory_db_bytes {
+        mm_gauge!(ctx.metrics, "orderbook.memory_db", bytes as i64);
+    }
 }
 
 /// Trie-related state extracted from `Orderbook` to reduce contention on the main
@@ -1510,8 +1512,10 @@ impl TrieStore {
         self.memory_db.shrink_to_fit();
     }
 
-    /// Aggregate counts for the gauges of the maintenance tick.
-    pub(crate) fn snapshot(&self) -> TrieStoreSnapshot {
+    /// Aggregate counts for the gauges of the maintenance tick. The per-tick counts walk the pubkeys
+    /// and pair histories only; `memory_db` is measured (O(nodes)) just when `with_memory_db` is set,
+    /// which the tick does right after a purge, when the table holds live nodes only.
+    pub(crate) fn snapshot(&self, with_memory_db: bool) -> TrieStoreSnapshot {
         let mut history_pairs = 0;
         let mut history_deltas = 0;
         for pubkey_state in self.pubkeys_state.values() {
@@ -1525,9 +1529,9 @@ impl TrieStore {
             pubkeys: self.pubkeys_state.len(),
             history_pairs,
             history_deltas,
-            memory_db_entries: self.memory_db.keys().len(),
+            memory_db_entries: with_memory_db.then(|| self.memory_db.keys().len()),
             #[cfg(not(target_arch = "wasm32"))]
-            memory_db_bytes: parity_util_mem::malloc_size(&self.memory_db),
+            memory_db_bytes: with_memory_db.then(|| parity_util_mem::malloc_size(&self.memory_db)),
         }
     }
 
