@@ -549,7 +549,7 @@ estimation** before the limit is used. Its complete contract:
 > limit on a chain, that is the `gas_limit` block itself (R57.5.1), not this
 > member.
 
-> **As built (2026-10-28, PR #TBD) -- R57.5.3b.** `estimate_gas_mult` is read as a JSON
+> **As built (2026-10-28, PR #107) -- R57.5.3b.** `estimate_gas_mult` is read as a JSON
 > number at every EVM activation path (the platform-coin build and both token routes, with
 > the token's own value winning and a silent token inheriting its platform coin's; an explicit
 > `1.0` on a token is a value, not an absence); any other JSON type fails activation naming
