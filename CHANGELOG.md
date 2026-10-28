@@ -179,6 +179,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A market maker's keep-alive is now sent once per trading pair, as other nodes expect.** A maker
+  with orders on several pairs used to send, every 30 seconds, one message per pair that each listed
+  every pair, so each node that relays the order book asked for every pair once per copy. Seed nodes
+  answering those requests ran out of memory, and one pair they could not answer failed the whole
+  request and stopped the maker's orders from spreading further. Each message now carries the one pair
+  of the topic it is sent on, and pairs without orders get no message. This stops the flood of failing
+  sync requests that overloaded seed nodes. Detail: CRD ch.32 R-K2a.
+
 - **A maker node that is not a relay now keeps its order book of other makers up to date after a restart.** After a restart the node announced its stored orders again, but it did not record that it was following their trading pairs, so a keep-alive from another maker with a different order list never made it ask for that maker's orders, and its view of the other makers on its own pairs went stale until something else (an order book request, a new order on the pair) recorded the pair. Re-announcing a stored order now records the pair first, without requesting the order book. Detail: PR #101; CRD ch.59 R59.6.7.
 
 - **Gossip message ids now use the compact 8-byte form other KDF nodes use, which should cut the bandwidth a relay spends on duplicate messages.** Our nodes announced each message with an id written as decimal text, while the other implementations write the same 64-bit value as 8 raw bytes, so an id announced by one side never matched the id the other side already held and every announced message was requested again, then dropped as a duplicate. The id is now the 8-byte big-endian form; what it is computed from is unchanged. Nodes on the old and new encoding still exchange messages normally, but each message is sent once more between them until both sides are upgraded. Detail: PR #99; CRD ch.28 R13.

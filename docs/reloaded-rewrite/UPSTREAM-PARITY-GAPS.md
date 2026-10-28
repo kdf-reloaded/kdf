@@ -792,7 +792,7 @@ CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
 [`59-legacy-ordermatch-negotiation.md`](./59-legacy-ordermatch-negotiation.md)
 R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 
-- [ ] A Reloaded maker with K advertisable pairs under one pubkey publishes,
+- [x] *Fixed 2026-10-28: Reloaded conforms to R-K2a.* A Reloaded maker with K advertisable pairs under one pubkey publishes,
   every 30 s, K gossip messages that each carry all K roots, one per pair
   topic. The reference publishes K messages that each carry one root, each
   on its own pair's topic. Against reference relays the aggregated form

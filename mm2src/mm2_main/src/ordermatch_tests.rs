@@ -2682,10 +2682,9 @@ fn test_keep_alive_skips_zero_and_null_trie_roots() {
     all_roots.insert("C:D".to_owned(), hashed_null_node::<Layout>());
     all_roots.insert("E:F".to_owned(), [1; 8]);
 
-    let (roots, topics) = keep_alive_roots_and_topics(&all_roots);
+    let roots = advertisable_roots(&all_roots);
     assert_eq!(roots.len(), 1);
     assert_eq!(roots.get("E:F"), Some(&[1; 8]));
-    assert_eq!(topics.len(), 1);
 }
 
 #[test]
@@ -5031,7 +5030,7 @@ fn test_reads_never_run_ahead_of_trie_cancel() {
 
     // Consistent: nothing withheld.
     let payload = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS));
-    assert_eq!(payload.unwrap().unwrap().0.get(&pair), Some(&old_root));
+    assert_eq!(payload.unwrap().unwrap().get(&pair), Some(&old_root));
     assert!(sync_answer(&ctx, &pubkey, &pair, old_root).is_ok());
 
     // Cancel in the index while the worker is held back.
@@ -5047,7 +5046,7 @@ fn test_reads_never_run_ahead_of_trie_cancel() {
 
     // The worker catches up.
     drain_trie_queue(&octx, &mut rx);
-    let (roots, _topics) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
+    let roots = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
         .unwrap()
         .unwrap();
     let new_root = roots[&pair];
@@ -5083,7 +5082,7 @@ fn test_reads_never_run_ahead_of_trie_price_change() {
         .contains("retry"));
 
     drain_trie_queue(&octx, &mut rx);
-    let (roots, _) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
+    let roots = block_on(keep_alive_payload_for_pub(&octx, &pubkey, SHORT_WAIT_MS))
         .unwrap()
         .unwrap();
     assert_ne!(roots[&pair], old_root);
@@ -5104,7 +5103,7 @@ fn test_reads_not_withheld_with_running_worker() {
     delete_my_order(&ctx, first, None);
     // No flush: the keep-alive producer waits for the worker within the normal bound; the inbound
     // sync answer never waits, so it is asked after that.
-    let (roots, _) = block_on(keep_alive_payload_for_pub(&octx, &pubkey, TRIE_CATCH_UP_BOUND_MS))
+    let roots = block_on(keep_alive_payload_for_pub(&octx, &pubkey, TRIE_CATCH_UP_BOUND_MS))
         .unwrap()
         .unwrap();
     assert!(roots.contains_key(&pair));
@@ -5341,5 +5340,189 @@ mod reannounce_missing_own_order_tests {
         // A relay node requests in both cases.
         assert!(keep_alive_request(&ctx, &own_pair, true).is_some());
         assert!(keep_alive_request(&ctx, &other_pair, true).is_some());
+    }
+}
+
+/// CRD ch.32 R-K2a, T-K1 to T-K4: one keep-alive per advertisable pair, carrying that pair's root
+/// alone, on that pair's topic only.
+mod keep_alive_shape_tests {
+    use super::*;
+
+    /// A context whose published messages land in the returned receiver.
+    fn ctx_with_p2p() -> (MmArc, String, mpsc::Receiver<AdexBehaviourCmd>) {
+        let (ctx, pubkey, _secret) = make_ctx_for_tests();
+        let (tx, rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, pubkey, rx)
+    }
+
+    fn pairs(k: usize) -> Vec<(String, String)> { (0..k).map(|i| (format!("B{}", i), format!("R{}", i))).collect() }
+
+    fn insert_orders(ctx: &MmArc, pubkey: &str, pairs: &[(String, String)]) -> Vec<OrderbookItem> {
+        let mut all = Vec::new();
+        for (base, rel) in pairs {
+            for order in make_random_orders(pubkey.to_owned(), &[0; 32], base.clone(), rel.clone(), 2) {
+                insert_or_update_order(ctx, order.clone());
+                all.push(order);
+            }
+        }
+        flush_trie(ctx);
+        all
+    }
+
+    /// Every published keep-alive as (topic, signer, the single entry), checking the shape on the way.
+    fn published_keep_alives(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> Vec<(String, String, (String, H64))> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            let (topics, msg) = match cmd {
+                AdexBehaviourCmd::PublishMsg { topics, msg } => (topics, msg),
+                AdexBehaviourCmd::PublishMsgFrom { topics, msg, .. } => (topics, msg),
+                _ => continue,
+            };
+            let (message, _sig, signer) = decode_signed::<new_protocol::OrdermatchMessage>(&msg).unwrap();
+            let keep_alive = match message {
+                new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => keep_alive,
+                other => panic!("unexpected message {:?}", other),
+            };
+            assert_eq!(topics.len(), 1, "one topic per keep-alive");
+            assert_eq!(keep_alive.trie_roots.len(), 1, "one entry per keep-alive");
+            let entry = keep_alive.trie_roots.into_iter().next().unwrap();
+            assert_eq!(
+                topics[0],
+                orderbook_topic_from_ordered_pair(&entry.0),
+                "published on its pair's topic"
+            );
+            out.push((topics[0].clone(), signer.to_hex(), entry));
+        }
+        out
+    }
+
+    fn held_roots(ctx: &MmArc, pubkey: &str) -> HashMap<AlbOrderedOrderbookPair, H64> {
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let trie_store = octx.trie_store.lock();
+        trie_store.pubkeys_state[pubkey].trie_roots.clone()
+    }
+
+    /// T-K1, T-K2.
+    #[test]
+    fn one_single_entry_message_per_pair_on_its_own_topic() {
+        let (ctx, pubkey, mut rx) = ctx_with_p2p();
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        insert_orders(&ctx, &pubkey, &pairs(3));
+
+        block_on(broadcast_keep_alive_for_pub(&ctx, &octx, &pubkey, None));
+        let published = published_keep_alives(&mut rx);
+        assert_eq!(published.len(), 3);
+        let held = held_roots(&ctx, &pubkey);
+        let advertised: HashMap<_, _> = published
+            .iter()
+            .map(|(_, signer, (pair, root))| {
+                assert_eq!(signer, &pubkey);
+                (pair.clone(), *root)
+            })
+            .collect();
+        assert_eq!(advertised, held);
+
+        // A per-order pubkey publishes the same pattern, signed by its own key.
+        let per_order = key_pair_from_seed("per-order key").unwrap();
+        let per_order_pub = hex::encode(per_order.public_slice());
+        insert_orders(&ctx, &per_order_pub, &pairs(2));
+        block_on(broadcast_keep_alive_for_pub(
+            &ctx,
+            &octx,
+            &per_order_pub,
+            Some(&per_order),
+        ));
+        let published = published_keep_alives(&mut rx);
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().all(|(_, signer, _)| signer == &per_order_pub));
+    }
+
+    /// T-K3.
+    #[test]
+    fn zero_and_empty_roots_are_not_advertised() {
+        let (ctx, pubkey, mut rx) = ctx_with_p2p();
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let orders = insert_orders(&ctx, &pubkey, &pairs(3));
+        for order in orders.iter().filter(|o| o.base == "B0") {
+            delete_order(&ctx, &pubkey, order.uuid);
+        }
+        flush_trie(&ctx);
+
+        block_on(broadcast_keep_alive_for_pub(&ctx, &octx, &pubkey, None));
+        let published = published_keep_alives(&mut rx);
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().all(|(_, _, (pair, _))| pair != "B0:R0"));
+
+        block_on(broadcast_keep_alive_for_pub(&ctx, &octx, "unknown-pubkey", None));
+        assert!(published_keep_alives(&mut rx).is_empty());
+    }
+
+    /// T-K4: a receiver fed the per-pair messages ends where it ends when fed the aggregated form,
+    /// with at most one single-pair request per message.
+    #[test]
+    fn receiver_handles_single_entry_messages_like_the_aggregated_form() {
+        const MAKER: &str = "maker";
+        let (m, ..) = make_ctx_for_tests();
+        insert_orders(&m, MAKER, &pairs(3));
+        let advertised = advertisable_roots(&held_roots(&m, MAKER));
+
+        let receive = |messages: Vec<HashMap<AlbOrderedOrderbookPair, H64>>| {
+            let (p, ..) = make_ctx_for_tests();
+            let octx = OrdermatchContext::from_ctx(&p).unwrap();
+            let mut requests = Vec::new();
+            for trie_roots in messages {
+                let request = octx.trie_store.lock().prepare_sync_request_for_keep_alive(
+                    MAKER,
+                    PubkeyKeepAlive {
+                        trie_roots,
+                        timestamp: 0,
+                    },
+                    true,
+                    |_| true,
+                );
+                if let Some(OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. }) = request {
+                    requests.push(trie_roots);
+                }
+            }
+            for request in &requests {
+                let answer = process_sync_pubkey_orderbook_state(m.clone(), MAKER.to_owned(), request.clone())
+                    .unwrap()
+                    .unwrap();
+                let mut orderbook = octx.orderbook.lock();
+                let mut ops = Vec::new();
+                for (pair, diff) in answer.pair_orders_diff {
+                    let params = ProcessTrieParams {
+                        pubkey: MAKER,
+                        alb_pair: &pair,
+                        protocol_infos: &answer.protocol_infos,
+                        conf_infos: &answer.conf_infos,
+                    };
+                    ops.extend(match diff {
+                        DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
+                        DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
+                    });
+                }
+                orderbook.queue_trie_ops(&octx.trie_ops_tx, ops);
+            }
+            flush_trie(&p);
+            let book: HashSet<Uuid> = octx.orderbook.lock().order_set.keys().copied().collect();
+            (requests, held_roots(&p, MAKER), book)
+        };
+
+        let per_pair: Vec<_> = advertised
+            .iter()
+            .map(|(p, r)| HashMap::from([(p.clone(), *r)]))
+            .collect();
+        let (requests, roots, book) = receive(per_pair);
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|r| r.len() == 1));
+
+        let (aggregated_requests, aggregated_roots, aggregated_book) = receive(vec![advertised.clone()]);
+        assert_eq!(aggregated_requests.len(), 1);
+        assert_eq!(roots, aggregated_roots);
+        assert_eq!(roots, advertised);
+        assert_eq!(book, aggregated_book);
+        assert_eq!(book.len(), 6);
     }
 }
