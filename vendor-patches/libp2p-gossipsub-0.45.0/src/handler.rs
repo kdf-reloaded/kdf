@@ -20,12 +20,14 @@
 
 use crate::protocol::{GossipsubCodec, ProtocolConfig};
 use crate::rpc_proto::proto;
+use crate::send_queue::{DropLog, SendQueue, SendQueueConfig};
 use crate::types::{PeerKind, RawMessage, Rpc};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
 use futures::future::Either;
 use futures::prelude::*;
 use futures::StreamExt;
+use futures_ticker::Ticker;
 use instant::Instant;
 use libp2p_core::upgrade::DeniedUpgrade;
 use libp2p_swarm::handler::{
@@ -33,8 +35,8 @@ use libp2p_swarm::handler::{
     FullyNegotiatedInbound, FullyNegotiatedOutbound, KeepAlive, StreamUpgradeError,
     SubstreamProtocol,
 };
+use libp2p_identity::PeerId;
 use libp2p_swarm::Stream;
-use smallvec::SmallVec;
 use std::{
     pin::Pin,
     task::{Context, Poll},
@@ -58,6 +60,9 @@ pub enum HandlerEvent {
     /// An inbound or outbound substream has been established with the peer and this informs over
     /// which protocol. This message only occurs once per connection.
     PeerKind(PeerKind),
+    /// The send queue toward the peer has stayed at its cap for the whole stuck period. The
+    /// behaviour closes the connection.
+    SendQueueStuck,
 }
 
 /// A message sent from the behaviour to the handler.
@@ -96,8 +101,15 @@ pub struct EnabledHandler {
     /// The single long-lived inbound substream.
     inbound_substream: Option<InboundSubstreamState>,
 
-    /// Queue of values that we want to send to the remote.
-    send_queue: SmallVec<[proto::RPC; 16]>,
+    /// The peer this connection belongs to, for log lines.
+    peer_id: PeerId,
+
+    /// Queue of values that we want to send to the remote. First in, first out; the data RPCs in
+    /// it are capped (CRD ch.28 §28.9B RQ1).
+    send_queue: SendQueue,
+
+    /// Wakes the handler when the queue's stuck deadline passes.
+    stuck_timer: Option<Ticker>,
 
     /// Flag indicating that an outbound substream is being established to prevent duplicate
     /// requests.
@@ -164,7 +176,12 @@ enum OutboundSubstreamState {
 
 impl Handler {
     /// Builds a new [`Handler`].
-    pub fn new(protocol_config: ProtocolConfig, idle_timeout: Duration) -> Self {
+    pub fn new(
+        protocol_config: ProtocolConfig,
+        idle_timeout: Duration,
+        peer_id: PeerId,
+        send_queue_config: SendQueueConfig,
+    ) -> Self {
         Handler::Enabled(EnabledHandler {
             listen_protocol: protocol_config,
             inbound_substream: None,
@@ -172,7 +189,9 @@ impl Handler {
             outbound_substream_establishing: false,
             outbound_substream_attempts: 0,
             inbound_substream_attempts: 0,
-            send_queue: SmallVec::new(),
+            peer_id,
+            send_queue: SendQueue::new(send_queue_config),
+            stuck_timer: None,
             peer_kind: None,
             peer_kind_sent: false,
             last_io_activity: Instant::now(),
@@ -183,6 +202,57 @@ impl Handler {
 }
 
 impl EnabledHandler {
+    fn push_to_send_queue(&mut self, rpc: proto::RPC) {
+        match self.send_queue.push(rpc, Instant::now()) {
+            Some(DropLog::First {
+                queued_messages,
+                queued_bytes,
+            }) => log::warn!(
+                "Gossip send queue toward peer {} is full: dropping the oldest queued messages \
+                 (queued {queued_messages} messages, {queued_bytes} bytes)",
+                self.peer_id
+            ),
+            Some(DropLog::Summary { dropped }) => log::warn!(
+                "Gossip send queue toward peer {} is still full: dropped {dropped} messages \
+                 since the last report",
+                self.peer_id
+            ),
+            None => {},
+        }
+    }
+
+    /// Reports a connection that stayed at the send queue cap for the whole stuck period, and
+    /// keeps a timer armed for the deadline otherwise.
+    fn poll_send_queue_stuck(&mut self, cx: &mut Context<'_>) -> Option<HandlerEvent> {
+        let Some(deadline) = self.send_queue.stuck_deadline() else {
+            self.stuck_timer = None;
+            return None;
+        };
+        let now = Instant::now();
+        if now >= deadline {
+            self.stuck_timer = None;
+            let report = self.send_queue.take_stuck(now)?;
+            log::warn!(
+                "Closing the connection to peer {}: gossip send queue at its limit for {:?}, \
+                 {} messages dropped",
+                self.peer_id,
+                report.at_cap,
+                report.total_dropped
+            );
+            return Some(HandlerEvent::SendQueueStuck);
+        }
+        let timer = self
+            .stuck_timer
+            .get_or_insert_with(|| Ticker::new(deadline - now));
+        // A tick only means the deadline is near or the period changed: drop the timer and
+        // re-evaluate on the next poll.
+        if timer.poll_next_unpin(cx).is_ready() {
+            self.stuck_timer = None;
+            cx.waker().wake_by_ref();
+        }
+        None
+    }
+
     fn on_fully_negotiated_inbound(
         &mut self,
         (substream, peer_kind): (Framed<Stream, GossipsubCodec>, PeerKind),
@@ -229,6 +299,10 @@ impl EnabledHandler {
             <Handler as ConnectionHandler>::Error,
         >,
     > {
+        if let Some(event) = self.poll_send_queue_stuck(cx) {
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
+        }
+
         if !self.peer_kind_sent {
             if let Some(peer_kind) = self.peer_kind.as_ref() {
                 self.peer_kind_sent = true;
@@ -322,7 +396,6 @@ impl EnabledHandler {
                 // outbound idle state
                 Some(OutboundSubstreamState::WaitingOutput(substream)) => {
                     if let Some(message) = self.send_queue.pop() {
-                        self.send_queue.shrink_to_fit();
                         self.outbound_substream =
                             Some(OutboundSubstreamState::PendingSend(substream, message));
                         continue;
@@ -415,7 +488,7 @@ impl ConnectionHandler for Handler {
     fn on_behaviour_event(&mut self, message: HandlerIn) {
         match self {
             Handler::Enabled(handler) => match message {
-                HandlerIn::Message(m) => handler.send_queue.push(m),
+                HandlerIn::Message(m) => handler.push_to_send_queue(m),
                 HandlerIn::JoinedMesh => {
                     handler.in_mesh = true;
                 }
@@ -560,6 +633,133 @@ impl ConnectionHandler for Handler {
                 }
             }
             Handler::Disabled(_) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::task::noop_waker;
+
+    fn data_rpc(tag: u8) -> proto::RPC {
+        proto::RPC {
+            subscriptions: vec![],
+            publish: vec![proto::Message {
+                from: None,
+                data: Some(vec![tag; 10]),
+                seqno: None,
+                topic: "t".into(),
+                signature: None,
+                key: None,
+            }],
+            control: None,
+        }
+    }
+
+    fn control_rpc() -> proto::RPC {
+        proto::RPC {
+            subscriptions: vec![proto::SubOpts {
+                subscribe: Some(true),
+                topic_id: Some("t".into()),
+            }],
+            publish: vec![],
+            control: None,
+        }
+    }
+
+    fn handler(max_messages: usize, stuck_timeout: Duration) -> Handler {
+        Handler::new(
+            ProtocolConfig::default(),
+            Duration::from_secs(120),
+            PeerId::random(),
+            SendQueueConfig {
+                max_messages,
+                max_bytes: 1 << 20,
+                stuck_timeout,
+            },
+        )
+    }
+
+    fn enabled(handler: &mut Handler) -> &mut EnabledHandler {
+        match handler {
+            Handler::Enabled(h) => h,
+            Handler::Disabled(_) => panic!("handler is disabled"),
+        }
+    }
+
+    #[test]
+    fn behaviour_events_are_queued_in_order_and_capped() {
+        let mut h = handler(3, Duration::from_secs(60));
+        for tag in 0..5u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+            if tag == 1 {
+                h.on_behaviour_event(HandlerIn::Message(control_rpc()));
+            }
+        }
+        let q = &mut enabled(&mut h).send_queue;
+        assert_eq!(q.data_count(), 3);
+        assert_eq!(q.total_dropped(), 2);
+        let mut seen = vec![];
+        while let Some(rpc) = q.pop() {
+            seen.push(if rpc.publish.is_empty() {
+                None
+            } else {
+                Some(rpc.publish[0].data.as_ref().unwrap()[0])
+            });
+        }
+        // The control RPC survives; the two oldest data RPCs are gone.
+        assert_eq!(seen, vec![None, Some(2), Some(3), Some(4)]);
+    }
+
+    #[test]
+    fn stuck_connection_is_reported_to_the_behaviour_after_the_period() {
+        let mut h = handler(2, Duration::from_millis(200));
+        for tag in 0..3u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut poll_events = |h: &mut Handler| {
+            let mut events = vec![];
+            while let Poll::Ready(ev) = ConnectionHandler::poll(h, &mut cx) {
+                events.push(ev);
+            }
+            events
+        };
+        let is_stuck = |ev: &ConnectionHandlerEvent<_, _, HandlerEvent, Void>| {
+            matches!(
+                ev,
+                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)
+            )
+        };
+        // Before the period is over: only the outbound substream request.
+        assert!(!poll_events(&mut h).iter().any(is_stuck));
+        std::thread::sleep(Duration::from_millis(250));
+        let events = poll_events(&mut h);
+        assert_eq!(events.iter().filter(|ev| is_stuck(ev)).count(), 1);
+        // Reported once per period.
+        assert!(!poll_events(&mut h).iter().any(is_stuck));
+    }
+
+    #[test]
+    fn draining_before_the_period_ends_prevents_the_report() {
+        let mut h = handler(4, Duration::from_millis(100));
+        for tag in 0..5u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        let q = &mut enabled(&mut h).send_queue;
+        while q.data_count() > 2 {
+            q.pop();
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        while let Poll::Ready(ev) = ConnectionHandler::poll(&mut h, &mut cx) {
+            assert!(!matches!(
+                ev,
+                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)
+            ));
         }
     }
 }

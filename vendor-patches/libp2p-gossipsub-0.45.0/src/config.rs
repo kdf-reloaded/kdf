@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::protocol::{ProtocolConfig, ProtocolId, FLOODSUB_PROTOCOL};
+use crate::send_queue::SendQueueConfig;
 use crate::types::{FastMessageId, Message, MessageId, PeerKind, RawMessage};
 
 use libp2p_identity::PeerId;
@@ -96,12 +97,36 @@ pub struct Config {
     max_ihave_messages: usize,
     iwant_followup_time: Duration,
     published_message_ids_cache_time: Duration,
+    send_queue: SendQueueConfig,
     pub i_am_relay: bool,
 }
 
 impl Config {
     pub(crate) fn protocol_config(&self) -> ProtocolConfig {
         self.protocol.clone()
+    }
+
+    pub(crate) fn send_queue_config(&self) -> SendQueueConfig {
+        self.send_queue
+    }
+
+    /// Maximum number of queued data RPCs (RPCs that carry published or forwarded messages)
+    /// toward one connection. When a new one does not fit, the oldest are dropped (default is
+    /// 2048).
+    pub fn send_queue_max_messages(&self) -> usize {
+        self.send_queue.max_messages
+    }
+
+    /// Maximum total encoded size of the queued data RPCs toward one connection (default is
+    /// 4 MiB).
+    pub fn send_queue_max_bytes(&self) -> usize {
+        self.send_queue.max_bytes
+    }
+
+    /// Time a connection may stay at the send queue cap before it is closed. Also the minimum
+    /// interval between two drop summary log lines (default is 60 seconds).
+    pub fn send_queue_stuck_timeout(&self) -> Duration {
+        self.send_queue.stuck_timeout
     }
 
     // Overlay network parameters.
@@ -442,6 +467,7 @@ impl Default for ConfigBuilder {
                 max_ihave_messages: 10,
                 iwant_followup_time: Duration::from_secs(3),
                 published_message_ids_cache_time: Duration::from_secs(10),
+                send_queue: SendQueueConfig::default(),
                 i_am_relay: false,
             },
             invalid_protocol: false,
@@ -600,6 +626,26 @@ impl ConfigBuilder {
     /// The maximum byte size for each gossip (default is 2048 bytes).
     pub fn max_transmit_size(&mut self, max_transmit_size: usize) -> &mut Self {
         self.config.protocol.max_transmit_size = max_transmit_size;
+        self
+    }
+
+    /// The maximum number of data RPCs queued toward one connection (default is 2048).
+    pub fn send_queue_max_messages(&mut self, max_messages: usize) -> &mut Self {
+        self.config.send_queue.max_messages = max_messages;
+        self
+    }
+
+    /// The maximum total encoded size of the data RPCs queued toward one connection (default is
+    /// 4 MiB).
+    pub fn send_queue_max_bytes(&mut self, max_bytes: usize) -> &mut Self {
+        self.config.send_queue.max_bytes = max_bytes;
+        self
+    }
+
+    /// The time a connection may stay at the send queue cap before it is closed (default is
+    /// 60 seconds).
+    pub fn send_queue_stuck_timeout(&mut self, stuck_timeout: Duration) -> &mut Self {
+        self.config.send_queue.stuck_timeout = stuck_timeout;
         self
     }
 
@@ -894,6 +940,7 @@ impl std::fmt::Debug for Config {
         let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
         let _ = builder.field("fanout_ttl", &self.fanout_ttl);
         let _ = builder.field("idle_timeout", &self.idle_timeout);
+        let _ = builder.field("send_queue", &self.send_queue);
         let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
         let _ = builder.field("validate_messages", &self.validate_messages);
         let _ = builder.field("allow_self_origin", &self.allow_self_origin);
