@@ -2636,7 +2636,9 @@ fn test_orderbook_pubkey_sync_request() {
     };
     let mut trie_store = ordermatch_ctx.trie_store.lock();
     let request = trie_store
-        .prepare_sync_request_for_keep_alive(pubkey, message, false, |topic| subscribed_topics.contains(topic))
+        .prepare_sync_request_for_keep_alive(pubkey, message, false, SyncRequestRoot::Held, |topic| {
+            subscribed_topics.contains(topic)
+        })
         .unwrap();
     match request {
         OrdermatchRequest::SyncPubkeyOrderbookState {
@@ -2664,7 +2666,7 @@ fn test_keep_alive_records_local_receipt_time_not_sender_timestamp() {
         timestamp: far_future,
     };
     let mut trie_store = ordermatch_ctx.trie_store.lock();
-    trie_store.prepare_sync_request_for_keep_alive(pubkey, message, false, |_| false);
+    trie_store.prepare_sync_request_for_keep_alive(pubkey, message, false, SyncRequestRoot::Held, |_| false);
     let after = now_ms() / 1000;
 
     let stored = trie_store.pubkeys_state.get(pubkey).unwrap().last_keep_alive;
@@ -2715,7 +2717,9 @@ fn test_orderbook_pubkey_sync_request_relay() {
     };
     let mut trie_store = ordermatch_ctx.trie_store.lock();
     let request = trie_store
-        .prepare_sync_request_for_keep_alive(pubkey, message, true, |topic| subscribed_topics.contains(topic))
+        .prepare_sync_request_for_keep_alive(pubkey, message, true, SyncRequestRoot::Held, |topic| {
+            subscribed_topics.contains(topic)
+        })
         .unwrap();
     match request {
         OrdermatchRequest::SyncPubkeyOrderbookState {
@@ -5323,9 +5327,13 @@ mod reannounce_missing_own_order_tests {
         let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
         let subscribed: HashSet<String> = ordermatch_ctx.orderbook_subscriptions.read().keys().cloned().collect();
         let mut trie_store = ordermatch_ctx.trie_store.lock();
-        trie_store.prepare_sync_request_for_keep_alive("other-pubkey", keep_alive_for(pair), i_am_relay, |t| {
-            subscribed.contains(t)
-        })
+        trie_store.prepare_sync_request_for_keep_alive(
+            "other-pubkey",
+            keep_alive_for(pair),
+            i_am_relay,
+            SyncRequestRoot::Held,
+            |t| subscribed.contains(t),
+        )
     }
 
     #[test]
@@ -5491,6 +5499,7 @@ mod keep_alive_shape_tests {
                         timestamp: 0,
                     },
                     true,
+                    SyncRequestRoot::Held,
                     |_| true,
                 );
                 if let Some(OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. }) = request {
@@ -5621,6 +5630,7 @@ mod keep_alive_receiver_catch_up_tests {
             PK,
             keep_alive_for("C1:C2", advertised),
             true,
+            SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
         ));
         worker.join().unwrap();
@@ -5635,6 +5645,7 @@ mod keep_alive_receiver_catch_up_tests {
             PK,
             keep_alive_for("C1:C2", advertised),
             true,
+            SyncRequestRoot::Held,
             SHORT_WAIT_MS,
         ));
         assert!(matches!(
@@ -5666,6 +5677,7 @@ mod keep_alive_receiver_catch_up_tests {
             PK,
             keep_alive_for("C1:C2", [7; 8]),
             true,
+            SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
         ));
         let returned = std::time::Instant::now();
@@ -5812,5 +5824,464 @@ mod unchanged_order_update_tests {
         assert_eq!(published_updates(&mut rx), vec![order.orderbook_topic()]);
 
         std::fs::remove_dir_all(dbdir).ok();
+    }
+}
+
+/// Measurements of the keep-alive synchronization exchange between two of our own nodes (CRD ch.32
+/// R-Q4, R-Q4a). `M` is a responder (the maker, or a relay that is fully
+/// up to date with it), `P` a peer that received a keep-alive from `M`. Our receiver and responder
+/// functions run unchanged; only the network hop is replaced by a direct call.
+mod keep_alive_sync_measurement {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    const MAKER: &str = "021111111111111111111111111111111111111111111111111111111111111111";
+
+    /// Deterministic xorshift generator, so every run measures the same sequence.
+    struct Rng64(u64);
+
+    impl Rng64 {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 { self.next() % n }
+    }
+
+    fn new_node() -> MmArc { make_ctx_for_tests().0 }
+
+    fn pairs(k: usize) -> Vec<(String, String)> { (0..k).map(|i| (format!("B{}", i), format!("R{}", i))).collect() }
+
+    fn seed_orders(k: usize, per_pair: usize) -> Vec<OrderbookItem> {
+        pairs(k)
+            .into_iter()
+            .flat_map(|(base, rel)| make_random_orders(MAKER.to_owned(), &[0; 32], base, rel, per_pair))
+            .collect()
+    }
+
+    fn insert_all(ctx: &MmArc, orders: &[OrderbookItem]) {
+        for order in orders {
+            insert_or_update_order(ctx, order.clone());
+        }
+        flush_trie(ctx);
+    }
+
+    fn price_update(rng: &mut Rng64, uuid: Uuid) -> MakerOrderUpdated {
+        let mut msg = MakerOrderUpdated::new(uuid);
+        msg.with_new_price(BigRational::new(
+            (2000 + rng.below(10_000_000)).into(),
+            1_000_000.into(),
+        ));
+        msg
+    }
+
+    /// The maker's order set as `P` should see it: uuid → (price, max, min).
+    fn book(ctx: &MmArc) -> BTreeMap<Uuid, (BigRational, BigRational, BigRational)> {
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let orderbook = octx.orderbook.lock();
+        orderbook
+            .order_set
+            .values()
+            .filter(|o| o.pubkey == MAKER)
+            .map(|o| (o.uuid, (o.price.clone(), o.max_volume.clone(), o.min_volume.clone())))
+            .collect()
+    }
+
+    fn roots(ctx: &MmArc) -> HashMap<AlbOrderedOrderbookPair, H64> {
+        flush_trie(ctx);
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let trie_store = octx.trie_store.lock();
+        trie_store
+            .pubkeys_state
+            .get(MAKER)
+            .map(|s| s.trie_roots.clone())
+            .unwrap_or_default()
+    }
+
+    /// What `M` would advertise in its keep-alive right now.
+    fn keep_alive(ctx: &MmArc) -> PubkeyKeepAlive {
+        PubkeyKeepAlive {
+            trie_roots: advertisable_roots(&roots(ctx)),
+            timestamp: now_ms() / 1000,
+        }
+    }
+
+    /// `P` processes one keep-alive copy and returns the request it would send, naming the root
+    /// `request_root` selects. `P`'s worker is flushed first (R-T3b item 4).
+    fn prepare_with(
+        ctx: &MmArc,
+        msg: PubkeyKeepAlive,
+        request_root: SyncRequestRoot,
+    ) -> Option<HashMap<AlbOrderedOrderbookPair, H64>> {
+        flush_trie(ctx);
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let mut trie_store = octx.trie_store.lock();
+        match trie_store.prepare_sync_request_for_keep_alive(MAKER, msg, true, request_root, |_| true)? {
+            OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. } => Some(trie_roots),
+            other => panic!("unexpected request {:?}", other),
+        }
+    }
+
+    fn root_form(use_held_root: bool) -> SyncRequestRoot {
+        if use_held_root {
+            SyncRequestRoot::Held
+        } else {
+            SyncRequestRoot::Advertised
+        }
+    }
+
+    /// `P` applies `M`'s answer exactly as `process_orders_keep_alive` does after the network hop.
+    fn apply_answer(ctx: &MmArc, response: SyncPubkeyOrderbookStateRes) {
+        let octx = OrdermatchContext::from_ctx(ctx).unwrap();
+        {
+            let mut orderbook = octx.orderbook.lock();
+            let mut ops = Vec::new();
+            for (pair, diff) in response.pair_orders_diff {
+                let params = ProcessTrieParams {
+                    pubkey: MAKER,
+                    alb_pair: &pair,
+                    protocol_infos: &response.protocol_infos,
+                    conf_infos: &response.conf_infos,
+                };
+                let mut pair_ops = match diff {
+                    DeltaOrFullTrie::Delta(delta) => process_trie_delta(&mut orderbook, delta, params),
+                    DeltaOrFullTrie::FullTrie(values) => process_pubkey_full_trie(&mut orderbook, values, params),
+                };
+                ops.append(&mut pair_ops);
+            }
+            orderbook.queue_trie_ops(&octx.trie_ops_tx, ops);
+        }
+        flush_trie(ctx);
+    }
+
+    fn sync_once(m: &MmArc, p: &MmArc, request: HashMap<AlbOrderedOrderbookPair, H64>) {
+        flush_trie(m);
+        let response = process_sync_pubkey_orderbook_state(m.clone(), MAKER.to_owned(), request)
+            .unwrap()
+            .unwrap();
+        apply_answer(p, response);
+    }
+
+    /// A peer that sees the maker for the first time (fresh start, new subscription, restarted seed)
+    /// while the maker keeps updating: the keep-alive it received is already behind `M` when its
+    /// request arrives.
+    fn fresh_peer_round(use_held_root: bool) -> (bool, usize, usize) {
+        let mut rng = Rng64(0x5eed_0001);
+        let (m, p) = (new_node(), new_node());
+        let orders = seed_orders(4, 5);
+        insert_all(&m, &orders);
+
+        let msg = keep_alive(&m);
+        // Updates made by the maker while the keep-alive and the request travel.
+        for _ in 0..3 {
+            let uuid = orders[rng.below(orders.len() as u64) as usize].uuid;
+            process_maker_order_updated(m.clone(), MAKER.to_owned(), price_update(&mut rng, uuid));
+        }
+
+        let request = prepare_with(&p, msg, root_form(use_held_root)).expect("a fresh peer must request");
+        sync_once(&m, &p, request);
+        (book(&p) == book(&m), book(&p).len(), book(&m).len())
+    }
+
+    #[test]
+    fn fresh_peer_with_advertised_root_ends_with_a_partial_book() {
+        let (converged, p_len, m_len) = fresh_peer_round(false);
+        println!("advertised root: peer holds {} of {} orders", p_len, m_len);
+        assert!(
+            !converged,
+            "the delta from the advertised root must not rebuild a fresh peer"
+        );
+        assert!(p_len < m_len);
+    }
+
+    #[test]
+    fn fresh_peer_with_held_root_gets_the_full_book() {
+        let (converged, p_len, m_len) = fresh_peer_round(true);
+        println!("held root: peer holds {} of {} orders", p_len, m_len);
+        assert!(converged);
+    }
+
+    /// The `[0;8]` path: a fresh relay asks with the advertised root, the maker has since cancelled
+    /// one order, the delta only removes an order the relay never had, so the relay's root for the
+    /// pair stays the zero placeholder while the exchange counts as a success (the keep-alive is
+    /// forwarded). The next peer that asks the relay gets `InvalidStateRoot([0, 0, 0, 0, 0, 0, 0, 0])`.
+    #[test]
+    fn zero_root_survives_a_successful_sync_and_fails_the_next_requester() {
+        let (m, p) = (new_node(), new_node());
+        let orders = seed_orders(1, 3);
+        insert_all(&m, &orders);
+        let msg = keep_alive(&m);
+        let pair = msg.trie_roots.keys().next().unwrap().clone();
+        let advertised = msg.trie_roots[&pair];
+
+        delete_order(&m, MAKER, orders[0].uuid);
+        let request = prepare_with(&p, msg, SyncRequestRoot::Advertised).expect("a fresh relay must request");
+        sync_once(&m, &p, request);
+
+        assert_eq!(roots(&p).get(&pair), Some(&H64::default()), "zero placeholder survives");
+        let next = HashMap::from_iter(iter::once((pair.clone(), advertised)));
+        let err = process_sync_pubkey_orderbook_state(p.clone(), MAKER.to_owned(), next).unwrap_err();
+        println!("downstream requester gets: {}", err);
+        assert!(err.contains("InvalidStateRoot([0, 0, 0, 0, 0, 0, 0, 0])"), "{}", err);
+    }
+
+    /// The same exchange with the request this node sends: it names the zero root the relay holds,
+    /// which is never a history key, so the answer is the full set and the relay ends at the maker's
+    /// root and answers the next requester.
+    #[test]
+    fn held_root_request_leaves_no_zero_root_behind() {
+        let (m, p) = (new_node(), new_node());
+        let orders = seed_orders(1, 3);
+        insert_all(&m, &orders);
+        let msg = keep_alive(&m);
+        let pair = msg.trie_roots.keys().next().unwrap().clone();
+
+        delete_order(&m, MAKER, orders[0].uuid);
+        let request = prepare_with(&p, msg, SyncRequestRoot::Held).expect("a fresh relay must request");
+        assert_eq!(
+            request.get(&pair),
+            Some(&H64::default()),
+            "the request names the held root"
+        );
+        sync_once(&m, &p, request);
+
+        assert_eq!(roots(&p).get(&pair), roots(&m).get(&pair));
+        assert_eq!(book(&p), book(&m));
+        let next = HashMap::from_iter(iter::once((pair, H64::default())));
+        assert!(process_sync_pubkey_orderbook_state(p.clone(), MAKER.to_owned(), next).is_ok());
+    }
+
+    /// The aggregated keep-alive shape Reloaded used to publish (one payload with every root, once per
+    /// pair topic), measured: copies are processed concurrently (one task per gossip message), so each
+    /// sees the same divergence (CRD ch.32 R-K2a divergence note).
+    #[test]
+    fn k_topic_copies_yield_k_requests_each_for_every_diverging_pair() {
+        const K: usize = 6;
+        let mut rng = Rng64(0x5eed_0003);
+        let (m, p) = (new_node(), new_node());
+        let orders = seed_orders(K, 3);
+        insert_all(&m, &orders);
+        insert_all(&p, &orders);
+        // One price change per pair that `P` has not seen yet.
+        for (base, rel) in pairs(K) {
+            let uuid = orders
+                .iter()
+                .find(|o| o.base == base && o.rel == rel)
+                .map(|o| o.uuid)
+                .unwrap();
+            process_maker_order_updated(m.clone(), MAKER.to_owned(), price_update(&mut rng, uuid));
+        }
+
+        let advertised = keep_alive(&m).trie_roots;
+        let requests: Vec<_> = (0..K)
+            .filter_map(|_| {
+                prepare_with(
+                    &p,
+                    PubkeyKeepAlive {
+                        trie_roots: advertised.clone(),
+                        timestamp: 0,
+                    },
+                    SyncRequestRoot::Held,
+                )
+            })
+            .collect();
+        let pair_entries: usize = requests.iter().map(|r| r.len()).sum();
+        println!(
+            "K={} copies -> {} requests, {} pair entries in total",
+            K,
+            requests.len(),
+            pair_entries
+        );
+        assert_eq!(requests.len(), K);
+        assert_eq!(pair_entries, K * K);
+    }
+
+    /// Steady state over many keep-alive rounds. Per round the maker updates `per_round` orders; the
+    /// last `reorder` of them reach `P` only after the keep-alive (they travel on another topic's
+    /// mesh), the maker makes `in_flight` further updates between its keep-alive and `P`'s request,
+    /// and `P` misses about one in `loss_one_in` of the updates made before the keep-alive for good
+    /// (the divergence the keep-alive exists to repair; updates after it are always delivered). Returns the rounds in which `P`
+    /// sent requests, the requests sent, and the rounds that ended with `P` still diverged.
+    fn steady_state(
+        use_held_root: bool,
+        per_round: usize,
+        reorder: usize,
+        in_flight: usize,
+        loss_one_in: u64,
+    ) -> (usize, usize, usize) {
+        const ROUNDS: usize = 20;
+        const K: usize = 4;
+        let mut rng = Rng64(0x5eed_0004);
+        let (m, p) = (new_node(), new_node());
+        let orders = seed_orders(K, 5);
+        insert_all(&m, &orders);
+        insert_all(&p, &orders);
+
+        // The maker applies an update; it returns the message unless `P` loses it for good.
+        let update = |rng: &mut Rng64, may_be_lost: bool| {
+            let uuid = orders[rng.below(orders.len() as u64) as usize].uuid;
+            let msg = price_update(rng, uuid);
+            process_maker_order_updated(m.clone(), MAKER.to_owned(), msg.clone());
+            if may_be_lost && rng.below(loss_one_in) == 0 {
+                None
+            } else {
+                Some(msg)
+            }
+        };
+        let deliver = |msg: MakerOrderUpdated| {
+            process_maker_order_updated(p.clone(), MAKER.to_owned(), msg);
+        };
+
+        let (mut rounds_with_requests, mut requests_sent, mut rounds_diverged) = (0, 0, 0);
+        for _ in 0..ROUNDS {
+            let mut late = Vec::new();
+            for i in 0..per_round {
+                if let Some(msg) = update(&mut rng, true) {
+                    if i + reorder >= per_round {
+                        late.push(msg);
+                    } else {
+                        deliver(msg);
+                    }
+                }
+            }
+            let msg = keep_alive(&m);
+            late.extend((0..in_flight).filter_map(|_| update(&mut rng, false)));
+
+            let copies: Vec<_> = (0..K)
+                .filter_map(|_| {
+                    prepare_with(
+                        &p,
+                        PubkeyKeepAlive {
+                            trie_roots: msg.trie_roots.clone(),
+                            timestamp: 0,
+                        },
+                        root_form(use_held_root),
+                    )
+                })
+                .collect();
+            if !copies.is_empty() {
+                rounds_with_requests += 1;
+                requests_sent += copies.len();
+            }
+            for request in copies {
+                sync_once(&m, &p, request);
+            }
+            late.into_iter().for_each(deliver);
+            flush_trie(&p);
+            if book(&p) != book(&m) {
+                rounds_diverged += 1;
+            }
+        }
+        (rounds_with_requests, requests_sent, rounds_diverged)
+    }
+
+    #[test]
+    fn measure_steady_state_request_load() {
+        const NONE: u64 = u64::MAX;
+        println!("root       per_round reorder in_flight loss_1_in rounds_w_req requests diverged (20 rounds, K=4)");
+        let mut results = HashMap::new();
+        let cases = [
+            (0, 0, 0, NONE),
+            (5, 0, 0, NONE),
+            (30, 5, 10, NONE),
+            (30, 0, 10, 20),
+            (30, 5, 10, 20),
+        ];
+        for &(per_round, reorder, in_flight, loss) in &cases {
+            for &held in &[false, true] {
+                let r = steady_state(held, per_round, reorder, in_flight, loss);
+                println!(
+                    "{:10} {:9} {:7} {:9} {:9} {:12} {:8} {:8}",
+                    if held { "held" } else { "advertised" },
+                    per_round,
+                    reorder,
+                    in_flight,
+                    if loss == NONE { "-".to_owned() } else { loss.to_string() },
+                    r.0,
+                    r.1,
+                    r.2
+                );
+                results.insert((held, per_round, reorder, in_flight, loss), r);
+            }
+        }
+        // A quiet maker, and a maker whose updates all arrive before its keep-alive, cost nothing.
+        assert_eq!(results[&(false, 0, 0, 0, NONE)], (0, 0, 0));
+        assert_eq!(results[&(false, 5, 0, 0, NONE)], (0, 0, 0));
+        // Updates that merely arrive after the keep-alive cost requests but no lasting divergence.
+        assert_eq!(results[&(false, 30, 5, 10, NONE)].2, 0);
+        // A lost update is repaired by the next keep-alive with the held root, but not with the
+        // advertised root while the maker keeps moving.
+        assert_eq!(results[&(true, 30, 0, 10, 20)].2, 0);
+        assert_eq!(results[&(true, 30, 5, 10, 20)].2, 0);
+        assert!(results[&(false, 30, 0, 10, 20)].2 > 0);
+    }
+}
+
+/// CRD ch.32 R-Q4a, T-Q4a: the request names the held root by default, the advertised root with
+/// `orderbook_sync_names_held_root` set to `false`.
+mod sync_request_root_tests {
+    use super::*;
+
+    const PK: &str = "pubkey";
+
+    fn request_roots(
+        octx: &OrdermatchContext,
+        request_root: SyncRequestRoot,
+        entries: &[(&str, H64)],
+    ) -> HashMap<AlbOrderedOrderbookPair, H64> {
+        let keep_alive = PubkeyKeepAlive {
+            trie_roots: entries.iter().map(|(pair, root)| ((*pair).to_owned(), *root)).collect(),
+            timestamp: 0,
+        };
+        match octx
+            .trie_store
+            .lock()
+            .prepare_sync_request_for_keep_alive(PK, keep_alive, true, request_root, |_| true)
+        {
+            Some(OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. }) => trie_roots,
+            other => panic!("expected a request, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn held_root_by_default_and_zero_for_an_unsynchronized_pair() {
+        let (octx, mut rx) = ordermatch_ctx_without_worker();
+        for o in make_random_orders(PK.to_owned(), &[0; 32], "C1".into(), "C2".into(), 3) {
+            index_insert_and_queue(&octx, o);
+        }
+        drain_trie_queue(&octx, &mut rx);
+        let held = pair_trie_root_by_pub_ctx(&octx, PK, "C1:C2");
+
+        let request = request_roots(&octx, SyncRequestRoot::Held, &[("C1:C2", [7; 8]), ("C3:C4", [9; 8])]);
+        assert_eq!(request.get("C1:C2"), Some(&held));
+        assert_eq!(request.get("C3:C4"), Some(&H64::default()));
+
+        let request = request_roots(&octx, SyncRequestRoot::Advertised, &[
+            ("C1:C2", [7; 8]),
+            ("C3:C4", [9; 8]),
+        ]);
+        assert_eq!(request.get("C1:C2"), Some(&[7; 8]));
+        assert_eq!(request.get("C3:C4"), Some(&[9; 8]));
+    }
+
+    #[test]
+    fn the_switch_selects_the_root() {
+        let ctx_with = |conf: Json| MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        assert_eq!(SyncRequestRoot::configured(&ctx_with(json!({}))), SyncRequestRoot::Held);
+        assert_eq!(
+            SyncRequestRoot::configured(&ctx_with(json!({ "orderbook_sync_names_held_root": true }))),
+            SyncRequestRoot::Held
+        );
+        assert_eq!(
+            SyncRequestRoot::configured(&ctx_with(json!({ "orderbook_sync_names_held_root": "false" }))),
+            SyncRequestRoot::Held
+        );
+        assert_eq!(
+            SyncRequestRoot::configured(&ctx_with(json!({ "orderbook_sync_names_held_root": false }))),
+            SyncRequestRoot::Advertised
+        );
     }
 }

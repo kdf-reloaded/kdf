@@ -102,6 +102,7 @@ pub(crate) async fn process_orders_keep_alive(
         &from_pubkey,
         keep_alive,
         i_am_relay,
+        SyncRequestRoot::configured(&ctx),
         TRIE_CATCH_UP_BOUND_MS,
     )
     .await;
@@ -146,6 +147,27 @@ pub(crate) async fn process_orders_keep_alive(
     true
 }
 
+/// The root a keep-alive synchronization request names for a diverged pair (CRD ch.32 R-Q4, R-Q4a).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SyncRequestRoot {
+    /// The root this node holds for the pair (R-Q4a, Reloaded's default).
+    Held,
+    /// The root the keep-alive advertised (R-Q4, the reference's form).
+    Advertised,
+}
+
+impl SyncRequestRoot {
+    /// The MM2.json boolean `orderbook_sync_names_held_root`, default `true`; only an explicit JSON
+    /// `false` selects the advertised root.
+    pub(crate) fn configured(ctx: &MmArc) -> Self {
+        if ctx.conf["orderbook_sync_names_held_root"].as_bool() == Some(false) {
+            SyncRequestRoot::Advertised
+        } else {
+            SyncRequestRoot::Held
+        }
+    }
+}
+
 /// The synchronization request (if any) a received keep-alive calls for (CRD ch.32 R-Q4). The
 /// receipt time is recorded first; the roots are then compared with a trie store that reflects
 /// every index operation completed before the keep-alive is handled (R-T3b item 4). This runs on
@@ -157,6 +179,7 @@ pub(crate) async fn keep_alive_sync_request(
     from_pubkey: &str,
     keep_alive: new_protocol::PubkeyKeepAlive,
     i_am_relay: bool,
+    request_root: SyncRequestRoot,
     catch_up_bound_ms: u64,
 ) -> Option<OrdermatchRequest> {
     // CRD ch.32 R-P3: the receiver's own clock, recorded before anything else.
@@ -180,7 +203,7 @@ pub(crate) async fn keep_alive_sync_request(
     };
 
     let mut trie_store = ordermatch_ctx.trie_store.lock();
-    trie_store.prepare_sync_request_for_keep_alive(from_pubkey, keep_alive, i_am_relay, |topic: &str| {
+    trie_store.prepare_sync_request_for_keep_alive(from_pubkey, keep_alive, i_am_relay, request_root, |topic: &str| {
         subscribed_topics.contains(topic)
     })
 }
@@ -1335,6 +1358,7 @@ impl TrieStore {
         from_pubkey: &str,
         message: new_protocol::PubkeyKeepAlive,
         i_am_relay: bool,
+        request_root: SyncRequestRoot,
         is_subscribed: impl Fn(&str) -> bool,
     ) -> Option<OrdermatchRequest> {
         let pubkey_state = pubkey_state_mut(&mut self.pubkeys_state, from_pubkey);
@@ -1361,7 +1385,14 @@ impl TrieStore {
 
             let actual_trie_root = order_pair_root_mut(&mut pubkey_state.trie_roots, &alb_pair);
             if *actual_trie_root != trie_root {
-                trie_roots_to_request.insert(alb_pair, trie_root);
+                let named_root = match request_root {
+                    // The responder answers with the changes since the root the request names
+                    // (`DeltaOrFullTrie::from_history`); the zero root of a pair not synchronized yet
+                    // is never a history key and gets the full set.
+                    SyncRequestRoot::Held => *actual_trie_root,
+                    SyncRequestRoot::Advertised => trie_root,
+                };
+                trie_roots_to_request.insert(alb_pair, named_root);
             }
         }
 

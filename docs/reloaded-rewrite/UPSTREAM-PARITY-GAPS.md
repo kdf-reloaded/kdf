@@ -804,10 +804,10 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 - [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
   longer refuses while its trie worker lags (amended R-T3b item 2); it answers
   from the store as it stands, as the reference does.
-- [ ] Decided 2026-10-28 (ch. 32 R-Q4a): Reloaded names its own held root in
+- [x] *Done 2026-10-28 (ch. 32 R-Q4a):* Reloaded names its own held root in
   the synchronization request by default; wire-compatible, yields usable
   deltas; a deliberate divergence with the opt-back switch
-  `orderbook_sync_names_held_root`. Closed when the code lands.
+  `orderbook_sync_names_held_root`.
 - [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
   in-flight synchronization de-duplication, orphan-node release, inbound
   task cap. Deferred, none bound.

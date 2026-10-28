@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
+  shows that a node's copy of the maker's orders differs, the node asks another node for an update.
+  It used to describe its copy by the maker's advertised state instead of its own, so while the maker
+  kept changing orders the answer could be meant for a different copy, and the node kept only part of
+  the maker's orders, asking again every 30 seconds. The node now names the state it actually holds and
+  gets the changes it can apply, or the full set. Set the `MM2.json` boolean
+  `orderbook_sync_names_held_root` to `false` to ask the way GLEEC KDF does. Detail: CRD ch.32 R-Q4a.
+
 - **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot that
   re-submits all of its orders on every refresh used to send one message per order to every node, even
   when price, volumes and confirmations stayed the same. Such an update is still saved and answered as
