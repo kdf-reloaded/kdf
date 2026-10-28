@@ -571,6 +571,7 @@ impl SwapOps for BchCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -580,6 +581,7 @@ impl SwapOps for BchCoin {
         utxo_common::search_for_swap_tx_spend_my(
             &self.utxo_arc,
             time_lock,
+            my_pub,
             other_pub,
             secret_hash,
             tx,
@@ -592,6 +594,7 @@ impl SwapOps for BchCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -601,6 +604,7 @@ impl SwapOps for BchCoin {
         utxo_common::search_for_swap_tx_spend_other(
             &self.utxo_arc,
             time_lock,
+            my_pub,
             other_pub,
             secret_hash,
             tx,

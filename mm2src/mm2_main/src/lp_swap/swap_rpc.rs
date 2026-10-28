@@ -565,15 +565,20 @@ pub async fn recover_funds_of_swap(ctx: MmArc, req: Json) -> Result<Response<Vec
     };
 
     let recover_data = try_s!(swap.recover_funds(ctx).await);
-    let res = try_s!(json::to_vec(&json!({
+    let res = try_s!(json::to_vec(&recovered_swap_response(&recover_data)));
+    Ok(try_s!(Response::builder().body(res)))
+}
+
+/// The success response of `recover_funds_of_swap`. Its fields are the reference's; none is added (CRD ch.39 R39.5.4).
+fn recovered_swap_response(recover_data: &RecoveredSwap) -> Json {
+    json!({
         "result": {
             "action": recover_data.action,
             "coin": recover_data.coin,
             "tx_hash": recover_data.transaction.tx_hash(),
             "tx_hex": BytesJson::from(recover_data.transaction.tx_hex()),
         }
-    })));
-    Ok(try_s!(Response::builder().body(res)))
+    })
 }
 
 pub async fn import_swaps(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -662,6 +667,26 @@ mod lp_swap_tests {
 
     /// Tests use the legacy mainnet netid 8762 fee parameters.
     fn test_net_cfg() -> &'static dyn NetConfig { mm2_net_config::net_config_or_panic(8762) }
+
+    /// CRD ch.39 R39.5.4: the success response of `recover_funds_of_swap` keeps the reference's four fields;
+    /// the HTLC key that matched is reported in the log and in error texts only.
+    #[test]
+    fn recover_funds_of_swap_success_response_has_exactly_the_reference_fields() {
+        let tx: coins::utxo::UtxoTx = "0100000001de7aa8d29524906b2b54ee2e0281f3607f75662cbc9080df81d1047b78e21dbc00000000d7473044022079b6c50820040b1fbbe9251ced32ab334d33830f6f8d0bf0a40c7f1336b67d5b0220142ccf723ddabb34e542ed65c395abc1fbf5b6c3e730396f15d25c49b668a1a401209da937e5609680cb30bff4a7661364ca1d1851c2506fa80c443f00a3d3bf7365004c6b6304f62b0e5cb175210270e75970bb20029b3879ec76c4acd320a8d0589e003636264d01a7d566504bfbac6782012088a9142fb610d856c19fd57f2d0cffe8dff689074b3d8a882103f368228456c940ac113e53dad5c104cf209f2f102a409207269383b6ab9b03deac68ffffffff01d0dc9800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac40280e5c".into();
+        let recovered = RecoveredSwap {
+            action: RecoveredSwapAction::RefundedMyPayment,
+            coin: "ticker".to_owned(),
+            transaction: tx.into(),
+        };
+        let response = recovered_swap_response(&recovered);
+        let result = response["result"].as_object().expect("a result object");
+        let mut keys: Vec<&str> = result.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["action", "coin", "tx_hash", "tx_hex"]);
+        assert_eq!(response.as_object().expect("an object").len(), 1);
+        assert!(!response.to_string().contains("htlc_key"));
+        assert_eq!(result["action"], "RefundedMyPayment");
+    }
 
     #[test]
     fn recent_swap_status_json_skips_missing_swap() {

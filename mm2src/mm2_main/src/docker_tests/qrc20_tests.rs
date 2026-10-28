@@ -575,6 +575,7 @@ fn test_search_for_swap_tx_spend_taker_spent() {
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
+        maker_coin.my_public_key().unwrap(),
         taker_pub,
         secret_hash,
         &payment_tx_hex,
@@ -643,6 +644,7 @@ fn test_search_for_swap_tx_spend_maker_refunded() {
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
+        maker_coin.my_public_key().unwrap(),
         &taker_pub,
         secret_hash,
         &payment_tx_hex,
@@ -690,6 +692,7 @@ fn test_search_for_swap_tx_spend_not_spent() {
 
     let actual = block_on(maker_coin.search_for_swap_tx_spend_my(
         timelock,
+        maker_coin.my_public_key().unwrap(),
         &taker_pub,
         secret_hash,
         &payment_tx_hex,
@@ -1395,6 +1398,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_maker() {
     let found = block_on(coin.search_for_swap_tx_spend_my(
         time_lock,
         coin.my_public_key().unwrap(),
+        coin.my_public_key().unwrap(),
         &[0; 20],
         &tx.tx_hex(),
         0,
@@ -1433,6 +1437,7 @@ fn test_search_for_segwit_swap_tx_spend_native_was_refunded_taker() {
 
     let found = block_on(coin.search_for_swap_tx_spend_my(
         time_lock,
+        coin.my_public_key().unwrap(),
         coin.my_public_key().unwrap(),
         &[0; 20],
         &tx.tx_hex(),

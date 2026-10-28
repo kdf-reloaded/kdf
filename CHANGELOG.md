@@ -246,6 +246,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
   The change of a send made by another instance on the same seed still shows only once mined. Run
   one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39 R39.8.0ag1.
+- **Recovering an ARRR swap no longer fails with "does not pay the HTLC script".** Every ARRR swap
+  uses its own key for the swap's payment, but `recover_funds_of_swap` checked the payment with the
+  wallet's permanent key, so recovery always stopped with that error, even for a payment that had
+  long been refunded. Recovery now tries the swap's own key first and the wallet's permanent key
+  second, so swaps saved by older or other builds are recovered too. The log, and any error, say
+  which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
+  payment that is still waiting is refunded; and the swap completes if the other side spent it. The
+  error, when it is genuine, now says both keys were tried and shows the transaction id the way
+  explorers do. Detail: CRD ch.39 R39.5.4.
 - **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
   input points past the end of the previous transaction's outputs, a BCH transaction with no
   outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
