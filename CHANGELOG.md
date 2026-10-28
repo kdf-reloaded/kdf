@@ -257,6 +257,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
+- **Recovering an ARRR swap saved by another build no longer fails with "Invalid address".** Some swap files
+  carry an HTLC public key that does not belong to the private key saved with them. Recovery recognized the
+  payment by that public key, then built the refund with the saved private key, which produced a different
+  script, and the transaction builder rejected it. Recovery now always signs with the private key that
+  belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
+  key, the error now says so, naming the key. Detail: CRD ch.39 R39.5.4.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
