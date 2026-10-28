@@ -5459,3 +5459,88 @@ fn test_relay_mesh_join_is_reported() {
     gs.handle_i_am_relay(&peers[0], true);
     assert_eq!(relay_joined(&gs), 1);
 }
+
+#[test]
+// The queue signal toward a relay connection is counted and reported once, a closed connection clears it, and the
+// close of the last connection to a relay is reported (CRD ch.32 §32.9B R-MP2 item 2).
+fn test_queue_signal_and_relay_connection_close() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let endpoint = ConnectedPoint::Dialer {
+        address: Multiaddr::empty(),
+        role_override: Endpoint::Dialer,
+    };
+    let signal_events = |gs: &Behaviour<_, _>| {
+        gs.events
+            .iter()
+            .filter_map(|e| match e {
+                ToSwarm::GenerateEvent(Event::SendQueueSignal { raised, .. }) => Some(*raised),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let relay_closes = |gs: &Behaviour<_, _>| {
+        gs.events
+            .iter()
+            .filter(|e| matches!(e, ToSwarm::GenerateEvent(Event::RelayConnectionClosed { .. })))
+            .count()
+    };
+    let connect = |gs: &mut Behaviour<_, _>, id: usize, relay: bool| {
+        let peer = PeerId::random();
+        let conn = ConnectionId::new_unchecked(id);
+        let handler = gs
+            .handle_established_outbound_connection(conn, peer, &Multiaddr::empty(), Endpoint::Dialer)
+            .unwrap();
+        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: conn,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        if relay {
+            gs.connected_relays.insert(peer);
+        }
+        (peer, conn, handler)
+    };
+    let (relay, relay_conn, relay_handler) = connect(&mut gs, 1, true);
+    let (other, other_conn, other_handler) = connect(&mut gs, 2, false);
+    flush_events(&mut gs);
+
+    // A signal toward a non-relay peer is not a relay signal.
+    gs.on_connection_handler_event(other, other_conn, HandlerEvent::SendQueueSignal { raised: true });
+    assert!(!gs.relay_queue_signal());
+    assert_eq!(gs.queue_signals_raised(), 0);
+    gs.on_connection_handler_event(relay, relay_conn, HandlerEvent::SendQueueSignal { raised: true });
+    gs.on_connection_handler_event(relay, relay_conn, HandlerEvent::SendQueueSignal { raised: true });
+    assert!(gs.relay_queue_signal());
+    assert_eq!(gs.queue_signals_raised(), 1);
+    assert_eq!(signal_events(&gs), vec![true, true]);
+
+    // Closing the connection clears the signal and reports the close of the relay.
+    flush_events(&mut gs);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: relay,
+        connection_id: relay_conn,
+        endpoint: &endpoint,
+        handler: relay_handler,
+        remaining_established: 0,
+    }));
+    assert!(!gs.relay_queue_signal());
+    assert_eq!(signal_events(&gs), vec![false]);
+    assert_eq!(relay_closes(&gs), 1);
+
+    // The close of a connection to a non-relay peer is no relay close.
+    flush_events(&mut gs);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: other,
+        connection_id: other_conn,
+        endpoint: &endpoint,
+        handler: other_handler,
+        remaining_established: 0,
+    }));
+    assert_eq!(relay_closes(&gs), 0);
+}

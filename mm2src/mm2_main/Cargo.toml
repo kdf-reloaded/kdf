@@ -154,8 +154,6 @@ rustls-pemfile = "2.2"
 libp2p = { workspace = true, features = ["gossipsub", "noise", "ping", "macros", "yamux"] }
 
 [dev-dependencies]
-# Measurement knobs of the maker publication rate lab; never enabled in a shipped build.
-mm2_p2p = { path = "../mm2_p2p", features = ["application", "lab-knobs"] }
 crypto = { path = "../crypto", features = ["test-helpers"] }
 mocktopus = "0.8.0"
 testcontainers = { path = "../testcontainers-vendored" }

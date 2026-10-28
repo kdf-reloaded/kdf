@@ -8184,8 +8184,9 @@ mod maker_publication_tests {
         );
         assert_eq!(pending(&ctx), 2, "the outbox is untouched");
 
-        // A keep-alive is not priority.
+        // A keep-alive is not priority. The outbox is degraded, so the keep-alive does not wait for the pending messages.
         let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        octx.maker_outbox.outboxes.lock().signal(now_ms(), SignalKind::Close);
         block_on(broadcast_keep_alive_for_pub(&ctx, &octx, &pubkey_of(&ctx), None));
         let published = drain(&mut rx);
         assert!(published.iter().any(|p| kind(&p.message) == "keep-alive"));
@@ -8348,12 +8349,53 @@ mod maker_publication_tests {
         assert!(propagated(&mut rx), "a cancellation is propagated with priority");
     }
 
-    /// T-MP6: the pending messages of a pair are published before the keep-alive of that pair. A receiver that
-    /// applies the published messages in order holds the advertised root and requests no synchronization; without
-    /// the pending messages it does.
+    /// A receiver applies the given published messages in order and collects its synchronization requests.
+    fn apply_to_a_receiver(maker: &MmArc, messages: Vec<&Published>) -> Vec<Option<OrdermatchRequest>> {
+        let _ = maker;
+        let (receiver, _rx) = node(json!({}));
+        let recv_octx = OrdermatchContext::from_ctx(&receiver).unwrap();
+        let mut requests = Vec::new();
+        for p in messages {
+            let (message, _sig, signer) = decode_signed::<OrdermatchMessage>(&p.bytes).unwrap();
+            match message {
+                OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
+                    let request = block_on(keep_alive_sync_request(
+                        &recv_octx,
+                        &signer.to_hex(),
+                        keep_alive,
+                        true,
+                        SyncRequestRoot::Held,
+                        TRIE_CATCH_UP_BOUND_MS,
+                    ));
+                    requests.push(request);
+                },
+                _ => {
+                    block_on(process_msg(receiver.clone(), vec![], "peer".into(), &p.bytes, true));
+                },
+            }
+        }
+        requests
+    }
+
+    /// Exhausts the burst of `ctx` with orders on the pair `WARM:UP`, which then are published.
+    fn exhaust_the_burst(ctx: &MmArc, rx: &mut mpsc::Receiver<AdexBehaviourCmd>, burst: usize) -> Vec<Published> {
+        for _ in 0..burst {
+            maker_order_created_p2p_notify(ctx.clone(), &own_order("WARM", "UP"), vec![], vec![]);
+        }
+        assert_eq!(pending(ctx), 0);
+        let published = drain(rx);
+        assert_eq!(published.len(), burst);
+        published
+    }
+
+    /// T-MP6 (first part): with a budget that releases the pending messages within the wait, a pair's pending
+    /// messages are published before its keep-alive, and a receiver that applies them in order holds the advertised
+    /// root and sends no synchronization request.
     #[test]
-    fn t_mp6_the_changes_of_a_pair_precede_its_keep_alive() {
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+    fn t_mp6_the_changes_of_a_pair_precede_its_keep_alive_within_the_wait() {
+        // 2 messages per second, a burst of 20.
+        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 2.0 }));
+        let warm_up = exhaust_the_burst(&maker, &mut rx, 20);
         let orders = [
             own_order("DOC", "MARTY"),
             own_order("DOC", "MARTY"),
@@ -8365,19 +8407,29 @@ mod maker_publication_tests {
         }
         update_price(&maker, &orders[1], 7);
         flush_trie(&maker);
-        assert_eq!(pending(&maker), 3, "one creation left at once, the rest waits");
+        assert_eq!(pending(&maker), 4, "the budget is exhausted, all four wait");
+        spawn(maker_outbox_loop(maker.clone()));
         let octx = OrdermatchContext::from_ctx(&maker).unwrap();
+        let started = std::time::Instant::now();
         block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the pending messages left within the wait: {:?}",
+            started.elapsed()
+        );
         let published = drain(&mut rx);
         assert_eq!(pending(&maker), 0);
 
-        // Per pair: everything published for the pair before its keep-alive is a change of an order.
+        // Per pair: both orders of the pair precede its keep-alive, and no change of the pair follows it.
         let mut keep_alives = 0;
         for (i, p) in published.iter().enumerate() {
             if kind(&p.message) != "keep-alive" {
                 continue;
             }
             keep_alives += 1;
+            if p.topics[0].contains("WARM") {
+                continue;
+            }
             let before_for_pair = published[..i].iter().filter(|q| q.topics == p.topics).count();
             assert_eq!(before_for_pair, 2, "both orders of the pair precede its keep-alive");
             assert!(
@@ -8387,51 +8439,101 @@ mod maker_publication_tests {
                 "no change of the pair follows its keep-alive"
             );
         }
-        assert_eq!(keep_alives, 2, "one keep-alive per pair");
+        assert_eq!(keep_alives, 3, "one keep-alive per pair");
 
-        // A receiver applies the given published messages in order and collects its synchronization requests.
-        let apply = |messages: Vec<&Published>| {
-            let (receiver, _rx) = node(json!({}));
-            let recv_octx = OrdermatchContext::from_ctx(&receiver).unwrap();
-            let mut requests = Vec::new();
-            for p in messages {
-                let (message, _sig, signer) = decode_signed::<OrdermatchMessage>(&p.bytes).unwrap();
-                match message {
-                    OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
-                        let request = block_on(keep_alive_sync_request(
-                            &recv_octx,
-                            &signer.to_hex(),
-                            keep_alive,
-                            true,
-                            SyncRequestRoot::Held,
-                            TRIE_CATCH_UP_BOUND_MS,
-                        ));
-                        requests.push(request);
-                    },
-                    _ => {
-                        block_on(process_msg(receiver.clone(), vec![], "peer".into(), &p.bytes, true));
-                    },
-                }
-            }
-            requests
-        };
-        let all = apply(published.iter().collect());
-        assert_eq!(all.len(), 2);
+        // The receiver holds the advertised root of every pair: it knows the warm-up orders from earlier, so they
+        // are published to it first.
+        let all = apply_to_a_receiver(&maker, warm_up.iter().chain(published.iter()).collect());
+        assert_eq!(all.len(), 3);
         assert!(
             all.iter().all(|r| r.is_none()),
-            "the receiver holds both advertised roots: {:?}",
+            "the receiver holds the advertised roots: {:?}",
             all
         );
+    }
 
-        // Control: the same keep-alive after the one creation that was published at once, without the changes
-        // the flush released, diverges and makes the receiver ask for a synchronization.
-        let first_keep_alive = published.iter().position(|p| kind(&p.message) == "keep-alive").unwrap();
-        let requests = apply(vec![&published[0], &published[first_keep_alive]]);
-        assert_eq!(requests.len(), 1);
+    /// T-MP6 (second part): with more pending than the budget releases in 10 s, the keep-alives leave 10 s after the
+    /// tick, give or take a second, and no message leaves beyond the budget.
+    #[test]
+    fn t_mp6_with_more_pending_than_the_budget_releases_the_keep_alives_leave_after_ten_seconds() {
+        // 0.5 messages per second, a burst of 5.
+        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let _ = exhaust_the_burst(&maker, &mut rx, 5);
+        for _ in 0..20 {
+            maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
+        }
+        flush_trie(&maker);
+        assert_eq!(pending(&maker), 20);
+        spawn(maker_outbox_loop(maker.clone()));
+        let octx = OrdermatchContext::from_ctx(&maker).unwrap();
+        let started = std::time::Instant::now();
+        block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
+        let waited = started.elapsed();
         assert!(
-            requests[0].is_some(),
-            "without the flushed changes the receiver diverges"
+            waited >= Duration::from_secs(9) && waited <= Duration::from_secs(11),
+            "the keep-alives left after {:?}",
+            waited
         );
+        let published = drain(&mut rx);
+        let released = published.iter().filter(|p| kind(&p.message) == "created").count();
+        // 0.5 per second for 10 s, plus the tokens that had refilled and the pump's step.
+        assert!(
+            (4..=7).contains(&released),
+            "{released} messages left during the wait, the budget allows about 5"
+        );
+        assert_eq!(pending(&maker), 20 - released, "the rest stays pending");
+        assert!(published.iter().any(|p| kind(&p.message) == "keep-alive"));
+    }
+
+    /// T-MP6 (third part): in degraded mode the keep-alives leave at the tick.
+    #[test]
+    fn t_mp6_in_degraded_mode_the_keep_alives_leave_at_the_tick() {
+        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let _ = exhaust_the_burst(&maker, &mut rx, 5);
+        for _ in 0..4 {
+            maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
+        }
+        flush_trie(&maker);
+        let octx = OrdermatchContext::from_ctx(&maker).unwrap();
+        octx.maker_outbox.outboxes.lock().signal(now_ms(), SignalKind::Queue);
+        let started = std::time::Instant::now();
+        block_on(broadcast_keep_alive_for_pub(&maker, &octx, &pubkey_of(&maker), None));
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        let published = drain(&mut rx);
+        assert_eq!(published.iter().filter(|p| kind(&p.message) == "keep-alive").count(), 2);
+        assert_eq!(published.iter().filter(|p| kind(&p.message) == "created").count(), 0);
+        assert_eq!(pending(&maker), 4, "nothing was released");
+    }
+
+    /// T-MP5 (close part): the close of the last connection to a relay is a signal only with a pending message or a
+    /// release within 30 seconds; the outbox then drops to the floor in degraded mode.
+    #[test]
+    fn t_mp5_a_relay_close_is_a_signal_only_with_recent_maker_traffic() {
+        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        // No traffic: no signal.
+        relay_connection_closed(&ctx);
+        assert_eq!(
+            octx.maker_outbox
+                .close_signals
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        assert!(!octx.maker_outbox.outboxes.lock().is_degraded(&pubkey_of(&ctx)));
+
+        // A released message within the last 30 seconds: a signal.
+        maker_order_created_p2p_notify(ctx.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
+        drain(&mut rx);
+        relay_connection_closed(&ctx);
+        assert_eq!(
+            octx.maker_outbox
+                .close_signals
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert!(octx.maker_outbox.outboxes.lock().is_degraded(&pubkey_of(&ctx)));
+        assert_eq!(gauge_after_pump(&ctx, "p2p.outbox.degraded"), Some(1));
+        assert_eq!(gauge_after_pump(&ctx, "p2p.outbox.signals.close.count"), Some(1));
     }
 
     /// T-MP7: after a relay joined the relay mesh one keep-alive per pair leaves within 5 s, however many relays
@@ -8471,6 +8573,11 @@ mod maker_publication_tests {
         assert_eq!(drain(&mut rx).len(), 2, "a later join starts another round");
     }
 
+    fn gauge_after_pump(ctx: &MmArc, key: &str) -> Option<i64> {
+        pump_maker_outbox(ctx);
+        gauge(ctx, key)
+    }
+
     fn gauge(ctx: &MmArc, key: &str) -> Option<i64> {
         let json = ctx.metrics.collect_json().unwrap();
         json["metrics"]
@@ -8480,8 +8587,8 @@ mod maker_publication_tests {
             .and_then(|m| m["value"].as_i64())
     }
 
-    /// T-MP10 (outbox part): the outbox gauges show the pending messages, the rate and the pressure state, and
-    /// carry no label (no peer identity, no content).
+    /// T-MP10 (outbox part): the outbox gauges show the pending messages, the rate, the queue signal, the degraded
+    /// mode and the signals, and carry no label (no peer identity, no content).
     #[test]
     fn t_mp10_outbox_gauges_follow_the_state() {
         let (ctx, _rx) = node(json!({ "maker_update_rate_max": 0.1 }));
@@ -8495,12 +8602,22 @@ mod maker_publication_tests {
         // The rate is reported in thousandths of a message per second.
         assert_eq!(gauge(&ctx, "p2p.outbox.rate"), Some(100));
         assert_eq!(gauge(&ctx, "p2p.outbox.pressure"), Some(0));
+        assert_eq!(gauge(&ctx, "p2p.outbox.degraded"), Some(0));
+        assert_eq!(gauge(&ctx, "p2p.outbox.signals.queue.count"), Some(0));
+        assert_eq!(gauge(&ctx, "p2p.outbox.signals.close.count"), Some(0));
 
-        P2PContext::fetch_from_mm_arc(&ctx)
-            .relay_pressure
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        // The queue signal is raised (the swarm side counts it once).
+        let signal = P2PContext::fetch_from_mm_arc(&ctx).relay_queue_signal.clone();
+        signal.raised.store(true, std::sync::atomic::Ordering::Relaxed);
+        signal.raised_count.store(1, std::sync::atomic::Ordering::Relaxed);
         pump_maker_outbox(&ctx);
         assert_eq!(gauge(&ctx, "p2p.outbox.pressure"), Some(1));
+        assert_eq!(gauge(&ctx, "p2p.outbox.degraded"), Some(1));
+        assert_eq!(gauge(&ctx, "p2p.outbox.signals.queue.count"), Some(1));
+        // A close of the relay while a message is pending.
+        relay_connection_closed(&ctx);
+        pump_maker_outbox(&ctx);
+        assert_eq!(gauge(&ctx, "p2p.outbox.signals.close.count"), Some(1));
         let json = ctx.metrics.collect_json().unwrap();
         for metric in json["metrics"].as_array().unwrap() {
             if metric["key"].as_str().is_some_and(|k| k.starts_with("p2p.outbox")) {

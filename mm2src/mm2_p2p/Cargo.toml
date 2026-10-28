@@ -7,9 +7,6 @@ description = "Unified P2P networking for AtomicDEX — gossipsub, floodsub, pee
 [features]
 default = []
 application = []
-# Measurement knobs for the maker publication rate lab (ping round-trip pressure, ping close held in degraded
-# mode). Off by default; enabled only through mm2_main's dev-dependencies.
-lab-knobs = []
 
 [dependencies]
 async-trait = { workspace = true }

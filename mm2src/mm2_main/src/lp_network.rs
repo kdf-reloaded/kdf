@@ -39,7 +39,7 @@ use rand::random;
 use serde::de;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::mm2::{lp_ordermatch, lp_stats, lp_swap};
@@ -127,13 +127,22 @@ pub(crate) struct PendingHealthcheckWaiter {
     ack_tx: oneshot::Sender<()>,
 }
 
+/// The queue signal toward the node's relays (CRD ch.32 §32.9B R-MP2 item 2), as the swarm side last saw it. The
+/// swarm side writes it on every poll; the maker outbox reads it.
+#[derive(Debug, Default)]
+pub struct RelayQueueSignal {
+    /// Whether the signal is raised toward any connection to a relay.
+    pub raised: AtomicBool,
+    /// How many times it was raised toward a relay connection since start.
+    pub raised_count: AtomicU64,
+}
+
 pub struct P2PContext {
     /// Using Mutex helps to prevent cloning which can actually result to channel being unbounded in case of using 1 tx clone per 1 message.
     pub cmd_tx: PaMutex<AdexCmdTx>,
     pub(crate) pending_healthchecks: PaMutex<HashMap<String, PendingHealthcheckWaiter>>,
-    /// Whether the gossip send queue pressure signal is raised for any connection to a relay (CRD ch.28 §28.9B
-    /// RQ1 item 8). The swarm side sets it; the maker outbox reads it (CRD ch.32 §32.9B R-MP2 item 2).
-    pub relay_pressure: Arc<AtomicBool>,
+    /// The queue signal toward the relays (CRD ch.32 §32.9B R-MP2 item 2).
+    pub relay_queue_signal: Arc<RelayQueueSignal>,
 }
 
 #[cfg_attr(test, mockable)]
@@ -142,13 +151,13 @@ impl P2PContext {
         P2PContext {
             cmd_tx: PaMutex::new(cmd_tx),
             pending_healthchecks: PaMutex::new(HashMap::new()),
-            relay_pressure: Arc::new(AtomicBool::new(false)),
+            relay_queue_signal: Arc::default(),
         }
     }
 
-    /// Uses `relay_pressure`, a flag the swarm side already updates, as the pressure flag of the context.
-    pub fn with_relay_pressure(mut self, relay_pressure: Arc<AtomicBool>) -> Self {
-        self.relay_pressure = relay_pressure;
+    /// Uses `relay_queue_signal`, which the swarm side already updates, as the queue signal of the context.
+    pub fn with_relay_queue_signal(mut self, relay_queue_signal: Arc<RelayQueueSignal>) -> Self {
+        self.relay_queue_signal = relay_queue_signal;
         self
     }
 
@@ -166,16 +175,25 @@ impl P2PContext {
     }
 }
 
-/// Whether the node is under send queue pressure toward its relays (CRD ch.32 §32.9B R-MP2 item 2). `false`
-/// while there is no P2P context.
-pub fn relay_pressure(ctx: &MmArc) -> bool {
-    let p2p_ctx = match ctx.p2p_ctx.lock() {
+fn relay_queue_signal_of(ctx: &MmArc) -> Option<Arc<RelayQueueSignal>> {
+    match ctx.p2p_ctx.lock() {
         Ok(guard) => guard
             .as_ref()
-            .and_then(|p2p_ctx| p2p_ctx.clone().downcast::<P2PContext>().ok()),
+            .and_then(|p2p_ctx| p2p_ctx.clone().downcast::<P2PContext>().ok())
+            .map(|p2p_ctx| p2p_ctx.relay_queue_signal.clone()),
         Err(_) => None,
-    };
-    p2p_ctx.is_some_and(|p2p_ctx| p2p_ctx.relay_pressure.load(Ordering::Relaxed))
+    }
+}
+
+/// Whether the queue signal is raised toward any connection to a relay (CRD ch.32 §32.9B R-MP2 item 2). `false`
+/// while there is no P2P context.
+pub fn relay_queue_signal(ctx: &MmArc) -> bool {
+    relay_queue_signal_of(ctx).is_some_and(|signal| signal.raised.load(Ordering::Relaxed))
+}
+
+/// How many times the queue signal was raised toward a relay connection since start (CRD ch.32 §32.9B R-MP5).
+pub fn relay_queue_signal_count(ctx: &MmArc) -> u64 {
+    relay_queue_signal_of(ctx).map_or(0, |signal| signal.raised_count.load(Ordering::Relaxed))
 }
 
 fn peer_healthcheck_topic(peer_id: &str) -> String { pub_sub_topic(PEER_HEALTHCHECK_PREFIX, peer_id) }
@@ -327,6 +345,11 @@ pub async fn p2p_event_process_loop(ctx: MmWeak, mut rx: AdexEventRx, i_am_relay
                 if let Err(e) = process_p2p_request(ctx, peer_id, request, response_channel) {
                     log::error!("Error on process P2P request: {:?}", e);
                 }
+            },
+            Some(AdexBehaviourEvent::RelayConnectionClosed { peer_id }) => {
+                log::debug!("The last connection to relay {} closed", peer_id);
+                // CRD ch.32 §32.9B R-MP2 item 2: the close signal.
+                lp_ordermatch::relay_connection_closed(&ctx);
             },
             Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }) => {
                 log::debug!("Relay {} joined the relay mesh", peer_id);

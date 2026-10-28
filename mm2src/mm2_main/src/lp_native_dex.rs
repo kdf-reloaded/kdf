@@ -35,7 +35,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::str;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +43,7 @@ use std::time::Duration;
 use crate::mm2::database::init_and_migrate_db;
 use crate::mm2::lp_message_service::{init_message_service, InitMessageServiceError};
 use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe_to_own_peer_healthcheck_topic,
-                             NetIdError, P2PContext};
+                             NetIdError, P2PContext, RelayQueueSignal};
 use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_memory_loop, init_ordermatch_context,
                                 lp_ordermatch_loop, maker_outbox_loop, orders_kick_start,
                                 BalanceUpdateOrdermatchHandler, OrdermatchInitError};
@@ -618,16 +618,16 @@ async fn kick_start(ctx: MmArc) -> MmInitResult<()> {
 /// maker outbox reads (CRD ch.32 §32.9B R-MP2 item 2, R-MP5).
 pub(crate) struct SwarmPollRecorder {
     ctx: MmArc,
-    relay_pressure: Arc<AtomicBool>,
+    relay_queue_signal: Arc<RelayQueueSignal>,
     /// The send queue gauges walk all connections, so they are recorded at most once per interval.
     last_send_queue_gauges_ms: AtomicU64,
 }
 
 impl SwarmPollRecorder {
-    pub(crate) fn new(ctx: MmArc, relay_pressure: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(ctx: MmArc, relay_queue_signal: Arc<RelayQueueSignal>) -> Self {
         SwarmPollRecorder {
             ctx,
-            relay_pressure,
+            relay_queue_signal,
             last_send_queue_gauges_ms: AtomicU64::new(0),
         }
     }
@@ -660,8 +660,12 @@ impl SwarmPollRecorder {
             connected_peers_count as i64
         );
 
-        self.relay_pressure
-            .store(behaviour.relay_send_queue_pressure(), Ordering::Relaxed);
+        self.relay_queue_signal
+            .raised
+            .store(behaviour.relay_queue_signal(), Ordering::Relaxed);
+        self.relay_queue_signal
+            .raised_count
+            .store(behaviour.queue_signals_raised(), Ordering::Relaxed);
 
         let now = now_ms();
         let last = self.last_send_queue_gauges_ms.load(Ordering::Relaxed);
@@ -694,8 +698,8 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
 
     let seednodes = seednodes(&ctx)?;
 
-    // Set from the swarm poll, read by the maker outbox (CRD ch.32 §32.9B R-MP2 item 2).
-    let relay_pressure = Arc::new(AtomicBool::new(false));
+    // Written from the swarm poll, read by the maker outbox (CRD ch.32 §32.9B R-MP2 item 2).
+    let relay_queue_signal = Arc::new(RelayQueueSignal::default());
     let force_p2p_key = if i_am_seed {
         let key = sha256(&*ctx.secp256k1_key_pair().private().secret);
         Some(key.take())
@@ -709,7 +713,7 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
         light_node_type(&ctx)?
     };
 
-    let recorder = SwarmPollRecorder::new(ctx.clone(), relay_pressure.clone());
+    let recorder = SwarmPollRecorder::new(ctx.clone(), relay_queue_signal.clone());
     let spawn_result = spawn_gossipsub(force_p2p_key, spawn_boxed, seednodes, node_type, move |swarm| {
         recorder.record(swarm.behaviour())
     })
@@ -723,7 +727,7 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
         Ok(())
     }));
     ctx.peer_id.pin(peer_id.to_string()).map_to_mm(P2PInitError::Internal)?;
-    let p2p_context = P2PContext::new(cmd_tx).with_relay_pressure(relay_pressure);
+    let p2p_context = P2PContext::new(cmd_tx).with_relay_queue_signal(relay_queue_signal);
     p2p_context.store_to_mm_arc(&ctx);
     subscribe_to_own_peer_healthcheck_topic(&ctx, &peer_id.to_string());
     spawn(p2p_event_process_loop(ctx.weak(), event_rx, i_am_seed));

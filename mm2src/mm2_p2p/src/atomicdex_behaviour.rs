@@ -276,6 +276,11 @@ pub enum AdexBehaviourEvent {
         /// The relay that joined the mesh.
         peer_id: PeerId,
     },
+    /// The last connection to a relay closed (CRD ch.32 §32.9B R-MP2 item 2, the close signal).
+    RelayConnectionClosed {
+        /// The relay.
+        peer_id: PeerId,
+    },
 }
 
 /// Aggregate counters of the gossip send queues, for metrics (CRD ch.32 §32.9B R-MP5).
@@ -309,8 +314,8 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
         GossipsubEvent::Subscribed { peer_id, topic } => Some(AdexBehaviourEvent::Subscribed { peer_id, topic }),
         GossipsubEvent::Unsubscribed { peer_id, topic } => Some(AdexBehaviourEvent::Unsubscribed { peer_id, topic }),
         GossipsubEvent::GossipsubNotSupported { .. } => None,
-        // The pressure level is read from the behaviour (`relay_send_queue_pressure`), so the
-        // application always sees the current level and not a stream of changes it could miss.
+        // The pressure level feeds the queue signal inside the behaviour, and the application reads that
+        // (`relay_queue_signal`), so it always sees the current level and not a stream of changes it could miss.
         GossipsubEvent::SendQueuePressure {
             peer_id,
             connection_id,
@@ -325,6 +330,12 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
             None
         },
         GossipsubEvent::RelayMeshJoined { peer_id } => Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }),
+        // The queue signal is read from the behaviour (`relay_queue_signal`), so the application always sees the
+        // current level.
+        GossipsubEvent::SendQueueSignal { .. } => None,
+        GossipsubEvent::RelayConnectionClosed { peer_id } => {
+            Some(AdexBehaviourEvent::RelayConnectionClosed { peer_id })
+        },
     }
 }
 
@@ -637,19 +648,12 @@ impl AtomicDexBehaviour {
     /// The send queue counters of all connections (CRD ch.32 §32.9B R-MP5).
     pub fn send_queue_snapshot(&self) -> SendQueueSnapshot { self.gossipsub.send_queue_snapshot() }
 
-    /// Whether the send queue pressure signal is raised for any connection to a relay (CRD ch.28
-    /// §28.9B RQ1 item 8).
-    pub fn relay_send_queue_pressure(&self) -> bool {
-        #[cfg(feature = "lab-knobs")]
-        if crate::lab_knobs::rtt_pressure() && self.ping.rtt_pressure_among(&self.gossipsub.connected_relays()) {
-            return true;
-        }
-        #[cfg(feature = "lab-knobs")]
-        if crate::lab_knobs::c6_on() {
-            return crate::lab_knobs::c6_raised();
-        }
-        self.gossipsub.relay_send_queue_pressure()
-    }
+    /// Whether the queue signal of CRD ch.32 §32.9B R-MP2 item 2 is raised toward any connection to a relay: the
+    /// data queue has held something for 2 seconds, or the pressure level of CRD ch.28 §28.9B RQ1 item 8 is raised.
+    pub fn relay_queue_signal(&self) -> bool { self.gossipsub.relay_queue_signal() }
+
+    /// How many times the queue signal was raised toward a relay connection since start.
+    pub fn queue_signals_raised(&self) -> u64 { self.gossipsub.queue_signals_raised() }
 }
 
 /// Dispatches an event produced by the composed [`AtomicDexBehaviour`] to the application layer.
@@ -1154,11 +1158,6 @@ fn start_gossipsub(
     let mut announce_interval = Interval::new_at(Instant::now() + ANNOUNCE_INITIAL_DELAY, ANNOUNCE_INTERVAL);
     let mut listening = false;
     let polling_fut = poll_fn(move |cx: &mut Context| {
-        // Measurement only (feature `lab-knobs`): the relays connected when the poll began, to recognise the close
-        // of a relay connection.
-        #[cfg(feature = "lab-knobs")]
-        let known_relays: std::collections::HashSet<PeerId> =
-            swarm.behaviour().gossipsub.connected_relays().into_iter().collect();
         loop {
             match cmd_rx.poll_next_unpin(cx) {
                 Poll::Ready(Some(cmd)) => AtomicDexBehaviour::process_cmd(&mut swarm, spawn_fn, cmd),
@@ -1175,12 +1174,6 @@ fn start_gossipsub(
                         SwarmEvent::Behaviour(behaviour_event) => {
                             handle_behaviour_event(&mut swarm, &mut event_tx, behaviour_event)
                         },
-                        #[cfg(feature = "lab-knobs")]
-                        SwarmEvent::ConnectionClosed {
-                            peer_id,
-                            num_established: 0,
-                            ..
-                        } if known_relays.contains(&peer_id) => crate::lab_knobs::note_relay_close(),
                         #[cfg(feature = "application")]
                         SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                             AtomicDexBehaviour::request_peer_clock_check(
@@ -1216,8 +1209,6 @@ fn start_gossipsub(
                 listening = true;
             }
         }
-        #[cfg(feature = "lab-knobs")]
-        crate::lab_knobs::c6_sample(swarm.behaviour().send_queue_snapshot().max_per_connection > 0);
         on_poll(&swarm);
         Poll::Pending
     });

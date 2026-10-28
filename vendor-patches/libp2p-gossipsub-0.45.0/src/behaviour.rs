@@ -170,6 +170,18 @@ pub enum Event {
     },
     /// A relay peer was added to this node's relay mesh while connected (CRD ch.32 §32.9B R-MP4).
     RelayMeshJoined { peer_id: PeerId },
+    /// The queue signal of the send queue toward a connection changed (CRD ch.32 §32.9B R-MP2 item 2). Reported
+    /// once per change; a closed connection counts as cleared.
+    SendQueueSignal {
+        /// The peer of the connection.
+        peer_id: PeerId,
+        /// The connection.
+        connection_id: ConnectionId,
+        /// `true` when the signal was raised, `false` when it was cleared.
+        raised: bool,
+    },
+    /// The last connection to a relay closed (CRD ch.32 §32.9B R-MP2 item 2, the close signal).
+    RelayConnectionClosed { peer_id: PeerId },
 }
 
 /// A data structure for storing configuration for publishing messages. See [`MessageAuthenticity`]
@@ -389,6 +401,10 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
 
     /// Connections whose send queue pressure level is raised.
     pressured_connections: HashMap<ConnectionId, PeerId>,
+
+    /// Connections whose send queue signal is raised, and how many times a signal was raised toward a relay.
+    signalled_connections: HashMap<ConnectionId, PeerId>,
+    queue_signals_raised: u64,
 }
 
 impl<D, F> Behaviour<D, F>
@@ -542,6 +558,8 @@ where
             send_queue_stats: HashMap::new(),
             send_queue_dropped_closed: 0,
             pressured_connections: HashMap::new(),
+            signalled_connections: HashMap::new(),
+            queue_signals_raised: 0,
         })
     }
 }
@@ -3335,6 +3353,14 @@ where
             self.send_queue_dropped_closed =
                 self.send_queue_dropped_closed.saturating_add(stats.dropped());
         }
+        if self.signalled_connections.remove(&connection_id).is_some() {
+            self.events
+                .push_back(ToSwarm::GenerateEvent(Event::SendQueueSignal {
+                    peer_id,
+                    connection_id,
+                    raised: false,
+                }));
+        }
         if self.pressured_connections.remove(&connection_id).is_some() {
             self.events
                 .push_back(ToSwarm::GenerateEvent(Event::SendQueuePressure {
@@ -3456,7 +3482,10 @@ where
             self.outbound_peers.remove(&peer_id);
 
             self.relays_mesh.remove(&peer_id);
-            self.connected_relays.remove(&peer_id);
+            if self.connected_relays.remove(&peer_id) {
+                self.events
+                    .push_back(ToSwarm::GenerateEvent(Event::RelayConnectionClosed { peer_id }));
+            }
             self.included_to_relays_mesh.remove(&peer_id);
             self.peer_connections.remove(&peer_id);
 
@@ -3831,6 +3860,18 @@ where
             .any(|peer| self.connected_relays.contains(peer))
     }
 
+    /// Whether the queue signal is raised toward any connection to a relay (CRD ch.32 §32.9B R-MP2 item 2).
+    pub fn relay_queue_signal(&self) -> bool {
+        self.signalled_connections
+            .values()
+            .any(|peer| self.connected_relays.contains(peer))
+    }
+
+    /// How many times the queue signal was raised toward a relay connection since start.
+    pub fn queue_signals_raised(&self) -> u64 {
+        self.queue_signals_raised
+    }
+
     fn register_send_queue(&mut self, connection_id: ConnectionId, handler: &Handler) {
         if let Some(stats) = handler.send_queue_stats() {
             self.send_queue_stats.insert(connection_id, stats);
@@ -3940,6 +3981,26 @@ where
                 if changed {
                     self.events
                         .push_back(ToSwarm::GenerateEvent(Event::SendQueuePressure {
+                            peer_id: propagation_source,
+                            connection_id,
+                            raised,
+                        }));
+                }
+            }
+            HandlerEvent::SendQueueSignal { raised } => {
+                let changed = if raised {
+                    self.signalled_connections
+                        .insert(connection_id, propagation_source)
+                        .is_none()
+                } else {
+                    self.signalled_connections.remove(&connection_id).is_some()
+                };
+                if changed {
+                    if raised && self.connected_relays.contains(&propagation_source) {
+                        self.queue_signals_raised += 1;
+                    }
+                    self.events
+                        .push_back(ToSwarm::GenerateEvent(Event::SendQueueSignal {
                             peer_id: propagation_source,
                             connection_id,
                             raised,

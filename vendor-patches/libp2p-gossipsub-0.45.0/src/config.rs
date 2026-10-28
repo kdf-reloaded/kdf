@@ -147,6 +147,18 @@ impl Config {
         self.send_queue.priority_max
     }
 
+    /// How long the data queue toward a connection must hold something before the queue signal is
+    /// raised (default is 2 seconds).
+    pub fn send_queue_signal_raise_after(&self) -> Duration {
+        self.send_queue.signal_raise_after
+    }
+
+    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
+    /// seconds).
+    pub fn send_queue_signal_clear_after(&self) -> Duration {
+        self.send_queue.signal_clear_after
+    }
+
     // Overlay network parameters.
     /// Number of heartbeats to keep in the `memcache` (default is 5).
     pub fn history_length(&self) -> usize {
@@ -677,6 +689,20 @@ impl ConfigBuilder {
     /// The data queue depth at or below which the pressure signal is cleared (default is 64).
     pub fn send_queue_pressure_clear(&mut self, clear: usize) -> &mut Self {
         self.config.send_queue.pressure_clear = clear;
+        self
+    }
+
+    /// How long the data queue must hold something before the queue signal is raised (default is
+    /// 2 seconds).
+    pub fn send_queue_signal_raise_after(&mut self, after: Duration) -> &mut Self {
+        self.config.send_queue.signal_raise_after = after;
+        self
+    }
+
+    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
+    /// seconds).
+    pub fn send_queue_signal_clear_after(&mut self, after: Duration) -> &mut Self {
+        self.config.send_queue.signal_clear_after = after;
         self
     }
 

@@ -3,7 +3,6 @@
 mod adex_ping;
 pub mod atomicdex_behaviour;
 mod ip_helpers;
-#[cfg(feature = "lab-knobs")] pub mod lab_knobs;
 pub mod network_streamer;
 pub mod peers_exchange;
 pub mod relay_address;

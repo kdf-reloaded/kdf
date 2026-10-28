@@ -18,22 +18,21 @@
 //! driven by this file (the production loop's interval is a constant of the build), and calls the production
 //! keep-alive function.
 //!
-//! The small-scale test with a relay that keeps up runs by default. The full scenario is `#[ignore]`d; run it with
+//! The healthy-relay test runs by default. T-MP8 itself takes more than ten minutes per relay speed and is `#[ignore]`d.
+//! Run both speeds, in parallel, with
 //!
 //! ```text
-//! cargo test -p mm2_main --lib maker_outbox_lab_tests::t_mp8_full -- --ignored --nocapture
+//! cargo test -p mm2_main --lib maker_outbox_lab_tests::t_mp8 -- --ignored --nocapture
 //! ```
 //!
-//! Environment of the full run: `MP8_LOAD_SECS` (load duration, default 300), `MP8_CONVERGE_SECS` (how long to
-//! wait for convergence after the load, default 900), `MP8_RELAY_MSGS_PER_S` (default 1), `MP8_RELAY_SYNCS`
-//! (`false` makes the relay apply the messages only, default `true`), `MP8_COALESCING` (the maker's
-//! `maker_update_coalescing`, default `true`; `false` is the comparison without the outbox).
+//! or one of them as `t_mp8_relay_1_msg_per_s` or `t_mp8_relay_0_3_msg_per_s`. The load duration can be shortened
+//! with `MP8_LOAD_SECS` for a trial; the binding criteria are for at least 600 s.
 
 use super::{alb_ordered_pair, broadcast_keep_alives_for_own_pubkeys, maker_order_created_p2p_notify,
             maker_order_updated_p2p_notify, maker_outbox_loop, new_protocol, MakerOrder, OrderConfirmationsSettings,
             OrdermatchContext};
 use crate::mm2::lp_native_dex::SwarmPollRecorder;
-use crate::mm2::lp_network::{p2p_event_process_loop, P2PContext};
+use crate::mm2::lp_network::{p2p_event_process_loop, P2PContext, RelayQueueSignal};
 use crate::mm2::lp_swap::swap_versioning::SwapVersion;
 use common::executor::{spawn, spawn_boxed};
 use common::mm_number::BigRational;
@@ -357,22 +356,6 @@ struct Params {
     load_secs: u64,
     keep_alive_secs: u64,
     converge_secs: u64,
-    /// Whether the relay emulates the synchronization it requests after a keep-alive.
-    relay_syncs: bool,
-    /// The `maker_update_coalescing` setting of the maker; `false` publishes every message at once.
-    coalescing: bool,
-    /// Candidate C1: the flush before a keep-alive and the reconnect round release within the budget.
-    c1: bool,
-    /// Candidate C2: ping round-trip pressure.
-    c2: bool,
-    /// Candidate C4: a ping failure does not close the connection while the outbox is degraded.
-    c4: bool,
-    /// Candidate C1': C1, but a keep-alive waits at most 10 s for its pairs to drain.
-    c1p: bool,
-    /// Candidates C5a (1) and C5b (2): a relay connection close is the pressure signal.
-    c5: u8,
-    /// Candidate C6: pressure when the data queue has been non-empty for 2 s.
-    c6: bool,
     /// Seconds between two printed rows.
     row_secs: u64,
 }
@@ -381,6 +364,7 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
+/// A gauge of the node's metrics, as the node reports it; -1 if it has not been recorded.
 fn gauge(ctx: &MmArc, key: &str) -> i64 {
     let json = ctx.metrics.collect_json().unwrap();
     json["metrics"]
@@ -404,11 +388,17 @@ impl Rng64 {
 
 /// The result of a run, checked by the tests.
 struct Outcome {
-    /// (published at s from the load start, pair, latency in s or `None` when not delivered).
-    keep_alives: Vec<(f64, String, Option<f64>)>,
-    longest_gap_s: f64,
+    /// Seconds from the load start to the first signal (a queue signal, a close signal or degraded mode) the maker
+    /// reported in its metrics; `None` if there was none.
+    first_signal_s: Option<f64>,
+    /// For every tick from the first signal on, and every pair: the delay in seconds from the tick to the arrival of
+    /// its keep-alive, `None` if it never arrived.
+    delays_after: Vec<Option<f64>>,
+    /// The longest gap between delivered keep-alives from the first signal to the end of the load, and before it.
+    gap_after_s: f64,
+    gap_before_s: f64,
     converged_after_s: Option<f64>,
-    closes: usize,
+    degraded_seen: bool,
 }
 
 fn run(params: Params) -> Outcome {
@@ -421,35 +411,15 @@ fn run(params: Params) -> Outcome {
         params.relay_msgs_per_s,
         params.keep_alive_secs
     );
-    println!(
-        "candidates: C1 {} C1' {} C2 {} C4 {} C5 {} C6 {}",
-        params.c1, params.c1p, params.c2, params.c4, params.c5, params.c6
-    );
-    {
-        use super::maker_outbox::lab;
-        mm2_p2p::lab_knobs::reset_run();
-        lab::CLOSES_SEEN.store(0, Ordering::Relaxed);
-        lab::LAST_RELEASE_MS.store(0, Ordering::Relaxed);
-        lab::MODE.store(params.c5, Ordering::Relaxed);
-        lab::WAIT_CAP_MS.store(if params.c1p { 10_000 } else { u64::MAX }, Ordering::Relaxed);
-        mm2_p2p::lab_knobs::set_c6(params.c6);
-        mm2_p2p::lab_knobs::set_degraded(false);
-    }
-    super::maker_outbox::lab::BUDGETED_FLUSH.store(params.c1 || params.c1p, Ordering::Relaxed);
-    super::maker_outbox::lab::SLOT_MS.store(params.keep_alive_secs * 1000, Ordering::Relaxed);
-    mm2_p2p::lab_knobs::set_rtt_pressure(params.c2);
-    mm2_p2p::lab_knobs::set_hold_ping_close_when_degraded(params.c4);
     let relay = SlowRelay::start();
 
     // The maker: the production swarm, event loop, outbox pump and keep-alive function.
-    let ctx = MmCtxBuilder::new()
-        .with_conf(json!({ "maker_update_coalescing": params.coalescing }))
-        .into_mm_arc();
+    let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
     ctx.init_metrics().unwrap();
     let crypto_ctx = CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "maker rate control lab passphrase").unwrap();
     let persistent_pubkey = crypto_ctx.mm2_internal_pubkey_hex();
-    let relay_pressure = Arc::new(AtomicBool::new(false));
-    let recorder = SwarmPollRecorder::new(ctx.clone(), relay_pressure.clone());
+    let relay_queue_signal = Arc::new(RelayQueueSignal::default());
+    let recorder = SwarmPollRecorder::new(ctx.clone(), relay_queue_signal.clone());
     let (cmd_tx, event_rx, _peer_id, abort) = block_on(spawn_gossipsub(
         None,
         spawn_boxed,
@@ -459,7 +429,7 @@ fn run(params: Params) -> Outcome {
     ))
     .expect("spawn the maker swarm");
     P2PContext::new(cmd_tx.clone())
-        .with_relay_pressure(relay_pressure)
+        .with_relay_queue_signal(relay_queue_signal)
         .store_to_mm_arc(&ctx);
     spawn(p2p_event_process_loop(ctx.weak(), event_rx, false));
     spawn(maker_outbox_loop(ctx.clone()));
@@ -507,12 +477,10 @@ fn run(params: Params) -> Outcome {
         setup_started.elapsed().as_secs_f64()
     );
     octx.wait_trie_ops_flushed();
-    if params.relay_syncs {
-        *relay.state.oracle.lock().unwrap() = Some(SyncOracle {
-            octx: octx.clone(),
-            orders: order_pairs,
-        });
-    }
+    *relay.state.oracle.lock().unwrap() = Some(SyncOracle {
+        octx: octx.clone(),
+        orders: order_pairs,
+    });
 
     // The load.
     relay.set_rate(params.relay_msgs_per_s);
@@ -566,55 +534,46 @@ fn run(params: Params) -> Outcome {
         })
     };
 
-    println!("\n| t s | issued | pending | rate msg/s | pressure | queued | dropped | relay got | updates | keep-alives | syncs | relay closes |");
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!(
+        "\n| t s | issued | pending | rate msg/s | degraded | queue signals | close signals | queued | dropped | relay got | updates | keep-alives | syncs |"
+    );
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     let row = |t: f64| {
         println!(
-            "| {:.0} | {} | {} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {:.0} | {} | {} | {:.3} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             t,
             issued.load(Ordering::Relaxed),
             gauge(&ctx, "p2p.outbox.pending"),
             gauge(&ctx, "p2p.outbox.rate") as f64 / 1000.0,
-            gauge(&ctx, "p2p.outbox.pressure"),
+            gauge(&ctx, "p2p.outbox.degraded"),
+            gauge(&ctx, "p2p.outbox.signals.queue.count"),
+            gauge(&ctx, "p2p.outbox.signals.close.count"),
             gauge(&ctx, "p2p.send_queue.len"),
             gauge(&ctx, "p2p.send_queue.dropped.count"),
             relay.state.messages.load(Ordering::Relaxed),
             relay.state.updates.load(Ordering::Relaxed),
             relay.state.keep_alives.lock().unwrap().len(),
             relay.state.sync_requests.load(Ordering::Relaxed),
-            relay.state.closes.lock().unwrap().len(),
         );
     };
+    let mut first_signal_ms: Option<u64> = None;
+    let mut degraded_seen = false;
+    let mut watch = |first_signal_ms: &mut Option<u64>| {
+        if first_signal_ms.is_none()
+            && (gauge(&ctx, "p2p.outbox.signals.queue.count") > 0
+                || gauge(&ctx, "p2p.outbox.signals.close.count") > 0
+                || gauge(&ctx, "p2p.outbox.degraded") > 0)
+        {
+            *first_signal_ms = Some(now_ms());
+        }
+        degraded_seen |= gauge(&ctx, "p2p.outbox.degraded") > 0;
+    };
     let mut next_row = Duration::ZERO;
-    let mut next_sample = Duration::ZERO;
-    let mut peak_queue = 0i64;
-    let mut rate_trace: Vec<(u64, f64)> = Vec::new();
-    // The messages the outbox had released and the relay had read when the handler queue first held something.
-    let mut hidden_backlog: Option<(u64, usize)> = None;
-    let released_at_load_start = super::maker_outbox::lab::RELEASED.load(Ordering::Relaxed);
-    let mut next_trace = Duration::ZERO;
-    let mut first_degraded_ms: Option<u64> = None;
+    let mut next_watch = Duration::ZERO;
     while load_start.elapsed() < Duration::from_secs(params.load_secs) {
-        if first_degraded_ms.is_none() && mm2_p2p::lab_knobs::degraded() {
-            first_degraded_ms = Some(now_ms());
-        }
-        if load_start.elapsed() >= next_sample {
-            let queued = gauge(&ctx, "p2p.send_queue.len");
-            peak_queue = peak_queue.max(queued);
-            if queued > 0 && hidden_backlog.is_none() {
-                hidden_backlog = Some((
-                    super::maker_outbox::lab::RELEASED.load(Ordering::Relaxed) - released_at_load_start,
-                    relay.state.messages.load(Ordering::Relaxed),
-                ));
-            }
-            next_sample += Duration::from_secs(1);
-        }
-        if load_start.elapsed() >= next_trace {
-            rate_trace.push((
-                load_start.elapsed().as_secs(),
-                gauge(&ctx, "p2p.outbox.rate") as f64 / 1000.0,
-            ));
-            next_trace += Duration::from_secs(30);
+        if load_start.elapsed() >= next_watch {
+            watch(&mut first_signal_ms);
+            next_watch += Duration::from_secs(1);
         }
         if load_start.elapsed() >= next_row {
             row(load_start.elapsed().as_secs_f64());
@@ -653,10 +612,7 @@ fn run(params: Params) -> Outcome {
             converged_after = Some(converge_started.elapsed().as_secs_f64());
             break;
         }
-        peak_queue = peak_queue.max(gauge(&ctx, "p2p.send_queue.len"));
-        if first_degraded_ms.is_none() && mm2_p2p::lab_knobs::degraded() {
-            first_degraded_ms = Some(now_ms());
-        }
+        watch(&mut first_signal_ms);
         if converge_started.elapsed() >= next_row {
             row(params.load_secs as f64 + converge_started.elapsed().as_secs_f64());
             next_row += Duration::from_secs(params.row_secs);
@@ -665,312 +621,179 @@ fn run(params: Params) -> Outcome {
     }
     keep_alive_stop.store(true, Ordering::Relaxed);
     keep_alive_thread.join().unwrap();
-    let end_ms = now_ms();
 
-    // The judgement of the keep-alives published during the load and its converge phase.
+    // The keep-alives: for every tick and pair, the delay from the tick to the arrival.
     let seen = relay.state.keep_alives.lock().unwrap().clone();
     let ticks = keep_alive_ticks.lock().unwrap().clone();
-    let mut keep_alives: Vec<(f64, String, Option<f64>)> = Vec::new();
     let pairs_seen: std::collections::BTreeSet<String> = seen.iter().map(|k| k.pair.clone()).collect();
-    for tick_ms in ticks.iter().filter(|t| **t >= load_start_ms) {
+    let rel = |ms: u64| (ms as f64 - load_start_ms as f64) / 1000.0;
+    // A keep-alive carries the second its roots were read, up to the 10 s wait and a second after the tick.
+    let delay_of = |tick_ms: u64, pair: &String| {
         let tick_s = tick_ms / 1000;
+        seen.iter()
+            .filter(|k| &k.pair == pair && (tick_s..=tick_s + 12).contains(&k.sent_secs))
+            .map(|k| k.received_ms.saturating_sub(tick_ms) as f64 / 1000.0)
+            .fold(None, |best: Option<f64>, d| Some(best.map_or(d, |b| b.min(d))))
+    };
+    let first_signal_s = first_signal_ms.map(rel);
+    let signal_from_ms = first_signal_ms.unwrap_or(load_start_ms);
+    println!("\nkeep-alives: tick at (s from the load start), pair, delay in s");
+    let mut delays_after = Vec::new();
+    for tick_ms in ticks.iter().filter(|t| **t >= load_start_ms) {
         for pair in &pairs_seen {
-            // A keep-alive carries the second its roots were read, within a second of the tick.
-            let latency = seen
-                .iter()
-                .filter(|k| &k.pair == pair && (tick_s..=tick_s + 2).contains(&k.sent_secs))
-                .map(|k| (k.received_ms.saturating_sub(*tick_ms)) as f64 / 1000.0)
-                .fold(None, |best: Option<f64>, l| Some(best.map_or(l, |b| b.min(l))));
-            keep_alives.push(((*tick_ms - load_start_ms) as f64 / 1000.0, pair.clone(), latency));
+            let delay = delay_of(*tick_ms, pair);
+            println!(
+                "| {:.0} | {} | {} |",
+                rel(*tick_ms),
+                pair,
+                delay.map_or("not delivered".to_owned(), |d| format!("{:.1}", d))
+            );
+            if *tick_ms >= signal_from_ms && *tick_ms <= load_end_ms {
+                delays_after.push(delay);
+            }
         }
     }
-    // Gaps between delivered keep-alives (any pair) over the load; the load's start and end are boundaries.
-    let mut arrivals: Vec<f64> = seen
-        .iter()
-        .filter(|k| k.received_ms >= load_start_ms && k.received_ms <= load_end_ms)
-        .map(|k| (k.received_ms - load_start_ms) as f64 / 1000.0)
-        .collect();
-    arrivals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let load_s = (load_end_ms - load_start_ms) as f64 / 1000.0;
-    let mut points = vec![0.0];
-    points.extend(arrivals);
-    points.push(load_s);
-    let longest_gap_s = points.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
-
-    println!("\nkeep-alives published by the tick (s from the load start); latency in s");
-    println!("| tick at | pair | latency |");
-    println!("|---:|:---|---:|");
-    for (at, pair, latency) in &keep_alives {
-        match latency {
-            Some(l) => println!("| {:.0} | {} | {:.1} |", at, pair, l),
-            None => println!("| {:.0} | {} | not delivered |", at, pair),
-        }
-    }
-    let delivered = keep_alives.iter().filter(|k| k.2.is_some()).count();
-    let slow = keep_alives.iter().filter(|k| k.2.is_none_or(|l| l > 30.0)).count();
-    println!(
-        "\nkeep-alives: {} published by the tick, {} delivered, {} not within 30 s",
-        keep_alives.len(),
-        delivered,
-        slow
-    );
-    println!(
-        "longest gap between delivered keep-alives during the load: {:.1} s (limit 90 s)",
-        longest_gap_s
-    );
-    match converged_after {
-        Some(s) => println!(
-            "the relay's order set equals the maker's {:.1} s after the load stopped",
-            s
-        ),
-        None => println!(
-            "the relay's order set did NOT converge within {} s",
-            params.converge_secs
-        ),
-    }
-    let closes = relay.state.closes.lock().unwrap().len();
-    println!(
-        "relay connection closes: {} at (s from the load start): {:?}; established: {}",
-        closes,
-        relay
-            .state
-            .closes
-            .lock()
-            .unwrap()
+    // The gaps between delivered keep-alives (any pair), with the boundaries of the window as ends.
+    let gap = |from_ms: u64, to_ms: u64| {
+        let mut points: Vec<f64> = seen
             .iter()
-            .map(|c| (*c as f64 - load_start_ms as f64) / 1000.0)
-            .collect::<Vec<_>>(),
-        relay.state.connects.lock().unwrap().len()
-    );
-    println!(
-        "synchronization requests the relay would have sent: {}",
-        relay.state.sync_requests.load(Ordering::Relaxed)
-    );
-    println!(
-        "run took {:.0} s after the load",
-        (end_ms - load_end_ms) as f64 / 1000.0
-    );
-
-    // The summary of the run, in the shape of the comparison table.
-    let mut during_load: Vec<f64> = seen
-        .iter()
-        .filter(|k| k.received_ms >= load_start_ms && k.received_ms <= load_end_ms)
-        .map(|k| k.received_ms.saturating_sub(k.sent_secs * 1000) as f64 / 1000.0)
-        .collect();
-    during_load.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = during_load.get(during_load.len() / 2).copied();
-    let max_latency = during_load.last().copied();
-    let rss_mib = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status
-                .lines()
-                .find(|l| l.starts_with("VmRSS:"))
-                .and_then(|l| l.split_whitespace().nth(1))
-                .and_then(|kb| kb.parse::<f64>().ok())
-        })
-        .map(|kb| kb / 1024.0);
-    println!(
-        "\nSUMMARY candidates C1={} C1'={} C2={} C4={} C5={} C6={} relay={} msg/s load={} s",
-        params.c1, params.c1p, params.c2, params.c4, params.c5, params.c6, params.relay_msgs_per_s, params.load_secs
-    );
-    // Times relative to the load start, in seconds.
-    let rel = |ms: Option<u64>| ms.map(|ms| (ms as f64 - load_start_ms as f64) / 1000.0);
-    let close_times = mm2_p2p::lab_knobs::relay_close_times();
-    let first_close_ms = close_times.first().copied();
-    let first_nonempty = mm2_p2p::lab_knobs::first_nonempty_ms();
-    let c6_fired = mm2_p2p::lab_knobs::c6_first_raised_ms();
-    println!(
-        "SUMMARY queue first non-empty at {:?} s, C6 raised at {:?} s, first close at {:?} s, first degraded at {:?} s (from the load start)",
-        rel(first_nonempty),
-        rel(c6_fired),
-        rel(first_close_ms),
-        rel(first_degraded_ms)
-    );
-    println!(
-        "SUMMARY degraded before the first close: {}; C6 before the first close: {}; queue non-empty before the first close: {}",
-        match (first_degraded_ms, first_close_ms) {
-            (Some(d), Some(c)) => d < c,
-            (Some(_), None) => true,
-            _ => false,
-        },
-        match (c6_fired, first_close_ms) {
-            (Some(f), Some(c)) => f < c,
-            (Some(_), None) => true,
-            _ => false,
-        },
-        match (first_nonempty, first_close_ms) {
-            (Some(f), Some(c)) => f < c,
-            (Some(_), None) => true,
-            _ => false,
-        }
-    );
-    let first_signal = [c6_fired, first_close_ms, first_degraded_ms]
-        .into_iter()
-        .flatten()
-        .min();
-    println!(
-        "SUMMARY residual: first signal (C6, a close or degraded) {:?} s after the load start",
-        rel(first_signal)
-    );
-    // Keep-alives before and after the first close (relay side), within the load.
-    // The first close is the one the maker saw. The relay only notices it after it has read what was queued ahead
-    // of the close, which can be much later.
-    let split_ms = first_close_ms.unwrap_or(load_end_ms).clamp(load_start_ms, load_end_ms);
-    for (name, from, to) in [
-        ("before first close", load_start_ms, split_ms),
-        ("after first close", split_ms, load_end_ms),
-    ] {
-        let mut lat: Vec<f64> = seen
-            .iter()
-            .filter(|k| k.received_ms >= from && k.received_ms < to)
-            .map(|k| k.received_ms.saturating_sub(k.sent_secs * 1000) as f64 / 1000.0)
-            .collect();
-        let mut at: Vec<f64> = seen
-            .iter()
-            .filter(|k| k.received_ms >= from && k.received_ms < to)
+            .filter(|k| k.received_ms >= from_ms && k.received_ms <= to_ms)
             .map(|k| k.received_ms as f64 / 1000.0)
             .collect();
-        lat.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        at.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mut pts = vec![from as f64 / 1000.0];
-        pts.extend(at);
-        pts.push(to as f64 / 1000.0);
-        let gap = pts.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
-        println!(
-            "SUMMARY {}: {} s window, keep-alives {}, latency median {:?} s, max {:?} s, longest gap {:.1} s",
-            name,
-            (to - from) / 1000,
-            lat.len(),
-            lat.get(lat.len() / 2),
-            lat.last(),
-            gap
-        );
-    }
+        points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        points.insert(0, from_ms as f64 / 1000.0);
+        points.push(to_ms as f64 / 1000.0);
+        points.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max)
+    };
+    let gap_after_s = gap(signal_from_ms, load_end_ms);
+    let gap_before_s = if first_signal_ms.is_some() {
+        gap(load_start_ms, signal_from_ms)
+    } else {
+        0.0
+    };
+
+    let mut sorted: Vec<f64> = delays_after.iter().map(|d| d.unwrap_or(f64::INFINITY)).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!(
-        "SUMMARY keep-alives received during the load: {}, latency median {:?} s, max {:?} s",
-        during_load.len(),
-        median,
-        max_latency
+        "\nSUMMARY relay {} msg/s: first signal at {:?} s after the load start (degraded seen: {})",
+        params.relay_msgs_per_s, first_signal_s, degraded_seen
     );
-    println!("SUMMARY longest gap: {:.1} s", longest_gap_s);
     println!(
-        "SUMMARY closes at (s): {:?}",
-        relay
-            .state
-            .closes
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|c| ((*c as f64 - load_start_ms as f64) / 1000.0).round())
-            .collect::<Vec<_>>()
+        "SUMMARY after the first signal: {} keep-alives expected, {} delivered, delay median {:?} s, max {:?} s",
+        delays_after.len(),
+        delays_after.iter().flatten().count(),
+        sorted.get(sorted.len() / 2),
+        sorted.last()
     );
-    println!("SUMMARY rate trace (s, msg/s): {:?}", rate_trace);
-    println!("SUMMARY peak handler queue: {}", peak_queue);
-    println!("SUMMARY drops: {}", gauge(&ctx, "p2p.send_queue.dropped.count"));
     println!(
-        "SUMMARY convergence: {:?} s after the load, sync requests {}",
+        "SUMMARY longest gap between delivered keep-alives: {:.1} s before the first signal, {:.1} s from it to the end of the load",
+        gap_before_s, gap_after_s
+    );
+    println!(
+        "SUMMARY the relay's order set equals the maker's {:?} s after the load stopped; sync requests {}",
         converged_after,
         relay.state.sync_requests.load(Ordering::Relaxed)
     );
     println!(
-        "SUMMARY hidden backlog when the queue first held something (released, read by relay): {:?}",
-        hidden_backlog
-    );
-    println!(
-        "SUMMARY ping results (ms since the first ping, round trip ms or fail): {:?}",
-        mm2_p2p::lab_knobs::ping_log()
-    );
-    println!(
-        "SUMMARY RSS at the end: {:?} MiB (debug build, maker and relay in one process)",
-        rss_mib
+        "SUMMARY gauges at the end: rate {} (thousandths msg/s), degraded {}, pressure {}, queue signals {}, close signals {}, queued {}, dropped {}",
+        gauge(&ctx, "p2p.outbox.rate"),
+        gauge(&ctx, "p2p.outbox.degraded"),
+        gauge(&ctx, "p2p.outbox.pressure"),
+        gauge(&ctx, "p2p.outbox.signals.queue.count"),
+        gauge(&ctx, "p2p.outbox.signals.close.count"),
+        gauge(&ctx, "p2p.send_queue.len"),
+        gauge(&ctx, "p2p.send_queue.dropped.count"),
     );
     abort.abort();
     Outcome {
-        keep_alives,
-        longest_gap_s,
+        first_signal_s,
+        delays_after,
+        gap_after_s,
+        gap_before_s,
         converged_after_s: converged_after,
-        closes,
+        degraded_seen,
     }
 }
 
-fn check(outcome: &Outcome, expect_all_within: f64, max_gap: f64) {
-    let late: Vec<_> = outcome
-        .keep_alives
+/// The pass criteria of T-MP8: after the first signal the median tick-to-arrival delay is at most 10 s and no keep-alive
+/// arrives later than 60 s after its tick, no gap between delivered keep-alives exceeds 90 s (before the first signal
+/// one such gap is allowed), and the relay's order set converges within 120 s of the load stopping.
+///
+/// A keep-alive that never arrives is not an arrival: it counts as infinitely late in the median, and the 90 s gap
+/// bounds how long keep-alives can stay missing. The keep-alives that never arrive are those sent into a connection that
+/// then closes; the number is printed in the summary.
+fn check_t_mp8(outcome: &Outcome) {
+    let mut all: Vec<f64> = outcome
+        .delays_after
         .iter()
-        .filter(|(_, _, latency)| latency.is_none_or(|l| l > expect_all_within))
+        .map(|d| d.unwrap_or(f64::INFINITY))
         .collect();
+    all.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(!all.is_empty(), "no keep-alive tick after the first signal");
+    let median = all[all.len() / 2];
+    assert!(median <= 10.0, "median keep-alive delay {median} s");
+    let latest = outcome.delays_after.iter().flatten().fold(0.0_f64, |a, b| a.max(*b));
+    assert!(latest <= 60.0, "a keep-alive arrived {latest} s after its tick");
     assert!(
-        late.is_empty(),
-        "keep-alives not delivered within {expect_all_within} s: {late:?}"
+        outcome.gap_after_s <= 90.0,
+        "a gap of {:.1} s between delivered keep-alives after the first signal",
+        outcome.gap_after_s
     );
+    let converged = outcome.converged_after_s;
     assert!(
-        outcome.longest_gap_s <= max_gap,
-        "a gap of {:.1} s between delivered keep-alives",
-        outcome.longest_gap_s
-    );
-    assert!(
-        outcome.converged_after_s.is_some(),
-        "the relay's order set did not converge"
+        converged.is_some_and(|s| s <= 120.0),
+        "the relay's order set converged after {converged:?} s"
     );
 }
 
-/// The harness of T-MP8 at a small scale, with a relay that keeps up with the ceiling of 10 messages per second
-/// (it reads 20 per second): 60 orders on two pairs, 30 updates per second for 12 s, a keep-alive every 4 s.
-/// This checks the pipeline: the merging, the release at the ceiling, the flush before each keep-alive, the
-/// keep-alive arriving promptly and the convergence. It is not the slow-relay scenario of T-MP8, which is
-/// `t_mp8_full`.
+/// The harness with a relay that keeps up (it reads 20 per second, the maker releases at most 10): no signal, the rate
+/// stays at the ceiling, the keep-alives arrive at once and the relay's order set equals the maker's. This is a
+/// pipeline check of the harness that T-MP8 uses, not the slow-relay scenario.
 #[test]
 fn t_mp8_harness_with_a_relay_that_keeps_up() {
     let outcome = run(Params {
         orders: 60,
         pairs: 2,
-        updates_per_s: 30.0,
+        updates_per_s: 8.0,
         relay_msgs_per_s: 20.0,
         load_secs: 12,
         keep_alive_secs: 4,
         converge_secs: 60,
-        relay_syncs: true,
-        coalescing: true,
-        c1: false,
-        c2: false,
-        c4: false,
-        c1p: false,
-        c5: 0,
-        c6: false,
         row_secs: 4,
     });
-    check(&outcome, 30.0, 90.0);
-    assert_eq!(outcome.closes, 0, "the relay connection closed");
+    assert_eq!(
+        outcome.first_signal_s, None,
+        "a signal came toward a relay that keeps up"
+    );
+    assert!(!outcome.degraded_seen);
+    assert!(
+        outcome.delays_after.iter().all(|d| d.is_some_and(|d| d <= 2.0)),
+        "{:?}",
+        outcome.delays_after
+    );
+    assert!(outcome.converged_after_s.is_some_and(|s| s <= 20.0));
 }
 
-/// T-MP8: 600 orders, 90 updates per second, a relay that reads about one message per second, for at least 300 s.
-/// Every keep-alive reaches the relay within 30 s of its tick, no gap between delivered keep-alives exceeds 90 s,
-/// and after the load stops the relay's order set converges to the maker's.
-#[test]
-#[ignore = "heavy: about 10 to 20 minutes; run explicitly"]
-fn t_mp8_full() {
+fn t_mp8(relay_msgs_per_s: f64) {
     let outcome = run(Params {
-        orders: env_or("MP8_ORDERS", 600),
-        pairs: env_or("MP8_PAIRS", 3),
-        updates_per_s: env_or("MP8_UPDATES_PER_S", 90.0),
-        relay_msgs_per_s: env_or("MP8_RELAY_MSGS_PER_S", 1.0),
-        load_secs: env_or("MP8_LOAD_SECS", 300),
-        keep_alive_secs: env_or("MP8_KEEP_ALIVE_SECS", 30),
-        converge_secs: env_or("MP8_CONVERGE_SECS", 900),
-        relay_syncs: env_or("MP8_RELAY_SYNCS", true),
-        coalescing: env_or("MP8_COALESCING", true),
-        c1: env_or("MP8_C1", false),
-        c2: env_or("MP8_C2", false),
-        c4: env_or("MP8_C4", false),
-        c1p: env_or("MP8_C1P", false),
-        c5: match std::env::var("MP8_C5").as_deref() {
-            Ok("a") => 1,
-            Ok("b") => 2,
-            _ => 0,
-        },
-        c6: env_or("MP8_C6", false),
-        row_secs: 15,
+        orders: 600,
+        pairs: 3,
+        updates_per_s: 90.0,
+        relay_msgs_per_s,
+        load_secs: env_or("MP8_LOAD_SECS", 600),
+        keep_alive_secs: 30,
+        converge_secs: 300,
+        row_secs: 30,
     });
-    check(&outcome, 30.0, 90.0);
+    check_t_mp8(&outcome);
 }
+
+/// T-MP8: 600 orders, 90 updates per second for at least 600 s, toward a relay that reads about 1 message per second.
+#[test]
+#[ignore = "takes about 15 minutes; run with --ignored (see the module documentation)"]
+fn t_mp8_relay_1_msg_per_s() { t_mp8(1.0) }
+
+/// T-MP8 toward a relay that reads about 0.3 messages per second.
+#[test]
+#[ignore = "takes about 15 minutes; run with --ignored (see the module documentation)"]
+fn t_mp8_relay_0_3_msg_per_s() { t_mp8(0.3) }

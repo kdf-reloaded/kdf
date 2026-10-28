@@ -2,7 +2,7 @@
 //!
 //! The order messages a node publishes for its own maker orders wait here, per maker pubkey, with at
 //! most one pending message per order, and leave at a rate that follows the capacity of the relays.
-//! The logic is pure: every method takes the current time in milliseconds and the pressure level as
+//! The logic is pure: every method takes the current time in milliseconds and the queue signal level as
 //! arguments, so the tests inject a clock and need no sleeping. The publishing itself, and the
 //! signing, are done by the caller with what the methods return.
 
@@ -11,25 +11,53 @@ use common::mm_number::MmNumber;
 use keys::KeyPair;
 use parking_lot::Mutex as PaMutex;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use uuid::Uuid;
 
 /// R-MP2 item 1: the default of `maker_update_rate_max`, messages per second per maker pubkey.
 pub(crate) const DEFAULT_MAKER_UPDATE_RATE_MAX: f64 = 10.0;
-/// R-MP2 item 1: the burst is this many times the ceiling.
+/// R-MP2 item 1: the burst is this many times the rate.
 const BURST_FACTOR: f64 = 10.0;
-/// R-MP2 item 3: the lowest rate under pressure, messages per second.
+/// R-MP2 item 3: the rate in degraded mode, messages per second.
 const RATE_FLOOR: f64 = 0.5;
-/// R-MP2 item 3: while under pressure the rate is halved this often.
-const HALVE_INTERVAL_MS: u64 = 5_000;
-/// R-MP2 item 3: the rate starts to rise once the node has been out of pressure this long.
-const RECOVERY_DELAY_MS: u64 = 30_000;
-/// R-MP2 item 3: the rate rises by [`RAISE_STEP`] this often.
-const RAISE_INTERVAL_MS: u64 = 5_000;
-/// R-MP2 item 3: the amount, in messages per second, by which the rate rises.
-const RAISE_STEP: f64 = 1.0;
+/// R-MP2 item 3: the outbox leaves degraded mode this long after the last signal.
+const DEGRADED_FOR_MS: u64 = 5 * 60_000;
+/// R-MP2 item 3: the rate rises by this much, in messages per second, ...
+const RAISE_STEP: f64 = 0.5;
+/// ... this often.
+const RAISE_INTERVAL_MS: u64 = 60_000;
+/// R-MP2 item 3 and D7: the trip rate is forgotten this long after the last signal.
+const TRIP_FORGOTTEN_AFTER_MS: u64 = 30 * 60_000;
 /// R-MP2 item 5: the minimum time between two log lines of one pubkey.
 const LOG_INTERVAL_MS: u64 = 60_000;
+/// R-MP2 item 2: a relay close is a signal only if an outbox released a message within this long before it.
+const RECENT_RELEASE_MS: u64 = 30_000;
+
+/// The kind of a signal that a relay is not keeping up (R-MP2 item 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignalKind {
+    /// The data queue toward a relay holds data, or the pressure level of §28.9B RQ1 item 8 is raised.
+    Queue,
+    /// The last connection to a relay closed while maker data was pending or recently released.
+    Close,
+}
+
+impl SignalKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SignalKind::Queue => "queue",
+            SignalKind::Close => "close",
+        }
+    }
+}
+
+/// Whether the close of the last connection to a relay is a signal (R-MP2 item 2): an outbox holds a pending created
+/// or updated message, or released one within the preceding 30 seconds. `last_release_ms` is `None` or 0 when
+/// nothing was released yet.
+pub(crate) fn close_is_signal(has_pending: bool, last_release_ms: Option<u64>, now_ms: u64) -> bool {
+    has_pending
+        || last_release_ms.is_some_and(|released| released > 0 && now_ms.saturating_sub(released) <= RECENT_RELEASE_MS)
+}
 
 /// A maker-order message waiting in the outbox.
 #[derive(Clone, Debug, PartialEq)]
@@ -121,42 +149,28 @@ pub(crate) struct RateLog {
     pub(crate) pubkey: String,
     pub(crate) rate: f64,
     pub(crate) degraded: bool,
+    /// The kind of the last signal since the previous line, if there was one.
+    pub(crate) signal: Option<SignalKind>,
 }
 
-/// The rate adaptation and the token bucket of one maker pubkey (R-MP2).
+/// The rate and the token bucket of one maker pubkey (R-MP2).
 #[derive(Debug)]
 struct Budget {
     ceiling: f64,
     rate: f64,
     tokens: f64,
     last_refill_ms: u64,
-    /// The next halving while under pressure.
-    next_halve_ms: Option<u64>,
-    /// Start of the current interval out of pressure.
-    clear_since_ms: Option<u64>,
-    /// The next rise while recovering.
-    next_raise_ms: Option<u64>,
-    /// Whether the rate or the degraded state changed since the last log line.
-    dirty: bool,
-    was_degraded: bool,
-    last_log_ms: Option<u64>,
-    /// Measurement only: the state of candidates C5a and C5b.
-    #[cfg(test)]
-    lab: LabBudget,
-}
-
-/// Measurement only: the state of candidates C5a (a relay connection close puts the outbox in degraded mode for 5
-/// minutes, then the rate rises slowly) and C5b (AIMD on closes).
-#[cfg(test)]
-#[derive(Debug)]
-struct LabBudget {
+    /// Whether the outbox is in degraded mode: the rate is the floor and nothing is released.
     degraded: bool,
+    /// The rate in effect when the last signal outside degraded mode came; the climb stops one step below it.
+    trip_rate: Option<f64>,
     last_signal_ms: Option<u64>,
+    /// The next rise of the rate after degraded mode.
     next_raise_ms: Option<u64>,
-    /// C5b: the rate ceiling recorded at the last close, and when it grows next.
-    ceiling_b: f64,
-    ceiling_grow_ms: Option<u64>,
-    pressure_prev: bool,
+    /// Whether the rate, the degraded state or a signal came since the last log line.
+    dirty: bool,
+    unlogged_signal: Option<SignalKind>,
+    last_log_ms: Option<u64>,
 }
 
 impl Budget {
@@ -166,131 +180,57 @@ impl Budget {
             rate: ceiling,
             tokens: ceiling * BURST_FACTOR,
             last_refill_ms: now_ms,
-            next_halve_ms: None,
-            clear_since_ms: Some(now_ms),
+            degraded: false,
+            trip_rate: None,
+            last_signal_ms: None,
             next_raise_ms: None,
             dirty: false,
-            was_degraded: false,
+            unlogged_signal: None,
             last_log_ms: None,
-            #[cfg(test)]
-            lab: LabBudget {
-                degraded: false,
-                last_signal_ms: None,
-                next_raise_ms: None,
-                ceiling_b: ceiling,
-                ceiling_grow_ms: None,
-                pressure_prev: false,
-            },
-        }
-    }
-
-    /// Measurement only: a qualified close of a relay connection, or a rise of the pressure level.
-    #[cfg(test)]
-    fn lab_signal(&mut self, now_ms: u64, mode: u8) {
-        let floor = self.floor();
-        self.lab.last_signal_ms = Some(now_ms);
-        self.dirty = true;
-        if mode == lab::MODE_C5A {
-            self.lab.degraded = true;
-            self.rate = floor;
-            self.lab.next_raise_ms = None;
-        } else {
-            let half = self.rate / 2.0;
-            self.lab.ceiling_b = half;
-            if half < floor {
-                self.lab.degraded = true;
-                self.rate = floor;
-            } else {
-                self.rate = half;
-            }
-            self.lab.next_raise_ms = Some(now_ms + 60_000);
-            self.lab.ceiling_grow_ms = Some(now_ms + 300_000);
-        }
-    }
-
-    /// Measurement only: the rate adaptation of C5a and C5b. The pressure-driven adaptation is off; a rise of the
-    /// pressure level counts as a close.
-    #[cfg(test)]
-    fn lab_advance(&mut self, now_ms: u64, pressure: bool, cap: f64, mode: u8) {
-        let floor = self.floor();
-        if pressure && !self.lab.pressure_prev {
-            self.lab_signal(now_ms, mode);
-        } else if pressure && mode == lab::MODE_C5A {
-            self.lab.last_signal_ms = Some(now_ms);
-        }
-        self.lab.pressure_prev = pressure;
-        self.next_halve_ms = None;
-        self.clear_since_ms = None;
-        if mode == lab::MODE_C5A {
-            if self.lab.degraded {
-                if self.lab.last_signal_ms.is_some_and(|last| now_ms >= last + 300_000) {
-                    self.lab.degraded = false;
-                    self.rate = floor;
-                    self.lab.next_raise_ms = Some(now_ms + 60_000);
-                    self.dirty = true;
-                }
-            } else if let Some(mut next) = self.lab.next_raise_ms {
-                while self.rate < cap && now_ms >= next {
-                    self.rate = (self.rate + 0.5).min(cap);
-                    next += 60_000;
-                    self.dirty = true;
-                }
-                self.lab.next_raise_ms = Some(next);
-            }
-        } else if let Some(last) = self.lab.last_signal_ms {
-            if self.lab.degraded {
-                if now_ms >= last + 60_000 {
-                    self.lab.degraded = false;
-                    self.rate = floor;
-                    self.lab.next_raise_ms = Some(now_ms + 30_000);
-                    self.dirty = true;
-                }
-            } else if let Some(mut next) = self.lab.next_raise_ms {
-                while self.rate < self.lab.ceiling_b && now_ms >= next {
-                    self.rate = (self.rate + 0.5).min(self.lab.ceiling_b);
-                    next += 30_000;
-                    self.dirty = true;
-                }
-                self.lab.next_raise_ms = Some(next);
-            }
-            if let Some(mut grow) = self.lab.ceiling_grow_ms {
-                while now_ms >= grow && self.lab.ceiling_b < cap {
-                    self.lab.ceiling_b = (self.lab.ceiling_b + 0.5).min(cap);
-                    grow += 300_000;
-                }
-                self.lab.ceiling_grow_ms = Some(grow);
-            }
         }
     }
 
     fn floor(&self) -> f64 { RATE_FLOOR.min(self.ceiling) }
 
-    /// The bucket holds at most the burst of the current rate: ten times the rate, at most ten times
-    /// the ceiling. A lowered rate therefore also lowers what can leave at once.
+    /// The bucket holds at most the burst of the current rate: ten times the rate. A lowered rate therefore also
+    /// lowers what can leave at once.
     fn capacity(&self) -> f64 { self.rate * BURST_FACTOR }
 
-    fn degraded(&self, pressure: bool) -> bool {
-        #[cfg(test)]
-        if lab::mode() != 0 {
-            return self.lab.degraded;
+    /// The highest rate the climb reaches: one step below the trip rate, never below the floor, and the ceiling once
+    /// the trip rate is forgotten.
+    fn climb_limit(&self) -> f64 {
+        match self.trip_rate {
+            Some(trip) => (trip - RAISE_STEP).max(self.floor()).min(self.ceiling),
+            None => self.ceiling,
         }
-        pressure && self.rate <= self.floor()
     }
 
     fn is_idle(&self) -> bool {
         self.rate >= self.ceiling
             && self.tokens >= self.ceiling * BURST_FACTOR
-            && self.next_halve_ms.is_none()
+            && !self.degraded
+            && self.trip_rate.is_none()
             && !self.dirty
     }
 
-    /// Advances the clock: refills the bucket at the rate that held up to now, then adapts the rate
-    /// to the pressure level (R-MP2 item 3).
-    ///
-    /// While under pressure the rate halves every 5 s, the first time 5 s after the pressure began,
-    /// down to the floor. Once out of pressure for 30 s it rises by 1 message per second, first at
-    /// that moment and then every 5 s, up to the ceiling.
-    fn advance(&mut self, now_ms: u64, pressure: bool, ceiling: f64) {
+    /// A signal at `now_ms` (R-MP2 item 3). Outside degraded mode the rate in effect becomes the trip rate and the
+    /// outbox drops to the floor in degraded mode. While degraded the trip rate stays as it is.
+    fn signal(&mut self, now_ms: u64, kind: SignalKind) {
+        if !self.degraded {
+            self.trip_rate = Some(self.rate);
+            self.rate = self.floor();
+            self.degraded = true;
+            self.next_raise_ms = None;
+            self.tokens = self.tokens.min(self.capacity());
+            self.dirty = true;
+            self.unlogged_signal = Some(kind);
+        }
+        self.last_signal_ms = Some(now_ms);
+    }
+
+    /// Advances the clock: refills the bucket at the rate that held up to now, then adapts the rate (R-MP2 item 3).
+    /// `queue_signal` is the level of the queue signal; while it is raised it counts as a signal at every moment.
+    fn advance(&mut self, now_ms: u64, queue_signal: bool, ceiling: f64) {
         if ceiling != self.ceiling {
             self.ceiling = ceiling;
             if self.rate > ceiling {
@@ -302,49 +242,47 @@ impl Budget {
         self.last_refill_ms = self.last_refill_ms.max(now_ms);
         self.tokens = (self.tokens + self.rate * elapsed_ms as f64 / 1000.0).min(self.capacity());
 
+        if queue_signal {
+            self.signal(now_ms, SignalKind::Queue);
+        }
         let floor = self.floor();
-        #[cfg(test)]
-        let lab_mode = lab::mode();
-        #[cfg(not(test))]
-        let lab_mode = 0u8;
-        if lab_mode != 0 {
-            #[cfg(test)]
-            self.lab_advance(now_ms, pressure, ceiling, lab_mode);
-        } else if pressure {
-            self.clear_since_ms = None;
-            self.next_raise_ms = None;
-            let next = *self.next_halve_ms.get_or_insert(now_ms + HALVE_INTERVAL_MS);
-            let mut next = next;
-            while self.rate > floor && now_ms >= next {
-                self.rate = (self.rate / 2.0).max(floor);
+        if self.degraded {
+            if self
+                .last_signal_ms
+                .is_some_and(|last| now_ms >= last.saturating_add(DEGRADED_FOR_MS))
+            {
+                self.degraded = false;
+                self.rate = floor;
+                self.next_raise_ms = Some(now_ms + RAISE_INTERVAL_MS);
                 self.dirty = true;
-                next += HALVE_INTERVAL_MS;
             }
-            self.next_halve_ms = Some(next);
         } else {
-            self.next_halve_ms = None;
-            let since = *self.clear_since_ms.get_or_insert(now_ms);
-            if self.rate < self.ceiling && now_ms >= since + RECOVERY_DELAY_MS {
-                let mut next = *self.next_raise_ms.get_or_insert(since + RECOVERY_DELAY_MS);
-                while self.rate < self.ceiling && now_ms >= next {
-                    self.rate = (self.rate + RAISE_STEP).min(self.ceiling);
+            if self.trip_rate.is_some()
+                && self
+                    .last_signal_ms
+                    .is_some_and(|last| now_ms >= last.saturating_add(TRIP_FORGOTTEN_AFTER_MS))
+            {
+                self.trip_rate = None;
+                self.dirty = true;
+            }
+            let limit = self.climb_limit();
+            if self.rate < limit {
+                let mut next = *self.next_raise_ms.get_or_insert(now_ms + RAISE_INTERVAL_MS);
+                while self.rate < limit && now_ms >= next {
+                    self.rate = (self.rate + RAISE_STEP).min(limit);
                     self.dirty = true;
                     next += RAISE_INTERVAL_MS;
                 }
                 self.next_raise_ms = Some(next);
+            } else {
+                self.next_raise_ms = None;
             }
         }
         self.tokens = self.tokens.min(self.capacity());
-
-        let degraded = self.degraded(pressure);
-        if degraded != self.was_degraded {
-            self.was_degraded = degraded;
-            self.dirty = true;
-        }
     }
 
     /// The log line due now, if any: at most one per minute, carrying the state at that time.
-    fn take_log(&mut self, now_ms: u64, pubkey: &str, pressure: bool) -> Option<RateLog> {
+    fn take_log(&mut self, now_ms: u64, pubkey: &str) -> Option<RateLog> {
         if !self.dirty {
             return None;
         }
@@ -358,7 +296,8 @@ impl Budget {
         Some(RateLog {
             pubkey: pubkey.to_owned(),
             rate: self.rate,
-            degraded: self.degraded(pressure),
+            degraded: self.degraded,
+            signal: self.unlogged_signal.take(),
         })
     }
 }
@@ -374,7 +313,6 @@ struct Entry {
 /// The outbox of one maker pubkey.
 #[derive(Debug)]
 struct PubkeyOutbox {
-    pubkey: String,
     key_pair: Option<KeyPair>,
     entries: HashMap<Uuid, Entry>,
     /// The pending orders by slot number, oldest first.
@@ -384,9 +322,8 @@ struct PubkeyOutbox {
 }
 
 impl PubkeyOutbox {
-    fn new(pubkey: String, key_pair: Option<KeyPair>, ceiling: f64, now_ms: u64) -> Self {
+    fn new(key_pair: Option<KeyPair>, ceiling: f64, now_ms: u64) -> Self {
         PubkeyOutbox {
-            pubkey,
             key_pair,
             entries: HashMap::new(),
             by_age: BTreeMap::new(),
@@ -433,9 +370,9 @@ impl PubkeyOutbox {
 
     /// Releases pending messages, oldest first, while the bucket holds a token and the outbox is not
     /// degraded (R-MP2 items 1 and 4).
-    fn release_budgeted(&mut self, pressure: bool) -> Vec<Release> {
+    fn release_budgeted(&mut self) -> Vec<Release> {
         let mut released = Vec::new();
-        if self.budget.degraded(pressure) {
+        if self.budget.degraded {
             return released;
         }
         while self.budget.tokens >= 1.0 {
@@ -447,18 +384,6 @@ impl PubkeyOutbox {
         }
         released
     }
-
-    /// Releases every pending message of `topic`, oldest first, without regard to the budget
-    /// (R-MP3 item 2).
-    fn release_topic(&mut self, topic: &str) -> Vec<Release> {
-        let uuids: Vec<Uuid> = self
-            .by_age
-            .values()
-            .filter(|uuid| self.entries.get(uuid).is_some_and(|entry| entry.topic == topic))
-            .copied()
-            .collect();
-        uuids.iter().filter_map(|uuid| self.release(uuid)).collect()
-    }
 }
 
 /// The aggregate values of R-MP5.
@@ -468,19 +393,31 @@ pub(crate) struct OutboxMetrics {
     pub(crate) pending: usize,
     /// The lowest rate over pubkeys, the ceiling when there is none.
     pub(crate) rate: f64,
+    /// Whether any outbox is in degraded mode.
+    pub(crate) degraded: bool,
 }
 
 /// The outboxes of all maker pubkeys of the node.
 #[derive(Debug, Default)]
 pub(crate) struct MakerOutboxes {
     by_pubkey: HashMap<String, PubkeyOutbox>,
+    /// When the last signal came. The signals are node-wide: an outbox that appears while the node is degraded starts
+    /// degraded.
+    last_signal: Option<(u64, SignalKind)>,
 }
 
 impl MakerOutboxes {
     fn outbox(&mut self, pubkey: &str, key_pair: Option<KeyPair>, ceiling: f64, now_ms: u64) -> &mut PubkeyOutbox {
-        self.by_pubkey
-            .entry(pubkey.to_owned())
-            .or_insert_with(|| PubkeyOutbox::new(pubkey.to_owned(), key_pair, ceiling, now_ms))
+        let last_signal = self.last_signal;
+        self.by_pubkey.entry(pubkey.to_owned()).or_insert_with(|| {
+            let mut outbox = PubkeyOutbox::new(key_pair, ceiling, now_ms);
+            if let Some((at, kind)) = last_signal {
+                if now_ms.saturating_sub(at) < DEGRADED_FOR_MS {
+                    outbox.budget.signal(at, kind);
+                }
+            }
+            outbox
+        })
     }
 
     /// Stores a message of the maker `pubkey` and returns what is to be published now: a
@@ -489,7 +426,7 @@ impl MakerOutboxes {
     pub(crate) fn enqueue(
         &mut self,
         now_ms: u64,
-        pressure: bool,
+        queue_signal: bool,
         ceiling: f64,
         pubkey: &str,
         key_pair: Option<KeyPair>,
@@ -498,46 +435,37 @@ impl MakerOutboxes {
         message: OutboxMessage,
     ) -> (Vec<Release>, Option<RateLog>) {
         let outbox = self.outbox(pubkey, key_pair, ceiling, now_ms);
-        outbox.budget.advance(now_ms, pressure, ceiling);
+        outbox.budget.advance(now_ms, queue_signal, ceiling);
         let mut released: Vec<Release> = outbox.push(uuid, topic, message).into_iter().collect();
-        released.extend(outbox.release_budgeted(pressure));
-        let log = outbox.budget.take_log(now_ms, pubkey, pressure);
+        released.extend(outbox.release_budgeted());
+        let log = outbox.budget.take_log(now_ms, pubkey);
+        if queue_signal {
+            self.last_signal = Some((now_ms, SignalKind::Queue));
+        }
         (released, log)
     }
 
-    /// Releases the pending messages of the pair `topic` of `pubkey` before the keep-alive of that
-    /// pair (R-MP3 item 2). In degraded mode nothing is released (R-MP2 item 4).
-    pub(crate) fn flush_pair(
-        &mut self,
-        now_ms: u64,
-        pressure: bool,
-        ceiling: f64,
-        pubkey: &str,
-        topic: &str,
-    ) -> (Vec<Release>, Option<RateLog>) {
-        let Some(outbox) = self.by_pubkey.get_mut(pubkey) else {
-            return (Vec::new(), None);
-        };
-        outbox.budget.advance(now_ms, pressure, ceiling);
-        let released = if outbox.budget.degraded(pressure) {
-            Vec::new()
-        } else {
-            outbox.release_topic(topic)
-        };
-        let log = outbox.budget.take_log(now_ms, pubkey, pressure);
-        (released, log)
+    /// A signal at `now_ms`: every outbox drops to the floor in degraded mode (R-MP2 item 3).
+    pub(crate) fn signal(&mut self, now_ms: u64, kind: SignalKind) {
+        self.last_signal = Some((now_ms, kind));
+        for outbox in self.by_pubkey.values_mut() {
+            outbox.budget.signal(now_ms, kind);
+        }
     }
 
     /// The periodic step: adapts every pubkey's rate and releases what the budget allows.
-    pub(crate) fn tick(&mut self, now_ms: u64, pressure: bool, ceiling: f64) -> (Vec<Release>, Vec<RateLog>) {
+    pub(crate) fn tick(&mut self, now_ms: u64, queue_signal: bool, ceiling: f64) -> (Vec<Release>, Vec<RateLog>) {
         let mut released = Vec::new();
         let mut logs = Vec::new();
-        for (pubkey, outbox) in self.by_pubkey.iter_mut() {
-            outbox.budget.advance(now_ms, pressure, ceiling);
-            released.extend(outbox.release_budgeted(pressure));
-            logs.extend(outbox.budget.take_log(now_ms, pubkey, pressure));
+        if queue_signal {
+            self.last_signal = Some((now_ms, SignalKind::Queue));
         }
-        // An idle pubkey, at the ceiling with a full bucket, is the same as a new one.
+        for (pubkey, outbox) in self.by_pubkey.iter_mut() {
+            outbox.budget.advance(now_ms, queue_signal, ceiling);
+            released.extend(outbox.release_budgeted());
+            logs.extend(outbox.budget.take_log(now_ms, pubkey));
+        }
+        // An idle pubkey, at the ceiling with a full bucket and no memory of a signal, is the same as a new one.
         self.by_pubkey
             .retain(|_, outbox| !outbox.entries.is_empty() || !outbox.budget.is_idle());
         // Releases of different pubkeys are published in the order of their slots only within one
@@ -553,23 +481,11 @@ impl MakerOutboxes {
                 .values()
                 .map(|outbox| outbox.budget.rate)
                 .fold(ceiling, f64::min),
+            degraded: self.by_pubkey.values().any(|outbox| outbox.budget.degraded),
         }
     }
 
-    /// Measurement only: a qualified close of a relay connection (candidates C5a, C5b).
-    #[cfg(test)]
-    pub(crate) fn lab_signal(&mut self, now_ms: u64, mode: u8) {
-        for outbox in self.by_pubkey.values_mut() {
-            outbox.budget.lab_signal(now_ms, mode);
-        }
-    }
-
-    /// Measurement only: whether any message is pending.
-    #[cfg(test)]
-    pub(crate) fn has_pending(&self) -> bool { self.by_pubkey.values().any(|outbox| !outbox.entries.is_empty()) }
-
-    /// Measurement only: the pending messages of `pubkey` on the pairs `topics`.
-    #[cfg(test)]
+    /// The pending messages of `pubkey` on the pairs `topics` (R-MP3 item 2).
     pub(crate) fn pending_for_topics(&self, pubkey: &str, topics: &[String]) -> usize {
         self.by_pubkey.get(pubkey).map_or(0, |outbox| {
             outbox
@@ -580,19 +496,13 @@ impl MakerOutboxes {
         })
     }
 
-    /// Measurement only: whether `pubkey` is in degraded mode under `pressure`.
-    #[cfg(test)]
-    pub(crate) fn degraded_of(&self, pubkey: &str, pressure: bool) -> bool {
-        self.by_pubkey
-            .get(pubkey)
-            .is_some_and(|outbox| outbox.budget.degraded(pressure))
+    /// Whether `pubkey` is in degraded mode.
+    pub(crate) fn is_degraded(&self, pubkey: &str) -> bool {
+        self.by_pubkey.get(pubkey).is_some_and(|outbox| outbox.budget.degraded)
     }
 
-    /// Measurement only: whether any pubkey is in degraded mode under `pressure`.
-    #[cfg(test)]
-    pub(crate) fn any_degraded(&self, pressure: bool) -> bool {
-        self.by_pubkey.values().any(|outbox| outbox.budget.degraded(pressure))
-    }
+    /// Whether any message is pending.
+    pub(crate) fn has_pending(&self) -> bool { self.by_pubkey.values().any(|outbox| !outbox.entries.is_empty()) }
 
     /// The number of pending messages of `pubkey`.
     #[cfg(test)]
@@ -613,34 +523,11 @@ pub(crate) struct MakerOutbox {
     pub(crate) outboxes: PaMutex<MakerOutboxes>,
     /// Set while a keep-alive round after a relay joined the mesh is scheduled (R-MP4).
     pub(crate) reconnect_round_pending: AtomicBool,
-}
-
-/// Measurement knobs of the maker publication rate lab (tests only; the defaults are the shipped behaviour).
-#[cfg(test)]
-pub(crate) mod lab {
-    use std::sync::atomic::{AtomicBool, AtomicU64};
-
-    /// Candidate C1: the flush before a keep-alive and the keep-alive round release pending messages only within
-    /// the budget. A keep-alive goes out when its pair has nothing pending, or when `SLOT_MS` (a round: `ROUND_MS`)
-    /// has passed, or at once in degraded mode.
-    pub(crate) static BUDGETED_FLUSH: AtomicBool = AtomicBool::new(false);
-    pub(crate) static SLOT_MS: AtomicU64 = AtomicU64::new(30_000);
-    pub(crate) static ROUND_MS: AtomicU64 = AtomicU64::new(5_000);
-    /// Messages handed to the swarm by the outbox, for the backlog estimate.
-    pub(crate) static RELEASED: AtomicU64 = AtomicU64::new(0);
-    /// Candidate C1': the longest a keep-alive waits for its pairs to drain (`u64::MAX`: until the slot).
-    pub(crate) static WAIT_CAP_MS: AtomicU64 = AtomicU64::new(u64::MAX);
-    /// Candidates C5a (1) and C5b (2); 0 is off.
-    pub(crate) static MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-    pub(crate) const MODE_C5A: u8 = 1;
-    pub(crate) const MODE_C5B: u8 = 2;
-    pub(crate) fn mode() -> u8 { MODE.load(std::sync::atomic::Ordering::Relaxed) }
-    /// How many relay connection closes the pump has looked at.
-    pub(crate) static CLOSES_SEEN: AtomicU64 = AtomicU64::new(0);
-    /// When the outbox last released data (ms since the epoch).
-    pub(crate) static LAST_RELEASE_MS: AtomicU64 = AtomicU64::new(0);
-    /// Keep-alive rounds after a relay joined the mesh that are running now.
-    pub(crate) static ROUND_ACTIVE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    /// When an outbox last released a created or updated message, in milliseconds since the epoch; 0 for never
+    /// (R-MP2 item 2).
+    pub(crate) last_release_ms: AtomicU64,
+    /// Close signals since start (R-MP5).
+    pub(crate) close_signals: AtomicU64,
 }
 
 #[cfg(test)]
@@ -766,56 +653,93 @@ mod tests {
 
     const CEILING: f64 = 10.0;
     const PK: &str = "02aa";
+    const MIN: u64 = 60_000;
 
-    fn enqueue(
+    fn enqueue_with(
         outboxes: &mut MakerOutboxes,
         now_ms: u64,
-        pressure: bool,
+        queue_signal: bool,
+        ceiling: f64,
         uuid: Uuid,
         topic: &str,
         message: OutboxMessage,
     ) -> Vec<Release> {
         outboxes
-            .enqueue(now_ms, pressure, CEILING, PK, None, uuid, topic.to_owned(), message)
+            .enqueue(now_ms, queue_signal, ceiling, PK, None, uuid, topic.to_owned(), message)
             .0
+    }
+
+    fn enqueue(
+        outboxes: &mut MakerOutboxes,
+        now_ms: u64,
+        queue_signal: bool,
+        uuid: Uuid,
+        topic: &str,
+        message: OutboxMessage,
+    ) -> Vec<Release> {
+        enqueue_with(outboxes, now_ms, queue_signal, CEILING, uuid, topic, message)
     }
 
     fn update_msg(uuid: Uuid, price: i64) -> OutboxMessage {
         OutboxMessage::Updated(updated(uuid, Some(price), None, None))
     }
 
-    // T-MP2: a cancellation is released at once, with the budget exhausted and in degraded mode.
+    /// An outbox for `PK` that exists, with the bucket full, at `ceiling`.
+    fn outboxes_with_pk(now_ms: u64, ceiling: f64) -> MakerOutboxes {
+        let mut outboxes = MakerOutboxes::default();
+        let uuid = Uuid::new_v4();
+        enqueue_with(&mut outboxes, now_ms, false, ceiling, uuid, "t", update_msg(uuid, 1));
+        outboxes
+    }
+
+    /// Ticks from `from_ms` to `to_ms` in steps of `step_ms`; the queue signal is raised until `raised_until_ms`.
+    fn run(outboxes: &mut MakerOutboxes, from_ms: u64, to_ms: u64, step_ms: u64, ceiling: f64, raised_until_ms: u64) {
+        let mut t = from_ms;
+        while t <= to_ms {
+            outboxes.tick(t, t < raised_until_ms, ceiling);
+            t += step_ms;
+        }
+    }
+
+    // T-MP2: a cancellation is released at once with the budget exhausted and in degraded mode.
     #[test]
     fn cancellation_is_never_held_back() {
         let mut outboxes = MakerOutboxes::default();
-        let mut now = 1_000_000;
-        // Exhaust the burst of 100 and put the node under pressure to the floor.
+        let t0 = 1_000_000;
+        // 600 orders: the burst of 100 leaves, the rest waits.
         let uuids: Vec<Uuid> = (0..600).map(|_| Uuid::new_v4()).collect();
         for uuid in &uuids {
-            enqueue(&mut outboxes, now, true, *uuid, "t", update_msg(*uuid, 1));
+            enqueue(&mut outboxes, t0, false, *uuid, "t", update_msg(*uuid, 1));
         }
-        assert!(outboxes.pending_of(PK) > 0);
-        for _ in 0..30 {
-            now += 1_000;
-            outboxes.tick(now, true, CEILING);
-        }
-        assert_eq!(outboxes.rate_of(PK, CEILING), 0.5);
         let pending_before = outboxes.pending_of(PK);
-        assert!(pending_before > 0, "degraded mode keeps the pending messages");
-
+        assert_eq!(pending_before, 500);
+        // Exhausted budget: the cancellation leaves at once, the order's pending update is discarded.
         let victim = uuids[599];
         let released = enqueue(
             &mut outboxes,
-            now,
-            true,
+            t0,
+            false,
             victim,
             "t",
             OutboxMessage::Cancelled(cancelled(victim)),
         );
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].message, OutboxMessage::Cancelled(cancelled(victim)));
-        // The pending update of the order was discarded, nothing else changed.
         assert_eq!(outboxes.pending_of(PK), pending_before - 1);
+        // Degraded mode: the same.
+        outboxes.signal(t0 + 1_000, SignalKind::Close);
+        assert!(outboxes.is_degraded(PK));
+        let victim = uuids[598];
+        let released = enqueue(
+            &mut outboxes,
+            t0 + 2_000,
+            false,
+            victim,
+            "t",
+            OutboxMessage::Cancelled(cancelled(victim)),
+        );
+        assert_eq!(released.len(), 1);
+        assert_eq!(outboxes.pending_of(PK), pending_before - 2);
     }
 
     #[test]
@@ -836,6 +760,7 @@ mod tests {
         assert_eq!(outboxes.pending_of(PK), 0);
     }
 
+    // T-MP4: the ceiling and the burst.
     #[test]
     fn burst_and_ceiling_are_respected() {
         let mut outboxes = MakerOutboxes::default();
@@ -886,146 +811,190 @@ mod tests {
         );
     }
 
-    // T-MP4: adaptation with an injected clock.
+    // T-MP4: a close signal, and the queue signal becoming raised, drop the rate to the floor in degraded mode;
+    // nothing created or updated is released then.
     #[test]
-    fn rate_halves_under_pressure_and_recovers_after_thirty_seconds() {
-        let mut outboxes = MakerOutboxes::default();
-        let t0 = 1_000_000;
-        let uuid = Uuid::new_v4();
-        // Create the outbox (an update that leaves at once).
-        enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
-        let rate = |outboxes: &MakerOutboxes| outboxes.rate_of(PK, CEILING);
-        assert_eq!(rate(&outboxes), 10.0);
-
-        // Pressure from t0: halving at +5 s, +10 s, ...
-        let steps = [
-            (0, 10.0),
-            (4_999, 10.0),
-            (5_000, 5.0),
-            (9_999, 5.0),
-            (10_000, 2.5),
-            (15_000, 1.25),
-            (20_000, 0.625),
-            (25_000, 0.5),
-            (60_000, 0.5),
-        ];
-        for (offset, expected) in steps {
-            outboxes.tick(t0 + offset, true, CEILING);
-            assert_eq!(rate(&outboxes), expected, "at +{} ms", offset);
-        }
-
-        // Out of pressure from +60 s: nothing for 30 s, then +1/s every 5 s up to the ceiling.
-        let t1 = t0 + 60_000;
-        let steps = [
-            (0, 0.5),
-            (29_999, 0.5),
-            (30_000, 1.5),
-            (34_999, 1.5),
-            (35_000, 2.5),
-            (40_000, 3.5),
-            (70_000, 9.5),
-            (75_000, 10.0),
-            (200_000, 10.0),
-        ];
-        for (offset, expected) in steps {
-            outboxes.tick(t1 + offset, false, CEILING);
-            assert_eq!(rate(&outboxes), expected, "recovery at +{} ms", offset);
+    fn a_signal_drops_the_rate_to_the_floor_and_stops_the_releases() {
+        for kind in [SignalKind::Close, SignalKind::Queue] {
+            let t0 = 1_000_000;
+            let mut outboxes = outboxes_with_pk(t0, CEILING);
+            assert_eq!(outboxes.rate_of(PK, CEILING), 10.0);
+            assert!(!outboxes.is_degraded(PK));
+            match kind {
+                SignalKind::Close => outboxes.signal(t0 + 1_000, kind),
+                SignalKind::Queue => {
+                    outboxes.tick(t0 + 1_000, true, CEILING);
+                },
+            }
+            assert_eq!(outboxes.rate_of(PK, CEILING), 0.5, "{:?}", kind);
+            assert!(outboxes.is_degraded(PK), "{:?}", kind);
+            // Plenty of tokens had been banked, but degraded mode releases nothing.
+            for i in 0..50 {
+                let uuid = Uuid::new_v4();
+                assert!(enqueue(&mut outboxes, t0 + 2_000 + i, false, uuid, "t", update_msg(uuid, 1)).is_empty());
+            }
+            assert!(outboxes.tick(t0 + 60_000, false, CEILING).0.is_empty());
+            assert_eq!(outboxes.pending_of(PK), 50);
         }
     }
 
+    // T-MP4 / T-MP5: a relay close is a signal only with recent maker traffic.
     #[test]
-    fn a_short_pressure_blip_does_not_lower_the_rate() {
-        let mut outboxes = MakerOutboxes::default();
-        let t0 = 1_000_000;
-        let uuid = Uuid::new_v4();
-        enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
-        outboxes.tick(t0 + 1_000, true, CEILING);
-        outboxes.tick(t0 + 4_000, true, CEILING);
-        outboxes.tick(t0 + 4_500, false, CEILING);
-        outboxes.tick(t0 + 9_000, true, CEILING);
-        outboxes.tick(t0 + 12_000, true, CEILING);
-        assert_eq!(outboxes.rate_of(PK, CEILING), 10.0);
+    fn a_close_is_a_signal_only_with_pending_or_recent_traffic() {
+        let now = 10_000_000;
+        assert!(!close_is_signal(false, None, now));
+        assert!(!close_is_signal(false, Some(0), now));
+        assert!(close_is_signal(true, None, now), "a pending message");
+        assert!(close_is_signal(false, Some(now - 29_000), now), "released 29 s ago");
+        assert!(close_is_signal(false, Some(now - 30_000), now), "released 30 s ago");
+        assert!(!close_is_signal(false, Some(now - 31_000), now), "released 31 s ago");
     }
 
+    // T-MP4: the outbox leaves degraded mode 5 min after the last signal, and not earlier while the queue signal stays
+    // raised.
     #[test]
-    fn at_the_floor_under_pressure_nothing_is_released_and_the_flush_is_skipped() {
-        let mut outboxes = MakerOutboxes::default();
+    fn degraded_mode_ends_five_minutes_after_the_last_signal() {
         let t0 = 1_000_000;
-        // Exhaust the burst, then leave 300 messages pending on one pair.
-        for _ in 0..100 {
-            let uuid = Uuid::new_v4();
-            enqueue(&mut outboxes, t0, true, uuid, "warm", update_msg(uuid, 1));
-        }
-        for _ in 0..300 {
-            let uuid = Uuid::new_v4();
-            enqueue(&mut outboxes, t0, true, uuid, "pair-a", update_msg(uuid, 1));
-        }
-        for s in 1..=40 {
-            outboxes.tick(t0 + s * 1_000, true, CEILING);
-        }
-        // The rate fell to the floor; some messages left on the way down, none leave now.
+        let mut outboxes = outboxes_with_pk(t0, CEILING);
+        outboxes.signal(t0, SignalKind::Close);
+        outboxes.tick(t0 + 5 * MIN - 1, false, CEILING);
+        assert!(outboxes.is_degraded(PK));
+        outboxes.tick(t0 + 5 * MIN, false, CEILING);
+        assert!(!outboxes.is_degraded(PK));
         assert_eq!(outboxes.rate_of(PK, CEILING), 0.5);
-        let pending = outboxes.pending_of(PK);
-        assert!(pending > 0);
-        for s in 41..=100 {
-            assert!(outboxes.tick(t0 + s * 1_000, true, CEILING).0.is_empty());
-        }
-        assert_eq!(outboxes.pending_of(PK), pending);
-        let (flushed, _) = outboxes.flush_pair(t0 + 100_000, true, CEILING, PK, "pair-a");
-        assert!(flushed.is_empty(), "the flush is skipped in degraded mode");
-        // Out of pressure the flush works again, and releases the whole pair.
-        let (flushed, _) = outboxes.flush_pair(t0 + 101_000, false, CEILING, PK, "pair-a");
-        assert_eq!(flushed.len(), pending);
-        assert_eq!(outboxes.pending_of(PK), 0);
+
+        // A queue signal that stays raised counts at every moment: degraded 5 min after it clears.
+        let t1 = t0 + 20 * MIN;
+        outboxes.signal(t1, SignalKind::Close);
+        run(&mut outboxes, t1, t1 + 10 * MIN, 10_000, CEILING, t1 + 10 * MIN);
+        assert!(outboxes.is_degraded(PK), "still raised after 10 min");
+        let cleared = t1 + 10 * MIN;
+        run(&mut outboxes, cleared, cleared + 5 * MIN - 20_000, 10_000, CEILING, 0);
+        assert!(outboxes.is_degraded(PK), "4 min 40 s after it cleared");
+        outboxes.tick(cleared + 5 * MIN, false, CEILING);
+        assert!(!outboxes.is_degraded(PK));
     }
 
-    // T-MP6 (part): the flush releases exactly the pending messages of the pair, oldest first, and
-    // does not touch the budget.
+    // T-MP4: the rate rises by 0.5/s every 60 s and stops one step below the trip rate: with a trip rate of 3/s, at
+    // 2.5/s.
     #[test]
-    fn flush_releases_the_pair_oldest_first_without_the_budget() {
-        let mut outboxes = MakerOutboxes::default();
-        let now = 1_000_000;
-        for _ in 0..100 {
-            let uuid = Uuid::new_v4();
-            enqueue(&mut outboxes, now, false, uuid, "warm", update_msg(uuid, 1));
+    fn the_climb_stops_one_step_below_the_trip_rate() {
+        let t0 = 1_000_000;
+        let mut outboxes = outboxes_with_pk(t0, 3.0);
+        outboxes.signal(t0, SignalKind::Close);
+        let left = t0 + 5 * MIN;
+        run(&mut outboxes, t0, left, 10_000, 3.0, 0);
+        assert_eq!(outboxes.rate_of(PK, 3.0), 0.5);
+        for (minutes, expected) in [(1, 1.0), (2, 1.5), (3, 2.0), (4, 2.5), (5, 2.5), (20, 2.5)] {
+            run(&mut outboxes, left, left + minutes * MIN, 10_000, 3.0, 0);
+            // Between the steps the rate does not move.
+            assert_eq!(outboxes.rate_of(PK, 3.0), expected, "after {} min of climbing", minutes);
         }
-        let ids: Vec<Uuid> = (0..6).map(|_| Uuid::new_v4()).collect();
-        for (i, uuid) in ids.iter().enumerate() {
-            let topic = if i % 2 == 0 { "pair-a" } else { "pair-b" };
-            enqueue(&mut outboxes, now, false, *uuid, topic, update_msg(*uuid, 1));
-        }
-        assert_eq!(outboxes.pending_of(PK), 6);
-        let (flushed, _) = outboxes.flush_pair(now, false, CEILING, PK, "pair-a");
-        let order: Vec<Uuid> = flushed.iter().map(|r| as_updated(r.message.clone()).uuid()).collect();
-        assert_eq!(order, vec![ids[0], ids[2], ids[4]]);
-        assert!(flushed.iter().all(|r| r.topic == "pair-a"));
-        assert_eq!(outboxes.pending_of(PK), 3);
-        // The budget was not charged: the bucket is still empty, so nothing else leaves yet.
-        assert!(outboxes.tick(now, false, CEILING).0.is_empty());
+        // Not one step earlier.
+        let mut outboxes = outboxes_with_pk(t0, 3.0);
+        outboxes.signal(t0, SignalKind::Close);
+        run(&mut outboxes, t0, left + MIN - 10_000, 10_000, 3.0, 0);
+        assert_eq!(outboxes.rate_of(PK, 3.0), 0.5);
+    }
+
+    // T-MP4: a signal while degraded does not change the trip rate.
+    #[test]
+    fn a_signal_while_degraded_keeps_the_trip_rate() {
+        let t0 = 1_000_000;
+        let mut outboxes = outboxes_with_pk(t0, 3.0);
+        outboxes.signal(t0, SignalKind::Close);
+        // Another signal 2 min later, while degraded at the floor of 0.5.
+        outboxes.signal(t0 + 2 * MIN, SignalKind::Close);
+        outboxes.signal(t0 + 3 * MIN, SignalKind::Queue);
+        // 5 min after the last signal, the climb goes up to 2.5, the limit of the first trip rate of 3, and not
+        // to the floor, which a trip rate of 0.5 would give.
+        let left = t0 + 8 * MIN;
+        run(&mut outboxes, t0, left + 4 * MIN, 10_000, 3.0, 0);
+        assert!(!outboxes.is_degraded(PK));
+        assert_eq!(outboxes.rate_of(PK, 3.0), 2.5);
+    }
+
+    // T-MP4 and D7: after 30 min without a signal the trip rate is forgotten and the climb goes on to the ceiling.
+    #[test]
+    fn the_trip_rate_is_forgotten_after_thirty_minutes_without_a_signal() {
+        let t0 = 1_000_000;
+        let mut outboxes = outboxes_with_pk(t0, 3.0);
+        outboxes.signal(t0, SignalKind::Close);
+        run(&mut outboxes, t0, t0 + 30 * MIN - 10_000, 10_000, 3.0, 0);
+        assert_eq!(outboxes.rate_of(PK, 3.0), 2.5, "held below the trip rate");
+        run(&mut outboxes, t0 + 30 * MIN, t0 + 32 * MIN, 10_000, 3.0, 0);
+        assert_eq!(outboxes.rate_of(PK, 3.0), 3.0, "the ceiling");
+        // And the memory is gone: the outbox is idle again once the bucket is full.
+        run(&mut outboxes, t0 + 32 * MIN, t0 + 34 * MIN, 10_000, 3.0, 0);
+        assert!(outboxes.by_pubkey.is_empty());
+    }
+
+    // After a signal outside degraded mode during the climb, the rate then in effect is the trip rate.
+    #[test]
+    fn a_signal_during_the_climb_records_the_rate_then_in_effect() {
+        let t0 = 1_000_000;
+        let mut outboxes = outboxes_with_pk(t0, CEILING);
+        outboxes.signal(t0, SignalKind::Close);
+        let left = t0 + 5 * MIN;
+        run(&mut outboxes, t0, left + 4 * MIN, 10_000, CEILING, 0);
+        assert_eq!(outboxes.rate_of(PK, CEILING), 2.5);
+        outboxes.signal(left + 4 * MIN + 1_000, SignalKind::Close);
+        assert!(outboxes.is_degraded(PK));
+        let again = left + 4 * MIN + 1_000 + 5 * MIN;
+        run(&mut outboxes, left + 4 * MIN, again + 20 * MIN, 10_000, CEILING, 0);
+        assert_eq!(
+            outboxes.rate_of(PK, CEILING),
+            2.0,
+            "one step below the new trip rate of 2.5"
+        );
     }
 
     #[test]
-    fn log_lines_are_limited_to_one_per_minute_and_carry_the_current_state() {
+    fn an_outbox_that_appears_while_the_node_is_degraded_starts_degraded() {
+        let t0 = 1_000_000;
+        let mut outboxes = outboxes_with_pk(t0, CEILING);
+        outboxes.signal(t0 + 1_000, SignalKind::Close);
+        let (released, _) = outboxes.enqueue(
+            t0 + 2_000,
+            false,
+            CEILING,
+            "03bb",
+            None,
+            Uuid::new_v4(),
+            "t".into(),
+            update_msg(Uuid::new_v4(), 1),
+        );
+        assert!(released.is_empty());
+        assert!(outboxes.is_degraded("03bb"));
+    }
+
+    #[test]
+    fn log_lines_are_limited_to_one_per_minute_and_name_the_signal() {
         let mut outboxes = MakerOutboxes::default();
         let t0 = 1_000_000;
         let uuid = Uuid::new_v4();
-        enqueue(&mut outboxes, t0, true, uuid, "t", update_msg(uuid, 1));
+        enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
+        outboxes.signal(t0 + 1_000, SignalKind::Close);
         let mut lines = Vec::new();
-        for s in 1..=125 {
-            let (_, logs) = outboxes.tick(t0 + s * 1_000, true, CEILING);
+        for s in 1..=700 {
+            let (_, logs) = outboxes.tick(t0 + 1_000 + s * 1_000, false, CEILING);
             for log in logs {
                 lines.push((s, log));
             }
         }
-        // Halved at +5 s (first line), the further halvings are folded into the next minute's line.
-        assert_eq!(lines.len(), 2, "{:?}", lines);
-        assert_eq!(lines[0].0, 5);
-        assert_eq!(lines[0].1.rate, 5.0);
-        assert!(!lines[0].1.degraded);
-        assert_eq!(lines[1].0, 65);
-        assert_eq!(lines[1].1.rate, 0.5);
-        assert!(lines[1].1.degraded);
-        assert_eq!(lines[1].1.pubkey, PK);
+        // The signal (first line), leaving degraded mode 5 min later (second line), and the first rises are folded
+        // into one line a minute.
+        assert_eq!(lines[0].0, 1);
+        assert_eq!(lines[0].1.signal, Some(SignalKind::Close));
+        assert!(lines[0].1.degraded);
+        assert_eq!(lines[0].1.rate, 0.5);
+        assert_eq!(lines[1].0, 300);
+        assert!(!lines[1].1.degraded);
+        assert_eq!(lines[1].1.signal, None);
+        for pair in lines.windows(2) {
+            assert!(pair[1].0 - pair[0].0 >= 60, "{:?}", lines);
+        }
+        assert_eq!(lines[0].1.pubkey, PK);
     }
 
     #[test]
@@ -1034,7 +1003,8 @@ mod tests {
         let now = 1_000_000;
         assert_eq!(outboxes.metrics(CEILING), OutboxMetrics {
             pending: 0,
-            rate: CEILING
+            rate: CEILING,
+            degraded: false
         });
         for _ in 0..105 {
             let uuid = Uuid::new_v4();
@@ -1043,12 +1013,10 @@ mod tests {
         let uuid = Uuid::new_v4();
         outboxes.enqueue(now, false, CEILING, "03bb", None, uuid, "t".into(), update_msg(uuid, 1));
         let metrics = outboxes.metrics(CEILING);
-        assert_eq!(metrics.pending, 5);
-        assert_eq!(metrics.rate, CEILING);
-        // One pubkey under pressure for 5 s lowers the reported rate to the lowest.
-        outboxes.tick(now, true, CEILING);
-        outboxes.tick(now + 5_000, true, CEILING);
-        assert_eq!(outboxes.metrics(CEILING).rate, 5.0);
+        assert_eq!((metrics.pending, metrics.rate, metrics.degraded), (5, CEILING, false));
+        outboxes.signal(now + 1_000, SignalKind::Close);
+        let metrics = outboxes.metrics(CEILING);
+        assert_eq!((metrics.rate, metrics.degraded), (0.5, true));
     }
 
     #[test]

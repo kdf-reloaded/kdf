@@ -959,6 +959,8 @@ struct TestSender {
     drv: Driven<Gossipsub>,
     /// The send queue pressure changes the behaviour reported: (peer, raised).
     pressure_events: Arc<Mutex<Vec<(PeerId, bool)>>>,
+    /// The queue signal changes the behaviour reported: (peer, raised).
+    signal_events: Arc<Mutex<Vec<(PeerId, bool)>>>,
 }
 
 fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
@@ -986,15 +988,23 @@ fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
     let (ctl_tx, ctl_rx) = mpsc::unbounded();
     let pressure_events = Arc::new(Mutex::new(Vec::new()));
     let events = pressure_events.clone();
-    tokio::spawn(drive(swarm, ctl_rx, Arc::new(AtomicU64::new(0)), move |_, event| {
-        if let GossipsubEvent::SendQueuePressure { peer_id, raised, .. } = event {
-            events.lock().unwrap().push((peer_id, raised));
-        }
-    }));
+    let signal_events = Arc::new(Mutex::new(Vec::new()));
+    let signals = signal_events.clone();
+    tokio::spawn(drive(
+        swarm,
+        ctl_rx,
+        Arc::new(AtomicU64::new(0)),
+        move |_, event| match event {
+            GossipsubEvent::SendQueuePressure { peer_id, raised, .. } => events.lock().unwrap().push((peer_id, raised)),
+            GossipsubEvent::SendQueueSignal { peer_id, raised, .. } => signals.lock().unwrap().push((peer_id, raised)),
+            _ => {},
+        },
+    ));
     TestSender {
         port,
         drv: Driven { ctl: ctl_tx },
         pressure_events,
+        signal_events,
     }
 }
 
@@ -2029,4 +2039,79 @@ async fn rq1_production_node_exposes_the_queue_counters() {
     );
     paused.drv.stop();
     s.shutdown();
+}
+
+impl TestSender {
+    /// The queue signal changes reported for `peer`, in order.
+    fn signal(&self, peer: PeerId) -> Vec<bool> {
+        self.signal_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| *p == peer)
+            .map(|(_, raised)| *raised)
+            .collect()
+    }
+}
+
+/// T-MP5: a data queue that stays non-empty for 2 s raises the queue signal, one that empties within 2 s does not,
+/// and the signal clears after 5 s of an empty queue (CRD ch.32 §32.9B R-MP2 item 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mp5_queue_signal_follows_a_non_empty_queue() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-mp5-signal";
+    let s = spawn_test_sender(|b| {
+        // Far from the pressure thresholds, so that only the time-based part of the signal acts.
+        b.send_queue_pressure_raise(10_000)
+            .send_queue_stuck_timeout(Duration::from_secs(600));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+
+    // The transport window takes about 32 messages of 8 KiB; the rest is queued.
+    let started = Instant::now();
+    s.publish_range(topic, 0..80, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(1200)).await;
+    assert!(s.snapshot().await.queued > 0, "the queue holds data");
+    assert_eq!(s.signal(paused.peer_id), Vec::<bool>::new(), "not raised before 2 s");
+    wait_for("the queue signal is raised", Duration::from_secs(10), || {
+        !s.signal(paused.peer_id).is_empty()
+    })
+    .await;
+    let raised_after = started.elapsed();
+    assert!(
+        raised_after >= Duration::from_millis(1900) && raised_after < Duration::from_secs(4),
+        "raised after {raised_after:?}"
+    );
+    assert_eq!(s.signal(paused.peer_id), vec![true]);
+
+    // Resumed, the queue drains; the signal clears 5 s after it is empty.
+    paused.drv.resume();
+    wait_for("the queue is empty", Duration::from_secs(30), || {
+        received(&paused).last() == Some(&79)
+    })
+    .await;
+    let emptied = Instant::now();
+    async_std::task::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(s.signal(paused.peer_id), vec![true], "not cleared before 5 s");
+    wait_for("the queue signal is cleared", Duration::from_secs(10), || {
+        s.signal(paused.peer_id).len() == 2
+    })
+    .await;
+    assert!(
+        emptied.elapsed() >= Duration::from_secs(4),
+        "cleared after {:?}",
+        emptied.elapsed()
+    );
+    assert_eq!(s.signal(paused.peer_id), vec![true, false]);
+
+    // A burst the receiver takes at once (queue emptied within 2 s) raises nothing.
+    s.publish_range(topic, 100..110, 1024).await;
+    async_std::task::sleep(Duration::from_millis(3000)).await;
+    assert_eq!(s.signal(paused.peer_id), vec![true, false]);
+    paused.drv.stop();
+    s.stop();
 }

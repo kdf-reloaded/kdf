@@ -41,6 +41,12 @@ pub const DEFAULT_SEND_QUEUE_PRESSURE_CLEAR: usize = 64;
 /// Default cap on the queued RPCs of the priority lane (CRD ch.28 §28.9B RQ1 item 9).
 pub const DEFAULT_SEND_QUEUE_PRIORITY_MAX: usize = 256;
 
+/// Default time the data queue must hold something before the queue signal is raised (CRD ch.32 §32.9B R-MP2
+/// item 2).
+pub const DEFAULT_SEND_QUEUE_SIGNAL_RAISE_AFTER: Duration = Duration::from_secs(2);
+/// Default time the data queue must stay empty before the queue signal is cleared.
+pub const DEFAULT_SEND_QUEUE_SIGNAL_CLEAR_AFTER: Duration = Duration::from_secs(5);
+
 /// Limits of the per-connection send queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendQueueConfig {
@@ -57,6 +63,11 @@ pub struct SendQueueConfig {
     pub pressure_clear: usize,
     /// Maximum number of queued priority RPCs. A priority RPC past it closes the connection.
     pub priority_max: usize,
+    /// How long the data queue must hold at least one RPC, without becoming empty, before the queue signal is
+    /// raised.
+    pub signal_raise_after: Duration,
+    /// How long the data queue must stay empty before the queue signal is cleared.
+    pub signal_clear_after: Duration,
 }
 
 impl Default for SendQueueConfig {
@@ -68,6 +79,8 @@ impl Default for SendQueueConfig {
             pressure_raise: DEFAULT_SEND_QUEUE_PRESSURE_RAISE,
             pressure_clear: DEFAULT_SEND_QUEUE_PRESSURE_CLEAR,
             priority_max: DEFAULT_SEND_QUEUE_PRIORITY_MAX,
+            signal_raise_after: DEFAULT_SEND_QUEUE_SIGNAL_RAISE_AFTER,
+            signal_clear_after: DEFAULT_SEND_QUEUE_SIGNAL_CLEAR_AFTER,
         }
     }
 }
@@ -132,6 +145,13 @@ pub struct SendQueue {
     /// Current pressure level and the level last handed out by `take_pressure_change`.
     pressure: bool,
     pressure_reported: bool,
+    /// The queue signal (CRD ch.32 §32.9B R-MP2 item 2): the data queue has held something for the raise time, or
+    /// the pressure level is raised. It clears once the queue has been empty for the clear time and the pressure
+    /// level is cleared.
+    signal: bool,
+    signal_reported: bool,
+    nonempty_since: Option<Instant>,
+    empty_since: Option<Instant>,
     stats: Arc<SendQueueStats>,
     data_count: usize,
     data_bytes: usize,
@@ -153,6 +173,10 @@ impl SendQueue {
             priority_overflow: false,
             pressure: false,
             pressure_reported: false,
+            signal: false,
+            signal_reported: false,
+            nonempty_since: None,
+            empty_since: None,
             stats: Arc::new(SendQueueStats::default()),
             data_count: 0,
             data_bytes: 0,
@@ -203,7 +227,7 @@ impl SendQueue {
     /// Returns what to log, if anything.
     pub fn push(&mut self, rpc: proto::RPC, now: Instant) -> Option<DropLog> {
         let log = self.push_inner(rpc, now);
-        self.after_change();
+        self.after_change(now);
         log
     }
 
@@ -237,7 +261,46 @@ impl SendQueue {
         Some(self.pressure)
     }
 
-    fn after_change(&mut self) {
+    /// The queue signal change, if any, since the last call; each change is handed out once.
+    pub fn take_signal_change(&mut self) -> Option<bool> {
+        if self.signal == self.signal_reported {
+            return None;
+        }
+        self.signal_reported = self.signal;
+        Some(self.signal)
+    }
+
+    /// Re-evaluates the queue signal at `now`.
+    pub fn update_signal(&mut self, now: Instant) {
+        if !self.signal {
+            if self.pressure
+                || self
+                    .nonempty_since
+                    .map_or(false, |since| now.saturating_duration_since(since) >= self.config.signal_raise_after)
+            {
+                self.signal = true;
+            }
+        } else if !self.pressure
+            && self
+                .empty_since
+                .map_or(false, |since| now.saturating_duration_since(since) >= self.config.signal_clear_after)
+        {
+            self.signal = false;
+        }
+    }
+
+    /// The time at which the queue signal changes by itself, if no RPC is queued or taken before.
+    pub fn signal_deadline(&self) -> Option<Instant> {
+        if !self.signal {
+            self.nonempty_since?.checked_add(self.config.signal_raise_after)
+        } else if !self.pressure {
+            self.empty_since?.checked_add(self.config.signal_clear_after)
+        } else {
+            None
+        }
+    }
+
+    fn after_change(&mut self, now: Instant) {
         if !self.pressure {
             if self.data_count >= self.config.pressure_raise || self.period_start.is_some() {
                 self.pressure = true;
@@ -247,6 +310,14 @@ impl SendQueue {
         }
         self.stats.queued.store(self.data_count, Ordering::Relaxed);
         self.stats.dropped.store(self.total_dropped, Ordering::Relaxed);
+        if self.data_count > 0 {
+            self.empty_since = None;
+            self.nonempty_since.get_or_insert(now);
+        } else {
+            self.nonempty_since = None;
+            self.empty_since.get_or_insert(now);
+        }
+        self.update_signal(now);
     }
 
     fn push_inner(&mut self, rpc: proto::RPC, now: Instant) -> Option<DropLog> {
@@ -300,7 +371,10 @@ impl SendQueue {
 
     /// Removes the next RPC to write: the oldest priority RPC if there is one, else the oldest
     /// queued RPC, control or data.
-    pub fn pop(&mut self) -> Option<proto::RPC> {
+    pub fn pop(&mut self) -> Option<proto::RPC> { self.pop_at(Instant::now()) }
+
+    /// Like [`Self::pop`], with the current time given.
+    pub fn pop_at(&mut self, now: Instant) -> Option<proto::RPC> {
         if let Some(rpc) = self.priority.pop_front() {
             return Some(rpc);
         }
@@ -319,7 +393,7 @@ impl SendQueue {
         if self.queue.is_empty() && self.queue.capacity() > 16 {
             self.queue.shrink_to_fit();
         }
-        self.after_change();
+        self.after_change(now);
         Some(entry.rpc)
     }
 
@@ -642,6 +716,7 @@ mod tests {
             pressure_raise: raise,
             pressure_clear: clear,
             priority_max,
+            ..SendQueueConfig::default()
         })
     }
 
@@ -679,6 +754,7 @@ mod tests {
             pressure_raise: 100,
             pressure_clear: 1,
             priority_max: 4,
+            ..SendQueueConfig::default()
         });
         let now = Instant::now();
         for i in 0..8u8 {
@@ -704,6 +780,7 @@ mod tests {
             pressure_raise: 100,
             pressure_clear: 6,
             priority_max: 4,
+            ..SendQueueConfig::default()
         });
         let now = Instant::now();
         for i in 0..9u8 {
@@ -785,5 +862,72 @@ mod tests {
         assert!(!q.take_priority_overflow());
         // Nothing was lost from the lane.
         assert_eq!(drain_tags(&mut q), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn signal_is_raised_after_two_seconds_of_a_non_empty_queue_and_not_before() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        assert_eq!(q.signal_deadline(), Some(t0 + Duration::from_secs(2)));
+        q.update_signal(t0 + Duration::from_millis(1900));
+        assert_eq!(q.take_signal_change(), None);
+        q.update_signal(t0 + Duration::from_secs(2));
+        assert_eq!(q.take_signal_change(), Some(true));
+        // Reported once.
+        q.update_signal(t0 + Duration::from_secs(3));
+        assert_eq!(q.take_signal_change(), None);
+    }
+
+    #[test]
+    fn a_queue_that_empties_within_two_seconds_raises_no_signal() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        q.pop_at(t0 + Duration::from_millis(1500));
+        // Filling again restarts the two seconds.
+        q.push(data_rpc(2, 10), t0 + Duration::from_secs(2));
+        q.update_signal(t0 + Duration::from_secs(3));
+        q.update_signal(t0 + Duration::from_millis(3900));
+        assert_eq!(q.take_signal_change(), None);
+        q.update_signal(t0 + Duration::from_secs(4));
+        assert_eq!(q.take_signal_change(), Some(true));
+    }
+
+    #[test]
+    fn signal_clears_after_five_seconds_of_an_empty_queue() {
+        let mut q = queue(100, 1 << 20, 60);
+        let t0 = Instant::now();
+        q.push(data_rpc(1, 10), t0);
+        q.update_signal(t0 + Duration::from_secs(2));
+        assert_eq!(q.take_signal_change(), Some(true));
+        let t1 = t0 + Duration::from_secs(10);
+        q.pop_at(t1);
+        assert_eq!(q.signal_deadline(), Some(t1 + Duration::from_secs(5)));
+        q.update_signal(t1 + Duration::from_millis(4900));
+        assert_eq!(q.take_signal_change(), None);
+        q.update_signal(t1 + Duration::from_secs(5));
+        assert_eq!(q.take_signal_change(), Some(false));
+        // A queue that gets something again starts over.
+        q.push(data_rpc(2, 10), t1 + Duration::from_secs(6));
+        assert_eq!(q.signal_deadline(), Some(t1 + Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn a_raised_pressure_level_raises_the_signal_and_holds_it() {
+        let mut q = pressure_queue(3, 1, 4);
+        let t0 = Instant::now();
+        for i in 0..3u8 {
+            q.push(data_rpc(i, 10), t0);
+        }
+        // The pressure level (3 queued) raises the signal at once.
+        assert_eq!(q.take_signal_change(), Some(true));
+        // Empty, but the pressure level is cleared only at 1 or fewer: it is, and 5 s must pass.
+        let t1 = t0 + Duration::from_secs(1);
+        while q.pop_at(t1).is_some() {}
+        q.update_signal(t1 + Duration::from_secs(4));
+        assert_eq!(q.take_signal_change(), None);
+        q.update_signal(t1 + Duration::from_secs(5));
+        assert_eq!(q.take_signal_change(), Some(false));
     }
 }
