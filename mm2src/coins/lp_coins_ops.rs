@@ -238,8 +238,6 @@ pub async fn lp_register_coin(
     if tx_history {
         lp_spawn_tx_history(ctx.clone(), coin).map_to_mm(RegisterCoinError::Internal)?;
     }
-    let ctx_weak = ctx.weak();
-    spawn(async move { check_balance_update_loop(ctx_weak, ticker).await });
     Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -754,32 +752,6 @@ pub async fn show_priv_key(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
         }
     })));
     Ok(try_s!(Response::builder().body(res)))
-}
-pub async fn check_balance_update_loop(ctx: MmWeak, ticker: String) {
-    let mut current_balance = None;
-    loop {
-        Timer::sleep(10.).await;
-        let ctx = match MmArc::from_weak(&ctx) {
-            Some(ctx) => ctx,
-            None => return,
-        };
-
-        match lp_coinfind(&ctx, &ticker).await {
-            Ok(Some(coin)) => {
-                let balance = match coin.my_spendable_balance().compat().await {
-                    Ok(balance) => balance,
-                    Err(_) => continue,
-                };
-                if Some(&balance) != current_balance.as_ref() {
-                    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
-                    coins_ctx.balance_updated(&coin, &balance).await;
-                    current_balance = Some(balance);
-                }
-            },
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
 }
 pub async fn register_balance_update_handler(
     ctx: MmArc,

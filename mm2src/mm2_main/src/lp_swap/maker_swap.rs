@@ -2243,6 +2243,7 @@ pub struct MakerSwapPreparedParams {
     taker_payment_spend_trade_fee: TradeFee,
 }
 
+/// Returns the spendable balance of `my_coin` that the check read.
 pub async fn check_balance_for_maker_swap(
     ctx: &MmArc,
     my_coin: &MmCoinEnum,
@@ -2251,7 +2252,7 @@ pub async fn check_balance_for_maker_swap(
     swap_uuid: Option<&Uuid>,
     prepared_params: Option<MakerSwapPreparedParams>,
     stage: FeeApproxStage,
-) -> CheckBalanceResult<()> {
+) -> CheckBalanceResult<BigDecimal> {
     let (maker_payment_trade_fee, taker_payment_spend_trade_fee) = match prepared_params {
         Some(MakerSwapPreparedParams {
             maker_payment_trade_fee,
@@ -2272,9 +2273,10 @@ pub async fn check_balance_for_maker_swap(
         },
     };
 
-    check_my_coin_balance_for_swap(ctx, my_coin, swap_uuid, volume, maker_payment_trade_fee, None).await?;
+    let my_coin_balance =
+        check_my_coin_balance_for_swap(ctx, my_coin, swap_uuid, volume, maker_payment_trade_fee, None).await?;
     check_other_coin_balance_for_swap(ctx, other_coin, swap_uuid, taker_payment_spend_trade_fee).await?;
-    Ok(())
+    Ok(my_coin_balance)
 }
 
 pub struct MakerTradePreimage {
@@ -2352,7 +2354,7 @@ pub async fn maker_swap_trade_preimage(
             FeeApproxStage::TradePreimage,
         )
         .await
-        .mm_err(Into::into)?
+        .mm_err(Into::into)?;
     }
 
     let conf_settings = OrderConfirmationsSettings {
