@@ -116,7 +116,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   starts with the ticker and gives the node's position in the list as you configured it, so two coins
   that use one provider with different paths, or two nodes of one coin on one host, can be told
   apart. The host-only naming is unchanged, and so are the error texts a request returns. Detail:
-  PR #TBD; CRD ch.35 R35.1.16.
+  PR #133; CRD ch.35 R35.1.16.
 - **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
   shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
   not supported in this release and that light mode should be used. Native mode could not build a
