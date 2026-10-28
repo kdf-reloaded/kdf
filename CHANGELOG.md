@@ -260,7 +260,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   times by) has passed the lock time, and a refund the network still rejects as not yet final is
   retried until the refund deadline instead of ending the swap with its refund failed. Calling
   `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
-  CRD ch.39 R39.5.13.
+  PR #146; CRD ch.39 R39.5.13.
 
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
