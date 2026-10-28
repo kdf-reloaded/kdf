@@ -1,8 +1,9 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
-use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumRpcRequest, EstimateFeeMethod,
-                               UtxoRpcClientEnum};
+use crate::utxo::rpc_clients::electrum_pool::electrum_server_order;
+use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
+                               ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
 use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_families, unrecognised_enum_policy,
@@ -32,52 +33,6 @@ use primitives::hash::H256;
 use serde_json::{self as json, Value as Json};
 use serialization::CoinVariant;
 use std::sync::{Arc, Mutex, Weak};
-
-async fn add_next_electrum_server(
-    client: &ElectrumClientImpl,
-    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
-    active_servers: &mut Vec<ElectrumRpcRequest>,
-    max_connected: usize,
-) -> bool {
-    while active_servers.len() < max_connected {
-        let Some(server) = pending_servers.next() else { break };
-        match client.add_server(&server).await {
-            Ok(_) => {
-                active_servers.push(server);
-                return true;
-            },
-            Err(e) => log!("Error " (e) " connecting to " [server] ". Address won't be used"),
-        };
-    }
-
-    false
-}
-
-fn first_disconnected_electrum_server_index(statuses: &[Option<bool>]) -> Option<usize> {
-    statuses.iter().position(|status| *status == Some(false))
-}
-
-async fn replace_disconnected_electrum_server(
-    client: &ElectrumClientImpl,
-    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
-    active_servers: &mut Vec<ElectrumRpcRequest>,
-    max_connected: usize,
-) -> bool {
-    while active_servers.len() >= max_connected {
-        let mut statuses = Vec::with_capacity(active_servers.len());
-        for server in active_servers.iter() {
-            statuses.push(client.is_server_connected(&server.url).await);
-        }
-        let disconnected_index = first_disconnected_electrum_server_index(&statuses);
-        let Some(index) = disconnected_index else { break };
-        let server = active_servers.remove(index);
-        if let Err(e) = client.remove_server(&server.url).await {
-            log!("Error " (e) " removing disconnected Electrum server " [server] " during failover");
-        }
-    }
-
-    add_next_electrum_server(client, pending_servers, active_servers, max_connected).await
-}
 
 cfg_native! {
     use crate::utxo::coin_daemon_data_dir;
@@ -122,15 +77,10 @@ pub enum UtxoCoinBuildError {
     ErrorDetectingFeeMethod(String),
     ErrorDetectingDecimals(String),
     InvalidBlockchainNetwork(String),
-    #[display(
-        fmt = "Failed to connect to at least 1 of {:?} in {} seconds.",
-        electrum_servers,
-        seconds
-    )]
-    FailedToConnectToElectrums {
-        electrum_servers: Vec<ElectrumRpcRequest>,
-        seconds: u64,
-    },
+    /// No Electrum server could be connected within the call budget; the text names the coin and each server
+    /// with its failure (CRD ch.38 R38.6.4k-R item 5, R38.6.4i).
+    #[display(fmt = "{}", _0)]
+    FailedToConnectToElectrums(String),
     #[display(
         fmt = "No usable Electrum servers for {}: none are configured, or every configured server was rejected as \
                unusable by this build (native builds cannot use 'ws'/'wss' servers).",
@@ -139,7 +89,6 @@ pub enum UtxoCoinBuildError {
     NoUsableElectrumServers {
         ticker: String,
     },
-    ElectrumProtocolVersionCheckError(String),
     /// A Light-mode shielded coin needs at least one lightwalletd endpoint (CRD ch.39 R39.11.5).
     #[display(
         fmt = "{}: `light_wallet_d_servers` must list at least one lightwalletd endpoint",
@@ -675,7 +624,6 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
-        let (on_connect_tx, on_connect_rx) = mpsc::unbounded();
         let ticker = self.ticker().to_owned();
         let ctx = self.ctx();
         let mut event_handlers = vec![];
@@ -685,70 +633,44 @@ pub trait UtxoCoinBuilderCommonOps {
             );
         }
 
-        if args.negotiate_version {
-            event_handlers.push(ElectrumProtoVerifier { on_connect_tx }.into_shared());
-        }
-
-        // Distinguish "nothing to try" from "everything we tried failed": waiting five
-        // seconds only to report an empty candidate list gives no hint that the coin's
-        // `electrum` entry is missing, or that every entry was dropped as unusable
-        // (native builds skip 'ws'/'wss' servers, so a WSS-only coin lands here).
+        // Distinguish "nothing to try" from "everything we tried failed": an empty server
+        // list means the coin's `electrum` entry is missing.
         if servers.is_empty() {
             return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
                 ticker: self.ticker().to_owned(),
             });
         }
 
-        let all_servers = servers.clone();
-        let max_connected = max_connected.unwrap_or(servers.len()).max(1);
-        let min_connected = min_connected.unwrap_or(1).max(1).min(max_connected);
-
-        let client = ElectrumClientImpl::new(ticker, event_handlers);
-        let mut pending_servers = servers.into_iter();
-        let mut active_servers = Vec::new();
-        while add_next_electrum_server(&client, &mut pending_servers, &mut active_servers, max_connected).await {}
-
-        let mut attempts = 0i32;
-        while client.count_connected().await < min_connected {
-            if attempts >= 10 {
-                if replace_disconnected_electrum_server(
-                    &client,
-                    &mut pending_servers,
-                    &mut active_servers,
-                    max_connected,
-                )
-                .await
-                {
-                    attempts = 0;
-                    continue;
-                }
-
-                return MmError::err(UtxoCoinBuildError::FailedToConnectToElectrums {
-                    electrum_servers: all_servers.clone(),
-                    seconds: 5,
-                });
-            }
-
-            Timer::sleep(0.5).await;
-            attempts += 1;
+        // The activation probe (CRD ch.38 R38.6.4k-R) connects every listed server at once and the build
+        // waits for the first connection; the pool then maintains its set in the background.
+        let client_name = args
+            .negotiate_version
+            .then(|| format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version()));
+        let mut client = ElectrumClientImpl::new(ticker, event_handlers);
+        client.configure_pool(ElectrumPoolOptions {
+            min_connected: min_connected.unwrap_or(1),
+            max_connected,
+            client_name,
+            timings: ElectrumPoolTimings::default(),
+            order: electrum_server_order(&ctx),
+        });
+        for (server, e) in client.add_servers(&servers) {
+            log!("Error " (e) " using " [server] ". Address won't be used");
+        }
+        // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
+        // coin lands here) leaves the pool; with none left there is nothing to wait for.
+        if client.count_connections().await == 0 {
+            return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
+                ticker: self.ticker().to_owned(),
+            });
         }
 
         let client = Arc::new(client);
-
-        if args.negotiate_version {
-            let weak_client = Arc::downgrade(&client);
-            let client_name = format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version());
-            spawn_electrum_version_loop(weak_client, on_connect_rx, client_name);
-
-            wait_for_protocol_version_checked(&client)
-                .await
-                .map_to_mm(UtxoCoinBuildError::ElectrumProtocolVersionCheckError)?;
-        }
-
-        if args.spawn_ping {
-            let weak_client = Arc::downgrade(&client);
-            spawn_electrum_ping_loop(weak_client, active_servers);
-        }
+        client
+            .activation_probe()
+            .await
+            .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
+        client.start_pool(args.spawn_ping);
 
         Ok(ElectrumClient(client))
     }
@@ -904,151 +826,9 @@ fn read_native_mode_conf(
     Ok((rpc_port, rpc_user.clone(), rpc_password.clone()))
 }
 
-/// Ping the electrum servers every 30 seconds to prevent them from disconnecting us.
-/// According to docs server can do it if there are no messages in ~10 minutes.
-/// https://electrumx.readthedocs.io/en/latest/protocol-methods.html?highlight=keep#server-ping
-/// Weak reference will allow to stop the thread if client is dropped.
-fn spawn_electrum_ping_loop(weak_client: Weak<ElectrumClientImpl>, servers: Vec<ElectrumRpcRequest>) {
-    spawn(async move {
-        loop {
-            if let Some(client) = weak_client.upgrade() {
-                if let Err(e) = ElectrumClient(client).server_ping().compat().await {
-                    log!("Electrum servers " [servers] " ping error " [e]);
-                }
-            } else {
-                log!("Electrum servers " [servers] " ping loop stopped");
-                break;
-            }
-            Timer::sleep(30.).await
-        }
-    });
-}
-
-/// Follow the `on_connect_rx` stream and verify the protocol version of each connected electrum server.
-/// https://electrumx.readthedocs.io/en/latest/protocol-methods.html?highlight=keep#server-version
-/// Weak reference will allow to stop the thread if client is dropped.
-fn spawn_electrum_version_loop(
-    weak_client: Weak<ElectrumClientImpl>,
-    mut on_connect_rx: mpsc::UnboundedReceiver<String>,
-    client_name: String,
-) {
-    spawn(async move {
-        while let Some(electrum_addr) = on_connect_rx.next().await {
-            spawn(check_electrum_server_version(
-                weak_client.clone(),
-                client_name.clone(),
-                electrum_addr,
-            ));
-
-            // A script-hash subscription belongs to a single session, so a
-            // reconnect or a server swap drops it without saying so. Re-arm
-            // every watched hash on each newly connected server rather than
-            // assuming any survived (R38.6.5).
-            if let Some(client) = weak_client.upgrade() {
-                spawn(async move { ElectrumClient(client).resubscribe_watched_scripthashes().await });
-            }
-        }
-
-        log!("Electrum server.version loop stopped");
-    });
-}
-
-async fn check_electrum_server_version(
-    weak_client: Weak<ElectrumClientImpl>,
-    client_name: String,
-    electrum_addr: String,
-) {
-    // client.remove_server() is called too often
-    async fn remove_server(client: ElectrumClient, electrum_addr: &str) {
-        if let Err(e) = client.remove_server(electrum_addr).await {
-            log!("Error on remove server "[e]);
-        }
-    }
-
-    if let Some(c) = weak_client.upgrade() {
-        let client = ElectrumClient(c);
-        let available_protocols = client.protocol_version();
-        let version = match client
-            .server_version(&electrum_addr, &client_name, available_protocols)
-            .compat()
-            .await
-        {
-            Ok(version) => version,
-            Err(e) => {
-                log!("Electrum " (electrum_addr) " server.version error \"" [e] "\".");
-                if !e.error.is_transport() {
-                    remove_server(client, &electrum_addr).await;
-                };
-                return;
-            },
-        };
-
-        // check if the version is allowed
-        let actual_version = match version.protocol_version.parse::<f32>() {
-            Ok(v) => v,
-            Err(e) => {
-                log!("Error on parse protocol_version "[e]);
-                remove_server(client, &electrum_addr).await;
-                return;
-            },
-        };
-
-        if !available_protocols.contains(&actual_version) {
-            log!("Received unsupported protocol version " [actual_version] " from " [electrum_addr] ". Remove the connection");
-            remove_server(client, &electrum_addr).await;
-            return;
-        }
-
-        match client.set_protocol_version(&electrum_addr, actual_version).await {
-            Ok(()) => {
-                log!("Use protocol version " [actual_version] " for Electrum " [electrum_addr]);
-            },
-            Err(e) => {
-                log!("Error on set protocol_version "[e]);
-            },
-        };
-    }
-}
-
-/// Wait until the protocol version of at least one client's Electrum is checked.
-async fn wait_for_protocol_version_checked(client: &ElectrumClientImpl) -> Result<(), String> {
-    let mut attempts = 0;
-    loop {
-        if attempts >= 10 {
-            return ERR!("Failed protocol version verifying of at least 1 of Electrums in 5 seconds.");
-        }
-
-        if client.count_connections().await == 0 {
-            // All of the connections were removed because of server.version checking
-            return ERR!(
-                "There are no Electrums with the required protocol version {:?}",
-                client.protocol_version()
-            );
-        }
-
-        if client.is_protocol_version_checked().await {
-            break;
-        }
-
-        Timer::sleep(0.5).await;
-        attempts += 1;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_first_disconnected_electrum_server_index() {
-        assert_eq!(
-            first_disconnected_electrum_server_index(&[Some(true), Some(false), None]),
-            Some(1)
-        );
-        assert_eq!(first_disconnected_electrum_server_index(&[Some(true), None]), None);
-    }
 
     /// CRD ch.38 R38.6.6a: the classification table.
     #[test]

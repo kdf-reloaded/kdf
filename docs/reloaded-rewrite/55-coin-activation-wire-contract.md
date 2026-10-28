@@ -525,8 +525,8 @@ methods behave identically (the method name selects nothing for them).
 | Field | Type | Required / default | Effect |
 | --- | --- | --- | --- |
 | `servers` | array of server objects (R55.5.10) | required for `electrum`; not used by `enable` | Electrum servers |
-| `min_connected` | integer | optional, default 1 | minimum live Electrum connections |
-| `max_connected` | integer | optional, default all servers | maximum live Electrum connections |
+| `min_connected` | integer | optional, default 1 | minimum live Electrum connections (pool semantics: [Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b) |
+| `max_connected` | integer | optional, default all servers | maximum live Electrum connections (pool semantics: Chapter 38 R38.6.4b) |
 | `utxo_merge_params` | object (R55.5.10) | optional | automatic UTXO consolidation |
 | `address_format` | object | optional | overrides the configured address format |
 | `check_utxo_maturity` | boolean | optional | spend only mature outputs |
@@ -779,8 +779,8 @@ another activation untouched when it is cancelled.
 
 | Field | Type | Required / default | Effect |
 | --- | --- | --- | --- |
-| `mode` | object `{"rpc": "Native"}` or `{"rpc": "Electrum", "rpc_data": {"servers": [...], "min_connected"?: int, "max_connected"?: int}}` | required | backend selection |
-| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM |
+| `mode` | object `{"rpc": "Native"}` or `{"rpc": "Electrum", "rpc_data": {"servers": [...], "min_connected"?: int, "max_connected"?: int}}` | required | backend selection; the list order is the server priority and `min_connected`/`max_connected` bound the maintained set ([Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b) |
+| `mode.rpc_data.servers[]` | object `{url: string (required), protocol?: "TCP" \| "SSL" \| "WS" \| "WSS", disable_cert_verification?: boolean (default false), timeout_sec?: number}` | at least one for Electrum | Electrum server; `protocol` defaults to `TCP` on native targets and `WSS` on WASM; `timeout_sec` (default 20) bounds connection establishment and version negotiation, not requests (Chapter 38 R38.6.4e) |
 | `utxo_merge_params` | object `{merge_at: int (required), check_every?: number (default 10), max_merge_at_once?: int (default 100)}` | optional | automatic UTXO consolidation |
 | `tx_history` | boolean | optional, default `false` | start history collection on success |
 | `required_confirmations` | integer | optional; default from configuration | swap confirmations |
@@ -848,8 +848,8 @@ account semantics).
 | Failure | `error_type` | `error_data` |
 | --- | --- | --- |
 | the coin cannot be built: native wallet configuration unreadable or RPC port unknown, fee-method detection fails, hardware policy requested but the hardware-wallet context is not initialised, the coin's configuration does not support the hardware wallet, any other non-internal build failure | `CoinCreationError` | `{ticker, error}` |
-| an internal build failure, including Electrum connection settings that cannot be used (`min_connected` below 1 or above `max_connected`, unusable server entries) | `Internal` | string |
-| no Electrum server can be reached, or protocol-version negotiation fails with every server: building does not wait for a connection, so the failure is first observed by the block-height query below | `Transport` | string |
+| an internal build failure, including Electrum connection settings that cannot be used (`min_connected` below 1 or above `max_connected`, unusable server entries; [Chapter 38](38-utxo-coin-maintenance-and-features.md) R38.6.4b item 3) | `Internal` | string |
+| no Electrum server can be reached, or protocol-version negotiation fails with every server: Reloaded's build probes every listed server in parallel and fails when none connects within the call budget, naming each server (Chapter 38 R38.6.4k-R); under the reference's R38.6.4k the build does not wait, and the failure is first observed by the block-height query below | `Transport` | string |
 | SPV synchronisation reports a permanent failure, or its progress feed ends unexpectedly | `CoinCreationError` | `{ticker, error}` |
 | the block-height query after build fails | `Transport` | string |
 | balance query: transport failure or malformed answer | `Transport` | string |
@@ -877,7 +877,10 @@ account semantics).
 > exist on the wire but are never emitted (D55.4); `path_to_address` is honored
 > for a software global-HD account only, not under the Trezor policy;
 > unreachable Electrum servers are detected while building the coin rather than
-> lazily (the observable discriminant is the bound `Transport`).
+> lazily. Building probes every listed server in parallel and fails only when
+> none connects within the call budget (Chapter 38 R38.6.4k-R, a
+> Reloaded-original rule that replaces R38.6.4k); the observable discriminant
+> is the bound `Transport` either way.
 
 ---
 

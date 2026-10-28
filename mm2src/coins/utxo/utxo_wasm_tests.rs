@@ -20,9 +20,10 @@ pub async fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
                 disable_cert_verification: false,
                 timeout_sec: None,
             })
-            .await
             .expect("!add_server");
     }
+    let client = Arc::new(client);
+    client.start_pool(false);
 
     let mut attempts = 0;
     while !client.is_connected().await {
@@ -34,7 +35,7 @@ pub async fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
         attempts += 1;
     }
 
-    ElectrumClient(Arc::new(client))
+    ElectrumClient(client)
 }
 
 #[wasm_bindgen_test]

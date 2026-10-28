@@ -71,14 +71,13 @@ impl From<InitUtxoStandardError> for InitStandaloneCoinError {
 impl InitUtxoStandardError {
     /// Maps a coin build failure. No Electrum server being reachable is a backend failure (`Transport`),
     /// Electrum settings that cannot be used and internal failures are `Internal`, everything else is a
-    /// coin creation failure.
+    /// coin creation failure. Building probes every listed server and fails when none connects (CRD ch.38
+    /// R38.6.4k-R); a failed block-height read after the build is `Transport` too
+    /// ([`Self::from_block_height_err`]).
     pub fn from_build_err(build_err: UtxoCoinBuildError, ticker: String) -> Self {
         match build_err {
             UtxoCoinBuildError::Internal(internal) => InitUtxoStandardError::Internal(internal),
-            build_err @ (UtxoCoinBuildError::FailedToConnectToElectrums { .. }
-            | UtxoCoinBuildError::ElectrumProtocolVersionCheckError(_)) => {
-                InitUtxoStandardError::Transport(build_err.to_string())
-            },
+            UtxoCoinBuildError::FailedToConnectToElectrums(failure) => InitUtxoStandardError::Transport(failure),
             build_err @ (UtxoCoinBuildError::NoUsableElectrumServers { .. }
             | UtxoCoinBuildError::HDWalletStorageError(_)) => InitUtxoStandardError::Internal(build_err.to_string()),
             build_err => InitUtxoStandardError::CoinCreationError {

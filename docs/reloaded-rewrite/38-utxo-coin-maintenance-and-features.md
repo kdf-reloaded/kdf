@@ -39,7 +39,9 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   the whole-kilobyte fixed-fee option (`dingo_fee`) with proportional plain
   fixed fees, the fee-derived minimum trading volume, and FIRO Spark
   verbose-tx support. Exceptions: the fee-derived floor of §38.6.6 is
-  partly built (its as-built note lists what remains), and P2PK (R38.6.3) and
+  partly built (its as-built note lists what remains), the Electrum
+  connection pool of §38.6.4 is partly built (its as-built note of 2026-10-27
+  lists what remains), and P2PK (R38.6.3) and
   the Verus-family script label (R38.6.8) are built on dev (see their notes).
 - **§38.8 (T-PORT, required, NOT yet in reloaded):** software (non-hardware)
   global-HD UTXO accounts -- storage availability, account-`0` bootstrap at
@@ -652,7 +654,8 @@ that the stored row takes that height.
 > as-built, it was found absent and implemented in step 7. (§38.6.6 carries its
 > own as-built note, 2026-10-25: partly built.) Since then some of these ports
 > have been built on dev; each such rule carries its own as-built note
-> (R38.6.3 and R38.6.8, verified 2026-10-26), and "NOT yet in reloaded" in the
+> (R38.6.3 and R38.6.8, verified 2026-10-26; §38.6.4 partly, verified
+> 2026-10-27), and "NOT yet in reloaded" in the
 > headings above describes the state at the time of the audit, not today's tree.
 
 ## 38.6 Required UTXO feature ports
@@ -741,14 +744,15 @@ R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
 maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
 1. *What spreads.* With `electrum_spread_reads` enabled, the client sends
    each read-only query of a coin to the next connected session in turn,
-   round-robin over the sessions R38.6.4 keeps connected. Read-only queries
+   round-robin over the sessions R38.6.4 keeps connected (the maintained set
+   of R38.6.4b). Read-only queries
    are balance, unspent-list, history, header, block-count, transaction-get,
    fee-estimate and relay-fee requests, and the R38.6.3a batches that carry
    them.
 2. *What does not.* Transaction broadcasts, subscriptions and the
    keep-alive ping keep their current routing.
 3. *Failover.* A query that fails on its session falls back to the other
-   connected sessions, exactly as a query does today.
+   connected sessions, exactly as a query does today (R38.6.4f).
 4. *Consistency.* The recently-spent-output cache already shields a read
    that follows this node's own broadcast from a session that has not yet
    seen the broadcast. That shielding shall continue to hold whichever
@@ -770,6 +774,440 @@ on.
 >
 > **Compatibility:** for behaviour matching GLEEC KDF, set
 > `electrum_spread_reads` to `false`.
+
+> **As-built note (2026-10-27).** Reloaded implements R38.6.4b–R38.6.4k. The
+> spreading of read-only queries in R38.6.4a is not implemented yet; it belongs
+> to the order-posting work. The "Closed divergence (2026-10-27)" note after
+> R38.6.4k records what the tree did before. R38.6.4j is a Reloaded-original
+> rule and is marked so.
+
+R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
+1. The servers listed in the activation request ([chapter 55](55-coin-activation-wire-contract.md)
+   R55.4.3, R55.5.10) form the coin's pool for the coin's lifetime. A server's
+   position in the list is its priority; the first entry ranks highest. The
+   pool is neither extended nor reordered after activation; a server can only
+   leave it (R38.6.4d item 3).
+2. Within the pool the client keeps a *maintained set*: the servers whose
+   connections it holds open, pings, and routes ordinary requests to. The
+   set's size is kept between `min_connected` (the floor; default 1) and
+   `max_connected` (the ceiling; default the number of listed servers).
+3. The floor shall be at least 1 and shall not exceed the ceiling; a request
+   violating either fails activation as unusable connection settings
+   (chapter 55 R55.5.14, `Internal`). Neither bound is checked against the
+   list length: a ceiling above the list length is accepted and behaves as the
+   list length, and a floor above the list length is accepted, can never be
+   met, and by itself fails nothing -- the client keeps every server it can
+   reach and runs its maintenance on the regular cadence.
+4. A shielded coin has no such pool (the carve-out above).
+
+R38.6.4b-R **Server order drawn once at activation (Reloaded-original,
+maintainer decision 2026-10-28; amends R38.6.4b item 1 for Reloaded).**
+1. The top-level `MM2.json` string `electrum_server_order` selects the
+   coin's priority order. Two values are recognized:
+   - `random` (the default): building the coin puts the listed servers into a
+     uniformly random order once;
+   - `listed`: the listed order is kept, as in R38.6.4b item 1.
+
+   An absent switch means `random`. Any other value means `random`, and the
+   activation logs one warning naming the switch and the value.
+
+   The selected order is the coin's priority order wherever R38.6.4b –
+   R38.6.4k-R speak of priority or rank:
+   - the maintained set, and maintenance with displacement (R38.6.4c);
+   - routing, including the retry's visiting order (R38.6.4f);
+   - the activation probe's offer rule (R38.6.4k-R item 3).
+2. The order is held only in the running coin instance. It is not persisted,
+   and a re-activation draws a fresh order. A token or coin that reuses a
+   platform's Electrum client reuses that client's order.
+3. Two further values, `mixed` and `measured`, are reserved for the measured
+   server order planned as a follow-up (`docs/plans/electrum-measured-server-order.md`).
+   Until that follow-up lands, they fall back to `random` as unrecognized
+   values do.
+
+*Rationale.* Every wallet ships the same coins file, so ranking by list
+position sends every user to the same first server and leaves the later
+servers almost unused. A one-time draw spreads users across the listed
+servers while each node's own order stays stable, as the EVM node list already
+does (chapter 35 R35.1.7).
+
+> **Reloaded divergence (informative).** The reference ranks by list position.
+> The draw has no wire effect and no peer observes it: it changes only which of
+> the operator's own configured servers a node uses. By the second arm of the
+> default-side rule of `docs/COMPAT_SWITCHES.md`, Reloaded's variant is the
+> default.
+>
+> **Compatibility:** for behavior matching GLEEC KDF, set
+> `electrum_server_order` to `listed`.
+
+R38.6.4c **Maintenance of the set.**
+1. A maintenance pass runs at activation, then every 5 minutes, and at once
+   whenever the maintained count falls below the floor.
+2. A pass considers the pool's servers that are not maintained, in priority
+   order, and attempts to connect each candidate for as long as either the
+   maintained count is below the ceiling or the candidate outranks the
+   lowest-ranked maintained server. A candidate whose connection is
+   established and whose version negotiation succeeds (R38.6.4e item 1) joins
+   the set; if the set then exceeds the ceiling, its lowest-ranked member is
+   demoted. Once a candidate neither fits under the ceiling nor outranks the
+   lowest-ranked member, the pass ends: no lower-ranked candidate can qualify.
+3. Within a pass, attempts are made one server at a time, each bounded by
+   the establishment timeout of R38.6.4e item 1. The pass does not fail the
+   coin; a candidate that cannot be connected is left for a later pass
+   (R38.6.4d items 1 and 2) or removed (R38.6.4d item 3).
+4. A pass that ends below the floor while candidates remain is repeated after
+   a short pause (about one second) rather than after the 5-minute cadence.
+   When the floor cannot be met because the pool holds fewer servers than the
+   floor, the 5-minute cadence applies.
+5. A demoted server is no longer pinged and no longer receives ordinary
+   requests. Its connection may be closed at once or left to lapse under the
+   idle cutoff of R38.6.4e item 3 (informative: the reference lets it lapse).
+
+R38.6.4d **Suspension and permanent removal.**
+1. Every time a server's connection ends or an attempt to establish one
+   fails -- a dropped transport, the idle cutoff, a failed connection attempt,
+   a request failure that made the client close the connection, or the
+   release of a connection opened for a single request (R38.6.4f item 2,
+   R38.6.4g) -- the server is *suspended*: maintenance passes do not consider
+   it until the suspension lapses. The first suspension -- at activation, or
+   after a successful connection -- lasts 20 s; each further disconnection or
+   failed attempt before the next successful connection doubles it, up to a
+   cap of 12 hours. A successful connection resets the server, so that its
+   next suspension is again 20 s.
+2. A suspended server is skipped by a maintenance pass unless the pass finds
+   fewer unsuspended candidates than it needs to reach the floor; then the
+   pass considers suspended candidates as well, still in priority order.
+   Suspension governs maintenance only: the all-servers retry of R38.6.4f
+   item 2 and a directed request (R38.6.4g) connect a suspended server anyway.
+3. A failure that retrying cannot cure removes the server from the pool for
+   the coin's lifetime: an address that cannot be parsed into a host and port;
+   a transport the build does not support (`WS`/`WSS` on a native build,
+   `TCP`/`SSL` in a browser); a TLS address without a usable host name; and a
+   version negotiation the server rejects (R38.6.4e item 1). The removal takes
+   effect no later than the next maintenance pass, whether the failure was met
+   by a pass or by a request. Name-resolution failures, a refused or
+   timed-out connection, a TLS handshake failure, and a dropped transport are
+   recoverable: they suspend (item 1) and do not remove. A removed server no
+   longer counts toward the floor; once every server has been removed, every
+   request fails as R38.6.4i describes.
+
+R38.6.4e **Timeouts, version negotiation and liveness.**
+1. Establishing a connection -- resolving the address, connecting, the TLS
+   handshake where `SSL`/`WSS` is configured, and the protocol-version
+   negotiation (`server.version` with the client's supported range) -- shall
+   complete within the server's `timeout_sec` (chapter 55 R55.5.10; default
+   20 s) or fail as a recoverable failure (R38.6.4d item 1). Negotiation is
+   part of establishment: a connection whose negotiation did not succeed is
+   never used for another request. A server that rejects the offered range is
+   removed (R38.6.4d item 3); a version answer the client cannot read is a
+   recoverable failure. Two concurrent attempts to establish the same server's
+   connection shall not both connect; the second waits for the first (the
+   race-freedom R38.6.4 already requires).
+2. A request sent over an established connection shall be answered within
+   20 s or fail for that server. `timeout_sec` does not bound requests.
+3. A connection over which no response has arrived for 60 s shall be closed
+   (idle cutoff), no earlier than 60 s of silence; this counts as a
+   disconnection under R38.6.4d item 1.
+4. Every 30 s the client sends `server.ping` over every maintained
+   connection, concurrently, and waits for all of them; a connection whose
+   ping fails is closed (R38.6.4d item 1, R38.6.4f item 1). Connections
+   outside the maintained set are not pinged.
+5. Informative (Reloaded): a connection attempt whose caller has given up
+   finishes in the background, and a connection it makes after its call has
+   ended is released at once (R38.6.4d item 1).
+
+R38.6.4f **Routing of ordinary requests.**
+1. An ordinary request is tried over the maintained connections one at a time
+   in priority order; the first answer ends the request. A connection whose
+   attempt fails -- transport failure, or the per-request bound of R38.6.4e
+   item 2 -- is closed, which demotes and suspends its server (R38.6.4c,
+   R38.6.4d) and, if the set thereby falls below the floor, triggers a
+   maintenance pass. A protocol-level error answer from the server is an
+   answer, not a transport failure: it ends the request and closes nothing.
+2. A request that fails over every maintained connection, or finds the set
+   empty, is retried over *all* servers still in the pool, connecting them as
+   needed, with up to `max_connected` servers in flight at a time; the first
+   answer ends the request. Connections this retry opened to servers outside
+   the maintained set are released afterwards (closed, hence suspended under
+   R38.6.4d item 1); a losing parallel attempt may be released at once or
+   left to lapse under the idle cutoff of R38.6.4e item 3. The order in which
+   the retry visits the pool is not bound (informative: the reference visits
+   it in no particular order; Reloaded visits the servers not yet tried in this
+   call before those that already failed in it, and R38.6.4i still names each
+   server once).
+3. Informative: while the retry of item 2 connects servers in parallel, a
+   maintenance pass may be connecting as well, so the number of open
+   connections can briefly exceed the ceiling during this recovery. The
+   reference tolerates the exceedance; Reloaded may too, provided the set
+   itself never exceeds the ceiling once the recovery ends.
+4. `server.ping` is exempt from item 2: a ping that fails everywhere is not
+   retried over the pool. Broadcasts, subscriptions and the ping keep the
+   routing R38.6.4a item 2 names; with `electrum_spread_reads` enabled,
+   R38.6.4a decides on which maintained connection a read-only query starts,
+   and the failover of item 1 continues from there.
+
+R38.6.4g **Directed requests.** A request addressed to one named server --
+header retrieval from a chosen server, the per-server block-count survey, and
+the version negotiation itself -- uses that server's connection, opening it
+first if it is closed (within the bound of R38.6.4e item 1) and, if the request
+opened it and the server is not maintained, releasing it afterwards (R38.6.4d
+item 1). The version-negotiation request never opens a connection; it runs
+inside establishment. A directed request naming a server that is not in the
+pool fails without any connection attempt.
+
+R38.6.4h **Subscriptions survive a disconnect.** A script-hash subscription
+(`blockchain.scripthash.subscribe`) placed over a connection that ends shall be
+placed again over a maintained connection -- any one that accepts it -- and
+shall keep delivering to the same watchers. While no maintained connection
+exists, the client keeps retrying until one does. (Reloaded already re-arms
+every watched hash on each newly connected server for R38.6.5; this rule binds
+the outcome, not the mechanism.) A message from a server that carries a
+`method` is a notification and shall never be taken for the answer to a
+request. The Qtum contract-event subscription
+(`blockchain.contract.event.subscribe`) is outside this rule; Reloaded does not
+place it again after a disconnect, as before.
+
+R38.6.4i **Failure reporting.** A request that failed on every server it was
+tried on shall report a failure naming the coin and, for each server tried,
+that server's address (`host:port`) together with that server's failure. A
+failure that surfaces for one server alone (R38.6.4g) names that server's
+address and the coin. The wording is informative; the content is binding.
+
+R38.6.4j **Per-attempt budget derived from the call budget (Reloaded-original,
+2026-10-27).**
+1. Every client call that may try more than one server carries an overall
+   budget *B*. *B* defaults to 60 s -- the figure Reloaded's request path
+   already uses as its budget -- and a caller with a tighter deadline may pass
+   a smaller one.
+2. Before each round of attempts, the round's budget is the smaller of (a) the
+   establishment bound of R38.6.4e item 1 plus the per-request bound of item 2
+   and (b) (*B* − 5 s) / *N*, where *N* is the number of rounds the call may
+   still make: the maintained connections still to be tried one at a time
+   (R38.6.4f item 1) plus the retry rounds of R38.6.4f item 2, each of up to
+   `max_connected` servers in parallel. The round's budget is never below 5 s
+   and bounds everything the round does, connecting included.
+3. When *B* is exhausted the call ends with the failure of R38.6.4i even if
+   servers remain untried.
+4. Item 2 counts the retry rounds as the number of servers in the pool
+   divided by `max_connected`, rounded up, and takes the call's *remaining*
+   budget as *B*. The 5 s reserve is not spent, so a call whose servers all
+   fail ends no later than *B*.
+
+*Rationale.* Under R38.6.4e as the reference applies it, every attempt gets the
+same 20 s regardless of how many servers remain, so a call made while several
+maintained servers are dead can spend its caller's whole deadline on the dead
+ones before reaching a live one. Deriving the per-round budget from *B* and *N*
+guarantees that, with *B* intact, every server gets its turn inside the call
+and a single live server answers. Item 2 only ever tightens the reference's
+bounds; with one server to try, the reference's figures apply unchanged.
+This is a Reloaded improvement, not a reference behavior.
+
+R38.6.4k **No wait for the pool at activation.** (Reference-bound.) Building
+the coin shall not wait for any connection: the first maintenance pass starts
+in the background when the client is created, and the first request after the
+build -- the block-height query of chapter 55 §55.5 -- connects the pool itself
+through R38.6.4f item 2 if the set is still empty. An unreachable server set is
+therefore first observed by that query and reported as chapter 55 R55.5.14 and
+§55.3 bind (`Transport`). Nothing in the activation path depends on the floor
+having been reached.
+
+R38.6.4k-R **Parallel probe at activation (Reloaded-original, maintainer
+decision 2026-10-27; replaces R38.6.4k for Reloaded).**
+1. Building the coin starts an *activation probe*: every server in the pool
+   is connected in parallel. Each connection is an establishment under
+   R38.6.4e item 1, including version negotiation, regardless of
+   `max_connected` and of suspension.
+2. The build waits until the first server's establishment succeeds, or until
+   every attempt has ended, or until the call budget *B* of R38.6.4j (default
+   60 s) is spent, whichever comes first. Each attempt is bounded by its
+   establishment bound and by what remains of *B*.
+3. On the first success the build returns. Each server whose establishment
+   succeeded, then or later during the probe, is offered to the maintained set
+   by the rule of R38.6.4c item 2: it joins while the set is below the ceiling
+   or while it outranks the set's lowest-ranked member, which is then demoted.
+   Otherwise it is released at once, which suspends it under R38.6.4d item 1.
+   While the probe runs, the open connections may briefly exceed the ceiling,
+   as R38.6.4f item 3 allows. Once the probe has ended, the set never exceeds
+   the ceiling.
+4. A failed attempt suspends its server like any failed attempt (R38.6.4d item
+   1). A failure that retrying cannot cure removes the server (R38.6.4d item 3).
+5. When no attempt succeeds within *B*, the build fails with a transport-class
+   failure. It names the coin and, for each server tried, its `host:port` and
+   its failure (R38.6.4i), and is reported as `Transport` (chapter 55
+   R55.5.14).
+6. The first maintenance pass (R38.6.4c item 1) then runs as usual. The
+   block-height query that follows the build is routed by R38.6.4f.
+
+*Rationale.* A wallet maintainer reported activation failing, and the analysis
+found the case. With `max_connected` below the number of listed servers (a
+desktop wallet sends 1), the routing of R38.6.4f item 2 visits the pool
+`max_connected` servers at a time. Each round spends its R38.6.4j budget on the
+dead servers listed first, so a live server listed last answers only after
+those rounds. Probing every server at once finds the live one in the time of
+its own connection, and an operator whose servers are all unreachable gets the
+failure, naming each server, from the activation itself.
+
+> **Reloaded divergence (informative).** The reference rows do not wait at
+> activation (R38.6.4k). Reloaded's probe is visible only locally: it opens
+> one connection per listed server for the duration of the probe and changes
+> when an unreachable server set is reported, not how (`Transport` either
+> way). No peer observes it, so by the second arm of the default-side rule of
+> `docs/COMPAT_SWITCHES.md` there is no switch.
+
+> **Closed divergence (2026-10-27).** The gaps below are closed: Reloaded now
+> follows R38.6.4b–R38.6.4k. One consequence of R38.6.4c item 3 is worth
+> knowing: the maintenance pass connects candidates one at a time, so with
+> silent servers listed ahead of a live one, the live server joins the
+> maintained set only after the earlier attempts have run out their
+> establishment bound. Requests made meanwhile are answered through R38.6.4f
+> item 2 within the budget of R38.6.4j. The list below records the behavior
+> before the fix.
+>
+> **Reloaded divergence (2026-10-27, before the fix).** The tree then did this:
+> - *Pool management.* The builder opens the listed servers in configured
+>   order up to the ceiling and then waits up to about 5 s for the floor to be
+>   reached, swapping a server that has not connected for the next pending one
+>   during that wait; activation fails if the floor is still not reached, with
+>   an error that lists every configured server. After activation nothing
+>   manages the set: there is no priority-driven promotion or demotion, no
+>   periodic pass, and a pending server beyond the ceiling is never used. Each
+>   opened server reconnects on its own after a drop, with a delay that grows
+>   by 5 s per failure up to 60 s; that is a per-server reconnect delay, not
+>   the suspension of R38.6.4d, and it never takes a server out of
+>   consideration.
+> - *Routing.* An ordinary request is tried over the connected servers one at
+>   a time; the servers that failed are rotated to the back of the list, so
+>   priority is lost after the first failure. There is no retry over all
+>   configured servers, and a disconnected server is skipped, not reconnected
+>   for the request.
+> - *Timeouts.* There is no bound on connection establishment. A request's
+>   per-server wait is `timeout_sec` when set -- Reloaded applies it to
+>   requests, where the reference applies it to establishment -- and otherwise
+>   a 60 s budget divided by the number of servers from that one to the end of
+>   the list, so a call can wait well over 60 s. The idle cutoff is 60 s and
+>   the ping cadence 30 s, as bound; the ping goes to every connected server.
+> - *Version negotiation* runs after the connection is announced, on a
+>   separate task; a server whose version is unsupported is removed, as
+>   bound, but a request can reach a server before its negotiation ends.
+> - *Failure reporting.* A request that fails on every connected server
+>   reports the per-server failures without the servers' addresses.
+> - *Activation wait.* The up-to-5 s wait for the floor is the divergence from
+>   R38.6.4k that chapter 55 R55.5.14's status note already records (the
+>   observable discriminant is `Transport` either way). Implementing R38.6.4f
+>   item 2 removes the need for it: the block-height query connects the pool.
+
+T38.6.4.1 *Bounds and validation.* A test shall activate against an in-process
+Electrum test server set with `min_connected` 0, with `min_connected` above
+`max_connected`, and with `max_connected` above the list length, and assert
+the first two fail as unusable settings (`Internal`) and the third activates
+with a set no larger than the list; a floor above the list length shall
+activate and keep every reachable server (R38.6.4b).
+
+T38.6.4.2 *Priority maintenance.* With three test servers and `max_connected`
+2, a test shall start with the highest-ranked server down, assert the set is
+servers 2 and 3, bring server 1 up, trigger a pass, and assert the set is
+servers 1 and 2 with server 3 demoted; with the pass cadence shortened for the
+test, the same shall happen without an explicit trigger (R38.6.4c items 1–2, 5).
+
+T38.6.4.3 *Floor refill.* With `min_connected` 2 and three servers, a test shall
+drop one maintained connection and assert that a pass runs at once and refills
+the set from the remaining candidate; with no candidate left it shall assert
+the pass repeats on the short pause and that the coin stays usable over the
+remaining connection (R38.6.4c items 1, 3–4).
+
+T38.6.4.4 *Suspension.* A test shall make a server fail two connection attempts
+and assert that passes skip it for 20 s and then 40 s; then connect it, drop
+it, and assert a 20 s suspension; then assert a suspended server is still
+connected when the floor cannot otherwise be reached, and by a directed
+request (R38.6.4d items 1–2). A test with a long-running clock stub shall
+assert the 12-hour cap.
+
+T38.6.4.5 *Permanent removal.* A test shall list an unparseable address, a `WS`
+server on a native build, and a server that rejects the offered version range,
+and assert each leaves the pool after at most one pass and never counts toward
+the floor; a server whose address does not resolve shall stay in the pool and
+be suspended (R38.6.4d item 3).
+
+T38.6.4.6 *Timeouts and liveness.* Against a server that accepts the TCP
+connection and never answers, a test shall assert establishment fails at
+`timeout_sec` (default 20 s) and the server is suspended; against a connected
+server that stops answering, a request fails at 20 s and the connection is
+closed; a connection idle for 60 s is closed; pings arrive every 30 s on
+maintained connections and never on a demoted one (R38.6.4e).
+
+T38.6.4.7 *Routing and retry.* With the set at servers 1 and 2 and server 1
+made to fail a request, a test shall assert the answer came from server 2,
+server 1 left the set and is suspended, and a pass was triggered if below the
+floor; with every maintained server failing, it shall assert the request is
+answered by a non-maintained server, that server is released afterwards, and
+the set never exceeds the ceiling once recovery ends; a ping failing everywhere
+shall not touch the non-maintained servers (R38.6.4f).
+
+T38.6.4.8 *Directed request.* A test shall direct a header request to a
+non-maintained server, assert it was connected for the request and released
+afterwards, that a version-negotiation request to a closed server opens
+nothing, and that a request naming a server outside the pool fails without a
+connection attempt (R38.6.4g).
+
+T38.6.4.9 *Subscription re-arm.* A test shall subscribe a script hash, drop the
+connection carrying it, and assert the subscription is placed again on a
+remaining maintained connection and a later notification reaches the same
+watcher (R38.6.4h).
+
+T38.6.4.10 *Failure content.* A test shall make every server fail and assert
+the reported failure contains the coin ticker and each tried server's
+`host:port` (R38.6.4i).
+
+T38.6.4.11 *Derived budget.* With four servers in the set, the first three
+black-holing requests, and *B* 60 s, a test shall assert the call is answered
+by the fourth server within 60 s; with *B* 20 s and two dead servers it shall
+assert the call fails no later than 20 s and names both servers (R38.6.4j).
+
+T38.6.4.12 *No activation wait.* A test shall activate with every server slow
+to accept and assert the build returns before any connection exists, and that
+the block-height query then connects and answers; with no server reachable,
+the task status shall be `Transport` (R38.6.4k, chapter 55 R55.5.14).
+For Reloaded, T38.6.4.12-R replaces it.
+
+T38.6.4.12-R *Parallel activation probe.* Against stub servers, a test shall
+assert each of the following (R38.6.4k-R):
+- with three listed servers, `max_connected` 1, the first two silent and the
+  third live, the build returns after the live server's establishment and well
+  inside one R38.6.4j round budget, and the live server is maintained;
+- with every server live and `max_connected` 1, after the probe ends exactly
+  one server is maintained, the highest-ranked one among those that connected,
+  and the others are released and suspended;
+- a server whose probe attempt failed is suspended, and one that rejects the
+  version range is removed;
+- with every server dead, the build fails within *B* with a failure naming the
+  coin and each server's `host:port`, reported as `Transport`;
+- the build never waits longer than *B*.
+
+T38.6.4.13-R *Server order drawn at activation.* With an injected permutation,
+a test shall assert that the maintained set, the routing order, the retry's
+visiting order, displacement and the probe's offer rule all follow the drawn
+order. With `electrum_server_order` set to `listed`, the listed order is kept.
+Each of these settings shall parse as stated:
+- an absent switch means `random`;
+- `random` means `random`;
+- `listed` means `listed`;
+- any other value, including `mixed`, `measured`, a different letter case or
+  a non-string, means `random` with one warning.
+
+Two activations shall draw independently of each other. Over many draws with
+the real random source, each server shall come first roughly equally often,
+within generous bounds (R38.6.4b-R).
+
+> **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
+> T38.6.4.12 against an in-process stub server set, with two exceptions:
+> - The first two cases of T38.6.4.1 (a floor of 0, a floor above the
+>   ceiling) are covered at the settings-validation level and its mapping to
+>   `Internal`.
+> - The `Transport` task status of T38.6.4.12 is covered at the error-mapping
+>   level.
+>
+> An end-to-end run of both through the task RPC needs the Docker test
+> environment.
 
 ### 38.6.5 UTXO balance event streaming
 R38.6.5 For Electrum-backed UTXO coins the project shall emit balance-change
@@ -1291,6 +1729,64 @@ R38.8.6 **Tests (two-direction, observable).**
   2025-03-24)` and `PR #2454 (merged 2025-07-30)`. Dates are metadata,
   not expression and not a state's identity, so no gate pass was run;
   the full record is in chapter 60 §60.12.
+- *Electrum connection-pool item (§38.6.4, 2026-10-27).* R38.6.4b–R38.6.4i,
+  R38.6.4k, the as-built note before R38.6.4b, the Reloaded divergence note
+  after R38.6.4k and T38.6.4.1–T38.6.4.12 were written by the Spec Reader
+  under the two-team workflow at the rows `v2.6.0-beta` and `v3.0.0-beta` of
+  chapter 02 §2.15A, which agree on every fact bound there (within the
+  connection-pool subsystem the only difference between the rows is lint
+  attributes; the activation builder differs between the rows in an
+  unrelated area).
+  Corpus-sourced: the pool and maintained-set model, the floor and ceiling
+  defaults and their validation, the maintenance cadence and
+  promotion/demotion rule, the suspension figures (20 s first, doubling,
+  12-hour cap, reset on connection) and the suspended-server exception,
+  the recoverable/irrecoverable classification, the establishment,
+  request, idle-cutoff and ping figures, the sequential-then-all routing
+  with its concurrency and release behavior, the directed-request
+  behavior, the subscription re-arm, the failure content, and the
+  no-wait-at-activation rule. Not corpus-sourced: the wire names
+  (`min_connected`, `max_connected`, `timeout_sec`, the Electrum protocol
+  method strings), which are public, and everything that describes this
+  repository (the as-built note, the Reloaded divergence note, the
+  parenthetical in R38.6.4h). R38.6.4j is Reloaded-original: the
+  derivation of a per-round budget from the call budget was designed in
+  this project; the only reference fact it rests on is the equal
+  per-request bound of R38.6.4e item 2. The same pass added
+  cross-references from chapter 55 R55.4.3, R55.5.10 and R55.5.14 to this
+  subsection and two cross-references inside R38.6.4a; those carry no new
+  reference content. *Dirty Gate clearance (chapter 01 T1, R40).* PASS on
+  2026-10-27, no leaks; every bound fact confirmed at both rows. *Extent:*
+  the Electrum connection-pool and connection-management subsystem of the
+  UTXO RPC-client layer (connection management, per-server context,
+  establishment and request transport, client routing, protocol constants),
+  the Electrum branch of UTXO coin activation building, and the shared
+  JSON-RPC error wrapper, at `v2.6.0-beta` and `v3.0.0-beta`; nine source
+  files read at the later row, plus a mechanical diff between the rows over
+  the eight subsystem files, the activation builder and the RPC-client
+  module. *Method:* reading of the candidate hunks against the reference,
+  plus the mechanical diff between the rows; the gate script was not run
+  because the candidate is prose. *Measure:* 0.03 for this chapter and 0.00
+  for the chapter 55 cross-references, against the 0.10 threshold. The two
+  softenings made afterwards by a context that never read the corpus (the
+  idle cutoff "no earlier than 60 s", and the release of a losing parallel
+  attempt in R38.6.4f item 2) follow the gate's own advisory notes and add
+  no reference content.
+- *Reloaded-original additions with the implementation (2026-10-27/28).* A
+  context that never read the corpus wrote the following from the
+  maintainer's decision of 2026-10-27 and this repository's own code and
+  tests:
+  - R38.6.4k-R with its rationale and divergence note, and T38.6.4.12-R;
+  - R38.6.4b-R (the `electrum_server_order` switch, maintainer decision of
+    2026-10-28) with its rationale and divergence note, and T38.6.4.13-R;
+  - the Reloaded sentences in R38.6.4e item 5, R38.6.4f item 2, R38.6.4h and
+    R38.6.4j item 4;
+  - the "no later than" wording of T38.6.4.11;
+  - the coverage note after T38.6.4.12-R;
+  - the as-built and closed-divergence notes.
+
+  They describe Reloaded's own behavior. They add no reference fact beyond
+  those cleared above, and they need no gate pass.
 - *Forbidden corpus:* consulted only through the two-team workflow, for
   the items this footer names; never otherwise.
 - *Addition of 2026-10-26, cleared by the KDF Dirty Gate.* R38.6.3a was written by

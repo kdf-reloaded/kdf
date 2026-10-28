@@ -48,20 +48,18 @@ fn balance(spendable: &str, unspendable: &str) -> CoinBalance {
 // R55.5.14 failure mapping (T55.13)
 // ---------------------------------------------------------------------------
 
+/// CRD ch.38 R38.6.4k-R item 5: the activation probe's failure is `Transport` and keeps the text that
+/// names the coin and each server.
 #[test]
 fn unreachable_electrum_servers_are_transport_with_a_string() {
-    for build_err in [
-        UtxoCoinBuildError::FailedToConnectToElectrums {
-            electrum_servers: vec![],
-            seconds: 5,
-        },
-        UtxoCoinBuildError::ElectrumProtocolVersionCheckError("no server answered".to_owned()),
-    ] {
-        let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(build_err, "RIN".to_owned()));
-        assert_eq!(wire["error_type"], json!("Transport"));
-        assert!(wire["error_data"].is_string());
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    let failure =
+        "RIN: no Electrum server could be connected (2): a.example:50001: refused; b.example:50002: timed out";
+    let (wire, status) = wire_of(InitUtxoStandardError::from_build_err(
+        UtxoCoinBuildError::FailedToConnectToElectrums(failure.to_owned()),
+        "RIN".to_owned(),
+    ));
+    assert_eq!(wire, json!({ "error_type": "Transport", "error_data": failure }));
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
 }
 
 #[test]
