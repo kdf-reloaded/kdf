@@ -150,6 +150,7 @@ mod metrics;
 mod peer_score;
 mod protocol;
 mod rpc_proto;
+mod send_queue;
 mod subscription_filter;
 mod time_cache;
 mod topic;

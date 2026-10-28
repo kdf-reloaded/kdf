@@ -640,7 +640,10 @@ its gating is not.*
   restates), §32.5 (the order-record wire shape), §32.7 (the
   synchronisation surface D2 concerns; §32.7.3 R-Q4 to R-Q6 bind the
   keep-alive-driven request and answer R59.6.7 item 1 relies on),
-  §32.8 R-F3a (relay forwarding of a keep-alive) and §32.9 (the
+  §32.8 R-F3a and R-F3b (a relay's gossip-layer forward of a keep-alive,
+  which precedes its own handling, and the application-level forward;
+  pointer updated 2026-10-28 with the second-pass amendment of chapter 32,
+  which passed the KDF Dirty Gate on 2026-10-28) and §32.9 (the
   keep-alive and expiry semantics R59.6.4 refines; R-K2a binds the
   one-pair-per-message shape R59.6.2 names).
 - [Chapter 51 — Legacy (V1) Atomic-Swap State Machine](51-legacy-v1-swap-state-machine.md)

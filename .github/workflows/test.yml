@@ -187,6 +187,16 @@ jobs:
           # See docs/plans/evm-test-infrastructure.md.
           - name: eth-scripted-node
             cmd: "cargo test -p coins --lib eth::eth_tests::scripted_node_ports::"
+          # The per-connection gossip send queue bound (CRD ch.28 §28.9B RQ1): the
+          # vendored gossipsub crate's own tests for it, then the in-process
+          # integration test with the production node. The vendored crate is
+          # excluded from the workspace, so `-p` cannot build its tests (its
+          # dev-dependencies are not resolved); it is run by manifest path, and only
+          # the new tests, because six upstream routing tests fail on the unmodified
+          # fork source too (see vendor-patches/libp2p-gossipsub-0.45.0/PATCH-NOTES.md).
+          # The measurement scenarios in the integration test are `#[ignore]`.
+          - name: gossip-send-queue
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib -- send_queue:: handler::tests && cargo test -p mm2_p2p --test gossip_send_queue"
 
     steps:
       - uses: actions/checkout@v7

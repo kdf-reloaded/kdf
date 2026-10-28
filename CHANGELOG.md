@@ -230,6 +230,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
+  gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
+  comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
+  so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
+  exchange repairs what a dropped message carried. A peer that stays at the limit for a full minute is
+  disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
+  Messages are also sent in the order they were queued, where a backlog used to go out newest first.
+  The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
+  minute. Nothing new is sent on the wire. More in ch.28 §28.9B.
+
 - **A taker now keeps trying to send its swap payment until the same moment the reference does.** The
   taker gave up on sending its payment one third of the swap's lock duration after the start. It now uses
   the maker-payment wait deadline, two fifths of the lock duration, which is the same deadline it already
