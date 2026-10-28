@@ -366,6 +366,88 @@ fn classify_spend(spend: ZTransaction, input_index: usize) -> Result<FoundSwapTx
     }
 }
 
+/// The wallet's own send record as an answer to the already-sent question (R39.11.26).
+///
+/// A recorded transaction counts when it has a transparent output of exactly `script_pubkey` and it
+/// is mined, or unmined and not past its expiry height judged against the fresh tip read
+/// (R39.11.10a, the tip `wait_for_confirmations` uses). An expiry height of zero never expires.
+/// The tip is read only when no mined record counts, so a mined record is answered with no request.
+///
+/// `None` means "no counting record", never "not sent": a database that cannot be read, a tip that
+/// cannot be read and an expired record all leave the question to the servers.
+async fn recorded_own_send(coin: &ZCoin, client: &LightwalletdClient, script_pubkey: &[u8]) -> Option<ZTransaction> {
+    let ticker = &coin.as_ref().conf.ticker;
+    let records = match coin
+        .z_fields
+        .shielded_history
+        .recorded_transactions_containing(script_pubkey)
+    {
+        Ok(records) => records,
+        Err(e) => {
+            log::warn!(
+                "ZCoin {}: the wallet database's send record could not be read ({}); asking the servers",
+                ticker,
+                e
+            );
+            return None;
+        },
+    };
+    let mut unmined = Vec::new();
+    for record in records {
+        let Ok(tx) = read_tx(&record.raw) else { continue };
+        let pays_htlc = tx.transparent_bundle().is_some_and(|bundle| {
+            bundle
+                .vout
+                .iter()
+                .any(|out| out.script_pubkey().0 .0.as_slice() == script_pubkey)
+        });
+        if !pays_htlc {
+            continue;
+        }
+        match record.mined_height {
+            Some(height) => {
+                log::info!(
+                    "ZCoin {}: the wallet's own send record answers the already-sent question: payment {} \
+                     (mined at height {}); no server asked",
+                    ticker,
+                    hex::encode(txid_display(&tx).0),
+                    height
+                );
+                return Some(tx);
+            },
+            None => unmined.push(tx),
+        }
+    }
+    if unmined.is_empty() {
+        return None;
+    }
+    let tip = match client.0.confirmation_tip().await {
+        Ok(tip) => tip,
+        Err(e) => {
+            log::warn!(
+                "ZCoin {}: the tip could not be read to judge the expiry of the recorded send ({}); \
+                 asking the servers",
+                ticker,
+                e
+            );
+            return None;
+        },
+    };
+    let tx = unmined.into_iter().find(|tx| {
+        let expiry = u64::from(u32::from(tx.expiry_height()));
+        expiry == 0 || tip <= expiry
+    })?;
+    log::info!(
+        "ZCoin {}: the wallet's own send record answers the already-sent question: payment {} \
+         (unmined, within its expiry height {} at tip {}); no address query made",
+        ticker,
+        hex::encode(txid_display(&tx).0),
+        u32::from(tx.expiry_height()),
+        tip
+    );
+    Some(tx)
+}
+
 /// `check_if_my_payment_sent` for a ZHTLC coin. Yields the Zcash-transaction arm.
 pub(crate) fn check_if_my_payment_sent(
     coin: ZCoin,
@@ -390,6 +472,11 @@ pub(crate) fn check_if_my_payment_sent(
             // less is an error, because an empty answer here would double-fund the payment.
             UtxoRpcClientEnum::LightWalletD(client) => {
                 let script_pubkey = Builder::build_p2sh(&hash.into()).to_bytes();
+                // The wallet's own record of what it sent answers "sent" before any server is asked
+                // (R39.11.26); it never answers "not sent".
+                if let Some(tx) = recorded_own_send(&coin, client, &script_pubkey).await {
+                    return Ok(Some(TransactionEnum::from(tx)));
+                }
                 let log = DetectionLog {
                     coin: &coin.as_ref().conf.ticker,
                     polling: false,
