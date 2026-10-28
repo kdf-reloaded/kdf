@@ -289,6 +289,28 @@ pub(crate) fn htlc_detection_progress(
     client.0.detection_progress(&hash)
 }
 
+/// The taker refusal's check (R39.11.28) for a ZHTLC coin. A coin not served over lightwalletd has nothing
+/// to check here: its node answers address reads itself. For a Light-mode coin at least one source must
+/// answer an address read of the wallet's own transparent address, lightwalletd first and the Electrum
+/// fallback otherwise, or the taker could not watch its payment for the maker's spend.
+pub(crate) async fn ensure_own_payment_watchable(coin: &ZCoin) -> Result<(), String> {
+    let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client else {
+        return Ok(());
+    };
+    let own_address = try_s!(coin.as_ref().derivation_method.iguana_or_err());
+    let source = coin
+        .z_fields
+        .electrum_fallback
+        .ensure_watch_source(client.backend(), own_address)
+        .await?;
+    log::info!(
+        "{}: the taker's payment can be watched for the maker's spend: {} answered an address read",
+        coin.as_ref().conf.ticker,
+        source
+    );
+    Ok(())
+}
+
 /// `check_payment_pays_htlc` for a ZHTLC coin: the payment is read with the Zcash reader and checked by the
 /// one shared check, [`ensure_payment_pays_htlc`], whose only failure is the script mismatch.
 pub(crate) fn check_payment_pays_htlc(

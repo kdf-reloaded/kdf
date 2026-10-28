@@ -22,6 +22,7 @@
    pubkey, (3) persistent.
    - The private key is no longer written to the swap record.
    - Swaps already in flight keep their saved key and keep working.
+   - Under an HD wallet the base key is the transparent key at `derivation_path` (D39.5.a).
 4. **Bit-exact check (T39.5.a).** A vector from a reference-made ARRR swap on a throwaway
    non-HD test wallet. The code from step 3 is not merged before this passes.
    - The `Negotiated` events' `taker_pubkey` / `maker_pubkey` are 33 zero bytes in both
@@ -33,6 +34,10 @@
    non-final is retried until the refund deadline. A separate pull request; it does not wait
    for step 4.
 
-## Open decisions
+## Decisions
 
-- **D39.5.a:** the base key under the HD-wallet policy.
+- **D39.5.a, decided 2026-10-28: follow the reference.** Under an HD wallet the coin's
+  transparent key, and so the HTLC base key, is the key at the coins-file `derivation_path`
+  (`m/<derivation_path>/0'/0/0`, R39.6.4 §2). It is implemented in the step 3 pull request,
+  with a test that the HD and seed policies give different base keys and that recovery
+  re-derives from the policy in force.

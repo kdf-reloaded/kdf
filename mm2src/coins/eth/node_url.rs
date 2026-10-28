@@ -9,6 +9,8 @@
 //! # Public exports
 //!
 //! - [`host_only`] — the host-only form of one configured URL.
+//! - [`NodeSlot`] / [`ListedNode`] / [`listed_nodes`] — the ticker and list position (R35.1.16) that travel with a
+//!   node URL, and the one place that renders a node log line.
 //! - [`scrub_node_url`] — rewrites a lower-layer message so that it no longer carries that URL.
 //! - [`UNNAMED_NODE`] — what stands in for a URL that cannot be parsed.
 //!
@@ -19,6 +21,58 @@
 
 use http::Uri;
 use std::str::FromStr;
+use std::sync::Arc;
+
+/// Where a node stands (CRD ch.35 R35.1.16): the ticker of the coin whose activation request supplied the node
+/// list, the node's 1-based position in that list **as the request gave it**, and the length of that list.
+///
+/// It travels with the node URL (see [`ListedNode`]) so that a reordering of the list, such as the shuffle at
+/// activation (R35.1.7), cannot change what a log line says. Every log line that names an EVM node is built by
+/// [`NodeSlot::line`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeSlot {
+    ticker: Arc<str>,
+    position: usize,
+    of: usize,
+}
+
+impl NodeSlot {
+    /// `[<ticker>] <before><host> (node <i> of <n>)<after>`, `host` being the R35.1.14 host-only form.
+    pub fn line(&self, before: &str, host: &str, after: &str) -> String {
+        format!(
+            "[{}] {before}{host} (node {} of {}){after}",
+            self.ticker, self.position, self.of
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn position(&self) -> usize { self.position }
+}
+
+/// A configured node URL together with its [`NodeSlot`].
+#[derive(Clone, Debug)]
+pub struct ListedNode {
+    pub url: String,
+    pub slot: NodeSlot,
+}
+
+/// The nodes of a coin's activation request in the order the request gave them: node `i` of `n` is at position
+/// `i` (1-based) and keeps it wherever the returned vector is shuffled or sliced afterwards.
+pub fn listed_nodes(ticker: &str, urls: Vec<String>) -> Vec<ListedNode> {
+    let ticker: Arc<str> = Arc::from(ticker);
+    let of = urls.len();
+    urls.into_iter()
+        .enumerate()
+        .map(|(i, url)| ListedNode {
+            url,
+            slot: NodeSlot {
+                ticker: ticker.clone(),
+                position: i + 1,
+                of,
+            },
+        })
+        .collect()
+}
 
 /// Stands in for a node URL that has no scheme or no host, so that the raw string is never echoed.
 pub(crate) const UNNAMED_NODE: &str = "<invalid node URL>";
@@ -77,6 +131,60 @@ pub(crate) fn scrub_node_url(text: &str, url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T35.34: the exact shape of a node log line.
+    #[test]
+    fn t35_34_a_node_line_starts_with_the_ticker_and_carries_the_list_position_after_the_host() {
+        let nodes = listed_nodes("ETC", vec![
+            "https://rpc.example.org/v3/KEY1".to_owned(),
+            "https://rpc.example.org/v3/KEY2".to_owned(),
+            "https://rpc.example.org/v3/KEY3".to_owned(),
+            "https://rpc.example.org/v3/KEY4".to_owned(),
+        ]);
+        let host = host_only(&nodes[1].url);
+        assert_eq!(
+            nodes[1]
+                .slot
+                .line("Couldn't get client version for node ", &host, ", no node answered"),
+            "[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), no node answered"
+        );
+        assert_eq!(
+            nodes[1]
+                .slot
+                .line("EVM RPC ", &host, " answered eth_call with error 3: reverted"),
+            "[ETC] EVM RPC https://rpc.example.org (node 2 of 4) answered eth_call with error 3: reverted"
+        );
+    }
+
+    /// T35.34: two nodes of one coin on one host differ in the position, two coins on one host differ in the
+    /// ticker.
+    #[test]
+    fn t35_34_same_host_different_paths_are_told_apart_by_position_and_by_ticker() {
+        let urls = vec![
+            "https://rpc.swiftnodes.io/etc/KEY".to_owned(),
+            "https://rpc.swiftnodes.io/xpl/KEY".to_owned(),
+        ];
+        let etc = listed_nodes("ETC", urls.clone());
+        let xpl = listed_nodes("XPL", urls);
+        let host = host_only(&etc[0].url);
+        assert_eq!(host, host_only(&etc[1].url));
+        let line = |node: &ListedNode| node.slot.line("node ", &host, "");
+        assert_ne!(line(&etc[0]), line(&etc[1]));
+        assert_ne!(line(&etc[0]), line(&xpl[0]));
+        assert_eq!(line(&etc[1]), "[ETC] node https://rpc.swiftnodes.io (node 2 of 2)");
+        assert_eq!(line(&xpl[1]), "[XPL] node https://rpc.swiftnodes.io (node 2 of 2)");
+    }
+
+    #[test]
+    fn listed_nodes_numbers_the_list_as_given_from_one() {
+        let nodes = listed_nodes("ETC", vec![
+            "http://a".to_owned(),
+            "http://b".to_owned(),
+            "http://c".to_owned(),
+        ]);
+        assert_eq!(nodes.iter().map(|n| n.slot.position()).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(nodes[2].url, "http://c");
+    }
 
     #[test]
     fn host_only_strips_userinfo_path_query_and_fragment() {

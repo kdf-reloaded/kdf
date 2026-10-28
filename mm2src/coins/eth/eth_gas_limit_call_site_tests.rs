@@ -54,7 +54,11 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".to_owned()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".to_owned()]),
+        vec![],
+    )
+    .unwrap();
     let my_address = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
         coin_type,

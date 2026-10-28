@@ -215,6 +215,10 @@ pub struct MakerSwap {
     payment_locktime: u64,
     /// Temporary privkey used to sign P2P messages when applicable
     p2p_privkey: Option<KeyPair>,
+    /// Whether this process started the swap (`RunMakerSwapInput::StartNew`) rather than restoring it from
+    /// its saved log. Set only by `run_maker_swap`; a swap restored by any other path stays `false` and
+    /// asks every question (CRD ch.39 R39.11.27).
+    started_in_this_process: AtomicBool,
 }
 
 impl MakerSwap {
@@ -352,6 +356,7 @@ impl MakerSwap {
             conf_settings,
             payment_locktime,
             p2p_privkey,
+            started_in_this_process: AtomicBool::new(false),
             mutable: RwLock::new(MakerSwapMut {
                 data: MakerSwapData::default(),
                 other_maker_coin_htlc_pub: H264::default(),
@@ -795,19 +800,32 @@ impl MakerSwap {
             .map(|h| h.0)
             .unwrap_or_else(|| dhash160(&self.r().data.secret.0).take().to_vec());
 
-        let transaction_f = self
-            .maker_coin
-            .check_if_my_payment_sent(
-                self.r().data.maker_payment_lock as u32,
-                &*self.r().my_maker_coin_htlc_pub,
-                &*self.r().other_maker_coin_htlc_pub,
-                &secret_hash,
-                self.r().data.maker_coin_start_block,
-                &self.r().data.maker_coin_swap_contract_address,
-            )
-            .compat();
+        // CRD ch.39 R39.11.27: a shielded coin's payment in a swap this process started has nothing to find.
+        let skip_already_sent = super::skips_already_sent_question(
+            &self.maker_coin,
+            &self.uuid,
+            "maker",
+            self.started_in_this_process.load(Ordering::Relaxed),
+            self.r().maker_payment.is_some(),
+        );
+        let already_sent = if skip_already_sent {
+            Ok(None)
+        } else {
+            let transaction_f = self
+                .maker_coin
+                .check_if_my_payment_sent(
+                    self.r().data.maker_payment_lock as u32,
+                    &*self.r().my_maker_coin_htlc_pub,
+                    &*self.r().other_maker_coin_htlc_pub,
+                    &secret_hash,
+                    self.r().data.maker_coin_start_block,
+                    &self.r().data.maker_coin_swap_contract_address,
+                )
+                .compat();
+            transaction_f.await
+        };
 
-        let transaction = match transaction_f.await {
+        let transaction = match already_sent {
             Ok(res) => match res {
                 Some(tx) => tx,
                 None => {
@@ -2171,7 +2189,10 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
     };
 
     let (swap, mut command) = match swap {
-        RunMakerSwapInput::StartNew(swap) => (swap, MakerSwapCommand::Start),
+        RunMakerSwapInput::StartNew(swap) => {
+            swap.started_in_this_process.store(true, Ordering::Relaxed);
+            (swap, MakerSwapCommand::Start)
+        },
         RunMakerSwapInput::KickStart {
             maker_coin,
             taker_coin,
@@ -2703,6 +2724,112 @@ mod maker_swap_tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], MakerSwapEvent::MakerPaymentSent(_)));
         assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    thread_local! {
+        static SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        static SENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Runs the maker payment step of a swap inside its send deadline, with the already-sent search finding
+    /// nothing. `fresh` is whether this process started the swap, `shielded` whether the coin's HTLC key is
+    /// random per swap, `with_payment_event` whether the log already holds `MakerPaymentSent`. Returns how
+    /// many times the search ran, how many payments were sent, and the step's result.
+    fn run_maker_payment_step(
+        fresh: bool,
+        shielded: bool,
+        with_payment_event: bool,
+    ) -> (usize, usize, (Option<MakerSwapCommand>, Vec<MakerSwapEvent>)) {
+        SEARCHES.with(|c| c.set(0));
+        SENDS.with(|c| c.set(0));
+        let maker_swap = maker_swap_for_payment_stage();
+        maker_swap.w().data.started_at = now_ms() / 1000;
+        maker_swap.started_in_this_process.store(fresh, Ordering::Relaxed);
+        if with_payment_event {
+            let tx: coins::TransactionEnum = eth_tx_for_test().into();
+            maker_swap.w().maker_payment = Some(TransactionIdentifier {
+                tx_hex: tx.tx_hex().into(),
+                tx_hash: tx.tx_hash(),
+            });
+        }
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(move |_| MockResult::Return(shielded));
+        // A maker never asks the taker's refusal question (CRD ch.39 R39.11.28).
+        TestCoin::ensure_own_payment_watchable.mock_safe(|_| panic!("the maker payment step asked R39.11.28"));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            SEARCHES.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(None)))
+        });
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+        let result = block_on(maker_swap.maker_payment()).unwrap();
+        (SEARCHES.with(|c| c.get()), SENDS.with(|c| c.get()), result)
+    }
+
+    /// T39.11.r (CRD ch.39 R39.11.27), maker: a swap started in this process with no payment event sends a
+    /// shielded coin's payment without the already-sent query.
+    #[test]
+    fn fresh_maker_swap_skips_the_already_sent_question_for_a_shielded_coin() {
+        let (searches, sends, (command, events)) = run_maker_payment_step(true, true, false);
+        assert_eq!(searches, 0, "the already-sent search must not run");
+        assert_eq!(sends, 1);
+        assert!(matches!(command, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert!(matches!(events.as_slice(), [MakerSwapEvent::MakerPaymentSent(_)]));
+    }
+
+    /// T39.11.r, maker: the skip does not lift the step's deadline: past it, nothing is sent.
+    #[test]
+    fn fresh_maker_swap_past_the_send_deadline_still_fails_without_sending() {
+        SEARCHES.with(|c| c.set(0));
+        SENDS.with(|c| c.set(0));
+        let maker_swap = maker_swap_for_payment_stage();
+        assert!(maker_swap.r().data.started_at + maker_swap.r().data.lock_duration / 3 < now_ms() / 1000);
+        maker_swap.started_in_this_process.store(true, Ordering::Relaxed);
+        TestCoin::htlc_key_is_random_per_swap.mock_safe(|_| MockResult::Return(true));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            SEARCHES.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(None)))
+        });
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SENDS.with(|c| c.set(c.get() + 1));
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(maker_swap.maker_payment()).unwrap();
+
+        assert!(matches!(command, Some(MakerSwapCommand::Finish)));
+        match events.as_slice() {
+            [MakerSwapEvent::MakerPaymentTransactionFailed(err)] => assert!(err.error.contains("Timeout")),
+            other => panic!("expected MakerPaymentTransactionFailed, got {other:?}"),
+        }
+        assert_eq!(SEARCHES.with(|c| c.get()), 0);
+        assert_eq!(SENDS.with(|c| c.get()), 0);
+    }
+
+    /// T39.11.r, maker: a swap restored from its saved log (kick-started) always asks, shielded coin or not.
+    #[test]
+    fn restored_maker_swap_asks_the_already_sent_question_for_a_shielded_coin() {
+        let (searches, sends, (command, _)) = run_maker_payment_step(false, true, false);
+        assert_eq!(searches, 1, "a restored swap must ask");
+        assert_eq!(sends, 1);
+        assert!(matches!(command, Some(MakerSwapCommand::WaitForTakerPayment)));
+    }
+
+    /// T39.11.r, maker: a log that already holds the payment event asks, even in a swap this process started.
+    #[test]
+    fn maker_swap_with_a_payment_event_asks_the_already_sent_question() {
+        let (searches, _, _) = run_maker_payment_step(true, true, true);
+        assert_eq!(searches, 1);
+    }
+
+    /// T39.11.r, maker: a transparent coin asks in a fresh swap and in a restored one.
+    #[test]
+    fn maker_swap_asks_the_already_sent_question_for_a_transparent_coin() {
+        for fresh in [true, false] {
+            let (searches, sends, _) = run_maker_payment_step(fresh, false, false);
+            assert_eq!((searches, sends), (1, 1), "fresh: {fresh}");
+        }
     }
 
     /// A real Tendermint platform coin or token on `ticker`, registered in `ctx` next to the other coins. Tendermint

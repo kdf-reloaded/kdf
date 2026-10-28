@@ -27,9 +27,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   parameters / checkpoint / HD path from `protocol_data`, and HD-derived
   shielded key-policy derivation are all implemented. One narrow platform gap
   remains: WASM shielded-transaction *building* (blocked by the absent
-  `LocalTxProver` parameter files; §39.6.1). The transparent UTXO side of a
-  shielded coin is iguana-derived even under an HD wallet; only the shielded
-  Sapling key is HD-derived, per R39.6.4 §2.
+  `LocalTxProver` parameter files; §39.6.1). Under an HD wallet the shielded
+  Sapling key is HD-derived per R39.6.4 §2; since maintainer Decision D39.5.a
+  (2026-10-28) the coin's transparent secp256k1 key is HD-derived too, at the
+  coins-file `derivation_path` (R39.6.4 §2, R39.5.9). That transparent part is not
+  yet implemented: the build still derives it from the seed key.
 - **§39.6.4 Ironwood (plan Step E, implemented):** the builder constructs the
   version-6 transaction format the Ironwood upgrade requires, selected by the
   coin's Ironwood activation height, which is configured or discovered at runtime
@@ -451,7 +453,8 @@ activation request. The Light-mode activation request (§39.10) carries no membe
 influences *d*; its `account` member selects only the Sapling spending-key account.
 Hardware-wallet policies are refused for this coin type.
 
-For a node under the HD-wallet policy see D39.5.a.
+Under the HD-wallet policy this rests on the transparent derivation of R39.6.4 §2, adopted by
+maintainer Decision D39.5.a (2026-10-28).
 
 R39.5.10 **Where the key is used.** *(binding, parity.)* The derived key enters:
 - the payment: only as this node's key inside the HTLC redeem script whose P2SH is output 0
@@ -577,7 +580,14 @@ broadcasts nothing.
 
 #### Deferred Work (§39.5)
 
-D39.5.a **HD-wallet base key for the shielded HTLC key.** *(maintainer decision.)* §39.0 and §39.6 record that Reloaded derives the transparent
+D39.5.a **Decided 2026-10-28 (maintainer): follow the reference.** Under the HD-wallet policy
+the shielded coin's transparent key, and with it the base key of R39.5.9, is the key at the
+coins-file `derivation_path` with the default account, change and address index; R39.6.4 §2
+binds it, with no divergence and no operator-facing exception. Under the seed policy nothing
+changes. A swap saved by an earlier Reloaded build with a random per-swap key keeps that saved
+key (R39.5.4, candidate (2)). The question as it was put:
+
+**HD-wallet base key for the shielded HTLC key.** §39.0 and §39.6 record that Reloaded derives the transparent
 side of a shielded coin from the seed key even under an HD wallet. That satisfies R39.5.9
 only for seed-policy nodes. For HD-policy nodes the reference's base key differs, so a swap
 started by the reference under HD cannot be recovered by Reloaded with the same seed (the
@@ -592,7 +602,9 @@ deliberate Reloaded exception in §39.0 and in the operator-facing compatibility
 > **Status of Part B:** R39.6.1, R39.6.2, R39.6.3, and R39.6.4 are all
 > implemented, including HD-derived shielded key-policy support (R39.6.4 §2).
 > The transparent (UTXO) side of a shielded coin remains iguana-derived; only
-> the shielded Sapling spending key is HD-derived, as R39.6.4 §2 requires.
+> the shielded Sapling spending key is HD-derived, as R39.6.4 §2 required until
+> 2026-10-28. Maintainer Decision D39.5.a extended R39.6.4 §2 to the transparent
+> key under HD ("Transparent key under HD"); that part is not yet implemented.
 
 ## 39.6 Required shielded-coin ports
 
@@ -962,6 +974,18 @@ from hardcoded Zcash-mainnet constants. Concretely:
   key shall be derived along `z_derivation_path` with the activation `account`
   appended as a hardened child (R39.1.4); with a raw/iguana key policy the path
   is not required.
+- **Transparent key under HD.** *(binding, parity; maintainer Decision D39.5.a,
+  2026-10-28.)* When the key policy is HD-derived, the coin's transparent
+  secp256k1 key shall be the key the UTXO builder activates for a UTXO coin's
+  default address: the coins-file `derivation_path` with account 0 (hardened),
+  the external chain 0 and address index 0, i.e. `m/<derivation_path>/0'/0/0`.
+  The activation request carries no member that changes it; its `account` member
+  selects only the Sapling account. This key is the base key of R39.5.9 and the
+  key of every transparent use of the coin. With a raw/iguana key policy it is
+  the seed's secp256k1 key, as before. Under the HD policy a missing
+  `derivation_path` is a build error, as a missing `z_derivation_path` is (a
+  Reloaded choice: what the reference does without the member is not
+  established).
 - **Sync checkpoint.** `check_point_block` shall be the sync-start anchor. In
   native mode the wallet database is anchored at `check_point_block.height`,
   falling back to `sapling_activation_height` when the checkpoint is absent. In
@@ -1007,7 +1031,9 @@ mainnet constants.
 >   ZIP32 master of the iguana secret. `account` is an optional `init_z_coin`
 >   request field defaulting to `0`, ignored under the Iguana policy. Under the
 >   HD policy a missing `z_derivation_path` is a build error. The transparent
->   UTXO side of the coin remains iguana-derived (out of R39.6.4 §2 scope).
+>   UTXO side of the coin remains iguana-derived (out of R39.6.4 §2 scope at the
+>   time; history since Decision D39.5.a, 2026-10-28, extended §2 to the
+>   transparent key under HD, not yet implemented).
 > - **ZOMBIE fixtures.** Test fixtures updated to carry full `protocol_data` with
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
@@ -5133,6 +5159,24 @@ Electrum server with its condition, and says that the taker could not watch its
 payment for the maker's spend. A maker, and a taker paying with any other coin,
 are not affected.
 
+> **Status update (reloaded, 2026-10-28).** R39.11.27 and R39.11.28 are implemented
+> (T39.11.r, T39.11.s).
+>
+> - **"A shielded coin" in R39.11.27.** It is decided by the property the rule rests on:
+>   the coin's HTLC key is random per swap (only the shielded coin has it).
+> - **"Started in this process".** Recorded when the swap is started new, never when it
+>   is restored from its saved log.
+> - **The address read of R39.11.28.** It is the transparent-address listing of the
+>   wallet's own transparent address on each admitted lightwalletd endpoint, then the
+>   script history of that address on each identity-checked Electrum server.
+>   - An endpoint that answers with the no-address-index rejection is marked
+>     (R39.11.4i).
+>   - The check runs in the taker's start step, after the balance check and before
+>     anything is sent.
+> - **Not exercised end to end.** No test drives the whole start step: its balance check
+>   has no test double. The refusal step is tested directly, with the fee step made to
+>   fail if reached.
+
 #### Tests
 
 > **Status update (reloaded, Step C).** T39.11.a--T39.11.d, T39.11.f and
@@ -5493,8 +5537,9 @@ block predates the import.
   `sync_params`, or the default recent window of R39.8.0av when none is
   supplied -- whose anchor is fetched from the backend rather than read from
   the configured checkpoint (R39.6.4 §3, R39.8.0g).
-- R39.6.4 is implemented, including HD-derived shielded key-policy support
-  (the transparent UTXO side remains iguana-derived, which is outside R39.6.4 §2).
+- R39.6.4 is implemented, including HD-derived shielded key-policy support,
+  except its "Transparent key under HD" bullet (Decision D39.5.a, 2026-10-28):
+  the transparent UTXO side is still iguana-derived under HD.
 - Shielded history activation: a Light-mode ARRR activation initializes both the
   compact-block cache and shielded wallet database, reports compact-block and
   wallet-db scan progress, and reaches terminal activation only after wallet-db
