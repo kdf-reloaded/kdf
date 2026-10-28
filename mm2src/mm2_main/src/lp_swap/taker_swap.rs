@@ -1466,8 +1466,9 @@ impl TakerSwap {
             Ok(res) => match res {
                 Some(tx) => tx,
                 None => {
-                    // ch.51 R17/R29: the send deadline applies only when no payment of ours is on chain yet.
-                    let timeout = self.r().data.started_at + self.r().data.lock_duration / 3;
+                    // ch.51 R17/R29: the send deadline applies only when no payment of ours is on chain yet, and it is
+                    // the stored maker-payment wait deadline.
+                    let timeout = self.r().data.maker_payment_wait;
                     let now = now_ms() / 1000;
                     if now > timeout {
                         return Ok((Some(TakerSwapCommand::Finish), vec![
@@ -2842,7 +2843,7 @@ mod taker_swap_tests {
         static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
 
         let taker_swap = taker_swap_for_payment_stage();
-        assert!(taker_swap.r().data.started_at + taker_swap.r().data.lock_duration / 3 < now_ms() / 1000);
+        assert!(taker_swap.r().data.maker_payment_wait < now_ms() / 1000);
         TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
             MockResult::Return(Box::new(futures01::future::ok(Some(eth_tx_for_test().into()))))
         });
@@ -2906,6 +2907,7 @@ mod taker_swap_tests {
         let taker_swap = taker_swap_for_payment_stage();
         // Inside the deadline, so the failure cannot come from the timeout.
         taker_swap.w().data.started_at = now_ms() / 1000;
+        taker_swap.w().data.maker_payment_wait = now_ms() / 1000 + 1000;
         TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
             MockResult::Return(Box::new(futures01::future::err("search backend down".to_string())))
         });
@@ -2935,6 +2937,7 @@ mod taker_swap_tests {
 
         let taker_swap = taker_swap_for_payment_stage();
         taker_swap.w().data.started_at = now_ms() / 1000;
+        taker_swap.w().data.maker_payment_wait = now_ms() / 1000 + 1000;
         TestCoin::check_if_my_payment_sent
             .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(None))));
         TestCoin::send_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
@@ -2947,6 +2950,50 @@ mod taker_swap_tests {
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], TakerSwapEvent::TakerPaymentSent(_)));
         assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    /// T21 (CRD ch.51 R29): the send deadline is the swap's stored `maker_payment_wait`, not start + 1/3 of the lock
+    /// duration. The stored value is set well apart from start + 1/3 so the test proves which one is used.
+    #[test]
+    fn taker_payment_deadline_is_the_stored_maker_payment_wait() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        let taker_swap = taker_swap_for_payment_stage();
+        let now = now_ms() / 1000;
+        let lock_duration = taker_swap.r().data.lock_duration;
+        // Started so that start + 1/3 of the lock duration is already 100 s past, while the stored wait is 1000 s ahead.
+        taker_swap.w().data.started_at = now - lock_duration / 3 - 100;
+        taker_swap.w().data.maker_payment_wait = now + 1000;
+        assert!(taker_swap.r().data.started_at + lock_duration / 3 < now);
+        TestCoin::check_if_my_payment_sent
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(None))));
+        TestCoin::send_taker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        // Between start + 1/3 and the stored wait: the payment is sent.
+        let (command, events) = block_on(taker_swap.send_taker_payment()).unwrap();
+        assert!(matches!(command, Some(TakerSwapCommand::WaitForTakerPaymentSpend)));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], TakerSwapEvent::TakerPaymentSent(_)));
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1);
+
+        // Past the stored wait: payment-failed Timeout naming that deadline, no further send.
+        let passed = now_ms() / 1000 - 10;
+        taker_swap.w().data.maker_payment_wait = passed;
+        let (command, events) = block_on(taker_swap.send_taker_payment()).unwrap();
+        assert!(matches!(command, Some(TakerSwapCommand::Finish)));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            TakerSwapEvent::TakerPaymentTransactionFailed(err) => {
+                assert!(err.error.contains("Timeout"), "{}", err.error);
+                assert!(err.error.contains(&format!("> {passed}")), "{}", err.error);
+            },
+            other => panic!("expected TakerPaymentTransactionFailed, got {other:?}"),
+        }
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1, "no second send past the deadline");
     }
 
     #[test]

@@ -240,6 +240,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
   minute. Nothing new is sent on the wire. More in ch.28 §28.9B.
 
+- **A taker now keeps trying to send its swap payment until the same moment the reference does.** The
+  taker gave up on sending its payment one third of the swap's lock duration after the start. It now uses
+  the maker-payment wait deadline, two fifths of the lock duration, which is the same deadline it already
+  uses to wait for the maker payment's confirmations. A taker whose maker payment confirmed late used to
+  end the swap at this step, losing its dex fee and leaving the maker's payment locked until its refund.
+  The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
 - **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
 - **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
 - **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending

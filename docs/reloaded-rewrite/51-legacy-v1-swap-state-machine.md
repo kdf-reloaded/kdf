@@ -467,7 +467,9 @@ has committed only the dex fee, and there is nothing to refund.
 **R29.** *Send taker payment.* `STAGE-SEND-TAKER-PAYMENT` MUST first
 search the chain for a taker payment it may already have broadcast. Only
 if none is found MUST it check that the maker-payment wait deadline has
-not passed. Failure of the search or a passed deadline MUST emit
+not passed: the swap's stored `maker_payment_wait`, the swap start time
+plus two fifths of the lock duration, the same deadline the taker's wait
+for the maker payment's confirmations uses. Failure of the search or a passed deadline MUST emit
 `TakerPaymentTransactionFailed` and transition to `STAGE-FINISH`. On
 success it MUST emit `TakerPaymentSent`. This search-before-deadline
 ordering is required by R7: a replayed stage must not refuse to continue
