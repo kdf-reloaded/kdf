@@ -820,6 +820,94 @@ async fn a_confirmed_transaction_satisfies_the_wait_without_any_server_side_deco
         .unwrap();
 }
 
+/// R39.11.10a fixture: the highest observed tip is `HIGHEST_SEEN` and the following reads are the
+/// scripted `fresh` ones; `tx` (when given) is the transaction the service returns.
+const HIGHEST_SEEN: u64 = 110;
+
+struct BoundBranch;
+impl WalletBranchStore for BoundBranch {
+    fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+    fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+}
+
+fn client_after_highest_seen(
+    fresh: &[u64],
+    tx: Result<RawTx, EndpointError>,
+) -> (Arc<FakeTransport>, LightwalletdClient) {
+    let transport = Arc::new(FakeTransport::default());
+    let mut script = healthy(&[HIGHEST_SEEN]);
+    script.tips.extend(fresh.iter().map(|t| Ok(*t)));
+    script.tip_floor = fresh.last().copied();
+    script.transaction = Some(tx);
+    transport.serve("a", script);
+    let client = LightwalletdClient::new(
+        transport.clone(),
+        vec!["a".to_owned()],
+        &arrr_params(),
+        test_addressing(),
+    );
+    client.0.bind_wallet(Arc::new(BoundBranch));
+    (transport, client)
+}
+
+/// T39.11.10a: highest observed 110, fresh read 105, mined at 105 -> 1 confirmation, not 6.
+#[tokio::test]
+async fn confirmations_use_fresh_tip_not_highest_seen() {
+    let (_transport, client) = client_after_highest_seen(&[105], Ok(tx_at(105, 1)));
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+
+    let tip = client.0.confirmation_tip().await.unwrap();
+    assert_eq!(tip, 105, "the fresh read, not the highest observed");
+    assert_eq!(confirmation_depth(tip, Some(105)), 1);
+    assert_eq!(
+        confirmation_depth(HIGHEST_SEEN, Some(105)),
+        6,
+        "the monotonic height would overcount"
+    );
+}
+
+/// T39.11.10a: a wait for 2 confirmations is not done at fresh 105, and is done at a later fresh 106.
+#[tokio::test]
+async fn wait_for_confirmations_waits_for_fresh_tip() {
+    let (transport, client) = client_after_highest_seen(&[105, 106], Ok(tx_at(105, 1)));
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+
+    client
+        .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 2, false, u64::MAX, 1)
+        .await
+        .unwrap();
+    // One read to establish the highest tip, then 105 (depth 1, keep waiting), then 106 (depth 2).
+    assert_eq!(transport.called("a", "tip"), 3);
+    assert_eq!(transport.called("a", "tx"), 2);
+}
+
+/// T39.11.10a: expiry 107, fresh read 105, highest observed 110 -> not expired.
+#[tokio::test]
+async fn expiry_not_declared_on_lowered_tip() {
+    let (_transport, client) =
+        client_after_highest_seen(&[105], Err(EndpointError::NotFound("unknown txid".to_owned())));
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+
+    let wait_until = common::now_ms() / 1000 + 1;
+    let err = client
+        .wait_for_confirmations(H256Json::from([9u8; 32]), 107, 1, false, wait_until, 1)
+        .await
+        .unwrap_err();
+    assert!(err.contains("Waited too long"), "{err}");
+    assert!(!err.contains("expired"), "{err}");
+}
+
+/// T39.11.10a: the reported height stays monotonic while confirmations read the fresh tip.
+#[tokio::test]
+async fn reported_height_stays_monotonic() {
+    let (_transport, client) = client_after_highest_seen(&[105, 105], Ok(tx_at(105, 1)));
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+    assert_eq!(client.0.confirmation_tip().await.unwrap(), 105);
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+    assert_eq!(client.get_block_count().compat().await.unwrap(), HIGHEST_SEEN);
+}
+
 #[tokio::test]
 async fn notarized_depth_is_refused_and_not_substituted() {
     let transport = Arc::new(FakeTransport::default());

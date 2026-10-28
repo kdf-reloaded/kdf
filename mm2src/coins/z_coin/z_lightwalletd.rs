@@ -1259,6 +1259,11 @@ impl FreshTip {
     /// The height the coin reports and scans towards: never lower than one already observed
     /// (R39.11.10).
     pub(crate) fn monotonic(&self) -> u64 { self.read.max(self.highest_before) }
+
+    /// The height confirmations and expiry are judged against: the tip just read, not the highest
+    /// ever observed (R39.11.10a). A lagging or reorganized endpoint then delays those decisions
+    /// instead of overcounting a payment's confirmations.
+    pub(crate) fn confirmation_height(&self) -> u64 { self.read }
 }
 
 /// The target height every shielded construction path hands its builder (R39.11.11): the
@@ -1504,6 +1509,12 @@ impl LightwalletdBackend {
         self.fresh_tip().await.map(|tip| tip.monotonic())
     }
 
+    /// The tip confirmations and expiry are judged against: the fresh read, never the monotonic
+    /// height (R39.11.10a).
+    pub(crate) async fn confirmation_tip(&self) -> Result<u64, LightwalletdError> {
+        self.fresh_tip().await.map(|tip| tip.confirmation_height())
+    }
+
     /// What `GetLightdInfo` reports, from the first admitted endpoint that answers.
     pub(crate) async fn server_info(&self) -> Result<ServerInfo, LightwalletdError> {
         self.call("GetLightdInfo", |t, s| async move { t.light_info(&s).await }.boxed())
@@ -1663,7 +1674,7 @@ impl LightwalletdClient {
             }
 
             match self.raw_transaction(&tx_hash).await {
-                Ok(raw) => match self.0.chain_tip().await {
+                Ok(raw) => match self.0.confirmation_tip().await {
                     Ok(tip) => {
                         let depth = confirmation_depth(tip, raw.height);
                         if depth >= u64::from(confirmations) {
@@ -1680,7 +1691,7 @@ impl LightwalletdClient {
                 },
                 Err(fetch_error) => {
                     if expiry_height > 0 {
-                        match self.0.chain_tip().await {
+                        match self.0.confirmation_tip().await {
                             Ok(tip) if tip > u64::from(expiry_height) => {
                                 return Err(match fetch_error {
                                     LightwalletdError::NoSuchTransaction(_) => {
