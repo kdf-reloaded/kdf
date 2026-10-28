@@ -725,3 +725,48 @@ async fn test_watcher_node_observes_swap_traffic() {
         "watcher node missed payloads: {w_observed:?}",
     );
 }
+
+mod message_id_encoding {
+    use super::super::gossipsub_message_id;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    const PAYLOAD: &[u8] = b"kdf-reloaded message id fixture";
+    const SEQNO: Option<u64> = Some(0x0102_0304_0506_0708);
+
+    /// Independent computation of the R13 hash: payload bytes, then sequence number.
+    fn reference_hash(data: &[u8], seqno: Option<u64>) -> u64 {
+        let mut h = DefaultHasher::new();
+        data.to_vec().hash(&mut h);
+        seqno.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn message_id_is_eight_bytes_big_endian_of_hash() {
+        let id = gossipsub_message_id(PAYLOAD, SEQNO);
+        assert_eq!(id.0.len(), 8);
+        assert_eq!(id.0, reference_hash(PAYLOAD, SEQNO).to_be_bytes().to_vec());
+        // Pinned literal: catches a change of hasher, field order or byte order.
+        assert_eq!(id.0, vec![69u8, 145, 39, 43, 92, 48, 22, 110]);
+    }
+
+    #[test]
+    fn message_id_is_not_decimal_ascii() {
+        let id = gossipsub_message_id(PAYLOAD, SEQNO);
+        let decimal = reference_hash(PAYLOAD, SEQNO).to_string();
+        assert_ne!(id.0, decimal.as_bytes());
+        assert_eq!(id.0.len(), 8);
+        assert!(decimal.len() <= 20);
+    }
+
+    #[test]
+    fn message_id_is_content_addressed() {
+        let a = gossipsub_message_id(PAYLOAD, Some(1));
+        let b = gossipsub_message_id(PAYLOAD, Some(2));
+        assert_ne!(a, b);
+        assert_ne!(a, gossipsub_message_id(PAYLOAD, None));
+        assert_eq!(a, gossipsub_message_id(PAYLOAD, Some(1)));
+        assert_ne!(a, gossipsub_message_id(b"other payload", Some(1)));
+    }
+}

@@ -123,6 +123,22 @@ R10. **Time-out lets legitimate reuse through.** A cache
      a publisher who legitimately wishes to re-use the
      same identifier later is not blocked indefinitely.
 
+     *Informative (2026-10-27, KDF Spec Reader; passed the KDF Dirty Gate
+     on 2026-10-27).* The time-to-live is a contract on lookups, not
+     on storage: a lookup of an entry older than the
+     time-to-live returns absent, while the memory the entry
+     occupies may be reclaimed lazily, no later than the next
+     write into the cache. The reference behaves this way at
+     `v2.6.0-beta` and `v3.0.0-beta`: its time-keyed map
+     filters expired entries on read and reclaims them on
+     writes. *Reloaded divergence:* Reloaded's cache reclaims
+     on write only and its lookup does not filter by age, so an
+     entry older than 120 s still suppresses an insert until
+     the next cancellation is recorded. This is peer-visible
+     only to a publisher re-using an identifier after the
+     window, which version-4 identifiers make negligible; the
+     remedy is an age check in the lookup.
+
 R11. **Drop shall be logged at warn level.** A suppressed
      insert shall emit a single warn-level log entry
      identifying the dropped identifier; this is the only
@@ -258,4 +274,15 @@ V3. The publish-subscribe mesh protocol the codebase uses
   universally-unique-identifier collision properties); the
   orderbook substrate's pre-existing time-keyed-map
   primitive that the cache instantiates.
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* not consulted, except (addition of
+  2026-10-27, KDF Spec Reader, passed the KDF Dirty Gate on 2026-10-27) for the
+  informative note under R10: the read-time filtering and
+  write-time reclamation of the reference's cache at the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which is
+  the documented behavior of the public time-keyed-map crate the
+  reference uses there. No private identifier, body or literal
+  was reproduced. Dirty Gate clearance (chapter 01 T1, R40): PASS on 2026-10-27, measure
+  0.00, no leaks. *Extent:* the dependency lockfiles at both rows and the one
+  use site of the cache, with the primitive read from the public crate. *Method:*
+  reading plus a mechanical scan of the added lines. *Measure:* 0.00 against the
+  0.10 threshold.

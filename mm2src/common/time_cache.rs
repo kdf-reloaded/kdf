@@ -223,6 +223,14 @@ where
 
     pub fn get(&self, key: &Key) -> Option<&Value> { self.map.get(key).map(|e| &e.element) }
 
+    /// Like [`TimeCache::get`], but returns `None` for an entry whose time-to-live has elapsed,
+    /// even if the entry has not been reclaimed yet (reclaiming happens on writes only).
+    pub fn get_unexpired(&self, key: &Key) -> Option<&Value> { self.get_unexpired_at(key, Instant::now()) }
+
+    fn get_unexpired_at(&self, key: &Key, now: Instant) -> Option<&Value> {
+        self.map.get(key).filter(|e| e.expires > now).map(|e| &e.element)
+    }
+
     pub fn len(&self) -> usize { self.map.len() }
 
     pub fn is_empty(&self) -> bool { self.map.is_empty() }
@@ -291,6 +299,19 @@ mod test {
         assert_eq!(cache.get(&"t"), Some(&"tv".to_owned()));
         assert_eq!(cache.get(&"e"), Some(&"ev".to_owned()));
         assert_eq!(cache.get(&"f"), None);
+    }
+
+    #[test]
+    fn get_unexpired_filters_expired_entries_but_get_does_not() {
+        let mut cache = TimeCache::new(Duration::from_millis(100));
+        assert!(cache.insert("t", "tv".to_owned()));
+        assert_eq!(cache.get_unexpired(&"t"), Some(&"tv".to_owned()));
+        assert_eq!(cache.get_unexpired(&"missing"), None);
+
+        std::thread::sleep(Duration::from_millis(250));
+        // No write happened, so the entry is expired but not reclaimed.
+        assert_eq!(cache.get(&"t"), Some(&"tv".to_owned()));
+        assert_eq!(cache.get_unexpired(&"t"), None);
     }
 
     #[test]
