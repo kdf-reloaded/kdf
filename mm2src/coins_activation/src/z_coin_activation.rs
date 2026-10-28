@@ -48,11 +48,16 @@ fn shielded_unavailable_error(ticker: &str) -> ZcoinInitError {
 /// The backend an activation request asks for. A Light-mode request with no lightwalletd endpoint is
 /// a configuration error naming the coin, reported before any shielded work begins -- not a
 /// transient backend failure (CRD ch.39 R39.11.5). `electrum_servers` and the Electrum connection
-/// counts are accepted on the wire and have no effect here (R39.11.5, R39.11.7).
+/// counts are accepted on the wire and have no effect here (R39.11.5, R39.11.7). A Native-mode request is
+/// refused the same way: native mode is not supported in this release (R39.11.1a); the request still
+/// deserializes, so the wire shape is unchanged.
 fn zcoin_backend(ticker: &str, mode: &ZcoinRpcMode) -> Result<ZcoinBackend, ZcoinInitError> {
     match mode {
         #[cfg(not(target_arch = "wasm32"))]
-        ZcoinRpcMode::Native => Ok(ZcoinBackend::Native),
+        ZcoinRpcMode::Native => Err(ZcoinInitError::CoinCreationError {
+            ticker: ticker.to_owned(),
+            error: format!("{ticker} native mode is not supported in this release; use light mode"),
+        }),
         ZcoinRpcMode::Light {
             light_wallet_d_servers, ..
         } => {
@@ -1228,6 +1233,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("not available in the WebAssembly build"));
+    }
+
+    /// T39.11.1a / R39.11.1a: a Native-mode request is a configuration error naming the coin, raised by
+    /// the backend selection that runs before any wallet database, backend or scan is created.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_mode_activation_is_refused() {
+        match zcoin_backend("ARRR", &ZcoinRpcMode::Native) {
+            Err(ZcoinInitError::CoinCreationError { ticker, error }) => {
+                assert_eq!(ticker, "ARRR");
+                assert_eq!(
+                    error,
+                    "ARRR native mode is not supported in this release; use light mode"
+                );
+            },
+            _ => panic!("native mode must be refused with a CoinCreationError"),
+        }
+        // The wire shape is unchanged: the request parses, only activation refuses.
+        let params: ZcoinActivationParams = serde_json::from_value(json!({ "mode": { "rpc": "Native" } })).unwrap();
+        assert!(matches!(
+            zcoin_backend("PIRATE", &params.mode),
+            Err(ZcoinInitError::CoinCreationError { ticker, .. }) if ticker == "PIRATE"
+        ));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

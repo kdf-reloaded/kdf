@@ -99,6 +99,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
+  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
+  not supported in this release and that light mode should be used. Native mode could not build a
+  working wallet for a fresh activation, and after Ironwood it could build transactions the network
+  rejects. Light mode is unchanged. Native mode returns in a later release, see
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
 - **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
   answers "TRON support is not available in this build" instead, and the rest of the node is
   unaffected. It is planned to return in the next beta.
@@ -485,6 +492,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
+
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
+  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
+  release.
 
 - [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
   [`tron-gasfree`](docs/plans/tron-gasfree.md),

@@ -646,8 +646,16 @@ no Ironwood height anywhere shall keep constructing version 4 at every height.
   exception is a failed timestamp search once the server has itself reported Ironwood:
   the exact height then refines only *past* heights, and costs nothing about a new
   transaction's version.
-- (e) **Native mode** has no lightwalletd and therefore no discovery; it builds version 6
-  only from a configured height.
+- (e) **Native mode** builds nothing in this release: its activation is refused
+  (R39.11.1a), so no native-mode transaction reaches the builder and no version is ever
+  chosen for one. Native mode returns in v0.4.0 together with discovery of the
+  activation from its own daemon (`docs/plans/arrr-native-and-ironwood-pool.md`).
+
+  > **Provenance of (e) (2026-10-28).** Clean-room original Reloaded policy, decided by
+  > the maintainer. A Pirate Chain developer reported that native mode kept building
+  > version 4 when no Ironwood height was configured. The fix chosen for this release is
+  > the refusal of R39.11.1a, not discovery. The earlier text allowed version 6 only from
+  > a configured height.
 - (f) **Build capability.** With (a)-(d) in place `IRONWOOD_V6_SUPPORTED` is true, which
   makes R39.6.4b and R39.6.4c inert by their own terms.
 
@@ -3176,6 +3184,30 @@ definition -- and are fixed by that specification, not by this project.
 > return a typed unsupported error: nothing here decodes a transaction, and the
 > one caller that needs bytes and height (`validate_fee`) reads them from
 > `GetTransaction`. Notarized depth: see R39.11.4e.
+
+R39.11.1a **Native mode is refused in this release.** An activation request for a
+shielded coin with `mode.rpc` `Native` shall fail before any shielded work begins.
+It fails as a configuration error naming the coin, in the same error shape the
+activation already uses for an empty `light_wallet_d_servers` list. The message
+says native mode is not supported in this release and that light mode should be
+used. No backend, wallet database, or scan is created for the refused request.
+Light mode is unaffected. The native-mode text elsewhere in this chapter describes
+code that stays in the tree for a later release. It binds nothing that a node can
+reach while this rule stands.
+
+> **Provenance and reason (2026-10-28).** Clean-room original Reloaded policy,
+> decided by the maintainer. In this repository the native path cannot build a
+> working wallet for a fresh activation, because a full node's blocks do not feed
+> the compact-block cache (the status update under R39.8.0f). It also could not tell which transaction
+> version to build after Ironwood. Native mode, the Ironwood pool, and the
+> daemon-side activation discovery are planned for v0.4.0 in
+> `docs/plans/arrr-native-and-ironwood-pool.md`. The reference accepts native
+> mode; the divergence is listed in `docs/GLEEC_COMPATIBILITY.md`.
+
+T39.11.1a *Native mode refused.* An activation request with `mode.rpc` `Native`
+fails with the configuration error naming the coin and the light-mode advice,
+and leaves no backend, wallet database or scan state behind. A Light-mode request
+for the same coin still activates.
 
 R39.11.2 **Unconfirmed evidence remains asymmetric, and shall stay so even
 though one service now answers both sides.** The *only* source of mempool
