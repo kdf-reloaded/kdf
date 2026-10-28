@@ -136,6 +136,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **EVM log lines about a node say which coin it is and where it stands in the coin's list.** A line
+  such as `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...`
+  starts with the ticker and gives the node's position in the list as you configured it, so two coins
+  that use one provider with different paths, or two nodes of one coin on one host, can be told
+  apart. The host-only naming is unchanged, and so are the error texts a request returns. Detail:
+  PR #133; CRD ch.35 R35.1.16.
 - **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
   shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
   not supported in this release and that light mode should be used. Native mode could not build a
