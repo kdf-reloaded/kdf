@@ -1,6 +1,15 @@
 use super::*;
 use keys::Public;
 
+/// The answer of [`SwapOps::check_payment_pays_htlc`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum HtlcPaymentCheck {
+    /// Output 0 of the payment pays the script rebuilt from the given keys.
+    Pays,
+    /// The payment was read, and it pays another script. `payment_id` is its transaction id in display order.
+    PaysAnotherScript { payment_id: String },
+}
+
 /// Swap operations (mostly based on the Hash/Time locked transactions implemented by coin wallets).
 #[async_trait]
 pub trait SwapOps {
@@ -85,6 +94,7 @@ pub trait SwapOps {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -95,12 +105,31 @@ pub trait SwapOps {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String>;
+
+    /// Whether `payment_tx` pays the HTLC script rebuilt from `first_pub` (the refund key) and `second_pub`
+    /// (the spend key). Swap recovery asks it to pick between the swap's own HTLC key and the coin's
+    /// persistent key (CRD ch.39 R39.5.4) before it searches for, refunds or spends the payment.
+    ///
+    /// The default answers [`HtlcPaymentCheck::Pays`]: a coin whose HTLC script is not built from the
+    /// swap's keys, or whose swap key is always the persistent key, has nothing to choose between, and
+    /// recovery uses the swap's own key as it always did.
+    async fn check_payment_pays_htlc(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+        _payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        Ok(HtlcPaymentCheck::Pays)
+    }
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 

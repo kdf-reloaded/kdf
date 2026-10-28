@@ -370,6 +370,7 @@ impl SwapOps for EthCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         tx: &[u8],
@@ -384,6 +385,7 @@ impl SwapOps for EthCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         tx: &[u8],

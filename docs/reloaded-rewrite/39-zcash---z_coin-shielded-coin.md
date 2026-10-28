@@ -277,6 +277,59 @@ order never makes an orderbook response fail or go missing. *(Spec
 Reader addition 2026-10-26; cross-reference only, the binding rules and
 their clearance record live in chapter 32.)*
 
+R39.5.4 *Recovery uses the swap's own HTLC key.* A shielded coin's HTLC key
+pair is generated for each swap and saved with the swap; it is not the
+coin's persistent key. Every later step that rebuilds the swap's HTLC
+script — searching for the spend of this node's own payment, refunding it,
+and `recover_funds_of_swap` on either the maker or the taker side — shall
+try the HTLC public key this node negotiated for that swap first, read
+from the swap's saved record. A saved swap that carries no negotiated key
+falls back to the saved key pair, as the swap restore does
+([Chapter 51](51-legacy-v1-swap-state-machine.md) R63). If that key does not
+rebuild the script the payment pays, recovery shall try the coin's
+persistent key next: a swap saved by an older build, or by another build,
+may have negotiated with it. The first key that rebuilds the paid script is
+used for the rest of the recovery. Which key matched, "per-swap key" or
+"persistent key", is stated in a log line, and in the error text whenever
+recovery stops with an error (for example "refunded already by <txid>"). The
+response of a successful `recover_funds_of_swap` keeps its shape: no field is
+added, so the method stays wire-compatible with the reference. With a
+matching key:
+
+- a payment already refunded is reported as refunded, naming the refund
+  transaction;
+- a payment already spent by the counterparty yields its secret and the
+  swap continues as for any coin;
+- an unspent payment past its lock time is refunded.
+
+A payment whose output pays neither rebuilt script is still a hard stop
+(it is not this swap's payment, or the record is inconsistent). The error
+names the payment by its transaction id in the usual display byte order and
+says that both keys were tried.
+
+> **Provenance and reason (2026-10-26).** Clean-room original; this is a
+> Reloaded defect, not a reference question. Reloaded's shielded spend
+> search rebuilt the script with the persistent key, so recovery of every
+> shielded swap stopped with "does not pay the HTLC script this swap
+> negotiated". Observed on a September taker swap that had in fact been
+> refunded on chain; the message also printed the transaction id byte-reversed.
+
+T39.5.4 *Recovery with a per-swap key.* For a shielded taker payment and a
+shielded maker payment built with a per-swap HTLC key different from the
+persistent key, tests shall show that recovery:
+
+- reports "refunded already" with the refund transaction id once the
+  payment has been refunded;
+- refunds an unspent payment past its lock time;
+- recovers the secret from a counterparty spend.
+
+The same holds for a payment built with the persistent key, which matches on
+the fallback; the log line and any error text name the key that matched,
+and a successful response has the same fields as before. A payment of
+another swap still hits the hard stop; its message prints the transaction id
+in display order and says both keys were tried. A UTXO-coin case shows
+recovery unchanged there.
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -4575,6 +4628,10 @@ different cause. At least one live endpoint was observed in this state on
   `sync_status: Finished` while the shielded sync is healthy, and rejects
   non-shielded coins (`NotSupportedFor`) and inactive coins (`CoinIsNotActive`)
   (§39.8).
+- Swap recovery (§39.5, R39.5.4): recovery of a shielded swap rebuilds the
+  HTLC script with the swap's own per-swap key, so a refunded payment is
+  reported as refunded, a spent one yields its secret, and an expired one is
+  refunded (T39.5.4).
 - History order and unmined sends (§39.8.5.1): by default an own shielded send
   is served from broadcast on, ahead of every mined row, with its final
   amounts, and moves to its block's position once mined (R39.8.9i, decided in

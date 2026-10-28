@@ -388,6 +388,8 @@ pub(crate) struct Script {
     /// How long a broadcast takes to be answered, to widen a race around it.
     pub(crate) send_delay: Option<std::time::Duration>,
     pub(crate) balance: Option<Result<i64, EndpointError>>,
+    /// The transparent-history rows every address query answers with, those mined inside the asked window.
+    pub(crate) history: Vec<RawTx>,
 }
 
 /// Called with the bytes of every broadcast, before the scripted answer is returned.
@@ -512,9 +514,21 @@ impl LightwalletdTransport for FakeTransport {
             .unwrap_or_else(|| Err(Self::unscripted()))
     }
 
-    async fn taddr_txids(&self, server: &str, _address: &str, _start: u64, _end: u64) -> WindowRead {
+    async fn taddr_txids(&self, server: &str, _address: &str, start: u64, end: u64) -> WindowRead {
         self.record(server, "history");
-        WindowRead::default()
+        let txs = self
+            .scripts
+            .lock()
+            .get(server)
+            .map(|s| {
+                s.history
+                    .iter()
+                    .filter(|t| t.height.map_or(false, |h| (start..=end).contains(&h)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        WindowRead { txs, error: None }
     }
 
     async fn address_utxos(&self, server: &str, _address: &str) -> Result<Vec<TransparentUtxo>, EndpointError> {

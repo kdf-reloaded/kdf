@@ -1179,3 +1179,167 @@ async fn an_expired_unmined_send_leaves_no_row_and_no_change_in_the_balance() {
     // Added: the expired change is in neither figure (R39.8.0ag1, R39.8.0ar).
     assert_eq!(fixture.reported_balance().await, (sat(NOTE_VALUE), BigDecimal::from(0)));
 }
+
+/// T39.5.4 (R39.5.4), a shielded coin's spend search with the swap's own HTLC key. The payment and its
+/// refund are the live ARRR pair of `z_tx_read`'s tests (public chain data): the payment pays an HTLC
+/// whose refund key is the taker's per-swap key, which is not the coin's persistent key. The backend is
+/// the scripted lightwalletd transport; it serves the payment and, in its transparent history, the refund.
+mod per_swap_htlc_key_recovery {
+    use super::*;
+    use crate::{HtlcPaymentCheck, SwapOps};
+
+    const PAYMENT_HEX: &str = include_str!("test-fixtures/arrr-htlc-payment-75566e4d.hex");
+    const REFUND_HEX: &str = include_str!("test-fixtures/arrr-htlc-refund-0496f6d3.hex");
+    const PAYMENT_TXID_DISPLAY: &str = "75566e4d322874d79db2661d334fa404e449df15723b482957815fef203cf1e2";
+    const TIME_LOCK: u32 = 1_790_664_056;
+    const TAKER_KEY: &str = "03cd3144d880ce80ce9f2f4c24feb12d011bd6f067cdb44dcd2c41438923d64fe2";
+    const MAKER_KEY: &str = "02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580";
+    const SECRET_HASH: &str = "cb03f4f75479eb6731672f14069d05e1a08d8349";
+    /// Heights inside the fixture's chain (tip 11, Sapling activation 2).
+    const PAYMENT_HEIGHT: u64 = 5;
+    const REFUND_HEIGHT: u64 = 8;
+    const SEARCH_FROM: u64 = 3;
+
+    fn bytes(hex_str: &str) -> Vec<u8> { hex::decode(hex_str.trim()).unwrap() }
+
+    /// A Light-mode coin whose backend serves the live payment and, in the transparent history of the
+    /// HTLC addresses, its refund. `None` where the Sapling parameters are absent.
+    fn coin_with_refunded_payment() -> Option<LightCoinFixture> {
+        let fixture = LightCoinFixture::new()?;
+        for script in fixture.transport.scripts.lock().values_mut() {
+            script.transaction = Some(Ok(RawTx {
+                data: bytes(PAYMENT_HEX),
+                height: Some(PAYMENT_HEIGHT),
+            }));
+            script.history = vec![RawTx {
+                data: bytes(REFUND_HEX),
+                height: Some(REFUND_HEIGHT),
+            }];
+        }
+        Some(fixture)
+    }
+
+    fn assert_is_the_live_refund(found: Option<FoundSwapTxSpend>) {
+        match found {
+            Some(FoundSwapTxSpend::Refunded(tx)) => assert_eq!(tx.tx_hex(), bytes(REFUND_HEX)),
+            other => panic!("expected the live refund, got {other:?}"),
+        }
+    }
+
+    /// With the taker's per-swap key as "my" key the search over this node's own payment ends in the
+    /// refund; from the counterparty's side (the maker's key as "my" key) the same payment is found
+    /// refunded too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_payment_built_with_a_per_swap_key_is_found_refunded() {
+        let Some(fixture) = coin_with_refunded_payment() else {
+            return;
+        };
+        let (taker, maker, secret_hash) = (bytes(TAKER_KEY), bytes(MAKER_KEY), bytes(SECRET_HASH));
+        assert_ne!(
+            taker.as_slice(),
+            &**fixture.coin.my_public_key().unwrap(),
+            "the swap key is not the persistent key"
+        );
+
+        let mine = fixture
+            .coin
+            .search_for_swap_tx_spend_my(
+                TIME_LOCK,
+                &taker,
+                &maker,
+                &secret_hash,
+                &bytes(PAYMENT_HEX),
+                SEARCH_FROM,
+                &None,
+            )
+            .await
+            .expect("the search succeeds with the swap's own key");
+        assert_is_the_live_refund(mine);
+
+        let other = fixture
+            .coin
+            .search_for_swap_tx_spend_other(
+                TIME_LOCK,
+                &maker,
+                &taker,
+                &secret_hash,
+                &bytes(PAYMENT_HEX),
+                SEARCH_FROM,
+                &None,
+            )
+            .await
+            .expect("the search succeeds from the counterparty's side");
+        assert_is_the_live_refund(other);
+    }
+
+    /// The trait method recovery asks to pick the HTLC key (R39.5.4) answers over the live payment.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_coin_tells_which_key_rebuilds_the_script_a_payment_pays() {
+        let Some(fixture) = coin_with_refunded_payment() else {
+            return;
+        };
+        let (taker, maker, secret_hash) = (bytes(TAKER_KEY), bytes(MAKER_KEY), bytes(SECRET_HASH));
+        let persistent = fixture.coin.my_public_key().unwrap().to_vec();
+
+        let with_swap_key = fixture
+            .coin
+            .check_payment_pays_htlc(TIME_LOCK, &taker, &maker, &secret_hash, &bytes(PAYMENT_HEX))
+            .await;
+        assert_eq!(with_swap_key, Ok(HtlcPaymentCheck::Pays));
+        let with_persistent_key = fixture
+            .coin
+            .check_payment_pays_htlc(TIME_LOCK, &persistent, &maker, &secret_hash, &bytes(PAYMENT_HEX))
+            .await;
+        assert_eq!(
+            with_persistent_key,
+            Ok(HtlcPaymentCheck::PaysAnotherScript {
+                payment_id: PAYMENT_TXID_DISPLAY.to_owned()
+            })
+        );
+    }
+
+    /// The coin's persistent key does not rebuild the swap's script: the hard stop, naming the payment by
+    /// its display-order transaction id, in both directions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_persistent_key_is_still_the_hard_stop_and_names_the_display_txid() {
+        let Some(fixture) = coin_with_refunded_payment() else {
+            return;
+        };
+        let persistent = fixture.coin.my_public_key().unwrap().to_vec();
+        let (taker, maker, secret_hash) = (bytes(TAKER_KEY), bytes(MAKER_KEY), bytes(SECRET_HASH));
+
+        let mine = fixture
+            .coin
+            .search_for_swap_tx_spend_my(
+                TIME_LOCK,
+                &persistent,
+                &maker,
+                &secret_hash,
+                &bytes(PAYMENT_HEX),
+                SEARCH_FROM,
+                &None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            mine.contains("does not pay the HTLC script this swap negotiated"),
+            "{mine}"
+        );
+        assert!(mine.contains(PAYMENT_TXID_DISPLAY), "{mine}");
+
+        let other = fixture
+            .coin
+            .search_for_swap_tx_spend_other(
+                TIME_LOCK,
+                &persistent,
+                &taker,
+                &secret_hash,
+                &bytes(PAYMENT_HEX),
+                SEARCH_FROM,
+                &None,
+            )
+            .await
+            .unwrap_err();
+        assert!(other.contains(PAYMENT_TXID_DISPLAY), "{other}");
+    }
+}
