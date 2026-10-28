@@ -178,6 +178,24 @@ pub trait SwapOps {
         Box::new(futures01::future::ok(result))
     }
 
+    /// CRD ch.39 R39.5.13. When the refund broadcast of this coin was rejected with `rejection` (the plain
+    /// text of the failure) and the rejection says that the transaction is not yet final, returns the part
+    /// of the node's text worth logging; the refund stage then waits and goes back to the refund gate
+    /// instead of ending the swap in the refund-failed state. Every other rejection, and every other coin,
+    /// is terminal as before, which is the default.
+    fn retriable_refund_rejection(&self, _rejection: &str) -> Option<String> { None }
+
+    /// CRD ch.39 R39.5.13. For a coin whose refund gate waits for the chain's median time past: why the
+    /// refund may not be built yet, or `None` when the gate is open. `recover_funds_of_swap` asks it after
+    /// its own deadline check. The default reads nothing and answers `None`, so every other coin's
+    /// recovery is unchanged.
+    fn refund_gate_closed_note(
+        &self,
+        _locktime: u64,
+    ) -> Box<dyn Future<Item = Option<String>, Error = String> + Send + '_> {
+        Box::new(futures01::future::ok(None))
+    }
+
     fn negotiate_swap_contract_addr(
         &self,
         other_side_address: Option<&[u8]>,

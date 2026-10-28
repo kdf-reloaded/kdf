@@ -541,7 +541,7 @@ R39.5.12 **Refund gate and refund transaction of a shielded leg.** *(binding, pa
 > **Reloaded change: R39.5.13 (maintainer Decision AP).**
 
 R39.5.13 **Median-time-past-aware shielded refund.** *(binding, Reloaded-original;
-maintainer Decision AP, 2026-10-28; not yet implemented. Supersedes R39.5.12(a) and (c) for
+maintainer Decision AP, 2026-10-28; implemented, see the status update below. Supersedes R39.5.12(a) and (c) for
 this project while keeping (b) and (d) wire-identical.)* The shielded
 leg's refund gate shall require both that the wall clock has passed the HTLC locktime and
 that the chain's median-time-past (computed from the `time` field of the last 11 compact
@@ -551,6 +551,20 @@ broadcast rejection whose node text indicates non-finality shall be retried on t
 pass rather than terminating the swap, until the leg's refund deadline (locktime + 3700 s,
 ch. 51 R18/R30); other rejections keep R39.5.12(c). `recover_funds_of_swap` shall apply the
 same gate and report a "too early" error naming the earliest permitted instant.
+
+> **Status update (reloaded, 2026-10-28).** Implemented. The gate is `z_refund_gate::refund_gate`,
+> reached through `SwapOps::can_refund_htlc` of the shielded coin (`z_swap_ops.rs`): wall clock first
+> (no chain read while it has not passed the lock time), then the median time past of
+> `get_current_mtp` (the admitted backend's tip and its compact-block times, R39.11.4f and R39.11.8),
+> every wait capped at 3600 s through the UTXO coins' `capped_refund_wait`, a read failure an `Err`.
+> The retry is the coin's `SwapOps::retriable_refund_rejection` (the shielded coin answers for a
+> rejection text containing "non-final", any case; every other coin keeps the default `None`) used by
+> `refund_maker_payment` and `refund_taker_payment` through `retried_refund_rejection` until
+> locktime + 3700 s; a retried rejection is logged once at warn level and not published on the P2P
+> transaction-helper topic. Recovery asks `SwapOps::refund_gate_closed_note` after its own deadline
+> check, in the stage "checking whether the chain allows the refund yet"; the default answers `None`
+> without a read. The Native path (refused at activation in this release) reads its node's headers
+> through the same `get_current_mtp`; WASM, which cannot build a shielded swap, is unchanged.
 
 > **Divergence (informative).** Against the reference behavior of R39.5.12, three things
 > change: the refund of a shielded leg is broadcast once median time past, not only the wall
@@ -1365,7 +1379,8 @@ never sufficient evidence for reuse. The cache is deleted, not kept as a backup:
 it holds only blocks the backend can serve again, and a failure that repeats on
 every background pass (R39.8.0aa) would otherwise leave one more copy behind each
 time. Wallet-database backups of the rebuild paths (R39.8.0x, R39.8.0al) are
-unaffected.
+unaffected; a wallet database that has not scanned a block yet is deleted like the
+cache when it is replaced (R39.8.0ax).
 
 The dictated Pirate compact-block protobuf does not carry the modern optional
 `ChainMetadata` field. Before handing a bounded batch to a scanner that requires
@@ -2083,7 +2098,10 @@ birthday, scans the new chain, and leaves exactly one wallet backup and no
 compact-cache backup; (e) a wallet with no recorded sync start, or a backend that
 cannot supply the rebuild anchor, fails the pass and leaves the wallet unmodified;
 (f) an unchanged chain keeps the anchor; (g) a compact cache that fails validation
-is deleted, not renamed to a backup.
+is deleted, not renamed to a backup; (h) passes that keep failing after a rebuild,
+and a restarted interrupted first scan, add no wallet backup beyond the rebuild's
+own one, while a wallet that has scanned blocks is refused and left untouched
+(R39.8.0ax).
 
 T39.8.0g Pending-receipt tests shall use a mempool fixture to prove that a
 wallet-owned unconfirmed shielded output is reported in the non-spendable balance
@@ -2636,6 +2654,25 @@ shall keep no backup of the compact cache (R39.8.0n).
 
 The divergence shall be reported with both the stored and the reported block
 hash, in display byte order, so the two can be distinguished and looked up.
+
+R39.8.0ax **A wallet database that has not scanned a block shall be replaced
+without a backup.** *(binding; Reloaded-original -- it bounds the backup files
+of Reloaded's own rebuild paths.)* A wallet database can
+hold its account and nothing else: after the rebuild of R39.8.0al, and after a
+process stopped between importing the account and scanning the first block. The
+anchor check of R39.8.0al replaces such a database with a fresh one before it
+fetches the checkpoint again, and does so on every pass until a scan succeeds. The
+replaced database holds nothing the wallet cannot recreate -- no scanned block, no
+transaction and therefore no note, only an account derived from the wallet's
+viewing key -- so it shall be deleted together with its SQLite sidecar files, not
+kept as a backup. Keeping one per pass grows without bound while the scans keep
+failing, the same growth R39.8.0n removed for the compact cache. The check that
+the database holds no scanned block and no transaction shall be made under the
+same per-database guard as the replacement (R39.8.0ad), so a concurrent scan
+cannot add data between the check and the delete; a database that fails the
+check shall be left untouched and the pass shall fail. A rebuild's own backup of
+the previous, scanned wallet database (R39.8.0al) is unaffected and stays the only
+backup a rebuild leaves.
 
 R39.8.0ak The Sapling commitment tree carried by a lightwalletd `TreeState`
 shall be validated before it is accepted as the wallet's sync anchor. The
