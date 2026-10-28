@@ -498,6 +498,15 @@ other row the public reference is silent and the reference release decides.
 > Solana platform reports `Internal` (Chapter 40, deferred); in this beta
 > Solana is switched off and every Solana request ends at the refusal rows
 > above instead.
+>
+> **Error texts (pointer, 2026-10-28).** The `error` text of these rows stays
+> unbound, but what it may say about a node is bound by the owning chapters:
+> nodes and servers are named in host-only form and no credential appears
+> (chapter 35 R35.1.14 and R35.1.17, chapter 21 §21.9, chapter 36 §36.5A,
+> chapter 38 §38.6.9, chapter 39 §39.11.6, chapter 40 §40.5A, chapter 20
+> §20.8). The lightwalletd suspension of chapter 39 R39.11.31 does not change
+> when the two `task::enable_z_coin` backend rows apply. None of this changes
+> a discriminant, an `error_data` shape or an HTTP status.
 
 ---
 
@@ -1508,3 +1517,6 @@ R55.4.5 and the error body of R55.1.10.
     addition quoted no identifier and reproduced nothing, and the single
     behavioral statement it then carried was a restatement of material gated
     with Chapter 45 R45.3.7 -- the statement the reduction has since removed.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
+  error-texts pointer note in §55.3 is Reloaded-original. It binds nothing of
+  its own and points to the rules of the chapters it names.
