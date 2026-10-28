@@ -224,7 +224,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
   the wallet's own record of the transactions it broadcast. This works even when the configured
   `lightwalletd` servers cannot answer address questions. The record only ever answers "sent"; anything
-  else still goes to the servers. Detail: CRD ch.39 R39.11.26.
+  else still goes to the servers. Detail: PR #125; CRD ch.39 R39.11.26.
 - **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
   - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
   - each server gets at most 120 seconds per check;
