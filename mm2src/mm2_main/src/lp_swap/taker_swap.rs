@@ -16,6 +16,7 @@ use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ti
                                 OrderConfirmationsSettings, TakerAction, TakerOrderBuilder};
 use crate::mm2::lp_swap::{broadcast_p2p_tx_msg, tx_helper_topic};
 use crate::mm2::MM_VERSION;
+use coins::request_fee_scope::with_request_fee_scope;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
             TradeFee, TradePreimageValue, ValidatePaymentInput};
 use common::executor::Timer;
@@ -2489,6 +2490,13 @@ pub async fn max_taker_vol_v2(
     ctx: MmArc,
     req: MaxTakerVolV2Request,
 ) -> MmResult<TradingVolumeResponse, TradingRpcError> {
+    with_request_fee_scope(max_taker_vol_v2_impl(ctx, req)).await
+}
+
+async fn max_taker_vol_v2_impl(
+    ctx: MmArc,
+    req: MaxTakerVolV2Request,
+) -> MmResult<TradingVolumeResponse, TradingRpcError> {
     let coin = lp_coinfind(&ctx, &req.coin)
         .await
         .map_to_mm(TradingRpcError::Internal)?
@@ -2524,6 +2532,10 @@ pub async fn min_trading_vol_v2(
 }
 
 pub async fn max_taker_vol(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    with_request_fee_scope(max_taker_vol_impl(ctx, req)).await
+}
+
+async fn max_taker_vol_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let req: MaxTakerVolRequest = try_s!(json::from_value(req));
     let coin = match lp_coinfind(&ctx, &req.coin).await {
         Ok(Some(t)) => t,

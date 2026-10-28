@@ -2501,8 +2501,13 @@ fn test_qtum_my_balance() {
 #[test]
 fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     const DISPLAY_BALANCE: u64 = 68;
-    ElectrumClient::display_balance.mock_safe(move |_, _, _| {
-        MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(DISPLAY_BALANCE))))
+    // The qtum address is legacy and belongs to the activated key, so its P2PKH balance and P2PK lookup are one
+    // Electrum request (R38.6.3a); this is the client method that carries them.
+    ElectrumClient::display_balance_with_p2pk.mock_safe(move |_, _, _, _| {
+        MockResult::Return(Box::new(futures01::future::ok((
+            BigDecimal::from(DISPLAY_BALANCE),
+            Vec::new(),
+        ))))
     });
     QtumCoin::get_all_unspent_ordered_list.mock_safe(move |_, _| {
         panic!(
@@ -8508,5 +8513,241 @@ mod electrum_pool_activation {
         let height = block_on(client.get_block_count().compat()).unwrap();
         assert_eq!(height, 4242);
         assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+}
+
+// ---- Order-posting latency: one Electrum request message per legacy-address read (CRD ch.38 R38.6.3a) and one
+// fee reading per coin and order-posting request (R38.6.6j item 1) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod order_posting_latency {
+    use super::*;
+    use crate::request_fee_scope::with_request_fee_scope;
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::utxo_common::{address_balance, get_all_unspent_ordered_list};
+    use crate::{FeeApproxStage, TradePreimageValue};
+    use serde_json::Value as Json;
+
+    /// What the scripted Electrum server holds for the coin of the tests below: the balance and the unspent list of
+    /// the coin's P2PKH script hash, the unspent list of its P2PK script hash, and the fee readings.
+    fn script_electrum(server: &StubServer, p2pkh_hash: &str, p2pk_hash: &str) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.get_balance",
+            p2pkh_hash,
+            json!({"confirmed": 1_000_000, "unconfirmed": 5}),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            p2pkh_hash,
+            json!([
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 900_000},
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 900_000},
+            ]),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            p2pk_hash,
+            json!([
+                {"tx_hash": "02".repeat(32), "tx_pos": 3, "height": 11, "value": 100_000}
+            ]),
+        );
+        server.set_result("blockchain.estimatefee", json!(0.0001));
+        server.set_result("blockchain.relayfee", json!(0.00002));
+    }
+
+    /// A coin on a scripted Electrum server. Returns the coin and the stub server, which has recorded the request messages.
+    fn coin_on_scripted_electrum(
+        segwit: bool,
+        fee: TxFee,
+        force_min_relay_fee: bool,
+    ) -> (UtxoStandardCoin, StubServer) {
+        // The scripted server needs the coin's script hashes, which depend on the seed's key. Build the coin
+        // twice: once to learn its address and key, once with the client that answers for them.
+        let probe = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, segwit);
+        let address = match &probe.derivation_method {
+            DerivationMethod::Iguana(address) => address.clone(),
+            _ => unreachable!("the test coin has an Iguana address"),
+        };
+        let p2pkh = output_script(&address, ScriptType::P2PKH);
+        let p2pk = Builder::build_p2pk(probe.priv_key_policy.key_pair().unwrap().public());
+        let (p2pkh_hash, p2pk_hash) = (
+            hex::encode(electrum_script_hash(&p2pkh)),
+            hex::encode(electrum_script_hash(&p2pk)),
+        );
+        let (client, server) = electrum_client_over_stub(|server| script_electrum(server, &p2pkh_hash, &p2pk_hash));
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, segwit);
+        fields.tx_fee = fee;
+        fields.conf.force_min_relay_fee = force_min_relay_fee;
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    fn my_address(coin: &UtxoStandardCoin) -> Address {
+        match &coin.as_ref().derivation_method {
+            DerivationMethod::Iguana(address) => address.clone(),
+            _ => unreachable!("the test coin has an Iguana address"),
+        }
+    }
+
+    /// The `(method, scripthash)` lookups of every request message, one entry per message.
+    fn lookups(server: &StubServer) -> Vec<Vec<(String, String)>> {
+        server
+            .request_messages()
+            .iter()
+            .map(|message| {
+                let requests = match message.as_array() {
+                    Some(batch) => batch.clone(),
+                    None => vec![message.clone()],
+                };
+                requests
+                    .iter()
+                    .map(|r| {
+                        (
+                            r["method"].as_str().unwrap().to_owned(),
+                            r["params"][0].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn count_requests(server: &StubServer, method: &str) -> usize {
+        lookups(server).iter().flatten().filter(|(m, _)| m == method).count()
+    }
+
+    /// R38.6.3a: a legacy-address balance read is ONE request message carrying the P2PKH balance lookup and the
+    /// P2PK lookup, and the balance is the same as before: the P2PKH balance plus the P2PK unspents.
+    #[test]
+    fn legacy_address_balance_read_is_one_request_message() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        let balance = block_on(address_balance(&coin, &my_address(&coin))).unwrap();
+
+        // (1_000_000 + 5) base units of the P2PKH script, plus the 100_000 of the P2PK output; 8 decimals.
+        assert_eq!(balance.spendable, "0.01100005".parse::<BigDecimal>().unwrap());
+        assert_eq!(balance.unspendable, BigDecimal::from(0));
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "one request message: {:?}", sent);
+        assert_eq!(sent[0].len(), 2);
+        assert_eq!(sent[0][0].0, "blockchain.scripthash.get_balance");
+        assert_eq!(sent[0][1].0, "blockchain.scripthash.listunspent");
+    }
+
+    /// R38.6.3a: a legacy-address unspent-list read is ONE request message, and the unspents are those of
+    /// before: the P2PKH ones (de-duplicated) and the P2PK one.
+    #[test]
+    fn legacy_address_unspent_list_read_is_one_request_message() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &my_address(&coin))).unwrap();
+
+        let mut values: Vec<_> = unspents.iter().map(|u| u.value).collect();
+        values.sort();
+        assert_eq!(values, vec![100_000, 900_000]);
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "one request message: {:?}", sent);
+        assert_eq!(sent[0].len(), 2);
+        assert!(sent[0].iter().all(|(m, _)| m == "blockchain.scripthash.listunspent"));
+        assert_ne!(sent[0][0].1, sent[0][1].1, "the P2PKH and the P2PK script hashes");
+    }
+
+    /// R38.6.3a: a segwit address sends the P2PKH lookup alone, as before.
+    #[test]
+    fn segwit_address_reads_send_the_p2pkh_lookup_alone() {
+        let (coin, server) = coin_on_scripted_electrum(true, TxFee::FixedPerKb(1000), false);
+        let balance = block_on(address_balance(&coin, &my_address(&coin))).unwrap();
+        assert_eq!(balance.spendable, "0.01000005".parse::<BigDecimal>().unwrap());
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "{:?}", sent);
+        assert_eq!(sent[0].len(), 1);
+        assert_eq!(sent[0][0].0, "blockchain.scripthash.get_balance");
+
+        let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &my_address(&coin))).unwrap();
+        assert_eq!(unspents.iter().map(|u| u.value).collect::<Vec<_>>(), vec![900_000]);
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 2, "{:?}", sent);
+        assert_eq!(sent[1].len(), 1);
+        assert_eq!(sent[1][0].0, "blockchain.scripthash.listunspent");
+    }
+
+    /// R38.6.6j item 1: inside one order-posting request the spend check, the sender trade fee, the receiver
+    /// trade fee and a second spend check read a dynamic-fee coin's estimate exactly once.
+    #[test]
+    fn dynamic_fee_estimate_is_read_once_per_order_posting_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), false);
+        let (spend_safe, receiver_fee) = block_on(with_request_fee_scope(async {
+            let first = coin.spend_safe_amount().await.unwrap();
+            let sender = coin
+                .get_sender_trade_fee(
+                    TradePreimageValue::Exact("0.001".parse().unwrap()),
+                    FeeApproxStage::OrderIssue,
+                )
+                .await
+                .unwrap();
+            assert!(sender.amount.to_decimal() > BigDecimal::from(0));
+            let receiver = coin
+                .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                .compat()
+                .await
+                .unwrap();
+            let second = coin.spend_safe_amount().await.unwrap();
+            assert_eq!(first, second);
+            (first, receiver)
+        }));
+        assert!(spend_safe.is_some());
+        // 0.0001 coin/kB over the 496 byte HTLC spend.
+        assert_eq!(
+            receiver_fee.amount.to_decimal(),
+            "0.0000496".parse::<BigDecimal>().unwrap()
+        );
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 1);
+    }
+
+    /// R38.6.6j item 3: outside an order-posting request every consumer reads a fresh estimate, as swap
+    /// execution does.
+    #[test]
+    fn dynamic_fee_estimate_is_read_fresh_outside_a_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), false);
+        block_on(async {
+            coin.spend_safe_amount().await.unwrap();
+            coin.spend_safe_amount().await.unwrap();
+            coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                .compat()
+                .await
+                .unwrap();
+        });
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 3);
+    }
+
+    /// R38.6.6j item 1: the forced minimum relay fee is read once per request as well, and afresh outside one.
+    #[test]
+    fn forced_min_relay_fee_is_read_once_per_order_posting_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), true);
+        block_on(with_request_fee_scope(async {
+            coin.spend_safe_amount().await.unwrap();
+            coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                .compat()
+                .await
+                .unwrap();
+            coin.spend_safe_amount().await.unwrap();
+        }));
+        assert_eq!(count_requests(&server, "blockchain.relayfee"), 1);
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 1);
+
+        block_on(async {
+            coin.spend_safe_amount().await.unwrap();
+            coin.spend_safe_amount().await.unwrap();
+        });
+        assert_eq!(count_requests(&server, "blockchain.relayfee"), 3);
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 3);
+    }
+
+    /// A fixed-fee coin has nothing to read, in or out of a request.
+    #[test]
+    fn fixed_fee_coin_reads_nothing() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        block_on(with_request_fee_scope(async {
+            coin.spend_safe_amount().await.unwrap()
+        }));
+        assert!(lookups(&server).is_empty());
     }
 }

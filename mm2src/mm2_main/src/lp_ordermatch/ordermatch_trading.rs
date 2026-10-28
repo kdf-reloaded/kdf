@@ -1,4 +1,5 @@
 use super::*;
+use coins::request_fee_scope::with_request_fee_scope;
 
 #[cfg(feature = "ibc-routing-for-swaps")]
 fn tendermint_chain_id_from_conf(conf: &Json, platform_conf: Option<&Json>) -> Option<String> {
@@ -282,6 +283,12 @@ impl BalanceUpdateOrdermatchHandler {
 #[async_trait]
 impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
+        with_request_fee_scope(self.balance_updated_impl(coin, new_balance)).await
+    }
+}
+
+impl BalanceUpdateOrdermatchHandler {
+    async fn balance_updated_impl(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
         let ctx = match MmArc::from_weak(&self.ctx) {
             Some(ctx) => ctx,
             None => return,
@@ -1400,6 +1407,10 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
 }
 
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    with_request_fee_scope(buy_impl(ctx, req)).await
+}
+
+async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let input: AutoBuyInput = try_s!(json::from_value(req));
     if input.base == input.rel {
         return ERR!("Base and rel must be different coins");
@@ -1435,6 +1446,10 @@ pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
 }
 
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    with_request_fee_scope(sell_impl(ctx, req)).await
+}
+
+async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let input: AutoBuyInput = try_s!(json::from_value(req));
     if input.base == input.rel {
         return ERR!("Base and rel must be different coins");
@@ -1830,6 +1845,10 @@ pub(crate) async fn get_max_volume(
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
+    with_request_fee_scope(create_maker_order_impl(ctx, req)).await
+}
+
+async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
     let base_coin: MmCoinEnum = match try_s!(lp_coinfind(ctx, &req.base).await) {
         Some(coin) => coin,
         None => return ERR!("Base coin {} is not found", req.base),
@@ -1977,6 +1996,10 @@ pub(crate) async fn cancel_previous_maker_orders(
 }
 
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
+    with_request_fee_scope(update_maker_order_impl(ctx, req)).await
+}
+
+async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
     let order_mutex = {
         match ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid) {
@@ -2036,13 +2059,17 @@ pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
-    // CRD ch.60 R60.6.7 item 3: the order as updated must still be spendable on both legs. Its minimum
-    // volume is the requested one, else the one it already carries.
-    let min_volume_after_update = req
-        .min_volume
-        .clone()
-        .or_else(|| Some(order_before_update.min_base_vol.clone()));
-    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
+    // CRD ch.60 R60.6.7 item 3 and its Amendment: on an update the order as updated must still be spendable on
+    // both legs only when the update changes the volume (a volume delta, or `max`). A price-only, minimum-volume
+    // or confirmation-only update is not re-checked. The minimum volume checked is the requested one, else the
+    // one the order already carries.
+    if req.volume_delta.is_some() || req.max.unwrap_or(false) {
+        let min_volume_after_update = req
+            .min_volume
+            .clone()
+            .or_else(|| Some(order_before_update.min_base_vol.clone()));
+        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
+    }
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {

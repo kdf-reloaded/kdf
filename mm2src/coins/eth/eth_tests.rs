@@ -2823,3 +2823,125 @@ fn num_bigint_pow10(decimals: u8) -> mm2_number::BigInt {
     }
     v
 }
+
+/// CRD ch.57 R57.2.1 (the node queries of one gas-price resolution are concurrent) and R57.2.6 item 1 (one
+/// resolution per coin and order-posting request), against a scripted node whose queries take time.
+mod gas_price_resolution {
+    use super::scripted_evm_node::spawn;
+    use super::*;
+    use crate::request_fee_scope::with_request_fee_scope;
+    use serde_json::{json, Value as Json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    const NODE_LATENCY: Duration = Duration::from_millis(400);
+    const GAS_PRICE_WEI: u64 = 1_000_000_000;
+    const BASE_FEE_WEI: u64 = 10_000_000_000;
+
+    #[derive(Default)]
+    struct Calls {
+        gas_price: AtomicUsize,
+        fee_history: AtomicUsize,
+    }
+
+    /// A node answering both gas-price sources after [`NODE_LATENCY`]. A source in `broken` answers a value
+    /// that is not a result of that method.
+    fn node(calls: Arc<Calls>, broken: &'static [&'static str]) -> super::scripted_evm_node::ScriptedNode {
+        spawn(move |method, _params| {
+            std::thread::sleep(NODE_LATENCY);
+            match method {
+                "eth_gasPrice" => {
+                    calls.gas_price.fetch_add(1, Ordering::SeqCst);
+                    if broken.contains(&method) {
+                        return json!("not a price");
+                    }
+                    json!(format!("{:#x}", GAS_PRICE_WEI))
+                },
+                "eth_feeHistory" => {
+                    calls.fee_history.fetch_add(1, Ordering::SeqCst);
+                    if broken.contains(&method) {
+                        return json!("not a fee history");
+                    }
+                    json!({
+                        "oldestBlock": "0x1",
+                        "baseFeePerGas": [format!("{:#x}", BASE_FEE_WEI), format!("{:#x}", BASE_FEE_WEI)],
+                        "gasUsedRatio": [0.5],
+                    })
+                },
+                other => panic!("the scripted node does not serve `{}`", other),
+            }
+        })
+    }
+
+    fn coin_on(node: &super::scripted_evm_node::ScriptedNode) -> EthCoin {
+        eth_coin_for_test(EthCoinType::Eth, vec![node.url.clone()], None).1
+    }
+
+    fn fee_history_price() -> U256 { increase_by_percent(U256::from(BASE_FEE_WEI), BASE_BLOCK_FEE_DIFF_PCT) }
+
+    /// R57.2.1: two queries of N ms each resolve in about N ms, not 2N, and the maximum wins.
+    #[test]
+    fn the_node_queries_are_concurrent_and_the_maximum_wins() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let coin = coin_on(&node);
+
+        let started = Instant::now();
+        let price = block_on(coin.get_gas_price().compat()).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(price, fee_history_price());
+        assert!(price > U256::from(GAS_PRICE_WEI));
+        assert!(
+            elapsed < NODE_LATENCY * 2 - Duration::from_millis(100),
+            "the two queries ran one after another: {elapsed:?}"
+        );
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+    }
+
+    /// R57.2.1: a source that errors is dropped; with none left the resolution fails.
+    #[test]
+    fn a_failing_source_is_dropped_and_no_source_is_an_error() {
+        let calls = Arc::new(Calls::default());
+        let node_without_history = node(calls.clone(), &["eth_feeHistory"]);
+        let price = block_on(coin_on(&node_without_history).get_gas_price().compat()).unwrap();
+        assert_eq!(price, U256::from(GAS_PRICE_WEI));
+
+        let node_without_price = node(calls.clone(), &["eth_gasPrice"]);
+        let price = block_on(coin_on(&node_without_price).get_gas_price().compat()).unwrap();
+        assert_eq!(price, fee_history_price());
+
+        let dead_node = node(calls, &["eth_gasPrice", "eth_feeHistory"]);
+        let err = block_on(coin_on(&dead_node).get_gas_price().compat()).unwrap_err();
+        assert!(matches!(err.into_inner(), Web3RpcError::Internal(m) if m == "All requests failed"));
+    }
+
+    /// R57.2.6 item 1: inside one order-posting request the sender fee, the receiver fee and the maximum volume
+    /// resolve the gas price once; outside a request (swap execution) every consumer resolves it afresh.
+    #[test]
+    fn the_gas_price_is_resolved_once_per_order_posting_request() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let coin = coin_on(&node);
+
+        let prices = block_on(with_request_fee_scope(async {
+            let sender = coin.get_gas_price().compat().await.unwrap();
+            let receiver = coin.get_gas_price().compat().await.unwrap();
+            let max_volume = coin.get_gas_price().compat().await.unwrap();
+            (sender, receiver, max_volume)
+        }));
+        assert_eq!(prices, (fee_history_price(), fee_history_price(), fee_history_price()));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+
+        // The same three consumers outside a request, as in swap execution, read three times.
+        block_on(async {
+            for _ in 0..3 {
+                coin.get_gas_price().compat().await.unwrap();
+            }
+        });
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 4);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 4);
+    }
+}

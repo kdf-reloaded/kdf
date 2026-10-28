@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** planning (maintainer Decisions P and R, 2026-10-27; the maintainer moves it to in progress) — **Last reviewed:** 2026-10-27
+**Status:** in progress (pass 1 in review; maintainer Decisions P and R, 2026-10-27) — **Last reviewed:** 2026-10-28
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -35,9 +35,9 @@
 
 | # | Content | Rules | State |
 |---|---|---|---|
-| 0 | CRD branch `crd/order-post-latency` (PR #95) | all of the above | gated; PR #95 open |
-| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | started 2026-10-27 |
+| 0 | CRD branch `crd/order-post-latency` (PR #95) | all of the above | merged 2026-10-27 |
+| 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | implemented (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs`; F5 read spreading `electrum_spread_reads` | R38.6.6j items 2–4, R57.2.6, R38.6.4a | after pass 1 |
-| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, D60.4 | waits for the Spec Reader pass on D60.4 and its gate |
+| 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | ready; after pass 1 |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.

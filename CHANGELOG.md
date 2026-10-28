@@ -76,6 +76,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
 
+- **Posting and updating maker orders makes fewer Electrum and node requests.** Electrum servers
+  serve each connection about one request per second once its first burst is used, so every extra
+  request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
+  its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
+  coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
+  update that changes only the price, the minimum volume or the confirmation settings skips the
+  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
+  ch.57 R57.2.6, ch.60 R60.6.7.
+
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
   whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
   longer holds a request for a minute before the next node is tried. A request given up on is now

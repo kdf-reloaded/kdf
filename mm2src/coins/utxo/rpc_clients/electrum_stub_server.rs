@@ -2,7 +2,8 @@
 //! the Electrum line protocol to exercise the client's connection pool without a network.
 //!
 //! One [`StubServer`] is one server. Its behavior can be switched while the test runs, and it counts
-//! the connections it accepted and the requests it received per method.
+//! the connections it accepted and the requests it received per method, and records every message it
+//! received.
 
 use common::executor::spawn;
 use futures::channel::mpsc as futures_mpsc;
@@ -50,6 +51,10 @@ struct StubState {
     /// How long the stub waits before it serves an accepted connection.
     accept_delay: Mutex<Duration>,
     results: Mutex<HashMap<String, Json>>,
+    /// Canned results of the script-hash methods, per `(method, script hash)`; they win over `results`.
+    scripthash_results: Mutex<HashMap<(String, String), Json>>,
+    /// Every message (a request, or a batch of them) the stub received, in the order it arrived.
+    messages: Mutex<Vec<Json>>,
     requests: Mutex<HashMap<String, usize>>,
     last_requests: Mutex<HashMap<String, Json>>,
     accepted: AtomicUsize,
@@ -91,6 +96,8 @@ impl StubServer {
             version: Mutex::new("1.4".to_owned()),
             accept_delay: Mutex::new(Duration::ZERO),
             results: Mutex::new(HashMap::new()),
+            scripthash_results: Mutex::new(HashMap::new()),
+            messages: Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
             last_requests: Mutex::new(HashMap::new()),
             accepted: AtomicUsize::new(0),
@@ -185,6 +192,17 @@ impl StubServer {
         self.state.results.lock().unwrap().insert(method.to_owned(), result);
     }
 
+    /// The result `method` (`blockchain.scripthash.get_balance`, `blockchain.scripthash.listunspent`, ...)
+    /// answers for the script hash `scripthash`, the first parameter of the request. It wins over
+    /// [`Self::set_result`]; a batch element is answered by the same rule as a lone request.
+    pub fn set_scripthash_result(&self, method: &str, scripthash: &str, result: Json) {
+        self.state
+            .scripthash_results
+            .lock()
+            .unwrap()
+            .insert((method.to_owned(), scripthash.to_owned()), result);
+    }
+
     /// Closes every open connection; the behavior stays.
     pub fn kill_connections(&self) {
         for control in self.state.live.lock().unwrap().drain(..) {
@@ -226,6 +244,23 @@ impl StubServer {
         self.state.last_requests.lock().unwrap().get(method).cloned()
     }
 
+    /// Every message the stub received, a batch as one entry.
+    pub fn messages(&self) -> Vec<Json> { self.state.messages.lock().unwrap().clone() }
+
+    /// The messages the stub received, but those made only of `server.version` and `server.ping` requests
+    /// (the connection's own traffic): what a test counts when it counts the messages a read cost.
+    pub fn request_messages(&self) -> Vec<Json> {
+        let is_own_traffic =
+            |request: &Json| matches!(request["method"].as_str(), Some("server.version" | "server.ping"));
+        self.messages()
+            .into_iter()
+            .filter(|message| match message {
+                Json::Array(batch) => !batch.iter().all(is_own_traffic),
+                single => !is_own_traffic(single),
+            })
+            .collect()
+    }
+
     /// How many requests of every method but `server.version` and `server.ping` the stub received.
     pub fn ordinary_requests(&self) -> usize {
         self.state
@@ -261,15 +296,24 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json) -> Option<J
         (_, "server.ping") => result(Json::Null),
         (StubBehavior::BlackHoleRequests, _) => None,
         (StubBehavior::JsonRpcError, _) => error("stub error"),
-        _ => result(
-            state
-                .results
+        _ => {
+            let scripthash = request["params"][0].as_str().unwrap_or_default().to_owned();
+            let canned = state
+                .scripthash_results
                 .lock()
                 .unwrap()
-                .get(&method)
-                .cloned()
-                .unwrap_or(Json::Null),
-        ),
+                .get(&(method.clone(), scripthash))
+                .cloned();
+            result(canned.unwrap_or_else(|| {
+                state
+                    .results
+                    .lock()
+                    .unwrap()
+                    .get(&method)
+                    .cloned()
+                    .unwrap_or(Json::Null)
+            }))
+        },
     }
 }
 
@@ -309,6 +353,7 @@ async fn serve_connection(
         let Ok(request) = serde_json::from_str::<Json>(&line) else {
             continue;
         };
+        state.messages.lock().unwrap().push(request.clone());
         let behavior = match *state.behavior.lock().unwrap() {
             StubBehavior::RefuseAfter(_) => StubBehavior::Answer,
             other => other,

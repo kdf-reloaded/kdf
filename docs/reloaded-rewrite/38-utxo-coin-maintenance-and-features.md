@@ -716,6 +716,12 @@ address each send one request message to the server, carrying both
 lookups. A segwit or non-legacy address sends the P2PKH lookup alone, as
 before.
 
+> **As-built note (2026-10-27, clean-side record).** Implemented in PR #114 for
+> balance reads and unspent-list reads. The P2PK lookups that the send and
+> withdraw paths use to classify inputs are not balance or unspent-list reads.
+> They still cost one separate request each on a legacy address, which is
+> follow-up work.
+
 ### 38.6.4 Electrum connection prioritisation
 R38.6.4 The Electrum client shall support configurable minimum and maximum
 connected-server counts and shall prioritise servers by their order in the
@@ -1418,6 +1424,13 @@ same estimate up to three times in sequence.
 >
 > **Compatibility:** for behaviour matching GLEEC KDF most closely, set
 > `fee_estimate_cache_secs` to `0`.
+
+> **As-built note (2026-10-27, clean-side record).** Item 1 is implemented in PR
+> #114. A scope entered by each order-posting entry point and by the maker
+> balance-update handler shares one reading per coin, for the fee estimate and
+> the forced minimum relay fee alike. The scope ends with the request, and
+> work spawned outside it reads fresh. Items 2–4 (the cache and its key) are
+> not implemented yet.
 
 ### 38.6.7 FIRO Spark verbose-tx support
 R38.6.7 The project shall parse FIRO Spark verbose transactions (the

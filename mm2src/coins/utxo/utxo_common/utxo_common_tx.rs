@@ -1,6 +1,7 @@
 // utxo_common_tx — transaction building, signing, fee estimation, UTXO management
 
 use super::*;
+use crate::request_fee_scope::{self, FeeReadKind};
 use utxo_signer::with_key_pair::sign_tx;
 
 pub const DEFAULT_FEE_VOUT: usize = 0;
@@ -18,16 +19,32 @@ pub async fn get_tx_fee(coin: &UtxoCoinFields) -> UtxoRpcResult<ActualTxFee> {
     let conf = &coin.conf;
     match &coin.tx_fee {
         TxFee::Dynamic(method) => {
-            let fee = coin
-                .rpc_client
-                .estimate_fee_sat(coin.decimals, method, &conf.estimate_fee_mode, conf.estimate_fee_blocks)
-                .compat()
-                .await?;
+            // R38.6.6j item 1: one estimate per coin and order-posting request. Outside such a request
+            // (every swap path) this is a plain fresh read.
+            let fee = request_fee_scope::memoize(
+                FeeReadKind::UtxoFeeEstimate,
+                &conf.ticker,
+                coin.rpc_client
+                    .estimate_fee_sat(coin.decimals, method, &conf.estimate_fee_mode, conf.estimate_fee_blocks)
+                    .compat(),
+            )
+            .await?;
             Ok(ActualTxFee::Dynamic(fee))
         },
         TxFee::FixedPerKb(satoshis) => Ok(ActualTxFee::FixedPerKb(*satoshis)),
         TxFee::FixedPerStartedKb(satoshis) => Ok(ActualTxFee::FixedPerStartedKb(*satoshis)),
     }
+}
+
+/// The node's minimum relay fee of a coin that forces it. Like the dynamic-fee estimate of [`get_tx_fee`], it is
+/// read once per order-posting request and always afresh outside one (CRD ch.38 R38.6.6j items 1 and 3).
+pub async fn get_min_relay_fee(coin: &UtxoCoinFields) -> Result<BigDecimal, common::jsonrpc_client::JsonRpcError> {
+    request_fee_scope::memoize(
+        FeeReadKind::UtxoRelayFee,
+        &coin.conf.ticker,
+        coin.rpc_client.get_relay_fee().compat(),
+    )
+    .await
 }
 
 pub fn send_outputs_from_my_address<T>(coin: T, outputs: Vec<TransactionOutput>) -> TransactionFut
@@ -291,7 +308,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         );
 
         self.min_relay_fee = if coin.as_ref().conf.force_min_relay_fee {
-            let fee_dec = coin.as_ref().rpc_client.get_relay_fee().compat().await?;
+            let fee_dec = get_min_relay_fee(coin.as_ref()).await?;
             let min_relay_fee = sat_from_big_decimal(&fee_dec, coin.as_ref().decimals).mm_err(Into::into)?;
             Some(min_relay_fee)
         } else {
@@ -987,17 +1004,20 @@ pub async fn get_all_unspent_ordered_list<'a, T: UtxoCommonOps>(
     address: &Address,
 ) -> UtxoRpcResult<(Vec<UnspentInfo>, RecentlySpentOutPointsGuard<'a>)> {
     let decimals = coin.as_ref().decimals;
-    let mut unspents = coin
-        .as_ref()
-        .rpc_client
-        .list_unspent(address, decimals)
-        .compat()
-        .await?;
-
     // For Electrum legacy addresses also query `<pubkey> OP_CHECKSIG` (P2PK)
     // script-hash unspents so they are available for selection and spending.
-    let mut p2pk_unspents = crate::utxo::electrum_p2pk_unspents_for_address(coin.as_ref(), address).await?;
-    unspents.append(&mut p2pk_unspents);
+    // The P2PK lookup travels in the same Electrum request message as the
+    // P2PKH one (R38.6.3a).
+    let unspents = match crate::utxo::electrum_p2pk_lookup(coin.as_ref(), address) {
+        Some((electrum, p2pk_script)) => electrum.list_unspent_with_p2pk(address, &p2pk_script).compat().await?,
+        None => {
+            coin.as_ref()
+                .rpc_client
+                .list_unspent(address, decimals)
+                .compat()
+                .await?
+        },
+    };
 
     let recently_spent = coin.as_ref().recently_spent_outpoints.lock().await;
     let unordered_unspents = recently_spent.replace_spent_outputs_with_cache(unspents.into_iter().collect());

@@ -543,6 +543,12 @@ coin layer (§60.5 R60.5.6 rows 3–5 and 8, findings F1 and F2).
    trade-fee calculation of the same request. A request reads each coin's
    fee rate at most once (chapter 38 R38.6.6j, chapter 57 R57.2.6).
 
+> **As-built note (2026-10-27, clean-side record).** The Amendment under item 3
+> and item 8 are implemented in PR #114. `update_maker_order` runs the check
+> only for a volume delta or `max`. The check's fee reading is shared with the
+> request's trade-fee calculation through the request scope of chapter 38
+> R38.6.6j.
+
 > **As-built note (2026-10-25, clean-side record).** R60.6.4 and R60.6.7
 > are implemented in PR #73, together with T60.5 and T60.6. The UTXO
 > legacy and version-two spends and refunds, the ZHTLC transparent spend
