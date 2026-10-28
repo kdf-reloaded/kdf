@@ -785,6 +785,23 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   skips that uuid with a warning. Not covered by R-F6c, which is about address
   derivation; a Reloaded-internal inconsistency, not a reference-parity item.
 
+## #18 — Statistics store: an existing row is not refreshed from a later terminal report — **OPEN (small, post-beta follow-up)**
+
+CRD reference: [`51-legacy-v1-swap-state-machine.md`](./51-legacy-v1-swap-state-machine.md)
+R50A item 5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
+
+The publication, redaction and own-role key fill of R50A are implemented in
+PR #108. Two small items remain:
+
+- [ ] For a swap identifier that is already in `stats_swaps`, R50A item 5 also
+  refreshes the fiat price, GUI and version columns from the later report.
+  Reloaded sets the own-role key column only and leaves the other columns as
+  the first report wrote them (the previous code did not refresh them either).
+  Needs a decision on which columns each role owns.
+- [ ] No state-16 migration corrects the key columns of databases already at
+  state 15; they keep the old both-parties values. Deliberately not done for
+  the beta, since almost no Reloaded node has a populated statistics store yet.
+
 ---
 
 ## Audit method (for reproducibility)
