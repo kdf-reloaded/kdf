@@ -1,6 +1,7 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_macros))]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+use crate::node_url::{electrum_host_port, electrum_server_name, host_only, scrub_node_url, SECRET_SET, UNNAMED_SERVER};
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::{output_script, sat_from_big_decimal};
 use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};

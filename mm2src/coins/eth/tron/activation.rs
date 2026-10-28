@@ -14,7 +14,7 @@
 
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
-use crate::eth::node_url::host_only;
+use crate::node_url::host_only;
 
 use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
                  EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
@@ -261,9 +261,9 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(err.contains("not a valid URI"), "{err}");
+        assert!(err.contains("not a valid URI"), "the invalid-URI reason is missing");
         for secret in ["user", "secret", "APIKEY", "token=X", "bad host"] {
-            assert!(!err.contains(secret), "{secret} in {err}");
+            assert!(!err.contains(secret), "a credential part is rendered");
         }
     }
 

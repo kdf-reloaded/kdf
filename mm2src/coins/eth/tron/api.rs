@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::address::TronAddress;
 use super::proto::TaposBlockData;
-use crate::eth::node_url::scrub_node_url;
+use crate::node_url::scrub_node_url;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -458,7 +458,7 @@ mod tests {
             let err = TronApiError::from(MmError::new(slurp)).without_node_urls(&[&url, node]);
             let text = err.to_string();
             for secret in secrets {
-                assert!(!text.contains(secret), "{secret} in {text}");
+                assert!(!text.contains(secret), "a credential part is rendered");
             }
         }
     }
@@ -472,7 +472,7 @@ mod tests {
         ]);
         let err = common::block_on(client.get_now_block()).unwrap_err().to_string();
         for secret in ["user", "secret", "APIKEY", "OTHERKEY"] {
-            assert!(!err.contains(secret), "{secret} in {err}");
+            assert!(!err.contains(secret), "a credential part is rendered");
         }
     }
 }

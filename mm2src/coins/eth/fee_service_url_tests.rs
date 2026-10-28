@@ -18,9 +18,9 @@ const HOST_ONLY: &str = "https://gas.example.org:8443";
 const SECRETS: [&str; 5] = ["user", "secret", "/v3/APIKEY", "APIKEY", "key=X"];
 
 fn assert_host_only_text(text: &str, host_only: &str, secrets: &[&str]) {
-    assert!(text.contains(host_only), "{host_only} missing in {text}");
+    assert!(text.contains(host_only), "the host-only form is missing from the text");
     for secret in secrets {
-        assert!(!text.contains(secret), "{secret} in {text}");
+        assert!(!text.contains(secret), "a credential part is rendered");
     }
 }
 
@@ -51,7 +51,7 @@ fn a_gas_station_failure_names_the_station_host_only() {
         // The same error as it reaches the caller of the gas-price estimation.
         let web3_text = Web3RpcError::from(err).to_string();
         for secret in SECRETS {
-            assert!(!web3_text.contains(secret), "{secret} in {web3_text}");
+            assert!(!web3_text.contains(secret), "a credential part is rendered");
         }
     }
 }
@@ -137,7 +137,7 @@ mod loopback {
             block_on(make_gas_station_request(&keyed_url(closed_port())).map_err(|e| e.into_inner())).unwrap_err(),
         );
         for secret in SECRETS {
-            assert!(!web3.to_string().contains(secret), "{secret} in {web3}");
+            assert!(!web3.to_string().contains(secret), "a credential part is rendered");
         }
     }
 

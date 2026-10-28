@@ -5,8 +5,8 @@ use super::*;
 // LP-17: bring alloy `Provider` trait into scope so `RootProvider`'s
 // inherent + trait methods (`client()`, `get_block_number()`, etc.) are
 // callable from the helpers below.
-use crate::eth::node_url::{host_only, scrub_node_url};
 use crate::hd_wallet::{HDAccountOps, HDWalletCoinOps, HDWalletOps};
+use crate::node_url::{host_only, scrub_node_url};
 use crate::{CoinWithDerivationMethod, CryptoCtx, KeyPairPolicy};
 use alloy::providers::Provider as _;
 use crypto::{Bip44DerivationPath, HDPathToCoin};

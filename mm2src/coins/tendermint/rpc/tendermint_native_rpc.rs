@@ -17,6 +17,8 @@ use tendermint_rpc::Paging;
 pub use tendermint_rpc::{query::Query as TendermintQuery, Error, Order, Scheme, SimpleRequest, Url};
 use tokio::time;
 
+use crate::node_url::host_only;
+
 /// Provides lightweight access to the Tendermint RPC. It gives access to all
 /// endpoints with the exception of the event subscription-related ones.
 #[async_trait]
@@ -283,8 +285,17 @@ impl Client for HttpClient {
 }
 
 /// A URL limited to use with HTTP clients.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HttpClientUrl(Url);
+
+/// The debug form names the node by its host-only form (CRD ch.36 R36.5A.2).
+impl fmt::Debug for HttpClientUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HttpClientUrl")
+            .field(&host_only(&self.0.to_string()))
+            .finish()
+    }
+}
 
 impl TryFrom<Url> for HttpClientUrl {
     type Error = Error;
@@ -329,6 +340,7 @@ impl TryFrom<HttpClientUrl> for http::Uri {
 }
 
 mod sealed {
+    use crate::node_url::{host_only, scrub_node_url};
     use common::log::debug;
     use common::wio::https_connector;
     use http::{header, HeaderValue, Uri};
@@ -338,6 +350,7 @@ mod sealed {
     use hyper_util::client::legacy::connect::{Connect, HttpConnector};
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::{TokioExecutor, TokioTimer};
+    use std::fmt;
     use tendermint_rpc::{Error, Response, SimpleRequest};
 
     type RequestBody = Full<Bytes>;
@@ -350,10 +363,19 @@ mod sealed {
     }
 
     /// A wrapper for a `hyper`-based client, generic over the connector type.
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct HyperClient<C> {
         uri: Uri,
         inner: Client<C, RequestBody>,
+    }
+
+    /// The debug form names the node by its host-only form (CRD ch.36 R36.5A.2).
+    impl<C> fmt::Debug for HyperClient<C> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("HyperClient")
+                .field("node", &host_only(&self.uri.to_string()))
+                .finish()
+        }
     }
 
     impl<C> HyperClient<C> {
@@ -368,14 +390,21 @@ mod sealed {
         where
             R: SimpleRequest,
         {
+            let kind = request.method().to_string();
             let request = self.build_request(request)?;
             let response = self
                 .inner
                 .request(request)
                 .await
-                .map_err(|e| Error::client_internal(e.to_string()))?;
+                .map_err(|e| Error::client_internal(scrub_node_url(&e.to_string(), &self.uri.to_string())))?;
             let response_body = response_to_string(response).await?;
-            debug!("Incoming response: {}", response_body);
+            // A node's response body is never logged (CRD ch.36 R36.5A.3): the kind, the node and the size.
+            debug!(
+                "Tendermint RPC {} answered {} with {} bytes",
+                host_only(&self.uri.to_string()),
+                kind,
+                response_body.len()
+            );
             R::Response::from_string(&response_body)
         }
     }
@@ -522,5 +551,47 @@ mod tests {
         let client = HttpClient::new(format!("http://127.0.0.1:{port}").as_str()).unwrap();
         let err = common::block_on(async { client.health().await.unwrap_err() });
         assert!(err.to_string().to_ascii_lowercase().contains("utf-8"), "{err}");
+    }
+
+    /// T36.15: no log line carries the body of a node's response; a line may carry its size.
+    #[test]
+    fn a_response_body_is_never_logged() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        let capturing = install_log_capture();
+        let (port, _request) = serve_once(r#"{"jsonrpc":"2.0","id":"probe","result":{"marker":"BODYMARKER"}}"#);
+        let client = HttpClient::new(format!("http://127.0.0.1:{port}").as_str()).unwrap();
+        common::block_on(async {
+            client.health().await.unwrap();
+        });
+        let lines = captured_log_lines();
+        if capturing {
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("Tendermint RPC") && line.contains("bytes")),
+                "the answer is reported by its size"
+            );
+        }
+        assert!(
+            lines.iter().all(|line| !line.contains("BODYMARKER")),
+            "a log line carries the response body"
+        );
+    }
+
+    /// T36.14 (client part): the debug forms of the client and of its URL name the node host-only.
+    #[test]
+    fn the_debug_form_of_a_client_names_the_node_host_only() {
+        let client = HttpClient::new("http://user:secret@127.0.0.1:26657/rpc/APIKEY?token=X").unwrap();
+        let url = HttpClientUrl::from_str("http://user:secret@127.0.0.1:26657/rpc/APIKEY?token=X").unwrap();
+        for rendered in [
+            format!("{client:?}"),
+            format!("{url:?}"),
+            format!("{:#?}", client.clone()),
+        ] {
+            assert!(rendered.contains("http://127.0.0.1:26657"), "{rendered}");
+            for secret in ["user", "secret", "/rpc/", "APIKEY", "token=X"] {
+                assert!(!rendered.contains(secret), "a credential part is rendered");
+            }
+        }
     }
 }

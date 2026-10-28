@@ -281,17 +281,28 @@ fn t35_30_the_all_failed_text_lists_each_host_once_and_nothing_more() {
         Reply::Fail(format!("Transport '{}' error: HTTP 502 Bad Gateway", call.uri))
     });
     let err = eth_call(&provider).unwrap_err();
-    assert!(err.is_transport_error(), "{err}");
+    assert!(err.is_transport_error(), "the failure is not a transport error");
     let text = err.to_string();
-    assert_eq!(text.matches("https://rpc.example.org:8545").count(), 1, "{text}");
-    assert_eq!(text.matches("https://other.example.net").count(), 1, "{text}");
+    assert_eq!(
+        text.matches("https://rpc.example.org:8545").count(),
+        1,
+        "the first host is not listed exactly once"
+    );
+    assert_eq!(
+        text.matches("https://other.example.net").count(),
+        1,
+        "the second host is not listed exactly once"
+    );
     for secret in [
         "user", "secret", "/v3/", "APIKEY", "OTHERKEY", "THIRDKEY", "token=", "/key/",
     ] {
-        assert!(!text.contains(secret), "{secret} in {text}");
+        assert!(!text.contains(secret), "a credential part is rendered");
     }
     // A transport-class outcome carries no node suffix (R35.1.15).
-    assert!(!text.contains("(node "), "{text}");
+    assert!(
+        !text.contains("(node "),
+        "a node suffix is on a transport-class outcome"
+    );
 }
 
 #[test]
@@ -308,9 +319,12 @@ fn t35_28_nothing_secret_reaches_a_returned_text_or_a_log_line() {
         ))
     });
     let err = eth_call(&provider).unwrap_err().to_string();
-    assert!(err.contains("https://rpc.example.org:8545"), "{err}");
+    assert!(
+        err.contains("https://rpc.example.org:8545"),
+        "the host-only form is missing from the text"
+    );
     for secret in secrets {
-        assert!(!err.contains(secret), "{secret} in {err}");
+        assert!(!err.contains(secret), "a credential part is rendered");
     }
 
     // A node that answers a JSON-RPC error whose message mentions its own URL.
@@ -322,9 +336,12 @@ fn t35_28_nothing_secret_reaches_a_returned_text_or_a_log_line() {
         ))
     });
     let err = eth_call(&provider).unwrap_err().to_string();
-    assert!(err.ends_with("(node https://rpc.example.org:8545)"), "{err}");
+    assert!(
+        err.ends_with("(node https://rpc.example.org:8545)"),
+        "the node suffix is not the host-only form"
+    );
     for secret in secrets {
-        assert!(!err.contains(secret), "{secret} in {err}");
+        assert!(!err.contains(secret), "a credential part is rendered");
     }
 
     let lines: Vec<String> = captured_log_lines()
@@ -336,12 +353,12 @@ fn t35_28_nothing_secret_reaches_a_returned_text_or_a_log_line() {
             lines.iter().any(|line| line
                 == "WARN EVM RPC https://rpc.example.org:8545 answered eth_call with error 3: execution reverted at \
                     https://rpc.example.org:8545"),
-            "{lines:?}"
+            "the host-only log line is missing"
         );
     }
     for line in &lines {
         for secret in secrets {
-            assert!(!line.contains(secret), "{secret} in log line {line}");
+            assert!(!line.contains(secret), "a credential part is rendered in a log line");
         }
     }
 }
@@ -423,4 +440,26 @@ fn an_empty_node_list_is_an_error_not_a_panic() {
     let (transport, _) = stub_transport(&[], CUTOFF, |_| Reply::Hang);
     let provider = provider_from_transport(transport);
     assert!(eth_call(&provider).is_err());
+}
+
+#[test]
+fn t35_34_the_debug_form_of_the_transport_names_each_node_host_only() {
+    let urls = [
+        "https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X",
+        "https://other.example.net/key/THIRDKEY",
+    ];
+    let (transport, _) = stub_transport(&urls, CUTOFF, |call| {
+        Reply::Body(result_body(&call.request, r#""0x01""#))
+    });
+    let direct = AlloyTransport::direct(urls[0].to_owned(), vec![]).unwrap();
+    for rendered in [
+        format!("{transport:?}"),
+        format!("{direct:?}"),
+        format!("{:#?}", transport.with_own_order()),
+    ] {
+        assert!(rendered.contains("https://rpc.example.org:8545"), "{rendered}");
+        for secret in ["user", "secret", "/v3/", "APIKEY", "THIRDKEY", "token=", "/key/"] {
+            assert!(!rendered.contains(secret), "a credential part is rendered");
+        }
+    }
 }

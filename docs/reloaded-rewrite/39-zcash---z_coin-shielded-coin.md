@@ -5070,12 +5070,12 @@ less and less often, and a server that answers is back at once.
 > is offered. They are recorded in `docs/GLEEC_COMPATIBILITY.md` with "none --
 > no switch exists".
 
-> **Status (2026-10-28).** Not implemented. In this repository every log line
-> and error of the lightwalletd backend names an endpoint by its configured
-> string; `BroadcastRejected` carries the code and message without the
-> endpoint and is not logged; and no endpoint is ever suspended: each
-> operation tries every admitted endpoint in configured order and connects a
-> dead one again on every call.
+> **Status (2026-10-28).** Implemented. The lightwalletd backend names every
+> endpoint host-only; `BroadcastRejected` carries the endpoint and is logged
+> once at warn level; and an endpoint that fails at transport level is
+> suspended on the schedule Electrum uses (`coins/endpoint_suspension.rs`).
+> Admission still probes every endpoint, and an operation tries suspended
+> endpoints before it fails. T39.11.t–T39.11.v cover it.
 
 #### Tests
 

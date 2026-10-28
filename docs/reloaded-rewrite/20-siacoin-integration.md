@@ -453,11 +453,13 @@ it, so by the second arm of the default-side rule (`docs/COMPAT_SWITCHES.md`)
 the Reloaded form is the default. Both are recorded in
 `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 
-> **Status (2026-10-28).** Not implemented (D10). In the bound revision of the
-> external Sia library, the native client configuration derives a debug form
-> that prints the password, and the client's request errors carry the HTTP
-> client's text, which includes the full request URL. Reloaded's activation
-> request holds that configuration and derives its own debug form over it.
+> **Status (2026-10-28).** Implemented at Reloaded's boundary (D10). In the
+> bound revision of the external Sia library, the client configuration's
+> debug form prints the password and the request errors carry the full
+> request URL. Reloaded therefore gives the types that hold the configuration
+> their own debug form and rewrites the library's error texts before it logs
+> or returns them. A change in the library would make that rewriting
+> unnecessary.
 
 **T-N1.** Activate SC against a closed port with a `server_url` that carries a
 path and a query string and with a `password` set. The activation error and

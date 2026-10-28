@@ -778,10 +778,10 @@ form is the default, and an opt-in to print credentials would be an opt-in to
 weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 "none -- no switch exists".
 
-> **Status (2026-10-28).** Not implemented yet. In this repository the node
-> entry of the EVM transport derives a debug form that prints the configured
-> URL, and so does the transport that holds the list. The TRON client already
-> hides its node list in its debug form.
+> **Status (2026-10-28).** Implemented. The EVM transport, its node entries,
+> the activation request and the fee-service URLs have debug forms that show
+> URLs host-only and secrets as set (T35.34). The RPC wire dump marks the
+> removed URL parts in its redacted mode (T35.35).
 
 ---
 

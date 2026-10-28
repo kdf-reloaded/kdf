@@ -501,11 +501,11 @@ protect the operator, so by the second arm of the default-side rule
 print credentials would be an opt-in to weaken security. They are recorded in
 `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 
-> **Status (2026-10-28).** Not implemented yet. In this repository the
-> node-selection logs and the "every node unavailable" error name each node by
-> its full URI, the invalid-URL activation error echoes the configured string,
-> the per-node HTTP client derives a debug form that prints its URI, and the
-> native client logs every response body at debug level.
+> **Status (2026-10-28).** Implemented. Node-selection logs and errors name
+> each node host-only, an unparseable URL is not echoed, the per-node HTTP
+> client's debug form is host-only, and a response is logged by its size only.
+> T36.15 covers the texts; the coin-level case of T36.14 has no test yet,
+> because no test builds a full Tendermint coin.
 
 ---
 
