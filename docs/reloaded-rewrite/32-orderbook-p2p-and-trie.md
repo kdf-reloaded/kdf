@@ -1691,7 +1691,8 @@ messages at no more than the pubkey's current *rate*.
      rate, and never below the floor, so a rate at which a relay has
      already failed is not tried again.
    - After 30 minutes without a signal the trip rate is forgotten, and the
-     climb continues up to the ceiling (D7).
+     climb continues up to the ceiling (maintainer decision 2026-10-28,
+     D7).
    - The signals are node-wide and apply to every outbox; each pubkey
      keeps its own rate and trip rate.
 4. **Degraded mode.** While degraded, the outbox stops releasing created
@@ -2027,15 +2028,17 @@ D6. **Reference unboundedness, and Reloaded-original hardening
     changes a wire shape.
 
 D7. **Recovery of the maker publication rate (§32.9B R-MP2 item 3;
-    open, conservative reading taken; added 2026-10-28).** The rise
-    stops one step below the trip rate, so that a rate at which a relay
-    already failed is not tried again. The rise was agreed without its
-    end: without one, a maker whose relay recovers would stay at the
-    lowered rate until restart. The rule forgets the trip rate after 30
-    minutes without a signal. Open: the length of that period, or a
-    slow growth of the limit instead (for example +0.5 messages per
-    second every 5 minutes, as in the measured candidate that halved the
-    rate on each close). Also open: whether each new relay connection
+    resolved 2026-10-28, maintainer decision; added 2026-10-28).** The
+    rise stops one step below the trip rate, so that a rate at which a
+    relay already failed is not tried again. The rise was agreed without
+    its end: without one, a maker whose relay recovers would stay at the
+    lowered rate until restart. The alternatives were to forget the trip
+    rate after 30 minutes without a signal, or a slow growth of the
+    limit instead (+0.5 messages per second every 5 minutes, as in the
+    measured candidate that halved the rate on each close). The
+    maintainer chose the first, as R-MP2 item 3 states it: its worst
+    case is one more trip per 30 minutes against a relay that is still
+    slow. Still open: whether each new relay connection
     should start at a low rate, which would close the residual gap of
     the first signal. That option was not chosen on 2026-10-28; the
     lab's T-MP13 runs should show whether the residual matters.
