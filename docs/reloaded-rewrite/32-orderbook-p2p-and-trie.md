@@ -1307,10 +1307,11 @@ gossip message per pair (one handler task, one comparison, at most one
 single-pair synchronization request, one forwarding decision), and
 that per-pair independence is what the shape exists to guarantee.
 
-> **Reloaded divergence (2026-10-28) — the incident shape, to be
-> removed.** Reloaded today builds, per pubkey and tick, **one** payload
+> **Reloaded divergence (2026-10-28) — the incident shape; removed
+> the same day, Reloaded now conforms to R-K2a (parity).** Until then
+> Reloaded built, per pubkey and tick, **one** payload
 > whose `trie_roots` holds **all** K advertisable pair roots and
-> publishes that same payload once on **every** one of the K pair topics
+> published that same payload once on **every** one of the K pair topics
 > (K distinct gossip messages, each carrying K roots). This is a
 > wire-decodable but non-conforming shape, and against reference
 > receivers it multiplies work quadratically: a relay subscribed to the
@@ -1332,7 +1333,8 @@ that per-pair independence is what the shape exists to guarantee.
 > failure is confined to its pair. The aggregated form is what the
 > public seed nodes were observed to be overloaded by; conforming to
 > R-K2a is the fix, and nothing in the receiving side of Reloaded
-> depends on the aggregated form.
+> depends on the aggregated form (T-K4 checks that the receiver ends in
+> the same state either way).
 
 **T-K1** *One message per pair per tick (R-K2a).* A maker with orders
 under one pubkey on three pairs publishes, per advertisement tick,

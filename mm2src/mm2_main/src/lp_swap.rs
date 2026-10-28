@@ -57,7 +57,7 @@
 
 use crate::mm2::lp_network::{broadcast_p2p_msg, Libp2pPeerId};
 use async_std::sync as async_std_sync;
-use coins::{lp_coinfind, lp_coinfind_or_err, CoinFindError, MmCoinEnum, TradeFee, TransactionEnum,
+use coins::{lp_coinfind, lp_coinfind_or_err, CoinFindError, HtlcPaymentCheck, MmCoinEnum, TradeFee, TransactionEnum,
             SWAP_HTLC_PUBKEY_LEN};
 use common::log::{debug, warn};
 use common::{bits256, calc_total_pages,
@@ -1033,6 +1033,114 @@ pub fn derive_htlc_pubkeys(
         H264::from(&maker_coin_htlc_pubkey[..]),
         H264::from(&taker_coin_htlc_pubkey[..]),
     ))
+}
+
+/// Which HTLC key a recovery rebuilt a payment's script with (CRD ch.39 R39.5.4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RecoveryHtlcKeyKind {
+    /// The key this node negotiated for the swap, read from the swap's saved record.
+    PerSwap,
+    /// The coin's persistent key.
+    Persistent,
+}
+
+impl RecoveryHtlcKeyKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            RecoveryHtlcKeyKind::PerSwap => "per-swap key",
+            RecoveryHtlcKeyKind::Persistent => "persistent key",
+        }
+    }
+}
+
+/// The HTLC key recovery uses for one payment: the first candidate that rebuilds the script the payment pays.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecoveryHtlcKey {
+    pub(crate) kind: RecoveryHtlcKeyKind,
+    pub(crate) pubkey: H264,
+    pub(crate) keypair: KeyPair,
+}
+
+/// Whose payment a recovery is looking at, which decides the role of this node's key in the HTLC script.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PaymentOwner {
+    /// This node sent it: this node's key is the refund key.
+    Mine,
+    /// The counterparty sent it: this node's key is the spend key.
+    Other,
+}
+
+pub(crate) struct RecoveryKeyRequest<'a> {
+    pub(crate) ctx: &'a MmArc,
+    pub(crate) coin: &'a MmCoinEnum,
+    pub(crate) owner: PaymentOwner,
+    /// The key this node negotiated for the swap and its key pair.
+    pub(crate) per_swap_pubkey: H264,
+    pub(crate) per_swap_keypair: KeyPair,
+    pub(crate) other_pubkey: &'a [u8],
+    pub(crate) time_lock: u32,
+    pub(crate) secret_hash: &'a [u8],
+    pub(crate) payment_tx: &'a [u8],
+}
+
+/// Picks the HTLC key a recovery uses for a payment (CRD ch.39 R39.5.4): the swap's own key first, then the
+/// coin's persistent key, whichever first rebuilds the script the payment pays. The persistent key is a
+/// candidate only when it differs from the swap's key. A payment that matches neither is a hard stop.
+pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Result<RecoveryHtlcKey, String> {
+    let persistent_keypair = req.ctx.secp256k1_key_pair();
+    let persistent = RecoveryHtlcKey {
+        kind: RecoveryHtlcKeyKind::Persistent,
+        pubkey: H264::from(&**persistent_keypair.public()),
+        keypair: *persistent_keypair,
+    };
+    let per_swap = RecoveryHtlcKey {
+        kind: RecoveryHtlcKeyKind::PerSwap,
+        pubkey: req.per_swap_pubkey,
+        keypair: req.per_swap_keypair,
+    };
+    let mut candidates = vec![per_swap];
+    if persistent.pubkey != per_swap.pubkey {
+        candidates.push(persistent);
+    }
+
+    let mut other_script_payment = None;
+    for candidate in &candidates {
+        let (first, second) = match req.owner {
+            PaymentOwner::Mine => (candidate.pubkey.as_slice(), req.other_pubkey),
+            PaymentOwner::Other => (req.other_pubkey, candidate.pubkey.as_slice()),
+        };
+        match try_s!(
+            req.coin
+                .check_payment_pays_htlc(req.time_lock, first, second, req.secret_hash, req.payment_tx)
+                .await
+        ) {
+            HtlcPaymentCheck::Pays => {
+                info!(
+                    "Swap recovery of a {} payment: the {} rebuilds the HTLC script it pays",
+                    req.coin.ticker(),
+                    candidate.kind.label()
+                );
+                return Ok(*candidate);
+            },
+            HtlcPaymentCheck::PaysAnotherScript { payment_id } => other_script_payment = Some(payment_id),
+        }
+    }
+
+    // Every candidate either returned above or recorded the payment's id, and there is always one candidate.
+    let Some(payment_id) = other_script_payment else {
+        return ERR!("No HTLC key candidate was checked against the payment");
+    };
+    let tried = if candidates.len() > 1 {
+        "both the swap's per-swap key and the persistent key were tried"
+    } else {
+        "the swap's key, which is also the persistent key, was tried"
+    };
+    ERR!(
+        "Payment tx {} output 0 does not pay the HTLC script this swap negotiated: {} -- this payment cannot be \
+         recovered automatically",
+        payment_id,
+        tried
+    )
 }
 
 /// Data to be exchanged and validated on swap start, the replacement of LP_pubkeys_data, LP_choosei_data, etc.

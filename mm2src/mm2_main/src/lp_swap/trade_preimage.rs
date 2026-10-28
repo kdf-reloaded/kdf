@@ -1,6 +1,7 @@
 use super::check_balance::CheckBalanceError;
 use super::{maker_swap_trade_preimage, taker_swap_trade_preimage, MakerTradePreimage, TakerTradePreimage};
 use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, TakerAction, TakerOrderBuildError};
+use coins::request_fee_scope::with_request_fee_scope;
 use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, TradeFee, TradePreimageError};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::HttpStatusCode;
@@ -17,6 +18,13 @@ construct_detailed!(DetailedRequiredBalance, required_balance);
 pub type TradePreimageRpcResult<T> = Result<T, MmError<TradePreimageRpcError>>;
 
 pub async fn trade_preimage_rpc(
+    ctx: MmArc,
+    req: TradePreimageRequest,
+) -> TradePreimageRpcResult<TradePreimageResponse> {
+    with_request_fee_scope(trade_preimage_rpc_impl(ctx, req)).await
+}
+
+async fn trade_preimage_rpc_impl(
     ctx: MmArc,
     req: TradePreimageRequest,
 ) -> TradePreimageRpcResult<TradePreimageResponse> {

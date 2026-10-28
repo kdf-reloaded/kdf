@@ -280,6 +280,9 @@ impl From<EthCoinBuildError> for ActivationErr {
         match err {
             EthCoinBuildError::AtLeastOneNodeRequired(e) => ActivationErr::AtLeastOneNodeRequired(e),
             EthCoinBuildError::InvalidPayload(e) => ActivationErr::InvalidPayload(e),
+            // An unusable coin-configuration member (CRD R57.5.1) is reported on the closed wire set of
+            // ch.35 as an invalid payload; the message names the key.
+            EthCoinBuildError::InvalidConfig(e) => ActivationErr::InvalidPayload(e),
             EthCoinBuildError::Transport(e) => ActivationErr::Transport(e),
             EthCoinBuildError::Internal(e) => ActivationErr::Internal(e),
         }

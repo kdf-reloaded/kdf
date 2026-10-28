@@ -20,10 +20,6 @@ pub(crate) const ETH_GAS_STATION_DECIMALS: u8 = 8;
 /// Gas fees are denominated in the platform coin, which is 18-decimal on every
 /// EVM chain regardless of the traded token's own decimals.
 pub(crate) const ETH_DECIMALS: u8 = 18;
-/// The EVM's fixed intrinsic gas cost of any transaction. Used as an
-/// unarguable lower bound when reporting how much gas money is missing after
-/// `estimate_gas` failed outright — never to actually send a transaction.
-pub(crate) const MIN_TX_GAS_LIMIT: u64 = 21_000;
 pub(crate) const GAS_PRICE_PERCENT: u64 = 10;
 /// It can change 12.5% max each block according to https://www.blocknative.com/blog/eip-1559-fees
 pub(crate) const BASE_BLOCK_FEE_DIFF_PCT: u64 = 13;
@@ -416,8 +412,16 @@ pub struct EthCoinImpl {
     pub derivation_method: DerivationMethod<Address, EthHDWallet>,
     /// V2 swap contract addresses (maker, taker). None if V2 not configured.
     pub(crate) swap_v2_contracts: Option<SwapV2Contracts>,
-    /// Gas limits for V2 swap operations.
+    /// Gas limits for V1 swap operations, sends and trade-fee figures (CRD R57.5): the coin's `gas_limit`
+    /// block, else its platform coin's, else the defaults.
+    pub(crate) gas_limit: EthGasLimit,
+    /// Gas limits for V2 swap operations (CRD R57.6): the coin's `gas_limit_v2` block, else its platform
+    /// coin's, else the defaults.
     pub(crate) gas_limit_v2: EthGasLimitV2,
+    /// The `estimate_gas_mult` of the coin's configuration entry, else its platform coin's (CRD R57.5.3b), as
+    /// parsed. `None` means no scaling. Applied only to the estimated gas limit of the legacy ERC-20 `approve`
+    /// that precedes a V1 HTLC payment.
+    pub(crate) estimate_gas_mult: Option<f64>,
     /// HTTP API client for TRON full nodes. Populated only when
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.
@@ -470,13 +474,13 @@ pub(crate) enum TakerPaymentStateV2 {
 }
 
 /// Gas limits for V2 swap contract calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthGasLimitV2 {
     pub maker: MakerGasLimitV2,
     pub taker: TakerGasLimitV2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakerGasLimitV2 {
     pub eth_payment: u64,
     pub erc20_payment: u64,
@@ -499,7 +503,7 @@ pub struct MakerGasLimitV2 {
     pub nft_erc1155_maker_refund_secret: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakerGasLimitV2 {
     pub eth_payment: u64,
     pub erc20_payment: u64,
@@ -512,39 +516,38 @@ pub struct TakerGasLimitV2 {
     pub approve_payment: u64,
 }
 
+/// The defaults of CRD R57.6.2.
 impl Default for EthGasLimitV2 {
     fn default() -> Self {
         EthGasLimitV2 {
             maker: MakerGasLimitV2 {
-                eth_payment: 150_000,
-                erc20_payment: 250_000,
-                eth_taker_spend: 150_000,
+                eth_payment: 65_000,
+                erc20_payment: 150_000,
+                eth_taker_spend: 100_000,
                 erc20_taker_spend: 150_000,
-                eth_maker_refund_timelock: 150_000,
-                erc20_maker_refund_timelock: 150_000,
-                eth_maker_refund_secret: 150_000,
-                erc20_maker_refund_secret: 150_000,
-                // NFT defaults sit above ERC-20 because the HTLC contract
-                // additionally invokes `safeTransferFrom` on the token contract.
-                nft_erc721_payment: 200_000,
-                nft_erc1155_payment: 220_000,
-                nft_erc721_taker_spend: 200_000,
-                nft_erc1155_taker_spend: 220_000,
-                nft_erc721_maker_refund_timelock: 200_000,
-                nft_erc1155_maker_refund_timelock: 220_000,
-                nft_erc721_maker_refund_secret: 200_000,
-                nft_erc1155_maker_refund_secret: 220_000,
+                eth_maker_refund_timelock: 90_000,
+                erc20_maker_refund_timelock: 100_000,
+                eth_maker_refund_secret: 90_000,
+                erc20_maker_refund_secret: 100_000,
+                nft_erc721_payment: 130_000,
+                nft_erc1155_payment: 130_000,
+                nft_erc721_taker_spend: 100_000,
+                nft_erc1155_taker_spend: 100_000,
+                nft_erc721_maker_refund_timelock: 100_000,
+                nft_erc1155_maker_refund_timelock: 100_000,
+                nft_erc721_maker_refund_secret: 100_000,
+                nft_erc1155_maker_refund_secret: 100_000,
             },
             taker: TakerGasLimitV2 {
-                eth_payment: 150_000,
-                erc20_payment: 250_000,
-                eth_maker_spend: 150_000,
-                erc20_maker_spend: 150_000,
-                eth_taker_refund_timelock: 150_000,
-                erc20_taker_refund_timelock: 150_000,
-                eth_taker_refund_secret: 150_000,
-                erc20_taker_refund_secret: 150_000,
-                approve_payment: 150_000,
+                eth_payment: 65_000,
+                erc20_payment: 150_000,
+                eth_maker_spend: 100_000,
+                erc20_maker_spend: 115_000,
+                eth_taker_refund_timelock: 90_000,
+                erc20_taker_refund_timelock: 100_000,
+                eth_taker_refund_secret: 90_000,
+                erc20_taker_refund_secret: 100_000,
+                approve_payment: 50_000,
             },
         }
     }

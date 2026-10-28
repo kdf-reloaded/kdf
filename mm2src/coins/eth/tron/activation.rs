@@ -16,8 +16,8 @@ use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
 use crate::eth::node_url::host_only;
 
-use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimitV2, EthSigner,
-                 SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
+                 EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState};
 
 use common::log::warn;
@@ -160,7 +160,12 @@ pub async fn tron_coin_from_conf_and_request(
         logs_block_range: 0,
         derivation_method: DerivationMethod::Iguana(my_address),
         swap_v2_contracts: None,
+        // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit
+        // blocks of CRD ch. 57 do not apply, so the defaults stand.
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        // No EVM estimation on TRON, so no multiplier (CRD R57.5.3b).
+        estimate_gas_mult: None,
         tron_api: Some(tron_api),
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),

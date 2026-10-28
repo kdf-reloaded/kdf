@@ -1,5 +1,6 @@
 use super::*;
 use crate::z_coin::z_tx_read;
+use crate::HtlcPaymentCheck;
 
 #[async_trait]
 impl SwapOps for ZCoin {
@@ -320,17 +321,17 @@ impl SwapOps for ZCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        let my_public = *try_s!(self.as_ref().priv_key_policy.key_pair_or_err()).public();
         z_tx_read::search_for_swap_tx_spend(
             self,
             time_lock,
-            &my_public,
+            &try_s!(Public::from_slice(my_pub)),
             &try_s!(Public::from_slice(other_pub)),
             secret_hash,
             tx,
@@ -342,23 +343,40 @@ impl SwapOps for ZCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        let my_public = *try_s!(self.as_ref().priv_key_policy.key_pair_or_err()).public();
         z_tx_read::search_for_swap_tx_spend(
             self,
             time_lock,
             &try_s!(Public::from_slice(other_pub)),
-            &my_public,
+            &try_s!(Public::from_slice(my_pub)),
             secret_hash,
             tx,
             search_from_block,
         )
         .await
+    }
+
+    async fn check_payment_pays_htlc(
+        &self,
+        time_lock: u32,
+        first_pub: &[u8],
+        second_pub: &[u8],
+        secret_hash: &[u8],
+        payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        z_tx_read::check_payment_pays_htlc(
+            time_lock,
+            &try_s!(Public::from_slice(first_pub)),
+            &try_s!(Public::from_slice(second_pub)),
+            secret_hash,
+            payment_tx,
+        )
     }
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {

@@ -8,7 +8,8 @@ use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_
             MySwapInfo, NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction,
             SavedSwap, SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
-use super::{derive_htlc_pubkeys, select_secret_hash_algo, validate_wire_pubkey};
+use super::{derive_htlc_pubkeys, resolve_recovery_htlc_key, select_secret_hash_algo, validate_wire_pubkey,
+            PaymentOwner, RecoveryKeyRequest};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
 use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MakerOrderBuilder,
@@ -1250,18 +1251,36 @@ impl MakerSwap {
             // so it can't be used across await
             let timelock = selfi.taker_payment_lock.load(Ordering::Relaxed) as u32;
             let other_taker_coin_htlc_pub = selfi.r().other_taker_coin_htlc_pub;
+            let my_taker_coin_htlc_pub = selfi.r().my_taker_coin_htlc_pub;
+            let my_taker_coin_htlc_keypair = selfi.r().my_taker_coin_htlc_keypair;
 
             let taker_coin_start_block = selfi.r().data.taker_coin_start_block;
             let taker_coin_swap_contract_address = selfi.r().data.taker_coin_swap_contract_address.clone();
 
             let secret = selfi.r().data.secret.0;
-            let taker_coin_htlc_priv = selfi.r().my_taker_coin_htlc_keypair.private().secret;
+
+            // The HTLC key that rebuilds the taker payment's script: the swap's own key, else the persistent
+            // key (CRD ch.39 R39.5.4).
+            let taker_key = resolve_recovery_htlc_key(RecoveryKeyRequest {
+                ctx: &selfi.ctx,
+                coin: &selfi.taker_coin,
+                owner: PaymentOwner::Other,
+                per_swap_pubkey: my_taker_coin_htlc_pub,
+                per_swap_keypair: my_taker_coin_htlc_keypair,
+                other_pubkey: other_taker_coin_htlc_pub.as_slice(),
+                time_lock: timelock,
+                secret_hash,
+                payment_tx: taker_payment_hex,
+            })
+            .await?;
+            let taker_coin_htlc_priv = taker_key.keypair.private().secret;
 
             // check if the taker payment is not spent yet
             match selfi
                 .taker_coin
                 .search_for_swap_tx_spend_other(
                     timelock,
+                    taker_key.pubkey.as_slice(),
                     other_taker_coin_htlc_pub.as_slice(),
                     secret_hash,
                     taker_payment_hex,
@@ -1272,16 +1291,18 @@ impl MakerSwap {
             {
                 Ok(Some(FoundSwapTxSpend::Spent(tx))) => {
                     return ERR!(
-                        "Taker payment was already spent by {} tx {:02x}",
+                        "Taker payment was already spent by {} tx {:02x} (matched the {})",
                         selfi.taker_coin.ticker(),
-                        tx.tx_hash()
+                        tx.tx_hash(),
+                        taker_key.kind.label()
                     )
                 },
                 Ok(Some(FoundSwapTxSpend::Refunded(tx))) => {
                     return ERR!(
-                        "Taker payment was already refunded by {} tx {:02x}",
+                        "Taker payment was already refunded by {} tx {:02x} (matched the {})",
                         selfi.taker_coin.ticker(),
-                        tx.tx_hash()
+                        tx.tx_hash(),
+                        taker_key.kind.label()
                     )
                 },
                 Err(e) => return ERR!("Error {} when trying to find taker payment spend", e),
@@ -1328,7 +1349,7 @@ impl MakerSwap {
         let other_maker_coin_htlc_pub = self.r().other_maker_coin_htlc_pub;
         let maker_coin_start_block = self.r().data.maker_coin_start_block;
         let maker_coin_swap_contract_address = self.r().data.maker_coin_swap_contract_address.clone();
-        let maker_coin_htlc_keypair = self.r().my_maker_coin_htlc_keypair;
+        let my_maker_coin_htlc_keypair = self.r().my_maker_coin_htlc_keypair;
         let my_maker_coin_htlc_pub = self.r().my_maker_coin_htlc_pub;
 
         let maybe_maker_payment = self.r().maker_payment.clone();
@@ -1354,11 +1375,28 @@ impl MakerSwap {
                 }
             },
         };
+        // The HTLC key that rebuilds the maker payment's script: the swap's own key, else the persistent key
+        // (CRD ch.39 R39.5.4).
+        let maker_key = try_s!(
+            resolve_recovery_htlc_key(RecoveryKeyRequest {
+                ctx: &self.ctx,
+                coin: &self.maker_coin,
+                owner: PaymentOwner::Mine,
+                per_swap_pubkey: my_maker_coin_htlc_pub,
+                per_swap_keypair: my_maker_coin_htlc_keypair,
+                other_pubkey: other_maker_coin_htlc_pub.as_slice(),
+                time_lock: maker_payment_lock,
+                secret_hash: &secret_hash.0,
+                payment_tx: &maker_payment,
+            })
+            .await
+        );
         // validate that maker payment is not spent
         match self
             .maker_coin
             .search_for_swap_tx_spend_my(
                 maker_payment_lock,
+                maker_key.pubkey.as_slice(),
                 other_maker_coin_htlc_pub.as_slice(),
                 &secret_hash.0,
                 &maker_payment,
@@ -1378,9 +1416,10 @@ impl MakerSwap {
                 })
             },
             Ok(Some(FoundSwapTxSpend::Refunded(tx))) => ERR!(
-                "Maker payment was already refunded by {} tx {:02x}",
+                "Maker payment was already refunded by {} tx {:02x} (matched the {})",
                 self.maker_coin.ticker(),
-                tx.tx_hash()
+                tx.tx_hash(),
+                maker_key.kind.label()
             ),
             Err(e) => ERR!("Error {} when trying to find maker payment spend", e),
             Ok(None) => {
@@ -1388,8 +1427,9 @@ impl MakerSwap {
                 log!("Trying to refund MakerPayment");
                 if now_ms() / 1000 < self.r().data.maker_payment_lock + 3700 {
                     return ERR!(
-                        "Too early to refund, wait until {}",
-                        self.r().data.maker_payment_lock + 3700
+                        "Too early to refund, wait until {} (matched the {})",
+                        self.r().data.maker_payment_lock + 3700,
+                        maker_key.kind.label()
                     );
                 }
                 let fut = self.maker_coin.send_maker_refunds_payment(
@@ -1397,7 +1437,7 @@ impl MakerSwap {
                     maker_payment_lock,
                     other_maker_coin_htlc_pub.as_slice(),
                     &secret_hash.0,
-                    maker_coin_htlc_keypair.private().secret.as_slice(),
+                    maker_key.keypair.private().secret.as_slice(),
                     &maker_coin_swap_contract_address,
                 );
 
@@ -2053,7 +2093,6 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
     subscribe_to_topic(&ctx, swap_topic(&swap.uuid));
     let mut status = ctx.log.status_handle();
     let uuid_str = swap.uuid.to_string();
-    let to_broadcast = !(swap.maker_coin.is_privacy() || swap.taker_coin.is_privacy());
     macro_rules! swap_tags {
         () => {
             &[&"swap", &("uuid", uuid_str.as_str())]
@@ -2114,10 +2153,9 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
                         command = c;
                     },
                     None => {
-                        if to_broadcast {
-                            if let Err(e) = broadcast_my_swap_status(&ctx, uuid).await {
-                                log!("!broadcast_my_swap_status(" (uuid) "): " (e));
-                            }
+                        // R50A item 1: the terminal report is made for every swap, privacy coins included.
+                        if let Err(e) = broadcast_my_swap_status(&ctx, uuid).await {
+                            log!("!broadcast_my_swap_status(" (uuid) "): " (e));
                         }
                         break;
                     },
@@ -2338,7 +2376,7 @@ mod maker_swap_tests {
     use super::*;
     use crate::mm2::lp_swap::SWAP_WIRE_PUBKEY_LEN;
     use coins::eth::{addr_from_str, signed_eth_tx_from_bytes, SignedEthTx};
-    use coins::{MarketCoinOps, MmCoin, SwapOps, TestCoin};
+    use coins::{HtlcPaymentCheck, MarketCoinOps, MmCoin, SwapOps, TestCoin};
     use common::{block_on, new_uuid};
     use crypto::privkey::key_pair_from_seed;
     use mm2_core::mm_ctx::MmCtxBuilder;
@@ -2399,7 +2437,7 @@ mod maker_swap_tests {
             MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
         });
         TestCoin::search_for_swap_tx_spend_my
-            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (maker_swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap).unwrap();
@@ -2471,7 +2509,7 @@ mod maker_swap_tests {
             MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
         });
         TestCoin::search_for_swap_tx_spend_my
-            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
 
         block_on(
             CoinsContext::from_ctx(&ctx)
@@ -2522,6 +2560,131 @@ mod maker_swap_tests {
         assert!(!err.to_lowercase().contains("wallet"), "{err}");
     }
 
+    const SAVED_MAKER_COIN_HTLC_PUB: &str = "02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580";
+    const SAVED_WITH_MAKER_COIN_HTLC_PUB: &str = r#"{"error_events":["StartFailed","NegotiateFailed","TakerFeeValidateFailed","MakerPaymentTransactionFailed","MakerPaymentDataSendFailed","TakerPaymentValidateFailed","TakerPaymentSpendFailed","TakerPaymentSpendConfirmFailed","MakerPaymentRefunded","MakerPaymentRefundFailed"],"events":[{"event":{"data":{"lock_duration":7800,"maker_amount":"3.54932734","maker_coin":"KMD","maker_coin_htlc_pubkey":"02ccd091588f2acb3b5320dc53950f7b00fff8dfae39286d745e96bed48f49c580","maker_coin_start_block":1452970,"maker_payment_confirmations":1,"maker_payment_lock":1563759539,"my_persistent_pub":"031bb83b58ec130e28e0a6d5d2acf2eb01b0d3f1670e021d47d31db8a858219da8","secret":"0000000000000000000000000000000000000000000000000000000000000000","started_at":1563743939,"taker":"101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9","taker_amount":"0.02004833998671660000000000","taker_coin":"ETH","taker_coin_start_block":8196380,"taker_payment_confirmations":1,"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"},"type":"Started"},"timestamp":1563743939211},{"event":{"data":{"taker_payment_locktime":1563751737,"taker_pubkey":"03101ace6b08605b9424b0582b5cce044b70a3c8d8d10cb2965e039b0967ae92b9"},"type":"Negotiated"},"timestamp":1563743979835},{"event":{"data":{"tx_hash":"a59203eb2328827de00bed699a29389792906e4f39fdea145eb40dc6b3821bd6","tx_hex":"f8690284ee6b280082520894d8997941dd1346e9231118d5685d866294f59e5b865af3107a4000801ca0743d2b7c9fad65805d882179062012261be328d7628ae12ee08eff8d7657d993a07eecbd051f49d35279416778faa4664962726d516ce65e18755c9b9406a9c2fd"},"type":"TakerFeeValidated"},"timestamp":1563744052878},{"event":{"data":{"error":"lp_swap:1888] eth:654] RPC error: Error { code: ServerError(-32010), message: \"Transaction with the same hash was already imported.\", data: None }"},"type":"MakerPaymentTransactionFailed"},"timestamp":1563744118577},{"event":{"type":"Finished"},"timestamp":1563763243350}],"success_events":["Started","Negotiated","TakerFeeValidated","MakerPaymentSent","TakerPaymentReceived","TakerPaymentWaitConfirmStarted","TakerPaymentValidatedAndConfirmed","TakerPaymentSpent","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","TakerPaymentSpendConfirmStarted","TakerPaymentSpendConfirmed","Finished"],"uuid":"3447b727-fe93-4357-8e5a-8cf2699b7e86"}"#;
+
+    fn maker_swap_with_saved_htlc_key() -> (MakerSwap, KeyPair, KeyPair) {
+        let maker_saved_swap: MakerSavedSwap = json::from_str(SAVED_WITH_MAKER_COIN_HTLC_PUB).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+        TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(Some(eth_tx_for_test().into()))))
+        });
+        let maker_coin = MmCoinEnum::Test(TestCoin::default());
+        let taker_coin = MmCoinEnum::Test(TestCoin::default());
+        let (maker_swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap).unwrap();
+        // The saved record of the test carries the per-swap public key only; give the swap its private half.
+        let per_swap_key_pair = KeyPair::random_compressed();
+        maker_swap.w().my_maker_coin_htlc_keypair = per_swap_key_pair;
+        (maker_swap, key_pair, per_swap_key_pair)
+    }
+
+    /// CRD ch.39 R39.5.4, maker side: the maker payment was built with the persistent key, so the saved
+    /// per-swap key does not rebuild its script and the persistent key does. The spend search is given the
+    /// persistent key, the refund is signed with it, and the result says "persistent key".
+    #[test]
+    fn test_recover_funds_maker_swap_falls_back_to_the_persistent_key() {
+        let (maker_swap, key_pair, per_swap_key_pair) = maker_swap_with_saved_htlc_key();
+        let persistent_pub = key_pair.public().to_vec();
+        static PERSISTENT_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        *PERSISTENT_PUB.lock().unwrap() = persistent_pub.clone();
+        static CANDIDATES_TRIED: std::sync::Mutex<Vec<Vec<u8>>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, _, first, _, _, _| {
+            CANDIDATES_TRIED.lock().unwrap().push(first.to_vec());
+            let check = if first == PERSISTENT_PUB.lock().unwrap().as_slice() {
+                HtlcPaymentCheck::Pays
+            } else {
+                HtlcPaymentCheck::PaysAnotherScript {
+                    payment_id: "abcd".to_owned(),
+                }
+            };
+            MockResult::Return(Box::pin(futures::future::ready(Ok(check))))
+        });
+        static SPEND_SEARCH_MY_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, my_pub, _, _, _, _, _| {
+            *SPEND_SEARCH_MY_PUB.lock().unwrap() = my_pub.to_vec();
+            MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
+        });
+        static REFUND_PRIVKEY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, privkey, _| {
+            *REFUND_PRIVKEY.lock().unwrap() = privkey.to_vec();
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(maker_swap.recover_funds()).unwrap();
+        assert_eq!(actual, RecoveredSwap {
+            action: RecoveredSwapAction::RefundedMyPayment,
+            coin: "ticker".to_string(),
+            transaction: eth_tx_for_test().into(),
+        });
+        assert_eq!(*CANDIDATES_TRIED.lock().unwrap(), vec![
+            hex::decode(SAVED_MAKER_COIN_HTLC_PUB).unwrap(),
+            persistent_pub.clone()
+        ]);
+        assert_eq!(*SPEND_SEARCH_MY_PUB.lock().unwrap(), persistent_pub);
+        assert_eq!(*REFUND_PRIVKEY.lock().unwrap(), key_pair.private().secret.to_vec());
+        assert_ne!(
+            *REFUND_PRIVKEY.lock().unwrap(),
+            per_swap_key_pair.private().secret.to_vec(),
+            "the refund is not signed with the per-swap key"
+        );
+    }
+
+    /// R39.5.4, maker side: the swap's per-swap key matches first and is the one the search and the refund use;
+    /// a payment found refunded says so and names the key.
+    #[test]
+    fn test_recover_funds_maker_swap_uses_the_per_swap_key_when_it_matches() {
+        let (maker_swap, _, per_swap_key_pair) = maker_swap_with_saved_htlc_key();
+        static SPEND_SEARCH_MY_PUB: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, my_pub, _, _, _, _, _| {
+            *SPEND_SEARCH_MY_PUB.lock().unwrap() = my_pub.to_vec();
+            MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
+        });
+        static REFUND_PRIVKEY: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        TestCoin::send_maker_refunds_payment.mock_safe(|_, _, _, _, _, privkey, _| {
+            *REFUND_PRIVKEY.lock().unwrap() = privkey.to_vec();
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let actual = block_on(maker_swap.recover_funds()).unwrap();
+        assert_eq!(actual.action, RecoveredSwapAction::RefundedMyPayment);
+        assert_eq!(
+            *SPEND_SEARCH_MY_PUB.lock().unwrap(),
+            hex::decode(SAVED_MAKER_COIN_HTLC_PUB).unwrap()
+        );
+        assert_eq!(
+            *REFUND_PRIVKEY.lock().unwrap(),
+            per_swap_key_pair.private().secret.to_vec()
+        );
+    }
+
+    /// R39.5.4, maker side: a payment that pays neither rebuilt script is the hard stop and says both keys
+    /// were tried.
+    #[test]
+    fn test_recover_funds_maker_swap_foreign_payment_is_a_hard_stop_naming_both_keys() {
+        let (maker_swap, _, _) = maker_swap_with_saved_htlc_key();
+        TestCoin::check_payment_pays_htlc.mock_safe(|_, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Ok(
+                HtlcPaymentCheck::PaysAnotherScript {
+                    payment_id: "75566e4d322874d79db2661d334fa404e449df15723b482957815fef203cf1e2".to_owned(),
+                },
+            ))))
+        });
+        let err = block_on(maker_swap.recover_funds()).unwrap_err();
+        assert!(
+            err.contains("75566e4d322874d79db2661d334fa404e449df15723b482957815fef203cf1e2"),
+            "{err}"
+        );
+        assert!(
+            err.contains("both the swap's per-swap key and the persistent key were tried"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn test_recover_funds_maker_payment_refund_errored() {
         // the swap ends up with MakerPaymentRefundFailed error
@@ -2542,7 +2705,7 @@ mod maker_swap_tests {
         });
 
         TestCoin::search_for_swap_tx_spend_my
-            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (maker_swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap).unwrap();
@@ -2569,7 +2732,7 @@ mod maker_swap_tests {
         TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Refunded(
                 eth_tx_for_test().into(),
             ))))))
@@ -2594,7 +2757,7 @@ mod maker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED: bool = true;
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
                 eth_tx_for_test().into(),
@@ -2602,7 +2765,7 @@ mod maker_swap_tests {
         });
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED: bool = true;
-        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Refunded(
                 eth_tx_for_test().into(),
@@ -2638,7 +2801,7 @@ mod maker_swap_tests {
             MockResult::Return(Box::new(futures01::future::ok(Some(eth_tx_for_test().into()))))
         });
         TestCoin::search_for_swap_tx_spend_my
-            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         let maker_coin = MmCoinEnum::Test(TestCoin::default());
         let taker_coin = MmCoinEnum::Test(TestCoin::default());
         let (maker_swap, _) = MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap).unwrap();
@@ -2705,7 +2868,7 @@ mod maker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED: bool = true;
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
                 eth_tx_for_test().into(),
@@ -2713,7 +2876,7 @@ mod maker_swap_tests {
         });
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED: bool = true;
-        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
                 eth_tx_for_test().into(),
@@ -2764,7 +2927,7 @@ mod maker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED: bool = false;
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
                 eth_tx_for_test().into(),
@@ -2772,7 +2935,7 @@ mod maker_swap_tests {
         });
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED: bool = false;
-        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
         });
@@ -2810,7 +2973,7 @@ mod maker_swap_tests {
         TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED: bool = false;
-        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_MY_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(Some(FoundSwapTxSpend::Spent(
                 eth_tx_for_test().into(),
@@ -2818,7 +2981,7 @@ mod maker_swap_tests {
         });
 
         static mut SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED: bool = false;
-        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _| {
+        TestCoin::search_for_swap_tx_spend_other.mock_safe(|_, _, _, _, _, _, _, _| {
             unsafe { SEARCH_FOR_SWAP_TX_SPEND_OTHER_CALLED = true }
             MockResult::Return(Box::pin(futures::future::ready(Ok(None))))
         });

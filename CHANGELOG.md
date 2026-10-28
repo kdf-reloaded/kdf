@@ -51,7 +51,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
+  random once when the coin is enabled, so users spread across the listed servers (set
+  `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
+  used again; a server that keeps failing is skipped for a growing
+  time (20 s doubling up to 12 h); if every connected server fails, every listed server is tried;
+  connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
+  server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
+  one connects; if none does, the error names each server. More in ch.38 §38.6.4.
+- **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
+  shows that a node's copy of the maker's orders differs, the node asks another node for an update.
+  It used to describe its copy by the maker's advertised state instead of its own, so while the maker
+  kept changing orders the answer could be meant for a different copy, and the node kept only part of
+  the maker's orders, asking again every 30 seconds. The node now names the state it actually holds and
+  gets the changes it can apply, or the full set. Set the `MM2.json` boolean
+  `orderbook_sync_names_held_root` to `false` to ask the way GLEEC KDF does. Detail: CRD ch.32 R-Q4a.
+
+- **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot that
+  re-submits all of its orders on every refresh used to send one message per order to every node, even
+  when price, volumes and confirmations stayed the same. Such an update is still saved and answered as
+  before, but no message goes out, so the network carries only real changes. Set the `MM2.json` boolean
+  `suppress_unchanged_order_updates` to `false` to broadcast every update again. Detail: CRD ch.59
+  R59.4.6.
+
 - **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
+
+- **Posting and updating maker orders makes fewer Electrum and node requests.** Electrum servers
+  serve each connection about one request per second once its first burst is used, so every extra
+  request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
+  its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
+  coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
+  update that changes only the price, the minimum volume or the confirmation settings skips the
+  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
+  ch.57 R57.2.6, ch.60 R60.6.7.
 
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
   whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
@@ -179,10 +211,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
+- **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
+  later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
+- **Electrum change notifications are no longer dropped.** A server's message that an address or the
+  chain tip changed was read as an answer to no request and discarded, so balance streaming and
+  history refresh never saw it; it now reaches the waiting watcher, also after the connection that
+  carried the subscription was replaced. More in ch.38 §38.6.4 and §38.6.5.
+- **A market maker's keep-alive is now sent once per trading pair, as other nodes expect.** A maker
+  with orders on several pairs used to send, every 30 seconds, one message per pair that each listed
+  every pair, so each node that relays the order book asked for every pair once per copy. Seed nodes
+  answering those requests ran out of memory, and one pair they could not answer failed the whole
+  request and stopped the maker's orders from spreading further. Each message now carries the one pair
+  of the topic it is sent on, and pairs without orders get no message. This stops the flood of failing
+  sync requests that overloaded seed nodes. Detail: CRD ch.32 R-K2a.
+
+- **A node answers every order-book sync request at once and asks for one only when it needs it.** A
+  node whose own order data was a few milliseconds behind used to refuse other nodes' sync requests
+  with a "retry" answer; a relay that got that answer stopped passing the maker's orders on until the
+  next keep-alive, 30 seconds later. The node now answers from the data it has, as other KDF nodes do,
+  leaving out an order whose cancellation it is still applying. Before comparing a received keep-alive
+  with its own data, it waits briefly for that data to catch up, so it no longer requests a sync it does
+  not need. Detail: CRD ch.32 R-T3b items 2 and 4.
+
 - **A maker node that is not a relay now keeps its order book of other makers up to date after a restart.** After a restart the node announced its stored orders again, but it did not record that it was following their trading pairs, so a keep-alive from another maker with a different order list never made it ask for that maker's orders, and its view of the other makers on its own pairs went stale until something else (an order book request, a new order on the pair) recorded the pair. Re-announcing a stored order now records the pair first, without requesting the order book. Detail: PR #101; CRD ch.59 R59.6.7.
 
 - **Gossip message ids now use the compact 8-byte form other KDF nodes use, which should cut the bandwidth a relay spends on duplicate messages.** Our nodes announced each message with an id written as decimal text, while the other implementations write the same 64-bit value as 8 raw bytes, so an id announced by one side never matched the id the other side already held and every announced message was requested again, then dropped as a duplicate. The id is now the 8-byte big-endian form; what it is computed from is unchanged. Nodes on the old and new encoding still exchange messages normally, but each message is sent once more between them until both sides are upgraded. Detail: PR #99; CRD ch.28 R13.
-- **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.** For a few milliseconds after a cancel or a price change, the node's order index was already up to date while the data behind its keep-alive messages and its answers to other nodes' sync requests was not, so it could still announce the old state, and a node that had already seen the cancel could log "recently cancelled" when the old order was listed again. Keep-alives and sync answers are now built only once both are up to date: a keep-alive is skipped for that round and a sync request gets a "retry" answer instead. Detail: PR #98; CRD ch.32 R-T3b.
+- **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.** For a few milliseconds after a cancel or a price change, the node's order index was already up to date while the data behind its keep-alive messages and its answers to other nodes' sync requests was not, so it could still announce the old state, and a node that had already seen the cancel could log "recently cancelled" when the old order was listed again. Keep-alives are now built only once both are up to date; until then the keep-alive is skipped for that round. Detail: PR #98; CRD ch.32 R-T3b.
 
 - **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
 
@@ -198,6 +253,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
   of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
   by node instead. More in ch.35 §35.1.F.
+- **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
+  back.** Confirmations, and the decision that a transaction has expired, are now counted against
+  the current tip, not against the highest one ever seen. A lagging server can now only make a wait
+  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
 - **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node checks its
   `light_wallet_d_servers` against each other, a server listed twice, also under a different spelling
   such as with or without `https://` or the default port, now counts once. Before, `[A, A, B]` let A
@@ -251,6 +310,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
   The change of a send made by another instance on the same seed still shows only once mined. Run
   one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39 R39.8.0ag1.
+- **Recovering an ARRR swap no longer fails with "does not pay the HTLC script".** Every ARRR swap
+  uses its own key for the swap's payment, but `recover_funds_of_swap` checked the payment with the
+  wallet's permanent key, so recovery always stopped with that error, even for a payment that had
+  long been refunded. Recovery now tries the swap's own key first and the wallet's permanent key
+  second, so swaps saved by older or other builds are recovered too. The log, and any error, say
+  which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
+  payment that is still waiting is refunded; and the swap completes if the other side spent it. The
+  error, when it is genuine, now says both keys were tried and shows the transaction id the way
+  explorers do. Detail: PR #109; CRD ch.39 R39.5.4.
 - **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
   input points past the end of the previous transaction's outputs, a BCH transaction with no
   outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
@@ -363,6 +431,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
   The MM2.json boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
   refusal. Detail: PR #28; CRD ch.35 R35.2.5.
+- **Swaps with a shielded coin such as ARRR now report their outcome to the network like every other
+  swap, and the report no longer names the traders.** When an older-style swap ends, whatever the
+  outcome, the node publishes the usual `swapstatus` summary that statistics nodes collect; before,
+  it stayed silent whenever a shielded coin was involved. The summary leaves out both parties' public
+  keys (the sender's own key too, when the swap used a one-off key), and a statistics node now fills
+  in only the key of the party that sent the report. More in
+  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #108.
 - **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
   sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
   now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree
@@ -409,6 +484,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   PR #55; CRD ch.37 R37.5.2, R37.5.4.
 
 - **A node no longer keeps memory for every swap it has ever run, and stopping it no longer waits for the swap bookkeeping.** Each finished swap left a small record behind for as long as the node ran (about 3 KB for a maker or taker swap in total), so a node that runs many swaps grew slowly without bound. The record of a running swap is now dropped as soon as the swap ends, on every way it can end, together with the messages kept for it. When the node is told to stop, it clears this list at once instead of waiting for it to empty. Detail: PR #100; CRD ch.51 R58A, R58B.
+
+- **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for the newer swaps), and a token inherits its platform coin's block. We ignored them and used 150000 for every swap call, which is too low on some chains, so swap transactions on chains such as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used for every swap call, the trade-fee estimates and the approval; a value that is not a whole number stops that coin from activating and names the key. Where the coins file sets nothing, the defaults now match the other KDF implementations: for example a platform-coin payment is 65000 and its refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57 R57.5, R57.6.
 
 ### Plans touched
 

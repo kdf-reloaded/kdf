@@ -1,4 +1,5 @@
 use super::*;
+use coins::request_fee_scope::with_request_fee_scope;
 
 #[cfg(feature = "ibc-routing-for-swaps")]
 fn tendermint_chain_id_from_conf(conf: &Json, platform_conf: Option<&Json>) -> Option<String> {
@@ -282,6 +283,12 @@ impl BalanceUpdateOrdermatchHandler {
 #[async_trait]
 impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
+        with_request_fee_scope(self.balance_updated_impl(coin, new_balance)).await
+    }
+}
+
+impl BalanceUpdateOrdermatchHandler {
+    async fn balance_updated_impl(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
         let ctx = match MmArc::from_weak(&self.ctx) {
             Some(ctx) => ctx,
             None => return,
@@ -341,49 +348,47 @@ impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     }
 }
 
-/// Selects the trie roots worth advertising in a keep-alive: zero and empty-trie roots are skipped.
-pub(crate) fn keep_alive_roots_and_topics(
+/// The trie roots a pubkey advertises (CRD ch.32 R-K2a): every pair root except the zero and the
+/// empty-trie root.
+pub(crate) fn advertisable_roots(
     all_roots: &HashMap<AlbOrderedOrderbookPair, H64>,
-) -> (HashMap<AlbOrderedOrderbookPair, H64>, HashSet<String>) {
-    let mut trie_roots = HashMap::new();
-    let mut topics = HashSet::new();
-    for (alb_pair, root) in all_roots.iter() {
-        if *root == H64::default() || *root == hashed_null_node::<Layout>() {
-            continue;
-        }
-        topics.insert(orderbook_topic_from_ordered_pair(alb_pair));
-        trie_roots.insert(alb_pair.clone(), *root);
-    }
-    (trie_roots, topics)
+) -> HashMap<AlbOrderedOrderbookPair, H64> {
+    all_roots
+        .iter()
+        .filter(|(_, root)| **root != H64::default() && **root != hashed_null_node::<Layout>())
+        .map(|(alb_pair, root)| (alb_pair.clone(), *root))
+        .collect()
 }
 
-/// The trie roots and topics a keep-alive for `pubkey` would carry, taken from a snapshot in which
-/// the trie store has applied every completed index operation (CRD ch.32 R-T3b item 2).
+/// The roots the keep-alives for `pubkey` would carry, taken from a snapshot in which the trie
+/// store has applied every completed index operation (CRD ch.32 R-T3b item 2).
 /// `Ok(None)` means the pubkey has no state; `Err` means the worker did not catch up within the
 /// bound, so no root may be advertised this round.
 pub(crate) async fn keep_alive_payload_for_pub(
     ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     catch_up_bound_ms: u64,
-) -> Result<Option<(HashMap<AlbOrderedOrderbookPair, H64>, HashSet<String>)>, TrieNotCaughtUp> {
+) -> Result<Option<HashMap<AlbOrderedOrderbookPair, H64>>, TrieNotCaughtUp> {
     ordermatch_ctx
         .with_consistent_state(catch_up_bound_ms, |_orderbook, trie_store| {
             trie_store
                 .pubkeys_state
                 .get(pubkey)
-                .map(|state| keep_alive_roots_and_topics(&state.trie_roots))
+                .map(|state| advertisable_roots(&state.trie_roots))
         })
         .await
 }
 
+/// Publishes the keep-alives of `pubkey` (CRD ch.32 R-K2a): one message per advertisable pair,
+/// carrying that pair's root alone, on that pair's topic only.
 pub(crate) async fn broadcast_keep_alive_for_pub(
     ctx: &MmArc,
     ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     p2p_privkey: Option<&KeyPair>,
 ) {
-    let (trie_roots, topics) = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
-        Ok(Some(payload)) => payload,
+    let trie_roots = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
+        Ok(Some(roots)) => roots,
         Ok(None) => return,
         Err(TrieNotCaughtUp) => {
             log::warn!(
@@ -394,12 +399,15 @@ pub(crate) async fn broadcast_keep_alive_for_pub(
         },
     };
 
-    let message = new_protocol::PubkeyKeepAlive {
-        trie_roots,
-        timestamp: now_ms() / 1000,
-    };
-
-    broadcast_ordermatch_message(ctx, topics, message.into(), p2p_privkey);
+    let timestamp = now_ms() / 1000;
+    for (alb_pair, root) in trie_roots {
+        let topic = orderbook_topic_from_ordered_pair(&alb_pair);
+        let message = new_protocol::PubkeyKeepAlive {
+            trie_roots: HashMap::from([(alb_pair, root)]),
+            timestamp,
+        };
+        broadcast_ordermatch_message(ctx, [topic], message.into(), p2p_privkey);
+    }
 }
 
 pub async fn broadcast_maker_orders_keep_alive_loop(ctx: MmArc) {
@@ -1399,6 +1407,10 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
 }
 
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    with_request_fee_scope(buy_impl(ctx, req)).await
+}
+
+async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let input: AutoBuyInput = try_s!(json::from_value(req));
     if input.base == input.rel {
         return ERR!("Base and rel must be different coins");
@@ -1434,6 +1446,10 @@ pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
 }
 
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
+    with_request_fee_scope(sell_impl(ctx, req)).await
+}
+
+async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let input: AutoBuyInput = try_s!(json::from_value(req));
     if input.base == input.rel {
         return ERR!("Base and rel must be different coins");
@@ -1829,6 +1845,10 @@ pub(crate) async fn get_max_volume(
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
+    with_request_fee_scope(create_maker_order_impl(ctx, req)).await
+}
+
+async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
     let base_coin: MmCoinEnum = match try_s!(lp_coinfind(ctx, &req.base).await) {
         Some(coin) => coin,
         None => return ERR!("Base coin {} is not found", req.base),
@@ -1976,6 +1996,10 @@ pub(crate) async fn cancel_previous_maker_orders(
 }
 
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
+    with_request_fee_scope(update_maker_order_impl(ctx, req)).await
+}
+
+async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(ctx));
     let order_mutex = {
         match ordermatch_ctx.maker_orders_ctx.lock().get_order(&req.uuid) {
@@ -2035,13 +2059,17 @@ pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
-    // CRD ch.60 R60.6.7 item 3: the order as updated must still be spendable on both legs. Its minimum
-    // volume is the requested one, else the one it already carries.
-    let min_volume_after_update = req
-        .min_volume
-        .clone()
-        .or_else(|| Some(order_before_update.min_base_vol.clone()));
-    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
+    // CRD ch.60 R60.6.7 item 3 and its Amendment: on an update the order as updated must still be spendable on
+    // both legs only when the update changes the volume (a volume delta, or `max`). A price-only, minimum-volume
+    // or confirmation-only update is not re-checked. The minimum volume checked is the requested one, else the
+    // one the order already carries.
+    if req.volume_delta.is_some() || req.max.unwrap_or(false) {
+        let min_volume_after_update = req
+            .min_volume
+            .clone()
+            .or_else(|| Some(order_before_update.min_base_vol.clone()));
+        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
+    }
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {
@@ -2100,13 +2128,28 @@ pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result
         return ERR!("Order state has changed after price/volume/balance checks. Please try to update the order again if it's still needed.");
     }
     order.apply_updated(&update_msg);
+    let broadcast =
+        !suppress_unchanged_order_updates(ctx) || maker_order_update_changes_order(&order_before_update, &order);
     if let Err(e) = save_maker_order_on_update(ctx.clone(), &order).await {
         *order = order_before_update;
         return ERR!("Error on saving updated order state to database:{}", e);
     }
-    update_msg.with_new_max_volume((new_volume - reserved_amount).into());
-    maker_order_updated_p2p_notify(ctx.clone(), order.orderbook_topic(), update_msg, order.p2p_keypair());
+    // CRD ch.59 R59.4.6: an update that changes nothing peers see is not broadcast.
+    if broadcast {
+        update_msg.with_new_max_volume((new_volume - reserved_amount).into());
+        maker_order_updated_p2p_notify(ctx.clone(), order.orderbook_topic(), update_msg, order.p2p_keypair());
+    }
     Ok(order.clone())
+}
+
+/// Whether an update turned `before` into an order that differs in anything the order-updated
+/// message carries: price, maximum volume, minimum volume or confirmation settings. Amounts are
+/// compared as numbers (CRD ch.59 R59.4.6).
+pub(crate) fn maker_order_update_changes_order(before: &MakerOrder, after: &MakerOrder) -> bool {
+    before.price != after.price
+        || before.max_base_vol != after.max_base_vol
+        || before.min_base_vol != after.min_base_vol
+        || before.conf_settings != after.conf_settings
 }
 
 pub async fn update_maker_order_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {

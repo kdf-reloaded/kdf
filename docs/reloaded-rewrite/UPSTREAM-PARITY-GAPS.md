@@ -368,8 +368,8 @@ chain's fee quote needs at least the first two closed before it matches.
   for the Arbitrum, Base, Ethereum, Avalanche, Polygon, Gnosis and several
   other platform coins. This is the larger half of the reported fee error on
   those chains.
-- [ ] **`gas_limit` and `gas_limit_v2` coin-configuration blocks are never
-  read (ch. 57 R57.5.1–R57.5.4, R57.6.1–R57.6.4).** This is the gap the
+- [x] **`gas_limit` and `gas_limit_v2` coin-configuration blocks are never
+  read (ch. 57 R57.5.1–R57.5.4, R57.6.1–R57.6.4) -- implemented in PR #105 (2026-10-28).** This is the gap the
   tracker previously did not record at all. Reloaded hard-codes 21000 for a
   native send, 210000 for a token send, 150000 for every V1 HTLC send, spend
   and refund, 300000 for the platform-coin sender preimage, and builds its V2
@@ -388,11 +388,14 @@ chain's fee quote needs at least the first two closed before it matches.
   chain the shared defaults misprice, and the alternative a Coder would
   otherwise be tempted to hard-code.
 
-Three smaller items on the same surface are recorded as deferred rather than
-tracked here: the three additional fee-approximation stages (ch. 57 D1), the
-per-coin gas-estimate multiplier the configuration sets to 1.3 for two
-layer-two platform coins (ch. 57 D3), and the removal of reloaded's inert
-third (external gas-oracle) price source (ch. 57 D4).
+Two smaller items on the same surface are recorded as deferred rather than
+tracked here: the three additional fee-approximation stages (ch. 57 D1) and
+the removal of reloaded's inert third (external gas-oracle) price source
+(ch. 57 D4). The per-coin gas-estimate multiplier the configuration sets to
+1.3 for two layer-two platform coins, formerly ch. 57 D3, is bound since
+2026-10-27 as ch. 57 R57.5.3b (it scales only the legacy ERC-20 approve's
+estimated limit, never a configured or default limit) and is part of the
+`gas_limit` item above: reloaded reads neither.
 
 ---
 
@@ -782,6 +785,23 @@ R39.5.3. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   skips that uuid with a warning. Not covered by R-F6c, which is about address
   derivation; a Reloaded-internal inconsistency, not a reference-parity item.
 
+## #19 — Statistics store: an existing row is not refreshed from a later terminal report — **OPEN (small, post-beta follow-up)**
+
+CRD reference: [`51-legacy-v1-swap-state-machine.md`](./51-legacy-v1-swap-state-machine.md)
+R50A item 5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
+
+The publication, redaction and own-role key fill of R50A are implemented in
+PR #108. Two small items remain:
+
+- [ ] For a swap identifier that is already in `stats_swaps`, R50A item 5 also
+  refreshes the fiat price, GUI and version columns from the later report.
+  Reloaded sets the own-role key column only and leaves the other columns as
+  the first report wrote them (the previous code did not refresh them either).
+  Needs a decision on which columns each role owns.
+- [ ] No state-16 migration corrects the key columns of databases already at
+  state 15; they keep the old both-parties values. Deliberately not done for
+  the beta, since almost no Reloaded node has a populated statistics store yet.
+
 ---
 
 ## #18 — Orderbook keep-alive: one aggregated message to every pair topic, where the reference sends one single-pair message per topic — **OPEN (hotfix; chapter material authored 2026-10-28, passed the KDF Dirty Gate 2026-10-28)**
@@ -792,7 +812,7 @@ CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
 [`59-legacy-ordermatch-negotiation.md`](./59-legacy-ordermatch-negotiation.md)
 R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
 
-- [ ] A Reloaded maker with K advertisable pairs under one pubkey publishes,
+- [x] *Fixed 2026-10-28: Reloaded conforms to R-K2a.* A Reloaded maker with K advertisable pairs under one pubkey publishes,
   every 30 s, K gossip messages that each carry all K roots, one per pair
   topic. The reference publishes K messages that each carry one root, each
   on its own pair's topic. Against reference relays the aggregated form
@@ -801,14 +821,13 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   Observed live on 2026-10-28 as public seed nodes overloaded by Reloaded
   makers. Fix: conform to R-K2a (sender side only; the receiver needs no
   change).
-- [ ] Decided 2026-10-28 (ch. 32 D5): Reloaded's synchronization responder no
+- [x] *Fixed 2026-10-28 (ch. 32 D5):* Reloaded's synchronization responder no
   longer refuses while its trie worker lags (amended R-T3b item 2); it answers
-  from the store as it stands, as the reference does. Closed when the code
-  lands.
-- [ ] Decided 2026-10-28 (ch. 32 R-Q4a): Reloaded names its own held root in
+  from the store as it stands, as the reference does.
+- [x] *Done 2026-10-28 (ch. 32 R-Q4a):* Reloaded names its own held root in
   the synchronization request by default; wire-compatible, yields usable
   deltas; a deliberate divergence with the opt-back switch
-  `orderbook_sync_names_held_root`. Closed when the code lands.
+  `orderbook_sync_names_held_root`.
 - [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
   in-flight synchronization de-duplication, orphan-node release, inbound
   task cap. Deferred, none bound.

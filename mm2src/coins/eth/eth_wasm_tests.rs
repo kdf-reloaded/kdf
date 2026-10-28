@@ -39,7 +39,9 @@ async fn test_send() {
         swap_contract_address: Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap(),
         fallback_swap_contract: None,
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
         derivation_method: DerivationMethod::Iguana(key_pair.address()),
         web3_instances: vec![Web3Instance {
             web3: web3.clone(),

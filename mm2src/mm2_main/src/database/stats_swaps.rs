@@ -2,6 +2,7 @@ use crate::mm2::lp_swap::{MakerSavedSwap, MakerSwapEvent, SavedSwap, SavedSwapIo
 use common::log::{debug, error};
 use db_common::sqlite::rusqlite::{params_from_iter, Connection, OptionalExtension};
 use mm2_core::mm_ctx::MmArc;
+use rpc::v1::types::H264 as H264Json;
 use std::collections::HashSet;
 
 const CREATE_STATS_SWAPS_TABLE: &str = "CREATE TABLE IF NOT EXISTS stats_swaps (
@@ -27,6 +28,8 @@ const INSERT_STATS_SWAP_ON_INIT: &str = "INSERT INTO stats_swaps (
     is_success
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
 
+// The public-key columns are not inserted: they are set afterwards from the record's own role only (CRD ch.51
+// R50A item 5), so an unknown key stays NULL.
 const INSERT_STATS_SWAP: &str = "INSERT INTO stats_swaps (
     maker_coin,
     maker_coin_ticker,
@@ -42,13 +45,11 @@ const INSERT_STATS_SWAP: &str = "INSERT INTO stats_swaps (
     is_success,
     maker_coin_usd_price,
     taker_coin_usd_price,
-    maker_pubkey,
-    taker_pubkey,
     maker_gui,
     taker_gui,
     maker_version,
     taker_version
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)";
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
 
 pub const ADD_FIAT_SNAPSHOT_COLUMNS: &[&str] = &[
     "ALTER TABLE stats_swaps ADD COLUMN maker_coin_usd_price DECIMAL;",
@@ -93,7 +94,6 @@ const ADD_SPLIT_TICKERS: &[&str] = &[
 pub const ADD_STARTED_AT_INDEX: &str = "CREATE INDEX timestamp_index ON stats_swaps (started_at);";
 
 const SELECT_ID_BY_UUID: &str = "SELECT id FROM stats_swaps WHERE uuid = ?1";
-const UPDATE_BOTH_PUBKEYS_BY_UUID: &str = "UPDATE stats_swaps SET maker_pubkey = ?1, taker_pubkey = ?2 WHERE uuid = ?3";
 const UPDATE_MAKER_PUBKEY_BY_UUID: &str = "UPDATE stats_swaps SET maker_pubkey = ?1 WHERE uuid = ?2";
 const UPDATE_TAKER_PUBKEY_BY_UUID: &str = "UPDATE stats_swaps SET taker_pubkey = ?1 WHERE uuid = ?2";
 
@@ -168,7 +168,6 @@ fn insert_stats_maker_swap_sql(
             )
         })
         .unwrap_or_default();
-    let (maker_pubkey, taker_pubkey) = maker_swap_pubkeys(swap);
 
     let params = vec![
         swap_data.maker_coin.clone(),
@@ -185,8 +184,6 @@ fn insert_stats_maker_swap_sql(
         (is_success as u32).to_string(),
         maker_coin_usd_price,
         taker_coin_usd_price,
-        maker_pubkey.unwrap_or_default(),
-        taker_pubkey.unwrap_or_default(),
         swap.gui.clone().unwrap_or_default(),
         String::new(),
         swap.mm_version.clone().unwrap_or_default(),
@@ -260,7 +257,6 @@ fn insert_stats_taker_swap_sql(
             )
         })
         .unwrap_or_default();
-    let (maker_pubkey, taker_pubkey) = taker_swap_pubkeys(swap);
 
     let params = vec![
         swap_data.maker_coin.clone(),
@@ -277,8 +273,6 @@ fn insert_stats_taker_swap_sql(
         (is_success as u32).to_string(),
         maker_coin_usd_price,
         taker_coin_usd_price,
-        maker_pubkey.unwrap_or_default(),
-        taker_pubkey.unwrap_or_default(),
         String::new(),
         swap.gui.clone().unwrap_or_default(),
         String::new(),
@@ -319,6 +313,10 @@ fn insert_stats_taker_swap_sql_init(swap: &TakerSavedSwap) -> Option<(&'static s
     Some((INSERT_STATS_SWAP_ON_INIT, params))
 }
 
+/// Stores a received or self-published terminal swap record in `stats_swaps` (CRD ch.51 R50A item 5).
+///
+/// A record whose swap identifier is not yet present creates the row; a record whose identifier is present
+/// creates nothing. In both cases the public-key column of the record's own role is then set from the record.
 pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap, fiat_snapshot: Option<&FiatPriceSnapshot>) {
     let params = vec![swap.uuid().to_string()];
     let query_row = conn.query_row(SELECT_ID_BY_UUID, params_from_iter(params.iter()), |row| {
@@ -326,29 +324,41 @@ pub fn add_swap_to_index(conn: &Connection, swap: &SavedSwap, fiat_snapshot: Opt
     });
     match query_row.optional() {
         // swap is not indexed yet, go ahead
-        Ok(None) => (),
-        // swap is already indexed
-        Ok(Some(_)) => return,
+        Ok(None) => {
+            let sql_with_params = match swap {
+                SavedSwap::Maker(maker) => insert_stats_maker_swap_sql(maker, fiat_snapshot),
+                SavedSwap::Taker(taker) => insert_stats_taker_swap_sql(taker, fiat_snapshot),
+            };
+
+            let (sql, params) = match sql_with_params {
+                Some(tuple) => tuple,
+                None => return,
+            };
+
+            debug!("Executing query {} with params {:?}", sql, params);
+            if let Err(e) = conn.execute(sql, params_from_iter(params.iter())) {
+                error!("Error {} on query {} with params {:?}", e, sql, params);
+                return;
+            };
+        },
+        // swap is already indexed, only the own-role key column is updated below
+        Ok(Some(_)) => (),
         Err(e) => {
             error!("Error {} on query {} with params {:?}", e, SELECT_ID_BY_UUID, params);
             return;
         },
     };
 
-    let sql_with_params = match swap {
-        SavedSwap::Maker(maker) => insert_stats_maker_swap_sql(maker, fiat_snapshot),
-        SavedSwap::Taker(taker) => insert_stats_taker_swap_sql(taker, fiat_snapshot),
+    let update = match swap {
+        SavedSwap::Maker(maker) => maker_pubkey_update_statement(maker),
+        SavedSwap::Taker(taker) => taker_pubkey_update_statement(taker),
     };
-
-    let (sql, params) = match sql_with_params {
-        Some(tuple) => tuple,
-        None => return,
-    };
-
-    debug!("Executing query {} with params {:?}", sql, params);
-    if let Err(e) = conn.execute(sql, params_from_iter(params.iter())) {
-        error!("Error {} on query {} with params {:?}", e, sql, params);
-    };
+    if let Some((sql, params)) = update {
+        debug!("Executing query {} with params {:?}", sql, params);
+        if let Err(e) = conn.execute(sql, params_from_iter(params.iter())) {
+            error!("Error {} on query {} with params {:?}", e, sql, params);
+        };
+    }
 }
 
 pub fn add_and_split_tickers() -> Vec<(&'static str, Vec<String>)> {
@@ -367,59 +377,48 @@ pub fn add_gui_and_version_columns() -> Vec<(&'static str, Vec<String>)> {
     ADD_GUI_AND_VERSION_COLUMNS.iter().map(|sql| (*sql, vec![])).collect()
 }
 
+/// The state-15 backfill (CRD ch.44 R44.6.3): sets, for every historical record, the public-key column of the
+/// record's own role only, by the same rule as a live report (CRD ch.51 R50A item 5).
 pub async fn backfill_pubkey_statements(ctx: &MmArc) -> Vec<(&'static str, Vec<String>)> {
     let maker_swaps = SavedSwap::load_all_from_maker_stats_db(ctx).await.unwrap_or_default();
     let taker_swaps = SavedSwap::load_all_from_taker_stats_db(ctx).await.unwrap_or_default();
 
     maker_swaps
         .iter()
-        .filter_map(|swap| pubkey_update_statement(&swap.uuid.to_string(), maker_swap_pubkeys(swap)))
-        .chain(
-            taker_swaps
-                .iter()
-                .filter_map(|swap| pubkey_update_statement(&swap.uuid.to_string(), taker_swap_pubkeys(swap))),
-        )
+        .filter_map(maker_pubkey_update_statement)
+        .chain(taker_swaps.iter().filter_map(taker_pubkey_update_statement))
         .collect()
 }
 
-fn pubkey_update_statement(
-    uuid: &str,
-    pubkeys: (Option<String>, Option<String>),
-) -> Option<(&'static str, Vec<String>)> {
-    match pubkeys {
-        (Some(maker_pubkey), Some(taker_pubkey)) => Some((UPDATE_BOTH_PUBKEYS_BY_UUID, vec![
-            maker_pubkey,
-            taker_pubkey,
-            uuid.to_owned(),
-        ])),
-        (Some(maker_pubkey), None) => Some((UPDATE_MAKER_PUBKEY_BY_UUID, vec![maker_pubkey, uuid.to_owned()])),
-        (None, Some(taker_pubkey)) => Some((UPDATE_TAKER_PUBKEY_BY_UUID, vec![taker_pubkey, uuid.to_owned()])),
-        (None, None) => None,
-    }
+fn maker_pubkey_update_statement(swap: &MakerSavedSwap) -> Option<(&'static str, Vec<String>)> {
+    let maker_pubkey = maker_own_pubkey(swap)?;
+    Some((UPDATE_MAKER_PUBKEY_BY_UUID, vec![maker_pubkey, swap.uuid.to_string()]))
 }
 
-fn maker_swap_pubkeys(swap: &MakerSavedSwap) -> (Option<String>, Option<String>) {
-    let maker_pubkey = swap.events.first().and_then(|event| match &event.event {
-        MakerSwapEvent::Started(data) => Some(format!("{:02x}", data.my_persistent_pub)),
-        _ => None,
-    });
-    let taker_pubkey = swap.events.iter().find_map(|event| match &event.event {
-        MakerSwapEvent::Negotiated(data) => Some(format!("{:02x}", data.taker_pubkey)),
-        _ => None,
-    });
-    (maker_pubkey, taker_pubkey)
+fn taker_pubkey_update_statement(swap: &TakerSavedSwap) -> Option<(&'static str, Vec<String>)> {
+    let taker_pubkey = taker_own_pubkey(swap)?;
+    Some((UPDATE_TAKER_PUBKEY_BY_UUID, vec![taker_pubkey, swap.uuid.to_string()]))
 }
 
-fn taker_swap_pubkeys(swap: &TakerSavedSwap) -> (Option<String>, Option<String>) {
-    let taker_pubkey = swap.events.first().and_then(|event| match &event.event {
-        TakerSwapEvent::Started(data) => Some(format!("{:02x}", data.my_persistent_pub)),
+/// The maker's persistent public key from the start event of a maker record. `None` when the record has no start
+/// event or the key is all-zero, i.e. redacted by a privacy-coin author (CRD ch.51 R50A item 3).
+fn maker_own_pubkey(swap: &MakerSavedSwap) -> Option<String> {
+    swap.events.first().and_then(|event| match &event.event {
+        MakerSwapEvent::Started(data) if data.my_persistent_pub != H264Json::default() => {
+            Some(format!("{:02x}", data.my_persistent_pub))
+        },
         _ => None,
-    });
-    let maker_pubkey = swap.events.iter().find_map(|event| match &event.event {
-        TakerSwapEvent::Negotiated(data) => Some(format!("{:02x}", data.maker_pubkey)),
+    })
+}
+
+/// The taker's persistent public key from the start event of a taker record; see [`maker_own_pubkey`].
+fn taker_own_pubkey(swap: &TakerSavedSwap) -> Option<String> {
+    swap.events.first().and_then(|event| match &event.event {
+        TakerSwapEvent::Started(data) if data.my_persistent_pub != H264Json::default() => {
+            Some(format!("{:02x}", data.my_persistent_pub))
+        },
         _ => None,
-    });
-    (maker_pubkey, taker_pubkey)
+    })
 }
 
 #[test]

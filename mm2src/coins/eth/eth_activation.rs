@@ -27,6 +27,11 @@ pub enum EthCoinBuildError {
     /// The caller-supplied payload cannot be used: a node URL, a swap contract, the coin's derivation path.
     #[display(fmt = "{}", _0)]
     InvalidPayload(String),
+    /// The coin's configuration entry holds a value the builder cannot use: a `gas_limit` /
+    /// `gas_limit_v2` member that is not a non-negative integer (CRD R57.5.1, R57.6.1), or an
+    /// `estimate_gas_mult` member that is not a number (R57.5.3b). Names the key.
+    #[display(fmt = "{}", _0)]
+    InvalidConfig(String),
     /// Every supplied node failed the reachability probe (R35.1.6).
     #[display(fmt = "{}", _0)]
     Transport(String),
@@ -44,6 +49,10 @@ pub enum Erc20BuildError {
     /// The token configuration declares decimals the framework cannot represent.
     #[display(fmt = "{}", _0)]
     UnsupportedDecimals(String),
+    /// The token's configuration entry holds a `gas_limit` / `gas_limit_v2` member that is not a
+    /// non-negative integer (CRD R57.5.1, R57.6.1). Names the key.
+    #[display(fmt = "{}", _0)]
+    InvalidConfig(String),
     /// The platform coin's context is gone.
     #[display(fmt = "{}", _0)]
     Internal(String),
@@ -564,6 +573,42 @@ pub(crate) fn platform_required_confirmations(requested: Option<u64>, conf: &Jso
     requested.unwrap_or_else(|| conf["required_confirmations"].as_u64().unwrap_or(default))
 }
 
+/// The gas-limit blocks of the coin whose configuration entry is `conf` (CRD R57.5, R57.6): its own entry's
+/// block, else for an ERC-20 token its platform coin's entry (R57.5.3), else the defaults.
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidConfig`] naming the key of a member that is not a non-negative integer.
+pub(crate) fn coin_gas_limits(
+    ctx: &MmArc,
+    conf: &Json,
+    protocol: &CoinProtocol,
+) -> Result<(EthGasLimit, EthGasLimitV2), MmError<EthCoinBuildError>> {
+    let result = match protocol {
+        CoinProtocol::ERC20 { platform, .. } => gas_limits_from_confs(&[conf, &crate::coin_conf(ctx, platform)]),
+        _ => gas_limits_from_confs(&[conf]),
+    };
+    result.map_to_mm(|e| EthCoinBuildError::InvalidConfig(e.to_string()))
+}
+
+/// The `estimate_gas_mult` of the coin whose configuration entry is `conf` (CRD R57.5.3b item 1): its own
+/// entry's member, else for an ERC-20 token its platform coin's entry (R57.5.3), else none (no scaling).
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidConfig`] naming the key when the member is not a JSON number.
+pub(crate) fn coin_estimate_gas_mult(
+    ctx: &MmArc,
+    conf: &Json,
+    protocol: &CoinProtocol,
+) -> Result<Option<f64>, MmError<EthCoinBuildError>> {
+    let result = match protocol {
+        CoinProtocol::ERC20 { platform, .. } => estimate_gas_mult_from_confs(&[conf, &crate::coin_conf(ctx, platform)]),
+        _ => estimate_gas_mult_from_confs(&[conf]),
+    };
+    result.map_to_mm(|e| EthCoinBuildError::InvalidConfig(e.to_string()))
+}
+
 /// Shared EVM-coin builder body: identical for every signing policy except how the [`EthSigner`] and the
 /// [`DerivationMethod`] are constructed.
 pub(crate) async fn build_eth_coin(
@@ -585,6 +630,11 @@ pub(crate) async fn build_eth_coin(
     }
 
     params.validate_swap_contracts(conf)?;
+    // The per-coin gas-limit blocks (CRD R57.5, R57.6) are read before any node is contacted: an unusable
+    // member fails the activation, naming the key. A token falls back to its platform coin's entry (R57.5.3).
+    let (gas_limit, gas_limit_v2) = coin_gas_limits(ctx, conf, &protocol)?;
+    // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
+    let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,
     // which `validate_swap_contracts` never lets through for a trading-capable coin.
     let swap_contract_address = params.swap_contract_address.unwrap_or_default();
@@ -666,7 +716,9 @@ pub(crate) async fn build_eth_coin(
         logs_block_range: conf["logs_block_range"].as_u64().unwrap_or(DEFAULT_LOGS_BLOCK_RANGE),
         derivation_method,
         swap_v2_contracts,
-        gas_limit_v2: EthGasLimitV2::default(),
+        gas_limit,
+        gas_limit_v2,
+        estimate_gas_mult,
         // ETH/ERC20 coins never use the TRON HTTP API; populated only by the
         // dedicated TRON activation path.
         tron_api: None,

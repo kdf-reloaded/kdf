@@ -945,6 +945,13 @@ broadcast on the watcher topic bound by
 legacy-only (chapter 51 R30, chapter 17 §17.11); a version-two swap has
 no watcher-outcome events and its persisted log MUST NOT contain any.
 
+> **Pointer (added 2026-10-27; passed the KDF Dirty Gate on 2026-10-28 with chapter 51 R50A).**
+> *No terminal status report.* The version-two machines publish no
+> terminal swap-status report of the kind chapter 51 R48/R50A binds for
+> the legacy protocol — a reference fact at both rows of chapter 02 §2.15A
+> that chapter 51 R50A item 1 records. A version-two swap's outcome
+> therefore reaches no counterparty-statistics store by that path.
+
 ## 52.8 Bound Reserved-Funds Semantics
 
 **R57.** *Reservation lives in a per-coin ledger, not the legacy

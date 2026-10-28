@@ -570,7 +570,9 @@ fn build_trezor_coin(
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method,
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }))
 }
 

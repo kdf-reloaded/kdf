@@ -68,7 +68,8 @@ time and are the practical reason this chapter exists:
 
 Bound rules R1–R7 cover the run loop and lifecycle; R8–R19 the maker
 stage graph; R20–R32 the taker stage graph; R33–R40 the refusal and
-abort contract; R41–R50 the message contract and timeout budget;
+abort contract; R41–R50A the message contract, timeout budget and
+terminal status report;
 R51–R58B the reserved-funds semantics and the registry and message-store
 lifecycle; R59–R66 the wire field and type
 expectations; R71–R73 the secret-hash algorithm selection; R67–R70 the
@@ -727,10 +728,13 @@ transient coin error (R18).
 
 **R48.** *Terminal swap-status broadcast.* On termination (R4) each side
 MUST load its own completed swap record, redact secret material from
-it, and broadcast it on the swap topic as an unsigned JSON object with
-exactly two members: a `method` member whose value is the fixed string
-`swapstatus`, and a `data` member carrying the redacted record. This
-message is deliberately *not* wrapped in the signed envelope of R43.
+it (the complete redaction set is R50A item 3), and broadcast it on the
+swap topic as an unsigned JSON object with exactly two members: a
+`method` member whose value is the fixed string `swapstatus`, and a
+`data` member carrying the redacted record. This message is deliberately
+*not* wrapped in the signed envelope of R43. R50A binds when the report
+is made, for which swaps, what it contains, and what a receiver does
+with it.
 
 **R49.** *Receiver handling of the status broadcast.* A receiver that
 fails to decode an incoming payload as the signed envelope of R43 MUST
@@ -744,7 +748,155 @@ its counterparty's terminal outcome.
 remove the maker's secret from the broadcast record. The record is
 broadcast on a public topic; a maker that broadcasts an unredacted
 record before its own spend confirms discloses the secret to any
-observer.
+observer. R50A item 3 binds the full set of fields the redaction
+touches; the secret is the one whose omission is a loss of funds.
+
+**R50A.** *The terminal status report: scope, content, redaction and
+receiver storage.* (Authored by the KDF Spec Reader 2026-10-27 from the
+rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at
+both; **passed the KDF Dirty Gate on 2026-10-28**, see §51.16.) The broadcast of R48
+is the legacy protocol's only report of a swap's outcome to the network,
+and the counterparty-statistics store of R49 is populated from nothing
+else. Its complete contract:
+
+1. *When, and for which swaps.* The report MUST be made on **every**
+   termination of a legacy maker or taker run loop (R4) — after the swap
+   is marked finished and before the registry entry is released —
+   whatever the terminal outcome: success, failure at any stage, refusal
+   and abort alike. The report MUST be made for a swap in which either
+   coin, or both, is a privacy (shielded) coin: there is **no**
+   privacy-coin suppression at either reference row, so a node of either
+   row publishes and expects to receive privacy-coin reports. Version-two swaps
+   ([chapter 52](52-swap-v2-state-machine.md)) make no such report at
+   either row. The report carries no netid logic and is identical on
+   netid `8762` and `6133` (R69).
+2. *What is published.* The `data` member of R48 is the node's complete
+   persisted saved-swap record for the swap — the role-tagged record of
+   [chapter 44](44-database-persistence-and-migrations.md) §44.8A with its
+   identifiers, coins, amounts, GUI and daemon-version metadata, success
+   and error vocabularies and full ordered event array — after the
+   redaction of item 3 and nothing else is removed, added or renamed. A
+   successful swap's record already carries the two fiat reference prices
+   the node set on it at completion (both roles, both rows; chapter 42
+   §42.6); a failed swap's record carries none; a receiver replaces
+   whatever it finds with its own fetch (item 4). On a native build the
+   node MUST first store the same redacted record in its own aggregate
+   statistics store (item 5), then publish it; a browser build publishes
+   without storing. A failure to load, store or publish
+   the report MUST be logged and MUST NOT alter the termination sequence
+   of R4.
+3. *Redaction.* Exactly the following fields of the **start event's**
+   payload (the first event of the record, type `Started` in both role
+   vocabularies of chapter 44 R44.8A.3 / R44.8A.4) are altered; no other
+   event and no other field is touched:
+   - maker record: the maker's **secret** is replaced by the all-zero
+     value of its 32-byte field (R50); the **taker's public key** field is
+     replaced by the all-zero value of its fixed-width field;
+   - taker record: the **maker's public key** field is replaced by the
+     all-zero value of its fixed-width field;
+   - both records: when the swap signed its peer-to-peer traffic with a
+     per-swap ephemeral key (R43) — which is the case whenever the node's
+     own coin in the swap is a privacy coin — the node's **own persistent
+     public key** field is replaced by the all-zero value of its
+     fixed-width 33-byte field; and, in every case, the **ephemeral key**
+     field is emptied so that the published record carries no key
+     material for it.
+   Two consequences are the point of the design and MUST be preserved:
+   each party's report identifies, by persistent key, **at most itself**,
+   never its counterparty; and a privacy-coin party's report identifies
+   neither party. The per-coin HTLC public keys and swap-contract
+   addresses of the start event are not redacted (but see the
+   code-quality finding below).
+4. *What a receiver does.* A native-build node subscribed to the swap
+   topic that receives a payload which is not the signed envelope of R43
+   and decodes as the R48 object (R49) MUST fetch the current fiat
+   reference prices of the two coins ([chapter 42](42-price-service-and-makerbot.md)
+   §42.6), set them on the record, and store the record in the aggregate
+   statistics store of item 5; a decode or storage failure is logged and
+   the payload dropped. A browser build does not attempt the second
+   decode and stores nothing. The report is unauthenticated (R48): the
+   store is statistics, and nothing in the swap machines or the
+   reservation rules of §51.8 MUST ever read it as a trust input.
+5. *What the store keeps.* The aggregate statistics store is the
+   `stats_swaps` table whose schema, index and migrations
+   [chapter 44](44-database-persistence-and-migrations.md) §44.6 binds;
+   this item binds only how a received or self-published record fills
+   it. A record whose swap identifier is not yet present creates the row
+   with the base and split-coin columns (ch. 44 §44.6.1, §44.6.3); a
+   record whose identifier is present creates nothing. In both cases the
+   optional columns are then updated from the record: the fiat price
+   columns (§44.6.4) from the prices of item 4, the GUI and version
+   columns (§44.6.6) from the record's metadata, and the two public-key
+   columns (§44.6.5) **from the record's own role only** — a maker record
+   supplies `maker_pubkey` from the maker's persistent key in its start
+   event and never `taker_pubkey`; a taker record supplies `taker_pubkey`
+   and never `maker_pubkey`. A swap's two key columns are therefore both
+   filled only once both parties' reports have been received, and a
+   privacy-coin party's column stays empty by item 3. The state-15
+   backfill of ch. 44 R44.6.3 applies the same own-role derivation to
+   historical records.
+
+> **Reloaded divergence (2026-10-27).** Reloaded diverges on three points
+> of R50A, the first by a decision the maintainer has since reversed in
+> favor of parity. (i) *Suppression.* Reloaded still skips the report
+> when either coin is a privacy coin
+> (`mm2src/mm2_main/src/lp_swap/maker_swap.rs:2056` computes the
+> condition and `:2117` gates the broadcast on it;
+> `mm2src/mm2_main/src/lp_swap/taker_swap.rs:369` and `:419` likewise;
+> the shielded coin answers the predicate at `mm2src/coins/z_coin.rs:2661`).
+> The maintainer decided parity: **publish**, as item 1 binds. (ii)
+> *Redaction set.* Reloaded's redaction
+> (`mm2src/mm2_main/src/lp_swap/saved_swap.rs`, the redaction method)
+> zeroes the maker's secret and empties the ephemeral key, and
+> additionally empties two per-swap HTLC private-key fields that
+> Reloaded's start-event payload carries and the reference's does not —
+> those two removals are correct and MUST stay — but it leaves the
+> counterparty's public key and the node's own persistent key in place,
+> so a Reloaded report identifies both parties even for a privacy-coin
+> swap. Item 3 binds the reference set on top of Reloaded's own two
+> fields. (iii) *Key columns.* Reloaded's statistics fill
+> (`mm2src/mm2_main/src/database/stats_swaps.rs`, the per-role key
+> derivation) takes **both** parties' keys from each record — its own
+> from the start event and the counterparty's from the negotiation
+> event — and writes both columns from either role's report, which item
+> 5 forbids; ch. 44 R44.6.3's backfill in Reloaded does the same. A Coder
+> closing R50A changes the three together: remove the suppression, widen
+> the redaction, and narrow the column fill to own-role, so that a
+> published Reloaded record and a received reference record are stored
+> by the same rule.
+
+> **As built (2026-10-28, PR #108).** The three points above are closed:
+> the report is made on every legacy termination with no privacy-coin
+> condition; the redaction zeroes exactly the start-event fields of item
+> 3 on top of Reloaded's two HTLC private-key fields (the negotiation
+> event is untouched); the statistics fill and the state-15 backfill set
+> only the record's own-role key column, and leave it unset (not an
+> all-zero value) when the own key is zero or absent. Open: for a swap
+> identifier that is already present, Reloaded sets the own-role key
+> column only; the fiat price, GUI and version columns of item 5 are
+> still not refreshed from the later report. State 15 is already applied
+> on existing databases, so their stored key columns keep the old
+> both-parties values until a later migration corrects them. Tests:
+> T26–T28 in `mm2src/mm2_main/src/lp_swap/terminal_report_tests.rs`.
+
+> **Code-quality finding (informative; trigger: a contradiction between
+> two things read side by side).** At both reference rows the redaction
+> of item 3 removes the counterparty's persistent public key from the
+> start event, with the stated intent that a statistics node learn each
+> party's key only from that party's own report. The same record's
+> negotiation event (`Negotiated` in both role vocabularies of chapter 44
+> R44.8A.3 / R44.8A.4) still carries the counterparty's negotiation
+> payload, whose fields include the counterparty's **persistent public
+> key itself** (the `persistent_pubkey` of R59) and its two per-coin HTLC
+> public keys, so a receiver recovers the redacted key from the second
+> event in the array. The redaction therefore achieves its attribution
+> intent only when the swap failed before negotiation completed. R50A
+> binds the reference set as-is for wire and storage parity. Proposed
+> resolution for the maintainer, not a Coder: if attribution hygiene is
+> wanted, extend item 3 to zero the counterparty's key fields of the
+> negotiation event as well; because the record is unsigned and consumed
+> only by statistics stores, the extension breaks no peer, but it should
+> be adopted as a documented Reloaded-original divergence, not silently.
 
 ## 51.8 Bound Reserved-Funds Semantics
 
@@ -1222,6 +1374,8 @@ and the 33-byte key width of R62 MUST NOT be relaxed, on either netid.
 | Every receive budget carries a fixed 90-second grace allowance         | R46           |
 | Terminal status broadcast is unsigned JSON with a fixed method string  | R48, R49      |
 | The maker's secret is redacted from the terminal broadcast             | R50           |
+| The terminal report is made on every legacy terminal, privacy coins included, V2 never | R50A item 1 |
+| A report identifies by persistent key at most its own author; a privacy-coin party identifies no one | R50A items 3, 5 |
 | Reservation exists exactly while the registry entry exists             | R51           |
 | A terminated swap reserves nothing, even if it never broadcast anything | R52, R57     |
 | Public-key fields are exactly 33 bytes on every chain                  | R62, R63      |
@@ -1377,6 +1531,42 @@ under R6 at the next start. Separately, after a swap finishes normally
 the node holds no message store for its identifier, and a message
 addressed to that identifier is ignored.
 
+**T26.** *A privacy-coin swap end publishes a redacted report (R50A
+items 1–3).* Run a legacy swap between a shielded coin and a transparent
+UTXO coin (for example ARRR against RIN) to each of: success, a
+negotiation refusal, and a payment-stage failure, in both roles. On every
+termination exactly one R48 object is published on the swap topic by
+each side, after the swap is marked finished and before the registry
+entry is released (R4); the test MUST fail if the publication is skipped
+because either coin is a privacy coin. Repeat for a swap between two
+transparent coins and assert the same. A version-two swap on the same
+node publishes nothing of the kind. *(Added 2026-10-27 with R50A; passed the KDF Dirty Gate on 2026-10-28.)*
+
+**T27.** *Redaction fields, exactly (R50A item 3).* For a published maker
+record: the start event's secret is the all-zero 32-byte value, the
+taker's public-key field is all-zero, and when the swap used a per-swap
+signing key the maker's own persistent-key field is all-zero and the
+ephemeral-key field carries no key; when the swap used the persistent key,
+the own persistent-key field is intact. For a published taker record: the
+maker's public-key field is all-zero and the same two conditional
+redactions apply. In both: every other event, including the negotiation
+event's key fields, and every other start-event field equals the stored
+record byte for byte; and the node's own stored record (its `my_swaps`
+copy) is **not** redacted. The test MUST fail if the two Reloaded-specific
+HTLC private-key fields are present with a value. *(Added 2026-10-27 with R50A; passed the KDF Dirty Gate on 2026-10-28.)*
+
+**T28.** *A receiver stores it (R50A items 4–5).* Deliver a published
+maker report for an unknown swap identifier to a native-build node: a
+`stats_swaps` row is created, `maker_pubkey` equals the maker's persistent
+key from the record, `taker_pubkey` is unset, and the two fiat price
+columns are set from the price source. Deliver the matching taker report:
+no second row; `taker_pubkey` is now set and `maker_pubkey` is unchanged.
+Deliver a maker report whose own persistent key is all-zero (privacy-coin
+author): `maker_pubkey` stays unset. Deliver the same payloads to a
+browser-build node: nothing is stored. Deliver a payload that is neither
+the signed envelope nor the R48 object: it is dropped with no store
+change. *(Added 2026-10-27 with R50A; passed the KDF Dirty Gate on 2026-10-28.)*
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1472,7 +1662,10 @@ reference rows alike.
 - The third-party-watcher protocol and its topic naming —
   [chapter 09](09-watcher-reward-infrastructure.md).
 - The persisted legacy swap record and its event `type` vocabulary —
-  [chapter 44](44-database-persistence-and-migrations.md) §44.8A.
+  [chapter 44](44-database-persistence-and-migrations.md) §44.8A; the
+  aggregate statistics table the terminal report of R48/R50A fills —
+  chapter 44 §44.6; and the fiat price snapshot a receiver sets on the
+  record — [chapter 42](42-price-service-and-makerbot.md) §42.6.
 - The generic persistent state-machine runtime that the legacy machines
   deliberately do not use — [chapter 14](14-state-machine-runtime.md).
 - The published JSON serialisation framework's byte-sequence
@@ -1537,6 +1730,33 @@ reference rows alike.
   compared regions plus a mechanical regex scan of every added line against
   private identifiers, literals and distinctive phrases; the mechanical gate
   tool was not run (prose). *Measure:* 0.02 against the 0.10 threshold.)
+  (Addition of 2026-10-27, KDF Spec Reader, **passed the KDF Dirty Gate on 2026-10-28**: R50A,
+  T26–T28, the pointer sentences added to R48 and R50, the two invariant
+  rows, the §51.1 range text and the §51.15 item rest on the rows
+  `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, read at both and
+  identical at both for every fact stated; The facts taken are: that the report is made on every
+  legacy terminal with no privacy-coin suppression and never for a
+  version-two swap; that the published object is the complete saved
+  record after redaction; the exact redaction set — maker secret,
+  counterparty persistent key, own persistent key when a per-swap key
+  signed, and the per-swap key itself — confined to the start event; the
+  native-only self-store before publication; the native-only receive path
+  with fiat prices fetched at receive time; and the own-role-only fill of
+  the two statistics key columns on insert-or-update. The Reloaded
+  divergence note and the file:line citations in it are from this
+  workspace. No private identifier, function body, control-flow
+  transcription, helper decomposition, log or error literal was
+  reproduced. Dirty Gate clearance (chapter 01 T1, R40): PASS on 2026-10-28, measure
+  0.02, no leaks; every reference fact was confirmed at both rows. *Extent:* the
+  legacy swap run-loop termination, the terminal swap-status report, its
+  redaction, the swap-topic receive path and the swap-statistics store fill and
+  backfill; the order-matching site that chooses a per-swap signing key; and the
+  version-two swap machines for the absence claim, at `v2.6.0-beta` and
+  `v3.0.0-beta` (eleven files per row). *Method:* reading of the candidate
+  hunks against the reference regions at both rows, and a mechanical regex
+  comparison of every added line against identifier, literal, comment-phrase,
+  path and version-control-identifier lists; the mechanical gate tool was not
+  run (prose). *Measure:* 0.02 against the 0.10 threshold.)
   Otherwise
   consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the legacy swap state

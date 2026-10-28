@@ -15,23 +15,32 @@ where
         return Ok(unspents.to_coin_balance(coin.as_ref().decimals));
     }
 
-    let balance = coin
-        .as_ref()
-        .rpc_client
-        .display_balance(address.clone(), coin.as_ref().decimals)
-        .compat()
-        .await?;
-
     // Electrum `display_balance` tracks the address script-hash (P2PKH/P2SH)
     // and doesn't include legacy pay-to-pubkey outputs. Add P2PK script-level
-    // unspents for this address when applicable.
-    let p2pk_extra = crate::utxo::electrum_p2pk_unspents_for_address(coin.as_ref(), address)
-        .await
-        .mm_err(Into::into)?
-        .into_iter()
-        .fold(BigDecimal::default(), |acc, unspent| {
-            acc + big_decimal_from_sat_unsigned(unspent.value, coin.as_ref().decimals)
-        });
+    // unspents for this address when applicable. The P2PK lookup travels in the
+    // same Electrum request message as the balance read (R38.6.3a).
+    let (balance, p2pk_extra) = match crate::utxo::electrum_p2pk_lookup(coin.as_ref(), address) {
+        Some((electrum, p2pk_script)) => {
+            let (balance, p2pk_unspents) = electrum
+                .display_balance_with_p2pk(address, coin.as_ref().decimals, &p2pk_script)
+                .compat()
+                .await
+                .mm_err(BalanceError::from)?;
+            let p2pk_extra = p2pk_unspents.into_iter().fold(BigDecimal::default(), |acc, unspent| {
+                acc + big_decimal_from_sat_unsigned(unspent.value, coin.as_ref().decimals)
+            });
+            (balance, p2pk_extra)
+        },
+        None => {
+            let balance = coin
+                .as_ref()
+                .rpc_client
+                .display_balance(address.clone(), coin.as_ref().decimals)
+                .compat()
+                .await?;
+            (balance, BigDecimal::default())
+        },
+    };
 
     Ok(CoinBalance {
         spendable: balance + p2pk_extra,

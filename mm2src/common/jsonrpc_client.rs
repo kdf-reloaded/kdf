@@ -161,6 +161,9 @@ impl JsonRpcBatchRequest {
     #[inline]
     pub fn is_empty(&self) -> bool { self.0.is_empty() }
 
+    /// Returns the method names of the requests, in the order they were requested.
+    pub fn methods(&self) -> impl Iterator<Item = &str> + '_ { self.0.iter().map(|req| req.method.as_str()) }
+
     /// Returns original sequence of identifiers.
     /// The method is used to process batch responses in the same order in which the requests were sent.
     #[inline]

@@ -154,7 +154,7 @@ impl MmCoin for EthCoin {
             self.get_gas_price()
                 .map_err(|e| e.to_string())
                 .and_then(move |gas_price| {
-                    let fee = gas_price * U256::from(150_000);
+                    let fee = gas_price * U256::from(coin.gas_limit.eth_max_trade_gas);
                     let fee_coin = match &coin.coin_type {
                         EthCoinType::Eth => &coin.ticker,
                         EthCoinType::Erc20 { platform, .. } => platform,
@@ -184,11 +184,13 @@ impl MmCoin for EthCoin {
 
         let gas_price = self.get_gas_price().compat().await.mm_err(Into::into)?;
         let gas_price = increase_gas_price_by_stage(gas_price, &stage);
+        // The sender-side gas is the payment call plus the refund call: `eth_payment` + `eth_sender_refund`
+        // for the platform coin, `erc20_payment` + `erc20_sender_refund` for a token (CRD R57.5.2, R57.3.4).
+        // This consolidates the baseline's single 300000 constant. The upper-bound stages of R57.3.4 that
+        // would split "payment only" from "payment plus refund" do not exist here yet (CRD D1), so every
+        // stage reserves the refund leg, as the old constant did.
         let gas_limit = match self.coin_type {
-            EthCoinType::Eth => {
-                // this gas_limit includes gas for `ethPayment` and `senderRefund` contract calls
-                U256::from(300_000)
-            },
+            EthCoinType::Eth => self.gas_limit.sender_preimage_gas(false),
             EthCoinType::Erc20 { token_addr, .. } => {
                 let value = match value {
                     TradePreimageValue::Exact(value) | TradePreimageValue::UpperBound(value) => {
@@ -203,21 +205,23 @@ impl MmCoin for EthCoin {
                 if allowed < value {
                     // estimate gas for the `approve` contract call
 
+                    // The RAW estimate: the gas-estimate multiplier is not applied on the fee-quote path
+                    // (CRD R57.5.3b item 6).
                     // Pass a dummy spender. Let's use `my_address`.
                     let spender = self.my_address;
                     let approve_function = ERC20_CONTRACT.function("approve")?;
                     let approve_data = approve_function.encode_input(&[Token::Address(spender), Token::Uint(value)])?;
                     let approve_gas_limit = self
-                        .estimate_gas_for_contract_call(token_addr, Bytes::from(approve_data))
+                        .approve_gas_estimate(token_addr, Bytes::from(approve_data))
                         .compat()
                         .await
                         .mm_err(Into::into)?;
 
                     // this gas_limit includes gas for `approve`, `erc20Payment` and `senderRefund` contract calls
-                    U256::from(300_000) + approve_gas_limit
+                    self.gas_limit.sender_preimage_gas(true) + approve_gas_limit
                 } else {
                     // this gas_limit includes gas for `erc20Payment` and `senderRefund` contract calls
-                    U256::from(300_000)
+                    self.gas_limit.sender_preimage_gas(true)
                 }
             },
             EthCoinType::Tron | EthCoinType::Trc20 { .. } => unreachable!("TRON rejected before gas-price request"),
@@ -243,7 +247,10 @@ impl MmCoin for EthCoin {
         let fut = async move {
             let gas_price = coin.get_gas_price().compat().await.mm_err(Into::into)?;
             let gas_price = increase_gas_price_by_stage(gas_price, &stage);
-            let total_fee = gas_price * U256::from(150_000);
+            let total_fee = gas_price
+                * coin
+                    .gas_limit
+                    .receiver_preimage_gas(matches!(coin.coin_type, EthCoinType::Erc20 { .. }));
             let amount = u256_to_big_decimal(total_fee, 18).mm_err(Into::into)?;
             let fee_coin = match &coin.coin_type {
                 EthCoinType::Eth => &coin.ticker,
@@ -342,8 +349,9 @@ impl MmCoin for EthCoin {
                 // A failure to read that balance must not mask the original error, so
                 // it only ever downgrades to propagating `estimate_err` below.
                 if let Ok(platform_balance) = self.base_coin_balance().compat().await {
-                    let min_gas_fee = u256_to_big_decimal(U256::from(MIN_TX_GAS_LIMIT) * gas_price, ETH_DECIMALS)
-                        .mm_err(Into::into)?;
+                    let min_gas_fee =
+                        u256_to_big_decimal(U256::from(self.gas_limit.eth_send_coins) * gas_price, ETH_DECIMALS)
+                            .mm_err(Into::into)?;
                     if platform_balance < min_gas_fee {
                         return MmError::err(TradePreimageError::NotSufficientBalance {
                             coin: fee_coin.to_string(),
