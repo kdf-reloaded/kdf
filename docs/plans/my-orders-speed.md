@@ -259,7 +259,8 @@ machine load average 260 to 600:
 The first call after a restart, or after the memo empties, costs what it cost before. What
 remains in profile B is the lock-and-clone loop (about 3 ms) and the serialization of three
 rational arrays per order (about 6 ms); caching those would be a further stage and is not part
-of this change. The answer is byte for byte the old one for every order with at most one
+of this change. The maintainer accepted the profile-B miss on 2026-10-29 (12.3 ms against the 10 ms target,
+about 4.5 times faster than before), so no such cache is added. The answer is byte for byte the old one for every order with at most one
 match; with two or more matches the order of the `matches` entries was already random (a
 `HashMap` with a per-instance hasher), so the test compares the parsed documents there.
 `my_orders` now returns an error instead of panicking if the answer cannot be serialized.
