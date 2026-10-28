@@ -559,7 +559,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
   decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
-  Detail: PR #TBD.
+  Detail: PR #123.
 
 ### Known limitations
 
