@@ -642,6 +642,11 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
   spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
 
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
+  transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
+  decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
+  Detail: PR #123.
+
 ### Known limitations
 
 What does not work yet, or works only in part, in this release. Each item says where more detail
