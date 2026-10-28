@@ -473,7 +473,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
   pair). The metrics now also show the node store's size and entry count, the number of stored change
   histories and changes, tracked pubkeys, and queued trie updates. More in
-  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #TBD.
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
