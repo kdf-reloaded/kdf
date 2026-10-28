@@ -57,7 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
   speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an error
   instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
-  Detail: PR #TBD.
+  Detail: PR #154.
 
 - **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
   `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
