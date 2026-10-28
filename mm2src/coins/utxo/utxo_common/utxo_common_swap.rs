@@ -1370,10 +1370,10 @@ pub fn dex_fee_script(uuid: [u8; 16], time_lock: u32, watcher_pub: &Public, send
 
 /// Upper bound, in seconds, on the wait returned by [`can_refund_htlc`]: a caller sleeps at most this
 /// long before it re-checks, never longer than the real remaining wait.
-const MAX_REFUND_WAIT_SECS: u64 = 3600;
+pub(crate) const MAX_REFUND_WAIT_SECS: u64 = 3600;
 
 /// Caps the remaining wait at [`MAX_REFUND_WAIT_SECS`].
-fn capped_refund_wait(remaining_secs: u64) -> CanRefundHtlc {
+pub(crate) fn capped_refund_wait(remaining_secs: u64) -> CanRefundHtlc {
     CanRefundHtlc::HaveToWait(remaining_secs.min(MAX_REFUND_WAIT_SECS))
 }
 

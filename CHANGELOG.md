@@ -276,6 +276,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
   and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
   Test-only; the node itself is unchanged.
+- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
+  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
+  times by) has passed the lock time, and a refund the network still rejects as not yet final is
+  retried until the refund deadline instead of ending the swap with its refund failed. Calling
+  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
+  PR #146; CRD ch.39 R39.5.13.
 - **A node that relays the order book now answers other nodes' sync requests for a maker it is still
   catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
   while the relay was itself fetching them (the usual case right after a stall or a restart) got an
@@ -610,6 +616,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   A compact cache that fails validation is deleted instead of renamed to `.invalid-chain.<ms>.bak`,
   which also ends the multi-gigabyte backup flood. No RPC or wire change. Detail: PR #31; CRD ch.39
   R39.8.0al and R39.8.0n.
+- **A shielded (ARRR) wallet no longer piles up `.checkpoint.<ms>.bak` files when its sync keeps
+  failing right after a rebuild.** Until the first block is scanned, a wallet holds nothing but its
+  account, and every sync pass starts that wallet over. Each restart kept the old copy as a backup,
+  so a server that kept failing left one more file every 30 seconds. Such a copy contains nothing the
+  wallet cannot recreate from its viewing key, so it is now deleted. A wallet that has scanned blocks
+  or holds transactions is never deleted this way, and the one backup a rebuild keeps of the previous
+  wallet is unchanged. Existing `*.checkpoint.*.bak` files can be deleted safely. No RPC or wire
+  change. Detail: PR #150; CRD ch.39 (shielded coins) R39.8.0ax.
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and
   `get_swap_gas_fee_policy` echoed it, but nothing read it, so every swap transaction was signed in
   the legacy form and `High` behaved exactly like `Legacy`. `Low`, `Medium` and `High` now emit an
@@ -662,6 +676,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
   wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
   refused before its fee.
+- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — new, in planning
+  for after the beta: answering the ARRR swap questions from the blocks `lightwalletd` serves,
+  without an address index, and then retiring the Electrum fallback, which stays for the beta.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
   ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
   release.

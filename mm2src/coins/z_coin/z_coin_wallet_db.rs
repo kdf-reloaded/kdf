@@ -710,7 +710,7 @@ impl ZCoinShieldedHistory {
                 // (R39.8.0n).
                 let mutation_lock = wallet_db_mutation_lock(&self.wallet_db_path);
                 let _guard = mutation_lock.lock();
-                discard_compact_cache(&self.compact_blocks_path)?;
+                discard_database(&self.compact_blocks_path)?;
                 initialize_compact_db(&self.compact_blocks_path)?;
                 Ok(start_height.saturating_sub(1))
             },
@@ -836,7 +836,7 @@ impl ZCoinShieldedHistory {
         let _guard = mutation_lock.lock();
         *self.initial_chain_state.lock() = None;
         preserve_database_for_rebuild(&self.wallet_db_path, "chain-divergence")?;
-        discard_compact_cache(&self.compact_blocks_path)?;
+        discard_database(&self.compact_blocks_path)?;
         initialize_compact_db(&self.compact_blocks_path)?;
         initialize_wallet_db(&self.wallet_db_path, self.consensus_params.clone())?;
         let mut wallet_db = open_wallet_db(&self.wallet_db_path, self.consensus_params.clone())?;
@@ -845,14 +845,28 @@ impl ZCoinShieldedHistory {
         Ok(())
     }
 
+    /// Replaces a wallet database that holds an account but has not scanned a block
+    /// yet with a fresh one, so the checkpoint can be fetched again.
+    ///
+    /// Such a database holds nothing the wallet cannot recreate -- no scanned block,
+    /// no transaction and so no note, only an account derived from the viewing key
+    /// -- so it is deleted rather than kept as a backup. A wallet left in this state
+    /// by a rebuild or an interrupted first scan passes through here on every pass
+    /// until a scan succeeds, and a backup per pass grew without bound for as long
+    /// as the scans kept failing (R39.8.0ax).
     fn reset_unscanned_wallet_db(&self) -> Result<(), String> {
-        if !self.wallet_scan_state_is_empty()? {
-            return Err("Refusing to rebuild an unscanned shielded wallet DB that contains transactions".to_owned());
-        }
         let mutation_lock = wallet_db_mutation_lock(&self.wallet_db_path);
         let _guard = mutation_lock.lock();
+        // Checked under the lock, so a scan cannot add the first block or
+        // transaction between the check and the delete.
+        if self.scanned_block_height()?.is_some() || !self.wallet_scan_state_is_empty()? {
+            return Err(
+                "Refusing to rebuild an unscanned shielded wallet DB that contains scanned blocks or transactions"
+                    .to_owned(),
+            );
+        }
         *self.initial_chain_state.lock() = None;
-        preserve_database_for_rebuild(&self.wallet_db_path, "checkpoint")?;
+        discard_database(&self.wallet_db_path)?;
         initialize_wallet_db(&self.wallet_db_path, self.consensus_params.clone())
     }
 
@@ -2923,12 +2937,14 @@ fn preserve_database_for_rebuild(path: &Path, reason: &str) -> Result<Option<Pat
 
 const DATABASE_SIDECAR_SUFFIXES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
-/// Deletes a compact-block cache database together with its SQLite sidecars.
+/// Deletes a shielded database together with its SQLite sidecars. Used only for
+/// databases that hold nothing the wallet cannot recreate: the compact-block cache
+/// (R39.8.0n) and a wallet database that has not scanned a block (R39.8.0ax).
 ///
 /// Sidecars go first: if deleting the main file then fails, the error propagates
-/// and no stale `-wal` or `-journal` is left to be replayed into the fresh cache
+/// and no stale `-wal` or `-journal` is left to be replayed into the fresh database
 /// created at the same path.
-fn discard_compact_cache(path: &Path) -> Result<(), String> {
+fn discard_database(path: &Path) -> Result<(), String> {
     for suffix in DATABASE_SIDECAR_SUFFIXES {
         remove_file_if_exists(&path_with_suffix(path, suffix))?;
     }
@@ -2940,7 +2956,7 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(format!(
-            "Failed to discard compact cache file {}: {}",
+            "Failed to delete shielded database file {}: {}",
             path.display(),
             e
         )),
@@ -5062,21 +5078,134 @@ pub(crate) mod tests {
         );
     }
 
+    /// A rebuilt wallet holds its account but no scanned block until the next scan
+    /// succeeds. Every pass before that replaces the database again, and must not
+    /// leave a backup each time.
+    ///
+    /// Regression: each such pass kept the replaced database as
+    /// `*.checkpoint.<ms>.bak`, so a backend that kept failing right after a rebuild
+    /// left one more backup every 30 seconds -- the growth R39.8.0n removed for the
+    /// compact cache (R39.8.0ax).
     #[test]
-    fn discard_compact_cache_removes_the_database_and_its_sidecars() {
+    fn passes_failing_after_a_rebuild_leave_no_backup_beyond_the_rebuild_one() {
+        let tip = 160;
+        let ScannedFixture {
+            history,
+            params,
+            db_dir,
+            mut chain,
+            ..
+        } = scanned_fixture("rebuild-then-failing-passes", tip, FIXTURE_FIRST_BLOCK_HEIGHT, |_| true);
+        for height in 20..=tip {
+            let reorged = reorged_tree_state(&chain[&height]);
+            chain.insert(height, reorged);
+        }
+        let mut source = FixtureTreeStates {
+            states: chain,
+            requested: Vec::new(),
+        };
+        let anchor =
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip)).unwrap();
+        assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
+        let rebuild_backups = backup_files(&db_dir);
+        assert_eq!(rebuild_backups.len(), 1, "{:?}", rebuild_backups);
+
+        // Three passes whose scans fail after anchoring: each finds the account and
+        // no scanned block, and replaces the database.
+        for _ in 0..3 {
+            let anchor = common::block_on(history.ensure_lightwalletd_chain_state(
+                &mut source,
+                params.clone(),
+                FIXTURE_CHECKPOINT_HEIGHT,
+            ))
+            .unwrap();
+            assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
+            assert_eq!(wallet_account_count(&history, &params), 1);
+        }
+
+        assert_eq!(
+            backup_files(&db_dir),
+            rebuild_backups,
+            "only the rebuild's own backup may exist"
+        );
+        assert_eq!(
+            history.wallet_sync_start_height().unwrap(),
+            Some(FIXTURE_CHECKPOINT_HEIGHT + 1)
+        );
+    }
+
+    /// A process that stopped after importing the account but before scanning a
+    /// block leaves a database with nothing in it but that account. It is replaced
+    /// on the next pass without a backup.
+    #[test]
+    fn an_interrupted_first_scan_is_restarted_without_a_backup() {
+        let history = open_checkpointed_test_history(FIXTURE_CHECKPOINT_HEIGHT as u32);
+        let db_dir = history.wallet_db_path().parent().unwrap().to_path_buf();
+        assert_eq!(history.scanned_block_height().unwrap(), None);
+        let checkpoint = chain_state_from_checkpoint(&CheckPointBlockInfo {
+            height: FIXTURE_CHECKPOINT_HEIGHT as u32,
+            hash: rpc::v1::types::H256([9u8; 32]),
+            time: 1234,
+            sapling_tree: empty_sapling_tree_bytes().into(),
+        })
+        .unwrap();
+        let mut source = FixtureTreeStates {
+            states: HashMap::from([(
+                FIXTURE_CHECKPOINT_HEIGHT,
+                fixture_tree_state(FIXTURE_CHECKPOINT_HEIGHT, &[9u8; 32], &checkpoint),
+            )]),
+            requested: Vec::new(),
+        };
+
+        for _ in 0..2 {
+            let anchor = common::block_on(history.ensure_lightwalletd_chain_state(
+                &mut source,
+                test_params(),
+                FIXTURE_CHECKPOINT_HEIGHT,
+            ))
+            .unwrap();
+            assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
+        }
+
+        assert!(backup_files(&db_dir).is_empty(), "{:?}", backup_files(&db_dir));
+        assert_eq!(wallet_account_count(&history, &test_params()), 1);
+    }
+
+    /// Deleting is only for a database that holds nothing the wallet cannot
+    /// recreate. One that has scanned blocks is refused and left untouched.
+    #[test]
+    fn a_scanned_wallet_is_never_deleted_as_unscanned() {
+        let tip = 30;
+        let ScannedFixture {
+            history,
+            params,
+            db_dir,
+            ..
+        } = scanned_fixture("unscanned-reset-refused", tip, FIXTURE_FIRST_BLOCK_HEIGHT, |_| true);
+
+        let error = history.reset_unscanned_wallet_db().unwrap_err();
+
+        assert!(error.contains("Refusing to rebuild"), "{error}");
+        assert_eq!(history.scanned_block_height().unwrap(), Some(tip));
+        assert_eq!(history.balance(params).unwrap(), FIXTURE_OWN_NOTE_VALUE);
+        assert!(backup_files(&db_dir).is_empty());
+    }
+
+    #[test]
+    fn discard_database_removes_the_database_and_its_sidecars() {
         let path = test_db_dir("discard-compact-cache").join("ARRR_RELOADED_COMPACT_BLOCKS.db");
         std::fs::write(&path, b"db").unwrap();
         std::fs::write(path_with_suffix(&path, "-wal"), b"wal").unwrap();
         std::fs::write(path_with_suffix(&path, "-journal"), b"journal").unwrap();
 
-        discard_compact_cache(&path).unwrap();
+        discard_database(&path).unwrap();
 
         assert!(!path.exists());
         for suffix in DATABASE_SIDECAR_SUFFIXES {
             assert!(!path_with_suffix(&path, suffix).exists(), "{} left behind", suffix);
         }
         // Nothing to delete is not an error.
-        discard_compact_cache(&path).unwrap();
+        discard_database(&path).unwrap();
     }
 
     // Shapes measured against Pirate lightwalletd servers (mainnet activation
