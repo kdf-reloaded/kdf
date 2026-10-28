@@ -3761,7 +3761,18 @@ pub(crate) async fn pending_nonce_from_nodes(
                         })
                     },
                 },
-                Err(e) => log!("Error " (e) " when getting nonce for addr " [addr]),
+                Err(e) => {
+                    // R35.1.16: the failing node is named, with the coin's ticker and the node's list position.
+                    let node_line = crate::eth::alloy_compat::provider::direct_node_line(
+                        &web3.web3,
+                        &format!("Error {e} when getting nonce for addr {addr:?} from node "),
+                        "",
+                    );
+                    match node_line {
+                        Some(line) => log!((line)),
+                        None => log!("Error " (e) " when getting nonce for addr " [addr]),
+                    }
+                },
             }
         }
         if let Some(best) = best {

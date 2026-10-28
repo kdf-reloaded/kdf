@@ -119,8 +119,9 @@ pub async fn tron_coin_from_conf_and_request(
     // never dispatch RPCs through this provider; it exists only to satisfy
     // the shared `EthCoinImpl` shape.
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
-    let web3 = crate::eth::alloy_compat::build_provider(urls, event_handlers)
-        .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
+    let web3 =
+        crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes(ticker, urls), event_handlers)
+            .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
 
     if req["swap_contract_address"].is_string() {
         warn!("TRON coin '{ticker}': swap_contract_address ignored (TRON swaps not yet wired)");
