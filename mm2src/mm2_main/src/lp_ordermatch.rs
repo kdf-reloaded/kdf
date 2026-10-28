@@ -69,6 +69,7 @@ use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, chec
                           SwapConfirmationsSettings, TakerSwap};
 
 pub use best_orders::{best_orders_rpc, best_orders_rpc_v2};
+use maker_balance_watch::{start_maker_balance_watch, BalanceWatches};
 use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, save_maker_order_on_update,
                         save_my_new_maker_order, save_my_new_taker_order, MyActiveOrders, MyOrdersFilteringHistory,
                         MyOrdersHistory, MyOrdersStorage};
@@ -84,6 +85,8 @@ cfg_wasm32! {
 
 #[path = "lp_ordermatch/best_orders.rs"] mod best_orders;
 #[path = "lp_ordermatch/lp_bot.rs"] mod lp_bot;
+#[path = "lp_ordermatch/maker_balance_watch.rs"]
+mod maker_balance_watch;
 #[cfg(test)]
 pub use lp_bot::{process_price_request, StartSimpleMakerBotRequest, KMD_PRICE_ENDPOINT};
 pub use lp_bot::{start_simple_market_maker_bot, stop_simple_market_maker_bot, TradingBotEvent};
@@ -182,6 +185,8 @@ pub struct MakerOrdersContext {
     order_tickers: HashMap<Uuid, String>,
     /// base ticker → count of active orders for that ticker.
     count_by_tickers: HashMap<String, usize>,
+    /// The balance watches of the base coins that have active orders (CRD ch.60 R60.4.5).
+    balance_watches: BalanceWatches,
 }
 
 impl MakerOrdersContext {
@@ -190,6 +195,17 @@ impl MakerOrdersContext {
             orders: TimedMap::new(),
             order_tickers: HashMap::new(),
             count_by_tickers: HashMap::new(),
+            balance_watches: BalanceWatches::default(),
+        }
+    }
+
+    /// Counts one order less for `ticker`; the last order of a base coin ends that coin's balance watch.
+    fn decrement_ticker_count(&mut self, ticker: &str) {
+        if let Some(count) = self.count_by_tickers.get_mut(ticker) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.balance_watches.stop(ticker);
+            }
         }
     }
 
@@ -217,9 +233,7 @@ impl MakerOrdersContext {
         let removed = self.orders.remove(uuid);
         if removed.is_some() {
             if let Some(ticker) = self.order_tickers.remove(uuid) {
-                if let Some(count) = self.count_by_tickers.get_mut(&ticker) {
-                    *count = count.saturating_sub(1);
-                }
+                self.decrement_ticker_count(&ticker);
             }
         }
         removed
@@ -268,9 +282,7 @@ impl MakerOrdersContext {
         let expired = self.orders.drop_expired_entries();
         for (uuid, _) in &expired {
             if let Some(ticker) = self.order_tickers.remove(uuid) {
-                if let Some(count) = self.count_by_tickers.get_mut(&ticker) {
-                    *count = count.saturating_sub(1);
-                }
+                self.decrement_ticker_count(&ticker);
             }
         }
         expired

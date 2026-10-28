@@ -1391,3 +1391,238 @@ mod per_swap_htlc_key_recovery {
         assert!(other.contains(PAYMENT_TXID_DISPLAY), "{other}");
     }
 }
+
+/// T39.11.q (R39.11.26): the wallet's own send record answers the already-sent question before any
+/// server is asked, and never answers "not sent". The records are made by the real send path
+/// (`z_send_htlc` -> `send_outputs` -> `record_sent_in_wallet_db`), the coin is then restarted over the
+/// same wallet database, and the question is asked through the swap trait over the scripted backend.
+mod own_send_record {
+    use super::*;
+    use crate::SwapOps;
+    use keys::Public;
+
+    const TIME_LOCK: u32 = 1_790_000_000;
+    /// The compressed secp256k1 generator and its double: two valid public keys.
+    const MY_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const OTHER_KEY: &str = "02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const SECRET_HASH: [u8; 20] = [5; 20];
+
+    fn key(hex_str: &str) -> Vec<u8> { hex::decode(hex_str).unwrap() }
+
+    /// Funds the HTLC of `(MY_KEY, OTHER_KEY, SECRET_HASH)` from the wallet and returns what the send
+    /// returned.
+    async fn fund_htlc(fixture: &LightCoinFixture) -> ZTransaction {
+        super::super::z_htlc::z_send_htlc(
+            &fixture.coin,
+            TIME_LOCK,
+            &Public::from_slice(&key(MY_KEY)).unwrap(),
+            &Public::from_slice(&key(OTHER_KEY)).unwrap(),
+            &SECRET_HASH,
+            BigDecimal::from(1),
+        )
+        .await
+        .expect("the HTLC is funded")
+    }
+
+    async fn already_sent(fixture: &LightCoinFixture, my_key: &str, other_key: &str) -> Option<crate::TransactionEnum> {
+        fixture
+            .coin
+            .check_if_my_payment_sent(TIME_LOCK, &key(my_key), &key(other_key), &SECRET_HASH, 0, &None)
+            .compat()
+            .await
+            .expect("the question is answered")
+    }
+
+    /// The requests the fixture's backend has seen, by method.
+    fn methods(fixture: &LightCoinFixture) -> Vec<&'static str> {
+        fixture.transport.calls.lock().iter().map(|(_, m)| *m).collect()
+    }
+
+    /// Requests that put the address question to a server (or fetch a transaction for it).
+    fn address_requests(fixture: &LightCoinFixture) -> usize {
+        methods(fixture)
+            .into_iter()
+            .filter(|m| ["history", "utxos", "tx", "balance", "send"].contains(m))
+            .count()
+    }
+
+    fn assert_is(found: Option<crate::TransactionEnum>, funding: &ZTransaction) {
+        let found = found.expect("the payment is reported as sent");
+        let mut written = Vec::new();
+        funding.write(&mut written).unwrap();
+        assert_eq!(found.tx_hex(), written, "the recorded transaction itself is returned");
+    }
+
+    /// An unmined record paying exactly the HTLC script, within its expiry, answers "sent" after a
+    /// restart. The only request the coin makes is the tip read that expiry is judged against.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unmined_record_within_expiry_answers_sent_without_an_address_request() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        let funding = fund_htlc(&fixture).await;
+        let restarted = fixture.reopen();
+        assert!(methods(&restarted).is_empty(), "a restart makes no request of its own");
+
+        let found = already_sent(&restarted, MY_KEY, OTHER_KEY).await;
+
+        assert_is(found, &funding);
+        assert_eq!(
+            address_requests(&restarted),
+            0,
+            "no server was asked the address question: {:?}",
+            methods(&restarted)
+        );
+        assert!(
+            methods(&restarted).iter().all(|m| ["info", "cache", "tip"].contains(m)),
+            "only the tip read for the expiry decision: {:?}",
+            methods(&restarted)
+        );
+    }
+
+    /// A mined record counts, and needs no request at all.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_mined_record_answers_sent_with_no_request() {
+        let Some(mut fixture) = LightCoinFixture::new() else {
+            return;
+        };
+        let funding = fund_htlc(&fixture).await;
+        fixture.scan_block_containing(&funding, 12);
+        let restarted = fixture.reopen();
+        let script_pubkey = funding
+            .transparent_bundle()
+            .unwrap()
+            .vout
+            .iter()
+            .find(|out| out.script_pubkey().0 .0.len() == 23)
+            .unwrap()
+            .script_pubkey()
+            .0
+             .0
+            .clone();
+        let records = restarted
+            .history()
+            .recorded_transactions_containing(&script_pubkey)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].mined_height, Some(12), "the scan marked the record mined");
+
+        let found = already_sent(&restarted, MY_KEY, OTHER_KEY).await;
+
+        assert_is(found, &funding);
+        assert!(
+            methods(&restarted).is_empty(),
+            "a mined record is answered with no request: {:?}",
+            methods(&restarted)
+        );
+    }
+
+    /// An unmined record whose expiry height the fresh tip has passed is disregarded and the servers
+    /// are asked; their answer is what comes back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unmined_record_past_its_expiry_is_disregarded_and_the_servers_are_asked() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        let funding = fund_htlc(&fixture).await;
+        let expiry: u64 = u32::from(funding.expiry_height()).into();
+        let mut restarted = fixture.reopen();
+        restarted.set_tip(expiry + 1);
+
+        let found = already_sent(&restarted, MY_KEY, OTHER_KEY).await;
+
+        assert!(found.is_none(), "the expired record did not answer");
+        assert!(
+            address_requests(&restarted) > 0,
+            "the servers were asked: {:?}",
+            methods(&restarted)
+        );
+    }
+
+    /// The expiry boundary is the one `wait_for_confirmations` uses: a transaction is expired when the
+    /// tip has passed its expiry height, not when the tip reaches it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_record_still_counts_at_the_expiry_height_itself() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        let funding = fund_htlc(&fixture).await;
+        let expiry: u64 = u32::from(funding.expiry_height()).into();
+        let mut restarted = fixture.reopen();
+        restarted.set_tip(expiry);
+
+        let found = already_sent(&restarted, MY_KEY, OTHER_KEY).await;
+
+        assert_is(found, &funding);
+        assert_eq!(address_requests(&restarted), 0, "{:?}", methods(&restarted));
+    }
+
+    /// A recorded send that does not pay the asked HTLC's script is disregarded: the question for a
+    /// different HTLC goes to the servers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recorded_send_without_the_htlc_output_is_disregarded() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        // A plain shielded send, and an HTLC funding for another key pair: neither pays the asked script.
+        fixture.send(SEND_AMOUNT / 2).await.unwrap();
+        let restarted = fixture.reopen();
+
+        let found = already_sent(&restarted, OTHER_KEY, MY_KEY).await;
+
+        assert!(found.is_none());
+        assert!(
+            address_requests(&restarted) > 0,
+            "the servers were asked: {:?}",
+            methods(&restarted)
+        );
+    }
+
+    /// The same record does not answer for a script it only resembles: the asked HTLC differs in its
+    /// lock time, so the output is not exactly the asked script.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_record_paying_a_different_htlc_script_is_disregarded() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        fund_htlc(&fixture).await;
+        let restarted = fixture.reopen();
+
+        let found = restarted
+            .coin
+            .check_if_my_payment_sent(TIME_LOCK + 1, &key(MY_KEY), &key(OTHER_KEY), &SECRET_HASH, 0, &None)
+            .compat()
+            .await
+            .expect("the question is answered");
+
+        assert!(found.is_none());
+        assert!(address_requests(&restarted) > 0, "{:?}", methods(&restarted));
+    }
+
+    /// With nothing recorded the answer "not sent" comes from the servers' scripted healthy empty
+    /// history; the record contributes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn with_an_empty_record_not_sent_comes_from_the_servers() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+
+        let found = already_sent(&fixture, MY_KEY, OTHER_KEY).await;
+
+        assert!(found.is_none());
+        assert!(
+            address_requests(&fixture) > 0,
+            "the servers were asked and answered: {:?}",
+            methods(&fixture)
+        );
+    }
+
+    /// A wallet database that cannot be read is no answer either way: the question goes on to the
+    /// server path, which here fails on the same unreadable database (the backend's branch binding
+    /// lives in it) and so returns the undetermined error. The record answered neither "sent" nor
+    /// "not sent".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_record_falls_through_to_the_server_path() {
+        let Some(fixture) = LightCoinFixture::new() else { return };
+        fund_htlc(&fixture).await;
+        let restarted = fixture.reopen();
+        std::fs::write(restarted.history().wallet_db_path(), b"this is not a database").unwrap();
+
+        let answer = restarted
+            .coin
+            .check_if_my_payment_sent(TIME_LOCK, &key(MY_KEY), &key(OTHER_KEY), &SECRET_HASH, 0, &None)
+            .compat()
+            .await;
+
+        let error = answer.expect_err("an unreadable record never answers, either way");
+        assert!(error.contains("the HTLC could not be searched for"), "{error}");
+    }
+}

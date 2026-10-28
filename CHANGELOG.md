@@ -59,6 +59,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
   server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
   one connects; if none does, the error names each server. More in ch.38 §38.6.4.
+
+- **A node now reads a coin's balance only while it has a maker order selling that coin.** It used to
+  read the balance of every activated coin every 10 seconds, whether or not any order needed it, and
+  those reads competed with order posting for the same throttled Electrum session. Now the balance of
+  a coin is read every 30 seconds, and only while at least one of your maker orders has that coin as
+  its base; a coin that is only activated, or only the other side of your orders, is not read at all.
+  The interval is fixed and cannot be changed. For a market maker this means an order's volume
+  follows a deposit or spend within about 30 seconds instead of 10, and a freshly posted order
+  is checked against the balance read while it was created. An order restored at start or converted
+  from a timed-out taker order is re-checked once, 30 seconds after the node starts watching its coin.
+  Detail: PR #116; CRD ch.60 R60.4.5, R60.4.6.
+
 - **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
   shows that a node's copy of the maker's orders differs, the node asks another node for an update.
   It used to describe its copy by the maker's advertised state instead of its own, so while the maker
@@ -218,6 +230,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
+  gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
+  comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
+  so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
+  exchange repairs what a dropped message carried. A peer that stays at the limit for a full minute is
+  disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
+  Messages are also sent in the order they were queued, where a backlog used to go out newest first.
+  The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
+  minute. Nothing new is sent on the wire. More in ch.28 §28.9B.
+
+- **A taker now keeps trying to send its swap payment until the same moment the reference does.** The
+  taker gave up on sending its payment one third of the swap's lock duration after the start. It now uses
+  the maker-payment wait deadline, two fifths of the lock duration, which is the same deadline it already
+  uses to wait for the maker payment's confirmations. A taker whose maker payment confirmed late used to
+  end the swap at this step, losing its dex fee and leaving the maker's payment locked until its refund.
+  The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
+- **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
+- **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
+- **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending
+  its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
+  the wallet's own record of the transactions it broadcast. This works even when the configured
+  `lightwalletd` servers cannot answer address questions. The record only ever answers "sent"; anything
+  else still goes to the servers. Detail: PR #125; CRD ch.39 R39.11.26.
 - **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
   - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
   - each server gets at most 120 seconds per check;
@@ -515,6 +550,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
+- [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
+  ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
+  wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
+  refused before its fee.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
   ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
   release.
