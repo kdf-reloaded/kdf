@@ -502,7 +502,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
   sync for more than five minutes now receives a full snapshot instead of a delta (as it already
   did after a write to the pair); within five minutes nothing changes. More in
-  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131, PR #134.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
