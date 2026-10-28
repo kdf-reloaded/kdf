@@ -368,6 +368,32 @@ fn branch_identifiers_parse_as_the_service_sends_them() {
     assert_eq!(parse_branch_id("1ffffffff"), None);
 }
 
+/// R39.11.4i(e): the node's no-address-index answer is its own condition, whatever the status code;
+/// any other service answer stays a serve failure.
+#[test]
+fn status_error_classifies_the_no_address_index_message_apart_from_a_service_error() {
+    let refused = status_error(tonic::Status::unknown("-5: No information available for address"));
+    assert_eq!(
+        refused,
+        EndpointError::NoAddressIndex("Unknown error: -5: No information available for address".to_owned())
+    );
+    assert_eq!(
+        refused.to_string(),
+        "the server's node keeps no address index: Unknown error: -5: No information available for address"
+    );
+    assert_eq!(
+        status_error(tonic::Status::internal("-5: NO INFORMATION AVAILABLE FOR ADDRESS")),
+        EndpointError::NoAddressIndex("Internal error: -5: NO INFORMATION AVAILABLE FOR ADDRESS".to_owned())
+    );
+    assert!(matches!(
+        status_error(tonic::Status::unknown("something else")),
+        EndpointError::Service(_)
+    ));
+    // It ends a read instead of being bisected; a service error is bisected.
+    assert!(!WindowError::from(&refused).serve_failure);
+    assert!(WindowError::from(&status_error(tonic::Status::unknown("something else"))).serve_failure);
+}
+
 // ---------------------------------------------------------------------------------------------
 // A scripted transport
 // ---------------------------------------------------------------------------------------------
@@ -1287,7 +1313,7 @@ fn refusing_every_request(calls: Arc<Mutex<usize>>) -> impl FnMut(u64, u64) -> f
             txs: Vec::new(),
             error: Some(WindowError {
                 serve_failure: true,
-                message: "Unknown error: -5: No information available for address".to_owned(),
+                message: "Internal error: the node could not serve a transaction".to_owned(),
             }),
         })
     }
@@ -1327,7 +1353,7 @@ async fn a_refusing_endpoint_costs_about_sixty_thousand_requests_unbounded_and_e
     assert_eq!(read.requests, 18);
     let failure = read.failure.clone().expect("named failure");
     assert!(
-        failure.starts_with("could not serve 5 heights of window 4137700..=4138699 (last error: Unknown error: -5: No information available for address); the failure is not confined to single transactions"),
+        failure.starts_with("could not serve 5 heights of window 4137700..=4138699 (last error: Internal error: the node could not serve a transaction); the failure is not confined to single transactions"),
         "{failure}"
     );
     assert!(!read.is_clean());

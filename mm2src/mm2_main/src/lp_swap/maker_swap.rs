@@ -784,14 +784,6 @@ impl MakerSwap {
     }
 
     async fn maker_payment(&self) -> Result<(Option<MakerSwapCommand>, Vec<MakerSwapEvent>), String> {
-        let timeout = self.r().data.started_at + self.r().data.lock_duration / 3;
-        let now = now_ms() / 1000;
-        if now > timeout {
-            return Ok((Some(MakerSwapCommand::Finish), vec![
-                MakerSwapEvent::MakerPaymentTransactionFailed(ERRL!("Timeout {} > {}", now, timeout).into()),
-            ]));
-        }
-
         // ch.51 R71/R72: read the algorithm already selected for this swap
         // rather than recomputing with the 20-byte default -- this is the
         // hash the maker's own on-chain payment must actually commit to.
@@ -819,6 +811,17 @@ impl MakerSwap {
             Ok(res) => match res {
                 Some(tx) => tx,
                 None => {
+                    // ch.51 R17/R29: the send deadline applies only when no payment of ours is on chain yet.
+                    let timeout = self.r().data.started_at + self.r().data.lock_duration / 3;
+                    let now = now_ms() / 1000;
+                    if now > timeout {
+                        return Ok((Some(MakerSwapCommand::Finish), vec![
+                            MakerSwapEvent::MakerPaymentTransactionFailed(
+                                ERRL!("Timeout {} > {}", now, timeout).into(),
+                            ),
+                        ]));
+                    }
+
                     let payment_fut = self.maker_coin.send_maker_payment(
                         self.r().data.maker_payment_lock as u32,
                         &*self.r().my_maker_coin_htlc_pub,
@@ -2512,6 +2515,139 @@ mod maker_swap_tests {
         assert_eq!(expected, actual);
         assert!(unsafe { MY_PAYMENT_SENT_CALLED });
         assert!(unsafe { MAKER_REFUND_CALLED });
+    }
+
+    /// A maker swap loaded from the saved log of `MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT`, with both coins mocked.
+    /// Its `started_at` lies in 2019, so every swap built here is far past the payment send deadline until a test
+    /// moves `started_at` forward.
+    fn maker_swap_for_payment_stage() -> MakerSwap {
+        let maker_saved_swap: MakerSavedSwap = json::from_str(MAKER_SAVED_PAYMENT_ERRORED_BUT_SENT).unwrap();
+        let key_pair =
+            key_pair_from_seed("spice describe gravity federal blast come thank unfair canal monkey style afraid")
+                .unwrap();
+        let ctx = test_ctx_with_netid(key_pair);
+        TestCoin::ticker.mock_safe(|_| MockResult::Return("ticker"));
+        TestCoin::swap_contract_address.mock_safe(|_| MockResult::Return(None));
+        let maker_coin = MmCoinEnum::Test(TestCoin::default());
+        let taker_coin = MmCoinEnum::Test(TestCoin::default());
+        MakerSwap::load_from_saved(ctx, maker_coin, taker_coin, maker_saved_swap)
+            .unwrap()
+            .0
+    }
+
+    /// T21 (CRD ch.51 R17): a maker payment already on chain is adopted when the stage is re-entered after the send
+    /// deadline: `MakerPaymentSent` with that transaction, no second broadcast, no payment-failed event.
+    #[test]
+    fn maker_payment_resumed_after_deadline_with_payment_on_chain_adopts_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        let maker_swap = maker_swap_for_payment_stage();
+        assert!(maker_swap.r().data.started_at + maker_swap.r().data.lock_duration / 3 < now_ms() / 1000);
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::ok(Some(eth_tx_for_test().into()))))
+        });
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(maker_swap.maker_payment()).unwrap();
+        assert!(matches!(command, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MakerSwapEvent::MakerPaymentSent(ident) => {
+                let tx: coins::TransactionEnum = eth_tx_for_test().into();
+                assert_eq!(ident.tx_hash, tx.tx_hash());
+                assert_eq!(ident.tx_hex, tx.tx_hex().into());
+            },
+            other => panic!("expected MakerPaymentSent, got {other:?}"),
+        }
+        assert_eq!(
+            SEND_CALLS.load(Ordering::SeqCst),
+            0,
+            "a found payment is never sent again"
+        );
+    }
+
+    /// T21 (CRD ch.51 R17): past the send deadline with nothing on chain the step fails with the timeout error and
+    /// broadcasts nothing.
+    #[test]
+    fn maker_payment_after_deadline_without_payment_fails_without_sending() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        let maker_swap = maker_swap_for_payment_stage();
+        TestCoin::check_if_my_payment_sent
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(None))));
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(maker_swap.maker_payment()).unwrap();
+        assert!(matches!(command, Some(MakerSwapCommand::Finish)));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MakerSwapEvent::MakerPaymentTransactionFailed(err) => {
+                assert!(err.error.contains("Timeout"), "{}", err.error)
+            },
+            other => panic!("expected MakerPaymentTransactionFailed, got {other:?}"),
+        }
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// T21 (CRD ch.51 R17): a failed already-sent search fails the step with that error, at any time, and broadcasts
+    /// nothing.
+    #[test]
+    fn maker_payment_search_error_fails_the_step_without_sending() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        let maker_swap = maker_swap_for_payment_stage();
+        // Inside the deadline, so the failure cannot come from the timeout.
+        maker_swap.w().data.started_at = now_ms() / 1000;
+        TestCoin::check_if_my_payment_sent.mock_safe(|_, _, _, _, _, _, _| {
+            MockResult::Return(Box::new(futures01::future::err("search backend down".to_string())))
+        });
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(maker_swap.maker_payment()).unwrap();
+        assert!(matches!(command, Some(MakerSwapCommand::Finish)));
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            MakerSwapEvent::MakerPaymentTransactionFailed(err) => {
+                assert!(err.error.contains("search backend down"), "{}", err.error)
+            },
+            other => panic!("expected MakerPaymentTransactionFailed, got {other:?}"),
+        }
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    /// T21 (CRD ch.51 R17): the normal path is unchanged: inside the deadline, nothing found, the payment is sent once
+    /// and reported as `MakerPaymentSent`.
+    #[test]
+    fn maker_payment_within_deadline_not_found_sends() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEND_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+        let maker_swap = maker_swap_for_payment_stage();
+        maker_swap.w().data.started_at = now_ms() / 1000;
+        TestCoin::check_if_my_payment_sent
+            .mock_safe(|_, _, _, _, _, _, _| MockResult::Return(Box::new(futures01::future::ok(None))));
+        TestCoin::send_maker_payment.mock_safe(|_, _, _, _, _, _, _| {
+            SEND_CALLS.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(eth_tx_for_test().into())))
+        });
+
+        let (command, events) = block_on(maker_swap.maker_payment()).unwrap();
+        assert!(matches!(command, Some(MakerSwapCommand::WaitForTakerPayment)));
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], MakerSwapEvent::MakerPaymentSent(_)));
+        assert_eq!(SEND_CALLS.load(Ordering::SeqCst), 1);
     }
 
     /// A real Tendermint platform coin or token on `ticker`, registered in `ctx` next to the other coins. Tendermint
