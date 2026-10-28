@@ -97,6 +97,7 @@ pub(crate) async fn process_orders_keep_alive(
     i_am_relay: bool,
 ) -> bool {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
+    let deferral_ms = sync_answer_deferral_ms(&ctx);
     let to_request = keep_alive_sync_request(
         &ordermatch_ctx,
         &from_pubkey,
@@ -104,11 +105,14 @@ pub(crate) async fn process_orders_keep_alive(
         i_am_relay,
         SyncRequestRoot::configured(&ctx),
         TRIE_CATCH_UP_BOUND_MS,
+        deferral_ms,
     )
     .await;
 
-    let req = match to_request {
-        Some(req) => req,
+    // `in_flight` ends the record of this request (CRD ch.32 R-Q5b) wherever the function ends: a
+    // failed request, an early return or a dropped future all drop it.
+    let (req, in_flight) = match to_request {
+        Some(to_request) => to_request,
         // The message was processed, simply forward it
         None => return true,
     };
@@ -124,7 +128,7 @@ pub(crate) async fn process_orders_keep_alive(
 
     // Phase 1: derive all index mutations under the Orderbook lock and enqueue their trie ops
     // before releasing it (CRD ch.32 R-T3b item 1).
-    {
+    let queued_batches = {
         let mut orderbook = ordermatch_ctx.orderbook.lock();
         let mut ops = Vec::new();
         for (pair, diff) in response.pair_orders_diff {
@@ -142,6 +146,13 @@ pub(crate) async fn process_orders_keep_alive(
         }
         // Phase 2: the worker applies the batch in the background; queued under the guard.
         orderbook.queue_trie_ops(&ordermatch_ctx.trie_ops_tx, ops);
+        orderbook.trie_ops_enqueued
+    };
+
+    // The request counts as in flight (CRD ch.32 R-Q5b) until the worker has applied the batch. The
+    // forward below does not wait for that (R-F3b): the record ends on a task of its own.
+    if let Some(in_flight) = in_flight {
+        in_flight.complete_after_apply(ordermatch_ctx.trie_store.clone(), queued_batches, deferral_ms);
     }
 
     true
@@ -174,6 +185,11 @@ impl SyncRequestRoot {
 /// the keep-alive's own task, so it may wait for the worker up to `catch_up_bound_ms`; past the
 /// bound the roots are compared with the store as it stands, which at worst costs a request a
 /// caught-up store would not have needed.
+///
+/// With `deferral_ms` above zero (CRD ch.32 R-Q5b) the request comes with the record that marks it as
+/// in flight. The record is made while the trie store is still locked, in the same step that creates
+/// the all-zero placeholder entries of the request, so no request for the placeholder can be seen
+/// without it.
 pub(crate) async fn keep_alive_sync_request(
     ordermatch_ctx: &OrdermatchContext,
     from_pubkey: &str,
@@ -181,7 +197,8 @@ pub(crate) async fn keep_alive_sync_request(
     i_am_relay: bool,
     request_root: SyncRequestRoot,
     catch_up_bound_ms: u64,
-) -> Option<OrdermatchRequest> {
+    deferral_ms: u64,
+) -> Option<(OrdermatchRequest, Option<SyncInFlight>)> {
     // CRD ch.32 R-P3: the receiver's own clock, recorded before anything else.
     pubkey_state_mut(&mut ordermatch_ctx.trie_store.lock().pubkeys_state, from_pubkey).last_keep_alive =
         now_ms() / 1000;
@@ -203,9 +220,22 @@ pub(crate) async fn keep_alive_sync_request(
     };
 
     let mut trie_store = ordermatch_ctx.trie_store.lock();
-    trie_store.prepare_sync_request_for_keep_alive(from_pubkey, keep_alive, i_am_relay, request_root, |topic: &str| {
-        subscribed_topics.contains(topic)
-    })
+    let request = trie_store.prepare_sync_request_for_keep_alive(
+        from_pubkey,
+        keep_alive,
+        i_am_relay,
+        request_root,
+        |topic: &str| subscribed_topics.contains(topic),
+    )?;
+    let in_flight = match &request {
+        OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. } if deferral_ms > 0 => Some(
+            ordermatch_ctx
+                .sync_answer_deferral
+                .track_own_request(from_pubkey, trie_roots.keys()),
+        ),
+        _ => None,
+    };
+    Some((request, in_flight))
 }
 
 pub(crate) fn process_maker_order_updated(
@@ -463,6 +493,26 @@ pub(crate) fn mm2_internal_pubkey_hex(ctx: &MmArc) -> Result<Option<String>, Str
     }
 }
 
+/// CRD ch.59 R59.6.1a: an accepted order message from `pubkey` (the key its signature verified for,
+/// in the hex form the trie store keys its records by) counts as liveness, exactly as a keep-alive
+/// does (R59.6.1). It only refreshes a record the node already holds; it never creates one.
+fn refresh_liveness_from_order_message(ctx: &MmArc, pubkey: &str) {
+    if !order_messages_refresh_liveness(ctx) {
+        return;
+    }
+    let ordermatch_ctx = match OrdermatchContext::from_ctx(ctx) {
+        Ok(ordermatch_ctx) => ordermatch_ctx,
+        Err(e) => {
+            log::warn!("Cannot refresh the liveness of pubkey {}: {}", pubkey, e);
+            return;
+        },
+    };
+    let mut trie_store = ordermatch_ctx.trie_store.lock();
+    if let Some(state) = trie_store.pubkeys_state.get_mut(pubkey) {
+        state.last_keep_alive = now_ms() / 1000;
+    }
+}
+
 /// Attempts to decode a message and process it returning whether the message is valid and worth rebroadcasting
 pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, msg: &[u8], i_am_relay: bool) -> bool {
     match decode_signed::<new_protocol::OrdermatchMessage>(msg) {
@@ -475,6 +525,7 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 new_protocol::OrdermatchMessage::MakerOrderCreated(created_msg) => {
                     let order: OrderbookItem = (created_msg, hex::encode(pubkey.to_bytes().as_slice())).into();
                     insert_or_update_order(&ctx, order);
+                    refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
                     true
                 },
                 new_protocol::OrdermatchMessage::PubkeyKeepAlive(keep_alive) => {
@@ -501,10 +552,15 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                 },
                 new_protocol::OrdermatchMessage::MakerOrderCancelled(cancelled_msg) => {
                     delete_order(&ctx, &pubkey.to_hex(), cancelled_msg.uuid.into());
+                    refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
                     true
                 },
                 new_protocol::OrdermatchMessage::MakerOrderUpdated(updated_msg) => {
-                    process_maker_order_updated(ctx, pubkey.to_hex(), updated_msg)
+                    let accepted = process_maker_order_updated(ctx.clone(), pubkey.to_hex(), updated_msg);
+                    if accepted {
+                        refresh_liveness_from_order_message(&ctx, &pubkey.to_hex());
+                    }
+                    accepted
                 },
             }
         },
@@ -1139,6 +1195,81 @@ pub(crate) fn collect_orderbook_metrics(ctx: &MmArc, orderbook: &Orderbook) {
     mm_gauge!(ctx.metrics, "orderbook.len", orderbook.order_set.len() as i64);
 }
 
+/// Remove the nodes of a pair trie from `memory_db`: every leaf is deleted from the trie the way
+/// `TrieStore::apply_remove` deletes one, so the reference count of each node the trie held drops by
+/// one. A node that another trie holds too (nodes are content addressed) stays readable for it; a
+/// node nobody refers to any more is reclaimed by the next `MemoryDB::purge`.
+///
+/// The zero root of a pair that was announced but never synchronized, and the root of an empty
+/// trie, hold no nodes.
+fn release_pair_trie(memory_db: &mut MemoryDB<Blake2Hasher64>, root: &H64) {
+    if *root == H64::default() || *root == hashed_null_node::<Layout>() {
+        return;
+    }
+    let keys = match collect_trie_keys(memory_db, root) {
+        Ok(keys) => keys,
+        Err(e) => {
+            log::error!("Failed to read the keys of the trie with root {:?}: {:?}", root, e);
+            return;
+        },
+    };
+    if let Err(e) =
+        delta_trie_root::<Layout, _, _, _, _, _>(memory_db, *root, keys.into_iter().map(|key| (key, None::<Vec<u8>>)))
+    {
+        log::error!("Failed to remove the nodes of the trie with root {:?}: {:?}", root, e);
+    }
+}
+
+fn collect_trie_keys(
+    memory_db: &MemoryDB<Blake2Hasher64>,
+    root: &H64,
+) -> Result<Vec<Vec<u8>>, Box<trie_db::TrieError<H64, sp_trie::Error>>> {
+    let trie = TrieDB::<Layout>::new(memory_db, root)?;
+    let mut keys = Vec::new();
+    for key_value in trie.iter()? {
+        let (key, _) = key_value?;
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+/// What the maintenance tick of the trie store reports (see [`TrieStore::snapshot`]).
+pub(crate) struct TrieStoreSnapshot {
+    pub(crate) applied_batches: u64,
+    /// Pubkeys the store tracks.
+    pub(crate) pubkeys: usize,
+    /// Pair histories over all pubkeys.
+    pub(crate) history_pairs: usize,
+    /// Diffs held by all pair histories.
+    pub(crate) history_deltas: usize,
+    /// Nodes of `memory_db` some trie refers to (nodes awaiting the next purge are not counted).
+    /// `None` unless the snapshot was asked to measure `memory_db`: counting is O(nodes).
+    pub(crate) memory_db_entries: Option<usize>,
+    /// Heap size of `memory_db`, table capacity included; `None` like `memory_db_entries`.
+    /// `malloc_size` is unusable on wasm32.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) memory_db_bytes: Option<usize>,
+}
+
+/// Emit the gauges of the trie store and of the queue that feeds it; aggregates only, because a seed
+/// tracks many pubkeys.
+pub(crate) fn collect_trie_store_metrics(ctx: &MmArc, snapshot: &TrieStoreSnapshot, enqueued_batches: u64) {
+    // `applied_batches` is read before `enqueued_batches` and both only grow, so the difference does
+    // not go below zero; the saturation only guards the subtraction itself.
+    let pending = enqueued_batches.saturating_sub(snapshot.applied_batches);
+    mm_gauge!(ctx.metrics, "orderbook.trie_ops.pending", pending as i64);
+    mm_gauge!(ctx.metrics, "orderbook.pubkeys", snapshot.pubkeys as i64);
+    mm_gauge!(ctx.metrics, "orderbook.history.pairs", snapshot.history_pairs as i64);
+    mm_gauge!(ctx.metrics, "orderbook.history.deltas", snapshot.history_deltas as i64);
+    if let Some(entries) = snapshot.memory_db_entries {
+        mm_gauge!(ctx.metrics, "orderbook.memory_db.entries", entries as i64);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(bytes) = snapshot.memory_db_bytes {
+        mm_gauge!(ctx.metrics, "orderbook.memory_db", bytes as i64);
+    }
+}
+
 /// Trie-related state extracted from `Orderbook` to reduce contention on the main
 /// order index. All trie operations go through this store via the async TrieOp channel.
 #[derive(Default)]
@@ -1262,7 +1393,11 @@ impl TrieStore {
                             apply_group(self, &key.0, &key.1, g);
                         }
                     }
-                    self.pubkeys_state.remove(&pubkey);
+                    if let Some(state) = self.pubkeys_state.remove(&pubkey) {
+                        for root in state.trie_roots.values() {
+                            release_pair_trie(&mut self.memory_db, root);
+                        }
+                    }
                 },
                 #[cfg(test)]
                 TrieOp::Flush(done) => {
@@ -1347,7 +1482,56 @@ impl TrieStore {
         if let Some(pubkey_state) = self.pubkeys_state.get_mut(pubkey) {
             pubkey_state.order_pairs_trie_state_history.remove(alb_pair.into());
             pubkey_state.orders_uuids.retain(|(_uuid, pair)| pair != alb_pair);
-            pubkey_state.trie_roots.remove(alb_pair);
+            if let Some(root) = pubkey_state.trie_roots.remove(alb_pair) {
+                release_pair_trie(&mut self.memory_db, &root);
+            }
+        }
+    }
+
+    /// The periodic upkeep of the trie store: the histories drop what is past its time to live and
+    /// give back the room the burst that filled them left behind. Expiry otherwise happens only when
+    /// a pair receives its next update, and an idle pair would keep its whole history.
+    ///
+    /// A pair history is never removed because its diffs ran out: `apply_remove` records a diff only
+    /// while the pair history exists, so the pair histories leave by their own time to live only.
+    pub(crate) fn expire_histories(&mut self) {
+        for pubkey_state in self.pubkeys_state.values_mut() {
+            let pair_histories = &mut pubkey_state.order_pairs_trie_state_history;
+            pair_histories.remove_expired();
+            for history in pair_histories.values_mut() {
+                history.inner.remove_expired();
+                history.inner.shrink_if_sparse();
+            }
+            pair_histories.shrink_if_sparse();
+        }
+    }
+
+    /// Drop the nodes no trie refers to any more and shrink the table that held them.
+    pub(crate) fn purge_memory_db(&mut self) {
+        self.memory_db.purge();
+        self.memory_db.shrink_to_fit();
+    }
+
+    /// Aggregate counts for the gauges of the maintenance tick. The per-tick counts walk the pubkeys
+    /// and pair histories only; `memory_db` is measured (O(nodes)) just when `with_memory_db` is set,
+    /// which the tick does right after a purge, when the table holds live nodes only.
+    pub(crate) fn snapshot(&self, with_memory_db: bool) -> TrieStoreSnapshot {
+        let mut history_pairs = 0;
+        let mut history_deltas = 0;
+        for pubkey_state in self.pubkeys_state.values() {
+            for (_pair, history) in pubkey_state.order_pairs_trie_state_history.iter() {
+                history_pairs += 1;
+                history_deltas += history.get_element().len();
+            }
+        }
+        TrieStoreSnapshot {
+            applied_batches: self.applied_batches,
+            pubkeys: self.pubkeys_state.len(),
+            history_pairs,
+            history_deltas,
+            memory_db_entries: with_memory_db.then(|| self.memory_db.keys().len()),
+            #[cfg(not(target_arch = "wasm32"))]
+            memory_db_bytes: with_memory_db.then(|| parity_util_mem::malloc_size(&self.memory_db)),
         }
     }
 

@@ -62,7 +62,8 @@ fn eth_coin_for_test_with_netid_and_decimals(
     netid: u16,
     decimals: u8,
 ) -> (MmArc, EthCoin) {
-    let web3 = crate::eth::alloy_compat::build_provider(urls, vec![]).unwrap();
+    let web3 =
+        crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
     let web3_instances = vec![Web3Instance {
         web3: web3.clone(),
         is_parity: true,
@@ -181,7 +182,11 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         .unwrap()
         .address();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH".to_string(),
         EthCoinType::Erc20 { .. } => "JST".to_string(),
@@ -364,7 +369,11 @@ fn test_wait_for_payment_spend_timeout() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8555".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
 
     let my_addr = key_pair.address();
@@ -535,7 +544,11 @@ mod search_for_swap_tx_spend_scripted {
             &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
         )
         .unwrap();
-        let web3 = crate::eth::alloy_compat::build_provider(vec![url.to_owned()], vec![]).unwrap();
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
         let ctx = MmCtxBuilder::new().into_mm_arc();
         let swap_contract_address = Address::from_str(SWAP_CONTRACT_ADDR).unwrap();
         let my_addr = key_pair.address();
@@ -1415,7 +1428,11 @@ fn test_message_hash() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1465,7 +1482,11 @@ fn test_sign_verify_message() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1647,7 +1668,11 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
     let public = *key_pair.public();
     let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let conf = json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [] });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
     let ticker = match coin_type {
@@ -2233,7 +2258,11 @@ mod swap_send_path_wire_form {
             &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
         )
         .unwrap();
-        let web3 = crate::eth::alloy_compat::build_provider(vec![url.to_owned()], vec![]).unwrap();
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
         let mut coins = vec![
             json!({"coin": "USDC-PLG20", "protocol": {"type": "ERC20", "protocol_data":
                 {"platform": "MATIC", "contract_address": format!("{:#x}", token_addr)}}}),
@@ -2765,7 +2794,11 @@ mod scripted_node_ports {
         let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
             .into_iter()
             .map(|url| Web3Instance {
-                web3: crate::eth::alloy_compat::build_provider(vec![url], vec![]).unwrap(),
+                web3: crate::eth::alloy_compat::build_provider(
+                    crate::eth::node_url::listed_nodes("TEST", vec![url]),
+                    vec![],
+                )
+                .unwrap(),
                 is_parity: false,
             })
             .collect();
@@ -2917,6 +2950,57 @@ mod gas_price_resolution {
         assert!(matches!(err.into_inner(), Web3RpcError::Internal(m) if m == "All requests failed"));
     }
 
+    /// R57.2.7: the platform coin and a token of it share one gas-price reading, within a request and across
+    /// requests of the node; outside a request each resolves afresh.
+    #[test]
+    fn a_platform_and_its_token_share_one_gas_price_reading() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let platform = coin_on(&node);
+        let token = eth_coin_for_test(
+            EthCoinType::Erc20 {
+                platform: "ETH".to_owned(),
+                token_addr: Address::from_slice(&[7; 20]),
+            },
+            vec![node.url.clone()],
+            None,
+        )
+        .1;
+        assert_eq!((platform.ticker.as_str(), token.ticker.as_str()), ("ETH", "JST"));
+        // The node whose cache is used: its coins file lists the token under its platform.
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new()
+            .with_conf(json!({"coins": [
+                {"coin": "ETH", "protocol": {"type": "ETH"}},
+                {"coin": "JST", "protocol": {"type": "ERC20", "protocol_data": {"platform": "ETH"}}},
+            ]}))
+            .into_mm_arc();
+
+        // Within one request the token asks first, then the platform.
+        let (from_token, from_platform) = block_on(with_request_fee_scope(&ctx, async {
+            let token_price = token.get_gas_price().compat().await.unwrap();
+            let platform_price = platform.get_gas_price().compat().await.unwrap();
+            (token_price, platform_price)
+        }));
+        assert_eq!((from_token, from_platform), (fee_history_price(), fee_history_price()));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+
+        // A later request, platform first this time: the same reading.
+        block_on(with_request_fee_scope(&ctx, async {
+            platform.get_gas_price().compat().await.unwrap();
+            token.get_gas_price().compat().await.unwrap();
+        }));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+
+        // Outside a request (swap execution) every coin resolves afresh.
+        block_on(async {
+            token.get_gas_price().compat().await.unwrap();
+            platform.get_gas_price().compat().await.unwrap();
+        });
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 3);
+    }
+
     /// R57.2.6 item 1: inside one order-posting request the sender fee, the receiver fee and the maximum volume
     /// resolve the gas price once; outside a request (swap execution) every consumer resolves it afresh.
     #[test]
@@ -2925,12 +3009,15 @@ mod gas_price_resolution {
         let node = node(calls.clone(), &[]);
         let coin = coin_on(&node);
 
-        let prices = block_on(with_request_fee_scope(async {
-            let sender = coin.get_gas_price().compat().await.unwrap();
-            let receiver = coin.get_gas_price().compat().await.unwrap();
-            let max_volume = coin.get_gas_price().compat().await.unwrap();
-            (sender, receiver, max_volume)
-        }));
+        let prices = block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                let sender = coin.get_gas_price().compat().await.unwrap();
+                let receiver = coin.get_gas_price().compat().await.unwrap();
+                let max_volume = coin.get_gas_price().compat().await.unwrap();
+                (sender, receiver, max_volume)
+            },
+        ));
         assert_eq!(prices, (fee_history_price(), fee_history_price(), fee_history_price()));
         assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
         assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);

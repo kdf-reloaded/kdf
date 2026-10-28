@@ -12,6 +12,7 @@
 //! helper's rule has a part that does not depend on the parser (secret extraction, the spend search,
 //! the wait loop) that part is the shared one, called with the facts this module read.
 
+use super::z_electrum_fallback::{FallbackError, SentAnswer, SpendAnswer};
 use super::z_lightwalletd::{DetectionLog, FundingFound, HtlcIndexError, LightwalletdClient, OutputRef, SentOutcome,
                             SpendOutcome};
 use super::ZCoin;
@@ -173,10 +174,13 @@ pub(crate) fn wait_for_confirmations(
 
 /// Turns an undetermined detection into the message the caller sees, and records the named conditions
 /// on the sync-error channel (R39.8.0au, R39.11.17): they leave a swap decision short of an answer
-/// while nothing has strictly failed.
-fn report_undetermined(coin: &ZCoin, error: HtlcIndexError) -> String {
-    let message = error.to_string();
-    if error.is_named_condition() {
+/// while nothing has strictly failed. `fallback` is what the Electrum fallback made of the same question
+/// (R39.11.25): when it could not answer either, its conditions are named next to lightwalletd's
+/// (R39.11.20(c)).
+fn report_undetermined(coin: &ZCoin, error: HtlcIndexError, fallback: FallbackError) -> String {
+    let named = error.is_named_condition() || fallback.has_conditions();
+    let message = fallback.appended_to(error.to_string());
+    if named {
         coin.set_shielded_sync_error(&message);
     }
     message
@@ -209,7 +213,17 @@ async fn find_spend_over_lightwalletd(
     match client.0.detect_output_spend(output, from_block, &log).await {
         Ok(SpendOutcome::NotSpent(_)) => Ok(None),
         Ok(SpendOutcome::Spent(spend)) => Ok(Some((read_tx(&spend.tx)?, spend.input_index))),
-        Err(e) => Err(report_undetermined(coin, e)),
+        // No admitted endpoint gave an answer: the activation's Electrum servers are asked (R39.11.25).
+        Err(e) => match coin
+            .z_fields
+            .electrum_fallback
+            .spend(client.backend(), output, &log)
+            .await
+        {
+            Ok(SpendAnswer::Spent { tx, input_index }) => Ok(Some((tx, input_index))),
+            Ok(SpendAnswer::NotSpent) => Ok(None),
+            Err(fallback) => Err(report_undetermined(coin, e, fallback)),
+        },
     }
 }
 
@@ -273,6 +287,28 @@ pub(crate) fn htlc_detection_progress(
         .try_into()
         .ok()?;
     client.0.detection_progress(&hash)
+}
+
+/// The taker refusal's check (R39.11.28) for a ZHTLC coin. A coin not served over lightwalletd has nothing
+/// to check here: its node answers address reads itself. For a Light-mode coin at least one source must
+/// answer an address read of the wallet's own transparent address, lightwalletd first and the Electrum
+/// fallback otherwise, or the taker could not watch its payment for the maker's spend.
+pub(crate) async fn ensure_own_payment_watchable(coin: &ZCoin) -> Result<(), String> {
+    let UtxoRpcClientEnum::LightWalletD(client) = &coin.as_ref().rpc_client else {
+        return Ok(());
+    };
+    let own_address = try_s!(coin.as_ref().derivation_method.iguana_or_err());
+    let source = coin
+        .z_fields
+        .electrum_fallback
+        .ensure_watch_source(client.backend(), own_address)
+        .await?;
+    log::info!(
+        "{}: the taker's payment can be watched for the maker's spend: {} answered an address read",
+        coin.as_ref().conf.ticker,
+        source
+    );
+    Ok(())
 }
 
 /// `check_payment_pays_htlc` for a ZHTLC coin: the payment is read with the Zcash reader and checked by the
@@ -481,11 +517,23 @@ pub(crate) fn check_if_my_payment_sent(
                     coin: &coin.as_ref().conf.ticker,
                     polling: false,
                 };
-                let outcome = client
-                    .0
-                    .detect_funding(&script_pubkey, search_from_block, &log)
-                    .await
-                    .map_err(|e| report_undetermined(&coin, e))?;
+                let outcome = match client.0.detect_funding(&script_pubkey, search_from_block, &log).await {
+                    Ok(outcome) => outcome,
+                    // No admitted endpoint gave an answer: the activation's Electrum servers are asked
+                    // (R39.11.25); their "sent" carries the payment itself.
+                    Err(e) => {
+                        return match coin
+                            .z_fields
+                            .electrum_fallback
+                            .already_sent(client.backend(), &script_pubkey, &log)
+                            .await
+                        {
+                            Ok(SentAnswer::Sent(tx)) => Ok(Some(TransactionEnum::from(tx))),
+                            Ok(SentAnswer::NotSent) => Ok(None),
+                            Err(fallback) => Err(report_undetermined(&coin, e, fallback)),
+                        };
+                    },
+                };
                 match outcome {
                     SentOutcome::NotSent => Ok(None),
                     SentOutcome::Sent(FundingFound::Transaction { tx, .. }) => {

@@ -80,6 +80,8 @@ pub enum UtxoConfError {
     ErrorDeserializingDerivationPath(String),
     InvalidConsensusBranchId(String),
     InvalidVersionGroupId(String),
+    /// The coin's own `fee_estimate_cache_secs` is not an integer from 0 to 600 (CRD ch.38 R38.6.6k item 1).
+    InvalidFeeEstimateCacheSecs(String),
     #[display(
         fmt = "Invalid 'fork_id' {}: expected a hexadecimal string such as \"0x40\" that fits 32 bits, or omit the key to use the coin's default",
         found
@@ -217,6 +219,8 @@ impl<'a> UtxoConfBuilder<'a> {
     /// Builds the configuration and returns, instead of logging them, the warnings the build produced.
     fn build_with_warnings(&self) -> UtxoConfResult<(UtxoCoinConf, Vec<String>)> {
         let mut warnings = Vec::new();
+        crate::request_fee_scope::per_coin_fee_estimate_cache_secs(&[self.conf])
+            .map_to_mm(UtxoConfError::InvalidFeeEstimateCacheSecs)?;
         let checksum_type = self.checksum_type();
         let pub_addr_prefix = self.pub_addr_prefix();
         let p2sh_addr_prefix = self.p2sh_address_prefix();
@@ -585,6 +589,20 @@ mod tests {
             .with_unrecognised_enum_policy(policy)
             .build_with_warnings()
             .unwrap()
+    }
+
+    /// CRD ch.38 R38.6.6k item 1: a coin's own `fee_estimate_cache_secs` is an integer from 0 to 600, or the
+    /// build fails naming the key.
+    #[test]
+    fn fee_estimate_cache_secs_of_a_coin_is_zero_to_six_hundred() {
+        for secs in [json!(0), json!(15), json!(600)] {
+            build("RIN", json!({"coin": "RIN", "fee_estimate_cache_secs": secs})).unwrap();
+        }
+        build("RIN", json!({"coin": "RIN"})).unwrap();
+        for bad in [json!(601), json!(-1), json!("5"), json!(1.5), json!(null)] {
+            let err = build("RIN", json!({"coin": "RIN", "fee_estimate_cache_secs": bad.clone()})).unwrap_err();
+            assert!(err.to_string().contains("fee_estimate_cache_secs"), "{bad}: {err}");
+        }
     }
 
     fn rxd_conf() -> Json { json!({"coin": "RXD", "fork_id": "0x40", "signature_version": "fork_id_rxd"}) }

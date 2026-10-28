@@ -209,8 +209,62 @@ makes its node queries one after another, contrary to R57.2.1.
 > **As-built note (2026-10-27, clean-side record).** R57.2.1's concurrency and
 > R57.2.6's first point are implemented in PR #114. The resolution now issues
 > its queries together, and an order-posting request resolves the gas price
-> once per coin, through the same request scope as chapter 38 R38.6.6j. The
-> cache is not implemented yet.
+> once per coin, through the same request scope as chapter 38 R38.6.6j.
+>
+> **As-built note (2026-10-28, clean-side record).** The short cache is
+> implemented (PR #128) in the same cache as the UTXO fee estimate, under the
+> same `fee_estimate_cache_secs` key, validation and rules; see chapter 38
+> R38.6.6j's as-built note. The resolved legacy gas price is stored after a
+> successful resolution, with the time the resolution finished, and an
+> order-posting request that finds a young entry uses it instead of resolving.
+> Resolutions outside a request scope, which is every swap transaction,
+> neither read the cache nor write to it. The key of the entry is given by
+> R57.2.7 below.
+
+**R57.2.7** *One gas-price reading per chain (Reloaded-original, maintainer
+Decision AD of 2026-10-28; written on the clean side from that decision and a
+market maker's field report, no forbidden-class input).* A platform coin and
+all of its tokens resolve the legacy gas price of R57.2.1 from the same
+sources. The reuse of R57.2.6, within one request and across requests, shall
+therefore share one reading per chain, not one per token:
+- an order-posting request that touches several coins of one chain resolves
+  the gas price once;
+- the cache holds one entry for the chain, keyed by the platform coin.
+The shared reading is the resolved value before any per-coin scaling. A
+per-coin multiplier (R57.2.4 `legacy_price_mult`, not implemented today)
+would be applied to it afterwards, per coin. Whether a shared reading is still
+young enough to reuse is judged against the lifetime of the coin that asks
+(chapter 38 R38.6.6k). A swap's own transactions resolve the gas price fresh,
+as R57.2.6 binds.
+
+*Rationale.* A market maker with 200 token orders on one chain, re-posted
+within one block, needs one gas-price reading, not 200.
+
+*Acceptance.* Two tokens of one chain and their platform coin cause one
+gas-price resolution within one order-posting request, and one across
+requests while the reading is young enough for each of them. A coin of
+another chain resolves its own.
+
+> **As-built note (2026-10-28, clean-side record).** R57.2.7 is implemented
+> (PR #128). `EthCoin::get_gas_price` takes its reading through the request
+> scope under the key of the chain, which is the platform coin's ticker (the
+> `platform` of an ERC-20 or TRC-20 token, the coin's own ticker for a platform
+> coin), and asks on behalf of the calling coin, so the age of a cached reading
+> is judged against that coin's lifetime (chapter 38 R38.6.6k). The adaptive
+> default of R38.6.6k belongs to the chain's entry: its start value comes from
+> the platform coin's `avg_blocktime`, it doubles when a fresh resolution equals
+> the previous fresh one (exactly equal wei), and a differing resolution resets
+> it, whichever coin of the chain caused the fetch. A coin of the chain with its
+> own fixed `fee_estimate_cache_secs` judges age against that value, and its
+> fetches update the chain's entry as chapter 38's note describes. The reading is
+> the value of the resolution itself, before anything per coin; the place where a
+> `legacy_price_mult` (R57.2.4, not implemented) would be applied is the value
+> that `get_gas_price` returns, per coin, not the shared reading. The resolution
+> is made with the sources of the coin that asks first (its gas-station settings
+> and nodes); a token shares the platform's nodes, and a token entry that carries
+> different gas-station settings from its platform would be served the
+> platform's or its own reading, whichever came first. The Tron coin types
+> resolve no legacy gas price through this path.
 
 ## 57.3 The proportional-increase arithmetic
 
@@ -570,6 +624,23 @@ estimation** before the limit is used. Its complete contract:
 > item 5's "every version-two transaction supplies a fixed limit" does not hold for it in
 > Reloaded; it is left unscaled here, as the chapter's scope intends. The `approve_token`
 > RPC is a non-swap call and is unscaled too.
+
+> **Operator guidance (informative; Reloaded-original, 2026-10-28, Decision AF).**
+> `estimate_gas_mult` reaches the legacy ERC-20 `approve` only (items 5-6). Every other
+> swap transaction (the taker fee, the payments, the spends, the refunds, and all
+> version-two calls) uses a fixed limit, so the means of changing one is the `gas_limit`
+> / `gas_limit_v2` block (R57.5.1, R57.6.1), set per chain on the platform coin's entry,
+> from which its tokens inherit (R57.5.3). On a chain that charges the gas *limit* rather
+> than the gas used (Monad does), every unit of limit above the real use is paid, so the
+> limits of such a chain should be set close to measured use, with a margin; on a chain
+> that refunds unused gas a generous limit costs only the up-front balance. A token
+> operation costs on such a chain a multiple of its Ethereum figure (measured 2026-10-28
+> on the same USDC code: `transfer` 1.3 to 1.6 times, `approve` 1.55 times, Base against
+> Monad), so Ethereum-tuned defaults may be too low for a token payment there. The
+> measurements and the reasoning are in
+> [`docs/plans/evm-swap-gas-multiplier.md`](../plans/evm-swap-gas-multiplier.md).
+> Nothing here changes behavior; whether the multiplier should ever scale the fixed
+> limits is open and is not decided by this paragraph.
 
 **R57.5.4** *Implementation status (gap).* Reloaded reads neither
 `gas_limit` nor `gas_limit_v2`. Its V1 gas limits are compile-time
@@ -1808,3 +1879,7 @@ pre-anchor baseline code.*
   *Method:* reading plus mechanical text search against both rows; the gate
   script was not run because there are no code blocks. *Measure:* 0.01
   against the 0.10 threshold.
+- *Reloaded-original addition (2026-10-28), clean side.* R57.2.7 was written
+  by a session that never read the corpus, from the maintainer's Decision AD of
+  2026-10-28 and a market maker's field report. It takes no forbidden-class
+  input, so chapter 01 R38 is not engaged and no gate pass is required.

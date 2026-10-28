@@ -4,6 +4,7 @@
 use super::*;
 use crate::eth::alloy_compat::provider::provider_from_transport;
 use crate::eth::alloy_compat::KdfProvider;
+use crate::eth::node_url::listed_nodes;
 use serde_json::{json, Value as Json};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -117,14 +118,20 @@ pub(crate) fn stub_transport_with_handlers(
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     handler: impl Fn(&Call) -> Reply + Send + Sync + 'static,
 ) -> (AlloyTransport, StubSender) {
+    let nodes = listed_nodes("TEST", urls.iter().map(|u| (*u).to_owned()).collect());
+    stub_transport_of_nodes(nodes, cutoff_s, event_handlers, handler)
+}
+
+/// Like [`stub_transport_with_handlers`] for nodes that already carry the ticker and the list position their log
+/// lines name (CRD ch.35 R35.1.16).
+pub(crate) fn stub_transport_of_nodes(
+    nodes: Vec<ListedNode>,
+    cutoff_s: f64,
+    event_handlers: Vec<RpcTransportEventHandlerShared>,
+    handler: impl Fn(&Call) -> Reply + Send + Sync + 'static,
+) -> (AlloyTransport, StubSender) {
     let sender = StubSender::new(handler);
-    let transport = AlloyTransport::with_sender(
-        urls.iter().map(|u| (*u).to_owned()).collect(),
-        event_handlers,
-        Arc::new(sender.clone()),
-        cutoff_s,
-    )
-    .unwrap();
+    let transport = AlloyTransport::with_sender(nodes, event_handlers, Arc::new(sender.clone()), cutoff_s).unwrap();
     (transport, sender)
 }
 

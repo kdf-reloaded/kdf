@@ -283,7 +283,9 @@ impl BalanceUpdateOrdermatchHandler {
 #[async_trait]
 impl BalanceTradeFeeUpdatedHandler for BalanceUpdateOrdermatchHandler {
     async fn balance_updated(&self, coin: &MmCoinEnum, new_balance: &BigDecimal) {
-        with_request_fee_scope(self.balance_updated_impl(coin, new_balance)).await
+        // The scope belongs to the node; a node that is gone has nothing to update (as in the implementation).
+        let Some(ctx) = MmArc::from_weak(&self.ctx) else { return };
+        with_request_fee_scope(&ctx, self.balance_updated_impl(coin, new_balance)).await
     }
 }
 
@@ -723,8 +725,78 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
     }
 }
 
+/// Period of the trie store maintenance. The diffs of a pair history live 300 s, so one that is past
+/// its time to live is held at most a tenth longer than it has to.
+const TRIE_MAINTENANCE_PERIOD_SECS: f64 = 30.;
+/// The nodes no trie refers to any more are purged on every 20th tick, that is every 600 s.
+const MEMORY_DB_PURGE_EVERY_TICKS: u64 = 20;
+
+/// One round of the trie store maintenance (never awaits, so no lock is held across a suspension):
+/// expire the histories, purge `memory_db` when `purge` is set, and report the gauges. The trie store
+/// lock and the orderbook lock are taken one after the other, never together.
+pub(crate) fn run_trie_store_maintenance(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext, purge: bool) {
+    let snapshot = {
+        let mut trie_store = ordermatch_ctx.trie_store.lock();
+        trie_store.expire_histories();
+        if purge {
+            trie_store.purge_memory_db();
+        }
+        // `memory_db` is measured on purge ticks only, right after the purge, where the table is small.
+        trie_store.snapshot(purge)
+    };
+    // Read after `applied_batches` (see `collect_trie_store_metrics`).
+    let enqueued_batches = ordermatch_ctx.orderbook.lock().trie_ops_enqueued;
+    collect_trie_store_metrics(ctx, &snapshot, enqueued_batches);
+    if purge {
+        // Both locks are released here: `malloc_trim` can take milliseconds and must not delay the trie worker.
+        release_freed_heap();
+    }
+}
+
+/// Parses the resident set size in bytes out of the content of `/proc/self/statm` (the second field is the
+/// number of resident pages).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn parse_statm_rss_bytes(statm: &str, page_size: u64) -> Option<u64> {
+    let resident_pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    resident_pages.checked_mul(page_size)
+}
+
+/// The resident set size of this process in bytes, or `None` when it cannot be read.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn current_rss_bytes() -> Option<u64> {
+    // SAFETY: `sysconf` has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = u64::try_from(page_size).ok().filter(|size| *size > 0)?;
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    parse_statm_rss_bytes(&statm, page_size)
+}
+
+/// After the purge the freed memory of the trie store is still held in the glibc arenas and counted in the
+/// resident set of the process: hand it back to the system. The line with the resident set before and after is
+/// logged when the resident set can be read.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn release_freed_heap() {
+    let rss_before = current_rss_bytes();
+    // SAFETY: `malloc_trim` has no preconditions, it may be called at any time from any thread.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    if let (Some(before), Some(after)) = (rss_before, current_rss_bytes()) {
+        log::debug!("malloc_trim after trie store purge: rss {} -> {} bytes", before, after);
+    }
+}
+
+/// Only glibc has `malloc_trim`: nothing to do elsewhere.
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn release_freed_heap() {}
+
 /// The maintenance step for the own maker orders that are absent from the local orderbook (CRD ch.60 R60.4.6
 /// item 5, ch.59 R59.6.7): reconcile each with a fresh balance read, then re-announce it or cancel it.
+///
+/// The reads (the pair lookup, the base coin's spendable balance and the maximum maker volume, which reads a
+/// fee) take network round trips, so no order's lock is held across them: the lock is taken briefly to copy the
+/// tickers, and again to apply the result. The balance of a base coin is read once per pass, however many missing
+/// orders it has.
 pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext) {
     let mut missing_uuids = Vec::new();
     let mut to_cancel = Vec::new();
@@ -737,33 +809,63 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
         }
     }
 
+    // What the reads need from each missing order, copied under its lock, which is released at once.
+    let mut missing_orders = Vec::new();
     for uuid in missing_uuids {
         let order_mutex = match ordermatch_ctx.maker_orders_ctx.lock().get_order(&uuid) {
             Some(o) => o.clone(),
             None => continue,
         };
+        let (base_ticker, rel_ticker) = {
+            let order = order_mutex.lock().await;
+            (order.base.clone(), order.rel.clone())
+        };
+        missing_orders.push((uuid, order_mutex, base_ticker, rel_ticker));
+    }
 
-        let mut order = order_mutex.lock().await;
-        let (base, rel) = match find_pair(ctx, &order.base, &order.rel).await {
+    // The maximum maker volume of each base coin, or why it could not be had: the balance and the fee are read
+    // once per base coin and pass, with no order lock held.
+    let mut max_vols: HashMap<String, Result<MmNumber, String>> = HashMap::new();
+    let mut reads = Vec::new();
+    for (uuid, order_mutex, base_ticker, rel_ticker) in missing_orders {
+        let (base, rel) = match find_pair(ctx, &base_ticker, &rel_ticker).await {
             Ok(Some(pair)) => pair,
             _ => continue,
         };
-        let current_balance = match base.my_spendable_balance().compat().await {
-            Ok(b) => b,
-            Err(e) => {
+        if !max_vols.contains_key(&base_ticker) {
+            let max_vol = match base.my_spendable_balance().compat().await {
+                Ok(current_balance) => {
+                    match calc_max_maker_vol(ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await {
+                        Ok(info) => Ok(info.volume),
+                        Err(e) => Err(e.to_string()),
+                    }
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            max_vols.insert(base_ticker.clone(), max_vol);
+        }
+        reads.push((uuid, order_mutex, base_ticker, base, rel));
+    }
+
+    // Apply under the order's lock, to an order that is still there.
+    for (uuid, order_mutex, base_ticker, base, rel) in reads {
+        let max_vol = match max_vols.get(&base_ticker) {
+            Some(Ok(max_vol)) => max_vol.clone(),
+            Some(Err(e)) => {
                 log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
                 to_cancel.push(uuid);
                 continue;
             },
+            None => continue,
         };
-        let max_vol = match calc_max_maker_vol(ctx, &base, &current_balance, FeeApproxStage::OrderIssue).await {
-            Ok(info) => info.volume,
-            Err(e) => {
-                log::info!("Error {} on balance check to kickstart order {}, cancelling", e, uuid);
-                to_cancel.push(uuid);
-                continue;
-            },
-        };
+
+        let mut order = order_mutex.lock().await;
+        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
+        // The order may have been cancelled or filled since it was read: then it is left alone and not announced.
+        if !maker_orders.contains_key(&uuid) {
+            continue;
+        }
+
         if max_vol < order.available_amount() {
             order.max_base_vol = order.reserved_amount() + max_vol;
         }
@@ -773,12 +875,8 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
             continue;
         }
 
-        let maker_orders = ordermatch_ctx.maker_orders_ctx.lock();
-
         // notify other nodes only if maker order is still there keeping maker_orders locked during the operation
-        if maker_orders.contains_key(&uuid) {
-            reannounce_missing_own_order(ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
-        }
+        reannounce_missing_own_order(ctx, &order, base.coin_protocol_info(), rel.coin_protocol_info());
     }
 
     for uuid in to_cancel {
@@ -798,7 +896,10 @@ pub(crate) async fn reconcile_missing_own_maker_orders(ctx: &MmArc, ordermatch_c
     }
 }
 
+/// Keeps the memory of the trie store bounded independently of the traffic: histories expire on a
+/// timer, not on the next update of their pair, and `memory_db` is purged and shrunk every 600 s.
 pub async fn clean_memory_loop(ctx_weak: MmWeak) {
+    let mut tick: u64 = 0;
     loop {
         {
             let ctx = match MmArc::from_weak(&ctx_weak) {
@@ -810,10 +911,10 @@ pub async fn clean_memory_loop(ctx_weak: MmWeak) {
             }
 
             let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
-            let mut trie_store = ordermatch_ctx.trie_store.lock();
-            trie_store.memory_db.purge();
+            run_trie_store_maintenance(&ctx, &ordermatch_ctx, tick.is_multiple_of(MEMORY_DB_PURGE_EVERY_TICKS));
         }
-        Timer::sleep(600.).await;
+        tick += 1;
+        Timer::sleep(TRIE_MAINTENANCE_PERIOD_SECS).await;
     }
 }
 
@@ -1412,7 +1513,8 @@ pub async fn start_swap_rpc(ctx: MmArc, req: StartSwapRequest) -> MmResult<Start
 }
 
 pub async fn buy(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(buy_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, buy_impl(ctx, req)).await
 }
 
 async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1451,7 +1553,8 @@ async fn buy_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
 }
 
 pub async fn sell(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
-    with_request_fee_scope(sell_impl(ctx, req)).await
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, sell_impl(ctx, req)).await
 }
 
 async fn sell_impl(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
@@ -1861,7 +1964,7 @@ async fn get_max_volume_and_balance(
 }
 
 pub async fn create_maker_order(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(create_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, create_maker_order_impl(ctx, req)).await
 }
 
 async fn create_maker_order_impl(ctx: &MmArc, req: SetPriceReq) -> Result<MakerOrder, String> {
@@ -2015,7 +2118,7 @@ pub(crate) async fn cancel_previous_maker_orders(
 }
 
 pub async fn update_maker_order(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
-    with_request_fee_scope(update_maker_order_impl(ctx, req)).await
+    with_request_fee_scope(ctx, update_maker_order_impl(ctx, req)).await
 }
 
 async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Result<MakerOrder, String> {
@@ -2078,17 +2181,15 @@ async fn update_maker_order_impl(ctx: &MmArc, req: MakerOrderUpdateReq) -> Resul
         update_msg.with_new_min_volume(actual_min_vol.into());
     }
 
-    // CRD ch.60 R60.6.7 item 3 and its Amendment: on an update the order as updated must still be spendable on
-    // both legs only when the update changes the volume (a volume delta, or `max`). A price-only, minimum-volume
-    // or confirmation-only update is not re-checked. The minimum volume checked is the requested one, else the
-    // one the order already carries.
-    if req.volume_delta.is_some() || req.max.unwrap_or(false) {
-        let min_volume_after_update = req
-            .min_volume
-            .clone()
-            .or_else(|| Some(order_before_update.min_base_vol.clone()));
-        try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
-    }
+    // CRD ch.60 R60.6.7 item 3 and its Amendment (Decision AC): the order as updated must still be spendable on
+    // both legs, whatever the update changes. The fee-rate input may come from the short cache (ch.38 R38.6.6j
+    // item 2, R38.6.6k), so within its lifetime the check makes no node request. The minimum volume checked is
+    // the requested one, else the one the order already carries.
+    let min_volume_after_update = req
+        .min_volume
+        .clone()
+        .or_else(|| Some(order_before_update.min_base_vol.clone()));
+    try_s!(check_pre_trade_spend_safety(ctx, &base_coin, &rel_coin, min_volume_after_update, &new_price).await);
 
     // Calculate order volume and add to update_msg if new_volume is found in the request
     let new_volume = if req.max.unwrap_or(false) {
@@ -2886,4 +2987,30 @@ pub async fn cancel_all_orders_rpc(ctx: MmArc, req: Json) -> Result<Response<Vec
     Response::builder()
         .body(json::to_vec(&res).expect("Serialization failed"))
         .map_err(|e| ERRL!("{}", e))
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod heap_release_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_statm_rss_bytes() {
+        // size resident shared text lib data dt
+        assert_eq!(
+            parse_statm_rss_bytes("5000 1234 300 10 0 900 0\n", 4096),
+            Some(1234 * 4096)
+        );
+        assert_eq!(parse_statm_rss_bytes("5000 0 0 0 0 0 0", 4096), Some(0));
+        assert_eq!(parse_statm_rss_bytes("", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 abc 1", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 -3 1", 4096), None);
+        assert_eq!(parse_statm_rss_bytes("5000 18446744073709551615 1", 4096), None);
+    }
+
+    #[test]
+    fn test_current_rss_bytes_is_readable_and_release_freed_heap_does_not_panic() {
+        assert!(current_rss_bytes().is_some_and(|rss| rss > 0));
+        release_freed_heap();
+    }
 }

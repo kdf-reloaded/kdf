@@ -439,7 +439,7 @@ pub(crate) struct DetectionLog<'a> {
 }
 
 impl DetectionLog<'_> {
-    fn line(&self, message: String) {
+    pub(crate) fn line(&self, message: String) {
         if self.polling {
             common::log::debug!("{}", message);
         } else {
@@ -632,9 +632,14 @@ impl LightwalletdBackend {
                 .flatten()
                 .find(|text| mentions_no_address_index(text))
         });
-        let Some(message) = message else {
-            return;
-        };
+        if let Some(message) = message {
+            self.mark_no_address_index(server, message);
+        }
+    }
+
+    /// Marks `server` "no address index" with the node's `message`, logging once at `warn` the first
+    /// time (R39.11.4i(a)).
+    fn mark_no_address_index(&self, server: &str, message: &str) {
         let first = self
             .no_address_index
             .lock()
@@ -648,6 +653,61 @@ impl LightwalletdBackend {
                 message
             );
         }
+    }
+
+    /// The capability probe of the taker refusal (R39.11.28): does any admitted endpoint answer one
+    /// transparent-address read, a `GetAddressUtxos` of `address`, without the no-address-index
+    /// rejection? Endpoints are asked in configured order, stopping at the first that does; an endpoint
+    /// already marked (R39.11.4i) is not asked, and one that answers with the rejection is marked, exactly
+    /// as a detection marks it. The read's content is irrelevant: an empty listing is an answer.
+    ///
+    /// `Ok` names the endpoint that answered. `Err` has one named condition per configured endpoint (or
+    /// the admission failure that left none), which the refusal's error carries.
+    pub(crate) async fn probe_address_read(&self, address: &Address) -> Result<String, Vec<String>> {
+        let encoded = address.to_string();
+        let admitted = match self.admitted().await {
+            Ok(admitted) => admitted,
+            Err(e) => return Err(vec![format!("no endpoint could be admitted: {}", e)]),
+        };
+        let mut conditions = Vec::new();
+        for server in admitted {
+            if let Some(message) = self.no_address_index_message(&server) {
+                conditions.push(format!(
+                    "{}: no address index, skipped (node message: {})",
+                    server, message
+                ));
+                continue;
+            }
+            let deadline = tokio::time::Instant::now() + self.endpoint_budget;
+            match within_budget(deadline, self.transport.address_utxos(&server, &encoded)).await {
+                Some(Ok(_)) => {
+                    common::log::info!(
+                        "lightwalletd {} answered a transparent-address read; it can watch an HTLC",
+                        server
+                    );
+                    return Ok(server);
+                },
+                Some(Err(EndpointError::NoAddressIndex(message))) => {
+                    self.mark_no_address_index(&server, &message);
+                    conditions.push(format!("{}: no address index (node message: {})", server, message));
+                },
+                Some(Err(e)) => conditions.push(format!("{}: the address read failed: {}", server, e)),
+                None => conditions.push(format!(
+                    "{}: the address read was not answered within {:?}",
+                    server, self.endpoint_budget
+                )),
+            }
+        }
+        // The endpoints admission left out are part of the picture the error gives.
+        if let Some(cached) = self.cached.lock().as_ref() {
+            for (server, reason) in &cached.outcome.excluded {
+                conditions.push(format!("{}: excluded by admission: {}", server, reason));
+            }
+            for (server, error) in &cached.outcome.unreachable {
+                conditions.push(format!("{}: unreachable: {}", server, error));
+            }
+        }
+        Err(conditions)
     }
 
     fn no_address_index_message(&self, server: &str) -> Option<String> {
@@ -669,7 +729,12 @@ impl LightwalletdBackend {
 
     /// Records what the detection of the HTLC with redeem-script hash `hash` is reading, for the
     /// recovery bound's error (R39.5.5). Replaced on every read; removed when the detection ends.
-    fn note_progress(&self, hash: [u8; 20], what: String) { self.detection_progress.lock().insert(hash, what); }
+    pub(crate) fn note_progress(&self, hash: [u8; 20], what: String) {
+        self.detection_progress.lock().insert(hash, what);
+    }
+
+    /// Ends the progress record of the detection for `hash`: the detection ran to its end.
+    pub(crate) fn end_progress(&self, hash: &[u8; 20]) { self.detection_progress.lock().remove(hash); }
 
     /// What the detection in flight for the HTLC with this redeem-script hash read last. After a
     /// detection was dropped before it ended, this stays as it was (R39.5.5).

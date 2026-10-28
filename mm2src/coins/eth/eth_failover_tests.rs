@@ -120,6 +120,47 @@ fn t35_31_the_broadcast_does_not_wait_for_a_node_that_never_answers() {
     assert_eq!(s3.hosts_for("eth_sendRawTransaction").len(), 1);
 }
 
+/// T35.34: a node of the nonce gathering that fails is named with the coin's ticker and its position in the
+/// coin's list (R35.1.16), not "1 of 1".
+#[test]
+fn t35_34_a_failing_node_of_the_nonce_gathering_is_named_with_ticker_and_list_position() {
+    let capturing = install_log_capture();
+    let listed = crate::eth::node_url::listed_nodes("T3534NONCE", vec![NODE_1.into(), NODE_2.into(), NODE_3.into()]);
+    let mut instances = Vec::new();
+    for (i, node) in listed.into_iter().enumerate() {
+        let failing = i == 1;
+        let (transport, _) = stub_transport_of_nodes(vec![node], DIRECT_BOUND_S, vec![], move |call| {
+            if failing {
+                Reply::Fail("connection refused".to_owned())
+            } else {
+                nonce_reply(call, 7)
+            }
+        });
+        instances.push(Web3Instance {
+            web3: provider_from_transport(transport),
+            is_parity: false,
+        });
+    }
+    let pending = block_on(pending_nonce_from_nodes(my_address(), &instances, 0.01)).unwrap();
+    assert_eq!(pending.nodes.len(), 2);
+    if capturing {
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|l| l.contains("[T3534NONCE] Error"))
+            .collect();
+        let wanted = format!(
+            " when getting nonce for addr {:?} from node http://n2.test (node 2 of 3)",
+            my_address()
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[T3534NONCE] Error ") && l.ends_with(&wanted)),
+            "{lines:?}"
+        );
+    }
+}
+
 #[test]
 fn t35_31_no_node_answering_the_nonce_is_six_rounds_then_failure() {
     let mut senders = Vec::new();

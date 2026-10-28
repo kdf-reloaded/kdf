@@ -9,7 +9,7 @@
 
 use super::*;
 use crate::eth::eth_hd_wallet::{EthHDAccount, EthHDWallet};
-use crate::eth::node_url::{host_only, scrub_node_url};
+use crate::eth::node_url::{host_only, listed_nodes, scrub_node_url, ListedNode};
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::HDWalletCoinStorage;
 use crate::is_wallet_only_conf;
@@ -507,34 +507,44 @@ pub(crate) async fn eth_coin_from_params_with_trezor(
 ///
 /// The probe itself runs under the per-node cutoff of the failover path (R35.1.10). The provider kept for a node
 /// is a direct one: nonce gathering and the signed-transaction broadcast (R35.1.12) address each node on its own.
+///
+/// Every log line names the coin and the node's position in the list the request gave (R35.1.16): `nodes` carries
+/// that position with each URL, so the order in which they are probed does not matter.
 async fn probe_eth_nodes(
     ctx: &MmArc,
     ticker: &str,
-    urls: &[String],
+    nodes: &[ListedNode],
 ) -> Result<Vec<Web3Instance>, MmError<EthCoinBuildError>> {
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
     let mut web3_instances = vec![];
-    for url in urls.iter() {
-        let node = host_only(url);
+    for listed in nodes.iter() {
+        let url = &listed.url;
+        let host = host_only(url);
+        let line = |before: &str, reason: &str| listed.slot.line(before, &host, &format!(", {reason}"));
         // LP-17: alloy provider per URL + alloy raw web3_clientVersion.
-        let provider = match super::alloy_compat::build_provider(vec![url.clone()], event_handlers.clone()) {
+        let provider = match super::alloy_compat::build_provider(vec![listed.clone()], event_handlers.clone()) {
             Ok(p) => p,
             Err(e) => {
-                log!("Failed to build alloy provider for node " (node) ", " (scrub_node_url(&e, url)));
+                log!((line("Failed to build alloy provider for node ", &scrub_node_url(&e, url))));
                 continue;
             },
         };
         let version: String = match provider.client().request_noparams("web3_clientVersion").await {
             Ok(v) => v,
             Err(e) => {
-                log!("Couldn't get client version for node " (node) ", " (scrub_node_url(&e.to_string(), url)));
+                log!(
+                    (line(
+                        "Couldn't get client version for node ",
+                        &scrub_node_url(&e.to_string(), url)
+                    ))
+                );
                 continue;
             },
         };
-        let direct = match super::alloy_compat::build_direct_provider(url.clone(), event_handlers.clone()) {
+        let direct = match super::alloy_compat::build_direct_provider(listed.clone(), event_handlers.clone()) {
             Ok(p) => p,
             Err(e) => {
-                log!("Failed to build alloy provider for node " (node) ", " (scrub_node_url(&e, url)));
+                log!((line("Failed to build alloy provider for node ", &scrub_node_url(&e, url))));
                 continue;
             },
         };
@@ -553,6 +563,14 @@ async fn probe_eth_nodes(
         ));
     }
     Ok(web3_instances)
+}
+
+/// The nodes of the request in the random order activation uses (CRD ch.35 R35.1.7). Each node keeps the position
+/// the request gave it (R35.1.16), whatever order is drawn.
+fn shuffled_listed_nodes<R: rand::Rng + ?Sized>(ticker: &str, urls: Vec<String>, rng: &mut R) -> Vec<ListedNode> {
+    let mut nodes = listed_nodes(ticker, urls);
+    nodes.as_mut_slice().shuffle(rng);
+    nodes
 }
 
 /// Default confirmations of the legacy `enable`/`electrum` EVM methods when neither the request nor the coin
@@ -633,6 +651,13 @@ pub(crate) async fn build_eth_coin(
     // The per-coin gas-limit blocks (CRD R57.5, R57.6) are read before any node is contacted: an unusable
     // member fails the activation, naming the key. A token falls back to its platform coin's entry (R57.5.3).
     let (gas_limit, gas_limit_v2) = coin_gas_limits(ctx, conf, &protocol)?;
+    // CRD ch.38 R38.6.6k item 1: the coin's own `fee_estimate_cache_secs`, else (for a token) its platform's.
+    let platform_conf = match &protocol {
+        CoinProtocol::ERC20 { platform, .. } => crate::coin_conf(ctx, platform),
+        _ => Json::Null,
+    };
+    crate::request_fee_scope::per_coin_fee_estimate_cache_secs(&[conf, &platform_conf])
+        .map_to_mm(EthCoinBuildError::InvalidConfig)?;
     // The gas-estimate multiplier (CRD R57.5.3b) is read at the same point and under the same inheritance.
     let estimate_gas_mult = coin_estimate_gas_mult(ctx, conf, &protocol)?;
     // A wallet-only coin has no swap, so its swap contracts are not required: none given means the zero address,
@@ -642,7 +667,7 @@ pub(crate) async fn build_eth_coin(
     let swap_v2_contracts = params.swap_v2_contracts;
     let nft_swap_v2_contract = params.nft_swap_v2_contract;
 
-    let mut urls = params.urls.clone();
+    let urls = params.urls.clone();
     if urls.is_empty() {
         return MmError::err(EthCoinBuildError::AtLeastOneNodeRequired(
             "Enable request for ETH coin must have at least 1 node URL".to_owned(),
@@ -651,14 +676,13 @@ pub(crate) async fn build_eth_coin(
     for url in urls.iter() {
         validate_eth_node_url(url)?;
     }
-    let mut rng = small_rng();
-    urls.as_mut_slice().shuffle(&mut rng);
+    let nodes = shuffled_listed_nodes(ticker, urls, &mut small_rng());
 
     let my_address = signer.address();
 
-    let web3_instances = probe_eth_nodes(ctx, ticker, &urls).await?;
+    let web3_instances = probe_eth_nodes(ctx, ticker, &nodes).await?;
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
-    let web3 = super::alloy_compat::build_provider(urls, event_handlers).map_to_mm(EthCoinBuildError::Internal)?;
+    let web3 = super::alloy_compat::build_provider(nodes, event_handlers).map_to_mm(EthCoinBuildError::Internal)?;
 
     let (coin_type, decimals) = match protocol {
         CoinProtocol::ETH { .. } => (EthCoinType::Eth, 18),
@@ -1085,11 +1109,11 @@ mod tests {
         let capturing = install_log_capture();
         let url = "http://user:secret@127.0.0.1:1/v3/APIKEY?token=X".to_owned();
         let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
-        let err = common::block_on(probe_eth_nodes(&ctx, "ETH", &[url])).unwrap_err();
+        let err = common::block_on(probe_eth_nodes(&ctx, "ETH", &listed_nodes("ETH", vec![url]))).unwrap_err();
         assert!(matches!(err.get_inner(), EthCoinBuildError::Transport(_)), "{err}");
         let lines: Vec<String> = captured_log_lines()
             .into_iter()
-            .filter(|line| line.contains("client version for node"))
+            .filter(|line| line.contains("[ETH] Couldn't get client version for node"))
             .collect();
         if capturing {
             assert_eq!(lines.len(), 1, "{lines:?}");
@@ -1100,6 +1124,63 @@ mod tests {
                 assert!(!text.contains(secret), "{secret} in {text}");
             }
         }
+    }
+
+    /// T35.34: a node keeps the position the request gave it, whatever order the activation shuffle draws.
+    #[test]
+    fn t35_34_positions_survive_the_activation_shuffle() {
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+
+        let urls: Vec<String> = (1..=4).map(|i| format!("http://node{i}.example/key{i}")).collect();
+        let mut orders = std::collections::HashSet::new();
+        for seed in 0..64 {
+            let nodes = shuffled_listed_nodes("ETC", urls.clone(), &mut SmallRng::seed_from_u64(seed));
+            assert_eq!(nodes.len(), 4);
+            orders.insert(nodes.iter().map(|n| n.url.clone()).collect::<Vec<_>>());
+            for node in &nodes {
+                // `node<i>` was configured i-th, so it is "node i of 4" wherever it landed.
+                let configured = node.url.split("node").nth(1).unwrap().chars().next().unwrap();
+                let line = node.slot.line("", "h", "");
+                assert_eq!(line, format!("[ETC] h (node {configured} of 4)"), "seed {seed}");
+            }
+        }
+        assert!(orders.len() > 1, "the seeds must have drawn more than one order");
+    }
+
+    /// T35.34: the probe's lines for a failing node carry the coin's ticker and the node's position in the list
+    /// as the request gave it. Four nodes on one host, different paths: the lines differ in the position only.
+    #[test]
+    fn t35_34_the_probe_names_the_coin_and_the_list_position() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        use rand::rngs::SmallRng;
+        use rand::SeedableRng;
+
+        let capturing = install_log_capture();
+        let urls: Vec<String> = (1..=4)
+            .map(|i| format!("http://127.0.0.1:1/path{i}/SECRET{i}"))
+            .collect();
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let nodes = shuffled_listed_nodes("T3534PROBE", urls, &mut SmallRng::seed_from_u64(7));
+        let err = common::block_on(probe_eth_nodes(&ctx, "T3534PROBE", &nodes)).unwrap_err();
+        assert!(matches!(err.get_inner(), EthCoinBuildError::Transport(_)), "{err}");
+        if !capturing {
+            return;
+        }
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|line| line.contains("[T3534PROBE] Couldn't get client version for node"))
+            .collect();
+        for i in 1..=4 {
+            let wanted =
+                format!("[T3534PROBE] Couldn't get client version for node http://127.0.0.1:1 (node {i} of 4), ");
+            assert_eq!(
+                lines.iter().filter(|l| l.contains(&wanted)).count(),
+                1,
+                "node {i}: {lines:?}"
+            );
+        }
+        assert!(lines.iter().all(|l| !l.contains("SECRET")), "{lines:?}");
     }
 
     /// T35.28 (`wss://` variant): until a WebSocket transport exists the URL is rejected at activation, and the

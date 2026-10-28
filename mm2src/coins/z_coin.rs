@@ -1,7 +1,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawInProgressStatus, WithdrawTaskHandle};
-use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut,
-                               UtxoRpcResult};
+use crate::utxo::rpc_clients::{ElectrumRpcRequest, UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps, UtxoRpcError,
+                               UtxoRpcFut, UtxoRpcResult};
 use crate::utxo::utxo_builder::{UtxoCoinBuildError, UtxoCoinBuildResult, UtxoCoinBuilderCommonOps,
                                 UtxoCoinWithIguanaPrivKeyBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
@@ -134,6 +134,7 @@ macro_rules! try_ztx_s {
 }
 
 mod z_coin_ops;
+#[cfg(not(target_arch = "wasm32"))] mod z_electrum_fallback;
 #[cfg(not(target_arch = "wasm32"))] mod z_ironwood;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_note_lock_tests;
@@ -667,13 +668,26 @@ pub enum ZcoinBackend {
     /// A full node reached through its RPC. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
     Native,
-    /// The configured `light_wallet_d_servers` and nothing else. `electrum_servers` is accepted on
-    /// the activation wire and ignored: no Electrum connection is opened for a ZHTLC coin
-    /// (R39.11.5, R39.11.7).
-    Light { light_wallet_d_servers: Vec<String> },
+    /// The configured `light_wallet_d_servers`, which serve the whole coin, and the activation's
+    /// `electrum_servers`, which are kept for the one thing they are used for: the fallback of three
+    /// swap-path questions (R39.11.25). No Electrum connection is opened, attempted or probed at
+    /// activation (R39.11.5, R39.11.7); an empty list means there is no fallback.
+    Light {
+        light_wallet_d_servers: Vec<String>,
+        electrum_servers: Vec<ElectrumRpcRequest>,
+    },
 }
 
 impl ZcoinBackend {
+    /// The Electrum servers of the activation, for the fallback of R39.11.25; none for a Native coin.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn electrum_servers(&self) -> Vec<ElectrumRpcRequest> {
+        match self {
+            ZcoinBackend::Native => Vec::new(),
+            ZcoinBackend::Light { electrum_servers, .. } => electrum_servers.clone(),
+        }
+    }
+
     fn mode(&self) -> ZcoinMode {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
@@ -738,6 +752,10 @@ pub struct ZCoinFields {
     /// The waits `send_outputs` makes; see [`SendPacing`].
     #[cfg(not(target_arch = "wasm32"))]
     send_pacing: SendPacing,
+    /// The Electrum fallback of the three swap-path questions of a Light-mode coin (CRD ch.39 R39.11.25).
+    /// Holds the activation's `electrum_servers` and connects to none of them until a question needs it.
+    #[cfg(not(target_arch = "wasm32"))]
+    electrum_fallback: z_electrum_fallback::ElectrumFallback,
     /// Message from the most recent shielded sync failure, cleared by the next
     /// successful scan. Without it a failed scan is reported as a scan still in
     /// progress, because both leave `wallet_db_scan_complete` false (R39.8.0au).
@@ -1584,6 +1602,7 @@ mod light_backend_tests {
 
         let backend = ZcoinBackend::Light {
             light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+            electrum_servers: Vec::new(),
         };
         assert!(backend.mode().is_light());
         let builder = builder_for(&ctx, &conf, &params, backend);
@@ -1595,6 +1614,43 @@ mod light_backend_tests {
         assert!(matches!(fee, crate::utxo::TxFee::FixedPerKb(10000)));
     }
 
+    /// T39.11.p / R39.11.5, R39.11.25(e): the activation keeps the Electrum servers for the fallback and
+    /// opens no connection to them. A listening server sees no connection while the coin's client is
+    /// built and while the fallback is made from the activation's list.
+    #[test]
+    fn a_light_coin_with_electrum_servers_opens_no_electrum_connection_at_activation() {
+        use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let conf = json!({ "coin": "ARRR", "txfee": 10000 });
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        block_on(async {
+            let listening = StubServer::start(StubBehavior::Answer).await;
+            let unreachable = ElectrumRpcRequest {
+                url: "127.0.0.1:1".to_owned(),
+                protocol: Default::default(),
+                disable_cert_verification: false,
+                timeout_sec: None,
+            };
+            let backend = ZcoinBackend::Light {
+                light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+                electrum_servers: vec![listening.request(), unreachable],
+            };
+            assert_eq!(backend.electrum_servers().len(), 2, "the list is kept as listed");
+            let fallback =
+                z_electrum_fallback::ElectrumFallback::for_activation(ctx.weak(), "ARRR", backend.electrum_servers());
+            let builder = builder_for(&ctx, &conf, &params, backend);
+            let client = builder
+                .rpc_client()
+                .await
+                .expect("activation does not depend on Electrum");
+            assert!(matches!(client, UtxoRpcClientEnum::LightWalletD(_)), "{client:?}");
+
+            assert_eq!(listening.accepted(), 0, "no connection was opened");
+            drop(fallback);
+            assert_eq!(listening.accepted(), 0);
+        });
+    }
+
     /// The published mainnet ARRR entry has no `txfee`: it must build and keep the shared fixed
     /// default (no estimation is involved).
     #[test]
@@ -1604,6 +1660,7 @@ mod light_backend_tests {
         let conf = json!({ "coin": "ARRR" });
         let backend = ZcoinBackend::Light {
             light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+            electrum_servers: Vec::new(),
         };
         let builder = builder_for(&ctx, &conf, &params, backend);
         let client = block_on(builder.rpc_client()).unwrap();
@@ -1619,6 +1676,7 @@ mod light_backend_tests {
         for conf in [json!({ "coin": "ARRR", "txfee": 0 })] {
             let backend = ZcoinBackend::Light {
                 light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+                electrum_servers: Vec::new(),
             };
             let builder = builder_for(&ctx, &conf, &params, backend);
             let client = block_on(builder.rpc_client()).unwrap();
@@ -1637,6 +1695,7 @@ mod light_backend_tests {
         let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
         let builder = builder_for(&ctx, &conf, &params, ZcoinBackend::Light {
             light_wallet_d_servers: Vec::new(),
+            electrum_servers: Vec::new(),
         });
         let err = block_on(builder.rpc_client()).unwrap_err();
         assert!(
@@ -1650,7 +1709,8 @@ mod light_backend_tests {
         assert_eq!(ZcoinBackend::Native.mode(), ZcoinMode::Native);
         assert!(!ZcoinBackend::Native.mode().is_light());
         assert!(ZcoinBackend::Light {
-            light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()]
+            light_wallet_d_servers: vec!["https://lightd1.example:443".to_owned()],
+            electrum_servers: Vec::new(),
         }
         .mode()
         .is_light());
@@ -2205,7 +2265,9 @@ impl<'a> UtxoCoinBuilderCommonOps for ZCoinBuilder<'a> {
         match &self.backend {
             #[cfg(not(target_arch = "wasm32"))]
             ZcoinBackend::Native => Ok(UtxoRpcClientEnum::Native(self.native_client()?)),
-            ZcoinBackend::Light { light_wallet_d_servers } => {
+            ZcoinBackend::Light {
+                light_wallet_d_servers, ..
+            } => {
                 #[cfg(target_arch = "wasm32")]
                 {
                     let _ = light_wallet_d_servers;
@@ -2334,6 +2396,12 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             in_flight_spends: Mutex::new(HashMap::new()),
             #[cfg(not(target_arch = "wasm32"))]
             send_pacing: SendPacing::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            electrum_fallback: z_electrum_fallback::ElectrumFallback::for_activation(
+                self.ctx.weak(),
+                self.ticker,
+                self.backend.electrum_servers(),
+            ),
             #[cfg(not(target_arch = "wasm32"))]
             shielded_sync_error: Mutex::new(None),
             sapling_state_synced: AtomicBool::new(false),

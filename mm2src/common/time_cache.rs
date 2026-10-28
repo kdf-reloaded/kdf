@@ -34,6 +34,19 @@ pub struct ExpiringElement<Element> {
     element: Element,
     /// The expire time.
     expires: Instant,
+    /// Identifies the one element of the ordered list that stands for this key. It tells that
+    /// element from a leftover of an earlier entry of the same key (removed, then inserted again).
+    serial: u64,
+}
+
+/// An element of the ordered list: a key waiting for its expire time.
+#[derive(Debug)]
+struct QueuedKey<Key> {
+    key: Key,
+    /// The expire time the key was queued with. The entry in the map can expire later.
+    expires: Instant,
+    /// The `serial` of the entry the element was queued for.
+    serial: u64,
 }
 
 impl<Element> ExpiringElement<Element> {
@@ -47,16 +60,23 @@ pub struct TimeCache<Key, Value> {
     /// Mapping a key to its value together with its latest expire time (can be updated through
     /// reinserts).
     map: FnvHashMap<Key, ExpiringElement<Value>>,
-    /// An ordered list of keys by expires time.
-    list: VecDeque<ExpiringElement<Key>>,
+    /// An ordered list of keys by expires time. It holds one element per key; the expire time of an
+    /// element can trail the one in the map, in which case the key is queued again when the element
+    /// reaches the front (see [`TimeCache::remove_expired_keys`]).
+    list: VecDeque<QueuedKey<Key>>,
+    /// The `serial` the next new entry gets.
+    next_serial: u64,
     /// The time elements remain in the cache.
     ttl: Duration,
 }
 
+/// Room (in elements) a map or list may keep beyond twice its length before [`TimeCache::shrink_if_sparse`]
+/// shrinks it.
+pub const SHRINK_FLOOR: usize = 16;
+
 pub struct OccupiedEntry<'a, K, V> {
     expiration: Instant,
     entry: hash_map::OccupiedEntry<'a, K, ExpiringElement<V>>,
-    list: &'a mut VecDeque<ExpiringElement<K>>,
 }
 
 impl<'a, K, V> OccupiedEntry<'a, K, V>
@@ -73,27 +93,20 @@ where
 
     #[allow(dead_code)]
     pub fn insert_and_update_expiration(&mut self, value: V) -> V {
-        //We push back an additional element, the first reference in the list will be ignored
-        // since we also updated the expires in the map, see below.
-        self.list.push_back(ExpiringElement {
-            element: self.entry.key().clone(),
-            expires: self.expiration,
-        });
+        // The key keeps its single list element; the later expire time in the map makes the
+        // element re-queue the key when it reaches the front.
+        let serial = self.entry.get().serial;
         self.entry
             .insert(ExpiringElement {
                 element: value,
                 expires: self.expiration,
+                serial,
             })
             .element
     }
 
     pub fn into_mut_with_update_expiration(mut self) -> &'a mut V {
-        //We push back an additional element, the first reference in the list will be ignored
-        // since we also updated the expires in the map, see below.
-        self.list.push_back(ExpiringElement {
-            element: self.entry.key().clone(),
-            expires: self.expiration,
-        });
+        // The key keeps its single list element, see `insert_and_update_expiration`.
         self.entry.get_mut().update_expiration(self.expiration);
         &mut self.entry.into_mut().element
     }
@@ -102,7 +115,8 @@ where
 pub struct VacantEntry<'a, K, V> {
     expiration: Instant,
     entry: hash_map::VacantEntry<'a, K, ExpiringElement<V>>,
-    list: &'a mut VecDeque<ExpiringElement<K>>,
+    list: &'a mut VecDeque<QueuedKey<K>>,
+    serial: u64,
 }
 
 impl<'a, K, V> VacantEntry<'a, K, V>
@@ -110,15 +124,17 @@ where
     K: Eq + std::hash::Hash + Clone,
 {
     pub fn insert(self, value: V) -> &'a mut V {
-        self.list.push_back(ExpiringElement {
-            element: self.entry.key().clone(),
+        self.list.push_back(QueuedKey {
+            key: self.entry.key().clone(),
             expires: self.expiration,
+            serial: self.serial,
         });
         &mut self
             .entry
             .insert(ExpiringElement {
                 element: value,
                 expires: self.expiration,
+                serial: self.serial,
             })
             .element
     }
@@ -157,38 +173,81 @@ where
         TimeCache {
             map: FnvHashMap::default(),
             list: VecDeque::new(),
+            next_serial: 0,
             ttl,
         }
     }
 
     fn remove_expired_keys(&mut self, now: Instant) {
-        while let Some(element) = self.list.pop_front() {
-            if element.expires > now {
-                self.list.push_front(element);
+        while let Some(queued) = self.list.pop_front() {
+            if queued.expires > now {
+                self.list.push_front(queued);
                 break;
             }
-            if let Occupied(entry) = self.map.entry(element.element.clone()) {
-                if entry.get().expires <= now {
+            if let Occupied(entry) = self.map.entry(queued.key.clone()) {
+                if entry.get().serial != queued.serial {
+                    // Left over from an entry that was removed and inserted again: the live element
+                    // of the key is elsewhere in the list.
+                    continue;
+                }
+                let expires = entry.get().expires;
+                if expires <= now {
                     entry.remove();
+                } else {
+                    // The entry was refreshed after it was queued: queue the key again at its
+                    // current expire time, keeping the list ordered.
+                    let at = self.list.partition_point(|other| other.expires <= expires);
+                    self.list.insert(at, QueuedKey {
+                        key: queued.key,
+                        expires,
+                        serial: queued.serial,
+                    });
                 }
             }
         }
     }
 
-    pub fn entry(&mut self, key: Key) -> Entry<'_, Key, Value> {
-        let now = Instant::now();
+    /// Removes the expired entries now, without waiting for the next write.
+    pub fn remove_expired(&mut self) { self.remove_expired_keys(Instant::now()) }
+
+    /// Gives memory back when the map or the list holds far more room than it needs, which they
+    /// never do on their own after a burst: they are shrunk to their length once the capacity
+    /// exceeds `2 * len + SHRINK_FLOOR`.
+    pub fn shrink_if_sparse(&mut self) {
+        if self.map.capacity() > 2 * self.map.len() + SHRINK_FLOOR {
+            self.map.shrink_to_fit();
+        }
+        if self.list.capacity() > 2 * self.list.len() + SHRINK_FLOOR {
+            self.list.shrink_to_fit();
+        }
+    }
+
+    /// The capacity of the map and of the list of the cache.
+    pub fn capacities(&self) -> (usize, usize) { (self.map.capacity(), self.list.capacity()) }
+
+    /// The number of elements in the ordered list of the cache (one per key, plus those left over from
+    /// removed keys until they reach the front).
+    pub fn queued_len(&self) -> usize { self.list.len() }
+
+    pub fn entry(&mut self, key: Key) -> Entry<'_, Key, Value> { self.entry_at(key, Instant::now()) }
+
+    fn entry_at(&mut self, key: Key, now: Instant) -> Entry<'_, Key, Value> {
         self.remove_expired_keys(now);
         match self.map.entry(key) {
             Occupied(entry) => Entry::Occupied(OccupiedEntry {
                 expiration: now + self.ttl,
                 entry,
-                list: &mut self.list,
             }),
-            Vacant(entry) => Entry::Vacant(VacantEntry {
-                expiration: now + self.ttl,
-                entry,
-                list: &mut self.list,
-            }),
+            Vacant(entry) => {
+                let serial = self.next_serial;
+                self.next_serial += 1;
+                Entry::Vacant(VacantEntry {
+                    expiration: now + self.ttl,
+                    entry,
+                    list: &mut self.list,
+                    serial,
+                })
+            },
         }
     }
 
@@ -240,6 +299,9 @@ where
     pub fn iter(&self) -> Iter<'_, Key, ExpiringElement<Value>> { self.map.iter() }
 
     pub fn keys(&self) -> Keys<'_, Key, ExpiringElement<Value>> { self.map.keys() }
+
+    /// The values of the cache, mutably. Neither the keys nor the expire times change.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> { self.map.values_mut().map(|e| &mut e.element) }
 }
 
 impl<Key, Value> TimeCache<Key, Value>
@@ -379,5 +441,142 @@ mod test {
         cache.insert("e", "");
         cache.remove("e");
         assert!(!cache.contains_key(&"e"));
+    }
+
+    /// Entry at the given time (the tests run on a virtual clock): refreshed when present, inserted otherwise.
+    fn touch_at(cache: &mut TimeCache<&'static str, u32>, key: &'static str, now: Instant) {
+        *cache.entry_at(key, now).or_insert_with_update_expiration(|| 0) += 1;
+    }
+
+    #[test]
+    fn refreshed_entry_survives_its_original_expiry() {
+        let t0 = Instant::now();
+        let mut cache = TimeCache::new(Duration::from_secs(10));
+        touch_at(&mut cache, "k", t0);
+        touch_at(&mut cache, "k", t0 + Duration::from_secs(6));
+
+        // past the expiry the entry had when it was first queued, before the refreshed one
+        cache.remove_expired_keys(t0 + Duration::from_secs(11));
+        assert_eq!(cache.get(&"k"), Some(&2));
+        assert_eq!(cache.queued_len(), 1, "the key is queued again, not twice");
+
+        cache.remove_expired_keys(t0 + Duration::from_secs(15));
+        assert!(cache.contains_key(&"k"), "still within 10 s of the refresh");
+
+        cache.remove_expired_keys(t0 + Duration::from_secs(17));
+        assert!(!cache.contains_key(&"k"));
+        assert_eq!(cache.queued_len(), 0);
+    }
+
+    #[test]
+    fn refreshes_keep_one_list_element_per_key() {
+        let t0 = Instant::now();
+        let mut cache = TimeCache::new(Duration::from_secs(10));
+        for i in 0..1000u64 {
+            for key in ["a", "b", "c"] {
+                touch_at(&mut cache, key, t0 + Duration::from_millis(i));
+            }
+        }
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.queued_len(), 3);
+        assert_eq!(cache.get(&"a"), Some(&1000));
+
+        // insert_and_update_expiration does not queue either
+        if let Entry::Occupied(mut entry) = cache.entry_at("a", t0 + Duration::from_secs(1)) {
+            entry.insert_and_update_expiration(7);
+        } else {
+            panic!("a is cached");
+        }
+        assert_eq!(cache.queued_len(), 3);
+        assert_eq!(cache.get(&"a"), Some(&7));
+    }
+
+    #[test]
+    fn requeued_key_keeps_the_list_ordered() {
+        let t0 = Instant::now();
+        let secs = |n: f64| t0 + Duration::from_secs_f64(n);
+        let mut cache = TimeCache::new(Duration::from_secs(10));
+        touch_at(&mut cache, "a", t0); // expires at 10
+        touch_at(&mut cache, "b", secs(5.)); // 15
+        touch_at(&mut cache, "a", secs(6.)); // refreshed: 16
+        touch_at(&mut cache, "c", secs(7.)); // 17
+
+        // "a" reaches the front at 11 and is queued again between "b" (15) and "c" (17)
+        cache.remove_expired_keys(secs(11.));
+        assert_eq!(cache.queued_len(), 3);
+        cache.remove_expired_keys(secs(15.5));
+        assert!(!cache.contains_key(&"b"));
+        assert!(cache.contains_key(&"a") && cache.contains_key(&"c"));
+        cache.remove_expired_keys(secs(16.5));
+        assert!(!cache.contains_key(&"a"), "a is not held back behind c");
+        assert!(cache.contains_key(&"c"));
+        cache.remove_expired_keys(secs(17.5));
+        assert!(cache.is_empty());
+        assert_eq!(cache.queued_len(), 0);
+    }
+
+    #[test]
+    fn unrefreshed_entries_still_expire_on_time() {
+        let t0 = Instant::now();
+        let mut cache = TimeCache::new(Duration::from_secs(10));
+        touch_at(&mut cache, "a", t0);
+        touch_at(&mut cache, "b", t0 + Duration::from_secs(4));
+        cache.remove_expired_keys(t0 + Duration::from_secs(9));
+        assert_eq!(cache.len(), 2);
+        cache.remove_expired_keys(t0 + Duration::from_secs(10));
+        assert!(!cache.contains_key(&"a") && cache.contains_key(&"b"));
+        cache.remove_expired_keys(t0 + Duration::from_secs(14));
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn list_element_of_a_removed_key_does_not_hold_back_the_reinserted_one() {
+        let t0 = Instant::now();
+        let mut cache = TimeCache::new(Duration::from_secs(10));
+        touch_at(&mut cache, "k", t0);
+        assert_eq!(cache.remove("k"), Some(1));
+        touch_at(&mut cache, "k", t0 + Duration::from_secs(1));
+        assert_eq!(cache.queued_len(), 2);
+
+        // the leftover element (10) is dropped, it must not queue the live key a second time
+        cache.remove_expired_keys(t0 + Duration::from_millis(10_500));
+        assert_eq!(cache.get(&"k"), Some(&1));
+        assert_eq!(cache.queued_len(), 1);
+        cache.remove_expired_keys(t0 + Duration::from_secs(11));
+        assert!(cache.is_empty());
+        assert_eq!(cache.queued_len(), 0);
+    }
+
+    #[test]
+    fn remove_expired_works_on_the_real_clock() {
+        let mut cache = TimeCache::new(Duration::from_millis(50));
+        cache.insert("t", ());
+        cache.remove_expired();
+        assert!(cache.contains_key(&"t"));
+        std::thread::sleep(Duration::from_millis(120));
+        cache.remove_expired();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn shrink_if_sparse_only_shrinks_when_far_above_the_length() {
+        let t0 = Instant::now();
+        let mut cache: TimeCache<u32, u32> = TimeCache::new(Duration::from_secs(10));
+        for i in 0..1000u32 {
+            cache.entry_at(i, t0).or_insert_with(|| i);
+        }
+        let (map_cap, list_cap) = cache.capacities();
+        cache.shrink_if_sparse();
+        assert_eq!(cache.capacities(), (map_cap, list_cap), "dense: nothing to shrink");
+
+        cache.remove_expired_keys(t0 + Duration::from_secs(11));
+        assert!(cache.is_empty());
+        assert_eq!(cache.capacities(), (map_cap, list_cap), "expiry alone keeps the room");
+        cache.shrink_if_sparse();
+        let (map_cap, list_cap) = cache.capacities();
+        assert!(
+            map_cap <= SHRINK_FLOOR && list_cap <= SHRINK_FLOOR,
+            "{map_cap} {list_cap}"
+        );
     }
 }

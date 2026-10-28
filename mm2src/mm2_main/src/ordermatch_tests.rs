@@ -4445,7 +4445,7 @@ mod t60_6_pre_trade_spend_check_tests {
             uuid: order.uuid,
             new_price: None,
             max: None,
-            // R60.6.7 Amendment: only an update that changes the volume is re-checked.
+            // R60.6.7 Amendment (Decision AC): every update is re-checked; this one also changes the volume.
             volume_delta: Some(MmNumber::from("0.5")),
             min_volume: Some(units_8(10_000)),
             base_confs: None,
@@ -4495,9 +4495,9 @@ mod t60_6_pre_trade_spend_check_tests {
         );
     }
 
-    /// CRD ch.60 R60.6.7 Amendment: only an update that changes the volume re-checks the order. The mock counts
-    /// the safe-amount reads and reports a safe amount no order can meet, so a read that happens shows as the
-    /// typed refusal and a read that does not happen shows as none.
+    /// CRD ch.60 R60.6.7 Amendment (Decision AC): every update re-checks the order, whatever it changes. The mock
+    /// counts the safe-amount reads and reports a safe amount no order can meet, so a check that happens shows as
+    /// the typed refusal.
     mod update_maker_order_check_scope {
         use super::*;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4563,27 +4563,27 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn price_only_update_is_not_rechecked() {
+        fn price_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.new_price = Some(MmNumber::from("2")));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn min_volume_only_update_is_not_rechecked() {
+        fn min_volume_only_update_is_rechecked() {
             let (error, reads) = run(|req| req.min_volume = Some(units_8(12_000)));
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
-        fn confirmations_only_update_is_not_rechecked() {
+        fn confirmations_only_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.base_confs = Some(3);
                 req.rel_nota = Some(true);
             });
-            assert_eq!(reads, 0, "{error:?}");
-            assert!(!refused_by_the_check(&error), "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
         }
 
         #[test]
@@ -4601,12 +4601,81 @@ mod t60_6_pre_trade_spend_check_tests {
         }
 
         #[test]
-        fn max_false_is_not_a_volume_change() {
+        fn max_false_update_is_rechecked() {
             let (error, reads) = run(|req| {
                 req.max = Some(false);
                 req.new_price = Some(MmNumber::from("2"));
             });
-            assert_eq!(reads, 0, "{error:?}");
+            assert!(reads > 0, "{error:?}");
+            assert!(refused_by_the_check(&error), "{error:?}");
+        }
+
+        /// Two price-only updates of the order, each refused under the conditions of (a). The safe amount of a
+        /// coin is read through the request scope like the coin layer does, from a dynamic-fee estimate that the
+        /// mock counts. Returns the refusals and the number of estimate fetches.
+        fn two_price_only_updates(conf: Json) -> (Vec<String>, usize) {
+            use coins::request_fee_scope::{memoize, FeeReadKind};
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(units_8(10_000)));
+            let fetches = Arc::new(AtomicUsize::new(0));
+            let counted = fetches.clone();
+            TestCoin::spend_safe_amount.mock_safe(move |coin| {
+                let (fetches, ticker) = (counted.clone(), coin.ticker().to_owned());
+                MockResult::Return(Box::pin(async move {
+                    let counted = fetches.clone();
+                    memoize::<u64, (), _>(FeeReadKind::UtxoFeeEstimate, &ticker, async move {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        Ok(7)
+                    })
+                    .await
+                    .unwrap();
+                    Ok(Some(MmNumber::from(1_000)))
+                }))
+            });
+            let ctx = ctx_with(conf, &["DYN", "KMD"]);
+            let (base, rel) = pair("DYN", "KMD");
+            let order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(1.into())
+                .with_min_base_vol(Some(units_8(11_000)))
+                .with_price(1.into())
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .build_unchecked();
+            let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+            ordermatch_ctx
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, Arc::new(AsyncMutex::new(order.clone())));
+            let refusals = ["2", "3"]
+                .iter()
+                .map(|price| {
+                    let req = update_request(order.uuid, |req| req.new_price = Some(MmNumber::from(*price)));
+                    match block_on(update_maker_order(&ctx, req)) {
+                        Err(e) => e,
+                        Ok(_) => panic!("the update must be refused"),
+                    }
+                })
+                .collect();
+            (refusals, fetches.load(Ordering::SeqCst))
+        }
+
+        /// T60.6 (g): a price-only update is re-checked and refused under the conditions of (a), and while the
+        /// fee reading is young enough it makes no fee request: the two updates cost one estimate fetch.
+        #[test]
+        fn t60_6_g_a_price_only_update_is_rechecked_and_served_from_the_cache() {
+            let (refusals, fetches) = two_price_only_updates(json!({}));
+            for refusal in &refusals {
+                assert!(refusal.contains("is too low, required at least"), "{refusal}");
+            }
+            // The check refuses at the first leg it finds short (the base coin), so it reads that coin's
+            // estimate once; the second update reads nothing.
+            assert_eq!(fetches, 1, "one fetch for the two updates");
+        }
+
+        /// With the cache off, each of the same two updates reads the estimate.
+        #[test]
+        fn t60_6_g_with_the_cache_off_every_update_reads_the_estimate() {
+            let (refusals, fetches) = two_price_only_updates(json!({"fee_estimate_cache_secs": 0}));
+            assert!(refusals.iter().all(|r| r.contains("is too low, required at least")));
+            assert_eq!(fetches, 2);
         }
     }
 
@@ -5353,6 +5422,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         trie_store: Arc::new(parking_lot::Mutex::new(TrieStore::default())),
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
+        sync_answer_deferral: Default::default(),
         pending_maker_reserved: Default::default(),
         orderbook_tickers: Default::default(),
         original_tickers: Default::default(),
@@ -6028,9 +6098,10 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
+            0,
         ));
         worker.join().unwrap();
-        assert!(request.is_none(), "{:?}", request);
+        assert!(request.is_none(), "the caught-up store matches the advertised root");
         assert!(peer.trie_store.lock().pubkeys_state[PK].last_keep_alive >= before);
 
         // The worker stays behind past the bound: the store as it stands is compared and a request
@@ -6043,10 +6114,11 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             SHORT_WAIT_MS,
+            0,
         ));
         assert!(matches!(
             request,
-            Some(OrdermatchRequest::SyncPubkeyOrderbookState { .. })
+            Some((OrdermatchRequest::SyncPubkeyOrderbookState { .. }, None))
         ));
     }
 
@@ -6075,6 +6147,7 @@ mod keep_alive_receiver_catch_up_tests {
             true,
             SyncRequestRoot::Held,
             TRIE_CATCH_UP_BOUND_MS,
+            0,
         ));
         let returned = std::time::Instant::now();
         let seen = first_seen.join().unwrap().expect("the receipt is recorded");
@@ -6679,6 +6752,442 @@ mod sync_request_root_tests {
             SyncRequestRoot::configured(&ctx_with(json!({ "orderbook_sync_names_held_root": false }))),
             SyncRequestRoot::Advertised
         );
+    }
+}
+
+/// The memory the trie store holds after a burst of order updates, a pair clear or a pubkey removal
+/// is given back by the maintenance tick (`run_trie_store_maintenance`), without any further traffic.
+mod trie_store_memory_retention {
+    use super::*;
+    use common::time_cache::SHRINK_FLOOR;
+    use mm2_metrics::MetricsOps;
+
+    const MAKER: &str = "021111111111111111111111111111111111111111111111111111111111111111";
+    /// The test time to live of the histories (`TRIE_ORDER_HISTORY_TIMEOUT`, `TRIE_STATE_HISTORY_TIMEOUT`)
+    /// plus a margin.
+    const PAST_TTL: Duration = Duration::from_millis(3500);
+
+    fn new_node() -> (MmArc, Arc<OrdermatchContext>) {
+        let (ctx, _, _) = make_ctx_for_tests();
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        (ctx, octx)
+    }
+
+    /// The pair histories of `MAKER` live an hour instead of the test default, so that only the
+    /// diffs of a pair history expire in the test.
+    fn keep_pair_histories(octx: &OrdermatchContext) {
+        octx.trie_store.lock().pubkeys_state.insert(
+            MAKER.to_owned(),
+            OrderbookPubkeyState::with_history_timeout(Duration::from_secs(3600)),
+        );
+    }
+
+    fn seed(ctx: &MmArc, octx: &OrdermatchContext, n: usize) -> Vec<OrderbookItem> {
+        let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "RIN".into(), "KMD".into(), n);
+        for order in &orders {
+            insert_or_update_order(ctx, order.clone());
+        }
+        octx.wait_trie_ops_flushed();
+        orders
+    }
+
+    /// `updates` price updates, round-robin over the orders, each one a different price.
+    fn burst(ctx: &MmArc, octx: &OrdermatchContext, orders: &[OrderbookItem], updates: u64) {
+        burst_from(ctx, octx, orders, 0, updates)
+    }
+
+    /// Like [`burst`], the prices start at `first_price_numer` (over one million).
+    fn burst_from(
+        ctx: &MmArc,
+        octx: &OrdermatchContext,
+        orders: &[OrderbookItem],
+        first_price_numer: u64,
+        updates: u64,
+    ) {
+        for i in 0..updates {
+            let mut update = MakerOrderUpdated::new(orders[i as usize % orders.len()].uuid);
+            update.with_new_price(BigRational::new(
+                (2000 + first_price_numer + i).into(),
+                1_000_000.into(),
+            ));
+            assert!(process_maker_order_updated(ctx.clone(), MAKER.to_owned(), update));
+            if i % 500 == 499 {
+                octx.wait_trie_ops_flushed();
+            }
+        }
+        octx.wait_trie_ops_flushed();
+    }
+
+    fn pair() -> String { alb_ordered_pair("RIN", "KMD") }
+
+    /// `(diffs in the pair history, its time-cache capacities, queued list length)`.
+    fn inner_state(octx: &OrdermatchContext) -> (usize, (usize, usize), usize) {
+        let trie_store = octx.trie_store.lock();
+        let histories = &trie_store.pubkeys_state[MAKER].order_pairs_trie_state_history;
+        let history = histories.get(&pair()).expect("the pair history exists");
+        (
+            history.inner.len(),
+            history.inner.capacities(),
+            history.inner.queued_len(),
+        )
+    }
+
+    /// `(pair histories, their time-cache capacities, queued list length)` of the per-pubkey cache.
+    fn outer_state(octx: &OrdermatchContext) -> (usize, (usize, usize), usize) {
+        let trie_store = octx.trie_store.lock();
+        let histories = &trie_store.pubkeys_state[MAKER].order_pairs_trie_state_history;
+        (histories.len(), histories.capacities(), histories.queued_len())
+    }
+
+    fn assert_not_sparse(what: &str, len: usize, (map_capacity, list_capacity): (usize, usize)) {
+        let bound = 2 * len + SHRINK_FLOOR;
+        assert!(map_capacity <= bound, "{what}: map capacity {map_capacity} > {bound}");
+        assert!(
+            list_capacity <= bound,
+            "{what}: list capacity {list_capacity} > {bound}"
+        );
+    }
+
+    fn roots(octx: &OrdermatchContext) -> HashMap<AlbOrderedOrderbookPair, H64> {
+        octx.wait_trie_ops_flushed();
+        octx.trie_store.lock().pubkeys_state[MAKER].trie_roots.clone()
+    }
+
+    #[test]
+    fn idle_pair_history_is_expired_and_shrunk_by_the_tick() {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 30);
+        burst(&ctx, &octx, &orders, 20_000);
+
+        let (diffs, ..) = inner_state(&octx);
+        assert!(diffs > 2, "the burst left {diffs} diffs");
+        let (pairs, _, queued) = outer_state(&octx);
+        assert_eq!(
+            (pairs, queued),
+            (1, 1),
+            "one list element per pair history after 20000 refreshes"
+        );
+        let bytes_before = octx.trie_store.lock().snapshot(true).memory_db_bytes.unwrap();
+
+        std::thread::sleep(PAST_TTL);
+        // Nothing wrote to the pair, so nothing has reclaimed the expired diffs yet.
+        assert!(inner_state(&octx).0 > 2);
+
+        run_trie_store_maintenance(&ctx, &octx, true);
+
+        let (diffs, capacities, queued) = inner_state(&octx);
+        assert!(diffs <= 2, "{diffs} diffs left");
+        assert_eq!(queued, diffs, "no expired element is left in the list");
+        assert_not_sparse("diffs", diffs, capacities);
+        let (pairs, capacities, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (1, 1));
+        assert_not_sparse("pair histories", pairs, capacities);
+
+        // memory_db holds the live nodes of the 30 orders and nothing else: the same as a node that
+        // only ever saw the final orders
+        let (ref_ctx, ref_octx) = new_node();
+        let final_orders: Vec<OrderbookItem> = octx.orderbook.lock().order_set.values().cloned().collect();
+        assert_eq!(final_orders.len(), 30);
+        for order in final_orders {
+            insert_or_update_order(&ref_ctx, order);
+        }
+        ref_octx.wait_trie_ops_flushed();
+        run_trie_store_maintenance(&ref_ctx, &ref_octx, true);
+        assert_eq!(roots(&octx), roots(&ref_octx));
+
+        let live = octx.trie_store.lock().snapshot(true);
+        let reference = ref_octx.trie_store.lock().snapshot(true);
+        let (live_bytes, reference_bytes) = (live.memory_db_bytes.unwrap(), reference.memory_db_bytes.unwrap());
+        assert_eq!(live.memory_db_entries, reference.memory_db_entries);
+        assert!(
+            live_bytes <= 2 * reference_bytes,
+            "memory_db holds {} B for {} live nodes, a fresh one {} B",
+            live_bytes,
+            live.memory_db_entries.unwrap(),
+            reference_bytes
+        );
+        assert!(
+            bytes_before > 2 * reference_bytes,
+            "the burst did not fill memory_db ({bytes_before} B), the test shows nothing"
+        );
+    }
+
+    #[test]
+    fn idle_pair_history_cache_is_emptied_by_the_tick_when_its_own_time_is_up() {
+        let (ctx, octx) = new_node();
+        let orders = seed(&ctx, &octx, 30);
+        burst(&ctx, &octx, &orders, 5_000);
+        let (pairs, _, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (1, 1));
+
+        std::thread::sleep(PAST_TTL);
+        run_trie_store_maintenance(&ctx, &octx, false);
+
+        let (pairs, capacities, queued) = outer_state(&octx);
+        assert_eq!((pairs, queued), (0, 0));
+        assert_not_sparse("pair histories", pairs, capacities);
+        // the pair itself is still known
+        assert!(octx.trie_store.lock().pubkeys_state[MAKER]
+            .trie_roots
+            .contains_key(&pair()));
+    }
+
+    /// A node that holds the answer to a sync request for `old_root` of the maker's pair.
+    fn node_with_one_update() -> (MmArc, Arc<OrdermatchContext>, H64, Uuid) {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 5);
+        let old_root = roots(&octx)[&pair()];
+        burst(&ctx, &octx, &orders[..1], 1);
+        assert_ne!(roots(&octx)[&pair()], old_root);
+        (ctx, octx, old_root, orders[0].uuid)
+    }
+
+    fn answer(ctx: &MmArc, root: H64) -> DeltaOrFullTrie<Uuid, OrderbookP2PItem> {
+        let request = HashMap::from([(pair(), root)]);
+        let mut response = process_sync_pubkey_orderbook_state(ctx.clone(), MAKER.to_owned(), request)
+            .unwrap()
+            .unwrap();
+        response.pair_orders_diff.remove(&pair()).unwrap()
+    }
+
+    #[test]
+    fn the_tick_does_not_change_a_delta_answer_within_the_ttl_and_expired_roots_get_the_full_trie() {
+        let (ctx, octx, old_root, updated) = node_with_one_update();
+        // a second node whose expired diff is reclaimed lazily, by the next write to the pair
+        let (lazy_ctx, lazy_octx, lazy_old_root, _) = node_with_one_update();
+
+        let before = answer(&ctx, old_root);
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let after = answer(&ctx, old_root);
+        for delta in [before, after] {
+            match delta {
+                DeltaOrFullTrie::Delta(delta) => {
+                    assert_eq!(delta.keys().collect::<Vec<_>>(), vec![&updated]);
+                },
+                DeltaOrFullTrie::FullTrie(_) => panic!("the diff is within its time to live"),
+            }
+        }
+
+        std::thread::sleep(PAST_TTL);
+        run_trie_store_maintenance(&ctx, &octx, true);
+        match answer(&ctx, old_root) {
+            DeltaOrFullTrie::FullTrie(orders) => assert_eq!(orders.len(), 5),
+            DeltaOrFullTrie::Delta(_) => panic!("the diff expired and was reclaimed by the tick"),
+        }
+
+        // the same outcome as lazy expiry: the next write to the pair reclaims the expired diff
+        let lazy_orders: Vec<OrderbookItem> = lazy_octx.orderbook.lock().order_set.values().cloned().collect();
+        burst_from(&lazy_ctx, &lazy_octx, &lazy_orders[..1], 500_000, 1);
+        match answer(&lazy_ctx, lazy_old_root) {
+            DeltaOrFullTrie::FullTrie(orders) => assert_eq!(orders.len(), 5),
+            DeltaOrFullTrie::Delta(_) => panic!("lazy expiry has no diff for the old root either"),
+        }
+    }
+
+    fn gauges(ctx: &MmArc) -> HashMap<String, i64> {
+        let json = ctx.metrics.collect_json().unwrap();
+        json["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric["type"] == "gauge")
+            .map(|metric| {
+                (
+                    metric["key"].as_str().unwrap().to_owned(),
+                    metric["value"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_tick_reports_the_gauges() {
+        let (ctx, octx) = new_node();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 10);
+        burst(&ctx, &octx, &orders, 50);
+
+        // A tick without purge reports the four per-tick gauges and leaves `memory_db` alone.
+        run_trie_store_maintenance(&ctx, &octx, false);
+        let reported = gauges(&ctx);
+        assert_eq!(reported["orderbook.pubkeys"], 1);
+        assert_eq!(reported["orderbook.history.pairs"], 1);
+        // the 50 updates, and the 9 inserts after the first of the 10 orders (the first one has no previous root)
+        assert_eq!(reported["orderbook.history.deltas"], 59);
+        assert_eq!(reported["orderbook.trie_ops.pending"], 0);
+        assert!(!reported.contains_key("orderbook.memory_db.entries"));
+        assert!(!reported.contains_key("orderbook.memory_db"));
+        let light = octx.trie_store.lock().snapshot(false);
+        assert!(light.memory_db_entries.is_none());
+        #[cfg(not(target_arch = "wasm32"))]
+        assert!(light.memory_db_bytes.is_none());
+
+        // A purge tick adds the two node-store gauges, measured after the purge.
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let reported = gauges(&ctx);
+        assert_eq!(reported["orderbook.pubkeys"], 1);
+        assert_eq!(reported["orderbook.history.deltas"], 59);
+        let snapshot = octx.trie_store.lock().snapshot(true);
+        let entries = snapshot.memory_db_entries.unwrap();
+        let bytes = snapshot.memory_db_bytes.unwrap();
+        assert_eq!(reported["orderbook.memory_db.entries"], entries as i64);
+        assert!(entries >= 10, "at least a leaf per order");
+        assert_eq!(live_nodes(&mut octx.trie_store.lock()), entries);
+        assert_eq!(reported["orderbook.memory_db"], bytes as i64);
+        assert!(reported["orderbook.memory_db"] > 0);
+
+        // batches queued and not applied yet
+        collect_trie_store_metrics(&ctx, &snapshot, snapshot.applied_batches + 3);
+        assert_eq!(gauges(&ctx)["orderbook.trie_ops.pending"], 3);
+
+        // the sweep keeps reporting the length of the index
+        collect_orderbook_metrics(&ctx, &octx.orderbook.lock());
+        assert_eq!(gauges(&ctx)["orderbook.len"], 10);
+    }
+
+    // ---- ClearPair and RemovePubkey give the nodes of the pair trie back
+
+    const PAIR: &str = "DOC:MARTY";
+
+    fn item(item_pubkey: &str, uuid: Uuid, price_numer: u64) -> OrderbookItem {
+        trie_op_item(item_pubkey, "DOC", "MARTY", uuid, price_numer)
+    }
+
+    fn insert_op(pubkey: &str, item_pubkey: &str, uuid: Uuid, price_numer: u64) -> TrieOp {
+        TrieOp::Insert {
+            pubkey: pubkey.to_owned(),
+            alb_pair: PAIR.to_owned(),
+            uuid,
+            order: item(item_pubkey, uuid, price_numer),
+        }
+    }
+
+    fn insert_all_ops(pubkey: &str, item_pubkey: &str, orders: u64, price_base: u64) -> Vec<TrieOp> {
+        (0..orders)
+            .map(|n| insert_op(pubkey, item_pubkey, trie_op_uuid(n), price_base + n))
+            .collect()
+    }
+
+    /// Nodes some trie refers to; panics when a node has a negative count (a node removed twice).
+    fn live_nodes(store: &mut TrieStore) -> usize {
+        store.memory_db.purge();
+        let nodes = store.memory_db.keys();
+        assert!(
+            nodes.values().all(|rc| *rc > 0),
+            "a node has a negative reference count"
+        );
+        nodes.len()
+    }
+
+    fn read_back(store: &TrieStore, pubkey: &str) -> usize {
+        let root = store.pubkeys_state[pubkey].trie_roots[PAIR];
+        get_full_trie::<Uuid, OrderbookItem>(
+            &root,
+            &store.memory_db,
+            |uuid| Some(item("X", *uuid, 1)),
+            MissingValue::Fail,
+        )
+        .unwrap()
+        .len()
+    }
+
+    #[test]
+    fn full_resyncs_with_changed_data_leave_no_orphaned_nodes() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops(MAKER, MAKER, 30, 1000));
+        for round in 1..=20 {
+            let mut ops = vec![trie_op_clear(MAKER)];
+            ops.extend(insert_all_ops(MAKER, MAKER, 30, 1000 + round * 100));
+            store.apply_ops(ops);
+        }
+        let held = live_nodes(&mut store);
+
+        let mut fresh = TrieStore::default();
+        fresh.apply_ops(insert_all_ops(MAKER, MAKER, 30, 1000 + 20 * 100));
+        assert_eq!(
+            store.pubkeys_state[MAKER].trie_roots,
+            fresh.pubkeys_state[MAKER].trie_roots
+        );
+        assert_eq!(
+            held,
+            live_nodes(&mut fresh),
+            "only the nodes of the last resync are held"
+        );
+        assert_eq!(read_back(&store, MAKER), 30);
+    }
+
+    #[test]
+    fn clearing_a_pair_keeps_nodes_another_pubkey_shares() {
+        // Both pubkeys carry the same orders, so their tries are the same nodes.
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("B", "X", 30, 1000));
+        assert_eq!(store.pubkeys_state["A"].trie_roots, store.pubkeys_state["B"].trie_roots);
+        let shared = live_nodes(&mut store);
+
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "A".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), shared, "B still holds every node");
+        assert_eq!(read_back(&store, "B"), 30);
+
+        // A comes back with the same orders: the tries are shared again
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        assert_eq!(live_nodes(&mut store), shared);
+        assert_eq!(read_back(&store, "A"), 30);
+
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "B".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), shared);
+        assert_eq!(read_back(&store, "A"), 30);
+        store.apply_ops(vec![TrieOp::ClearPair {
+            pubkey: "A".to_owned(),
+            alb_pair: PAIR.to_owned(),
+        }]);
+        assert_eq!(live_nodes(&mut store), 0, "nobody refers to a node any more");
+    }
+
+    #[test]
+    fn removing_a_pubkey_gives_its_nodes_back_and_keeps_shared_ones() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("B", "X", 30, 1000));
+        store.apply_ops(insert_all_ops("C", "Y", 12, 5000));
+        let all = live_nodes(&mut store);
+
+        // a bare RemovePubkey, without the removal of the orders first
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "C".to_owned() }]);
+        let without_c = live_nodes(&mut store);
+        assert!(without_c < all);
+
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "A".to_owned() }]);
+        assert_eq!(live_nodes(&mut store), without_c, "B holds the nodes A shared");
+        assert_eq!(read_back(&store, "B"), 30);
+
+        store.apply_ops(vec![TrieOp::RemovePubkey { pubkey: "B".to_owned() }]);
+        assert_eq!(live_nodes(&mut store), 0);
+    }
+
+    #[test]
+    fn removing_a_pubkey_after_its_orders_were_removed_still_works() {
+        let mut store = TrieStore::default();
+        store.apply_ops(insert_all_ops("A", "X", 30, 1000));
+        let mut ops: Vec<TrieOp> = (0..30)
+            .map(|n| TrieOp::Remove {
+                pubkey: "A".to_owned(),
+                alb_pair: PAIR.to_owned(),
+                uuid: trie_op_uuid(n),
+            })
+            .collect();
+        ops.push(TrieOp::RemovePubkey { pubkey: "A".to_owned() });
+        store.apply_ops(ops);
+        assert!(store.pubkeys_state.is_empty());
+        assert_eq!(live_nodes(&mut store), 0);
     }
 }
 
@@ -7315,6 +7824,985 @@ mod t60_7_maker_balance_watch_tests {
             probe.log.lock().unwrap().clear();
         }
         std::fs::remove_dir_all(&dbdir).ok();
+    }
+
+    // ---- R60.4.6 item 5: the maintenance reads hold no order lock -------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    fn publishes(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> usize {
+        let mut n = 0;
+        while let Ok(cmd) = rx.try_recv() {
+            if matches!(
+                cmd,
+                AdexBehaviourCmd::PublishMsg { .. } | AdexBehaviourCmd::PublishMsgFrom { .. }
+            ) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    fn order_mutex(ctx: &MmArc, order: &MakerOrder) -> Arc<AsyncMutex<MakerOrder>> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let order_mutex = ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .get_order(&order.uuid)
+            .unwrap()
+            .clone();
+        order_mutex
+    }
+
+    /// The balance read and the fee read of the maintenance pass try to take the order's lock when they are
+    /// reached. They succeed only if the pass does not hold the lock across its network reads. Returns the number
+    /// of reads that found the lock taken.
+    fn mock_reads_that_try_the_lock(
+        order_mutex: Arc<AsyncMutex<MakerOrder>>,
+        spendable: &'static str,
+        on_balance_read: impl Fn() + 'static,
+    ) -> Arc<AtomicUsize> {
+        let blocked = Arc::new(AtomicUsize::new(0));
+        let (balance_guard, fee_guard) = (blocked.clone(), blocked.clone());
+        let balance_order = order_mutex.clone();
+        TestCoin::my_balance.mock_safe(move |_| {
+            if balance_order.try_lock().is_none() {
+                balance_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            on_balance_read();
+            MockResult::Return(Box::new(futures01::future::ok(CoinBalance::new(bd(spendable)))))
+        });
+        TestCoin::get_sender_trade_fee.mock_safe(move |coin, _value, _stage| {
+            if order_mutex.try_lock().is_none() {
+                fee_guard.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            let fee = TradeFee {
+                coin: coin.ticker().to_owned(),
+                amount: MmNumber::from("0.1"),
+                paid_from_trading_vol: false,
+            };
+            MockResult::Return(Box::pin(async move { Ok(fee) }))
+        });
+        blocked
+    }
+
+    /// The order's lock is free while the pass reads the base coin's balance and the fee, so a call that awaits
+    /// the order (`my_orders`, `update_maker_order`, `cancel`) does not wait for those round trips. The pass
+    /// still applies its result: the order is lowered and re-announced.
+    #[test]
+    fn t60_7_g_the_reconciliation_holds_no_order_lock_across_its_reads() {
+        let probe = Probe::install("5");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let order = own_order("BASE", "REL", "10", "1");
+        store(&ctx, &order);
+        let mutex = order_mutex(&ctx, &order);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counted = reads.clone();
+        let blocked = mock_reads_that_try_the_lock(mutex.clone(), "5", move || {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+        });
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "the balance was read");
+        assert_eq!(
+            blocked.load(AtomicOrdering::SeqCst),
+            0,
+            "a read found the order's lock taken"
+        );
+        assert_eq!(block_on(mutex.lock()).max_base_vol, MmNumber::from("4.9"));
+        assert!(publishes(&mut p2p_rx) >= 1, "and the order is re-announced");
+    }
+
+    /// Several missing orders on one base coin share one balance read per pass; another base coin reads its own.
+    #[test]
+    fn t60_7_g_missing_orders_on_one_base_coin_share_one_balance_read() {
+        let probe = Probe::install("10");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        for (base, rel) in [("BASE", "REL"), ("BASE", "OTHER"), ("BASE", "REL"), ("OTHER", "REL")] {
+            store(&ctx, &own_order(base, rel, "5", "1"));
+        }
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(probe.count("read BASE"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.count("read OTHER"), 1, "{:?}", probe.entries());
+        assert_eq!(probe.entries().len(), 2);
+        assert!(publishes(&mut p2p_rx) >= 4, "every order is re-announced");
+    }
+
+    /// An order that went away between the read and the apply is neither touched nor announced.
+    #[test]
+    fn t60_7_g_an_order_removed_between_the_read_and_the_apply_is_left_alone() {
+        let probe = Probe::install("2");
+        let ctx = ctx_with_coins(&probe);
+        let (tx, mut p2p_rx) = mpsc::channel(100);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let cancelled_count = cancelled.clone();
+        delete_my_maker_order.mock_safe(move |_, _, _| {
+            cancelled_count.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let gone = own_order("BASE", "REL", "5", "1");
+        let kept = own_order("OTHER", "REL", "5", "1");
+        store(&ctx, &gone);
+        store(&ctx, &kept);
+        let gone_mutex = order_mutex(&ctx, &gone);
+        // The balance of BASE is 2, so a lowering would show: the supported maximum 1.9 is below the available 5.
+        let remover = ctx.clone();
+        let removed = gone.clone();
+        mock_reads_that_try_the_lock(gone_mutex.clone(), "2", move || remove(&remover, &removed));
+
+        block_on(reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx));
+
+        assert_eq!(
+            block_on(gone_mutex.lock()).max_base_vol,
+            MmNumber::from("5"),
+            "not touched"
+        );
+        assert!(!ordermatch_ctx.maker_orders_ctx.lock().contains_key(&gone.uuid));
+        assert_eq!(cancelled.load(AtomicOrdering::SeqCst), 0, "not cancelled either");
+        // Only the order that stayed was announced (the mock is the same for both bases, so it was lowered too).
+        assert_eq!(publishes(&mut p2p_rx), 1);
+        assert!(ordermatch_ctx.maker_orders_ctx.lock().contains_key(&kept.uuid));
+    }
+}
+
+/// CRD ch.59 R59.6.1a (T12): maker-order messages count as liveness for a public key the node already
+/// holds a record for. Messages go through `process_msg` signed with a real key, so the signature
+/// verification and the key form the store uses are exercised; the passage of time is simulated by
+/// moving `last_keep_alive` into the past and by the `now` argument of `stale_pubkeys`.
+mod order_message_liveness {
+    use super::*;
+
+    const WINDOW: u64 = 90;
+
+    fn node(conf: Json) -> (MmArc, String) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("passphrase").unwrap())
+            .unwrap();
+        let own_pubkey = hex::encode(&**ctx.secp256k1_key_pair().public());
+        (ctx, own_pubkey)
+    }
+
+    fn created(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCreated {
+            uuid: uuid.into(),
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            price: BigRational::from_integer(1.into()),
+            max_volume: BigRational::from_integer(2.into()),
+            min_volume: BigRational::from_integer(0.into()),
+            conf_settings: OrderConfirmationsSettings::default(),
+            created_at: now_ms() / 1000,
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+            base_protocol_info: vec![],
+            rel_protocol_info: vec![],
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCreated(msg), secret).unwrap()
+    }
+
+    fn updated(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let mut msg = MakerOrderUpdated::new(uuid);
+        msg.with_new_price(BigRational::new(3.into(), 2.into()));
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderUpdated(msg), secret).unwrap()
+    }
+
+    fn cancelled(secret: &[u8; 32], uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerOrderCancelled {
+            uuid: uuid.into(),
+            timestamp: now_ms() / 1000,
+            pair_trie_root: H64::default(),
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerOrderCancelled(msg), secret).unwrap()
+    }
+
+    fn receive(ctx: &MmArc, msg: &[u8]) -> bool {
+        let accepted = block_on(process_msg(ctx.clone(), vec![], "peer".to_owned(), msg, false));
+        flush_trie(ctx);
+        accepted
+    }
+
+    fn last_keep_alive(ctx: &MmArc, pubkey: &str) -> Option<u64> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        trie_store.pubkeys_state.get(pubkey).map(|s| s.last_keep_alive)
+    }
+
+    /// Simulate `secs` passing since the last liveness instant of the record.
+    fn age_record(ctx: &MmArc, pubkey: &str, secs: u64) {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let mut trie_store = ordermatch_ctx.trie_store.lock();
+        let state = trie_store.pubkeys_state.get_mut(pubkey).unwrap();
+        state.last_keep_alive -= secs;
+    }
+
+    fn swept(ctx: &MmArc, own_pubkey: &str, now: u64) -> Vec<String> {
+        let ordermatch_ctx = OrdermatchContext::from_ctx(ctx).unwrap();
+        let my_p2p_pubkeys = ordermatch_ctx.orderbook.lock().my_p2p_pubkeys.clone();
+        let trie_store = ordermatch_ctx.trie_store.lock();
+        stale_pubkeys(&trie_store.pubkeys_state, own_pubkey, &my_p2p_pubkeys, WINDOW, now).1
+    }
+
+    /// A node that holds a record and one order for the maker `P` (created through `process_msg`).
+    fn node_knowing_maker(conf: Json) -> (MmArc, String, String, [u8; 32], Uuid) {
+        let (ctx, own_pubkey) = node(conf);
+        let (maker, secret) = pubkey_and_secret_for_test("order-message-liveness-maker");
+        let uuid = Uuid::new_v4();
+        assert!(receive(&ctx, &created(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).is_some());
+        (ctx, own_pubkey, maker, secret, uuid)
+    }
+
+    #[test]
+    fn t12_updated_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_cancelled_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &cancelled(&secret, uuid)));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_created_message_refreshes_a_known_maker() {
+        let (ctx, _own, maker, secret, _uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let before = now_ms() / 1000;
+        assert!(receive(&ctx, &created(&secret, Uuid::new_v4())));
+        assert!(last_keep_alive(&ctx, &maker).unwrap() >= before);
+    }
+
+    #[test]
+    fn t12_updated_and_cancelled_messages_of_an_unknown_maker_create_no_record() {
+        let (ctx, _own) = node(json!({}));
+        let (maker, secret) = pubkey_and_secret_for_test("order-message-liveness-unknown-maker");
+        let uuid = Uuid::new_v4();
+        receive(&ctx, &updated(&secret, uuid));
+        receive(&ctx, &cancelled(&secret, uuid));
+        assert_eq!(last_keep_alive(&ctx, &maker), None);
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(!ordermatch_ctx.trie_store.lock().pubkeys_state.contains_key(&maker));
+    }
+
+    #[test]
+    fn t12_updated_message_for_an_unknown_order_is_ignored_and_does_not_refresh() {
+        let (ctx, _own, maker, secret, _uuid) = node_knowing_maker(json!({}));
+        age_record(&ctx, &maker, 80);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        // A validly signed update from the known maker, naming an order it never had.
+        assert!(!receive(&ctx, &updated(&secret, Uuid::new_v4())));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+    }
+
+    #[test]
+    fn t12_a_message_of_another_key_does_not_refresh_the_maker() {
+        let (ctx, _own, maker, _secret, _uuid) = node_knowing_maker(json!({}));
+        let (_other, other_secret) = pubkey_and_secret_for_test("order-message-liveness-other-maker");
+        age_record(&ctx, &maker, 80);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        receive(&ctx, &updated(&other_secret, Uuid::new_v4()));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+    }
+
+    #[test]
+    fn t12_updates_every_few_seconds_keep_the_maker_for_150_seconds_without_keep_alives() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        let update = updated(&secret, uuid);
+        for _ in 0..30 {
+            // Five seconds pass; the record is never older than the window at the sweep.
+            age_record(&ctx, &maker, 5);
+            let now = now_ms() / 1000;
+            assert!(swept(&ctx, &own, now).is_empty());
+            assert!(receive(&ctx, &update));
+        }
+        // 150 simulated seconds have passed with no keep-alive; the orders are still in the index.
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(ordermatch_ctx.orderbook.lock().order_set.contains_key(&uuid));
+        let last = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(swept(&ctx, &own, last + WINDOW - 1).is_empty());
+    }
+
+    #[test]
+    fn t12_a_maker_silent_past_the_window_is_selected() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({}));
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        let last = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(swept(&ctx, &own, last + WINDOW - 1).is_empty());
+        assert_eq!(swept(&ctx, &own, last + WINDOW), vec![maker]);
+    }
+
+    #[test]
+    fn t12_switch_off_leaves_liveness_to_keep_alives() {
+        let (ctx, own, maker, secret, uuid) = node_knowing_maker(json!({ "order_messages_refresh_liveness": false }));
+        age_record(&ctx, &maker, 60);
+        let aged = last_keep_alive(&ctx, &maker).unwrap();
+        assert!(receive(&ctx, &updated(&secret, uuid)));
+        assert!(receive(&ctx, &created(&secret, Uuid::new_v4())));
+        assert!(receive(&ctx, &cancelled(&secret, uuid)));
+        assert_eq!(last_keep_alive(&ctx, &maker), Some(aged));
+        assert_eq!(swept(&ctx, &own, aged + WINDOW), vec![maker]);
+    }
+
+    #[test]
+    fn t12_only_a_json_false_turns_the_switch_off() {
+        for (conf, expected) in [
+            (json!({}), true),
+            (json!({ "order_messages_refresh_liveness": true }), true),
+            (json!({ "order_messages_refresh_liveness": "false" }), true),
+            (json!({ "order_messages_refresh_liveness": 0 }), true),
+            (json!({ "order_messages_refresh_liveness": false }), false),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(order_messages_refresh_liveness(&ctx), expected);
+        }
+    }
+}
+
+/// CRD ch.32 R-Q5b, T-Q5b: a request for a pair the node is still synchronizing is parked and answered
+/// when the node's own synchronization lands.
+mod sync_answer_deferral_tests {
+    use super::*;
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS, MAX_PARKED_PER_PEER,
+                                                          MAX_PARKED_TOTAL};
+    use futures::channel::oneshot;
+    use mm2_p2p::atomicdex_behaviour::AdexResponse;
+    use std::sync::mpsc as std_mpsc;
+    use std::thread::JoinHandle;
+    use std::time::Instant;
+
+    const MAKER: &str = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PAIR: &str = "C1:C2";
+    const OTHER_PAIR: &str = "C3:C4";
+    const ORDERS: usize = 5;
+    /// A bound no test is meant to reach, unless it is the one that tests the bound.
+    const LONG_BOUND_MS: u64 = 5000;
+
+    type OwnResponseTx = oneshot::Sender<Vec<(PeerId, AdexResponse)>>;
+    type Answers = std_mpsc::Sender<(usize, AdexResponse)>;
+
+    fn node(conf: Json) -> (MmArc, mpsc::Receiver<AdexBehaviourCmd>) {
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        ctx.init_metrics().unwrap();
+        let (tx, rx) = mpsc::channel(1024);
+        P2PContext::new(tx).store_to_mm_arc(&ctx);
+        (ctx, rx)
+    }
+
+    fn next_cmd(rx: &mut mpsc::Receiver<AdexBehaviourCmd>) -> AdexBehaviourCmd {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match rx.try_recv() {
+                Ok(cmd) => return cmd,
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "no command was sent");
+                    std::thread::sleep(Duration::from_millis(1));
+                },
+            }
+        }
+    }
+
+    fn octx(ctx: &MmArc) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(ctx).unwrap() }
+
+    /// The tables of the node are empty (the in-flight record ends on a task of its own, so wait for it).
+    fn assert_tables_empty(ctx: &MmArc) {
+        let deferral = octx(ctx).sync_answer_deferral.clone();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && (deferral.parked_len() != 0 || deferral.in_flight_len() != 0) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(deferral.parked_len(), 0, "parked table");
+        assert_eq!(deferral.in_flight_len(), 0, "in-flight table");
+    }
+
+    /// The uuids of the maker's orders in the node's read index.
+    fn maker_book(ctx: &MmArc) -> HashSet<Uuid> {
+        octx(ctx)
+            .orderbook
+            .lock()
+            .order_set
+            .values()
+            .filter(|o| o.pubkey == MAKER)
+            .map(|o| o.uuid)
+            .collect()
+    }
+
+    /// The all-zero placeholder entry that the keep-alive path creates, without any request behind it.
+    fn add_placeholder(ctx: &MmArc, pubkey: &str, pair: &str) {
+        let octx = octx(ctx);
+        let mut trie_store = octx.trie_store.lock();
+        let state = pubkey_state_mut(&mut trie_store.pubkeys_state, pubkey);
+        order_pair_root_mut(&mut state.trie_roots, pair);
+    }
+
+    /// The eviction of `lp_ordermatch_loop` for the maker (after 90 s without a keep-alive).
+    fn wipe_maker(ctx: &MmArc) {
+        let octx = octx(ctx);
+        octx.trie_store
+            .lock()
+            .pubkeys_state
+            .get_mut(MAKER)
+            .unwrap()
+            .last_keep_alive = 0;
+        let (uuids, pubkeys) = {
+            let trie_store = octx.trie_store.lock();
+            stale_pubkeys(&trie_store.pubkeys_state, "own", &HashSet::new(), 90, now_ms() / 1000)
+        };
+        assert_eq!(pubkeys, vec![MAKER.to_owned()]);
+        let mut ops = Vec::new();
+        let mut orderbook = octx.orderbook.lock();
+        for uuid in uuids {
+            ops.extend(orderbook.index_remove(uuid).map(|(_, op)| op));
+        }
+        ops.push(TrieOp::RemovePubkey {
+            pubkey: MAKER.to_owned(),
+        });
+        orderbook.queue_trie_ops(&octx.trie_ops_tx, ops);
+        drop(orderbook);
+        flush_trie(ctx);
+    }
+
+    /// Ask `relay` for `pairs` of `pubkey` as the peer `peer` does; the answer lands in `answers` under `id`.
+    fn ask(
+        relay: &MmArc,
+        peer: PeerId,
+        id: usize,
+        pubkey: &str,
+        pairs: &[&str],
+        answers: &Answers,
+    ) -> Result<(), String> {
+        let roots: HashMap<String, H64> = pairs.iter().map(|p| (p.to_string(), H64::default())).collect();
+        let answers = answers.clone();
+        let reply: SyncAnswerReply = Box::new(move |res| answers.send((id, res)).map_err(|e| e.to_string()));
+        answer_sync_request(relay, peer, pubkey.to_owned(), roots, reply)
+    }
+
+    fn full_set_len(res: &AdexResponse) -> usize {
+        let response = match res {
+            AdexResponse::Ok { response } => response,
+            other => panic!("expected an answer, got {:?}", other),
+        };
+        let mut answer: SyncPubkeyOrderbookStateRes = decode_message(response).unwrap();
+        match answer.pair_orders_diff.remove(PAIR).expect("the pair is answered") {
+            DeltaOrFullTrie::FullTrie(orders) => orders.len(),
+            DeltaOrFullTrie::Delta(_) => panic!("expected a full snapshot"),
+        }
+    }
+
+    fn assert_placeholder_error(res: &AdexResponse) {
+        match res {
+            AdexResponse::Err { error } => assert!(error.contains("InvalidStateRoot"), "{}", error),
+            other => panic!("expected the placeholder error, got {:?}", other),
+        }
+    }
+
+    /// The relay's own keep-alive-driven request, started and held: the test decides how it ends.
+    struct OwnSync {
+        keep_alive_task: JoinHandle<bool>,
+        request: Vec<u8>,
+        response_tx: Option<OwnResponseTx>,
+    }
+
+    impl OwnSync {
+        /// The request is answered by `maker`.
+        fn answer(&mut self, maker: &MmArc) {
+            let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&self.request).unwrap() {
+                P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                    (pubkey, trie_roots)
+                },
+                other => panic!("unexpected request {:?}", other),
+            };
+            let answer = process_sync_pubkey_orderbook_state(maker.clone(), pubkey, trie_roots)
+                .unwrap()
+                .unwrap();
+            let res = AdexResponse::Ok {
+                response: encode_message(&answer).unwrap(),
+            };
+            self.response_tx
+                .take()
+                .unwrap()
+                .send(vec![(PeerId::random(), res)])
+                .unwrap();
+        }
+
+        /// The request fails (the transport drops the response channel).
+        fn fail(&mut self) { drop(self.response_tx.take()); }
+
+        /// The keep-alive task ends; whether it reported success (the forward of R-F3b).
+        fn finish(self) -> bool { self.keep_alive_task.join().unwrap() }
+    }
+
+    struct Fixture {
+        relay: MmArc,
+        relay_cmds: mpsc::Receiver<AdexBehaviourCmd>,
+        maker: MmArc,
+        uuids: HashSet<Uuid>,
+    }
+
+    impl Fixture {
+        /// A relay with the given config and a maker node holding `ORDERS` orders for `PAIR`.
+        fn new(conf: Json) -> Self {
+            let (relay, relay_cmds) = node(conf);
+            let (maker, _maker_cmds) = node(json!({}));
+            let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), ORDERS);
+            let uuids = orders.iter().map(|o| o.uuid).collect();
+            for order in orders {
+                insert_or_update_order(&maker, order);
+            }
+            flush_trie(&maker);
+            Fixture {
+                relay,
+                relay_cmds,
+                maker,
+                uuids,
+            }
+        }
+
+        /// What the maker advertises now.
+        fn keep_alive(&self) -> PubkeyKeepAlive {
+            let roots = octx(&self.maker)
+                .trie_store
+                .lock()
+                .pubkeys_state
+                .get(MAKER)
+                .map(|s| s.trie_roots.clone())
+                .unwrap_or_default();
+            PubkeyKeepAlive {
+                trie_roots: advertisable_roots(&roots),
+                timestamp: now_ms() / 1000,
+            }
+        }
+
+        /// The maker's keep-alive reaches the relay, which sends its own request and waits for the answer.
+        fn start_own_sync(&mut self) -> OwnSync {
+            let relay = self.relay.clone();
+            let keep_alive = self.keep_alive();
+            let keep_alive_task = std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    relay,
+                    "forwarding-peer".to_owned(),
+                    MAKER.to_owned(),
+                    keep_alive,
+                    true,
+                ))
+            });
+            match next_cmd(&mut self.relay_cmds) {
+                AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => OwnSync {
+                    keep_alive_task,
+                    request: req,
+                    response_tx: Some(response_tx),
+                },
+                other => panic!("unexpected command {:?}", other),
+            }
+        }
+    }
+
+    fn peer() -> PeerId { PeerId::random() }
+
+    fn answered(answers: &std_mpsc::Receiver<(usize, AdexResponse)>, within_ms: u64) -> (usize, AdexResponse) {
+        answers
+            .recv_timeout(Duration::from_millis(within_ms))
+            .expect("the request was not answered in time")
+    }
+
+    #[test]
+    fn parked_request_is_answered_with_the_full_set_once_the_own_answer_is_applied() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err(), "the request is parked, not answered");
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.answer(&f.maker);
+        let (id, res) = answered(&answers, 2000);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert_eq!(id, 1);
+        assert_eq!(full_set_len(&res), ORDERS);
+        assert!(own.finish());
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn parked_request_gets_the_placeholder_error_when_the_own_request_fails() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+
+        let started = Instant::now();
+        own.fail();
+        let (_, res) = answered(&answers, 2000);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert_placeholder_error(&res);
+        assert!(!own.finish(), "a failed request is not forwarded");
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn parked_request_gets_the_placeholder_error_when_the_bound_expires() {
+        const BOUND_MS: u64 = 300;
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": BOUND_MS }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        // The own request never answers during the test.
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        let (_, res) = answered(&answers, 3000);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(BOUND_MS - 50),
+            "answered after {:?}",
+            waited
+        );
+        assert!(
+            waited < Duration::from_millis(BOUND_MS * 5),
+            "answered after {:?}",
+            waited
+        );
+        assert_placeholder_error(&res);
+        // The parked slot is free; the own request is still in flight, as it has not ended.
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.fail();
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn requests_that_are_not_deferrable_are_answered_at_once() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        // A placeholder with no own request in flight.
+        add_placeholder(&f.relay, MAKER, PAIR);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+
+        // A pair the relay does not track.
+        ask(&f.relay, peer(), 2, MAKER, &["C9:C8"], &answers_tx).unwrap();
+        match answers.try_recv().expect("answered at once").1 {
+            AdexResponse::Err { error } => assert!(error.contains("No pair trie root for C9:C8"), "{}", error),
+            other => panic!("unexpected answer {:?}", other),
+        }
+
+        // A pubkey the relay has no data for.
+        ask(&f.relay, peer(), 3, "03unknown", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().expect("answered at once").1, AdexResponse::None);
+
+        assert!(answers.try_recv().is_err());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn request_with_a_non_deferrable_pair_is_answered_at_once_with_the_placeholder_error() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        // The pair of the own request is waited for; this one has a placeholder and no own request.
+        add_placeholder(&f.relay, MAKER, OTHER_PAIR);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR, OTHER_PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+        // The same with a pair the relay does not track.
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR, "C9:C8"], &answers_tx).unwrap();
+        assert!(matches!(
+            answers.try_recv().expect("answered at once").1,
+            AdexResponse::Err { .. }
+        ));
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+        // The own request is unaffected and a request for its pair alone is still parked.
+        ask(&f.relay, peer(), 3, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        own.answer(&f.maker);
+        assert_eq!(full_set_len(&answered(&answers, 2000).1), ORDERS);
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn at_most_eight_requests_per_peer_are_parked() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let greedy = peer();
+        for id in 0..MAX_PARKED_PER_PEER {
+            ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert!(answers.try_recv().is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+
+        // The ninth of that peer is answered at once; another peer is still served by parking.
+        ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 100);
+        assert_placeholder_error(&res);
+        ask(&f.relay, peer(), 101, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert!(answers.try_recv().is_err());
+        assert_eq!(
+            octx(&f.relay).sync_answer_deferral.parked_len(),
+            MAX_PARKED_PER_PEER + 1
+        );
+
+        own.answer(&f.maker);
+        let mut ids: Vec<usize> = (0..MAX_PARKED_PER_PEER + 1)
+            .map(|_| {
+                let (id, res) = answered(&answers, 3000);
+                assert_eq!(full_set_len(&res), ORDERS);
+                id
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..MAX_PARKED_PER_PEER).chain(iter::once(101)).collect::<Vec<_>>());
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn at_most_256_requests_are_parked_in_total() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        for id in 0..MAX_PARKED_TOTAL {
+            // Eight requests per peer, so only the total limit can stop the last one.
+            ask(&f.relay, peer(), id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        assert!(answers.try_recv().is_err());
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+
+        ask(&f.relay, peer(), 1000, MAKER, &[PAIR], &answers_tx).unwrap();
+        let (id, res) = answers.try_recv().expect("answered at once");
+        assert_eq!(id, 1000);
+        assert_placeholder_error(&res);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_TOTAL);
+
+        own.answer(&f.maker);
+        for _ in 0..MAX_PARKED_TOTAL {
+            assert_eq!(full_set_len(&answered(&answers, 5000).1), ORDERS);
+        }
+        assert!(own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn the_per_peer_limit_is_the_same_for_a_peer_across_pairs_and_requests() {
+        // A request for two tracked pairs counts once, whatever its size.
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        let p = peer();
+        for id in 0..MAX_PARKED_PER_PEER {
+            ask(&f.relay, p, id, MAKER, &[PAIR, PAIR], &answers_tx).unwrap();
+        }
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), MAX_PARKED_PER_PEER);
+        own.fail();
+        for _ in 0..MAX_PARKED_PER_PEER {
+            assert_placeholder_error(&answered(&answers, 3000).1);
+        }
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn zero_turns_deferral_off() {
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": 0 }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        // Nothing is tracked while deferral is off.
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 0);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 0);
+
+        own.answer(&f.maker);
+        assert!(own.finish());
+        flush_trie(&f.relay);
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_eq!(full_set_len(&answers.try_recv().expect("answered at once").1), ORDERS);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn only_a_non_negative_integer_sets_the_bound() {
+        for (conf, expected) in [
+            (json!({}), DEFAULT_SYNC_ANSWER_DEFERRAL_MS),
+            (json!({ "sync_answer_deferral_ms": 0 }), 0),
+            (json!({ "sync_answer_deferral_ms": 1200 }), 1200),
+            (
+                json!({ "sync_answer_deferral_ms": "0" }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": false }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": -1 }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+            (
+                json!({ "sync_answer_deferral_ms": 2.5 }),
+                DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+            ),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(sync_answer_deferral_ms(&ctx), expected);
+        }
+        assert_eq!(DEFAULT_SYNC_ANSWER_DEFERRAL_MS, 5000);
+        assert_eq!((MAX_PARKED_PER_PEER, MAX_PARKED_TOTAL), (8, 256));
+    }
+
+    #[test]
+    fn the_inbound_handler_returns_without_waiting() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+
+        let started = Instant::now();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        let handler_time = started.elapsed();
+        assert!(
+            handler_time < Duration::from_millis(LONG_BOUND_MS / 10),
+            "the handler took {:?} with the request parked for up to {} ms",
+            handler_time,
+            LONG_BOUND_MS
+        );
+        assert!(answers.try_recv().is_err());
+
+        own.fail();
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn a_cancelled_keep_alive_task_does_not_leave_the_record_behind() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let keep_alive = f.keep_alive();
+        let relay = f.relay.clone();
+        // The task is polled until it has sent its request, then dropped without ever finishing.
+        let mut task = Box::pin(process_orders_keep_alive(
+            relay,
+            "forwarding-peer".to_owned(),
+            MAKER.to_owned(),
+            keep_alive,
+            true,
+        ));
+        let mut cmds = f.relay_cmds;
+        block_on(async {
+            let sent = async { cmds.next().await };
+            futures::pin_mut!(sent);
+            match futures::future::select(task.as_mut(), sent).await {
+                futures::future::Either::Right((Some(AdexBehaviourCmd::RequestPeers { .. }), _)) => (),
+                _ => panic!("the request should have been sent first"),
+            }
+        });
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+
+        drop(task);
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert_tables_empty(&f.relay);
+    }
+
+    /// S2 of the wipe-recovery plan: a relay wiped for a maker gets the first keep-alive after the stall;
+    /// its subscriber, which received the same keep-alive from the relay's gossip-layer forward, asks
+    /// the relay while the relay's own request is in flight.
+    #[test]
+    fn s2_a_wiped_relay_serves_its_subscriber_when_its_own_sync_lands() {
+        let mut f = Fixture::new(json!({}));
+
+        // The relay held the maker's book, and the sweep wiped it after the stall.
+        let mut own = f.start_own_sync();
+        own.answer(&f.maker);
+        assert!(own.finish());
+        flush_trie(&f.relay);
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        wipe_maker(&f.relay);
+        assert!(maker_book(&f.relay).is_empty());
+        assert_tables_empty(&f.relay);
+
+        // The first keep-alive after the stall reaches the relay and, forwarded at once, its subscriber.
+        let (subscriber, mut subscriber_cmds) = node(json!({}));
+        let started = Instant::now();
+        let mut relay_own = f.start_own_sync();
+        let keep_alive = f.keep_alive();
+        let subscriber_task = {
+            let subscriber = subscriber.clone();
+            std::thread::spawn(move || {
+                block_on(process_orders_keep_alive(
+                    subscriber,
+                    "relay".to_owned(),
+                    MAKER.to_owned(),
+                    keep_alive,
+                    true,
+                ))
+            })
+        };
+
+        // The subscriber's request travels to the relay, whose own request is still in flight.
+        let (request, response_tx) = match next_cmd(&mut subscriber_cmds) {
+            AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => (req, response_tx),
+            other => panic!("unexpected command {:?}", other),
+        };
+        let (pubkey, trie_roots) = match decode_message::<P2PRequest>(&request).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { pubkey, trie_roots }) => {
+                (pubkey, trie_roots)
+            },
+            other => panic!("unexpected request {:?}", other),
+        };
+        let relay_peer = peer();
+        let reply: SyncAnswerReply = Box::new(move |res| {
+            response_tx
+                .send(vec![(relay_peer, res)])
+                .map_err(|_| "the subscriber is gone".to_owned())
+        });
+        answer_sync_request(&f.relay, peer(), pubkey, trie_roots, reply).unwrap();
+        assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
+        assert!(maker_book(&subscriber).is_empty());
+
+        // The relay's own answer arrives and lands; the subscriber is answered right after it.
+        relay_own.answer(&f.maker);
+        assert!(subscriber_task.join().unwrap(), "the subscriber's sync succeeded");
+        flush_trie(&subscriber);
+        assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
+        assert!(relay_own.finish());
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_eq!(maker_book(&subscriber), f.uuids);
+        assert_tables_empty(&f.relay);
+        assert_tables_empty(&subscriber);
     }
 }
 

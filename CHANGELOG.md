@@ -59,6 +59,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
   Detail: PR #TBD.
 
+- **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
+  `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
+  watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
+  that forces it, and the gas price of an EVM coin that an earlier request obtained. By default the
+  time a reading is reused adapts by itself. It starts at the coin's block time in seconds (at
+  least 2, at most 600; 15 seconds for a coin without one), doubles each time a fresh reading turns
+  out to be the same as the previous one, up to 10 minutes, and goes back to the start as soon as
+  the value changes. A chain with a fixed gas floor reaches one gas-price reading per 10 minutes
+  without any configuration; a changed value resets it at once. A platform coin and all its tokens
+  share one gas-price reading, so a maker with hundreds of token orders on one chain asks the node
+  once. To fix the time instead, set `fee_estimate_cache_secs` in a coin's configuration entry
+  (0 to 600; 0 turns the reuse off for that coin) or in `MM2.json` (0 to 30, for every coin without
+  its own value; a value outside the range stops the node from starting). This is also what lets
+  the pre-trade spend check run on every order update again, price-only ones included, without
+  extra requests. A swap's own transactions never use the reuse and always read a fresh value. Set
+  `fee_estimate_cache_secs` to `0` in `MM2.json`, and set none per coin, to restore GLEEC KDF
+  behavior most closely: a request then still reads each value once, but nothing is reused between
+  requests. Detail: PR #128; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
+- **Read-only Electrum queries are spread over the connected servers.** With the `MM2.json` boolean
+  `electrum_spread_reads` at its default `true`, each balance, unspent-list, history, header,
+  block-count, transaction and fee query of a coin goes to the next connected server in turn instead
+  of always to the first, so an order-posting burst can use the request budget of every connected
+  server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
+  moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
+  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
@@ -101,8 +126,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
   its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
   coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
-  update that changes only the price, the minimum volume or the confirmation settings skips the
-  pre-trade spend check and makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
+  update still runs the pre-trade spend check, whatever it changes, and while the fee reading is
+  recent enough the check makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
   ch.57 R57.2.6, ch.60 R60.6.7.
 
 - **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
@@ -119,6 +144,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
   The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
   also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
+- **EVM log lines about a node say which coin it is and where it stands in the coin's list.** A line
+  such as `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...`
+  starts with the ticker and gives the node's position in the list as you configured it, so two coins
+  that use one provider with different paths, or two nodes of one coin on one host, can be told
+  apart. The host-only naming is unchanged, and so are the error texts a request returns. Detail:
+  PR #133; CRD ch.35 R35.1.16.
 - **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
   shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
   not supported in this release and that light mode should be used. Native mode could not build a
@@ -238,6 +269,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A node that relays the order book now answers other nodes' sync requests for a maker it is still
+  catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
+  while the relay was itself fetching them (the usual case right after a stall or a restart) got an
+  error at once and waited for the maker's next keep-alive, 30 seconds later, for each relay hop. The
+  relay now holds such a request for at most 5 seconds and answers it when its own sync lands, so
+  the nodes behind it rebuild the maker's orders in seconds. If the relay's own sync fails or takes
+  longer than that, the asking node gets the same error as before. At most 8 requests per peer and 256
+  in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
+  restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: CRD ch.32
+  R-Q5b.
+
+- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
+  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
+  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
+  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
+  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
+  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
+  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
+  CRD ch.59 R59.6.1a.
+
+- **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
+
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
@@ -256,6 +309,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
 - **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
 - **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
+- **A taker paying with ARRR is refused at the start of the swap when nothing could watch its payment.**
+  A taker learns the swap secret only by seeing the maker spend the taker's payment. Before sending its
+  dex fee, a taker whose payment coin is ARRR in light mode now checks that at least one source can
+  answer an address question about it: a `lightwalletd` server, or an Electrum server that is on the same
+  chain. If none can, the swap ends at once with `StartFailed`. The error names each server and what is
+  wrong with it, and nothing is sent. Before, such a swap could reach the payment and lose it.
+  Detail: PR #136; CRD ch.39 R39.11.28.
+- **A fresh ARRR swap no longer asks whether it has already paid.** The "already sent" question exists
+  for a swap that resumes after a restart. An ARRR payment goes to a script made with a key used for
+  this one swap only, so a swap started in this run cannot have paid it yet. The question is now skipped
+  there. A resumed swap, and every other coin, still ask it. Detail: PR #136; CRD ch.39 R39.11.27.
+- **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An ARRR
+  swap asks three questions about its HTLC: was my payment already sent, was this payment spent, and
+  has the counterparty spent it yet. When no `lightwalletd` server can answer them, for example because
+  its node keeps no address index, the swap now asks the Electrum servers given in the activation's
+  `electrum_servers`, as other KDF nodes do. A server is used only if its block hash at a recent height
+  matches the `lightwalletd` servers' and its tip is at most 10 blocks behind; nothing else of the coin uses
+  Electrum. Activation never connects to these servers; the first question does. When neither source can
+  answer, the error names both. Detail: PR #130; CRD ch.39 R39.11.25.
 - **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending
   its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
   the wallet's own record of the transactions it broadcast. This works even when the configured
@@ -472,6 +544,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   one whose cache answers with an error or whose height is more than 40 blocks behind the others.
   A failed admission now lists every excluded endpoint and why, and its message no longer claims
   that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
+- **A seed or relay now gives back the memory a burst of order updates used.** Every order update a node
+  applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and bookkeeping),
+  and none of it was released until the same order pair changed again, so a node that had seen
+  500 updates a second for a few minutes stayed about 150 MB larger afterward. The change history is
+  now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
+  shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
+  clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
+  pair). The metrics now also show the node store's size and entry count, the number of stored change
+  histories and changes, tracked pubkeys, and queued trie updates. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
+- **A seed or relay on Linux now also returns freed order-book memory to the system.** After the memory
+  fix above the node's own data shrank back after a burst of order updates, but the system's memory
+  allocator (glibc) kept the freed pages in the process, so the memory shown by the operating system
+  stayed high (about 160 to 210 MB in a test where the data itself was 1 MB). After each ten-minute
+  clean-up the node now asks the allocator to hand the unused pages back (30 MB in the same test)
+  and writes the memory use before and after to the debug log. Other systems are unchanged. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #137.
+  pair). The metrics now also show the number of stored change histories and changes, tracked pubkeys, and
+  queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
+  sync for more than five minutes now receives a full snapshot instead of a delta (as it already
+  did after a write to the pair); within five minutes nothing changes. More in
+  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131, PR #134.
 - **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
   because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
   (the client still broadcasts), but when the client submits the transaction through
@@ -548,6 +642,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
 
+- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new, in progress: ARRR's per-swap HTLC
+  key derived as other KDF nodes derive it, so each side can recover the other's swaps from the seed,
+  and an ARRR refund that waits for the chain's median time instead of failing as too early.
 - [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
   ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
   wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
@@ -600,7 +697,15 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   checked live on an uncongested transaction pool (2026-10-26).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
   the Electrum servers' per-session limit of about one request per second. The rules for batching,
-  fee reuse, read spreading and balance polling are written (PR #95).
+  fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
+  read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
+  with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
+  transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
+  decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
+  Detail: PR #123.
 
 ### Known limitations
 
