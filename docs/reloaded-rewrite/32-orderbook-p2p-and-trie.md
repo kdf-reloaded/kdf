@@ -1876,7 +1876,9 @@ waiting up to 30 seconds for the next tick.
   toward one that reads about 0.3.
   - After the first signal, the median delay from a tick to the arrival
     of its keep-alive is at most 10 s, and no keep-alive arrives later
-    than 60 s after its tick.
+    than 60 s after its tick. A keep-alive lost with a connection that
+    closes never arrives; it is reported, and the gap criterion below
+    bounds it.
   - After the first signal, no gap between delivered keep-alives exceeds
     90 s. Before it, one such gap is allowed (the residual of the
     rationale).
