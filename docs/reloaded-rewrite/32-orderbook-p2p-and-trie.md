@@ -904,9 +904,13 @@ responder holds a root for (P, pair) and, for every requested pair whose held
 root is the all-zero placeholder, the responder's **own** keep-alive-driven
 synchronization request for (P, pair) is in flight. An own request is in
 flight from the moment it is sent until its answer's mutation events have
-been applied by the trie worker, or until it fails.
+been applied by the trie worker, or until it fails; the wait for the worker
+after a successful answer lasts at most the bound of item 3, so no record
+outlives the longest parked request.
 
-1. A deferrable request is **parked**. It is answered as soon as every own
+1. A deferrable request is **parked**. It waits for the own requests that
+   are in flight when it arrives (a later own request for the same pair does
+   not extend the wait). It is answered as soon as every own
    request it waits for has completed, or when its bound expires, whichever
    comes first. The answer is the one R-Q5 gives at that moment — the same
    outcomes, all-or-nothing as before. If an own request it waits for failed,
@@ -918,13 +922,15 @@ been applied by the trie worker, or until it fails.
 3. The **bound** is the top-level `MM2.json` integer
    `sync_answer_deferral_ms`, default `5000` (5 s), counted from the
    request's arrival. It MUST stay well below the requester's 10 s timeout
-   (R-Q6). The value `0` turns deferral off: every request is answered at
-   once, as in the reference.
+   (R-Q6); a bound at or above that timeout gains nothing, because the
+   transport abandons the request first. The value `0` turns deferral off:
+   every request is answered at once, as in the reference.
 4. **Limits.** At most 8 requests are parked per requesting peer and at most
-   256 in total; a request past either limit is answered at once. The limits
-   MUST stay below the number of concurrent inbound streams the
-   request-response layer allows, because a parked request holds its stream
-   open.
+   256 in total, a request counting once whatever the number of pairs it
+   names; a request past either limit is answered at once. The per-peer
+   limit MUST stay below the number of concurrent inbound streams the
+   transport allows on one connection, because a parked request holds its
+   stream open.
 5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
    the one case in which the answer is not built on the task that received
    the request (R-Q5's last paragraph).
@@ -940,7 +946,7 @@ been applied by the trie worker, or until it fails.
 > a relay they forward on success (R-F3b), so the next hop is served in the
 > same round. The answer and its shape are unchanged; only its timing
 > differs, and only for a request that would otherwise fail. Reference and
-> Reloaded requesters alike accept a late answer within their timeout.
+> Reloaded requesters alike accept a late answer within their timeout. Implemented 2026-10-28.
 
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
