@@ -1617,6 +1617,90 @@ back to an error path that skips transaction-history processing.
 > **Status: as-built on dev (verified 2026-10-26).** The verbose-transaction
 > parser reads the `cryptocondition` script label.
 
+### 38.6.9 Node naming and credentials in texts (Electrum servers and the native daemon)
+
+These rules apply the host-only node naming of
+[chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14 and the credentials rule
+of R35.1.16 to the two backends of a UTXO coin. They bind no wire shape.
+
+R38.6.9a **Electrum servers are named by host and port only (Reloaded;
+clean-room original; maintainer decision 2026-10-26; no switch).** Every log
+line, error text and status message the UTXO coin layer emits that names an
+Electrum server shall name it as `host:port`, the form R38.6.4i already uses
+for failure reports. It shall carry nothing else of the configured address: no
+userinfo, path, query or fragment, and no URL built from the address. The
+protocol (`TCP`, `SSL`, `WS`, `WSS`) may be named next to it. This holds on
+the native build, where an address is a host and port, and on the browser
+build, where the configured address of a `WS` or `WSS` server can carry more.
+In particular:
+
+1. A server address that cannot be reduced to a host and a port (one removed
+   under R38.6.4d item 3) is named by a fixed placeholder and its position in
+   the activation request's server list, never by the configured string.
+2. The WebSocket URL the browser build connects to, and any lower-layer text
+   (WebSocket, TLS, DNS) embedded in an emitted text, appear in the
+   `host:port` form only.
+3. The activation log line for a server that will not be used names the
+   server as item 1 or the main rule says.
+
+R35.1.16 applies to the Electrum client, its pool and per-server entries, and
+the server entries of the activation request: no rendering of them prints
+more of an address than `host:port`.
+
+R38.6.9b **The native daemon (Reloaded; clean-room original; maintainer
+decision 2026-10-26; no switch).** A UTXO coin in native mode talks to a local
+coin daemon over JSON-RPC with HTTP Basic authentication, built from the RPC
+port, user name and password in the daemon's configuration file.
+
+1. Every log line and error text that names the daemon shall name it in the
+   host-only form of R35.1.14 (`http://127.0.0.1:<port>`), including a
+   lower-layer text embedded in it.
+2. No rendering (R35.1.16) of the native client, of a value that holds it, or
+   of any value that holds the daemon credentials shall print the RPC user
+   name, the RPC password or the `Authorization` header value, whole, in part
+   or encoded (D38.6.9a).
+3. An error about reading the daemon's configuration file may name the file
+   and a missing key, never the value of a key.
+
+Neither rule has an opt-back switch, for the reason R35.1.14 gives: the
+backend is the operator's own and no peer observes it, so by the second arm
+of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the
+default. The scope limit of R35.1.16 for the RPC wire dump applies. Both are
+recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+> **Status (2026-10-28).** Not implemented yet. In this repository a native
+> build already names a parsed Electrum server as `host:port`, but the errors
+> for an address that cannot be parsed echo the configured string, and so
+> does the activation log line for a server that is not used. The browser
+> build names a server by its configured string and builds its WebSocket URL
+> from it. The native client derives a debug form that prints the
+> `Authorization` header value; the daemon itself is already named
+> `http://127.0.0.1:<port>`.
+
+T38.6.9.1 *Electrum naming.* On the native build, an activation lists a server
+whose address carries userinfo (`user:secret@host:50002`) and a valid server
+that refuses connections. Every log line, the removal error and the
+activation failure contain `host:port` or the placeholder with the list
+position, and none contains `user` or `secret`. The debug forms of the client,
+its pool and the parsed request contain neither. On the browser build, once a
+browser test harness exists, the same holds for a `WSS` address with a path
+and a query string.
+
+T38.6.9.2 *Native daemon credentials.* Build a native client from a
+configuration file with a known user name and password. Its debug form, and
+the debug form of the coin's RPC client, contain neither of them nor the
+encoded header value. A request to a closed port fails with an error that
+names `http://127.0.0.1:<port>` and nothing more of the endpoint.
+
+D38.6.9a *(Open -- conservative reading taken; 2026-10-28.)* *Is the RPC user
+name a credential?* R38.6.9b item 2 treats it as one, because it is half of
+the Basic-authentication pair. To be confirmed by the maintainer.
+
+D38.6.9b *(Open; 2026-10-28.)* *Response bodies in native-daemon errors.* A
+request the daemon answers with a non-success HTTP status yields an error that
+quotes the request and the response body. These rules do not bind it; the
+question is shared with chapter 36 D36.3.
+
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
 > **Status of §38.8:** required port. The reloaded UTXO HD path can only obtain
@@ -1736,7 +1820,7 @@ R38.8.6 **Tests (two-direction, observable).**
 - KMD reward computation follows R38.4.1–R38.4.1B on every surface of
   R38.4.1A, and the exact-value tests of R38.4.3 pass (issue #11 vector:
   3,488 base units, not 1,744,260).
-- Each Part-B item (R38.6.1--R38.6.8) is implemented with the acceptance test
+- Each Part-B item (R38.6.1--R38.6.9) is implemented with the acceptance test
   stated inline, and its coins-config keys / RPC field additions are documented
   alongside the implementation. For §38.6.6 that means the values of
   R38.6.6h and chapter 60 T60.1–T60.2, with every item of R38.6.6i closed.
@@ -2004,3 +2088,10 @@ R38.8.6 **Tests (two-direction, observable).**
   and AI of 2026-10-28, his relay-fee decision of the same day and a market
   maker's field report. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Reloaded-original addition (2026-10-28), clean side.* §38.6.9 (R38.6.9a,
+  R38.6.9b, the status note, T38.6.9.1, T38.6.9.2, D38.6.9a and D38.6.9b) was
+  written by a session that never read the corpus, from the maintainer
+  decision of 2026-10-26 (host-only node naming everywhere, except the RPC
+  wire dump, which keeps its own secrets switch) and this repository's own
+  code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.

@@ -281,6 +281,12 @@ intact, leave the sync status unchanged or set to the error state, and be
 retried on a later pass. It shall not clear history and shall not be
 reported to the caller as an empty history.
 
+**R53.4.8** *(Reloaded-original; maintainer decision 2026-10-26; not yet
+implemented.)* A text of the history path that names the walletd server -- the
+`RpcError` text of R53.2.9, the error sync state of R53.4.7 and their log
+lines -- follows ch. 20 §20.8 R-N1 and R-N2: the server in host-only form, and
+no credential.
+
 ---
 
 ## 53.5 Mapping a walletd event to a history record
@@ -675,3 +681,7 @@ V4. The walletd address-events endpoint, the event object's identifier /
   such. Any residual similarity of a conformant realisation to the
   historical lineage is governed by the R35 gate and the binding-scope note
   heading this chapter.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):*
+  R53.4.8 is Reloaded-original. It rests on the maintainer decision of
+  2026-10-26 (host-only node naming everywhere) and applies chapter 20 R-N1 and
+  R-N2; its tests are chapter 20 T-N1 and T-N2.
