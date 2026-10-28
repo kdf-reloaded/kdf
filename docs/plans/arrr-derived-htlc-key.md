@@ -1,0 +1,35 @@
+# Plan: ARRR's per-swap HTLC key derived as the reference derives it
+
+**Status:** in progress — **Last reviewed:** 2026-10-28
+
+> **Context.** Reloaded gives a shielded coin's swap leg a random HTLC key and saves its private
+> key with the swap. The reference instead derives that key from the coin's transparent key and
+> a per-swap input, and never stores it (CRD ch.39 R39.5.6–R39.5.9, gated 2026-10-28).
+>
+> Swaps made by the reference therefore cannot be recovered by Reloaded, and the reverse also
+> holds. A field case: a September ARRR maker swap's refund key is derived, and Reloaded's
+> recovery cannot sign it.
+
+## Steps
+
+1. **CRD.** Ch.39 R39.5.6–R39.5.13, T39.5.a–f and D39.5.a; the candidate order added to
+   R39.5.4; pointers from ch.51.
+2. **Key-pair consistency fix** (R39.5.4). It is the safety net: the named "no private key held"
+   stop. A separate pull request.
+3. **Code.** The ZCoin HTLC key is derived per R39.5.8 (the maker uses the secret hash, the taker
+   the uuid). It is used for payment, spend and refund, and re-derived on restart and in
+   recovery, with the candidate order (1) derived, (2) a saved key that belongs to the saved
+   pubkey, (3) persistent.
+   - The private key is no longer written to the swap record.
+   - Swaps already in flight keep their saved key and keep working.
+4. **Bit-exact check (T39.5.a).** A vector from a reference-made ARRR swap on a throwaway
+   non-HD test wallet. The code from step 3 is not merged before this passes.
+5. **Field recovery** of the September swap with the operator, once step 4 passes.
+6. **Refund timing** (R39.5.13, maintainer Decision AP, 2026-10-28). The shielded refund waits
+   until the chain's median time past has passed the lock time, and a refund rejected as
+   non-final is retried until the refund deadline. A separate pull request; it does not wait
+   for step 4.
+
+## Open decisions
+
+- **D39.5.a:** the base key under the HD-wallet policy.

@@ -124,6 +124,16 @@ What an integrator observes:
     when no `lightwalletd` endpoint and no Electrum server can watch its payment for the
     maker's spend. Without that watch a taker could not learn the secret and would lose
     its payment. GLEEC KDF has no such refusal.
+- A shielded coin's swap refund waits for the chain's clock (ch.39 R39.5.13, decided
+  2026-10-28, not yet implemented). Reloaded broadcasts the refund only once the chain's
+  median time past, not only the wall clock, has passed the payment's lock time. A refund
+  the network rejects as not yet final is retried until the refund deadline, instead of
+  ending the swap with its refund failed. `recover_funds_of_swap` called too early returns
+  a "too early" error naming the earliest permitted time. GLEEC KDF broadcasts at the wall
+  clock's lock time; the network judges finality by median time past, so that broadcast is
+  rejected and the funds wait for a manual `recover_funds_of_swap`. The refund transaction
+  is the same; only when it is sent differs. No switch reproduces the earlier broadcast,
+  because it only fails a refund that would succeed later.
 
 **Compatibility:** GLEEC KDF has no equivalent of the endpoint admission check or of
 the single builder-height authority; both are additive for a deployment whose endpoints
