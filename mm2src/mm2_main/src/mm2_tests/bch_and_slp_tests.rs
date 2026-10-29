@@ -12,6 +12,85 @@ const T_BCH_ELECTRUMS: &[&str] = &[
 
 fn t_bch_electrums_legacy_json() -> Vec<Json> { T_BCH_ELECTRUMS.iter().map(|url| json!({ "url": url })).collect() }
 
+/// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a mempool conflict.
+#[cfg(not(target_arch = "wasm32"))]
+const BCH_CONFLICT_RETRIES: usize = 12;
+/// How long [`withdraw_and_send_bch`] waits before each retry.
+#[cfg(not(target_arch = "wasm32"))]
+const BCH_CONFLICT_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// Withdraws 0.00001 BCH to `to` from the test wallet, checks the transaction's addresses, and
+/// broadcasts it.
+///
+/// The test wallet is a shared testnet wallet, and the Electrum servers can lag behind the wallet's
+/// own spends: a withdrawal built a few seconds after the previous broadcast can pick the coin that
+/// broadcast already spent, and the network then rejects it as a mempool conflict. Another CI run
+/// spending the same wallet at the same time ends the same way. Both clear once the servers have
+/// caught up, so a conflict rebuilds the withdrawal after a pause instead of failing the test; any
+/// other broadcast error still fails at once.
+#[cfg(not(target_arch = "wasm32"))]
+fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
+    for attempt in 1..=BCH_CONFLICT_RETRIES + 1 {
+        let withdraw = block_on(mm.rpc(&json! ({
+            "userpass": mm.userpass,
+            "method": "withdraw",
+            "coin": "BCH",
+            "to": to,
+            "amount": 0.00001,
+        })))
+        .unwrap();
+
+        assert!(withdraw.0.is_success(), "BCH withdraw: {}", withdraw.1);
+        let withdraw_json: Json = json::from_str(&withdraw.1).unwrap();
+        log!((withdraw_json));
+
+        // check "from" addresses
+        let from: Vec<&str> = withdraw_json["from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(from, vec![expected_from]);
+
+        // check "to" addresses
+        let to_addresses: Vec<&str> = withdraw_json["to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(to_addresses, vec![to]);
+
+        // send the transaction
+        let send_tx = block_on(mm.rpc(&json! ({
+            "userpass": mm.userpass,
+            "method": "send_raw_transaction",
+            "coin": "BCH",
+            "tx_hex": withdraw_json["tx_hex"],
+        })))
+        .unwrap();
+        if send_tx.0.is_success() {
+            log!((send_tx.1));
+            return;
+        }
+
+        let conflict = send_tx.1.contains("txn-mempool-conflict") || send_tx.1.contains("missingorspent");
+        assert!(
+            conflict && attempt <= BCH_CONFLICT_RETRIES,
+            "BCH send_raw_transaction (attempt {}): {}",
+            attempt,
+            send_tx.1
+        );
+        log!({
+            "BCH broadcast conflicts with an earlier spend of the test wallet (attempt {}), retrying in {:?}",
+            attempt,
+            BCH_CONFLICT_RETRY_DELAY
+        });
+        thread::sleep(BCH_CONFLICT_RETRY_DELAY);
+    }
+}
+
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn test_withdraw_cashaddresses() {
@@ -58,93 +137,21 @@ fn test_withdraw_cashaddresses() {
     log!([electrum]);
 
     // make withdraw from cashaddress to cashaddress
-    let withdraw = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "withdraw",
-        "coin": "BCH",
-        "to": "bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597",
-        "amount": 0.00001,
-    })))
-    .unwrap();
-
-    assert!(withdraw.0.is_success(), "BCH withdraw: {}", withdraw.1);
-    let withdraw_json: Json = json::from_str(&withdraw.1).unwrap();
-    log!((withdraw_json));
-
-    // check "from" addresses
-    let from: Vec<&str> = withdraw_json["from"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(from, vec!["bchtest:qqgp9xh3435xamv7ghct8emer2s2erzj8gx3gnhwkq"]);
-
-    // check "to" addresses
-    let to: Vec<&str> = withdraw_json["to"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(to, vec!["bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597"]);
-
-    // send the transaction
-    let send_tx = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "send_raw_transaction",
-        "coin": "BCH",
-        "tx_hex": withdraw_json["tx_hex"],
-    })))
-    .unwrap();
-    assert!(send_tx.0.is_success(), "BCH send_raw_transaction: {}", send_tx.1);
-    log!((send_tx.1));
+    withdraw_and_send_bch(
+        &mm,
+        "bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597",
+        "bchtest:qqgp9xh3435xamv7ghct8emer2s2erzj8gx3gnhwkq",
+    );
 
     // Wait 5 seconds to avoid double spending
     thread::sleep(Duration::from_secs(5));
 
     // make withdraw from cashaddress to legacy
-    let withdraw = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "withdraw",
-        "coin": "BCH",
-        "to": "1WxswvLF2HdaDr4k77e92VjaXuPQA8Uji",
-        "amount": 0.00001,
-    })))
-    .unwrap();
-
-    assert!(withdraw.0.is_success(), "BCH withdraw: {}", withdraw.1);
-    let withdraw_json: Json = json::from_str(&withdraw.1).unwrap();
-    log!((withdraw_json));
-
-    // check "from" addresses
-    let from: Vec<&str> = withdraw_json["from"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(from, vec!["bchtest:qqgp9xh3435xamv7ghct8emer2s2erzj8gx3gnhwkq"]);
-
-    // check "to" addresses
-    let to: Vec<&str> = withdraw_json["to"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(to, vec!["1WxswvLF2HdaDr4k77e92VjaXuPQA8Uji"]);
-
-    // send the transaction
-    let send_tx = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "send_raw_transaction",
-        "coin": "BCH",
-        "tx_hex": withdraw_json["tx_hex"],
-    })))
-    .unwrap();
-    assert!(send_tx.0.is_success(), "BCH send_raw_transaction: {}", send_tx.1);
-    log!((send_tx.1));
+    withdraw_and_send_bch(
+        &mm,
+        "1WxswvLF2HdaDr4k77e92VjaXuPQA8Uji",
+        "bchtest:qqgp9xh3435xamv7ghct8emer2s2erzj8gx3gnhwkq",
+    );
 
     // Wait 5 seconds to avoid double spending
     thread::sleep(Duration::from_secs(5));
@@ -179,47 +186,11 @@ fn test_withdraw_cashaddresses() {
     log!([electrum]);
 
     // make withdraw from Legacy to Cashaddress
-    let withdraw = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "withdraw",
-        "coin": "BCH",
-        "to": "bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597",
-        "amount": 0.00001,
-    })))
-    .unwrap();
-
-    assert!(withdraw.0.is_success(), "BCH withdraw: {}", withdraw.1);
-    let withdraw_json: Json = json::from_str(&withdraw.1).unwrap();
-    log!((withdraw_json));
-
-    // check "from" addresses
-    let from: Vec<&str> = withdraw_json["from"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(from, vec!["12Tz6nWqA7e5tV7m6d1EzMkNs6MQVW4UMw"]);
-
-    // check "to" addresses
-    let to: Vec<&str> = withdraw_json["to"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert_eq!(to, vec!["bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597"]);
-
-    // send the transaction
-    let send_tx = block_on(mm.rpc(&json! ({
-        "userpass": mm.userpass,
-        "method": "send_raw_transaction",
-        "coin": "BCH",
-        "tx_hex": withdraw_json["tx_hex"],
-    })))
-    .unwrap();
-    assert!(send_tx.0.is_success(), "BCH send_raw_transaction: {}", send_tx.1);
-    log!((send_tx.1));
+    withdraw_and_send_bch(
+        &mm,
+        "bchtest:qr39na5d25wdeecgw3euh9fkd4ygvd4pnsury96597",
+        "12Tz6nWqA7e5tV7m6d1EzMkNs6MQVW4UMw",
+    );
 }
 
 #[test]

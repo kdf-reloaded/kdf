@@ -1,14 +1,15 @@
 # Plan: order-posting latency
 
-**Status:** in progress (pass 1 and F2 merged; pass 2 in review; maintainer Decisions R, AC, AD and AI) — **Last reviewed:** 2026-10-28
+**Status:** in progress (pass 1, F2 and pass 2 merged; Decision AM in review; maintainer Decisions R, AC, AD, AI and AM) — **Last reviewed:** 2026-10-28
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
 > middle of a price-update round. The governing rules are CRD ch.38 R38.6.3a, R38.6.4a, R38.6.6j and
 > R38.6.6k, ch.57 R57.2.1, R57.2.6 and R57.2.7, and ch.60 R60.4.5, R60.4.6 and R60.6.7 (amendment and
-> item 8). Those of 2026-10-26 and 2026-10-27 passed the KDF Dirty Gate. R38.6.6k, R57.2.7 and the
-> rewritten R60.6.7 amendment of 2026-10-28 are Reloaded-original and clean-side, with no forbidden-class
-> input. This plan records only the measurements, the decisions and the packaging.
+> item 8), and ch.12 R7a and R7b (Decision AM). Those of 2026-10-26 and 2026-10-27 passed the KDF
+> Dirty Gate. R38.6.6k, R57.2.7, the rewritten R60.6.7 amendment of 2026-10-28, and ch.12 R7a and R7b
+> are Reloaded-original and clean-side, with no forbidden-class input. This plan records only the
+> measurements, the decisions and the packaging.
 
 ## What was measured (2026-10-26)
 
@@ -57,7 +58,13 @@ per coin before each order. On the implementation before this plan the full loop
   reads. An invalid `electrum_spread_reads` warns and is taken as `true`.
 - **Lock scope (2026-10-28).** The reconciliation of own orders missing from the orderbook reads the
   balance and the maximum volume without holding the order's lock, and locks only to apply the result.
-  The other lock holds across file and database writes are Decision AM, open with the maintainer.
+  The other lock holds across file and database writes are Decision AM.
+- **Decision AM (maintainer, 2026-10-28): fix now, before the beta.** The balance-update handler, the
+  periodic balance check, the timed-out match removal, an order's timeout expiry, the cancel paths and
+  `update_maker_order` no longer hold an order's own lock across file or database writes. Each copies
+  under a brief lock, writes unlocked, then re-locks and re-checks before it applies. Writes of one order
+  keep the order of its changes, and nothing recreates a cancelled order's record (ch.12 R7a, R7b; PR #149).
+  The match-negotiation paths keep their write under the lock and join the same write ordering.
 - **Balance watch on shared EVM RPC endpoints (maintainer, 2026-10-28).** F2 is parity: a base coin with maker
   orders costs one balance read per 30 s against its node or RPC endpoint, as the reference does (ch.60 R60.4.5,
   R60.4.6). Several such coins on one shared EVM endpoint each cost that one read; no change is planned.

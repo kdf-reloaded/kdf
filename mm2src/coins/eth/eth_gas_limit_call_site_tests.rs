@@ -417,6 +417,53 @@ fn a_token_with_its_own_block_wins_and_a_silent_token_inherits_the_platform_bloc
     assert_eq!(sent_gas(), vec![222_222, 111_111, 21_000]);
 }
 
+/// A token's own `gas_limit` block with no block on its platform entry -- the shape and values of a coins file
+/// running in production (2026-10). Every call site of the four keys uses the token's values, and a key the
+/// block omits is the code default. A platform block, when one exists, contributes nothing to such a token.
+#[test]
+fn a_token_with_its_own_block_and_a_platform_without_one_uses_its_values_at_every_call_site() {
+    mock_payment_sent();
+    mock_gas_price_one();
+    EthCoin::allowance.mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(U256::max_value()))));
+    let swap = Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap();
+    let own = json!({"gas_limit": {"eth_send_erc20": 150_000, "erc20_payment": 250_000,
+                                   "erc20_receiver_spend": 200_000, "erc20_sender_refund": 200_000}});
+    let default_trade_gas = EthGasLimit::default().eth_max_trade_gas;
+
+    // The first platform entry has no block. The second has one whose every member differs, and the token's own
+    // block replaces it as a whole.
+    let platform_block = json!({"gas_limit": {"eth_send_erc20": 1_111, "erc20_payment": 2_222,
+                                              "erc20_receiver_spend": 3_333, "erc20_sender_refund": 4_444,
+                                              "eth_max_trade_gas": 5_555}});
+    for platform in [json!({}), platform_block] {
+        capture_sent_gas();
+        let token = token_coin(platform.clone(), own.clone());
+        run(token.send_to_address(token_address(), U256::one()));
+        run(token.send_hash_time_locked_payment(vec![1; 32], U256::one(), 1_800_000_000, &[2; 20], swap, swap));
+        run(token.spend_hash_time_locked_payment(payment_tx(&token), swap, &[5; 32]));
+        run(token.refund_hash_time_locked_payment(swap, payment_tx(&token)));
+        assert_eq!(
+            sent_gas(),
+            vec![150_000, 250_000, 200_000, 200_000],
+            "platform {platform}"
+        );
+
+        // The fee quotes read the same keys: payment plus refund for the sender, the spend for the receiver.
+        let fee =
+            block_on(token.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox));
+        assert_eq!(fee.unwrap(), wei_amount(250_000 + 200_000), "platform {platform}");
+        let fee = token.get_receiver_trade_fee(FeeApproxStage::WithoutApprox).wait();
+        assert_eq!(fee.unwrap(), wei_amount(200_000), "platform {platform}");
+
+        // `eth_max_trade_gas` is not in the token's block, so it is the code default, never the platform's 5555.
+        assert_eq!(
+            token.get_trade_fee().wait().unwrap(),
+            wei_amount(default_trade_gas),
+            "platform {platform}"
+        );
+    }
+}
+
 // ─── T6: the V2 selection matrix ────────────────────────────────────────────────────────────────────
 
 fn v2_config() -> Json {

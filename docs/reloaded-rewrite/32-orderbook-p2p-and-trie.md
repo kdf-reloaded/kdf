@@ -1877,7 +1877,10 @@ messages at no more than the pubkey's current *rate*.
    per 30 seconds per maker pubkey and pair.
 5. **Logging.** Each signal with its kind, entering and leaving degraded
    mode, and each change of the rate are logged at most once per minute
-   per pubkey, with the rate. Order content is never logged.
+   per pubkey, with the rate. The line that enters degraded mode is
+   logged at once and is not held back by this limit *(added
+   2026-10-29)*; it counts as the minute's line for the others. Order
+   content is never logged.
 
 **R-MP3 (keep-alive ordering)** *(amended 2026-10-28)*. The keep-alive
 of R-K2/R-K2a is not counted against the budget, and it follows its
@@ -2022,7 +2025,9 @@ waiting up to 30 seconds for the next tick.
     trip rate; with a trip rate of 3/s it stops at 2.5/s;
   - a close signal while degraded does not change the trip rate;
   - after 30 min without a signal it climbs on to the ceiling;
-  - in degraded mode no created or updated message is released.
+  - in degraded mode no created or updated message is released;
+  - a signal 10 s after an earlier log line is logged at once, at warn
+    level and with its kind *(added 2026-10-29)*.
 - **T-MP5** *Signals (amended 2026-10-28).* §28.9B T-RQ1.8, and:
   - a data queue that stays non-empty for 2 s raises the queue signal,
     and one that empties within 2 s does not;

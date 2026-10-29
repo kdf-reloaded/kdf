@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Metrics for the gossip send queues and for the maker's pending order messages.** The gauges
+  `p2p.send_queue.len`, `p2p.send_queue.max_per_peer` and `p2p.send_queue.dropped.count` show the
+  messages queued toward peers, the longest single queue and the messages dropped since start.
+  `p2p.outbox.pending`, `p2p.outbox.rate` (in thousandths of a message per second),
+  `p2p.outbox.pressure` (1 while a relay's send queue is backed up), `p2p.outbox.degraded` (1 while
+  order updates are held back), `p2p.outbox.signals.queue.count` and `p2p.outbox.signals.close.count`
+  show the order messages waiting to be sent, the release rate, whether the relays are falling
+  behind, and how often a relay did. They carry no peer and no order. More in CRD ch.32 §32.9B.
+
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
@@ -51,6 +60,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
+  call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
+  12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
+  answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
+  speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an error
+  instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
+  Detail: PR #154.
+
 - **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
   `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
   watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
@@ -76,6 +93,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
   moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
   every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
+- **A maker that changes its orders faster than its relays can take them no longer loses its whole
+  order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
+  slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
+  updates, so the book vanished on every node. Now the maker keeps one pending message per order,
+  the latest values win, and the messages leave at a bounded rate (at most 10 per second per maker
+  key, a burst of 100). When a relay stops keeping up, either its send queue stays backed up for
+  2 seconds or the last connection to it closes while order messages are in flight, the rate drops
+  sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
+  the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
+  0.5 per second every minute, and stops one step below the rate at which the relay failed; after
+  30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
+  messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
+  at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
+  and jumps ahead of queued order updates. A peer may see an order's latest price a moment later, or
+  only at the next keep-alive synchronization, and may never see an intermediate value of an order
+  that changes quickly. Your own order list and the answers of `setprice`, `update_maker_order` and
+  `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
+  keep-alives. One short gap remains: the first signal comes only after the load has started, so a
+  burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
+  `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
+  JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
+
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
@@ -280,6 +320,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
   More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
   (R-K5, R-K6). Detail: PR #TBD.
+- **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
+  test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
+  reused the coin the first had just spent, because the Electrum servers had not yet caught up with
+  that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
+  and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
+  Test-only; the node itself is unchanged.
+- **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #149; CRD ch.12 R7a, R7b.
+- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
+  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
+  times by) has passed the lock time, and a refund the network still rejects as not yet final is
+  retried until the refund deadline instead of ending the swap with its refund failed. Calling
+  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
+  PR #146; CRD ch.39 R39.5.13.
 - **A node that relays the order book now answers other nodes' sync requests for a maker it is still
   catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
   while the relay was itself fetching them (the usual case right after a stall or a restart) got an
@@ -302,6 +355,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
 
+- **Recovering an ARRR swap saved by another build no longer fails with "Invalid address".** Some swap files
+  carry an HTLC public key that does not belong to the private key saved with them. Recovery recognized the
+  payment by that public key, then built the refund with the saved private key, which produced a different
+  script, and the transaction builder rejected it. Recovery now always signs with the private key that
+  belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
+  key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
@@ -608,6 +667,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   A compact cache that fails validation is deleted instead of renamed to `.invalid-chain.<ms>.bak`,
   which also ends the multi-gigabyte backup flood. No RPC or wire change. Detail: PR #31; CRD ch.39
   R39.8.0al and R39.8.0n.
+- **A shielded (ARRR) wallet no longer piles up `.checkpoint.<ms>.bak` files when its sync keeps
+  failing right after a rebuild.** Until the first block is scanned, a wallet holds nothing but its
+  account, and every sync pass starts that wallet over. Each restart kept the old copy as a backup,
+  so a server that kept failing left one more file every 30 seconds. Such a copy contains nothing the
+  wallet cannot recreate from its viewing key, so it is now deleted. A wallet that has scanned blocks
+  or holds transactions is never deleted this way, and the one backup a rebuild keeps of the previous
+  wallet is unchanged. Existing `*.checkpoint.*.bak` files can be deleted safely. No RPC or wire
+  change. Detail: PR #150; CRD ch.39 (shielded coins) R39.8.0ax.
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and
   `get_swap_gas_fee_policy` echoed it, but nothing read it, so every swap transaction was signed in
   the legacy form and `High` behaved exactly like `Legacy`. `Low`, `Medium` and `High` now emit an
@@ -649,6 +716,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for the newer swaps), and a token inherits its platform coin's block. We ignored them and used 150000 for every swap call, which is too low on some chains, so swap transactions on chains such as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used for every swap call, the trade-fee estimates and the approval; a value that is not a whole number stops that coin from activating and names the key. Where the coins file sets nothing, the defaults now match the other KDF implementations: for example a platform-coin payment is 65000 and its refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57 R57.5, R57.6.
 
+- **Tests now cover an EVM token that sets its own gas limits while its platform coin sets none.** The token's own `gas_limit` block is used for its sends, swap payments, spends and refunds and for the fee quotes, and a limit it leaves out takes the built-in default, never a value from the platform coin's entry. The test uses the limits of a coins file running in production.
+
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
@@ -660,6 +729,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
   wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
   refused before its fee.
+- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — new, in planning
+  for after the beta: answering the ARRR swap questions from the blocks `lightwalletd` serves,
+  without an address index, and then retiring the Electrum fallback, which stays for the beta.
 - [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
   ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
   release.
@@ -711,7 +783,8 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
   read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
-  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
+  order's file and database writes leave the order's lock (Decision AM) in PR #149.
 
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
