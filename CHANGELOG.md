@@ -6,16 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Added
+Within each heading, entries are grouped by area. Each entry ends with the pull request that made
+it and, where one exists, the CRD rule, for readers who want more.
 
-- **Metrics for the gossip send queues and for the maker's pending order messages.** The gauges
-  `p2p.send_queue.len`, `p2p.send_queue.max_per_peer` and `p2p.send_queue.dropped.count` show the
-  messages queued toward peers, the longest single queue and the messages dropped since start.
-  `p2p.outbox.pending`, `p2p.outbox.rate` (in thousandths of a message per second),
-  `p2p.outbox.pressure` (1 while a relay's send queue is backed up), `p2p.outbox.degraded` (1 while
-  order updates are held back), `p2p.outbox.signals.queue.count` and `p2p.outbox.signals.close.count`
-  show the order messages waiting to be sent, the release rate, whether the relays are falling
-  behind, and how often a relay did. They carry no peer and no order. More in CRD ch.32 §32.9B.
+### Added
 
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
@@ -23,26 +17,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   miner fee plus one hasting. The refusal is the usual volume-too-low error, with that amount as the
   threshold. Example: BTC at 0.0001 when the fee is high. The minimum volume an order advertises does
   not change, and peers see nothing new. Set the `MM2.json` boolean `pre_trade_spend_check` to `false`
-  to restore GLEEC KDF behaviour, with no check. Detail: PR #73; CRD ch.60 R60.6.7.
-
-- **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
-  wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
-  Any positive fee is accepted, including one below the estimate; a fee one tenth of the estimate was
-  accepted and mined within about ten minutes on an uncongested transaction pool (checked live
-  2026-10-26; a full pool is untested). Any other fee type sent for Siacoin is now rejected with an
-  invalid-fee-policy error instead of being silently ignored. More in
-  [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md).
-- **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
-  window applies.** It names the start height and window size, notes that earlier funds will not be
-  visible, and says to re-activate with `sync_params`; `first_sync_block` remains the machine-readable
-  signal (CRD ch.39 R39.8.0aw). Detail: PR #61.
-- **Releases and the runtime Docker image now ship the license files.** `COPYING`, `LICENSE` and
-  `THIRDPARTY-LICENSES` are attached to every release and covered by the signed `SHA256SUMS`, and
-  the image carries them in `/usr/share/doc/kdf/`. Detail: PR #36.
-- **A shielded (ARRR) withdrawal short only because of an unconfirmed transaction now says so.**
-  Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
-  `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
-  that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+  to restore GLEEC KDF behavior, with no check. Detail: PR #73; CRD ch.60 R60.6.7.
+- **Metrics for the gossip send queues and for the maker's pending order messages.** The gauges
+  `p2p.send_queue.len`, `p2p.send_queue.max_per_peer` and `p2p.send_queue.dropped.count` show the
+  messages queued toward peers, the longest single queue and the messages dropped since start.
+  `p2p.outbox.pending`, `p2p.outbox.rate` (in thousandths of a message per second),
+  `p2p.outbox.pressure` (1 while a relay's send queue is backed up), `p2p.outbox.degraded` (1 while
+  order updates are held back), `p2p.outbox.signals.queue.count` and `p2p.outbox.signals.close.count`
+  show the order messages waiting to be sent, the release rate, whether the relays are falling
+  behind, and how often a relay did. They carry no peer and no order. Detail: PR #148; CRD ch.32
+  §32.9B.
 - **Radiant (RXD) now activates and signs with Radiant's own signature hash.** A UTXO coin whose
   `signature_version` is `fork_id_rxd` signs every input with the Radiant dialect: the Bitcoin-Cash
   BIP-143 preimage with one extra digest, a 76-byte summary per output, inserted before the outputs
@@ -52,47 +36,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   with no on-chain check yet: duplicate references, the three reference opcodes that are skipped,
   and sighash modes other than `ALL | FORKID`. RXD's fitness for swaps beyond signing is not
   established, so this does not announce RXD trading. Detail: PR #65; CRD ch.58 §58.3, §58.5.
-- **Documented why a migrated shielded (ARRR) wallet can read a zero balance.** Activating a
-  shielded coin with no `sync_params` scans only a recent window (2,880 blocks, two days at a
-  60-second block time), so funds older than that are invisible while the sync completes
-  normally. This matches the reference, whose window is shorter; the remedy is to pass
-  `sync_params`. Detail: `docs/GLEEC_COMPATIBILITY.md`.
+- **A custom fee for Siacoin withdrawals.** A Siacoin `withdraw` now honors the fee you enter in the
+  wallet's custom-fee box, given as SC per kilobyte; leave it out and the fee is estimated as before.
+  Any positive fee is accepted, including one below the estimate; a fee one tenth of the estimate was
+  accepted and mined within about ten minutes on an uncongested transaction pool (checked live
+  2026-10-26; a full pool is untested). Any other fee type sent for Siacoin is now rejected with an
+  invalid-fee-policy error instead of being silently ignored. More in
+  [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md). Detail: PR #77.
+- **Activating a shielded coin without `sync_params` now logs a warning when the default recent scan
+  window applies.** Without `sync_params` only a recent window is scanned (2,880 blocks, two days at
+  a 60-second block time), so funds older than that stay invisible while the sync completes
+  normally; this is why a migrated ARRR wallet can read a zero balance. The warning names the start
+  height and window size, notes that earlier funds will not be visible, and says to re-activate with
+  `sync_params`; `first_sync_block` remains the machine-readable signal. The reference scans an even
+  shorter window, so the remedy is the same there: pass `sync_params`. More in
+  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md#zhtlc-zero-balance-after-migrating-a-wallet).
+  Detail: PR #61, PR #57; CRD ch.39 R39.8.0aw.
+- **A shielded (ARRR) withdrawal short only because of an unconfirmed transaction now says so.**
+  Instead of `NotSufficientBalance` with `available: 0` beside a healthy balance, it fails with
+  `BalanceLockedByUnconfirmedTransaction` (HTTP 400) naming the amounts and that it clears when
+  that transaction confirms. After a node restart the bare error is reported again. Detail: PR #50.
+- **Releases and the runtime Docker image now ship the license files.** `COPYING`, `LICENSE` and
+  `THIRDPARTY-LICENSES` are attached to every release and covered by the signed `SHA256SUMS`, and
+  the image carries them in `/usr/share/doc/kdf/`. Detail: PR #36.
 
 ### Changed
 
-- **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
-  call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
-  12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
-  answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
-  speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an error
-  instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
-  Detail: PR #154.
+#### Order book and peer-to-peer network
 
-- **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
-  `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
-  watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
-  that forces it, and the gas price of an EVM coin that an earlier request obtained. By default the
-  time a reading is reused adapts by itself. It starts at the coin's block time in seconds (at
-  least 2, at most 600; 15 seconds for a coin without one), doubles each time a fresh reading turns
-  out to be the same as the previous one, up to 10 minutes, and goes back to the start as soon as
-  the value changes. A chain with a fixed gas floor reaches one gas-price reading per 10 minutes
-  without any configuration; a changed value resets it at once. A platform coin and all its tokens
-  share one gas-price reading, so a maker with hundreds of token orders on one chain asks the node
-  once. To fix the time instead, set `fee_estimate_cache_secs` in a coin's configuration entry
-  (0 to 600; 0 turns the reuse off for that coin) or in `MM2.json` (0 to 30, for every coin without
-  its own value; a value outside the range stops the node from starting). This is also what lets
-  the pre-trade spend check run on every order update again, price-only ones included, without
-  extra requests. A swap's own transactions never use the reuse and always read a fresh value. Set
-  `fee_estimate_cache_secs` to `0` in `MM2.json`, and set none per coin, to restore GLEEC KDF
-  behavior most closely: a request then still reads each value once, but nothing is reused between
-  requests. Detail: PR #128; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
-- **Read-only Electrum queries are spread over the connected servers.** With the `MM2.json` boolean
-  `electrum_spread_reads` at its default `true`, each balance, unspent-list, history, header,
-  block-count, transaction and fee query of a coin goes to the next connected server in turn instead
-  of always to the first, so an order-posting burst can use the request budget of every connected
-  server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
-  moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
-  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
 - **A maker that changes its orders faster than its relays can take them no longer loses its whole
   order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
@@ -114,26 +85,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
   `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
   `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
-  JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
+  JSON `false` turns it off. More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md).
+  Detail: PR #148; CRD ch.32 §32.9B, ch.28 §28.9B.
+- **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot
+  that re-submits all of its orders on every refresh used to send one message per order to every
+  node, even when price, volumes and confirmations stayed the same. Such an update is still saved and
+  answered as before, but no message goes out, so the network carries only real changes. Set the
+  `MM2.json` boolean `suppress_unchanged_order_updates` to `false` to broadcast every update again.
+  Detail: PR #111; CRD ch.59 R59.4.6.
 
-- **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
-  random once when the coin is enabled, so users spread across the listed servers (set
-  `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
-  used again; a server that keeps failing is skipped for a growing
-  time (20 s doubling up to 12 h); if every connected server fails, every listed server is tried;
-  connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
-  server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
-  one connects; if none does, the error names each server. More in ch.38 §38.6.4.
-- **Electrum servers can be ranked by how they perform.** Two new values of the `MM2.json` string
-  `electrum_server_order` rank a coin's servers by measurement instead of by one random draw. `mixed`
-  weighs measured speed and chance half and half; `measured` goes by measured speed alone and is meant
-  as an opt-in, because nodes in one region would all pick the same fastest server. When the coin is
-  enabled, each listed server is asked for its newest block once (a small request that carries no
-  address), and servers that are slow or behind the chain rank last. While running, a connected
-  server that falls behind the chain or turns slow is replaced by a better one found by asking the
-  unused servers again, at most once per 5 minutes; nothing is probed on a schedule. The default stays
-  `random`. Set `electrum_server_order` to `listed` for GLEEC KDF behavior. More in ch.38 R38.6.4l.
+#### Order posting, fees and balances
 
+- **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
+  call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
+  12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
+  answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
+  speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an
+  error instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
+  Detail: PR #154.
+- **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
+  `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
+  watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
+  that forces it, and the gas price of an EVM coin that an earlier request obtained. By default the
+  time a reading is reused adapts by itself. It starts at the coin's block time in seconds (at
+  least 2, at most 600; 15 seconds for a coin without one), doubles each time a fresh reading turns
+  out to be the same as the previous one, up to 10 minutes, and goes back to the start as soon as
+  the value changes. A chain with a fixed gas floor reaches one gas-price reading per 10 minutes
+  without any configuration; a changed value resets it at once. A platform coin and all its tokens
+  share one gas-price reading, so a maker with hundreds of token orders on one chain asks the node
+  once. To fix the time instead, set `fee_estimate_cache_secs` in a coin's configuration entry
+  (0 to 600; 0 turns the reuse off for that coin) or in `MM2.json` (0 to 30, for every coin without
+  its own value; a value outside the range stops the node from starting). This is also what lets
+  the pre-trade spend check run on every order update again, price-only ones included, without
+  extra requests. A swap's own transactions never use the reuse and always read a fresh value. Set
+  `fee_estimate_cache_secs` to `0` in `MM2.json`, and set none per coin, to restore GLEEC KDF
+  behavior most closely: a request then still reads each value once, but nothing is reused between
+  requests. Detail: PR #128; CRD ch.38 R38.6.6j and R38.6.6k, ch.57 R57.2.6 and R57.2.7.
+- **Posting and updating maker orders makes fewer Electrum and node requests.** Electrum servers
+  serve each connection about one request per second once its first burst is used, so every extra
+  request cost about a second. A legacy address such as RIN or DOGE now reads its balance and its
+  coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
+  coin's gas price only once, and an EVM gas price's two node queries run in parallel. Detail:
+  PR #114; CRD ch.38 R38.6.3a, R38.6.6j, ch.57 R57.2.6.
 - **A node now reads a coin's balance only while it has a maker order selling that coin.** It used to
   read the balance of every activated coin every 10 seconds, whether or not any order needed it, and
   those reads competed with order posting for the same throttled Electrum session. Now the balance of
@@ -145,117 +138,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   from a timed-out taker order is re-checked once, 30 seconds after the node starts watching its coin.
   Detail: PR #116; CRD ch.60 R60.4.5, R60.4.6.
 
-- **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
-  shows that a node's copy of the maker's orders differs, the node asks another node for an update.
-  It used to describe its copy by the maker's advertised state instead of its own, so while the maker
-  kept changing orders the answer could be meant for a different copy, and the node kept only part of
-  the maker's orders, asking again every 30 seconds. The node now names the state it actually holds and
-  gets the changes it can apply, or the full set. Set the `MM2.json` boolean
-  `orderbook_sync_names_held_root` to `false` to ask the way GLEEC KDF does. Detail: CRD ch.32 R-Q4a.
+#### UTXO coins and Electrum
 
-- **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot that
-  re-submits all of its orders on every refresh used to send one message per order to every node, even
-  when price, volumes and confirmations stayed the same. Such an update is still saved and answered as
-  before, but no message goes out, so the network carries only real changes. Set the `MM2.json` boolean
-  `suppress_unchanged_order_updates` to `false` to broadcast every update again. Detail: CRD ch.59
-  R59.4.6.
-
-- **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the same order during that time. The check did not look at the age of the memory, so an old entry could keep ignoring the same order after the window, until the next cancellation cleared it. The check now treats an entry older than the window as absent. Orders get random identifiers, so this was very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
-
-- **Posting and updating maker orders makes fewer Electrum and node requests.** Electrum servers
-  serve each connection about one request per second once its first burst is used, so every extra
-  request cost about a second. A legacy address such as RVN, DOGE or KMD now reads its balance and
-  its coins in one request instead of two. Each order request reads a coin's fee estimate and an EVM
-  coin's gas price only once, and an EVM gas price's two node queries run in parallel. An order
-  update still runs the pre-trade spend check, whatever it changes, and while the fee reading is
-  recent enough the check makes no fee request. Detail: PR #114; CRD ch.38 R38.6.3a, R38.6.6j,
-  ch.57 R57.2.6, ch.60 R60.6.7.
-
-- **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
-  whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
-  longer holds a request for a minute before the next node is tried. A request given up on is now
-  closed too, instead of staying open in the background for as long as the node keeps silent. More in
-  ch.35 §35.1.F.
-
-- **EVM and Tron log lines and errors name a node by scheme, host and port only.** Paths, query
-  strings and credentials, where hosted providers keep API keys, are never printed: the activation
-  probe, the per-node failure logs, the error that lists the nodes tried, and the lower-layer texts
-  they carry. When a node answers with an error, the log says so
-  (`EVM RPC <host> answered <method> with error <code>: <message>`) and the error returned to the
-  caller ends with `(node <host>)`, so a revert reported by one of several nodes can be attributed.
-  The same goes for the gas-station URL and the gas-API provider (Infura, Blocknative) URL, which
-  also carry API keys. There is no switch to print the full URL. More in ch.35 §35.1.F.
-- **EVM log lines about a node say which coin it is and where it stands in the coin's list.** A line
-  such as `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...`
-  starts with the ticker and gives the node's position in the list as you configured it, so two coins
-  that use one provider with different paths, or two nodes of one coin on one host, can be told
-  apart. The host-only naming is unchanged, and so are the error texts a request returns. Detail:
-  PR #133; CRD ch.35 R35.1.16.
-- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
-  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
-  not supported in this release and that light mode should be used. Native mode could not build a
-  working wallet for a fresh activation, and after Ironwood it could build transactions the network
-  rejects. Light mode is unchanged. Native mode returns in a later release, see
-  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
-  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
-- **TRON (TRX, TRC20) cannot be activated in this beta.** Its support is not finished; activation
-  answers "TRON support is not available in this build" instead, and the rest of the node is
-  unaffected. It is planned to return in the next beta.
-
-- **Solana (SOL, SPL tokens) cannot be activated in this beta.** Its support is not finished;
-  `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
-  build" instead, and the rest of the node is unaffected. It is planned to return in the next beta.
-
-- **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
-  work; orders and swaps are not available and are planned to return in a later release. A swap
-  already in progress still completes. An order with a Tendermint coin saved by an earlier
-  version is cancelled at startup.
-
-- **A shielded (ARRR) send that has to wait for an earlier unmined send now waits up to 10 minutes
-  instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
-  waiting could free enough funds. More in
-  [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md). Detail: PR #85.
-
+- **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn
+  at random once when the coin is enabled, so users spread across the listed servers (set
+  `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is
+  used again; a server that keeps failing is skipped for a growing time (20 s doubling up to 12 h);
+  if every connected server fails, every listed server is tried; connecting is bounded by
+  `timeout_sec` (default 20 s) and each request by 20 s; errors name each server tried as
+  host:port. Detail: PR #104; CRD ch.38 §38.6.4.
+- **Electrum servers can be ranked by how they perform.** Two new values of the `MM2.json` string
+  `electrum_server_order` rank a coin's servers by measurement instead of by one random draw. `mixed`
+  weighs measured speed and chance half and half; `measured` goes by measured speed alone and is meant
+  as an opt-in, because nodes in one region would all pick the same fastest server. When the coin is
+  enabled, each listed server is asked for its newest block once (a small request that carries no
+  address), and servers that are slow or behind the chain rank last. While running, a connected
+  server that falls behind the chain or turns slow is replaced by a better one found by asking the
+  unused servers again, at most once per 5 minutes; nothing is probed on a schedule. The default stays
+  `random`. Set `electrum_server_order` to `listed` for GLEEC KDF behavior. More in
+  [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md). Detail: PR #144;
+  CRD ch.38 R38.6.4l.
+- **Read-only Electrum queries are spread over the connected servers.** With the `MM2.json` boolean
+  `electrum_spread_reads` at its default `true`, each balance, unspent-list, history, header,
+  block-count, transaction and fee query of a coin goes to the next connected server in turn instead
+  of always to the first, so an order-posting burst can use the request budget of every connected
+  server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
+  moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
+  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
 - **Fixed-fee UTXO coins now pay their `txfee` per kilobyte proportionally, as the reference does.**
   Every coin with a nonzero `txfee`, or none, used to pay the whole per-kilobyte fee for every
   started kilobyte, so a 226-byte KMD transaction cost 1,000 base units instead of 226. Withdrawals,
   swap payments and the DEX fee transaction now pay `floor(txfee × size / 1000)`, and a coin that
   forces the node's minimum relay fee pays that rate proportionally as well. A segwit transaction's
   size is its virtual size rounded up, as nodes count it, so a fee at the relay minimum is never one
-  unit short. Swap spends and refunds
-  are estimated over 496 bytes instead of 305 bytes rounded up to a whole kilobyte: a KMD spend costs
-  496. An explicit `UtxoFixed` withdraw fee keeps its meaning. Detail: PR #72; CRD ch.38
-  R38.6.6b–c.
-- **The coins-file option `dingo_fee` is now honoured.** With `dingo_fee: true` and a positive
+  unit short. Swap spends and refunds are estimated over 496 bytes instead of 305 bytes rounded up
+  to a whole kilobyte: a KMD spend costs 496. An explicit `UtxoFixed` withdraw fee keeps its
+  meaning. Detail: PR #72; CRD ch.38 R38.6.6b–c.
+- **The coins-file option `dingo_fee` is now honored.** With `dingo_fee: true` and a positive
   `txfee`, a coin pays `txfee` for every started kilobyte. DINGO, DEV, NYC, SHIC, TRMP and XVG carry
   it. Their version-two swap spend fee is now one `txfee`, matching a reference peer that validates
   it exactly; before, such a swap failed that peer's check. Their minimum trading volume uses the
   same fee. Detail: PR #72; CRD ch.38 R38.6.6a, ch.60 R60.6.2.
-- **The README now explains why the project exists.** Upstream's license added conditions on the
-  trading-fee code, its default network since v3.0 charges a 2% fee, and v3.0 refuses to start on
-  network 8762; KDF Reloaded keeps both networks usable. See also
-  [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md),
-  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md) and [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md).
-  Detail: PR #57.
-- **A UTXO coin's header layout now reaches every header read, and `protocol.chain_variant` is honored for
-  the first time.** The key is read from the coin's entry (eight values; an unrecognized one fails the
-  coin's activation naming the ticker and value), and the coin's layout (`header_layout`, else
-  `chain_variant`, else the Qtum reader for a `QTUM`/`QRC20` protocol type) is used by header sync, the
-  reorg walk, block timestamps, SPV, the stored-header re-reads and the WalletConnect genesis lookup, not
-  only the median-time-past. The structural fallback for `RIC` and `MEWC` now applies on all of those paths
-  too. The families without a dedicated reader still read the standard layout (CRD ch.37 R37.5.1,
-  R37.5.1a, R37.5.9e). Detail: PR #74.
+- **A UTXO coin's header layout now reaches every header read, and `protocol.chain_variant` is
+  honored for the first time.** The key is read from the coin's entry (eight values; an unrecognized
+  one fails the coin's activation naming the ticker and value), and the coin's layout
+  (`header_layout`, else `chain_variant`, else the Qtum reader for a `QTUM`/`QRC20` protocol type) is
+  used by header sync, the reorg walk, block timestamps, SPV, the stored-header re-reads and the
+  WalletConnect genesis lookup, not only the median-time-past. The structural fallback for `RIC` and
+  `MEWC` now applies on all of those paths too. The families without a dedicated reader still read
+  the standard layout. Detail: PR #74; CRD ch.37 R37.5.1, R37.5.1a, R37.5.9e.
 
-- **The generated `coins/utxo/pb.rs` is no longer committed, and it is now formatted when generated.**
-  `mm2src/coins/build.rs` regenerates it from `bchrpc.proto` on every build, so the committed copy
-  left a formatting-only diff in every worktree. The file is git-ignored and `prost-build` runs with
-  its `format` feature, producing the same text the repository used to carry. No runtime change.
-  Detail: PR #63.
+#### EVM coins
+
+- **An unresponsive EVM node is given up after 10 seconds instead of 60.** The limit now covers the
+  whole attempt, from connecting to the last byte of the answer, on every platform, so a slow node no
+  longer holds a request for a minute before the next node is tried. A request given up on is now
+  closed too, instead of staying open in the background for as long as the node keeps silent.
+  Detail: PR #90; CRD ch.35 §35.1.F.
+- **EVM and Tron log lines and errors name a node by scheme, host and port only, and EVM lines say
+  which coin and which list position.** Paths, query strings and credentials, where hosted providers
+  keep API keys, are never printed: the activation probe, the per-node failure logs, the error that
+  lists the nodes tried, and the lower-layer texts they carry. The same goes for the gas-station URL
+  and the gas-API provider (Infura, Blocknative) URL, which also carry API keys. When a node answers
+  with an error, the log says so (`EVM RPC <host> answered <method> with error <code>: <message>`)
+  and the error returned to the caller ends with `(node <host>)`, so a revert reported by one of
+  several nodes can be attributed. A line such as
+  `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...` starts
+  with the ticker and gives the node's position in the list as you configured it, so two coins that
+  use one provider with different paths, or two nodes of one coin on one host, can be told apart.
+  There is no switch to print the full URL. Detail: PR #90, PR #133; CRD ch.35 §35.1.F, R35.1.16.
 - **The initial swap gas-fee policy no longer depends on how the coin was activated, and a coin's
   `max_eth_tx_type` now caps the transaction type it will sign.** The legacy `enable` / `electrum`
   route resolves the policy the way the other routes do — the `swap_gas_fee_policy` request field,
   else the `swap_gas_fee_policy` key of the coin's entry, else `Legacy` — and that request field is
-  new on the legacy route and parsed leniently there: an unrecognised value is ignored, whereas
+  new on the legacy route and parsed leniently there: an unrecognized value is ignored, whereas
   `enable_eth_with_tokens` and `task::enable_eth` still reject it with `InvalidRequest`. A swap send
   whose EIP-2718 type exceeds the coin's `max_eth_tx_type` (a token falls back to its platform
   coin's entry) is now refused at signing, with nothing broadcast and no lower type substituted.
@@ -263,6 +219,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   too; an operator who wants an absent key to mean unrestricted sets the node-level boolean
   `max_eth_tx_type_absent_unrestricted` to `true` (default `false`). Activation logs the effective
   policy and cap and where each came from. Detail: PR #30; CRD ch.35 D35.6 and D35.7.
+
+#### ARRR and other shielded coins
+
+- **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
+  shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
+  not supported in this release and that light mode should be used. Native mode could not build a
+  working wallet for a fresh activation, and after Ironwood it could build transactions the network
+  rejects. Light mode is unchanged. Native mode returns in a later release, see
+  [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md). GLEEC KDF accepts
+  native mode. Detail: PR #115; CRD ch.39 R39.11.1a.
+- **A taker paying with ARRR is refused at the start of the swap when nothing could watch its
+  payment.** A taker learns the swap secret only by seeing the maker spend the taker's payment.
+  Before sending its dex fee, a taker whose payment coin is ARRR in light mode now checks that at
+  least one source can answer an address question about it: a `lightwalletd` server, or an Electrum
+  server that is on the same chain. If none can, the swap ends at once with `StartFailed`. The error
+  names each server and what is wrong with it, and nothing is sent. Before, such a swap could reach
+  the payment and lose it. Detail: PR #136; CRD ch.39 R39.11.28.
+- **A shielded (ARRR) send that has to wait for an earlier unmined send now waits up to 10 minutes
+  instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
+  waiting could free enough funds. More in
+  [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md). Detail: PR #85.
+
+#### Transport, TLS and dependencies
+
 - **The wss transport now uses rustls 0.23, and a malformed wss key file is a startup error instead
   of a panic.** A relay whose configured wss key or certificate cannot be loaded now fails to start
   with `P2PInitError::InvalidWssConfig`. Detail: PR #39.
@@ -295,27 +275,134 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cannot be fixed by a lockfile update; it is accepted in `deny.toml` until the RustCrypto EC stack
   moves to `crypto-bigint` 0.7. Detail: PR #68.
 
-### Removed
-
-- **The legacy `iguana/` and `etomic_build/` directories are gone.** Both were remnants of the
-  codebase's early days with no build, runtime, CI or documentation dependency. `iguana/tools/`
-  held a single Python 2.7 byte-compiled file, `getos.pyc` — the only `.pyc` in the tree — that
-  nothing referenced; `etomic_build/` held outdated `curl` wrapper scripts for the legacy RPC that
-  launched a binary path and sourced a coins file which no longer exist. The `.gitignore` entries
-  for paths under them were dropped with them; no other document changed. Three dead root scripts
-  went with them: `start_ONE_ANOTHER_trade.sh` (drove a `docker-compose` setup the repository
-  never contained and called scripts from the removed `etomic_build/`), `travis_cmake_linux.sh`
-  and `travis_cmake_mac.sh` (Travis-era CMake installers; the repository has no Travis
-  configuration). Detail: PR #64.
-
 ### Fixed
 
-- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
-  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
-  spent the taker's payment. A maker that failed during negotiation could be picked again for the
-  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
-  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
-  lifted with `unban_pubkeys`. Detail: CRD ch.59 R59.5.2, R59.5.4.
+#### Order book and peer-to-peer network
+
+- **A market maker's keep-alive is now sent once per trading pair, as other nodes expect.** A maker
+  with orders on several pairs used to send, every 30 seconds, one message per pair that each listed
+  every pair, so each node that relays the order book asked for every pair once per copy. When the
+  node answering could not serve one of the pairs, the whole request failed and the maker's orders
+  stopped spreading further. Each message now carries the one pair of the topic it is sent on, and
+  pairs without orders get no message. Detail: PR #111; CRD ch.32 R-K2a.
+- **A node now asks for exactly the order-book changes it is missing.** When a maker's keep-alive
+  shows that a node's copy of the maker's orders differs, the node asks another node for an update.
+  It used to describe its copy by the maker's advertised state instead of its own, so while the maker
+  kept changing orders the answer could be meant for a different copy, and the node kept only part of
+  the maker's orders, asking again every 30 seconds. The node now names the state it actually holds
+  and gets the changes it can apply, or the full set. Set the `MM2.json` boolean
+  `orderbook_sync_names_held_root` to `false` to ask the way GLEEC KDF does. Detail: PR #111; CRD
+  ch.32 R-Q4a.
+- **A node answers every order-book sync request at once and asks for one only when it needs it.** A
+  node whose own order data was a few milliseconds behind used to refuse other nodes' sync requests
+  with a "retry" answer; a relay that got that answer stopped passing the maker's orders on until the
+  next keep-alive, 30 seconds later. The node now answers from the data it has, as other KDF nodes do,
+  leaving out an order whose cancellation it is still applying. Before comparing a received
+  keep-alive with its own data, it waits briefly for that data to catch up, so it no longer requests
+  a sync it does not need. Detail: PR #111; CRD ch.32 R-T3b items 2 and 4.
+- **A node that relays the order book now answers other nodes' sync requests for a maker it is still
+  catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
+  while the relay was itself fetching them (the usual case right after a stall or a restart) got an
+  error at once and waited for the maker's next keep-alive, 30 seconds later, for each relay hop. The
+  relay now holds such a request for at most 5 seconds and answers it when its own sync lands, so
+  the nodes behind it rebuild the maker's orders in seconds. If the relay's own sync fails or takes
+  longer than that, the asking node gets the same error as before. At most 8 requests per peer and
+  256 in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
+  restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: PR #135; CRD
+  ch.32 R-Q5b.
+- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
+  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
+  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
+  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
+  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
+  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
+  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
+  PR #132; CRD ch.59 R59.6.1a.
+- **A maker that goes offline now drops out of the order book on schedule, whatever its clock says.**
+  The keep-alive expiry used the timestamp the maker put in its own message, so a maker with a fast
+  clock stayed listed for that skew plus 90 s after it died, and one that wrote a far-future
+  timestamp stayed listed indefinitely. The expiry now runs from when this node received the
+  keep-alive; the wire format is unchanged. Keep-alives also no longer advertise empty trie roots.
+  Detail: PR #52; CRD ch.32 R-P3.
+- **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.**
+  For a few milliseconds after a cancel or a price change, the node's order index was already up to
+  date while the data behind its keep-alive messages and its answers to other nodes' sync requests
+  was not, so it could still announce the old state, and a node that had already seen the cancel
+  could log "recently cancelled" when the old order was listed again. Keep-alives are now built only
+  once both are up to date; until then the keep-alive is skipped for that round. Detail: PR #98; CRD
+  ch.32 R-T3b.
+- **A cancelled order's identifier is no longer ignored once its two-minute window is over.** A node
+  remembers for 120 seconds that a peer cancelled an order and ignores a late announcement of the
+  same order during that time. The check did not look at the age of the memory, so an old entry could
+  keep ignoring the same order after the window, until the next cancellation cleared it. The check
+  now treats an entry older than the window as absent. Orders get random identifiers, so this was
+  very unlikely to matter in practice. Detail: PR #102; CRD ch.11 R10.
+- **A maker node that is not a relay now keeps its order book of other makers up to date after a
+  restart.** After a restart the node announced its stored orders again, but it did not record that
+  it was following their trading pairs, so a keep-alive from another maker with a different order
+  list never made it ask for that maker's orders, and its view of the other makers on its own pairs
+  went stale until something else (an order book request, a new order on the pair) recorded the
+  pair. Re-announcing a stored order now records the pair first, without requesting the order book.
+  Detail: PR #101; CRD ch.59 R59.6.7.
+- **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order
+  book every minute and a half and gets announced again.** Orders for those pairs are placed under a
+  separate key of their own, and the cleanup that forgets silent peers treated that key as a silent
+  peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own
+  keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59
+  R59.6.5.
+- **Reading the order book of a pair that includes an ARRR order no longer fails on the older
+  `orderbook` method.** Before, one ARRR order on the book made the whole older `orderbook` request
+  fail with an internal error, and the older `best_orders` silently left the order out. The order now
+  appears with the address `Shielded` (the same word the newer interface uses), and an order whose
+  coin has no address to show is left out on its own instead of failing the response. Tendermint,
+  Siacoin and Lightning orders now show up on the older methods too. Detail: PR #88; CRD ch.32
+  R-F6d, R-F6e.
+- **Gossip message ids now use the compact 8-byte form other KDF nodes use, which should cut the
+  bandwidth a relay spends on duplicate messages.** Our nodes announced each message with an id
+  written as decimal text, while the other implementations write the same 64-bit value as 8 raw
+  bytes, so an id announced by one side never matched the id the other side already held and every
+  announced message was requested again, then dropped as a duplicate. The id is now the 8-byte
+  big-endian form; what it is computed from is unchanged. Nodes on the old and new encoding still
+  exchange messages normally, but each message is sent once more between them until both sides are
+  upgraded. Detail: PR #99; CRD ch.28 R13.
+- **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
+  gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
+  comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
+  so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
+  exchange repairs what a dropped message carried. A peer that stays at the limit for a full minute is
+  disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
+  Messages are also sent in the order they were queued, where a backlog used to go out newest first.
+  The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
+  minute. Nothing new is sent on the wire. Detail: PR #122; CRD ch.28 §28.9B.
+- **A seed or relay now gives back the memory a burst of order updates used.** Every order update a
+  node applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and
+  bookkeeping), and none of it was released until the same order pair changed again, so a node that
+  had seen 500 updates a second for a few minutes stayed about 150 MB larger afterward. The change
+  history is now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node
+  store also shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its
+  queue; and clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of
+  a small pair). On Linux, the system's memory allocator (glibc) kept the freed pages in the process
+  even then, so after each ten-minute clean-up the node now also asks it to hand them back: in a test
+  where the order data itself was 1 MB, the memory the operating system showed fell from 160–210 MB
+  to 30 MB. The memory use before and after goes to the debug log; other systems are unchanged. A
+  peer that has been out of sync for more than five minutes now receives a full snapshot instead of
+  a delta (as it already did after a write to the pair); within five minutes nothing changes. The
+  metrics now also show the number of stored change histories and changes, tracked pubkeys and
+  queued trie updates, and, after each ten-minute clean-up, the node store's size and entry count.
+  Detail: PR #131, PR #134, PR #137; CRD ch.32 R-K4.
+
+#### Orders, swaps and activation (all coins)
+
+- **Listing, cancelling or updating an order no longer waits for another path's disk or network
+  work.** The balance-update handler, the periodic balance check, the removal of timed-out matches,
+  an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while
+  they wrote the order's file and history row, and the background maintenance that re-announces a
+  node's own orders missing from the order book held it while it read the balance and the fee, so
+  `my_orders`, `order_status` and other calls on that order waited for the disk or a network round
+  trip. They now do that work without the lock and take it only to apply the result, re-checking the
+  order first; the maintenance also reads each base coin's balance once per pass. One order's writes
+  still land in the order of its changes, and a cancelled order's record is never written back.
+  Detail: PR #128, PR #149; CRD ch.12 R7a, R7b, ch.60 R60.4.6 item 5.
 - **Two activations of the same coin no longer run at the same time.** If a coin is activated again
   while its first activation is still running, through any activation method or the legacy `enable`
   and `electrum`, the second now waits for the first. If the first activated the coin, the second
@@ -325,230 +412,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   then failed. A platform activation that brings tokens also waits for activations of those tokens.
   Callers get the same answers as before; only the second call can return later. Detail: PR #156;
   CRD ch.55 R55.1.12.
-- **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
-  test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
-  reused the coin the first had just spent, because the Electrum servers had not yet caught up with
-  that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
-  and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
-  Test-only; the node itself is unchanged.
-- **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #149; CRD ch.12 R7a, R7b.
-- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
-  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
-  times by) has passed the lock time, and a refund the network still rejects as not yet final is
-  retried until the refund deadline instead of ending the swap with its refund failed. Calling
-  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
-  PR #146; CRD ch.39 R39.5.13.
-- **A node that relays the order book now answers other nodes' sync requests for a maker it is still
-  catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
-  while the relay was itself fetching them (the usual case right after a stall or a restart) got an
-  error at once and waited for the maker's next keep-alive, 30 seconds later, for each relay hop. The
-  relay now holds such a request for at most 5 seconds and answers it when its own sync lands, so
-  the nodes behind it rebuild the maker's orders in seconds. If the relay's own sync fails or takes
-  longer than that, the asking node gets the same error as before. At most 8 requests per peer and 256
-  in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
-  restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: CRD ch.32
-  R-Q5b.
-
-- **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
-  delayed.** A maker's order book is kept for as long as either its keep-alives or its order
-  messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
-  so a maker whose keep-alives were held up in a busy send queue while its updates still arrived lost
-  its book after 90 seconds. A maker that really stopped is still removed after the same time. A
-  message from a maker the node does not know yet adds nothing, and nothing on the wire changes. To
-  restore the old behavior, set `order_messages_refresh_liveness` to `false` in `MM2.json`. Detail:
-  CRD ch.59 R59.6.1a.
-
-- **Listing or changing an order no longer waits for a network round trip of the background order maintenance.** The maintenance that re-announces a node's own orders missing from the order book held the order's lock while it read the balance and the fee. It now reads without the lock, reads each base coin's balance once per pass, and takes the lock only to apply the result. Detail: PR #128; CRD ch.60 R60.4.6 item 5.
-
-- **Recovering an ARRR swap saved by another build no longer fails with "Invalid address".** Some swap files
-  carry an HTLC public key that does not belong to the private key saved with them. Recovery recognized the
-  payment by that public key, then built the refund with the saved private key, which produced a different
-  script, and the transaction builder rejected it. Recovery now always signs with the private key that
-  belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
-  key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
-- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before, each
-  swap got a random key that was saved in the swap file, so a swap started by another KDF implementation
-  could not be recovered here, nor one of ours there. The key is now computed from the wallet's transparent
-  key and the swap (the secret hash for the maker, the swap UUID for the taker), and it is never saved: it
-  is computed again on restart and on recovery, so either implementation can recover a swap with the same
-  seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
-  the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
-  fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
-  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
-- **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
-  gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
-  comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
-  so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
-  exchange repairs what a dropped message carried. A peer that stays at the limit for a full minute is
-  disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
-  Messages are also sent in the order they were queued, where a backlog used to go out newest first.
-  The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
-  minute. Nothing new is sent on the wire. More in ch.28 §28.9B.
-
-- **A taker now keeps trying to send its swap payment until the same moment the reference does.** The
-  taker gave up on sending its payment one third of the swap's lock duration after the start. It now uses
-  the maker-payment wait deadline, two fifths of the lock duration, which is the same deadline it already
-  uses to wait for the maker payment's confirmations. A taker whose maker payment confirmed late used to
-  end the swap at this step, losing its dex fee and leaving the maker's payment locked until its refund.
-  The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
-- **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When the server's node refused an address lookup ("No information available for address"), the error blamed a missing transaction index, which is a different setting. For example, a maker payment failed with that explanation on a server whose node runs with the transaction index on. Such an answer now ends the lookup at its first request. The error says the server's node keeps no address index and quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
-- **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a node restarted after broadcasting its swap payment but before recording it, and came back after that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The swap now first looks for a payment it may already have sent and carries on with it. The deadline stops only a payment that has not been sent yet. This applies to maker and taker, for every coin. Detail: PR #119; CRD ch.51 R17, R29, T21.
-- **A taker paying with ARRR is refused at the start of the swap when nothing could watch its payment.**
-  A taker learns the swap secret only by seeing the maker spend the taker's payment. Before sending its
-  dex fee, a taker whose payment coin is ARRR in light mode now checks that at least one source can
-  answer an address question about it: a `lightwalletd` server, or an Electrum server that is on the same
-  chain. If none can, the swap ends at once with `StartFailed`. The error names each server and what is
-  wrong with it, and nothing is sent. Before, such a swap could reach the payment and lose it.
-  Detail: PR #136; CRD ch.39 R39.11.28.
-- **A fresh ARRR swap no longer asks whether it has already paid.** The "already sent" question exists
-  for a swap that resumes after a restart. An ARRR payment goes to a script made with a key used for
-  this one swap only, so a swap started in this run cannot have paid it yet. The question is now skipped
-  there. A resumed swap, and every other coin, still ask it. Detail: PR #136; CRD ch.39 R39.11.27.
-- **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An ARRR
-  swap asks three questions about its HTLC: was my payment already sent, was this payment spent, and
-  has the counterparty spent it yet. When no `lightwalletd` server can answer them, for example because
-  its node keeps no address index, the swap now asks the Electrum servers given in the activation's
-  `electrum_servers`, as other KDF nodes do. A server is used only if its block hash at a recent height
-  matches the `lightwalletd` servers' and its tip is at most 10 blocks behind; nothing else of the coin uses
-  Electrum. Activation never connects to these servers; the first question does. When neither source can
-  answer, the error names both. Detail: PR #130; CRD ch.39 R39.11.25.
-- **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before sending
-  its HTLC payment, a swap asks whether that payment is already on chain. The answer now comes first from
-  the wallet's own record of the transactions it broadcast. This works even when the configured
-  `lightwalletd` servers cannot answer address questions. The record only ever answers "sent"; anything
-  else still goes to the servers. Detail: PR #125; CRD ch.39 R39.11.26.
-- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps no address index; such a server is skipped.** Two servers in the published ARRR server list answer every address lookup with "No information available for address". We took each of those refusals for one transaction the server could not deliver, and narrowed the search down to single blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that listed such a server before a working one was affected. Now:
-  - such a server is recognized after a few requests, logged once as a warning, and skipped for the rest of the activation;
-  - each server gets at most 120 seconds per check;
-  - the search starts at the payment's own block;
-  - each step is logged.
-
-  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39 R39.5.5, R39.11.4h, R39.11.4i.
-- **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes its platform coin's value unless it sets its own. We ignored it, so an approval could run out of gas on those chains. The setting is read when the coin is activated (anything other than a number stops the coin from activating and names the key) and applied only to that approval's estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail: PR #107; CRD ch.57 R57.5.3b.
-- **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down and a
-  later one is up.** Every server gets its turn within the call's time budget. More in ch.38 §38.6.4.
-- **Electrum change notifications are no longer dropped.** A server's message that an address or the
-  chain tip changed was read as an answer to no request and discarded, so balance streaming and
-  history refresh never saw it; it now reaches the waiting watcher, also after the connection that
-  carried the subscription was replaced. More in ch.38 §38.6.4 and §38.6.5.
-- **A market maker's keep-alive is now sent once per trading pair, as other nodes expect.** A maker
-  with orders on several pairs used to send, every 30 seconds, one message per pair that each listed
-  every pair, so each node that relays the order book asked for every pair once per copy. Seed nodes
-  answering those requests ran out of memory, and one pair they could not answer failed the whole
-  request and stopped the maker's orders from spreading further. Each message now carries the one pair
-  of the topic it is sent on, and pairs without orders get no message. This stops the flood of failing
-  sync requests that overloaded seed nodes. Detail: CRD ch.32 R-K2a.
-
-- **A node answers every order-book sync request at once and asks for one only when it needs it.** A
-  node whose own order data was a few milliseconds behind used to refuse other nodes' sync requests
-  with a "retry" answer; a relay that got that answer stopped passing the maker's orders on until the
-  next keep-alive, 30 seconds later. The node now answers from the data it has, as other KDF nodes do,
-  leaving out an order whose cancellation it is still applying. Before comparing a received keep-alive
-  with its own data, it waits briefly for that data to catch up, so it no longer requests a sync it does
-  not need. Detail: CRD ch.32 R-T3b items 2 and 4.
-
-- **A maker node that is not a relay now keeps its order book of other makers up to date after a restart.** After a restart the node announced its stored orders again, but it did not record that it was following their trading pairs, so a keep-alive from another maker with a different order list never made it ask for that maker's orders, and its view of the other makers on its own pairs went stale until something else (an order book request, a new order on the pair) recorded the pair. Re-announcing a stored order now records the pair first, without requesting the order book. Detail: PR #101; CRD ch.59 R59.6.7.
-
-- **Gossip message ids now use the compact 8-byte form other KDF nodes use, which should cut the bandwidth a relay spends on duplicate messages.** Our nodes announced each message with an id written as decimal text, while the other implementations write the same 64-bit value as 8 raw bytes, so an id announced by one side never matched the id the other side already held and every announced message was requested again, then dropped as a duplicate. The id is now the 8-byte big-endian form; what it is computed from is unchanged. Nodes on the old and new encoding still exchange messages normally, but each message is sent once more between them until both sides are upgraded. Detail: PR #99; CRD ch.28 R13.
-- **A maker no longer advertises or serves a just-cancelled or just-repriced order from stale data.** For a few milliseconds after a cancel or a price change, the node's order index was already up to date while the data behind its keep-alive messages and its answers to other nodes' sync requests was not, so it could still announce the old state, and a node that had already seen the cancel could log "recently cancelled" when the old order was listed again. Keep-alives are now built only once both are up to date; until then the keep-alive is skipped for that round. Detail: PR #98; CRD ch.32 R-T3b.
-
-- **A maker order for a shielded-coin pair (such as ARRR) no longer drops out of the maker's own order book every minute and a half and gets announced again.** Orders for those pairs are placed under a separate key of their own, and the cleanup that forgets silent peers treated that key as a silent peer, because the node never hears its own keep-alive back. The cleanup now leaves the node's own keys alone, so these orders stay put and the extra announcements stop. Detail: PR #94; CRD ch.59 R59.6.5.
-
-- **An EVM node that answers with an error no longer ends the request; the next configured node is
-  tried.** Before, the first node's answer was accepted even when it carried an error object, such as
-  "block range too large" or a revert, so one picky node failed the call although the others could
-  serve it. Now the nodes are tried one at a time, a refusing node counts as a failed node, and the
-  node that finally answers is tried first the next time. When every node fails, the caller gets the
-  last node's own error. More in ch.35 §35.1.F.
-
-- **A swap or withdraw on an EVM coin no longer waits for all nodes to agree on the nonce.** One
-  lagging node used to hold the transaction indefinitely. Now the highest pending nonce wins and the
-  signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
-  of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
-  by node instead. More in ch.35 §35.1.F.
-- **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
-  back.** Confirmations, and the decision that a transaction has expired, are now counted against
-  the current tip, not against the highest one ever seen. A lagging server can now only make a wait
-  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
-- **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node checks its
-  `light_wallet_d_servers` against each other, a server listed twice, also under a different spelling
-  such as with or without `https://` or the default port, now counts once. Before, `[A, A, B]` let A
-  outvote B with only two real servers. Each dropped duplicate is logged. Detail: PR #113; CRD ch.39
-  R39.11.7b.
-- **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
-  ignored and every listed server was connected; with `max_connected: 1` only one server is connected
-  now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
-  refused with the usual error answer, as on the newer activation methods. This also applies to BCH
-  and QRC20 activated through `electrum`. More in ch.55 R55.4.3 and ch.38 R38.6.4.
-
-- **Reading the order book of a pair that includes an ARRR order no longer fails on the older `orderbook` method.**
-  Before, one ARRR order on the book made the whole older `orderbook` request fail with an internal
-  error, and the older `best_orders` silently left the order out. The order now appears with the
-  address `Shielded` (the same word the newer interface uses), and an order whose coin has no address
-  to show is left out on its own instead of failing the response. Tendermint, Siacoin and Lightning
-  orders now show up on the older methods too. Detail: PR #88; CRD ch.32 R-F6d, R-F6e.
-
-- **PIVX and LBRY (LBC) swaps can now complete.** Their block headers are now read correctly. Before,
-  a PIVX swap failed at the final step, after the taker had already paid, because the headers it needs
-  to set the spend's time lock could not be read; LBC had the same gap. PIVX headers carry an extra field
-  only in some chain versions (the headers are 80 or 112 bytes depending on the version), and LBC
-  headers always carry one (112 bytes); both are now read exactly, as stored and as served. A PIVX
-  header of version 7 is no longer misread. Detail: PR #82; CRD ch.37 R37.5.5.
-- **After a restart, the transaction history of UTXO coins no longer lists every earlier
-  transaction twice.** Each restart re-read the stored history under a wrong key, fetched every
-  transaction again as if it were new, and stored it a second time beside the old copy, so RIN,
-  KMD, LTC and every other UTXO coin showed two identical rows for each transaction it had before
-  the restart. A history already doubled on disk heals itself: the first sync after the upgrade
-  rewrites it with one row per transaction, and nothing needs to be deleted. Detail: PR #81;
-  CRD ch.38 R38.5A.4.
-- **The transaction history now lists transactions in a fixed order.** UTXO and QRC20 histories
-  list unconfirmed transactions first, then newer blocks before older ones, and transactions of
-  one block always in the same order. Before, transactions of one block could swap places
-  between two refreshes, and a wallet that merges history pages by position could show a
-  transaction twice and miss another. On a node that reads its transactions from a coin daemon
-  instead of Electrum, a transaction's block height is now the real height, not its position in
-  the block. Detail: PR #81; CRD ch.38 §38.5A.
-- **An ARRR send now appears in the transaction history at once, at the top, with its final
-  amount.** It used to appear at the bottom of the list until it was mined, and showed the whole
-  spent note as lost (for example -0.00198 instead of -0.00051), so the desktop wallet showed
-  another transaction twice and hid the send. Now the send is listed at the top from broadcast on,
-  with the change it pays back to the wallet already counted, and moves to its block's place once
-  mined; a send that expires unmined disappears. Transactions of one block keep a fixed order.
-  GLEEC KDF lists the send only once it is mined; set the `MM2.json` boolean
-  `shielded_history_unmined_sends` to `false` for that behavior. Detail: PR #81; CRD ch.39 §39.8.5.1.
-- **Right after an ARRR send, the change now shows as unspendable balance.** Until the send was
-  mined, the balance showed neither the spent note nor its change, so the wallet looked poorer by
-  the change amount for a block or two (for example 0 instead of 0.00106 unspendable). The change
-  is now shown as unspendable from the moment the send is broadcast, also after a restart, and
-  moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
-  The change of a send made by another instance on the same seed still shows only once mined. Run
-  one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39 R39.8.0ag1.
-- **Recovering an ARRR swap no longer fails with "does not pay the HTLC script".** Every ARRR swap
-  uses its own key for the swap's payment, but `recover_funds_of_swap` checked the payment with the
-  wallet's permanent key, so recovery always stopped with that error, even for a payment that had
-  long been refunded. Recovery now tries the swap's own key first and the wallet's permanent key
-  second, so swaps saved by older or other builds are recovered too. The log, and any error, say
-  which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
-  payment that is still waiting is refunded; and the swap completes if the other side spent it. The
-  error, when it is genuine, now says both keys were tried and shows the transaction id the way
-  explorers do. Detail: PR #109; CRD ch.39 R39.5.4.
-- **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
-  input points past the end of the previous transaction's outputs, a BCH transaction with no
-  outputs, or an SLP token whose creation carries no decimals made the history task panic, and the coin's history stopped updating until a restart.
-  Such a transaction is now logged and skipped, and the rest of the history keeps updating.
-  Detail: PR #84; CRD ch.38 R38.5A.9.
-- **Unconfirmed BCH and SLP transactions in the history now get their block height once mined.**
-  The history compared the hash in two different forms that never matched, so a BCH or SLP
-  transaction first seen unconfirmed stayed unconfirmed in the history. Detail: PR #84;
-  CRD ch.38 R38.5A.10.
-
+- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
+  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
+  spent the taker's payment. A maker that failed during negotiation could be picked again for the
+  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
+  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
+  lifted with `unban_pubkeys`. Detail: PR #158; CRD ch.59 R59.5.2, R59.5.4.
+- **A taker now keeps trying to send its swap payment until the same moment the reference does.**
+  The taker gave up on sending its payment one third of the swap's lock duration after the start. It
+  now uses the maker-payment wait deadline, two fifths of the lock duration, which is the same
+  deadline it already uses to wait for the maker payment's confirmations. A taker whose maker payment
+  confirmed late used to end the swap at this step, losing its dex fee and leaving the maker's payment
+  locked until its refund. The maker's own deadlines do not move. Detail: PR #126; CRD ch.51 R29.
+- **A swap that resumes after a restart no longer gives up on a payment it already sent.** Suppose a
+  node restarted after broadcasting its swap payment but before recording it, and came back after
+  that payment's send deadline. The swap checked the deadline first and ended as "payment failed", so
+  the payment stayed on chain with no refund until someone ran `recover_funds_of_swap` by hand. The
+  swap now first looks for a payment it may already have sent and carries on with it. The deadline
+  stops only a payment that has not been sent yet. This applies to maker and taker, for every coin.
+  Detail: PR #119; CRD ch.51 R17, R29, T21.
 - **A swap spend or refund whose fee would exceed the payment is now refused instead of broadcast
   as garbage.** The UTXO spend and refund builders subtracted the fee unchecked, so the value
   wrapped and the coin daemon rejected the transaction. They now fail with an error and broadcast
   nothing. The same holds for the ZHTLC transparent spend and for Sia, where the fixed miner fee is
   0.00002 SC. The version-two funding spend now also requires the fee plus dust. Detail: PR #73;
   CRD ch.60 R60.6.4.
-
 - **An 8-decimal EVM token such as WBTC no longer has a 0.01 minimum trade.** An EVM coin's minimum
   trading volume was 10^-(decimals / 3) with integer division, so every 8-decimal token refused a
   buy, a sell, a maker order or a trade preview below 0.01 (`The volume 0.00072437 of the
@@ -560,119 +448,118 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **BTC's minimum trading volume is now 0.0001, as for BTC-segwit and in the reference.** The exact
   ticker `BTC` was fixed at 0.00777; it now follows the UTXO rule, the larger of ten times the dust
   and ten times the fee for a 496-byte spend. That fee term is now truncated rather than rounded up,
-  which changes no coin in the public coins file. Detail: PR #66; CRD ch.60 R60.6.1, ch.38 R38.6.6e–f.
+  which changes no coin in the public coins file. Detail: PR #66; CRD ch.60 R60.6.1, ch.38
+  R38.6.6e–f.
 - **`min_trading_vol`, `setprice`, `buy`, `sell` and `trade_preimage` no longer crash the request for
   Lightning, Solana or SPL coins.** Lightning now reports its minimum trading volume and minimum
   transaction amount as the reference does: the largest counterparty minimum HTLC over its open
   channels, or 1 msat. Orders and trade previews involving Lightning, Solana or SPL, which cannot
   trade yet, are refused with an error naming the coin; `trade_preimage` returns the new typed error
   `TradingNotSupported` (HTTP 400). Detail: PR #66; CRD ch.60 R60.6.5, ch.41 R41.11A.
-- **RIC (Riecoin) and MEWC (Meowcoin) swaps could not complete the HTLC spend.** Their Electrum
-  servers serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native
-  blocks at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected,
-  and with it the median-time-past the spend queries before it signs. A new per-coin key,
-  `protocol.header_layout`, beside `type` in the coin's entry, selects the layout:
-  `"riecoin"` (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW
-  flag bit 8 set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The
-  median-time-past is then taken from each parsed header's time, and the full served bytes are what
-  is kept. An unrecognized value fails the coin's activation. A coin with no key is read as before
-  and, only when the standard read fails, retried as Riecoin and as the mixed layout (the one exact fit wins, one `info` line per coin naming the layout and suggesting the key); the new
-  `MM2.json` switch `header_layout_fallback_families` (array of distinct `chain_variant` names,
-  default `["BTC"]`; `[]` = reference behavior; anything else refuses the launch) names the
-  families that may do so. A list that both alternatives consume exactly is rejected as ambiguous,
-  naming both layouts, until the coin is pinned with `header_layout`.
-  RIC and MEWC swaps therefore complete with the shared coin registry untouched; the registry
-  maintainer may still add the key (`"riecoin"`, `"kawpow_auxpow_mixed"`) to pin the layout, and
-  other implementations ignore it. The header-sync (SPV) and header-store paths still read standard
-  headers. Detail: PR #62; CRD ch.37 §37.5.9.
-- **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
-  gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
-  chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
-  and the trade-preimage path applied the floor twice. The increase is now purely proportional.
-  Detail: CRD ch.57 R57.3.2; PR #59.
-- **UTXO refund polling no longer waits a full hour when the lock-time is nearer.** The refund
-  eligibility check floored its "wait this long" answer at one hour, so a refund that became
-  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
-  nothing signed changes and no funds were at risk. Detail: PR #60; CRD ch.37 §37.6 finding.
-- **A UTXO coin whose `signature_version` is not recognised now fails to activate instead of
-  signing with a different algorithm, unless the new node-level boolean
-  `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
-  `witness_v0`, `fork_id` and `fork_id_rxd`; any other value used to be silently replaced by the
-  coin's default, so its transactions were signed wrongly and rejected by the network. RXD's
-  `fork_id_rxd` was such a value until the Radiant signature hash was implemented (see Added).
-  This is a deliberate divergence from GLEEC KDF, which falls back silently. By default
-  activation now reports the offending value and the accepted set; with the switch set to `true` the
-  coin activates with the default, as under GLEEC KDF, and the node logs one warning per activation
-  naming the key and value. A coin with no `signature_version` is unchanged. The switch is named for
-  coin-configuration enumerations in general; `signature_version` is its only reader so far.
-  Detail: PR #54.
-- **A malformed or non-string `fork_id` in a UTXO coin's configuration now fails the activation
-  instead of crashing the node or taking the default.** A string such as `"0xZZ"` used to panic; a
-  number such as `64` was silently replaced by the coin's default. An absent `fork_id` is unchanged,
-  and the new switch does not apply: a malformed value is not an unrecognised enumeration member.
-  Detail: PR #54.
-- **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
-  header list) whose length fields asked for gigabytes of memory could abort the process or kill the
-  sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
-  branches now have length limits, and an over-long one is rejected as a malformed header like any
-  other. Detail: PR #52; CRD ch.37 R37.5.6a.
-- **A maker that goes offline now drops out of the orderbook on schedule, whatever its clock says.**
-  The keep-alive expiry used the timestamp the maker put in its own message, so a maker with a fast
-  clock stayed listed for that skew plus 90 s after it died, and one that wrote a far-future
-  timestamp stayed listed indefinitely. The expiry now runs from when this node received the
-  keep-alive (CRD ch.32 R-P3); the wire format is unchanged. Keep-alives also no longer advertise
-  empty trie roots. Detail: PR #52.
-- **A ZCash-family (ARRR) light-server endpoint whose block cache is stale is no longer used.**
-  An endpoint can report the current chain height and the right branch while its cache of blocks
-  stopped much earlier, so it cannot serve anything newer; it is now excluded at admission, as is
-  one whose cache answers with an error or whose height is more than 40 blocks behind the others.
-  A failed admission now lists every excluded endpoint and why, and its message no longer claims
-  that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
-- **A seed or relay now gives back the memory a burst of order updates used.** Every order update a node
-  applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and bookkeeping),
-  and none of it was released until the same order pair changed again, so a node that had seen
-  500 updates a second for a few minutes stayed about 150 MB larger afterward. The change history is
-  now expired and its tables shrunk every 30 seconds, whatever the traffic; the trie node store also
-  shrinks after each ten-minute clean-up; refreshing a cache entry no longer adds to its queue; and
-  clearing a pair or a pubkey now frees the nodes it leaked (about 6 KB per full resync of a small
-  pair). The metrics now also show the node store's size and entry count, the number of stored change
-  histories and changes, tracked pubkeys, and queued trie updates. More in
-  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131.
-- **A seed or relay on Linux now also returns freed order-book memory to the system.** After the memory
-  fix above the node's own data shrank back after a burst of order updates, but the system's memory
-  allocator (glibc) kept the freed pages in the process, so the memory shown by the operating system
-  stayed high (about 160 to 210 MB in a test where the data itself was 1 MB). After each ten-minute
-  clean-up the node now asks the allocator to hand the unused pages back (30 MB in the same test)
-  and writes the memory use before and after to the debug log. Other systems are unchanged. More in
-  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #137.
-  pair). The metrics now also show the number of stored change histories and changes, tracked pubkeys, and
-  queued trie updates, and (after each ten-minute clean-up) the node store's size and entry count. A peer that has been out of
-  sync for more than five minutes now receives a full snapshot instead of a delta (as it already
-  did after a write to the pair); within five minutes nothing changes. More in
-  [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md) (R-K4). Detail: PR #131, PR #134.
-- **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
-  because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
-  (the client still broadcasts), but when the client submits the transaction through
-  `send_raw_transaction` the notes it spends are now reserved until it is mined and scanned, or
-  expires. A withdrawal that is built and never submitted reserves nothing. `withdraw` with `max`
-  now reports an insufficient balance instead of an internal error when the spendable balance does
-  not cover the fee. Two daemons on one seed with separate wallet databases are not protected.
-  Detail: PR #49; CRD ch.39 D39.8.0e.
-- **`enable_erc20` now works on an HD wallet.** The one-shot call refused every HD-derived EVM
-  platform with `UnexpectedDerivationMethod`, so a client that knows only this call could not add an
-  EVM token after startup in HD mode. It now activates the token on the platform's enabled address
-  and returns one `balances` entry per known address — the same response shape as before, and
-  byte-identical on a single-address platform. A `path_to_address` selecting another address is
-  still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
-  The MM2.json boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
-  refusal. Detail: PR #28; CRD ch.35 R35.2.5.
+- **A node no longer keeps memory for every swap it has ever run, and stopping it no longer waits
+  for the swap bookkeeping.** Each finished swap left a small record behind for as long as the node
+  ran (about 3 KB for a maker or taker swap in total), so a node that runs many swaps grew slowly
+  without bound. The record of a running swap is now dropped as soon as the swap ends, on every way
+  it can end, together with the messages kept for it. When the node is told to stop, it clears this
+  list at once instead of waiting for it to empty. Detail: PR #100; CRD ch.51 R58A, R58B.
 - **Swaps with a shielded coin such as ARRR now report their outcome to the network like every other
   swap, and the report no longer names the traders.** When an older-style swap ends, whatever the
   outcome, the node publishes the usual `swapstatus` summary that statistics nodes collect; before,
   it stayed silent whenever a shielded coin was involved. The summary leaves out both parties' public
   keys (the sender's own key too, when the swap used a one-off key), and a statistics node now fills
-  in only the key of the party that sent the report. More in
-  [Legacy swap state machine](docs/reloaded-rewrite/51-legacy-v1-swap-state-machine.md) (R50A). Detail: PR #108.
+  in only the key of the party that sent the report. Detail: PR #108; CRD ch.51 R50A.
+
+#### ARRR and other shielded coins
+
+- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before,
+  each swap got a random key that was saved in the swap file, so a swap started by another KDF
+  implementation could not be recovered here, nor one of ours there. The key is now computed from the
+  wallet's transparent key and the swap (the secret hash for the maker, the swap UUID for the taker),
+  and it is never saved: it is computed again on restart and on recovery, so either implementation
+  can recover a swap with the same seed. Under an HD wallet the wallet's transparent key for ARRR and
+  other shielded coins is now the key at the coin's `derivation_path` (for ARRR
+  `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet fails if its coin entry has no
+  `derivation_path`; with a passphrase wallet nothing changes. Swaps already in progress keep their
+  saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
+- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
+  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
+  times by) has passed the lock time, and a refund the network still rejects as not yet final is
+  retried until the refund deadline instead of ending the swap with its refund failed. Calling
+  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
+  PR #146; CRD ch.39 R39.5.13.
+- **Recovering an ARRR swap no longer fails with "does not pay the HTLC script".** Every ARRR swap
+  uses its own key for the swap's payment, but `recover_funds_of_swap` checked the payment with the
+  wallet's permanent key, so recovery always stopped with that error, even for a payment that had
+  long been refunded. Recovery now tries the swap's own key first and the wallet's permanent key
+  second, so swaps saved by older or other builds are recovered too. The log, and any error, say
+  which key matched. A refunded payment is reported as refunded, naming the refund transaction; a
+  payment that is still waiting is refunded; and the swap completes if the other side spent it. The
+  error, when it is genuine, now says both keys were tried and shows the transaction id the way
+  explorers do. Detail: PR #109; CRD ch.39 R39.5.4.
+- **Recovering an ARRR swap saved by another build no longer fails with "Invalid address".** Some
+  swap files carry an HTLC public key that does not belong to the private key saved with them.
+  Recovery recognized the payment by that public key, then built the refund with the saved private
+  key, which produced a different script, and the transaction builder rejected it. Recovery now
+  always signs with the private key that belongs to the matching public key: the coin's own
+  persistent key when that is the one. If it holds no such key, the error now says so, naming the
+  key. Detail: PR #142; CRD ch.39 R39.5.4.
+- **ARRR swaps work again when their `lightwalletd` servers cannot answer address questions.** An
+  ARRR swap asks three questions about its HTLC: was my payment already sent, was this payment
+  spent, and has the counterparty spent it yet. When no `lightwalletd` server can answer them, for
+  example because its node keeps no address index, the swap now asks the Electrum servers given in
+  the activation's `electrum_servers`, as other KDF nodes do. A server is used only if its block
+  hash at a recent height matches the `lightwalletd` servers' and its tip is at most 10 blocks
+  behind; nothing else of the coin uses Electrum. Activation never connects to these servers; the
+  first question does. When neither source can answer, the error names both. More in
+  [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md). Detail: PR #130; CRD
+  ch.39 R39.11.25.
+- **An ARRR swap that restarts finds its own earlier payment without asking a server.** Before
+  sending its HTLC payment, a swap asks whether that payment is already on chain. The answer now
+  comes first from the wallet's own record of the transactions it broadcast. This works even when
+  the configured `lightwalletd` servers cannot answer address questions. The record only ever answers
+  "sent"; anything else still goes to the servers. Detail: PR #125; CRD ch.39 R39.11.26.
+- **A fresh ARRR swap no longer asks whether it has already paid.** The "already sent" question
+  exists for a swap that resumes after a restart. An ARRR payment goes to a script made with a key
+  used for this one swap only, so a swap started in this run cannot have paid it yet. The question is
+  now skipped there. A resumed swap, and every other coin, still ask it. Detail: PR #136; CRD ch.39
+  R39.11.27.
+- **ARRR swap recovery and spend detection no longer hang on a lightwalletd server whose node keeps
+  no address index; such a server is skipped.** Two servers in the published ARRR server list answer
+  every address lookup with "No information available for address". Each of those refusals was taken
+  for one transaction the server could not deliver, and the search was narrowed down to single
+  blocks to step around it. For a swap a few weeks old that meant tens of thousands of requests per
+  server, with nothing logged, so `recover_funds_of_swap` seemed never to return. Any activation that
+  listed such a server before a working one was affected. Now:
+  - such a server is recognized after a few requests, logged once as a warning, and skipped for the
+    rest of the activation;
+  - each server gets at most 120 seconds per check;
+  - the search starts at the payment's own block;
+  - each step is logged.
+
+  `recover_funds_of_swap` now returns within 10 minutes for every coin. If it stops, its error names
+  the step it was in, and for ARRR also the server it was reading. Detail: PR #117; CRD ch.39
+  R39.5.5, R39.11.4h, R39.11.4i.
+- **An ARRR swap that fails on a lightwalletd server without an address index now says so.** When
+  the server's node refused an address lookup ("No information available for address"), the error
+  blamed a missing transaction index, which is a different setting; a maker payment failed with that
+  explanation on a server whose node runs with the transaction index on. Such an answer now ends the
+  lookup at its first request, and the error says the server's node keeps no address index and
+  quotes the node's own message. Detail: PR #118; CRD ch.39 R39.11.4i(e).
+- **An ARRR payment is no longer counted as confirmed one block early after the chain tip moves
+  back.** Confirmations, and the decision that a transaction has expired, are now counted against
+  the current tip, not against the highest one ever seen. A lagging server can now only make a wait
+  longer, never shorter. Detail: PR #112; CRD ch.39 R39.11.10a.
+- **The same lightwalletd server listed twice no longer counts as two votes.** When an ARRR node
+  checks its `light_wallet_d_servers` against each other, a server listed twice, also under a
+  different spelling such as with or without `https://` or the default port, now counts once.
+  Before, `[A, A, B]` let A outvote B with only two real servers. Each dropped duplicate is logged.
+  Detail: PR #113; CRD ch.39 R39.11.7b.
+- **A ZCash-family (ARRR) light-server endpoint whose block cache is stale is no longer used.** An
+  endpoint can report the current chain height and the right branch while its cache of blocks
+  stopped much earlier, so it cannot serve anything newer; it is now excluded at admission, as is
+  one whose cache answers with an error or whose height is more than 40 blocks behind the others.
+  A failed admission now lists every excluded endpoint and why, and its message no longer claims
+  that an endpoint is "not on this coin's chain". Detail: PR #51; CRD ch.39 R39.11.7a(j).
 - **A shielded (ARRR) wallet that met a reorg of its own scan tip no longer wedges forever.** Every
   sync pass failed with `Compact block hash discontinuity` and the wallet never rewound. The scan
   now re-checks its anchor against lightwalletd on every pass, rewinds within the commitment-tree
@@ -688,7 +575,166 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wallet cannot recreate from its viewing key, so it is now deleted. A wallet that has scanned blocks
   or holds transactions is never deleted this way, and the one backup a rebuild keeps of the previous
   wallet is unchanged. Existing `*.checkpoint.*.bak` files can be deleted safely. No RPC or wire
-  change. Detail: PR #150; CRD ch.39 (shielded coins) R39.8.0ax.
+  change. Detail: PR #150; CRD ch.39 R39.8.0ax.
+- **A second ARRR withdrawal no longer fails with `bad-txns-duplicate-nullifier-requirements-not-met`
+  because the first one's notes were still unspent.** `withdraw` and `task::withdraw` are unchanged
+  (the client still broadcasts), but when the client submits the transaction through
+  `send_raw_transaction` the notes it spends are now reserved until it is mined and scanned, or
+  expires. A withdrawal that is built and never submitted reserves nothing. `withdraw` with `max`
+  now reports an insufficient balance instead of an internal error when the spendable balance does
+  not cover the fee. Two daemons on one seed with separate wallet databases are not protected.
+  Detail: PR #49; CRD ch.39 D39.8.0e.
+- **An ARRR send now appears in the transaction history at once, at the top, with its final
+  amount.** It used to appear at the bottom of the list until it was mined, and showed the whole
+  spent note as lost (for example -0.00198 instead of -0.00051), so the desktop wallet showed
+  another transaction twice and hid the send. Now the send is listed at the top from broadcast on,
+  with the change it pays back to the wallet already counted, and moves to its block's place once
+  mined; a send that expires unmined disappears. Transactions of one block keep a fixed order.
+  GLEEC KDF lists the send only once it is mined; set the `MM2.json` boolean
+  `shielded_history_unmined_sends` to `false` for that behavior. Detail: PR #81; CRD ch.39 §39.8.5.1.
+- **Right after an ARRR send, the change now shows as unspendable balance.** Until the send was
+  mined, the balance showed neither the spent note nor its change, so the wallet looked poorer by
+  the change amount for a block or two (for example 0 instead of 0.00106 unspendable). The change
+  is now shown as unspendable from the moment the send is broadcast, also after a restart, and
+  moves to the spendable balance once mined. A send that expires unmined drops out of the balance.
+  The change of a send made by another instance on the same seed still shows only once mined. Run
+  one instance per seed, as the known limitations already advise. Detail: PR #87; CRD ch.39
+  R39.8.0ag1.
+
+#### UTXO coins and Electrum
+
+- **Enabling a UTXO coin no longer fails or stalls when the first listed Electrum servers are down
+  and a later one is up.** Enabling a coin now tries every listed server at once, within the call's
+  time budget, and succeeds as soon as one connects; if none does, the error names each server.
+  Detail: PR #104; CRD ch.38 §38.6.4.
+- **Electrum change notifications are no longer dropped.** A server's message that an address or the
+  chain tip changed was read as an answer to no request and discarded, so balance streaming and
+  history refresh never saw it; it now reaches the waiting watcher, also after the connection that
+  carried the subscription was replaced. Detail: PR #104; CRD ch.38 §38.6.4, §38.6.5.
+- **The legacy `electrum` method now honors `min_connected` and `max_connected`.** Before, both were
+  ignored and every listed server was connected; with `max_connected: 1` only one server is connected
+  now, and unusable values (zero, a minimum above the maximum, a wrong type, an empty server list) are
+  refused with the usual error answer, as on the newer activation methods. This also applies to BCH
+  and QRC20 activated through `electrum`. Detail: PR #91; CRD ch.55 R55.4.3, ch.38 R38.6.4.
+- **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
+  header list) whose length fields asked for gigabytes of memory could abort the process or kill the
+  sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle
+  branches now have length limits, and an over-long one is rejected as a malformed header like any
+  other. Detail: PR #52; CRD ch.37 R37.5.6a.
+- **A swap on a merged-mined (AuxPoW) coin could be neither completed nor refunded once the chain
+  changed its block version.** The header reader recognized AuxPoW only by two exact version values,
+  so Syscoin headers at version `0x20100180` (from about height 1,320,000) were read as plain
+  80-byte headers and every header list was rejected. That broke median-time-past, which every HTLC
+  spend and refund needs, so a swap that reached the payment stage was stuck. SYS, NMC, PEP, DINGO,
+  MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
+  one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
+  protocol defines it. Balances, history, deposits and plain withdrawals were never affected.
+  Detail: PR #55; CRD ch.37 R37.5.2, R37.5.4.
+- **RIC (Riecoin) and MEWC (Meowcoin) swaps can now complete the HTLC spend.** Their Electrum servers
+  serve headers the standard 80-byte reader could not lay out (RIC: 112 bytes; MEWC: native blocks
+  at 120 bytes interleaved with merged-mined ones at 80), so every header list was rejected, and with
+  it the median-time-past the spend queries before it signs. A new per-coin key,
+  `protocol.header_layout`, beside `type` in the coin's entry, selects the layout: `"riecoin"`
+  (112 bytes: 64-bit time, 256-bit nonce) or `"kawpow_auxpow_mixed"` (per header: AuxPoW flag bit 8
+  set reads the standard 80 bytes, clear reads the 120-byte KawPoW form). The median-time-past is then
+  taken from each parsed header's time, and the full served bytes are what is kept. An unrecognized
+  value fails the coin's activation. A coin with no key is read as before and, only when the
+  standard read fails, retried as Riecoin and as the mixed layout (the one exact fit wins, one `info`
+  line per coin naming the layout and suggesting the key); the new `MM2.json` switch
+  `header_layout_fallback_families` (array of distinct `chain_variant` names, default `["BTC"]`;
+  `[]` = reference behavior; anything else refuses the launch) names the families that may do so. A
+  list that both alternatives consume exactly is rejected as ambiguous, naming both layouts, until
+  the coin is pinned with `header_layout`. RIC and MEWC swaps therefore complete with the shared coin
+  registry untouched; the registry maintainer may still add the key (`"riecoin"`,
+  `"kawpow_auxpow_mixed"`) to pin the layout, and other implementations ignore it. Detail: PR #62,
+  PR #67; CRD ch.37 §37.5.9.
+- **PIVX and LBRY (LBC) swaps can now complete.** Their block headers are now read correctly.
+  Before, a PIVX swap failed at the final step, after the taker had already paid, because the
+  headers it needs to set the spend's time lock could not be read; LBC had the same gap. PIVX headers
+  carry an extra field only in some chain versions (the headers are 80 or 112 bytes depending on the
+  version), and LBC headers always carry one (112 bytes); both are now read exactly, as stored and as
+  served. A PIVX header of version 7 is no longer misread. Detail: PR #82; CRD ch.37 R37.5.5.
+- **A UTXO coin whose `signature_version` is not recognized now fails to activate instead of signing
+  with a different algorithm, unless the new node-level boolean
+  `coin_conf_unrecognised_enum_falls_back` is `true`.** The accepted values are `base`,
+  `witness_v0`, `fork_id` and `fork_id_rxd`; any other value used to be silently replaced by the
+  coin's default, so its transactions were signed wrongly and rejected by the network. RXD's
+  `fork_id_rxd` was such a value until the Radiant signature hash was implemented (see Added). This
+  is a deliberate divergence from GLEEC KDF, which falls back silently. By default activation now
+  reports the offending value and the accepted set; with the switch set to `true` the coin activates
+  with the default, as under GLEEC KDF, and the node logs one warning per activation naming the key
+  and value. A coin with no `signature_version` is unchanged. The switch is named for
+  coin-configuration enumerations in general; `signature_version` is its only reader so far. Detail:
+  PR #54.
+- **A malformed or non-string `fork_id` in a UTXO coin's configuration now fails the activation
+  instead of crashing the node or taking the default.** A string such as `"0xZZ"` used to panic; a
+  number such as `64` was silently replaced by the coin's default. An absent `fork_id` is unchanged,
+  and the switch above does not apply: a malformed value is not an unrecognized enumeration member.
+  Detail: PR #54.
+- **UTXO refund polling no longer waits a full hour when the lock time is nearer.** The refund
+  eligibility check floored its "wait this long" answer at one hour, so a refund that became
+  spendable in minutes was re-checked an hour later. The wait is now capped at one hour instead;
+  nothing signed changes and no funds were at risk. Detail: PR #60; CRD ch.37 §37.6.
+- **After a restart, the transaction history of UTXO coins no longer lists every earlier
+  transaction twice.** Each restart re-read the stored history under a wrong key, fetched every
+  transaction again as if it were new, and stored it a second time beside the old copy, so RIN,
+  KMD, LTC and every other UTXO coin showed two identical rows for each transaction it had before
+  the restart. A history already doubled on disk heals itself: the first sync after the upgrade
+  rewrites it with one row per transaction, and nothing needs to be deleted. Detail: PR #81;
+  CRD ch.38 R38.5A.4.
+- **The transaction history now lists transactions in a fixed order.** UTXO and QRC20 histories
+  list unconfirmed transactions first, then newer blocks before older ones, and transactions of
+  one block always in the same order. Before, transactions of one block could swap places
+  between two refreshes, and a wallet that merges history pages by position could show a
+  transaction twice and miss another. On a node that reads its transactions from a coin daemon
+  instead of Electrum, a transaction's block height is now the real height, not its position in
+  the block. Detail: PR #81; CRD ch.38 §38.5A.
+- **One malformed transaction no longer stops a coin's transaction history.** A transaction whose
+  input points past the end of the previous transaction's outputs, a BCH transaction with no
+  outputs, or an SLP token whose creation carries no decimals made the history task panic, and the
+  coin's history stopped updating until a restart. Such a transaction is now logged and skipped, and
+  the rest of the history keeps updating. Detail: PR #84; CRD ch.38 R38.5A.9.
+- **Unconfirmed BCH and SLP transactions in the history now get their block height once mined.**
+  The history compared the hash in two different forms that never matched, so a BCH or SLP
+  transaction first seen unconfirmed stayed unconfirmed in the history. Detail: PR #84; CRD ch.38
+  R38.5A.10.
+
+#### EVM coins
+
+- **An EVM node that answers with an error no longer ends the request; the next configured node is
+  tried.** Before, the first node's answer was accepted even when it carried an error object, such as
+  "block range too large" or a revert, so one picky node failed the call although the others could
+  serve it. Now the nodes are tried one at a time, a refusing node counts as a failed node, and the
+  node that finally answers is tried first the next time. When every node fails, the caller gets the
+  last node's own error. Detail: PR #90; CRD ch.35 §35.1.F.
+- **A swap or withdraw on an EVM coin no longer waits for all nodes to agree on the nonce.** One
+  lagging node used to hold the transaction indefinitely. Now the highest pending nonce wins and the
+  signed transaction is sent at once to every node that reported it; the send succeeds as soon as one
+  of them accepts it. A transaction you broadcast yourself with `send_raw_transaction` is tried node
+  by node instead. Detail: PR #90; CRD ch.35 §35.1.F.
+- **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins
+  file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for
+  the newer swaps), and a token inherits its platform coin's block. They used to be ignored in favor
+  of 150000 for every swap call, which is too low on some chains, so swap transactions on chains such
+  as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used
+  for every swap call, the trade-fee estimates and the approval; a value that is not a whole number
+  stops that coin from activating and names the key. Where the coins file sets nothing, the defaults
+  now match the other KDF implementations: for example a platform-coin payment is 65000 and its
+  refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57
+  R57.5, R57.6.
+- **The per-coin `estimate_gas_mult` setting in the coins file is now honored for the ERC-20 approval
+  a swap sends.** Some layer-two coins (the public coins file sets it to 1.3 on its Arbitrum and Base
+  entries) ask for the gas the node estimates for the approval to be multiplied, and a token takes
+  its platform coin's value unless it sets its own. It used to be ignored, so an approval could run
+  out of gas on those chains. The setting is read when the coin is activated (anything other than a
+  number stops the coin from activating and names the key) and applied only to that approval's
+  estimated gas, rounded down; the fixed gas limits and the trade-fee quote are not scaled. Detail:
+  PR #107; CRD ch.57 R57.5.3b.
+- **An EVM gas price is no longer floored at +1 gwei.** The proportional increase added a fixed
+  gigawei whenever its own increment was smaller, so sends and swap fee quotes on sub-gigawei
+  chains (Ethereum today, Arbitrum, Base, BNB) overpaid or overquoted by up to hundreds of times,
+  and the trade-preimage path applied the floor twice. The increase is now purely proportional.
+  Detail: PR #59; CRD ch.57 R57.3.2.
 - **The swap gas-fee policy now takes effect.** `set_swap_gas_fee_policy` stored a policy and
   `get_swap_gas_fee_policy` echoed it, but nothing read it, so every swap transaction was signed in
   the legacy form and `High` behaved exactly like `Legacy`. `Low`, `Medium` and `High` now emit an
@@ -699,6 +745,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   ETH, MATIC, AVAX, ETH-ARB20, ETH-BASE and MOVR on `"Medium"`, so swaps of those coins and of
   their tokens now emit type 2 unless the policy is overridden at activation or with
   `set_swap_gas_fee_policy`. Not yet verified against a live network send. Detail: PR #25.
+- **EIP-1559 swap transactions are no longer priced from a stale base fee.** The fee estimate took
+  the base fee of the oldest block in the fee-history window instead of the newest, so under a
+  rising base fee `max_fee_per_gas` could land below the actual block base fee and the send was
+  rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
+  price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
+  conforming client may do, could also panic inside a swap send path and no longer can. Detail:
+  PR #48.
 - **A counterparty's EIP-1559 (type 2) and EIP-2930 (type 1) transaction can now be read.** Typed
   transactions — most Polygon traffic — failed to decode with `unexpected string` and took the swap
   with them (issue #14). They are now decoded through the EIP-2718 envelope, in swaps and in the
@@ -710,107 +763,142 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **An undecodable EVM transaction now says what it is.** The error names the unsupported type byte
   and the supported types, or, for a payload that is not a transaction at all, its length and a
   short prefix — instead of the opaque `unexpected string`. Detail: PR #24.
-- **EIP-1559 swap transactions are no longer priced from a stale base fee.** The fee estimate took
-  the base fee of the oldest block in the fee-history window instead of the newest, so under a
-  rising base fee `max_fee_per_gas` could land below the actual block base fee and the send was
-  rejected; this affects the coins the shipped coins file puts on a non-legacy tier, since those
-  price swaps from these estimates. An `eth_feeHistory` response that omits `baseFeePerGas`, which a
-  conforming client may do, could also panic inside a swap send path and no longer can. Detail: PR #48.
-- **A swap on a merged-mined (AuxPoW) coin could be neither completed nor refunded once the chain
-  changed its block version.** The header reader recognized AuxPoW only by two exact version values,
-  so Syscoin headers at version `0x20100180` (from about height 1,320,000) were read as plain
-  80-byte headers and every header list was rejected. That broke median-time-past, which every HTLC
-  spend and refund needs, so a swap that reached the payment stage was stuck. SYS, NMC, PEP, DINGO,
-  MYDOGE, UNO, DOI, SHIC, TRMP and XMY were affected; DOGE worked only because its version equals
-  one of the two values. AuxPoW is now recognized by the version's flag bit 8, per block, as the
-  protocol defines it. Balances, history, deposits and plain withdrawals were never affected. Detail:
-  PR #55; CRD ch.37 R37.5.2, R37.5.4.
+- **`enable_erc20` now works on an HD wallet.** The one-shot call refused every HD-derived EVM
+  platform with `UnexpectedDerivationMethod`, so a client that knows only this call could not add an
+  EVM token after startup in HD mode. It now activates the token on the platform's enabled address
+  and returns one `balances` entry per known address — the same response shape as before, and
+  byte-identical on a single-address platform. A `path_to_address` selecting another address is
+  still refused, as is a hardware-backed platform, and only `task::enable_erc20` reports progress.
+  The `MM2.json` boolean `erc20_hd_activation` set to `false` (default `true`) restores the former
+  refusal. Detail: PR #28; CRD ch.35 R35.2.5.
 
-- **A node no longer keeps memory for every swap it has ever run, and stopping it no longer waits for the swap bookkeeping.** Each finished swap left a small record behind for as long as the node ran (about 3 KB for a maker or taker swap in total), so a node that runs many swaps grew slowly without bound. The record of a running swap is now dropped as soon as the swap ends, on every way it can end, together with the messages kept for it. When the node is told to stop, it clears this list at once instead of waiting for it to empty. Detail: PR #100; CRD ch.51 R58A, R58B.
+### Tests
 
-- **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for the newer swaps), and a token inherits its platform coin's block. We ignored them and used 150000 for every swap call, which is too low on some chains, so swap transactions on chains such as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used for every swap call, the trade-fee estimates and the approval; a value that is not a whole number stops that coin from activating and names the key. Where the coins file sets nothing, the defaults now match the other KDF implementations: for example a platform-coin payment is 65000 and its refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57 R57.5, R57.6.
-
-- **Tests now cover an EVM token that sets its own gas limits while its platform coin sets none.** The token's own `gas_limit` block is used for its sends, swap payments, spends and refunds and for the fee quotes, and a limit it leaves out takes the built-in default, never a value from the platform coin's entry. The test uses the limits of a coins file running in production.
+- **The ARRR HTLC key derivation is checked against keys another KDF implementation derived.** A
+  maker and a taker swap made by the reference on throwaway wallets give the expected HTLC public
+  keys bit for bit, and two extra cases cover the low-S rule of the signature the derivation hashes.
+  Detail: PR #152; CRD ch.39 T39.5.a.
+- **The shielded in-flight note lock is covered end to end.** A real light-mode ARRR coin runs over
+  a real shielded wallet database against a scripted `lightwalletd`, through broadcast, rejection,
+  restart, scan, expiry and concurrent sends: a broadcast send's notes are not offered to a second
+  send, a rejected broadcast leaves them reusable at once, and a restart does not re-offer them.
+  Detail: PR #71; CRD ch.39 T39.8.0h.
+- **An EVM token that sets its own gas limits while its platform coin sets none is covered.** The
+  token's own `gas_limit` block is used for its sends, swap payments, spends and refunds and for the
+  fee quotes, and a limit it leaves out takes the built-in default, never a value from the platform
+  coin's entry. The test uses the limits of a coins file running in production. Detail: PR #155.
 
 ### Plans touched
 
-Plans this cycle moved, in any sense; each plan file carries the detail.
+Every plan this release touched in any sense since v0.2.0-beta.1, with what happened to it. Each plan
+file carries the detail. "New" means the plan was created in this cycle.
 
-- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new, in progress: ARRR's per-swap HTLC
-  key derived as other KDF nodes derive it, so each side can recover the other's swaps from the seed,
-  and an ARRR refund that waits for the chain's median time instead of failing as too early.
-- [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new, in progress:
-  ARRR swaps whose `lightwalletd` servers lack an address index get their HTLC answers from the
-  wallet's own send record and, as a fallback, from Electrum; a taker that no source can watch is
-  refused before its fee.
-- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — new, in planning
-  for after the beta: answering the ARRR swap questions from the blocks `lightwalletd` serves,
-  without an address index, and then retiring the Electrum fallback, which stays for the beta.
-- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, in planning:
-  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in this
-  release.
-
-- [`solana-support`](docs/plans/solana-support.md), [`tron-swap-support`](docs/plans/tron-swap-support.md),
-  [`tron-gasfree`](docs/plans/tron-gasfree.md),
-  [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) and
-  [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — each notes that its family is
-  switched off (TRON, Solana) or wallet-only (Tendermint) for this beta, and that turning it back on
-  belongs to the family's plan.
-
-- [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — the
-  withdraw path now records the transaction when the client submits it, and the plan moved to in progress (PR #49); the shortfall it causes is now named (PR #50). The test harness for the locked-notes check landed
-  (PR #71); the only open item is two daemon instances sharing one wallet.
-- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — the reorg-wedge fix
-  landed (PR #31); the lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42);
-  endpoints that have stopped following the chain are now excluded (PR #51); and activation warns
-  when the default recent scan window applies (PR #61).
-- [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — the rustls, webpki, ring
-  and tungstenite rows cleared, and the advisory ledger is green with one dated acceptance, the
-  `crypto-bigint` timing advisory RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68).
-- [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — superseded: the fork
-  bump it proposed gave way to a `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 (PR #40).
-- [`secp256k1-migration`](docs/plans/secp256k1-migration.md) — its last follow-up closed: the real
-  WASM link step is back in CI and no longer `continue-on-error` (PRs #26, #27).
-- [`clippy-ci-gate`](docs/plans/clippy-ci-gate.md) — the gate shipped; the vendor-filter follow-up
-  stays open (PR #27).
-- [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — opened, and two dead-network
-  EVM tests ported to a scripted local node (PR #30); tests against a local `geth` node now run in
+- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new, in progress: ARRR's per-swap
+  HTLC key is derived as other KDF nodes derive it (PRs #140, #152), recovery signs with the key that
+  matches the payment (PR #142), and the refund waits for the chain's median time (PR #146); the
+  field recovery of one earlier swap is left.
+- [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new and done: ARRR
+  swaps get their HTLC answers from the wallet's own send record and, as a fallback, from Electrum,
+  and a taker that no source could watch is refused (PRs #120, #125, #130, #136); the field check
+  was waived for lack of a suitable public server.
+- [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — new, planning for
+  after the beta: answering the ARRR swap questions from the blocks `lightwalletd` serves, without an
+  address index, and then retiring the Electrum fallback (PR #151).
+- [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md) — new, in progress: ARRR
+  builds the version-6 transactions of the Ironwood upgrade; the reorg wedge was fixed (PR #31), the
+  lightwalletd transport moved to tonic 0.14 on hyper 1 (PRs #37, #42), endpoints that stopped
+  following the chain are excluded (PR #51), activation warns about the default scan window
+  (PR #61), and field testing was green-lit on 2026-10-18.
+- [`arrr-native-and-ironwood-pool`](docs/plans/arrr-native-and-ironwood-pool.md) — new, planning:
+  ARRR native mode, the Ironwood pool and Pirate1 addresses for v0.4.0; native mode is refused in
+  this release (PR #115).
+- [`clippy-ci-gate`](docs/plans/clippy-ci-gate.md) — new, parked: the gate shipped (PR #27); the
+  vendor-filter follow-up stays open.
+- [`dependabot-triage-2026-09`](docs/plans/dependabot-triage-2026-09.md) — new and done: the
+  September 2026 dependency alerts were triaged.
+- [`electrum-measured-server-order`](docs/plans/electrum-measured-server-order.md) — new, in
+  progress: the `mixed` and `measured` server orders shipped (PR #144); making `mixed` the default
+  waits for a field run on RIN.
+- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — new, in progress: the minimum
+  trading volume matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins (PR #66); an
+  end-to-end preview on a real 8-decimal coin is left.
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new, blocked: per-chain gas
+  limits in the coins file, not the multiplier, are the knob (PR #123); the two remaining options
+  wait on the reference maintainers.
+- [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — new, planning: two dead-network
+  EVM tests ported to a scripted local node (PR #30), and tests against a local `geth` node run in
   CI (PR #53).
-- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — steps 2–4 done:
-  two mainnet test vectors sourced and the Radiant signature hash implemented (PR #65).
-- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — Riecoin and
-  Meowcoin swaps now complete: a per-coin `header_layout` key and a fallback switch landed (PRs
-  #62, #67), and the layout reaches every header read (PR #74). The AuxPoW coins also left the set
-  whose median-time-past errors (PR #55).
-- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — opened as a beta blocker: CRD
-  ch. 60 binds every coin family's trading floors, and the maintainer chose full parity plus a local
-  pre-trade spend check (PR #69). The `lightning-activation-features`, `solana-support`,
-  `tron-swap-support` and `evm-min-trading-volume` plans gained pointers to it.
-- [`evm-min-trading-volume`](docs/plans/evm-min-trading-volume.md) — its substance shipped: the
-  minimum trading volume now matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins
-  (PR #66).
-- [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — moved from parked to done:
-  a Siacoin `withdraw` now honors a custom fee (PR #77), and a fee below the node's estimate was
-  checked live on an uncongested transaction pool (2026-10-26).
-- [`order-posting-latency`](docs/plans/order-posting-latency.md) — opened: order posting is slowed by
-  the Electrum servers' per-session limit of about one request per second. The rules for batching,
-  fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
-  read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
-  with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
-  spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
-  order's file and database writes leave the order's lock (Decision AM) in PR #149.
-
-- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
-  transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
-  decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
-  Detail: PR #123.
-
-- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
-  list of deferred activation work now records the per-ticker serialization of activations (PR #156)
-  and the refusal of a future ARRR sync date (PR #22) as implemented.
-- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — still parked: it now
-  records, for after the beta, that a Lightning node whose activation failed, or that was disabled,
-  keeps its listening port and background work, so a retry on that port fails (PR #156).
+- [`faster-transaction-visibility`](docs/plans/faster-transaction-visibility.md) — new and done: push
+  notifications and pending receipts shipped, with tests.
+- [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — new and done: each peer's
+  gossip send queue is capped (PRs #121, #122), and the cap is listed in the compatibility document.
+- [`librustzcash-upgrade`](docs/plans/librustzcash-upgrade.md) — done: the upgrade with a
+  schema-safe rescan finished; a note records that the stack has moved again since.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — new, parked: it
+  points to the trading-floors work (PR #69) and records, for after the beta, that a Lightning node
+  whose activation failed keeps its listening port (PR #156).
+- [`lightning-ldk-upgrade`](docs/plans/lightning-ldk-upgrade.md) — new, parked: scoping only; it
+  records the local LDK patch (PR #66).
+- [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — new, in progress: a
+  maker's order messages leave at a bounded rate that drops when a relay falls behind (PRs #129,
+  #143, #148); follow-ups are open.
+- [`my-orders-speed`](docs/plans/my-orders-speed.md) — new and done: `my_orders` answers about 4 to
+  12 times faster with 2,000 orders (PR #154).
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
+  makes fewer Electrum and node round trips (PRs #95, #114, #116, #128) and no longer does I/O under
+  an order's lock (PR #149); a timing run is left.
+- [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — new, in progress: a maker's
+  order messages keep its book alive (PR #132) and a relay holds a sync answer while it catches up
+  (PR #135); a lab run is left.
+- [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — parked: given a status
+  header; the analysis is unchanged.
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — new, parked: the
+  coin-activation wire contract shipped (PR #17); per-coin serialization of activations (PR #156)
+  and the refusal of a future ARRR sync date (PR #22) are recorded as implemented.
+- [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md) — new, parked:
+  Radiant signing shipped (PRs #54, #65); its compatibility bookkeeping and one post-beta step are
+  open.
+- [`secp256k1-migration`](docs/plans/secp256k1-migration.md) — done: its last follow-up closed, the
+  real WASM link step is back in CI (PRs #26, #27).
+- [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md) — new, in
+  progress: a shielded send's notes stay reserved on the swap and `withdraw` paths (PR #49), the
+  shortfall is named (PR #50), and a harness covers the lock (PR #71); two daemons on one seed are
+  not yet detected.
+- [`shielded-sync-cache-reuse`](docs/plans/shielded-sync-cache-reuse.md) — parked: given a status
+  header; not started.
+- [`sia-withdraw-fee-control`](docs/plans/sia-withdraw-fee-control.md) — new and done: a Siacoin
+  `withdraw` honors a custom fee (PR #77), checked live on 2026-10-26.
+- [`solana-sdk-upgrade`](docs/plans/solana-sdk-upgrade.md) — new, parked: deferred; the SDK is pinned
+  upstream and would need a fork.
+- [`solana-support`](docs/plans/solana-support.md) — new, parked: Solana is switched off for this beta
+  (PR #93).
+- [`swap-transaction-path-hardening`](docs/plans/swap-transaction-path-hardening.md) — new, planning:
+  a stub to elaborate before any work is scheduled (PR #90).
+- [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — new, parked:
+  Tendermint coins are wallet-only for this beta (PR #93).
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — new, in progress (beta blocker):
+  every coin family's trading floors are specified (PR #69) and implemented (PRs #66, #72, #73); a
+  lab run is left.
+- [`tron-gasfree`](docs/plans/tron-gasfree.md) — new, parked: waits on pinning the GasFree proxy's
+  creation bytecode; TRON is off for this beta (PR #93).
+- [`tron-support`](docs/plans/tron-support.md) — new, parked: how TRON comes back in the next beta
+  (PR #138).
+- [`tron-swap-support`](docs/plans/tron-swap-support.md) — new, parked: branch-only; TRON is off for
+  this beta (PR #93).
+- [`utxo-header-family-selection`](docs/plans/utxo-header-family-selection.md) — new, in progress:
+  RIC and MEWC swaps complete through a per-coin `header_layout` and a fallback switch (PRs #62,
+  #67), the layout reaches every header read (PR #74), PIVX and LBC headers are read (PR #82), and
+  AuxPoW is recognized by its version flag (PR #55); the remaining family rules and step H5 are
+  open.
+- [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — in progress, the standing
+  advisory ledger: the rustls, webpki, ring and tungstenite rows cleared, and the ledger is green
+  with one dated acceptance, RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68).
+- [`v2-dynamic-fee-spend-estimate`](docs/plans/v2-dynamic-fee-spend-estimate.md) — new, parked:
+  options recorded, none chosen; Reloaded stays at parity.
+- [`v2-swap-engine-hardening`](docs/plans/v2-swap-engine-hardening.md) — new, parked: steps T1–T7 and
+  T9–T10 shipped; T8 is deferred and T11–T13 are queued.
+- [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — new and superseded: a
+  `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 replaced the fork bump (PR #40).
 
 ### Known limitations
 
@@ -824,8 +912,19 @@ lives.
   known case. More in [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md).
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
-  swap with a Komodo or GLEEC counterparty cannot complete. Spending a swap's locked ARRR is under
-  live testing. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+  swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
+  completed on the live chain, including the spend of the locked ARRR (October 2026). More in
+  [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+- **ARRR: a coins-file or RPC setting that requires notarization is accepted, but a swap that
+  requires notarization for ARRR fails at the confirmation wait, after its payment is on chain.** An
+  operator running ARRR must set `requires_notarization` to `false`; some older published coins files
+  set it. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
+  Detail: CRD ch.39 R39.11.4e, D39.11.f.
+- **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
+  an error saying shielded activation is not available in the WebAssembly build: the browser build
+  has no shielded wallet database, and building a shielded transaction would also need the Sapling
+  prover, which only the native build has. Use a native build for ARRR. Detail: CRD ch.39 R39.10.1,
+  §39.6.1.
 - **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
   Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
   [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
@@ -834,12 +933,16 @@ lives.
   you are offline, does not work yet (issue #56). More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
-  finished, so activation answers a clear error instead. Both are planned to return in the next beta.
-  More in [`tron-swap-support`](docs/plans/tron-swap-support.md) and
-  [`solana-support`](docs/plans/solana-support.md).
+  finished. TRON activation answers "TRON support is not available in this build";
+  `enable_solana_with_tokens` and `enable_spl` answer "Solana support is not available in this
+  build"; the rest of the node is unaffected. Both are planned to return in the next beta. More in
+  [`tron-support`](docs/plans/tron-support.md) and [`solana-support`](docs/plans/solana-support.md).
+  Detail: PR #93.
 - **Tendermint (Cosmos) coins are wallet-only in this beta.** Activation, balances and withdrawals
-  work; orders and swaps are planned to return in a later release. More in
-  [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md).
+  work; orders and swaps are planned to return in a later release. A swap already in progress still
+  completes, and an order with a Tendermint coin saved by an earlier version is cancelled at startup.
+  More in [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md). Detail:
+  PR #93.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
