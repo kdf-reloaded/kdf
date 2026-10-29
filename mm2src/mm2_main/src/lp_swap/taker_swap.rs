@@ -300,6 +300,14 @@ impl RunTakerSwapInput {
     }
 }
 
+/// Penalises `maker` when `event` is one of the outcomes of CRD ch.59 R59.5.2, naming the swap and the
+/// event in the record.
+pub(crate) fn penalise_maker_if_due(ctx: &MmArc, maker: chain::hash::H256, uuid: &Uuid, event: &TakerSwapEvent) {
+    if event.should_ban_maker() {
+        ban_pubkey_on_failed_swap(ctx, maker, uuid, event.clone().into());
+    }
+}
+
 /// Starts the taker swap and drives it to completion (until None next command received).
 /// Panics in case of command or event apply fails, not sure yet how to handle such situations
 /// because it's usually means that swap is in invalid state which is possible only if there's developer error
@@ -405,14 +413,7 @@ pub async fn run_taker_swap(swap: RunTakerSwapInput, ctx: MmArc) {
                     save_my_taker_swap_event(&ctx, &running_swap, to_save)
                         .await
                         .expect("!save_my_taker_swap_event");
-                    if event.should_ban_maker() {
-                        ban_pubkey_on_failed_swap(
-                            &ctx,
-                            running_swap.maker.bytes.into(),
-                            &running_swap.uuid,
-                            event.clone().into(),
-                        )
-                    }
+                    penalise_maker_if_due(&ctx, running_swap.maker.bytes.into(), &running_swap.uuid, &event);
                     status.status(&[&"swap", &("uuid", uuid.as_str())], &event.status_str());
                     // Notify the swap-status streamer of the new V1 taker event
                     // (mirrors the V2 emission in taker_swap_v2.rs).
@@ -775,10 +776,14 @@ impl TakerSwapEvent {
         }
     }
 
+    /// The taker-swap outcomes that penalise the maker for an hour (CRD ch.59 R59.5.2): a failed
+    /// negotiation, a maker payment that fails validation, and a taker payment the maker never spends.
     fn should_ban_maker(&self) -> bool {
         matches!(
             self,
-            TakerSwapEvent::MakerPaymentValidateFailed(_) | TakerSwapEvent::TakerPaymentWaitForSpendFailed(_)
+            TakerSwapEvent::NegotiateFailed(_)
+                | TakerSwapEvent::MakerPaymentValidateFailed(_)
+                | TakerSwapEvent::TakerPaymentWaitForSpendFailed(_)
         )
     }
 
@@ -3923,6 +3928,9 @@ mod taker_swap_tests {
 
         let event = TakerSwapEvent::MakerPaymentWaitConfirmFailed("err".into());
         assert!(!event.should_ban_maker());
+
+        let event = TakerSwapEvent::NegotiateFailed("err".into());
+        assert!(event.should_ban_maker());
 
         let event = TakerSwapEvent::MakerPaymentValidateFailed("err".into());
         assert!(event.should_ban_maker());

@@ -151,6 +151,7 @@ use std::num::NonZeroUsize;
 pub use swap_rpc::*;
 #[allow(unused_imports)]
 pub use swap_watcher::{process_watcher_msg, watcher_topic, SwapWatcherMsg, TakerSwapWatcherData, WATCHER_PREFIX};
+#[cfg(test)] pub(crate) use taker_swap::penalise_maker_if_due;
 #[allow(unused_imports)]
 pub use taker_swap::{calc_max_taker_vol, check_balance_for_taker_swap, max_taker_vol, max_taker_vol_from_available,
                      max_taker_vol_v2, min_trading_vol_v2, run_taker_swap, taker_swap_trade_preimage,

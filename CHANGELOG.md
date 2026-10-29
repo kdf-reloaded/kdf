@@ -310,6 +310,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
+  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
+  spent the taker's payment. A maker that failed during negotiation could be picked again for the
+  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
+  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
+  lifted with `unban_pubkeys`. Detail: CRD ch.59 R59.5.2, R59.5.4.
 - **Two activations of the same coin no longer run at the same time.** If a coin is activated again
   while its first activation is still running, through any activation method or the legacy `enable`
   and `electrum`, the second now waits for the first. If the first activated the coin, the second
