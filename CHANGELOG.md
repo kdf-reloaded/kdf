@@ -278,6 +278,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
+  test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
+  reused the coin the first had just spent, because the Electrum servers had not yet caught up with
+  that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
+  and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
+  Test-only; the node itself is unchanged.
 - **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #149; CRD ch.12 R7a, R7b.
 - **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
   shielded-coin payment now waits until the chain's median time (the clock the network judges lock
