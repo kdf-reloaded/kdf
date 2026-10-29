@@ -1,5 +1,6 @@
 /// Simple one-shot L2 activation. For lightweight L2 protocols that
 /// activate quickly and do not need progress tracking.
+use crate::context::lock_activation;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::{lp_coinfind, lp_coinfind_or_err, CoinProtocol, CoinsContext, MmCoinEnum};
@@ -115,6 +116,10 @@ where
     L2: L2ActivationOps,
     EnableL2Error: From<L2::ActivationError>,
 {
+    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+        .await
+        .map_to_mm(EnableL2Error::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableL2Error::L2IsAlreadyActivated(req.ticker));
     }

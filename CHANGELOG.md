@@ -270,6 +270,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Two activations of the same coin no longer run at the same time.** If a coin is activated again
+  while its first activation is still running, through any activation method or the legacy `enable`
+  and `electrum`, the second now waits for the first. If the first activated the coin, the second
+  ends with the usual already-activated error and builds nothing; if the first failed, the second
+  goes ahead. Before, the two built the coin in parallel. A second ARRR activation already waited,
+  but then built the coin a second time over the wallet database the first coin was using, and only
+  then failed.
+  A platform activation that brings tokens also waits for activations of those tokens. Callers get
+  the same answers as before; only the second call can return later. Detail: PR #TBD; CRD ch.55
+  R55.1.12.
 - **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
   shielded-coin payment now waits until the chain's median time (the clock the network judges lock
   times by) has passed the lock time, and a refund the network still rejects as not yet final is
@@ -730,6 +740,10 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
   decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
   Detail: PR #123.
+
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
+  list of deferred activation work now records the per-ticker serialization of activations (PR #TBD)
+  and the refusal of a future ARRR sync date (PR #22) as implemented.
 
 ### Known limitations
 

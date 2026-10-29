@@ -285,6 +285,14 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         Ok(coin)
     }
 
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
+        activation_request
+            .tokens_params
+            .iter()
+            .map(|token| token.ticker.clone())
+            .collect()
+    }
+
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>> {
@@ -418,6 +426,22 @@ mod tests {
         // get_balances defaults to true (R36.1.2).
         assert!(req.get_balances);
         assert!(!req.tx_history());
+    }
+
+    /// CRD ch.55 R55.1.12: the activation locks the tickers of the tokens the request registers beside the platform.
+    #[test]
+    fn the_requested_token_tickers_are_the_token_tickers_of_the_request() {
+        let req: TendermintActivationParams = serde_json::from_str(
+            r#"{
+                "nodes": [{"url": "https://rpc.example"}],
+                "tokens_params": [{"ticker": "IRIS-IBC"}, {"ticker": "IRIS-NYAN"}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            <TendermintCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&req),
+            ["IRIS-IBC", "IRIS-NYAN"]
+        );
     }
 
     #[test]

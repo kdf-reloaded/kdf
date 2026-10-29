@@ -773,10 +773,14 @@ another activation untouched when it is cancelled.
 
 > **Reloaded status (informative).** Since `fix/activation-api-parity` the
 > losing standalone task ends with `CoinIsAlreadyActivated`, and a cancelled
-> task removes only a coin it registered itself (R55.5.8). The serialization of
-> R55.1.12 is a decided change, not yet implemented outside the Z-coin, whose
-> activation already holds a per-ticker lock; elsewhere concurrent activations
-> still run in parallel, with the same observable outcome.
+> task removes only a coin it registered itself (R55.5.8). R55.1.12 is
+> implemented on every family and path: each activation takes the ticker's
+> activation lock before it builds anything and holds it through registration
+> and the steps after it, then re-checks the registration once the lock is its
+> own (`mm2src/coins/activation_locks.rs`, PR #TBD). A platform-with-tokens
+> activation locks the platform and every token its request names, in one
+> sorted order. The registration check of R55.5.5 stays as a backstop. Tested
+> by T55.21.
 
 > **Numbering (informative).** `R55.5.9` is deliberately unused. Requirements
 > from `R55.5.10` onwards are cited by those identifiers from source comments
@@ -1305,6 +1309,20 @@ legacy error answers HTTP 500 with only an `error` string.
 **T55.20** `UnexpectedCoinProtocol` and `UnexpectedPlatformProtocol` carry a
 `protocol` object with a string `type`.
 
+**T55.21** *R55.1.12.* Each case runs for every activation family: the
+standalone-coin task, the platform-with-tokens task and one-shot method, the
+token task and one-shot method, and the layer-2 task. It runs as well for
+legacy `enable` and `electrum`.
+
+(a) A second activation of a ticker that starts while the first is still
+running waits for it. When the first registered the coin, the second ends
+with its family's already-activated discriminant in that family's usual
+placement, and the coin is built only once. (b) When the first failed, the
+second proceeds and activates the coin. (c) A task activation and a legacy
+`enable` of one ticker wait for each other in the same way. (d) Activations
+of two different tickers do not wait for each other. (e) Cancelling an
+activation that is still waiting registers nothing and deregisters nothing.
+
 ## 55.13 Deferred Work
 
 **D55.1** *Task-status event streaming.* The reference release pushes every
@@ -1520,3 +1538,10 @@ R55.4.5 and the error body of R55.1.10.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   error-texts pointer note in §55.3 is Reloaded-original. It binds nothing of
   its own and points to the rules of the chapters it names.
+- *Clean-context addition (2026-10-29, forbidden corpus not consulted):* T55.21
+  and the update of the Reloaded status note after R55.5.8 are
+  Reloaded-original. They test and record the implementation of the
+  maintainer's decision of 2026-10-11 that R55.1.12 already binds, from this
+  repository's own code. They state Reloaded's own behavior and add no
+  reference content, so chapter 01 R38 is not engaged and no clearance above
+  is widened.
