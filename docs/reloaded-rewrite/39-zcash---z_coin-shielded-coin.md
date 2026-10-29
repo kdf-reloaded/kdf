@@ -647,6 +647,16 @@ script-mismatch outcome of R39.5.11(d)) and vice versa. Either R39.6.4 §2 is ex
 HD-derive the transparent key as the reference does, or the divergence is recorded as a
 deliberate Reloaded exception in §39.0 and in the operator-facing compatibility document.
 
+D39.5.b **A dedicated build error for the transparent key under HD** *(after the beta;
+cosmetic; 2026-10-29).* Since D39.5.a, a failure to derive the shielded coin's transparent
+key under the HD-wallet policy (the crypto context unavailable, or the coins-file
+`derivation_path` absent or invalid) is reported through the build error of the shielded
+key, whose text begins "HD shielded key derivation failed". The key that failed is the
+transparent one, so the prefix misleads; in the coins-file cases the detail after it names
+`derivation_path`, so the cause stays clear. A dedicated error, or a prefix that names no key kind, changes only the
+text of `error_data.error`: the activation still ends in `CoinCreationError` `{ticker,
+error}` (R39.10.12), and no behavior changes.
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -3546,8 +3556,10 @@ canonical counterparts for the same task.
 >    and (Step C, swap half) the swap-path spend and already-sent detection with the
 >    P2SH workaround (R39.11.4d) and the named conditions of R39.11.17. The
 >    detection of a *spend* was observed live on 2026-10-29 (R39.11.4d's status
->    note). Open: the naming, rejection and suspension rules of §39.11.6
->    (R39.11.29 -- R39.11.31), which are not implemented.
+>    note). The naming, rejection and suspension rules of §39.11.6
+>    (R39.11.29 -- R39.11.31) carry their own status note just before
+>    the tests of §39.11.6; that note, not this summary, records whether they
+>    are implemented.
 >
 > **Where it lives.** `mm2src/coins/z_coin/z_lightwalletd.rs` (admission, the
 > failover client, the height authority, the windowed history reader, the
