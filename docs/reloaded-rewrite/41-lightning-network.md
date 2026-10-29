@@ -595,6 +595,23 @@ exists today).
 D41.2 *Closed (2026-10-11).* The reloaded-only `enable_lightning` and
 `init_lightning` methods stay routed as documented extensions (R41.2.2).
 
+D41.3 *A discarded node keeps running (post-beta defect, 2026-10-29).*
+Starting the node binds its listening port and spawns long-lived loops, each
+holding the node:
+- network-graph and scorer persistence;
+- peer connection and node announcement;
+- the peer-to-peer listener;
+- best-block updates;
+- the background processor.
+
+No stop signal reaches them, so they survive two cases. One is an activation
+that fails after the node has started, for example at the address or balance
+read. The other is a Lightning coin that is disabled. Both leave the port bound
+and the loops running. A later activation on the same port then fails with an
+I/O error, and the loops of both nodes can write the same persisted files. A
+fix needs stop handles in the Lightning coin and its loops; see plan
+[`lightning-activation-features`](../plans/lightning-activation-features.md).
+
 ## 41.11A Trading floors (Spec Reader 2026-10-25; cleared by the Dirty Gate with chapter 60 on 2026-10-25)
 
 R41.11A.1 In both reference designations (`v2.6.0-beta` and `v3.0.0-beta`
@@ -670,3 +687,9 @@ list records the resulting deviations.
   R41.2.11. The remaining sections were not derived from the corpus. No source
   text, private identifier, internal decomposition, or error/log string literal
   was carried into this chapter.
+- *Clean-context addition (2026-10-29, forbidden corpus not consulted):*
+  D41.3 is Reloaded-original. It records a behavior of this repository's own
+  Lightning node start-up, found while R55.1.12 of
+  [Chapter 55](55-coin-activation-wire-contract.md) was implemented. It adds
+  no reference content, so chapter 01 R38 is not engaged and the corpus
+  record above is unchanged.

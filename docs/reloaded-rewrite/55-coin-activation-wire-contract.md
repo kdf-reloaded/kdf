@@ -1371,6 +1371,23 @@ instead of answering `PlatformIsAlreadyActivated`. Whether Reloaded has passive
 coins at all is a [Chapter 43](43-daemon-rpc-dispatcher-and-misc-maintenance.md)
 question (`disable_coin`); the activation side is deferred to it.
 
+**D55.7** *Inline NFT activation and the activation lock (deferred past the
+beta, 2026-10-29).* An `enable_eth_with_tokens` request with `nft_req`
+activates the NFT chain inline, but takes only the locks of R55.1.12 for the
+platform and the tokens its request names. `enable_nft` takes the lock of the
+NFT ticker, so the two do not wait for each other. They can race the NFT
+chain's active flag and its first inventory fetch; neither builds a coin
+twice. Including the NFT ticker in the platform request's locks is deferred.
+
+**D55.8** *EVM history started before registration (deferred past the beta,
+2026-10-29).* When `tx_history` is set, the EVM platform activation starts the
+platform's transaction-history loop just before it registers the platform. On
+each pass, the loop first checks that a coin of its ticker is registered, and
+it stops when none is. If its first check runs before the registration, the
+platform's history collection never starts. This was found by reading this
+repository's code, and has not been reproduced. Starting the loop after the
+registration is deferred.
+
 ## 55.14 Baseline Verifications
 
 **V55.1** The pinned baseline (Chapter 02) contains the task framework with
@@ -1538,8 +1555,8 @@ R55.4.5 and the error body of R55.1.10.
 - *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
   error-texts pointer note in §55.3 is Reloaded-original. It binds nothing of
   its own and points to the rules of the chapters it names.
-- *Clean-context addition (2026-10-29, forbidden corpus not consulted):* T55.21
-  and the update of the Reloaded status note after R55.5.8 are
+- *Clean-context addition (2026-10-29, forbidden corpus not consulted):* T55.21,
+  D55.7, D55.8 and the update of the Reloaded status note after R55.5.8 are
   Reloaded-original. They test and record the implementation of the
   maintainer's decision of 2026-10-11 that R55.1.12 already binds, from this
   repository's own code. They state Reloaded's own behavior and add no

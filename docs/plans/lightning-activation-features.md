@@ -33,6 +33,18 @@ References are to CRD ch. 41 (Dirty-Gate-passed).
    (R41.2.9). There is no awaiting state today, so this only matters together
    with hardware-wallet Lightning activation (D41.1).
 
+## Defect: a discarded node keeps running (added 2026-10-29)
+
+This is a real defect, kept for after the beta (CRD ch. 41 D41.3). When the
+node starts, it binds its listening port and spawns loops that never stop. A
+Lightning activation that fails after that point leaves them running, and so
+does a disabled Lightning coin. A retry on the same port then fails, and the
+loops of the old and new node can write the same persisted files. The fix:
+give `LightningCoin` and each of its loops a stop handle, and fire it when an
+unregistered node is dropped and when the coin is disabled. Then test a retry
+on the same port after a failed activation and after a disable. This fix does
+not depend on items 1-4.
+
 ## Order
 
 1, then 2 and 3 together (they touch the same start-up sequence), then 4 with

@@ -793,6 +793,9 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
   list of deferred activation work now records the per-ticker serialization of activations (PR #156)
   and the refusal of a future ARRR sync date (PR #22) as implemented.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — still parked: it now
+  records, for after the beta, that a Lightning node whose activation failed, or that was disabled,
+  keeps its listening port and background work, so a retry on that port fails (PR #156).
 
 ### Known limitations
 
