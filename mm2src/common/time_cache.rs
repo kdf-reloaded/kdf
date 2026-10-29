@@ -210,6 +210,35 @@ where
     /// Removes the expired entries now, without waiting for the next write.
     pub fn remove_expired(&mut self) { self.remove_expired_keys(Instant::now()) }
 
+    /// Removes and returns the entry that expires first, whether or not it has expired: the oldest
+    /// one, as every entry lives the same `ttl`. The list elements of removed keys at the front are
+    /// dropped on the way, and an element that trails the refreshed expire time of its entry is
+    /// queued again at the true one, so the entry returned is the one with the earliest true expire
+    /// time. `None` when the cache is empty.
+    pub fn pop_oldest(&mut self) -> Option<(Key, Value)> {
+        while let Some(queued) = self.list.pop_front() {
+            if let Occupied(entry) = self.map.entry(queued.key.clone()) {
+                if entry.get().serial != queued.serial {
+                    // Left over from an entry that was removed and inserted again.
+                    continue;
+                }
+                let expires = entry.get().expires;
+                if expires > queued.expires {
+                    let at = self.list.partition_point(|other| other.expires <= expires);
+                    self.list.insert(at, QueuedKey {
+                        key: queued.key,
+                        expires,
+                        serial: queued.serial,
+                    });
+                    continue;
+                }
+                let (key, element) = entry.remove_entry();
+                return Some((key, element.element));
+            }
+        }
+        None
+    }
+
     /// Gives memory back when the map or the list holds far more room than it needs, which they
     /// never do on their own after a burst: they are shrunk to their length once the capacity
     /// exceeds `2 * len + SHRINK_FLOOR`.
@@ -545,6 +574,49 @@ mod test {
         cache.remove_expired_keys(t0 + Duration::from_secs(11));
         assert!(cache.is_empty());
         assert_eq!(cache.queued_len(), 0);
+    }
+
+    #[test]
+    fn pop_oldest_takes_entries_in_insertion_order_and_skips_leftovers() {
+        let t0 = Instant::now();
+        let mut cache: TimeCache<&'static str, u32> = TimeCache::new(Duration::from_secs(10));
+        assert_eq!(cache.pop_oldest(), None);
+        touch_at(&mut cache, "a", t0);
+        touch_at(&mut cache, "b", t0 + Duration::from_secs(1));
+        touch_at(&mut cache, "c", t0 + Duration::from_secs(2));
+        // "a" is removed and inserted again: its first list element is a leftover now
+        assert_eq!(cache.remove("a"), Some(1));
+        touch_at(&mut cache, "a", t0 + Duration::from_secs(3));
+        assert_eq!(cache.queued_len(), 4);
+
+        // nothing has expired, the entries leave oldest first
+        assert_eq!(cache.pop_oldest(), Some(("b", 1)));
+        assert_eq!(cache.pop_oldest(), Some(("c", 1)));
+        assert_eq!(cache.queued_len(), 1, "the leftover of the first \"a\" went on the way");
+        assert_eq!(cache.pop_oldest(), Some(("a", 1)));
+        assert_eq!(cache.pop_oldest(), None);
+        assert_eq!((cache.len(), cache.queued_len()), (0, 0));
+    }
+
+    #[test]
+    fn pop_oldest_honours_a_refreshed_expiry_and_keeps_one_element_per_key() {
+        let t0 = Instant::now();
+        let secs = |n: u64| t0 + Duration::from_secs(n);
+        let mut cache: TimeCache<&'static str, u32> = TimeCache::new(Duration::from_secs(10));
+        touch_at(&mut cache, "a", secs(0)); // expires at 10
+        touch_at(&mut cache, "b", secs(1)); // 11
+        touch_at(&mut cache, "a", secs(5)); // refreshed: 15
+
+        // "a" is first in the list but "b" expires first
+        assert_eq!(cache.pop_oldest(), Some(("b", 1)));
+        assert_eq!(cache.queued_len(), 1);
+        assert_eq!(cache.pop_oldest(), Some(("a", 2)));
+        assert_eq!((cache.len(), cache.queued_len()), (0, 0));
+        // the cache works as before afterwards
+        touch_at(&mut cache, "a", secs(20));
+        assert_eq!((cache.len(), cache.queued_len()), (1, 1));
+        cache.remove_expired_keys(secs(31));
+        assert!(cache.is_empty());
     }
 
     #[test]

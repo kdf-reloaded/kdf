@@ -1610,7 +1610,9 @@ the leftovers of an applied update cost:
 1. *Drain in bulk.* When the worker wakes it takes the batch that woke it and
    every further batch already waiting in the queue, up to 1,024 batches or
    16,384 events, whichever comes first, and applies them as one sequence under
-   one acquisition of the trie-store lock. By R-T3a the outcome is exactly that
+   one acquisition of the trie-store lock. A batch that would pass the event
+   bound starts the next sequence, and a batch larger than the bound is applied
+   alone. By R-T3a the outcome is exactly that
    of applying the batches one by one; only the delta history may hold fewer
    entries, because a root that exists only between two merged batches is never
    stored. The node's own keep-alive never advertises such a root (R-T3b item 2
@@ -1621,9 +1623,15 @@ the leftovers of an applied update cost:
    applied batches (R-T3b items 2 and 4) advances by the number of batches
    merged, so "enqueued equals applied" still means caught up.
 2. *Early purge under load.* The ten-minute purge of R-K4 stays as the floor.
-   In addition the worker purges the unreferenced nodes of the node store as
-   soon as 100,000 leaf updates (insertions and removals) have been applied since
-   the last purge, but not more often than every 5 seconds. The threshold is
+   In addition the worker purges the unreferenced nodes of the node store once
+   100,000 leaf updates (insertions and removals) have been applied since the
+   last purge, but not more often than every 5 seconds. The condition is checked
+   once per drained sequence, after the updates of that sequence are applied, and
+   the leaf updates are counted after the coalescing of R-T3a (a superseded
+   insertion does not count), so the purge happens at the first sequence boundary
+   at or past the threshold, not at exactly the 100,000th update. The 5 seconds
+   are counted from the last purge of either kind, and the ten-minute purge
+   resets both the update count and that clock. The threshold is
    about 35 MB of unreferenced nodes (about 350 bytes per update, measured in
    process); the 5-second spacing keeps the cost of a purge, which walks the
    store, small against the work between two purges. An early purge only drops
@@ -1677,8 +1685,8 @@ never removes a node a live trie still refers to (every key of the live tries
 is readable afterwards).
 
 **T-K7** *History cap (R-K6).* Record 3,000 deltas on one slice: 2,048 remain,
-the oldest were dropped, the counter reads 952, and the memory held is the same
-as after 2,048. A requester holding the root of the oldest dropped delta is
+the oldest were dropped, the counter reads 952, and the entries held (and the
+map capacity) are the same as after 2,048. A requester holding the root of the oldest dropped delta is
 answered with the full snapshot; one holding a root inside the kept window is
 answered with a delta whose application reaches the advertised root; another
 slice of the same pubkey is unaffected.

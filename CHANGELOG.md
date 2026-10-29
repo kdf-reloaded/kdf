@@ -270,6 +270,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The order-book store no longer grows without bound when a maker updates orders very fast.** The
+  node now applies queued order updates in bulk (up to 1,024 at a time), drops the unused entries of
+  its node store as soon as 100,000 updates have piled up (at most every five seconds) instead of
+  only every ten minutes, and keeps at most 2,048 stored changes per maker and pair. In a test
+  of 120,480 updates for 30 orders the memory left after the node caught up fell from 134 MB to
+  26 MB (3 MB when the node was held back first). A peer that is behind, or asks about a state older
+  than the kept changes, receives the full set of orders instead of a delta; nothing else changes
+  for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
+  More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
+  (R-K5, R-K6). Detail: PR #TBD.
 - **A node that relays the order book now answers other nodes' sync requests for a maker it is still
   catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
   while the relay was itself fetching them (the usual case right after a stall or a restart) got an
