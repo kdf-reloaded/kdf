@@ -249,6 +249,35 @@ R40.5.2 The coin shall support constructing, signing, and broadcasting SOL and
 SPL transfers and shall decode transaction details returned by the node into the
 project's common transaction-details shape.
 
+## 40.5A Node naming and credentials (Reloaded-original; applies when Solana returns)
+
+R40.5A.1 **Host-only naming of Solana nodes and credentials in renderings
+(Reloaded; clean-room original; maintainer decision 2026-10-26; no switch).**
+Every log line, error text and status message the Solana coin layer emits that
+names a node shall name it in the host-only form of
+[chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14: scheme, host and, when
+present, port. This covers the node URLs of either activation surface (the
+`nodes[].url` of R40.2.1 and the node URL members of Reloaded's own surface,
+§40.6 item 3), the health-check selection of R40.1.5, the "no healthy node"
+errors of R40.2.4 and R40.3.4, and any lower-layer text (HTTP client, TLS, DNS)
+embedded in an emitted text, which shall carry the host-only form in place of
+a full URL. Chapter 35 R35.1.17 applies to the Solana node clients, their pool
+and the activation requests, with its scope limit for the RPC wire dump.
+
+The rule applies when Solana returns (D40.4). While `SOLANA_ACTIVATION_AVAILABLE`
+is `false` no node is contacted, so nothing it binds can be observed. The code
+stays compiled, so the rule may be implemented and T40.10 run before then.
+
+It has no opt-back switch, for the reason R35.1.14 gives: node access reaches
+no peer and the rule only protects the operator, so by the second arm of the
+default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the default.
+It is recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch
+exists".
+
+> **Status (2026-10-28).** Not implemented. In this repository a transport
+> failure embeds the lower layer's text, which carries the node's full URL,
+> and the node client derives a debug form that prints the URL.
+
 ## 40.6 Reloaded status (informative)
 
 Reloaded currently ships the baseline-era Solana surface, which differs from
@@ -360,6 +389,12 @@ and `enable_spl` answers HTTP 500 `Internal`, each with "Solana support is not
 available in this build"; legacy `enable` / `electrum` answer the same text; no
 Solana coin is registered.
 
+T40.10 *Host-only naming and credentials (R40.5A.1).* A node client built from
+a URL with a path segment and a query string that carry a key, pointed at a
+closed port: the transport error of a request and the debug forms of the
+client and its pool contain the host-only form and none of the path or query.
+A unit test; it needs no activation and runs while Solana is switched off.
+
 ## 40.8 Deferred Work
 
 D40.1 Solana transaction history.
@@ -375,7 +410,8 @@ session; see `docs/plans/solana-support.md`.
 D40.4 Switching Solana back on (planned for the next beta; maintainer decision
 2026-10-26): set `SOLANA_ACTIVATION_AVAILABLE` to `true`, re-enable the Solana
 docker tests listed in `docs/DISABLED_TESTS.md` (group 6) and retire T40.9.
-Part of `docs/plans/solana-support.md`.
+Part of `docs/plans/solana-support.md`. R40.5A.1 has to hold before the switch
+is turned back on.
 
 ## 40.9 Baseline Verifications
 
@@ -434,3 +470,10 @@ with the shapes listed in §40.6 items 3-5.
   and the JSON-RPC methods named in §40.4. No source text, private identifier,
   internal decomposition, or error/log string literal was carried into this
   chapter; the code-quality findings of §40.6 are restated as behaviour.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):*
+  §40.5A (R40.5A.1 and its status note), T40.10 and the last sentence of D40.4
+  are Reloaded-original. They rest on the maintainer decision of 2026-10-26
+  (host-only node naming everywhere, except the RPC wire dump, which keeps its
+  own secrets switch) and on this repository's own code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

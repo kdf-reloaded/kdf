@@ -23,6 +23,7 @@ pub(crate) enum RecoveryStage {
     CheckPaymentSent,
     SearchSpend,
     SpendOtherPayment,
+    CheckRefundGate,
     RefundMyPayment,
 }
 
@@ -33,6 +34,7 @@ impl RecoveryStage {
             RecoveryStage::CheckPaymentSent => "checking whether this node's own payment was sent",
             RecoveryStage::SearchSpend => "searching for a spend of the payment",
             RecoveryStage::SpendOtherPayment => "spending the counterparty's payment",
+            RecoveryStage::CheckRefundGate => "checking whether the chain allows the refund yet",
             RecoveryStage::RefundMyPayment => "refunding this node's payment",
         }
     }

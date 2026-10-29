@@ -1,5 +1,6 @@
 use super::*;
-use crate::z_coin::z_tx_read;
+use crate::z_coin::{z_refund_gate, z_tx_read};
+use crate::CanRefundHtlc;
 use crate::HtlcPaymentCheck;
 
 #[async_trait]
@@ -416,6 +417,25 @@ impl SwapOps for ZCoin {
 
     fn derive_swap_htlc_key_pair(&self, swap_unique_input: &[u8]) -> Result<KeyPair, String> {
         self.derived_htlc_key_pair(swap_unique_input)
+    }
+
+    /// R39.5.13: the refund waits until the wall clock and the chain's median time past have both passed
+    /// the lock time, and a read failure is an error the refund stage retries after 30 seconds.
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let fut = async move { Ok(z_refund_gate::refund_gate(self, locktime).await?.into_can_refund()) };
+        Box::new(fut.boxed().compat())
+    }
+
+    fn retriable_refund_rejection(&self, rejection: &str) -> Option<String> {
+        z_refund_gate::non_final_rejection(rejection)
+    }
+
+    fn refund_gate_closed_note(
+        &self,
+        locktime: u64,
+    ) -> Box<dyn Future<Item = Option<String>, Error = String> + Send + '_> {
+        let fut = async move { Ok(z_refund_gate::refund_gate(self, locktime).await?.closed_note(locktime)) };
+        Box::new(fut.boxed().compat())
     }
 }
 

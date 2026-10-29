@@ -40,8 +40,26 @@ connection is closed.
 
 The change also adds aggregate send-queue and outbox metrics (R-MP5).
 
-The binding rules are CRD ch.32 §32.9B (R-MP1–R-MP5, T-MP1–T-MP12) and
+The binding rules are CRD ch.32 §32.9B (R-MP1–R-MP5, T-MP1–T-MP13) and
 ch.28 §28.9B RQ1 items 8 and 9 (T-RQ1.8, T-RQ1.9).
+
+**Amendment (2026-10-28, direction (a)).** The first in-process run of
+T-MP8 failed: no keep-alive got through during the load. After measuring
+the candidates, the maintainer adopted three changes:
+- a keep-alive waits at most 10 s for its pairs' pending updates, and
+  that wait respects the budget;
+- two signals replace the halving under queue pressure: the send queue
+  toward a relay staying non-empty for 2 s, or the last connection to a
+  relay closing while maker updates are in flight. Either drops the rate
+  to the floor in degraded mode for 5 minutes;
+- after that the rate climbs by 0.5/s per minute, and stops below the
+  rate at which the relay last failed.
+
+The two signals cover the two stall modes seen in the field: a relay that
+stops reading, and one whose bandwidth is limited. The accepted cost is
+one synchronization request per receiver, pair and keep-alive while
+degraded. The measurements and the residual first-signal gap are in the
+ch.32 rationale, and the open recovery question is ch.32 D7.
 
 ## The one-page summary for the maintainer
 

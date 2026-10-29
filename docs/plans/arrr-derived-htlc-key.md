@@ -31,7 +31,7 @@
      implementations. Reloaded parses that value and uses the HTLC public keys instead, so a
      vector needs only the `Started` and `Negotiated` HTLC public keys.
 5. **Field recovery** of the September swap with the operator, once step 4 passes.
-6. **Refund timing** (R39.5.13, maintainer Decision AP, 2026-10-28). The shielded refund waits
+6. **Refund timing — done** (R39.5.13, maintainer Decision AP, 2026-10-28). The shielded refund waits
    until the chain's median time past has passed the lock time, and a refund rejected as
    non-final is retried until the refund deadline. A separate pull request; it does not wait
    for step 4.

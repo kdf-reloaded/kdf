@@ -84,6 +84,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   connecting is bounded by `timeout_sec` (default 20 s) and each request by 20 s; errors name each
   server tried as host:port; enabling a coin tries every listed server at once and succeeds as soon as
   one connects; if none does, the error names each server. More in ch.38 §38.6.4.
+- **Electrum servers can be ranked by how they perform.** Two new values of the `MM2.json` string
+  `electrum_server_order` rank a coin's servers by measurement instead of by one random draw. `mixed`
+  weighs measured speed and chance half and half; `measured` goes by measured speed alone and is meant
+  as an opt-in, because nodes in one region would all pick the same fastest server. When the coin is
+  enabled, each listed server is asked for its newest block once (a small request that carries no
+  address), and servers that are slow or behind the chain rank last. While running, a connected
+  server that falls behind the chain or turns slow is replaced by a better one found by asking the
+  unused servers again, at most once per 5 minutes; nothing is probed on a schedule. The default stays
+  `random`. Set `electrum_server_order` to `listed` for GLEEC KDF behavior. More in ch.38 R38.6.4l.
 
 - **A node now reads a coin's balance only while it has a maker order selling that coin.** It used to
   read the balance of every activated coin every 10 seconds, whether or not any order needed it, and
@@ -261,6 +270,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
+  shielded-coin payment now waits until the chain's median time (the clock the network judges lock
+  times by) has passed the lock time, and a refund the network still rejects as not yet final is
+  retried until the refund deadline instead of ending the swap with its refund failed. Calling
+  `recover_funds_of_swap` too early now answers "too early" with the time it waits for. Detail:
+  PR #146; CRD ch.39 R39.5.13.
 - **A node that relays the order book now answers other nodes' sync requests for a maker it is still
   catching up on, as soon as it has caught up.** Before, a node asking a relay for a maker's orders
   while the relay was itself fetching them (the usual case right after a stall or a restart) got an

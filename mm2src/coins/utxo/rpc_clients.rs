@@ -78,6 +78,9 @@ pub use native_rpc_client::*;
 pub(crate) mod electrum_types;
 pub use electrum_types::*;
 
+#[path = "rpc_clients/electrum_measure.rs"]
+pub(crate) mod electrum_measure;
+
 #[path = "rpc_clients/electrum_pool.rs"]
 pub(crate) mod electrum_pool;
 pub use electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
