@@ -30,8 +30,8 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
   `LocalTxProver` parameter files; §39.6.1). Under an HD wallet the shielded
   Sapling key is HD-derived per R39.6.4 §2; since maintainer Decision D39.5.a
   (2026-10-28) the coin's transparent secp256k1 key is HD-derived too, at the
-  coins-file `derivation_path` (R39.6.4 §2, R39.5.9). That transparent part is not
-  yet implemented: the build still derives it from the seed key.
+  coins-file `derivation_path` (R39.6.4 §2, R39.5.9); implemented by
+  `z_coin::transparent_secret_for_policy`.
 - **§39.6.4 Ironwood (plan Step E, implemented):** the builder constructs the
   version-6 transaction format the Ironwood upgrade requires, selected by the
   coin's Ironwood activation height, which is configured or discovered at runtime
@@ -515,6 +515,25 @@ re-applying R39.5.7–R39.5.9 to the saved Started event. Consequently:
 > error naming the mismatch before any chain query. This is additive and does not change the
 > parity behaviour above when the keys match.
 
+> **Status update (reloaded, 2026-10-28).** R39.5.6--R39.5.11 are implemented, with the HD
+> base key of R39.6.4 ("Transparent key under HD").
+> - *Derivation:* `coins::z_coin::derive_swap_htlc_key_pair` (R39.5.8), from the coin's
+>   activated transparent key (`ZCoin::derived_htlc_key_pair`, through
+>   `SwapOps::derive_swap_htlc_key_pair`). The maker's input is the saved secret-hash bytes
+>   (`maker_htlc_key_input`), the taker's the 16 raw uuid bytes.
+> - *Never saved:* `start_htlc_key_pair` writes no private key for the shielded leg. The key is
+>   derived again on restart (`restored_htlc_key_pair`, in `apply_event(Started)`) and in
+>   recovery (`recovery_key_pairs`, `resolve_recovery_htlc_key`) in the candidate order of the
+>   R39.5.4 amendment: derived, saved pair, persistent. A swap saved by an earlier Reloaded
+>   build keeps its saved pair when that pair belongs to the saved public key. Key resolution
+>   reads nothing from the network.
+> - *Pre-check:* `check_held_htlc_key`. It applies to **resumption only**: a kick-started
+>   swap whose re-derived key is not its saved public key is not resumed, and the log names
+>   the swap and the coin. In `recover_funds_of_swap` it only logs a warning, so the parity
+>   outcomes of (c) and (d) and T39.5.c stay as stated.
+> - *Tests:* T39.5.a passes on the reference vector, plus two low-S cases computed from the
+>   rule; T39.5.b and T39.5.c pass, plus in-flight, candidate-order and policy-switch cases.
+
 R39.5.12 **Refund gate and refund transaction of a shielded leg.** *(binding, parity.)*
 (a) The refund of a shielded leg becomes permitted when the node's wall clock exceeds the HTLC
     locktime; until then the refund stage waits (locktime − now + 1) seconds and re-checks, and
@@ -584,6 +603,17 @@ structure check only, and the derivation code is not merged before it passes); t
 for the UTXO leg equals `my_persistent_pub`, the shielded leg's does not.
 T39.5.b *No persistence.* *(parity.)* A saved swap contains no HTLC private key; the
 shielded leg's key is re-derived on restart and after re-activation and signs a valid refund.
+> **Amendment (2026-10-28) to T39.5.a.** "A 32-byte secret hash" means the secret-hash bytes
+> as saved: 20 bytes under the default algorithm (the reference vector's case), 32 when
+> ch. 51 R71/R72 selects SHA-256.
+
+> **Amendment (2026-10-28) to T39.5.c and the R39.5.4 candidate order.** T39.5.c concerns a
+> swap record that saved no HTLC private key, which every derived key is. Such a record has
+> no match-only candidate, so with a different seed recovery ends in the script-mismatch or
+> not-found class, as T39.5.c says. The named "no private key is held" stop of R39.5.4
+> applies only when the record saved a private key that does not belong to the saved
+> public key.
+
 T39.5.c *Mismatch outcomes.* *(parity.)* With a different seed, recovery of a saved shielded
 swap fails with the script-mismatch class when the payment is saved and with the
 not-found class when it is not; no other error class is produced.
@@ -626,7 +656,7 @@ deliberate Reloaded exception in §39.0 and in the operator-facing compatibility
 > The transparent (UTXO) side of a shielded coin remains iguana-derived; only
 > the shielded Sapling spending key is HD-derived, as R39.6.4 §2 required until
 > 2026-10-28. Maintainer Decision D39.5.a extended R39.6.4 §2 to the transparent
-> key under HD ("Transparent key under HD"); that part is not yet implemented.
+> key under HD ("Transparent key under HD"), implemented on 2026-10-28.
 
 ## 39.6 Required shielded-coin ports
 
@@ -1007,7 +1037,10 @@ from hardcoded Zcash-mainnet constants. Concretely:
   the seed's secp256k1 key, as before. Under the HD policy a missing
   `derivation_path` is a build error, as a missing `z_derivation_path` is (a
   Reloaded choice: what the reference does without the member is not
-  established).
+  established). *Status (2026-10-28):* implemented by
+  `z_coin::transparent_secret_for_policy`, reusing `derive_activated_hd_secret`,
+  which the UTXO builder's HD activation also uses. A missing `derivation_path`
+  fails the build with `HdDerivationError`.
 - **Sync checkpoint.** `check_point_block` shall be the sync-start anchor. In
   native mode the wallet database is anchored at `check_point_block.height`,
   falling back to `sapling_activation_height` when the checkpoint is absent. In
@@ -1055,7 +1088,7 @@ mainnet constants.
 >   HD policy a missing `z_derivation_path` is a build error. The transparent
 >   UTXO side of the coin remains iguana-derived (out of R39.6.4 §2 scope at the
 >   time; history since Decision D39.5.a, 2026-10-28, extended §2 to the
->   transparent key under HD, not yet implemented).
+>   transparent key under HD, now implemented).
 > - **ZOMBIE fixtures.** Test fixtures updated to carry full `protocol_data` with
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
@@ -5817,9 +5850,8 @@ alone, the three chapters should agree.
   `sync_params`, or the default recent window of R39.8.0av when none is
   supplied -- whose anchor is fetched from the backend rather than read from
   the configured checkpoint (R39.6.4 §3, R39.8.0g).
-- R39.6.4 is implemented, including HD-derived shielded key-policy support,
-  except its "Transparent key under HD" bullet (Decision D39.5.a, 2026-10-28):
-  the transparent UTXO side is still iguana-derived under HD.
+- R39.6.4 is implemented, including HD-derived shielded key-policy support and
+  its "Transparent key under HD" bullet (Decision D39.5.a, 2026-10-28).
 - Shielded history activation: a Light-mode ARRR activation initializes both the
   compact-block cache and shielded wallet database, reports compact-block and
   wallet-db scan progress, and reaches terminal activation only after wallet-db
