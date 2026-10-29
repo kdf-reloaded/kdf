@@ -806,10 +806,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.2.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
-- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new, in progress: ARRR's per-swap
+- [`arrr-derived-htlc-key`](docs/plans/arrr-derived-htlc-key.md) — new and done: ARRR's per-swap
   HTLC key is derived as other KDF nodes derive it (PRs #140, #152), recovery signs with the key that
   matches the payment (PR #142), and the refund waits for the chain's median time (PR #146); the
-  field recovery of one earlier swap is left.
+  field recovery of the stuck September swap passed on 2026-10-29.
 - [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new and done: ARRR
   swaps get their HTLC answers from the wallet's own send record and, as a fallback, from Electrum,
   and a taker that no source could watch is refused (PRs #120, #125, #130, #136); the field check
