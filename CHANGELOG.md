@@ -330,7 +330,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   than the kept changes, receives the full set of orders instead of a delta; nothing else changes
   for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
   More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
-  (R-K5, R-K6). Detail: PR #TBD.
+  (R-K5, R-K6). Detail: PR #164.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the
