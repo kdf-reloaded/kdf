@@ -321,6 +321,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The native coin daemon's and the Sia wallet daemon's error texts no longer quote the daemon's raw
+  answer.** They carry the daemon's error code, its message and the answer's size only. More in CRD
+  ch.38 §38.6.9 and ch.20 §20.8.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the
