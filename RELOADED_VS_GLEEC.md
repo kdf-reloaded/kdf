@@ -458,6 +458,28 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
+Ten more behaviors, in the order book, fee readings, Electrum and the shielded history, differ
+from GLEEC KDF by default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each
+switch in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
+
+- `pre_trade_spend_check: false` — no pre-trade spend check.
+- `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
+  requests.
+- `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
+  connected server first.
+- `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
+  listed instead of by a random draw.
+- `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
+  instead of the one this node holds.
+- `order_messages_refresh_liveness: false` — only keep-alives keep a maker's order book alive.
+- `sync_answer_deferral_ms: 0` — a sync request for a pair this node is still synchronizing is
+  answered at once.
+- `maker_update_coalescing: false` — every maker-order message is published at once.
+- `shielded_history_unmined_sends: false` — an own ARRR send is listed in the history only once
+  mined.
+- `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
+  baseline does; what GLEEC KDF does here is not established.
+
 ## Detail sections
 
 Detail subsections will be added as features land. Each entry above expands here with: rationale, code locations, test coverage, migration notes, and links to relevant pull requests.

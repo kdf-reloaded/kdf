@@ -75,7 +75,7 @@ cargo build --release --bin kdf
 
 The binary is placed at `target/release/kdf`. For a development environment with full test infrastructure (Docker-based integration tests, electrum mocks, etc.) see [`docs/DEV_ENVIRONMENT.md`](docs/DEV_ENVIRONMENT.md).
 
-For WebAssembly builds, see [`docs/WASM_BUILD.md`](docs/WASM_BUILD.md).
+For WebAssembly builds, see [`docs/WASM_BUILD.md`](docs/WASM_BUILD.md). In this release a browser (WASM) build cannot activate shielded coins such as ARRR; use a native build for them (see [Known limitations](CHANGELOG.md#known-limitations)).
 
 ## Configuration
 
