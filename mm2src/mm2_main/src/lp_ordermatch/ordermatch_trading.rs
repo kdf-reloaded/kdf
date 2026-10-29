@@ -1876,11 +1876,11 @@ impl<'a> From<&'a MakerMatch> for MakerMatchForRpc<'a> {
 pub(crate) struct MakerOrderForRpc<'a> {
     pub(crate) base: &'a str,
     pub(crate) rel: &'a str,
-    pub(crate) price: BigDecimal,
+    pub(crate) price: RenderedDecimal,
     pub(crate) price_rat: &'a MmNumber,
-    pub(crate) max_base_vol: BigDecimal,
+    pub(crate) max_base_vol: RenderedDecimal,
     pub(crate) max_base_vol_rat: &'a MmNumber,
-    pub(crate) min_base_vol: BigDecimal,
+    pub(crate) min_base_vol: RenderedDecimal,
     pub(crate) min_base_vol_rat: &'a MmNumber,
     pub(crate) created_at: u64,
     pub(crate) updated_at: Option<u64>,
@@ -1899,11 +1899,11 @@ impl<'a> From<&'a MakerOrder> for MakerOrderForRpc<'a> {
         MakerOrderForRpc {
             base: &order.base,
             rel: &order.rel,
-            price: order.price.to_decimal(),
+            price: order.price.to_rendered_decimal(),
             price_rat: &order.price,
-            max_base_vol: order.max_base_vol.to_decimal(),
+            max_base_vol: order.max_base_vol.to_rendered_decimal(),
             max_base_vol_rat: &order.max_base_vol,
-            min_base_vol: order.min_base_vol.to_decimal(),
+            min_base_vol: order.min_base_vol.to_rendered_decimal(),
             min_base_vol_rat: &order.min_base_vol,
             created_at: order.created_at,
             updated_at: order.updated_at,
@@ -2621,7 +2621,7 @@ pub(crate) struct MakerOrderForMyOrdersRpc<'a> {
     #[serde(flatten)]
     pub(crate) order: MakerOrderForRpc<'a>,
     pub(crate) cancellable: bool,
-    pub(crate) available_amount: BigDecimal,
+    pub(crate) available_amount: RenderedDecimal,
 }
 
 impl<'a> From<&'a MakerOrder> for MakerOrderForMyOrdersRpc<'a> {
@@ -2629,7 +2629,7 @@ impl<'a> From<&'a MakerOrder> for MakerOrderForMyOrdersRpc<'a> {
         MakerOrderForMyOrdersRpc {
             order: order.into(),
             cancellable: order.is_cancellable(),
-            available_amount: order.available_amount().into(),
+            available_amount: order.available_amount_rendered(),
         }
     }
 }
@@ -2691,6 +2691,18 @@ pub(crate) enum OrderForRpc<'a> {
     Taker(TakerOrderForRpc<'a>),
 }
 
+/// The `my_orders` answer. Field order is the wire order: `result`, then `maker_orders` and `taker_orders`.
+#[derive(Serialize)]
+struct MyOrdersResponse<'a> {
+    result: MyOrdersResult<'a>,
+}
+
+#[derive(Serialize)]
+struct MyOrdersResult<'a> {
+    maker_orders: HashMap<&'a Uuid, MakerOrderForMyOrdersRpc<'a>>,
+    taker_orders: HashMap<&'a Uuid, TakerOrderForRpc<'a>>,
+}
+
 pub async fn my_orders(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
     let ordermatch_ctx = try_s!(OrdermatchContext::from_ctx(&ctx));
     let my_maker_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
@@ -2701,7 +2713,7 @@ pub async fn my_orders(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
     }
     let maker_orders_for_rpc: HashMap<_, _> = maker_orders_map
         .iter()
-        .map(|(uuid, order)| (uuid, MakerOrderForMyOrdersRpc::from(order)))
+        .map(|(uuid, order)| (*uuid, MakerOrderForMyOrdersRpc::from(order)))
         .collect();
 
     let taker_orders = ordermatch_ctx.my_taker_orders.lock().await;
@@ -2709,14 +2721,14 @@ pub async fn my_orders(ctx: MmArc) -> Result<Response<Vec<u8>>, String> {
         .iter()
         .map(|(uuid, order)| (uuid, TakerOrderForRpc::from(order)))
         .collect();
-    let res = json!({
-        "result": {
-            "maker_orders": maker_orders_for_rpc,
-            "taker_orders": taker_orders_for_rpc,
-        }
-    });
+    let res = MyOrdersResponse {
+        result: MyOrdersResult {
+            maker_orders: maker_orders_for_rpc,
+            taker_orders: taker_orders_for_rpc,
+        },
+    };
     Response::builder()
-        .body(json::to_vec(&res).expect("Serialization failed"))
+        .body(try_s!(json::to_vec(&res)))
         .map_err(|e| ERRL!("{}", e))
 }
 
