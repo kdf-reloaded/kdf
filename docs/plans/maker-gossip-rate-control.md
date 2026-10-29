@@ -1,6 +1,6 @@
 # Plan: maker-side gossip rate control
 
-**Status:** in progress (rate control merged in PR #148; the AO follow-ups open) — **Last reviewed:** 2026-10-29
+**Status:** parked (shipped in PRs #148, #159, #160; two deferred items await field data) — **Last reviewed:** 2026-10-29
 
 > **Context.** A maker that changes its orders faster than its relay can take
 > them no longer gets its keep-alives through. After 90 s without a keep-alive,

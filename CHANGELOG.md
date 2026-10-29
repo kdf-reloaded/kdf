@@ -11,17 +11,6 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
-- **Node and server addresses and credentials no longer appear in logs, error texts or debug output.**
-  Every log line, error text and status message now names a node or server by scheme, host and port
-  only (Electrum servers as `host:port`), for Tron, Tendermint, Electrum, the native coin daemon,
-  lightwalletd, Solana and the Siacoin wallet daemon, and nothing prints a password, API key,
-  Authorization or header value, or the userinfo, path or query of a URL. A Tendermint node's response
-  body is no longer logged. The debug-build RPC wire dump is not affected. A shielded coin's
-  broadcast error and a warning log line now name the lightwalletd endpoint that rejected the
-  transaction, and a lightwalletd endpoint that fails to connect or answer is tried after the others
-  for a growing time (20 seconds, doubling, up to 12 hours) until it answers again. More in ch.35
-  R35.1.17 and ch.39 §39.11.6.
-
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
@@ -97,7 +86,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
   `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
   JSON `false` turns it off. More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md).
-  Detail: PR #148; CRD ch.32 §32.9B, ch.28 §28.9B.
+  Detail: PR #148, PR #159; CRD ch.32 §32.9B, D8, ch.28 §28.9B.
 - **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot
   that re-submits all of its orders on every refresh used to send one message per order to every
   node, even when price, volumes and confirmations stayed the same. Such an update is still saved and
@@ -206,18 +195,6 @@ it and, where one exists, the CRD rule, for readers who want more.
   longer holds a request for a minute before the next node is tried. A request given up on is now
   closed too, instead of staying open in the background for as long as the node keeps silent.
   Detail: PR #90; CRD ch.35 §35.1.F.
-- **EVM and Tron log lines and errors name a node by scheme, host and port only, and EVM lines say
-  which coin and which list position.** Paths, query strings and credentials, where hosted providers
-  keep API keys, are never printed: the activation probe, the per-node failure logs, the error that
-  lists the nodes tried, and the lower-layer texts they carry. The same goes for the gas-station URL
-  and the gas-API provider (Infura, Blocknative) URL, which also carry API keys. When a node answers
-  with an error, the log says so (`EVM RPC <host> answered <method> with error <code>: <message>`)
-  and the error returned to the caller ends with `(node <host>)`, so a revert reported by one of
-  several nodes can be attributed. A line such as
-  `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...` starts
-  with the ticker and gives the node's position in the list as you configured it, so two coins that
-  use one provider with different paths, or two nodes of one coin on one host, can be told apart.
-  There is no switch to print the full URL. Detail: PR #90, PR #133; CRD ch.35 §35.1.F, R35.1.16.
 - **The initial swap gas-fee policy no longer depends on how the coin was activated, and a coin's
   `max_eth_tx_type` now caps the transaction type it will sign.** The legacy `enable` / `electrum`
   route resolves the policy the way the other routes do — the `swap_gas_fee_policy` request field,
@@ -251,6 +228,31 @@ it and, where one exists, the CRD rule, for readers who want more.
   instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
   waiting could free enough funds. More in
   [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md). Detail: PR #85.
+
+#### Node names in logs and errors
+
+- **Node and server addresses and credentials no longer appear in logs, error texts or debug output.**
+  Every log line, error text and status message now names a node or server by scheme, host and port
+  only (Electrum servers as `host:port`), for Tron, Tendermint, Electrum, the native coin daemon,
+  lightwalletd, Solana and the Siacoin wallet daemon, and nothing prints a password, API key,
+  Authorization or header value, or the userinfo, path or query of a URL. A Tendermint node's response
+  body is no longer logged. The debug-build RPC wire dump is not affected. A shielded coin's
+  broadcast error and a warning log line now name the lightwalletd endpoint that rejected the
+  transaction, and a lightwalletd endpoint that fails to connect or answer is tried after the others
+  for a growing time (20 seconds, doubling, up to 12 hours) until it answers again. Detail:
+  PR #161; CRD ch.35 R35.1.17, ch.39 §39.11.6.
+- **EVM and Tron log lines and errors name a node by scheme, host and port only, and EVM lines say
+  which coin and which list position.** Paths, query strings and credentials, where hosted providers
+  keep API keys, are never printed: the activation probe, the per-node failure logs, the error that
+  lists the nodes tried, and the lower-layer texts they carry. The same goes for the gas-station URL
+  and the gas-API provider (Infura, Blocknative) URL, which also carry API keys. When a node answers
+  with an error, the log says so (`EVM RPC <host> answered <method> with error <code>: <message>`)
+  and the error returned to the caller ends with `(node <host>)`, so a revert reported by one of
+  several nodes can be attributed. A line such as
+  `[ETC] Couldn't get client version for node https://rpc.example.org (node 2 of 4), ...` starts
+  with the ticker and gives the node's position in the list as you configured it, so two coins that
+  use one provider with different paths, or two nodes of one coin on one host, can be told apart.
+  There is no switch to print the full URL. Detail: PR #90, PR #133; CRD ch.35 §35.1.F, R35.1.16.
 
 #### Transport, TLS and dependencies
 
@@ -811,7 +813,8 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`arrr-htlc-electrum-fallback`](docs/plans/arrr-htlc-electrum-fallback.md) — new and done: ARRR
   swaps get their HTLC answers from the wallet's own send record and, as a fallback, from Electrum,
   and a taker that no source could watch is refused (PRs #120, #125, #130, #136); the field check
-  was waived for lack of a suitable public server.
+  was waived for lack of a suitable public server, and one naming detail is recorded as deferred
+  work (PR #160).
 - [`arrr-htlc-lightwalletd-txwalk`](docs/plans/arrr-htlc-lightwalletd-txwalk.md) — new, planning for
   after the beta: answering the ARRR swap questions from the blocks `lightwalletd` serves, without an
   address index, and then retiring the Electrum fallback (PR #151).
@@ -850,9 +853,10 @@ file carries the detail. "New" means the plan was created in this cycle.
   whose activation failed keeps its listening port (PR #156).
 - [`lightning-ldk-upgrade`](docs/plans/lightning-ldk-upgrade.md) — new, parked: scoping only; it
   records the local LDK patch (PR #66).
-- [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — new, in progress: a
-  maker's order messages leave at a bounded rate that drops when a relay falls behind (PRs #129,
-  #143, #148); follow-ups are open.
+- [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — new, parked: a maker's
+  order messages leave at a bounded rate that drops when a relay falls behind (PRs #129, #143,
+  #148), with defaults measured in the lab (PR #159) and the follow-ups done (PR #160); two
+  deferred items await field data.
 - [`my-orders-speed`](docs/plans/my-orders-speed.md) — new and done: `my_orders` answers about 4 to
   12 times faster with 2,000 orders (PR #154).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
@@ -903,7 +907,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   open.
 - [`v0.2.0-dependency-hygiene`](docs/plans/v0.2.0-dependency-hygiene.md) — in progress, the standing
   advisory ledger: the rustls, webpki, ring and tungstenite rows cleared, and the ledger is green
-  with one dated acceptance, RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68).
+  with one dated acceptance, RUSTSEC-2026-0387 (PRs #37–#40, #42, #44, #68); redaction inside
+  `sia-rust` is recorded as deferred work (PR #160).
 - [`v2-dynamic-fee-spend-estimate`](docs/plans/v2-dynamic-fee-spend-estimate.md) — new, parked:
   options recorded, none chosen; Reloaded stays at parity.
 - [`v2-swap-engine-hardening`](docs/plans/v2-swap-engine-hardening.md) — new, parked: steps T1–T7 and
