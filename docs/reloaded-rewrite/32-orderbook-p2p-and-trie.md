@@ -1736,9 +1736,10 @@ from the index ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7).
 **R-MP2 (release budget).** The outbox releases created and updated
 messages at no more than the pubkey's current *rate*.
 
-1. **Ceiling.** The rate never exceeds `maker_update_rate_max` messages
-   per second per maker pubkey (top-level `MM2.json` number, default 10),
-   with a burst of 10 × that value (default 100).
+1. **Ceiling** *(amended 2026-10-29, decision AQ, D8)*. The rate never
+   exceeds `maker_update_rate_max` messages per second per maker pubkey
+   (top-level `MM2.json` number, default 20), with a burst of 10 × that
+   value (default 200).
 2. **Signals** *(amended 2026-10-28, decision AO direction (a)).* Two
    signals, each judged for every connection to a relay, tell the node
    that a relay is not keeping up:
@@ -1769,7 +1770,8 @@ messages at no more than the pubkey's current *rate*.
      last signal. A queue signal that stays raised counts as a signal at
      every moment it is raised.
    - It then releases at the floor, and the rate rises by 0.5 messages per
-     second every 60 seconds. The climb stops one step below the trip
+     second every 30 seconds *(amended 2026-10-29, D8)*. The climb stops
+     one step below the trip
      rate, and never below the floor, so a rate at which a relay has
      already failed is not tried again.
    - After 30 minutes without a signal the trip rate is forgotten, and the
@@ -1883,6 +1885,12 @@ stays: the first signal comes only after the load starts, about 50
 seconds later in process, so a burst of order changes can still cost one
 expiry of the maker's orders per new relay connection.
 
+The first trip often comes from that burst: when a maker starts, it
+publishes every order at the ceiling, and a slow relay trips on that
+burst rather than on later updates. The outbox then recovers by the
+climb of R-MP2 item 3. This is accepted and nothing changes for it
+(D8).
+
 R-MP4 replaces what a closing connection loses. Data still in the
 multiplexer's window when a connection closes is lost; §28.9B RQ1 item 5
 and the ping safeguard can both close a connection. The round restarts
@@ -1931,8 +1939,11 @@ waiting up to 30 seconds for the next tick.
     30 s is not a signal;
   - the outbox leaves degraded mode 5 min after the last signal, not
     earlier while the queue signal stays raised;
-  - the rate then rises by 0.5/s every 60 s and stops one step below the
-    trip rate; with a trip rate of 3/s it stops at 2.5/s;
+  - the rate then rises by 0.5/s every 30 s and stops one step below the
+    trip rate; with a trip rate of 3/s it stops at 2.5/s *(amended
+    2026-10-29)*;
+  - with no setting, the ceiling is 20/s and the burst 200 *(added
+    2026-10-29)*;
   - a close signal while degraded does not change the trip rate;
   - after 30 min without a signal it climbs on to the ceiling;
   - in degraded mode no created or updated message is released;
@@ -2131,6 +2142,26 @@ D7. **Recovery of the maker publication rate (§32.9B R-MP2 item 3;
     should start at a low rate, which would close the residual gap of
     the first signal. That option was not chosen on 2026-10-28; the
     lab's T-MP13 runs should show whether the residual matters.
+
+D8. **Default ceiling and climb step of the maker publication rate
+    (§32.9B R-MP2 items 1 and 3; resolved 2026-10-29, maintainer
+    decision AQ; added 2026-10-29).** A lab sweep with 176 orders and an
+    unthrottled relay measured, for a ceiling of 10, 20, 30 and 50
+    messages per second, a median order staleness of 15 to 17, 7.7, 4.8
+    and 2.8 seconds, and about 500, 1,200, 1,800 and 3,000 messages per
+    minute at the seed. Against a bandwidth-limited relay the trip cap
+    held at every ceiling, so the ceiling does not decide the behavior
+    toward a slow relay; the climb step decides how fast the rate
+    recovers. The maintainer chose a ceiling of 20, which halves the
+    staleness and keeps the load on other operators' seeds moderate;
+    higher values remain a setting. The climb step went from every 60 to
+    every 30 seconds, still additive: it halves the time back to a
+    relay's limit and overshoots it by one step at most, which the stop
+    below the trip rate then holds. Doubling the rate each step was
+    rejected, because it would overshoot a slow relay by nearly two
+    times and trip again on every cycle. The first trip often comes from
+    the burst that publishes a maker's orders at startup; that is
+    accepted, with no behavior change.
 
 ## 32.11 External References
 
