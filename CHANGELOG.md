@@ -317,7 +317,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   goes ahead. Before, the two built the coin in parallel. A second ARRR activation already waited,
   but then built the coin a second time over the wallet database the first coin was using, and only
   then failed. A platform activation that brings tokens also waits for activations of those tokens.
-  Callers get the same answers as before; only the second call can return later. Detail: PR #TBD;
+  Callers get the same answers as before; only the second call can return later. Detail: PR #156;
   CRD ch.55 R55.1.12.
 - **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
   test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
@@ -791,7 +791,7 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   Detail: PR #123.
 
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
-  list of deferred activation work now records the per-ticker serialization of activations (PR #TBD)
+  list of deferred activation work now records the per-ticker serialization of activations (PR #156)
   and the refusal of a future ARRR sync date (PR #22) as implemented.
 
 ### Known limitations

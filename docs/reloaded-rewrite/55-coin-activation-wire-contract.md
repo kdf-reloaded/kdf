@@ -777,7 +777,7 @@ another activation untouched when it is cancelled.
 > implemented on every family and path: each activation takes the ticker's
 > activation lock before it builds anything and holds it through registration
 > and the steps after it, then re-checks the registration once the lock is its
-> own (`mm2src/coins/activation_locks.rs`, PR #TBD). A platform-with-tokens
+> own (`mm2src/coins/activation_locks.rs`, PR #156). A platform-with-tokens
 > activation locks the platform and every token its request names, in one
 > sorted order. The registration check of R55.5.5 stays as a backstop. Tested
 > by T55.21.
