@@ -299,7 +299,9 @@ penalise on a failed negotiation. That single missing trigger is a parity
 **gap**, and it is the entire delta between reloaded and the reference
 for the field-reported problem. Closing it is a one-line widening of the
 set of taker-swap outcomes that trigger the penalty, plus the regression
-test of T4.
+test of T4. *Status (2026-10-29):* closed. A failed negotiation now
+penalises the maker like the other two outcomes, and T4 is implemented,
+both halves included.
 
 > The narrowness matters for expectations: closing R59.5.4 does **not**
 > make a taker retry a different maker within one order (R59.3.4 forbids
@@ -443,11 +445,14 @@ predicate at the eviction site.
 R59.6.2 and R59.6.4 are as-built in reloaded. R59.6.1's correction is
 merged into this project's integration branch (status as of
 2026-10-27), so a reloaded binary built from it expires peers on its own
-receipt clock. R59.6.5's per-order half is unimplemented. R59.6.7 is
-unimplemented: the re-announcement path subscribes to the topic without
-recording the subscription state (its divergence note). R59.6.3 is a
-conclusion and carries no implementation. R59.6.1a (added 2026-10-28) is
-implemented (2026-10-28).
+receipt clock. R59.6.5 is implemented in full (status as of 2026-10-29):
+the eviction sweep exempts the persistent key and every per-order key
+the node makes orders under. R59.6.7 is implemented (status as of
+2026-10-29): the re-announcement of an own order missing from the read
+index records the pair subscription, and keeps a subscription record
+already present, as its tests show. R59.6.3 is a conclusion and carries
+no implementation. R59.6.1a (added 2026-10-28) is implemented
+(2026-10-28).
 
 **R59.6.7** *Re-announcement records the pair subscription.* (Authored
 by the KDF Spec Reader 2026-10-27 from the rows `v2.6.0-beta` and
@@ -905,3 +910,9 @@ its gating is not.*
   subscribers dropped a maker's whole book 90 s after its keep-alives stopped
   arriving); and the maintainer's decision. No reference implementation was
   consulted for this item, and it needs no Dirty Gate pass.
+- *Status update (2026-10-29): R59.5.4 and R59.6.6.* R59.5.4 records that
+  the failed-negotiation penalty and T4 are implemented. R59.6.6 is brought
+  up to date with what this repository's integration branch implements for
+  R59.6.5 and R59.6.7. *Inputs:* this repository's own code and tests only.
+  No reference input: the rules themselves are unchanged, so no Dirty Gate
+  pass is needed.
