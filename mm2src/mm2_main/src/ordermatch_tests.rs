@@ -7765,6 +7765,7 @@ mod trie_store_memory_retention {
             trie_ops_tx,
             orderbook_subscriptions: Default::default(),
             sync_answer_deferral: Default::default(),
+            maker_outbox: Default::default(),
             pending_maker_reserved: Default::default(),
             orderbook_tickers: Default::default(),
             original_tickers: Default::default(),
