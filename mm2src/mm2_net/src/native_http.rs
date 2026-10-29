@@ -1,7 +1,8 @@
+use crate::host_label::host_only_uri;
 use crate::transport::{SlurpError, SlurpResult};
 use common::wio::{drive03, HYPER};
 use futures::channel::oneshot::Canceled;
-use http::{header, HeaderValue, Request};
+use http::{header, HeaderValue, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::client::legacy::Error as ClientError;
@@ -52,6 +53,43 @@ impl SlurpError {
     }
 }
 
+/// How a spawned request ended, as far as the line about an abandoned request tells it. It holds no URL and no
+/// error text: a [`SlurpError`] renders the full URI, which can carry a credential (CRD ch.35 R35.1.17).
+enum Ended {
+    /// The exchange reached its own bound, in seconds.
+    BoundReached(f64),
+    /// An answer arrived (the status of its head).
+    Answered(StatusCode),
+    /// The request failed; the kind of the failure.
+    Failed(&'static str),
+}
+
+impl SlurpError {
+    /// The kind of the error, with none of its text.
+    fn kind(&self) -> &'static str {
+        match self {
+            SlurpError::ErrorDeserializing { .. } => "deserializing",
+            SlurpError::InvalidRequest(_) => "invalid request",
+            SlurpError::Timeout { .. } => "timeout",
+            SlurpError::Transport { .. } => "transport",
+            SlurpError::Internal(_) => "internal",
+        }
+    }
+}
+
+/// The log line for a spawned request that finished after its caller had stopped waiting. `host` is the
+/// host-only label of the request URI.
+fn abandoned_line(host: &str, ended: &Ended) -> String {
+    let after = "after its caller had stopped waiting";
+    match ended {
+        Ended::BoundReached(bound_s) => format!("HTTP request to {host} ended at its {bound_s} s bound {after}"),
+        Ended::Answered(status) => {
+            format!("HTTP request to {host} got an answer (status {status}) {after}; the answer is discarded")
+        },
+        Ended::Failed(kind) => format!("HTTP request to {host} failed ({kind}) {after}"),
+    }
+}
+
 /// `http::Error` can appear on an HTTP request [`http::Builder::build`] building.
 impl From<http::Error> for SlurpError {
     fn from(e: http::Error) -> Self { SlurpError::InvalidRequest(e.to_string()) }
@@ -60,13 +98,20 @@ impl From<http::Error> for SlurpError {
 /// Executes a Hyper request, returning the response status, headers and body.
 pub async fn slurp_req(request: Request<Vec<u8>>) -> SlurpResult {
     let uri = request.uri().to_string();
+    let host = host_only_uri(request.uri());
     let (head, body) = request.into_parts();
     let request = Request::from_parts(head, Full::new(Bytes::from(body)));
 
     let request_f = HYPER.request(request);
-    let response = drive03(request_f)
-        .await?
-        .map_to_mm(|e: ClientError| SlurpError::from_error(&e, uri.clone()))?;
+    let response = drive03(request_f, move |answer| {
+        let ended = match answer {
+            Ok(response) => Ended::Answered(response.status()),
+            Err(e) => Ended::Failed(SlurpError::from_error(e, String::new()).kind()),
+        };
+        abandoned_line(&host, &ended)
+    })
+    .await?
+    .map_to_mm(|e: ClientError| SlurpError::from_error(&e, uri.clone()))?;
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.into_body();
@@ -93,6 +138,7 @@ pub async fn slurp_req_bounded(request: Request<Vec<u8>>, timeout_s: f64) -> Slu
     use hyper_util::rt::TokioTimer;
 
     let uri = request.uri().to_string();
+    let host = host_only_uri(request.uri());
     let (head, body) = request.into_parts();
     let request = Request::from_parts(head, Full::new(Bytes::from(body)));
     let bound = Duration::from_secs_f64(timeout_s.max(0.));
@@ -117,14 +163,27 @@ pub async fn slurp_req_bounded(request: Request<Vec<u8>>, timeout_s: f64) -> Slu
         // The timer is created inside the spawned task, so it is registered with the runtime that polls it.
         let timer = TokioTimer::new().sleep(bound);
         match select(Box::pin(exchange), timer).await {
-            Either::Left((result, _)) => result,
-            Either::Right(_) => MmError::err(SlurpError::Timeout {
-                uri,
-                error: format!("no complete response within {timeout_s} s"),
-            }),
+            Either::Left((result, _)) => (result, false),
+            Either::Right(_) => (
+                MmError::err(SlurpError::Timeout {
+                    uri,
+                    error: format!("no complete response within {timeout_s} s"),
+                }),
+                true,
+            ),
         }
     };
-    drive03(bounded).await?
+    // The flag tells the exchange's own bound from any other failure, for the line about an abandoned request.
+    let (result, _) = drive03(bounded, move |(result, bound_reached): &(SlurpResult, bool)| {
+        let ended = match result {
+            _ if *bound_reached => Ended::BoundReached(timeout_s),
+            Ok((status, ..)) => Ended::Answered(*status),
+            Err(e) => Ended::Failed(e.get_inner().kind()),
+        };
+        abandoned_line(&host, &ended)
+    })
+    .await?;
+    result
 }
 
 /// Executes a GET request, returning the response status, headers and body.
@@ -155,7 +214,7 @@ pub async fn slurp_post_json(url: &str, body: String) -> SlurpResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::native_http::{slurp_post_json, slurp_req_bounded, slurp_url};
+    use crate::native_http::{abandoned_line, slurp_post_json, slurp_req, slurp_req_bounded, slurp_url, Ended};
     use crate::transport::SlurpError;
     use common::block_on;
 
@@ -262,5 +321,148 @@ mod tests {
         let (status, _headers, body) = block_on(slurp_req_bounded(request, 5.)).unwrap();
         assert_eq!(status.as_u16(), 200);
         assert_eq!(body, b"ok");
+    }
+
+    /// A URL as a configured node or service has it: a credential in the userinfo, the path and the query.
+    const SECRET_PARTS: [&str; 3] = ["hunter2", "APIKEY", "token=X"];
+
+    fn assert_no_secret(text: &str) {
+        for secret in SECRET_PARTS {
+            assert!(!text.contains(secret), "'{secret}' leaked into '{text}'");
+        }
+    }
+
+    fn label_of(uri: &str) -> String { crate::host_label::host_only_uri(&uri.parse().unwrap()) }
+
+    #[test]
+    fn test_abandoned_line_for_each_outcome() {
+        let host = label_of("https://user:hunter2@node.example:8545/v3/APIKEY?token=X");
+        assert_eq!(host, "https://node.example:8545");
+        let cases = [
+            (
+                Ended::BoundReached(11.),
+                "HTTP request to https://node.example:8545 ended at its 11 s bound after its caller had stopped waiting",
+            ),
+            (
+                Ended::Answered(http::StatusCode::OK),
+                "HTTP request to https://node.example:8545 got an answer (status 200 OK) after its caller had stopped \
+                 waiting; the answer is discarded",
+            ),
+            (
+                Ended::Failed("transport"),
+                "HTTP request to https://node.example:8545 failed (transport) after its caller had stopped waiting",
+            ),
+        ];
+        for (ended, expected) in cases {
+            let line = abandoned_line(&host, &ended);
+            assert_eq!(line, expected);
+            assert_no_secret(&line);
+        }
+    }
+
+    #[test]
+    fn test_abandoned_line_names_no_host_when_the_uri_has_none() {
+        let host = crate::host_label::host_only_uri(&"/v3/APIKEY?token=X".parse().unwrap());
+        let line = abandoned_line(&host, &Ended::Failed("invalid request"));
+        assert_eq!(
+            line,
+            "HTTP request to <invalid node URL> failed (invalid request) after its caller had stopped waiting"
+        );
+        assert_no_secret(&line);
+    }
+
+    #[test]
+    fn test_error_kinds_carry_no_text() {
+        let err = SlurpError::Transport {
+            uri: "https://node.example/APIKEY".to_owned(),
+            error: "token=X".to_owned(),
+        };
+        assert_eq!(err.kind(), "transport");
+        assert_eq!(
+            SlurpError::InvalidRequest("hunter2".to_owned()).kind(),
+            "invalid request"
+        );
+        assert_eq!(SlurpError::Internal("hunter2".to_owned()).kind(), "internal");
+    }
+
+    /// Collects every line logged through `log!`.
+    struct Collector;
+    static LOGGED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    impl common::log::LogCallback for Collector {
+        fn callback(&mut self, _level: common::log::LogLevel, line: String) { LOGGED.lock().unwrap().push(line); }
+    }
+
+    /// Polls `fut` once, so that it hands its request to the shared runtime, and drops it: the caller stops waiting.
+    fn start_and_abandon<F: std::future::Future>(fut: F) {
+        futures::executor::block_on(async {
+            let mut fut = Box::pin(fut);
+            let _ = futures::poll!(fut.as_mut());
+        });
+    }
+
+    fn wait_for_line_with(needle: &str) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(line) = LOGGED.lock().unwrap().iter().find(|l| l.contains(needle)) {
+                return line.clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "no log line with '{needle}'");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A caller that stops waiting leaves the spawned request running; the line it logs when it ends names the
+    /// host and nothing of the credential in the URL.
+    #[test]
+    fn test_an_abandoned_request_logs_the_host_only() {
+        use std::io::Read;
+
+        common::log::register_callback(Collector);
+
+        // The bounded request: a peer that never answers, so the exchange ends at its own bound.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.read(&mut request); // returns once the bound closes the socket
+        });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://user:hunter2@127.0.0.1:{port}/v3/APIKEY?token=X"))
+            .body(b"{}".to_vec())
+            .unwrap();
+        start_and_abandon(slurp_req_bounded(request, 0.5));
+        let line = wait_for_line_with(&format!("127.0.0.1:{port} ended at its 0.5 s bound"));
+        assert!(line.ends_with("after its caller had stopped waiting"), "{line}");
+        assert_no_secret(&line);
+        peer.join().unwrap();
+
+        // The unbounded request: the peer answers after the caller has gone.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            use std::io::Write;
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        });
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("http://user:hunter2@127.0.0.1:{port}/v3/APIKEY?token=X"))
+            .body(b"{}".to_vec())
+            .unwrap();
+        start_and_abandon(slurp_req(request));
+        let line = wait_for_line_with(&format!("127.0.0.1:{port} got an answer"));
+        assert!(line.contains("the answer is discarded"), "{line}");
+        assert_no_secret(&line);
+        peer.join().unwrap();
+
+        for line in LOGGED.lock().unwrap().iter() {
+            assert_no_secret(line);
+        }
     }
 }

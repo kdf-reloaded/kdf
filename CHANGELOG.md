@@ -321,6 +321,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The log line about an abandoned HTTP request now says which host it was.** When a request
+  finished after its caller had stopped waiting, the node logged only "drive03 receiver is dropped".
+  This happens, for example, each time an EVM node misses the failover cutoff and the next node
+  answers. The line now names the scheme, host and port, never the path, query or credentials, and
+  says whether the request reached its time limit, got a late answer, or failed (only the kind of
+  the failure, without the error text). It stays one line per abandoned request at the normal log
+  level.
+  Detail: PR #TBD; CRD ch.35 R35.1.17.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the

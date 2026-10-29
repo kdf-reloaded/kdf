@@ -31,6 +31,10 @@
 //! - An input that is not an absolute URL with a host is never echoed: it renders as [`UNNAMED_NODE`].
 
 use http::Uri;
+use mm2_net::host_label::host_only_uri;
+/// Stands in for a node URL that has no scheme or no host, so that the raw string is never echoed. Defined in
+/// `mm2_net`, which the shared HTTP layer names hosts with, and shared from here.
+pub use mm2_net::host_label::UNNAMED_NODE;
 use serde::Deserialize;
 use std::fmt;
 use std::str::FromStr;
@@ -91,9 +95,6 @@ pub fn listed_nodes(ticker: &str, urls: Vec<String>) -> Vec<ListedNode> {
         .collect()
 }
 
-/// Stands in for a node URL that has no scheme or no host, so that the raw string is never echoed.
-pub const UNNAMED_NODE: &str = "<invalid node URL>";
-
 /// Renders `url` as `scheme://host` or `scheme://host:port` (IPv6 hosts keep their brackets).
 ///
 /// Userinfo, path, query and fragment are dropped. A string that is not an absolute URL with a host renders as
@@ -102,16 +103,6 @@ pub fn host_only(url: &str) -> String {
     match Uri::from_str(url) {
         Ok(uri) => host_only_uri(&uri),
         Err(_) => UNNAMED_NODE.to_owned(),
-    }
-}
-
-fn host_only_uri(uri: &Uri) -> String {
-    match (uri.scheme_str(), uri.host()) {
-        (Some(scheme), Some(host)) if !host.is_empty() => match uri.port_u16() {
-            Some(port) => format!("{scheme}://{host}:{port}"),
-            None => format!("{scheme}://{host}"),
-        },
-        _ => UNNAMED_NODE.to_owned(),
     }
 }
 
