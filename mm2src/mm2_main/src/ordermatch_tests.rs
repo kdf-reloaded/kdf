@@ -10285,7 +10285,7 @@ mod maker_publication_tests {
                 json!({ "maker_update_coalescing": other })
             )));
         }
-        assert_eq!(maker_update_rate_max(&ctx_with(json!({}))), 10.0);
+        assert_eq!(maker_update_rate_max(&ctx_with(json!({}))), 20.0);
         assert_eq!(
             maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": 25 }))),
             25.0
@@ -10298,7 +10298,7 @@ mod maker_publication_tests {
         for bad in [json!(0), json!(-3), json!("fast"), json!(null), json!(true)] {
             assert_eq!(
                 maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": bad }))),
-                10.0
+                20.0
             );
         }
     }

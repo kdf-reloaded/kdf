@@ -97,12 +97,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
   updates, so the book vanished on every node. Now the maker keeps one pending message per order,
-  the latest values win, and the messages leave at a bounded rate (at most 10 per second per maker
-  key, a burst of 100). When a relay stops keeping up, either its send queue stays backed up for
+  the latest values win, and the messages leave at a bounded rate (at most 20 per second per maker
+  key, a burst of 200). When a relay stops keeping up, either its send queue stays backed up for
   2 seconds or the last connection to it closes while order messages are in flight, the rate drops
   sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
   the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
-  0.5 per second every minute, and stops one step below the rate at which the relay failed; after
+  0.5 per second every 30 seconds, and stops one step below the rate at which the relay failed; after
   30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
   messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
   at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
@@ -112,7 +112,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
   keep-alives. One short gap remains: the first signal comes only after the load has started, so a
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
-  `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
   `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
   JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
 
