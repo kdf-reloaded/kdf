@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (pass 1, F2 and pass 2 merged; Decision AM in review; maintainer Decisions R, AC, AD, AI and AM) — **Last reviewed:** 2026-10-28
+**Status:** in progress (all passes merged, Decision AM in PR #149; the swaplab timing run left) — **Last reviewed:** 2026-10-29
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the

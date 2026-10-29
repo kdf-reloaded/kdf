@@ -1,6 +1,6 @@
 # Plan: Pirate Chain (ARRR) v6.0 / Ironwood compatibility for KDF Reloaded
 
-**Status:** in progress (steps A–E landed; field testing green-lit 2026-10-18) — **Last reviewed:** 2026-10-18
+**Status:** in progress (steps A–E landed; field testing green-lit 2026-10-18) — **Last reviewed:** 2026-10-29
 
 > **Context:** accepted 2026-09-17; implementation ran through 2026-10-12 (steps A–E) and
 > the reorg-recovery fix merged 2026-10-16. The §7 consultation with the Pirate Chain team

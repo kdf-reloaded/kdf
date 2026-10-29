@@ -1,6 +1,6 @@
 # Plan: ARRR's per-swap HTLC key derived as the reference derives it
 
-**Status:** in progress — **Last reviewed:** 2026-10-28
+**Status:** in progress — **Last reviewed:** 2026-10-29
 
 > **Context.** Reloaded gives a shielded coin's swap leg a random HTLC key and saves its private
 > key with the swap. The reference instead derives that key from the coin's transparent key and
@@ -15,7 +15,7 @@
 1. **CRD.** Ch.39 R39.5.6–R39.5.13, T39.5.a–f and D39.5.a; the candidate order added to
    R39.5.4; pointers from ch.51.
 2. **Key-pair consistency fix** (R39.5.4). It is the safety net: the named "no private key held"
-   stop. A separate pull request.
+   stop. A separate pull request — done, PR #142.
 3. **Code — done.** The ZCoin HTLC key is derived per R39.5.8 (the maker uses the secret hash, the taker
    the uuid). It is used for payment, spend and refund, and re-derived on restart and in
    recovery, with the candidate order (1) derived, (2) a saved key that belongs to the saved

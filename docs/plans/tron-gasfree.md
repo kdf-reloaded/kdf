@@ -1,6 +1,6 @@
 # Plan: Tron GasFree fee-delegated TRC20 withdraw rail
 
-**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-10-18
+**Status:** parked (branch-only; gated on pinning the GasFree proxy creation bytecode) — **Last reviewed:** 2026-10-29
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a complete, test-covered GasFree implementation and an

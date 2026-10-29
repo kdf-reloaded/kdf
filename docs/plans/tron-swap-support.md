@@ -1,6 +1,6 @@
 # Plan: Tron V1 atomic-swap participation
 
-**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-10-25
+**Status:** parked (branch-only; its ch.21 rewrite must pass the KDF Dirty Gate first) — **Last reviewed:** 2026-10-29
 
 > **Context:** written 2026-10-18, when a review of three stale June-2026
 > branches found a fully wired Tron V1 swap implementation and a 568-line

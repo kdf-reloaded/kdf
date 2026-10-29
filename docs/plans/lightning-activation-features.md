@@ -1,6 +1,6 @@
 # Plan: Lightning activation features
 
-**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-25
+**Status:** parked (deferred by maintainer decision 2026-10-11; nothing started) — **Last reviewed:** 2026-10-29
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity`. That branch brings the Lightning task activation

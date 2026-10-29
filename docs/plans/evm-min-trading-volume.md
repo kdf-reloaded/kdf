@@ -1,6 +1,6 @@
 # Plan: the EVM minimum trading volume
 
-**Status:** planning — **Last reviewed:** 2026-10-25
+**Status:** in progress (PR #66 merged; an end-to-end preview on a real 8-decimal coin left) — **Last reviewed:** 2026-10-29
 
 > **Context:** a field report of a refused WBTC-PLG20 buy traced to
 > `min_trading_vol` for EVM coins, which is computed from the coin's decimals by

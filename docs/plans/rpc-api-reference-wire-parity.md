@@ -1,6 +1,6 @@
 # Plan: wire parity of every RPC with the public KDF API reference
 
-**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-10-18
+**Status:** parked (coin activation shipped in PR #17; the rest not started) — **Last reviewed:** 2026-10-29
 
 > **Context:** written 2026-10-08 and updated 2026-10-11
 > on `fix/activation-api-parity`, after coin activation was brought to parity on

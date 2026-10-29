@@ -1,6 +1,6 @@
 # Plan: bound the per-peer gossip send queue
 
-**Status:** in progress — **Last reviewed:** 2026-10-28
+**Status:** done (PRs #121, #122; compatibility row added 2026-10-29) — **Last reviewed:** 2026-10-29
 
 > **Context.** The seed-node memory incident of 2026-10-28 prompted a survey of
 > the queues in our gossip layer. Toward a single peer, our node queues every

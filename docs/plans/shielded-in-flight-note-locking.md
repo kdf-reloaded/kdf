@@ -1,6 +1,6 @@
 # Plan: shielded in-flight note locking (ARRR taker swaps)
 
-**Status:** in progress (swap and `withdraw` paths shipped; T39.8.0h covered by the harness 2026-10-25; open: two-daemon detection, F3) — **Last reviewed:** 2026-10-25
+**Status:** in progress (swap and `withdraw` paths shipped; T39.8.0h covered by the harness 2026-10-25; open: two-daemon detection, F3) — **Last reviewed:** 2026-10-29
 
 > **Postponed until after the beta, 2026-10-25.** The two open items, detection of two daemons on one
 > seed with separate wallet databases and F3 (the post-broadcast sync trigger, latency only), are not

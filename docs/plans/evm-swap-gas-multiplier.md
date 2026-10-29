@@ -1,6 +1,6 @@
 # Plan: where the EVM gas multiplier and the gas limits reach the swap transactions
 
-**Status:** planning (option (c)+(d) decided 2026-10-28; the ch.57 paragraph and the coins-file proposal text are written, a docs-only PR is pending) — **Last reviewed:** 2026-10-28
+**Status:** blocked ((c) and (d) decided and written in PR #123; (a) and (b) wait on the reference maintainers' outcome) — **Last reviewed:** 2026-10-29
 
 > **Context:** an operator running a maker on USDC-MON (Monad) and USDC-BASE set
 > `estimate_gas_mult` and still saw the fixed 210,000 / 150,000 limits on the

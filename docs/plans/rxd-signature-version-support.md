@@ -1,22 +1,21 @@
 # Plan: Radiant signature-hash support
 
-**Status:** planning — **Last reviewed:** 2026-10-25
+**Status:** parked (signing shipped in PRs #54, #65; step 6 compatibility bookkeeping and step 8 open) — **Last reviewed:** 2026-10-29
 
 > **Context:** Radiant (`RXD`) is the one coin in the shipped registry whose
 > `signature_version` names a signing dialect this build did not implement.
 > The unsafe half of that was closed first — the coin no longer signs
-> something invalid (PR #54) — and the feature itself is now **implemented,
-> pending PR** stacked on #54, which waits on #57: the dialect CRD ch.58
-> binds, with two mainnet vectors behind it. What is left is landing the
-> stack, the compatibility bookkeeping of step 6, and one follow-up the
-> implementation surfaced (ch.58 D5, not a beta item).
+> something invalid (PR #54) — and the feature itself is now **implemented and
+> merged** (PR #65, 2026-10-25): the dialect CRD ch.58 binds, with two
+> mainnet vectors behind it. What is left is the compatibility bookkeeping
+> of step 6 and one follow-up the implementation surfaced (ch.58 D5, not a beta item).
 
-## Where it stands (2026-10-25)
+## Where it stands (2026-10-29)
 
 | Item | State |
 |---|---|
-| PR #54 (guard + switch) | open; waits on #57 |
-| Steps 2–4 (vectors, implementation, tests T1–T8) | **done** — pending PR on branch `feat/rxd-signature-version`, stacked on #54 |
+| PR #54 (guard + switch) | merged 2026-10-25 |
+| Steps 2–4 (vectors, implementation, tests T1–T8) | **done** — merged in PR #65, 2026-10-25 |
 | Step 5 (close the records) | ch.58: R58.5.1 closed, R58.5.2 implemented, D1 and D4 closed, D3 partly corroborated — done 2026-10-25 |
 | Step 6 (compatibility bookkeeping) | **open** — to be done in the implementation PR (see step 6) |
 | R58.3.3 correction against Radiant-Core | **done** in ch.58 on 2026-10-25 (see "The R58.3.3 correction" below) |
@@ -57,8 +56,8 @@ description for the reasoning and the eleven conf-builder tests behind it, and
 read `docs/reloaded-rewrite/58-utxo-signature-version-and-radiant-sighash.md`
 for the contract rather than this plan's summary of it.
 
-**The chapter was ready for the Coder, and the Coder has delivered: implemented,
-pending PR stacked on #54, which waits on #57.** Every forbidden-class-sourced
+**The chapter was ready for the Coder, and the Coder has delivered: implemented and
+merged in PR #65.** Every forbidden-class-sourced
 part of ch.58 is cleared: §58.2 (the configuration contract), §58.4 (the
 reference-against-Radiant comparison) and §58.5 (the implementation status)
 were authored by the KDF Spec Reader under the chapter-01 §1.4A two-team
@@ -191,9 +190,8 @@ the switch exists, and that support is planned rather than withdrawn.
 
 ## Steps
 
-*State as of 2026-10-25: step 1 open (PR #54 waits on #57); steps 2–4 done,
-pending PR stacked on #54; step 5 done in ch.58; step 6 open; steps 7–8 added
-this day.*
+*State as of 2026-10-29: steps 1–4 done and merged (PRs #54, #65, 2026-10-25);
+step 5 done in ch.58; step 6 open; steps 7–8 added 2026-10-25.*
 
 1. **Land PR #54** (or confirm it landed). Everything below assumes the guard
    and the switch are in place; without them the coin signs invalid
@@ -214,19 +212,19 @@ this day.*
    reference-bearing form (**D3**) can likewise come only from a public-chain
    artifact, and none is known; D3 stays open on that basis alone.
 3. **Implementation via the Coder**, from ch.58 — the three changes of R58.5.2
-   and nothing else. *Done 2026-10-25, pending PR.* The Coder implements the algorithm against Radiant-Core
+   and nothing else. *Done 2026-10-25, merged in PR #65.* The Coder implements the algorithm against Radiant-Core
    per R58.4.3. Scope is confirmed, not merely asserted: the cleared R58.4A.1
    finds nothing in the reference change beyond R58.5.2's three items, and no
    Radiant `chain_variant` value is recognized at any released designation,
    so there is no fourth item to discover.
 4. **Tests T1–T8** of §58.6, with T3 and T4 built on the step-2 vector. *Done
-   2026-10-25, pending PR; as-built notes under each test in ch.58 §58.6.* T4 in
+   2026-10-25, merged in PR #65; as-built notes under each test in ch.58 §58.6.* T4 in
    particular must assert the digest *changes* when field 8 is appended after
    the lock time instead of inserted before the outputs digest — a
    constant-equality test would not catch a correctly computed, wrongly placed
    summary digest.
 5. **Close the records.** *Done 2026-10-25 in ch.58: R58.5.1 closed, R58.5.2
-   implemented (pending PR), D1 closed (answered by PR #54), D4 closed (matrix
+   implemented (PR #65), D1 closed (answered by PR #54), D4 closed (matrix
    carried into §58.6), D3 partly corroborated and kept open for the two
    synthetic-only details.* Mark R58.5.1 closed in ch.58 §58.5 and answer **D1**
    (the unrecognized-value warning, which PR #54 settled in practice by failing
@@ -287,7 +285,7 @@ counterparty, or to verify rather than report what the lineage says about
 
 - A coins file carrying `"signature_version": "fork_id_rxd"` activates with no
   switch set, and resolves to the Radiant dialect — asserted on the resolved
-  version, not merely on activation succeeding (T1). *Done in the pending PR.*
+  version, not merely on activation succeeding (T1). *Done in PR #65.*
 - An RXD withdrawal built and signed by this node is accepted by the Radiant
   network. *Not yet exercised against the live network; the two mainnet
   vectors are the evidence so far.*

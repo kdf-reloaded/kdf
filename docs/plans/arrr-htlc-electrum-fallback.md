@@ -1,6 +1,6 @@
 # Plan: ARRR swap questions without an address index (Electrum fallback, own-send record)
 
-**Status:** in progress — **Last reviewed:** 2026-10-28
+**Status:** done (PRs #120, #125, #130, #136; field check waived 2026-10-28) — **Last reviewed:** 2026-10-29
 
 > **Context:** decided by the maintainer on 2026-10-28 (Decision AK).
 >
@@ -40,8 +40,10 @@
    for the three questions only: identity check, lag bound, script-history and unspent
    reads decoded with the Zcash reader, decision rules and logging.
 4. **Fresh-swap skip and taker refusal** (R39.11.27, R39.11.28) in the legacy swap state
-   machine. *(Done in this step's pull request.)*
-5. **Field check.** *(Left.)*
+   machine. *(Done in PR #136.)*
+5. **Field check.** *(Waived 2026-10-28: no index-less public lightwalletd available after
+   cipig's reindex; unit tests and the earlier black-box driver runs on the -5 endpoints cover
+   it; re-run if one appears.)*
    - An ARRR swap between two Reloaded nodes whose `lightwalletd` list holds only the
      no-index servers, with the ElectrumX configured.
    - The recovery black box against the same servers.

@@ -1,6 +1,6 @@
 # Plan: configuration-selected UTXO header families
 
-**Status:** in progress (proposed 2026-09-23; moved from parked on 2026-10-25 because it carries the beta blocker H4a, which PR #62 landed in part; the same day the key was renamed `header_layout` and step H4b — the switch-governed structural fallback that serves the shared registry's entries with no registry change — was added, pending on the PR #62 follow-up; no `chain_variant` in the tree, three open items and two non-blocking spec residuals) — **Last reviewed:** 2026-10-25
+**Status:** in progress (beta blocker H4a and the fallback H4b landed in PRs #62, #67 and #74; H4 in part in PR #82, its remaining family rules open; H5 open) — **Last reviewed:** 2026-10-29
 
 > **Context:** this plan closes the open work left by the fix for standard headers whose
 > version collides with a header family (commit `47ede628c`, CRD ch.37
@@ -568,12 +568,12 @@ threading extends it to the other read paths exactly as it extends the key.
 | Step | Depends on | Size | PR |
 |---|---|---|---|
 | H0 spec confirmation | — | done 2026-10-24 | chapter only |
-| H1 + H2 type and config | — | small | 1 |
-| H3 threading | H1, H2 | medium (≈10 call sites, both stores) | 2 |
+| H1 + H2 type and config | — | small | PR #74 |
+| H3 threading | H1, H2 | medium (≈10 call sites, both stores) | PR #74 |
 | H4a Reloaded-only layout key (D3) | H3 — not H4: the KawPoW and AuxPoW parsers it reuses are in the tree | medium (key read, two layouts, per-header list read, public-server fixtures) | **PR #62** (key, both readers, median-time-past path) — the remaining threading moved into H2/H3, the linkage skip into H5 |
 | H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | **pending**: the follow-up on PR #62 |
-| H4 family rules | H3 | medium | 4 |
-| H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | 5 |
+| H4 family rules | H3 | medium | PR #82 (LBRY and PIVX readers); the rest open |
+| H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | open |
 
 H1+H2 can start immediately; H0 gates nothing any more. Each PR updates ch.37
 §37.5.8 and §37.9 in the same commit as its code, and closes the
