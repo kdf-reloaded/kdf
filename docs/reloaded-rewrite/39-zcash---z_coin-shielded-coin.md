@@ -25,9 +25,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
 - **§39.6 (T-PORT, implemented):** WASM support, activation-time sync tuning /
   sync-from-date, Sapling parameter integrity verification, sourcing consensus
   parameters / checkpoint / HD path from `protocol_data`, and HD-derived
-  shielded key-policy derivation are all implemented. One narrow platform gap
-  remains: WASM shielded-transaction *building* (blocked by the absent
-  `LocalTxProver` parameter files; §39.6.1). Under an HD wallet the shielded
+  shielded key-policy derivation are all implemented, except on WASM: the
+  WASM build compiles the shielded coin but refuses its activation, because
+  it has no shielded wallet database, and shielded-transaction *building*
+  would also need the `LocalTxProver` parameter files it lacks (§39.6.1,
+  R39.10.1 remaining deviation 1; corrected 2026-10-29). Under an HD wallet the shielded
   Sapling key is HD-derived per R39.6.4 §2; since maintainer Decision D39.5.a
   (2026-10-28) the coin's transparent secp256k1 key is HD-derived too, at the
   coins-file `derivation_path` (R39.6.4 §2, R39.5.9); implemented by
@@ -79,9 +81,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
 
 R39.1.1 The shielded coin (`ZCoin`) is a UTXO-derived coin type that adds a
 Sapling shielded layer. This was originally built on the **native** target
-only; §39.6.1's required port has since made it buildable and activatable on
-the WASM target as well, with one narrow gap (shielded transaction *building*
-stays native-only -- see §39.6.1 for the exact boundary and status).
+only; §39.6.1's required port has since made it buildable on the WASM target
+as well, but a WASM build refuses its activation, because that build has no
+shielded wallet database, and shielded transaction *building* stays
+native-only (see §39.6.1 for the exact boundary and status, and R39.10.1 for
+the activation error).
 
 R39.1.2 A shielded coin's `coins`-config `protocol` field is a tagged object
 with `type` = `"ZHTLC"` **and a required `protocol_data` object**. The
@@ -647,6 +651,16 @@ script-mismatch outcome of R39.5.11(d)) and vice versa. Either R39.6.4 §2 is ex
 HD-derive the transparent key as the reference does, or the divergence is recorded as a
 deliberate Reloaded exception in §39.0 and in the operator-facing compatibility document.
 
+D39.5.b **A dedicated build error for the transparent key under HD** *(after the beta;
+cosmetic; 2026-10-29).* Since D39.5.a, a failure to derive the shielded coin's transparent
+key under the HD-wallet policy (the crypto context unavailable, or the coins-file
+`derivation_path` absent or invalid) is reported through the build error of the shielded
+key, whose text begins "HD shielded key derivation failed". The key that failed is the
+transparent one, so the prefix misleads; in the coins-file cases the detail after it names
+`derivation_path`, so the cause stays clear. A dedicated error, or a prefix that names no key kind, changes only the
+text of `error_data.error`: the activation still ends in `CoinCreationError` `{ticker,
+error}` (R39.10.12), and no behavior changes.
+
 ---
 
 ## Part B -- Required ports (T-PORT)
@@ -675,6 +689,15 @@ WASM build and reports a shielded balance.
 > `MmCoinEnum::ZCoin` variant and the `z_coin` module are available on all
 > targets. Shielded transaction *building* remains native-only, because the
 > Sapling local prover (and the parameter files it needs) is unavailable in WASM.
+>
+> **Status update (2026-10-29).** The note above is out of date on activation, and
+> the acceptance of R39.6.1 is not met. Since 2026-10-11 a WASM build has refused
+> every shielded activation with `CoinCreationError` `{ticker, error}`, stating that
+> shielded activation is not available in the WebAssembly build (R39.10.1, remaining
+> deviation 1). That build has no shielded wallet database, so it has no real balance
+> to report, and the coin is never built or registered there. Shielded transaction
+> building would also stay native-only, as above. This is a known limitation of the
+> beta, listed in the release notes; shielded coins in WASM are deferred (D39.6.a).
 
 ### 39.6.2 Activation-time sync tuning / sync-from-date
 R39.6.2 The activation request shall optionally accept sync-control parameters so
@@ -1004,6 +1027,19 @@ no Ironwood height anywhere shall keep constructing version 4 at every height.
 > in that window is rejected by the network rather than refused locally; on Pirate's test
 > chain, whose activation does not follow the timestamp, the derived height for *past*
 > blocks is not the chain's, which affects no new transaction.
+>
+> **Status update (2026-10-29): verified by broadcast.** On 2026-10-26 and 2026-10-27 the
+> main network accepted version-6 transactions built by this project: a shielded send, and
+> both transactions of a completed swap between two Reloaded nodes -- the HTLC payment
+> mined at height 4,185,655 (version 6, no transparent input, two transparent outputs) and
+> its spend mined at height 4,185,666 (version 6, one transparent input, no transparent
+> output). Acceptance by the live network is therefore observed, and the spend settles the
+> item above on a version-6 signature over a transaction with transparent inputs. The
+> versions and shapes were read back from the chain on 2026-10-29. Still not verified:
+> discovery against a mainnet server for a coin that configures no activation height. Of
+> the known limits, the pre-activation quiet window is obsolete -- Ironwood has been active
+> on the main chain since height 4,161,185, so no new transaction is built near the
+> boundary -- and the unpersisted discovered height is deferred (D39.6.b).
 
 R39.6.4 The shielded-coin builder shall source **all** of its Zcash
 network parameters, its shielded HD derivation path, and its sync checkpoint
@@ -1092,6 +1128,19 @@ mainnet constants.
 > - **ZOMBIE fixtures.** Test fixtures updated to carry full `protocol_data` with
 >   Zcash-mainnet parameters; bare `{"type":"ZHTLC"}` is now non-conformant per
 >   R39.1.2.
+
+#### Deferred Work (§39.6)
+
+D39.6.a **Shielded coins in WASM -- after the beta.** *(Recorded 2026-10-29.)* A WASM
+build needs a shielded wallet database in the browser (the logical data model of
+R39.8.0j), a Sapling prover that runs there, and a way to obtain the Sapling parameter
+files (§39.6.1). Until then a WASM build refuses to activate a shielded coin (R39.10.1).
+
+D39.6.b **The discovered Ironwood activation height is not persisted -- after the beta.**
+*(Recorded 2026-10-29.)* A height found by discovery (R39.6.4e(c)) is kept in memory only
+and is derived again after a restart, at a cost of about thirty block reads. Persisting
+it saves those reads; it changes no outcome, because the derivation gives the same height
+each time and its result is trusted only once its block is 30 deep.
 
 ---
 
@@ -1326,6 +1375,9 @@ R39.8.0al's rebuild rule, which re-anchors at exactly that height).
 > height and anchor rather than on the cache, so this is a finding against the
 > reference and **not** a convergence target: a Coder shall not adopt the
 > cache-keyed test.
+>
+> *Status (2026-10-29): nothing open for Reloaded; the proposed fix is addressed to
+> the reference.*
 
 T39.8.0av *Default-window shape.* A test shall pin, for a wallet database with
 no scanned block and an activation carrying no `sync_params`: that the resolved
@@ -1480,6 +1532,12 @@ spendable only when the scan reaches its block.
 > portion of the balance. Until §39.8.0.6 is implemented, the expected
 > user-visible latency for an incoming shielded payment in Light mode is one
 > block plus up to one background sync period (§39.8.0.5).
+>
+> **Status update (2026-10-29).** The note above is out of date: Light mode has
+> implemented §39.8.0.6 since 2026-08-09 (D39.8.0c). An incoming shielded payment
+> seen in the mempool is reported in the non-spendable portion of the balance
+> before its block is mined, and the change of an own unmined send is reported
+> there too (R39.8.0ag1). The latency stated above no longer applies.
 
 ### 39.8.0.4 Native persistence generations and rebuild boundary
 
@@ -1831,6 +1889,13 @@ failover; reorg recovery inherited from R39.8.0n). Tests are T39.8.0f.
 Residual: unconfirmed shielded receipts are still not represented in the balance,
 because the background pass consumes only mined compact blocks. That gap is now
 specified by §39.8.0.6 and tracked as D39.8.0c.
+
+D39.8.0i **Native mode returns after the beta.** *(Recorded 2026-10-29.)* The Native-mode
+gaps named in the status notes of R39.8.0f and R39.8.0m -- full-node blocks are not
+converted into the compact-block cache, and the wallet database is not maintained after
+activation -- and the Native-mode question of D39.11.j are not worked on before the beta:
+a Native-mode activation of a shielded coin is refused in this release (R39.11.1a). They
+return with Native mode in v0.4.0 (`docs/plans/arrr-native-and-ironwood-pool.md`).
 
 #### Baseline Verifications
 
@@ -2353,7 +2418,8 @@ prove that exactly one selects each note -- the other either waits and re-select
 different notes or fails with a typed error -- and that neither is rejected at
 broadcast for reusing a nullifier.
 
-> **Coverage status (2026-09-22).** T39.8.0h is **not** yet satisfied. One
+> **Coverage status (2026-09-22; superseded by the update of 2026-10-25 below, which
+> covers every case for the Light-mode send path).** T39.8.0h is **not** yet satisfied. One
 > deterministic case is covered: a recorded but unmined transaction is not
 > reported as scanned, which is the predicate the in-flight exclusion and the
 > pending-receipt accounting both depend on. Every other case the rule names --
@@ -2453,6 +2519,16 @@ describe a known defect in the implemented behaviour.
 
 *As built (2026-10-25).* The harness exists and every case T39.8.0h names is covered for the
 Light-mode send path (see the coverage update under T39.8.0h); this item is closed.
+
+D39.8.0j **Two instances on one seed, and a sync right after a send -- after the beta.**
+*(Postponed 2026-10-25.)* Two daemons running on one seed with separate wallet databases
+cannot see each other's in-flight records (D39.8.0e), so each may select a note the other
+has already spent; nothing detects that case yet (one cheap signal would be a nullifier on
+chain that this wallet did not create). Running one instance per seed is a known limitation
+of the release. Starting a sync right after a broadcast, so that the change becomes
+spendable sooner, is not implemented either; it changes latency only, because the
+exclusion is recorded in the wallet database. Both items are tracked in
+`docs/plans/shielded-in-flight-note-locking.md`.
 
 ### 39.8.1 Envelope, method string & platform gate
 
@@ -3331,6 +3407,9 @@ framework errors of §55.2.
 > (R39.6.2) and shall not copy the reference's effective behaviour.
 > Proposed upstream fix: treat "skip requested and a prior synced height
 > exists" as the resume condition.
+>
+> *Status (2026-10-29): nothing open for Reloaded; the proposed fix is addressed to
+> the reference.*
 
 > **Reloaded status (informative).** On `fix/activation-api-parity` all twelve
 > deviations previously listed here are resolved: WASM routing (but see item 1
@@ -3482,10 +3561,12 @@ canonical counterparts for the same task.
 >    endpoint admission, the single height authority, `UtxoRpcClientOps` over
 >    lightwalletd, and (Step D) the parser routing (R39.11.16/R39.11.16a);
 >    and (Step C, swap half) the swap-path spend and already-sent detection with the
->    P2SH workaround (R39.11.4d) and the named conditions of R39.11.17. Open: a live
->    run that detects a *spend* (R39.11.4d's status note), and the naming,
->    rejection and suspension rules of §39.11.6 (R39.11.29 -- R39.11.31), which
->    are not implemented.
+>    P2SH workaround (R39.11.4d) and the named conditions of R39.11.17. The
+>    detection of a *spend* was observed live on 2026-10-29 (R39.11.4d's status
+>    note). The naming, rejection and suspension rules of §39.11.6
+>    (R39.11.29 -- R39.11.31) carry their own status note just before
+>    the tests of §39.11.6; that note, not this summary, records whether they
+>    are implemented.
 >
 > **Where it lives.** `mm2src/coins/z_coin/z_lightwalletd.rs` (admission, the
 > failover client, the height authority, the windowed history reader, the
@@ -3629,6 +3710,12 @@ retrying it hides the reason.
 > **Pointer (2026-10-28).** R39.11.30 adds that the error and a `warn` log
 > line name the endpoint that rejected, in host-only form, and R39.11.31(h)
 > that a rejection never suspends an endpoint. Not yet implemented.
+>
+> **Status update (2026-10-29).** Submission is observed against the deployed
+> service: on 2026-10-26 and 2026-10-27 it accepted version-6 transactions this project
+> built and submitted -- a shielded send, and the payment and spend of a completed swap
+> (R39.6.4e's status note) -- and each was mined. A service-level rejection has not
+> been observed live; that path is still covered only by the scripted tests (D39.11.e).
 
 R39.11.4a **Transparent balance is served by the dedicated balance method, and
 its request encoding is load-bearing.** The method works against the deployed
@@ -3918,6 +4005,17 @@ that cannot see it waits out the lock and refunds a swap it had already won.
 > which funds a fresh HTLC, redeems it in the same run and asserts the detection and
 > `extract_secret`. Until that has been run, detection of a *spend* on a live chain is
 > unverified; detection of an *unspent* HTLC and the P2SH defect are proved.
+>
+> **Observed live (2026-10-29).** Detection of a *spend* is now observed on the main
+> chain, read-only, against an HTLC that a swap between two Reloaded nodes funded at
+> height 4,185,655 and spent at height 4,185,666. The production functions behind
+> `check_if_my_payment_sent` and `search_for_swap_tx_spend` were run against two
+> lightwalletd endpoints that keep the transaction index, each alone and both together.
+> In every run the payment was found as sent and the spend was found under the
+> pubkey-hash form, input 0, in about 230 ms, while the script-hash form returned
+> nothing, as the index defect predicts; `extract_secret` recovered a secret whose
+> hash matches the script. The opt-in test above, which also funds and redeems, has
+> still not been run on the test chain.
 
 R39.11.4e **Confirmation depth shall be derived locally; notarized depth is not
 obtainable and shall not be silently substituted.** The lookup method returns the
@@ -3947,6 +4045,11 @@ form available. Two consequences bind:
 > fails with an error saying notarized depth is not obtainable, and plain depth is
 > not substituted. Asserting `requires_notarization` at activation is still accepted;
 > the maintainer decision on its observable form (D39.11.f) is open.
+>
+> **Known issue (maintainer Decision AT, 2026-10-29).** The assertion stays accepted at
+> activation and by `set_requires_notarization`; the refusal this rule asks for is not
+> made there. A swap that requires notarization for a ZHTLC coin fails at the
+> confirmation wait, after its payment is on chain. See D39.11.f.
 
 R39.11.4f **Block timestamps and median time past shall be read from the compact
 block's block-time field.** The compact-block message carries the block time, so
@@ -4665,6 +4768,14 @@ terminal outcome.** *(Retained; restated for one backend.)* Specifically:
 > and branch on it. *(Trigger: a rule the code plainly violates once the backend
 > changes, visible at the call sites being specified.)*
 
+> **Status (2026-10-29): both findings above are resolved.** The ordinary send path
+> and the HTLC spend and refund path now take their target height from one
+> function, `ZCoin::builder_target_height` (`z_coin_ops.rs`, called from `gen_tx` and
+> from `z_htlc.rs`), and the test
+> `every_construction_path_derives_the_same_target_and_expiry_from_one_tip` is the
+> proposed regression. The coin carries its mode explicitly as `ZcoinMode`
+> (R39.11.4g), and every Light-only behavior branches on it.
+
 > **External defect (informative) -- the serving chain's transparent address
 > index files every output under the pubkey-hash key type.** This is a defect in
 > the chain's own node, not in this project, and it is recorded here because two
@@ -5147,6 +5258,11 @@ transparent-address request with the index-unavailable rejection of R39.11.20.*)
 > the HTLC script, and add the output-script assertion to T39.11.l. *(Trigger:
 > apparent with little extra effort — the check was read side by side with the
 > spend search, which does verify the script.)*
+>
+> **Status (2026-10-29): adopted.** T39.11.l carries the assertion ("a candidate
+> transaction without such an output is not adopted as sent"), and the test
+> `sent_detection_ignores_a_transaction_paying_another_script_and_a_listing_with_another_script`
+> (`z_lightwalletd/htlc_index/tests.rs`) proves it over lightwalletd.
 
 > **Code-quality finding (informative) — the reference's Native-mode already-sent
 > check depends on an import made at send time.** The reference imports the HTLC
@@ -5723,6 +5839,12 @@ balance (R39.11.4d's status note has the figures). What stays open:
 The durable fix is a node-side correction, after which the workaround should be removed,
 not kept.
 
+*Observed live (2026-10-29).* The first bullet is settled for the main chain: the detection
+functions found a mined HTLC spend through the index of two lightwalletd endpoints that
+keep the transaction index, in about 230 ms, and `extract_secret` recovered the secret
+from it (R39.11.4d's status note has the detail). A node without its transaction index
+remains D39.11.g.
+
 D39.11.e **Transaction submission is declared but not yet observed.** The
 service's submission method is specified as the broadcast route (R39.11.4) and is
 part of the dictated contract, but it has not been exercised against the deployed
@@ -5730,6 +5852,11 @@ node, because doing so requires a validly signed transaction of the chain's
 current version, which depends on the crate bump and the version-6 construction
 work. Until it is observed, the submission path's failure reporting
 (service-level rejection versus unreachable endpoint) is specified but unverified.
+
+*Resolved for the success path (2026-10-29).* Submission has been observed: the deployed
+service accepted version-6 transactions this project submitted on 2026-10-26 and
+2026-10-27, and each was mined (R39.11.4's status note). A service-level rejection has not
+been seen live and stays covered by the scripted tests only.
 
 D39.11.f **The `requires_notarization` policy for a ZHTLC coin needs a maintainer
 decision.** R39.11.4e establishes the fact -- no notarized-depth field exists on
@@ -5741,6 +5868,15 @@ reporting the coin as not notarization-capable. The published ARRR entry at the
 head dated 2026-10-26 does not set it, but earlier published revisions did
 (D39.11.i), so a deployment that ships or caches such a revision is affected; this
 chapter specifies the prohibition without choosing the form.
+
+*Decided 2026-10-29 (maintainer Decision AT): kept as a known issue.* Asserting
+`requires_notarization` for a ZHTLC coin stays accepted, at activation and by the
+`set_requires_notarization` request; nothing refuses it there. Plain confirmation depth is
+still never substituted (R39.11.4e), so a swap that requires notarization for such a coin
+fails at the confirmation wait, after its payment is on chain, and ends by the swap's
+ordinary failure path. Older published coins-file revisions set the flag for ARRR
+(D39.11.i); an operator running ARRR must set `requires_notarization` to `false`. The
+item stays open in `docs/plans/arrr-ironwood-compatibility.md` §11.6.
 
 D39.11.g **The serving node's transaction index is an unverifiable operational
 precondition for swap-path spend detection.** Without it the node cannot serve the
@@ -5755,6 +5891,15 @@ wallet use, and whether a coin with no endpoint that can serve this shape should
 refuse to enter swaps -- a refusal of the shape R39.6.4b already provides for a
 different cause. At least one live endpoint was observed in this state on
 2026-10-11, so this is not a theoretical configuration.
+
+*Deferred to after the beta (2026-10-29).* Both questions are decided with the
+lightwalletd-only transaction walk, which keeps the transaction index as a precondition
+of the spend questions and carries them as its open question 4
+(`docs/plans/arrr-htlc-lightwalletd-txwalk.md`). For the beta the rules already in force
+narrow the exposure: an endpoint without an address index is marked and skipped
+(R39.11.4i), the three swap questions go to the Electrum fallback when no admitted
+endpoint answers them (R39.11.25), and a taker that would pay with a shielded coin is
+refused at start when no source can watch its payment (R39.11.28).
 
 D39.11.h **Decided 2026-10-28 (maintainer Decision AK): adopted as R39.11.26.** The
 proposal is kept below as the record. *(Reloaded-original proposal.)* This project records every
@@ -5817,6 +5962,13 @@ R39.11.29 and chapter 38 R38.6.9a name an entry that cannot be parsed by a
 placeholder and its position in the configured list; chapter 35 R35.1.14 does
 not say how such an entry is named. If the maintainer prefers the placeholder
 alone, the three chapters should agree.
+
+D39.11.n **The "invalid address list" rejection keeps the ordinary failure class -- after
+the beta.** *(Recorded 2026-10-29.)* As R39.11.4a's status note says, the node's rejection
+of a balance request as an invalid address list surfaces as an ordinary endpoint failure
+that carries the node's text. Reclassifying it as a request-or-index condition would change
+only the class of the error; the request itself is refused either way, and a P2SH address
+never reaches the method (R39.11.4d).
 
 ## 39.7 Acceptance criteria (chapter)
 

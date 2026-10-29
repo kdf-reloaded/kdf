@@ -1187,13 +1187,28 @@ that reads differently from before) are worth capturing even when the shielded l
   `find_output_spend` / `check_if_my_payment_sent` fail with an explicit error and a P2SH
   address is refused by balance, UTXO and history (§10.4 step C). Proving that workaround on a
   funded HTLC is the next piece of real work after the wallet‑level tests pass.
+  *Since resolved:* the workaround was proved on a funded HTLC (CRD ch.39 D39.11.d), spend and
+  already‑sent detection are implemented (R39.11.4d), a swap between two Reloaded nodes
+  completed on the main chain in the field tests of 2026‑10‑26/27 with its ARRR HTLC spent,
+  and detection of that spend was observed on two mainnet endpoints on 2026‑10‑29.
 - **v6 broadcast acceptance is unproven.** Construction is verified offline against a mined
   v6 transaction, but **network acceptance has never been tested**, and a v6 shielded
   signature over a transaction with transparent inputs is not covered by the corpus (§10.4
   step E). A rejected broadcast during the tests is therefore a plausible and informative
-  outcome, not necessarily a regression.
+  outcome, not necessarily a regression. *Since resolved:* the main network accepted v6
+  transactions built by Reloaded on 2026‑10‑26/27, among them the HTLC spend, which has a
+  transparent input (CRD ch.39 R39.6.4e status note of 2026‑10‑29).
 - **Most of T39.8.0h is uncovered** (broadcast/restart/expiry/concurrency), because no harness
   can drive a shielded wallet database through those transitions yet (CRD ch.39 D39.8.0f).
+  *Since resolved:* the harness of 2026‑10‑25 covers every T39.8.0h case for the Light‑mode
+  send path, and D39.8.0f is closed.
+- **`requires_notarization` on ARRR is accepted but cannot be met** *(open; known issue by
+  maintainer Decision AT, 2026‑10‑29).* `lightwalletd` reports no notarized depth, and plain
+  confirmation depth is never substituted for it. The flag is still accepted at activation and
+  by `set_requires_notarization`, so a swap that requires notarization for ARRR fails at the
+  confirmation wait, after its payment is on chain. Older published coins‑file revisions set
+  the flag for ARRR; an operator must set `requires_notarization` to `false`. CRD ch.39
+  R39.11.4e, D39.11.f.
 
 ---
 
