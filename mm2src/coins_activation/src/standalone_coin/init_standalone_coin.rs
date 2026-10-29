@@ -1,4 +1,4 @@
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::prelude::*;
 use crate::standalone_coin::init_standalone_coin_error::{InitStandaloneCoinError, InitStandaloneCoinStatusError,
                                                          InitStandaloneCoinUserActionError};
@@ -50,17 +50,6 @@ pub trait InitStandaloneCoinActivationOps: Into<MmCoinEnum> + Send + Sync + 'sta
     type UserAction: serde::de::DeserializeOwned + NotMmError + Send + Sync + 'static;
 
     fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &InitStandaloneCoinTaskManagerShared<Self>;
-
-    /// Optionally acquires a guard held for the complete activation task,
-    /// including result construction and coin registration. Standalone coins
-    /// whose activation mutates shared persistent state can override this to
-    /// serialize same-ticker requests without delaying unrelated tickers.
-    async fn acquire_activation_guard(
-        _ctx: MmArc,
-        _ticker: &str,
-    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
-        Ok(None)
-    }
 
     /// Initialization of the standalone coin spawned as `RpcTask`.
     async fn init_standalone_coin(
@@ -209,7 +198,16 @@ where
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
         let ticker = self.request.ticker.clone();
-        let _activation_guard = Standalone::acquire_activation_guard(self.ctx.clone(), &ticker).await?;
+        // R55.1.12: activations of one ticker run one at a time, on every family and path. The lock is held through
+        // registration, and the ticker is checked again once it is ours, because the activation that held it may
+        // have registered the coin.
+        let _activation_guard = lock_activation(&self.ctx, &[&ticker])
+            .await
+            .map_to_mm(RegisterCoinError::Internal)
+            .mm_err(Into::into)?;
+        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &ticker).await {
+            return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() }.into());
+        }
         let coin = Standalone::init_standalone_coin(
             self.ctx.clone(),
             ticker.clone(),
@@ -227,9 +225,9 @@ where
 
         let tx_history = self.request.activation_params.tx_history();
 
-        // `lp_register_coin` intentionally allows concurrent activations of the same ticker to race (to keep
-        // activation fast). The task that loses the race ends with `CoinIsAlreadyActivated`; it must not
-        // report success for a coin instance it did not register (CRD ch. 55 R55.5.5).
+        // Registration stays the backstop for a coin that an activation outside the lock registered; the task
+        // that loses ends with `CoinIsAlreadyActivated`; it must not report success for a coin instance it did
+        // not register (CRD ch. 55 R55.5.5).
         lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
             ticker: ticker.clone(),
             tx_history,

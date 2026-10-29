@@ -1,5 +1,6 @@
 /// Contains token activation traits and their implementations for various coins
 ///
+use crate::context::lock_activation;
 use crate::platform_coin_with_tokens::CustomTokenError;
 use crate::prelude::*;
 use async_trait::async_trait;
@@ -154,6 +155,10 @@ where
     Token: TokenActivationOps,
     EnableTokenError: From<Token::ActivationError>,
 {
+    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+        .await
+        .map_to_mm(EnableTokenError::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
     }

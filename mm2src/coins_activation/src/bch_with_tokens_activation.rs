@@ -336,6 +336,14 @@ impl PlatformWithTokensActivationOps for BchCoin {
         Ok(platform_coin)
     }
 
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
+        activation_request
+            .slp_tokens_requests
+            .iter()
+            .map(|token| token.ticker.clone())
+            .collect()
+    }
+
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>> {
@@ -481,6 +489,19 @@ mod tests {
             .unwrap()
             .extend(extra.as_object().unwrap().clone());
         request
+    }
+
+    /// CRD ch.55 R55.1.12: the activation locks the tickers of the tokens the request registers beside the platform.
+    #[test]
+    fn the_requested_token_tickers_are_the_slp_tickers_of_the_request() {
+        let request: BchWithTokensActivationRequest = serde_json::from_value(request_json(json!({
+            "slp_tokens_requests": [{ "ticker": "ASLP" }, { "ticker": "BSLP" }],
+        })))
+        .unwrap();
+        assert_eq!(
+            <BchCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&request),
+            ["ASLP", "BSLP"]
+        );
     }
 
     #[test]

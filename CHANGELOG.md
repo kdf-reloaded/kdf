@@ -310,6 +310,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Two activations of the same coin no longer run at the same time.** If a coin is activated again
+  while its first activation is still running, through any activation method or the legacy `enable`
+  and `electrum`, the second now waits for the first. If the first activated the coin, the second
+  ends with the usual already-activated error and builds nothing; if the first failed, the second
+  goes ahead. Before, the two built the coin in parallel. A second ARRR activation already waited,
+  but then built the coin a second time over the wallet database the first coin was using, and only
+  then failed. A platform activation that brings tokens also waits for activations of those tokens.
+  Callers get the same answers as before; only the second call can return later. Detail: PR #156;
+  CRD ch.55 R55.1.12.
 - **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
   test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
   reused the coin the first had just spent, because the Electrum servers had not yet caught up with
@@ -351,6 +360,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   script, and the transaction builder rejected it. Recovery now always signs with the private key that
   belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
   key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
+- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before, each
+  swap got a random key that was saved in the swap file, so a swap started by another KDF implementation
+  could not be recovered here, nor one of ours there. The key is now computed from the wallet's transparent
+  key and the swap (the secret hash for the maker, the swap UUID for the taker), and it is never saved: it
+  is computed again on restart and on recovery, so either implementation can recover a swap with the same
+  seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
+  the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
+  fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
+  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
@@ -780,6 +798,13 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
   decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
   Detail: PR #123.
+
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
+  list of deferred activation work now records the per-ticker serialization of activations (PR #156)
+  and the refusal of a future ARRR sync date (PR #22) as implemented.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — still parked: it now
+  records, for after the beta, that a Lightning node whose activation failed, or that was disabled,
+  keeps its listening port and background work, so a retry on that port fails (PR #156).
 
 ### Known limitations
 
