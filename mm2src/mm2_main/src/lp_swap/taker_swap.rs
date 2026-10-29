@@ -44,6 +44,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
+/// Longest step of the refund chain's wait for the taker payment lock time; after each step the chain is
+/// asked whether the maker has spent the payment (CRD ch.51 R31a item 2).
+const REFUND_WAIT_CHAIN_CHECK_SECS: f64 = 300.;
+
 construct_detailed!(DetailedAmount, amount);
 
 pub const TAKER_SUCCESS_EVENTS: [&str; 17] = [
@@ -1868,12 +1872,25 @@ impl TakerSwap {
         &self,
         non_final_retry_secs: f64,
     ) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        // CRD ch.51 R31a item 1: a payment the maker has already spent, or that is already refunded, ends the
+        // refund chain before it starts.
+        if let Some(outcome) = self.refund_outcome_from_chain().await {
+            return Ok(outcome);
+        }
+
         let locktime = self.r().data.taker_payment_lock;
         let transaction = loop {
             loop {
                 match self.taker_coin.can_refund_htlc(locktime).compat().await {
                     Ok(CanRefundHtlc::CanRefundNow) => break,
-                    Ok(CanRefundHtlc::HaveToWait(to_sleep)) => Timer::sleep(to_sleep as f64).await,
+                    Ok(CanRefundHtlc::HaveToWait(to_sleep)) => {
+                        // R31a item 2: the wait for the lock time is cut into steps, each followed by a look
+                        // at the chain.
+                        Timer::sleep((to_sleep as f64).min(REFUND_WAIT_CHAIN_CHECK_SECS)).await;
+                        if let Some(outcome) = self.refund_outcome_from_chain().await {
+                            return Ok(outcome);
+                        }
+                    },
                     Err(e) => {
                         error!("Error {} on can_refund_htlc, retrying in 30 seconds", e);
                         Timer::sleep(30.).await;
@@ -1913,6 +1930,12 @@ impl TakerSwap {
                         continue;
                     }
 
+                    // R31a item 3: before the rejection ends the swap, the chain is asked once more; a maker
+                    // that spent the payment is the usual cause.
+                    if let Some(outcome) = self.refund_outcome_from_chain().await {
+                        return Ok(outcome);
+                    }
+
                     if let Some(tx) = err.get_tx() {
                         broadcast_p2p_tx_msg(
                             &self.ctx,
@@ -1946,6 +1969,86 @@ impl TakerSwap {
         Ok((Some(TakerSwapCommand::Finish), vec![
             TakerSwapEvent::TakerPaymentRefunded(tx_ident),
         ]))
+    }
+
+    /// CRD ch.51 R31a: what the chain says about the taker payment while the swap is in its refund chain.
+    ///
+    /// A spend by the maker reveals the secret, so the swap goes on to spend the maker payment, exactly as
+    /// after R30's wait; a refund already on chain ends the swap as refunded. `None` when neither is found,
+    /// when the search or the secret extraction fails (the refund chain then goes on as before), and when
+    /// the swap has already recorded a spend of the taker payment (a resumed swap whose spend of the maker
+    /// payment failed must not go round again).
+    async fn refund_outcome_from_chain(&self) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
+        if self.r().taker_payment_spend.is_some() {
+            return None;
+        }
+        let taker_payment = self.r().taker_payment.as_ref()?.tx_hex.0.clone();
+        let my_taker_coin_htlc_pub = self.r().my_taker_coin_htlc_pub;
+        let other_taker_coin_htlc_pub = self.r().other_taker_coin_htlc_pub;
+        let secret_hash = self.r().secret_hash.0.clone();
+        let taker_payment_lock = self.r().data.taker_payment_lock;
+        let taker_coin_start_block = self.r().data.taker_coin_start_block;
+        let taker_coin_swap_contract_address = self.r().data.taker_coin_swap_contract_address.clone();
+
+        let found = self
+            .taker_coin
+            .search_for_swap_tx_spend_my(
+                taker_payment_lock as u32,
+                my_taker_coin_htlc_pub.as_slice(),
+                other_taker_coin_htlc_pub.as_slice(),
+                &secret_hash,
+                &taker_payment,
+                taker_coin_start_block,
+                &taker_coin_swap_contract_address,
+            )
+            .await;
+        let found = match found {
+            Ok(found) => found?,
+            Err(e) => {
+                warn!(
+                    "Swap {}: could not look for a spend of the taker payment, going on with the refund: {}",
+                    self.uuid, e
+                );
+                return None;
+            },
+        };
+
+        match found {
+            FoundSwapTxSpend::Spent(tx) => {
+                let tx_hex = tx.tx_hex();
+                let secret = match self.taker_coin.extract_secret(&secret_hash, &tx_hex) {
+                    Ok(bytes) => H256Json::from(bytes.as_slice()),
+                    Err(e) => {
+                        warn!(
+                            "Swap {}: the taker payment was spent, but the secret could not be read from the spend, going on with the refund: {}",
+                            self.uuid, e
+                        );
+                        return None;
+                    },
+                };
+                let tx_hash = tx.tx_hash();
+                log!({"Swap {}: the maker spent the taker payment in {:02x}, spending the maker payment", self.uuid, tx_hash});
+                Some((Some(TakerSwapCommand::SpendMakerPayment), vec![
+                    TakerSwapEvent::TakerPaymentSpent(TakerPaymentSpentData {
+                        transaction: TransactionIdentifier {
+                            tx_hex: tx_hex.into(),
+                            tx_hash,
+                        },
+                        secret,
+                    }),
+                ]))
+            },
+            FoundSwapTxSpend::Refunded(tx) => {
+                let tx_hash = tx.tx_hash();
+                log!({"Swap {}: the taker payment is already refunded in {:02x}", self.uuid, tx_hash});
+                Some((Some(TakerSwapCommand::Finish), vec![
+                    TakerSwapEvent::TakerPaymentRefunded(TransactionIdentifier {
+                        tx_hex: tx.tx_hex().into(),
+                        tx_hash,
+                    }),
+                ]))
+            },
+        }
     }
 
     pub async fn load_from_db_by_uuid(
@@ -4436,6 +4539,9 @@ mod taker_swap_tests {
         // receiver shows what was published.
         let (tx, rx) = futures::channel::mpsc::channel(10);
         crate::mm2::lp_network::P2PContext::new(tx).store_to_mm_arc(&taker_swap.ctx);
+        // The refund chain asks the chain about the payment (CRD ch.51 R31a); by default nothing is found.
+        TestCoin::search_for_swap_tx_spend_my
+            .mock_safe(|_, _, _, _, _, _, _, _| MockResult::Return(Box::pin(futures::future::ready(Ok(None)))));
         (taker_swap, rx)
     }
 
@@ -4556,6 +4662,171 @@ mod taker_swap_tests {
 
         assert!(is_refund_failed(&events), "{events:?}");
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    const MAKER_SECRET: [u8; 32] = [7; 32];
+
+    fn spent_by_the_maker() -> FoundSwapTxSpend { FoundSwapTxSpend::Spent(eth_tx_for_test().into()) }
+
+    fn already_refunded() -> FoundSwapTxSpend { FoundSwapTxSpend::Refunded(eth_tx_for_test().into()) }
+
+    /// The chain as the refund chain sees it (CRD ch.51 R31a): the first `quiet` searches find nothing, every
+    /// later one finds `found`. The spend reveals [`MAKER_SECRET`].
+    fn mock_chain(quiet: usize, found: fn() -> FoundSwapTxSpend, searches: &'static std::sync::atomic::AtomicUsize) {
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(move |_, _, _, _, _, _, _, _| {
+            let search = searches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let answer = if search < quiet { None } else { Some(found()) };
+            MockResult::Return(Box::pin(futures::future::ready(Ok(answer))))
+        });
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Ok(MAKER_SECRET.to_vec())));
+    }
+
+    fn assert_goes_on_to_spend_the_maker_payment(
+        next: Option<TakerSwapCommand>,
+        events: &[TakerSwapEvent],
+        taker_swap: &TakerSwap,
+    ) {
+        assert!(matches!(next, Some(TakerSwapCommand::SpendMakerPayment)), "{next:?}");
+        let data = match events {
+            [TakerSwapEvent::TakerPaymentSpent(data)] => data,
+            other => panic!("expected the spend of the taker payment, got {other:?}"),
+        };
+        assert_eq!(data.secret, H256Json::from(MAKER_SECRET));
+        // Applying the event arms the spend of the maker payment with the secret, as after R30's wait.
+        taker_swap.apply_event(events[0].clone());
+        assert_eq!(taker_swap.r().secret, H256Json::from(MAKER_SECRET));
+        assert!(taker_swap.r().taker_payment_spend.is_some());
+    }
+
+    /// T51.31a.1: a payment the maker spent before the refund chain starts is never refunded; the swap goes on
+    /// to spend the maker payment.
+    #[test]
+    fn r31a_a_spend_found_on_entry_spends_the_maker_payment() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_chain(0, spent_by_the_maker, &SEARCHES);
+        mock_gate_open_counting(&GATES);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
+        assert_eq!(GATES.load(Ordering::SeqCst), 0, "the refund gate is not reached");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0, "no refund is built");
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// T51.31a.2: the wait for the lock time looks at the chain after each step and stops at a spend.
+    #[test]
+    fn r31a_a_spend_found_while_waiting_for_the_lock_time_spends_the_maker_payment() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        // On entry and after the first step nothing is spent; the second step finds the spend.
+        mock_chain(2, spent_by_the_maker, &SEARCHES);
+        TestCoin::can_refund_htlc.mock_safe(|_, _| {
+            GATES.fetch_add(1, Ordering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(CanRefundHtlc::HaveToWait(0))))
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 3);
+        assert_eq!(GATES.load(Ordering::SeqCst), 2);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    /// T51.31a.3: a terminal refund rejection asks the chain once more; the maker's spend found then replaces
+    /// the refund failure, and the rejected refund is not published.
+    #[test]
+    fn r31a_a_rejected_refund_with_the_payment_spent_spends_the_maker_payment() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_chain(1, spent_by_the_maker, &SEARCHES);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "on entry and after the rejection");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// T51.31a.4: with nothing on chain the refund chain ends as before, after asking on entry and after the
+    /// rejection.
+    #[test]
+    fn r31a_nothing_on_chain_keeps_the_refund_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_chain(usize::MAX, spent_by_the_maker, &SEARCHES);
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    /// T51.31a.5: a swap that has already recorded the spend of its payment (resumed after a failed spend of
+    /// the maker payment) does not ask the chain and refunds as before, so it cannot go round again.
+    #[test]
+    fn r31a_a_recorded_spend_is_not_looked_for_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        taker_swap.w().taker_payment_spend = Some(TransactionIdentifier {
+            tx_hex: vec![3u8].into(),
+            tx_hash: vec![4u8].into(),
+        });
+        mock_chain(0, spent_by_the_maker, &SEARCHES);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 0);
+    }
+
+    /// T51.31a.6: a refund already on chain (a restart after it was broadcast) ends the swap as refunded
+    /// without building another.
+    #[test]
+    fn r31a_a_refund_already_on_chain_ends_the_swap_as_refunded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        mock_chain(0, already_refunded, &SEARCHES);
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 0);
         assert_eq!(published_count(&mut published), 0);
     }
 
