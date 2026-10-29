@@ -8,6 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Metrics for the gossip send queues and for the maker's pending order messages.** The gauges
+  `p2p.send_queue.len`, `p2p.send_queue.max_per_peer` and `p2p.send_queue.dropped.count` show the
+  messages queued toward peers, the longest single queue and the messages dropped since start.
+  `p2p.outbox.pending`, `p2p.outbox.rate` (in thousandths of a message per second),
+  `p2p.outbox.pressure` (1 while a relay's send queue is backed up), `p2p.outbox.degraded` (1 while
+  order updates are held back), `p2p.outbox.signals.queue.count` and `p2p.outbox.signals.close.count`
+  show the order messages waiting to be sent, the release rate, whether the relays are falling
+  behind, and how often a relay did. They carry no peer and no order. More in CRD ch.32 §32.9B.
+
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
@@ -84,6 +93,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
   moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
   every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
+- **A maker that changes its orders faster than its relays can take them no longer loses its whole
+  order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
+  slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
+  updates, so the book vanished on every node. Now the maker keeps one pending message per order,
+  the latest values win, and the messages leave at a bounded rate (at most 10 per second per maker
+  key, a burst of 100). When a relay stops keeping up, either its send queue stays backed up for
+  2 seconds or the last connection to it closes while order messages are in flight, the rate drops
+  sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
+  the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
+  0.5 per second every minute, and stops one step below the rate at which the relay failed; after
+  30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
+  messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
+  at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
+  and jumps ahead of queued order updates. A peer may see an order's latest price a moment later, or
+  only at the next keep-alive synchronization, and may never see an intermediate value of an order
+  that changes quickly. Your own order list and the answers of `setprice`, `update_maker_order` and
+  `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
+  keep-alives. One short gap remains: the first signal comes only after the load has started, so a
+  burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
+  `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
+  JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
+
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
   `electrum_server_order` to `listed` to keep the listed order); a recovered higher-ranked server is

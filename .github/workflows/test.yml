@@ -194,9 +194,19 @@ jobs:
           # dev-dependencies are not resolved); it is run by manifest path, and only
           # the new tests, because six upstream routing tests fail on the unmodified
           # fork source too (see vendor-patches/libp2p-gossipsub-0.45.0/PATCH-NOTES.md).
-          # The measurement scenarios in the integration test are `#[ignore]`.
+          # The measurement scenarios in the integration test are `#[ignore]`. The last
+          # command runs the test that a relay joining the relay mesh is reported (CRD
+          # ch.32 §32.9B R-MP4); the one that waits for a reconnect is `#[ignore]`.
           - name: gossip-send-queue
-            cmd: "cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib -- send_queue:: handler::tests && cargo test -p mm2_p2p --test gossip_send_queue"
+            cmd: "cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib -- send_queue:: handler::tests test_priority_ test_send_queue_ test_relay_mesh_join test_queue_signal && cargo test -p mm2_p2p --test gossip_send_queue && cargo test -p mm2_p2p --lib test_relay_mesh_join_is_reported_once"
+          # The maker outbox and its budget (CRD ch.32 §32.9B R-MP1 to R-MP4): the pure
+          # logic with an injected clock, and the in-process harness of T-MP8 at a small
+          # scale. The tests of the publishing, the keep-alive ordering and the metrics are
+          # in `ordermatch_tests`, which another cell runs. T-MP8 itself, toward relays
+          # that read 1 and 0.3 messages per second, takes about 15 minutes and is
+          # `#[ignore]` (`t_mp8_relay_1_msg_per_s`, `t_mp8_relay_0_3_msg_per_s`).
+          - name: maker-outbox
+            cmd: "cargo test -p mm2_main --lib -- maker_outbox:: t_mp8_harness"
 
     steps:
       - uses: actions/checkout@v7

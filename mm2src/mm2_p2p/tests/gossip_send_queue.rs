@@ -479,10 +479,16 @@ struct ProdSender {
 }
 
 impl ProdSender {
-    async fn start() -> ProdSender {
+    async fn start() -> ProdSender { ProdSender::start_with_poll(|_| {}).await }
+
+    /// Starts the production node with `on_poll` called after every poll of the swarm, as the daemon does for
+    /// its gauges.
+    async fn start_with_poll(
+        on_poll: impl Fn(&libp2p::swarm::Swarm<mm2_p2p::atomicdex_behaviour::AtomicDexBehaviour>) + Send + 'static,
+    ) -> ProdSender {
         let port = next_port();
         let (cmd_tx, mut event_rx, _peer_id, abort) =
-            spawn_gossipsub(None, spawn_fn, vec![], NodeType::RelayInMemory { port }, |_| {})
+            spawn_gossipsub(None, spawn_fn, vec![], NodeType::RelayInMemory { port }, on_poll)
                 .await
                 .expect("spawn_gossipsub");
         // Drain the application event channel so that it never fills.
@@ -495,6 +501,7 @@ impl ProdSender {
             .send(AdexBehaviourCmd::PublishMsg {
                 topics: topics.to_vec(),
                 msg,
+                priority: false,
             })
             .await
             .expect("cmd channel");
@@ -950,6 +957,10 @@ fn log_lines_with(needle: &str) -> Vec<String> {
 struct TestSender {
     port: u64,
     drv: Driven<Gossipsub>,
+    /// The send queue pressure changes the behaviour reported: (peer, raised).
+    pressure_events: Arc<Mutex<Vec<(PeerId, bool)>>>,
+    /// The queue signal changes the behaviour reported: (peer, raised).
+    signal_events: Arc<Mutex<Vec<(PeerId, bool)>>>,
 }
 
 fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
@@ -975,10 +986,25 @@ fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
         .listen_on(format!("/memory/{port}").parse().unwrap())
         .expect("listen");
     let (ctl_tx, ctl_rx) = mpsc::unbounded();
-    tokio::spawn(drive(swarm, ctl_rx, Arc::new(AtomicU64::new(0)), |_, _| {}));
+    let pressure_events = Arc::new(Mutex::new(Vec::new()));
+    let events = pressure_events.clone();
+    let signal_events = Arc::new(Mutex::new(Vec::new()));
+    let signals = signal_events.clone();
+    tokio::spawn(drive(
+        swarm,
+        ctl_rx,
+        Arc::new(AtomicU64::new(0)),
+        move |_, event| match event {
+            GossipsubEvent::SendQueuePressure { peer_id, raised, .. } => events.lock().unwrap().push((peer_id, raised)),
+            GossipsubEvent::SendQueueSignal { peer_id, raised, .. } => signals.lock().unwrap().push((peer_id, raised)),
+            _ => {},
+        },
+    ));
     TestSender {
         port,
         drv: Driven { ctl: ctl_tx },
+        pressure_events,
+        signal_events,
     }
 }
 
@@ -1707,4 +1733,385 @@ async fn scenario_g_slow_reader() {
     }
     final_report(base, base_rss, &[&r]).await;
     s.shutdown();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Maker publication rate control: pressure signal, priority lane, metrics (CRD ch.28 §28.9B RQ1
+// items 8 and 9, ch.32 §32.9B R-MP5, R-MP10, R-MP12)
+// ---------------------------------------------------------------------------------------------
+
+impl TestSender {
+    /// Publishes messages `range` of `size` bytes, marked as priority or not, in one go.
+    async fn publish_marked(&self, topic: &str, range: std::ops::Range<u32>, size: usize, priority: bool) {
+        let topic = IdentTopic::new(topic);
+        self.drv
+            .run(move |swarm| {
+                for i in range {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .publish_with_priority(topic.clone(), payload(i, size), priority);
+                }
+            })
+            .await;
+    }
+
+    async fn snapshot(&self) -> libp2p::gossipsub::SendQueueSnapshot {
+        let out = Arc::new(Mutex::new(Default::default()));
+        let out_cb = out.clone();
+        self.drv
+            .run(move |swarm| *out_cb.lock().unwrap() = swarm.behaviour().send_queue_snapshot())
+            .await;
+        let snapshot = *out.lock().unwrap();
+        snapshot
+    }
+
+    /// The pressure changes reported for `peer`, in order.
+    fn pressure(&self, peer: PeerId) -> Vec<bool> {
+        self.pressure_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| *p == peer)
+            .map(|(_, raised)| *raised)
+            .collect()
+    }
+}
+
+/// T-RQ1.8 and the send queue part of T-MP10: filling a paused peer's queue past the raise threshold
+/// raises the signal once, draining it to the low mark clears it once; the counters show the backlog
+/// and the drops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_pressure_signal_is_reported_once_per_change() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-pressure";
+    let s = spawn_test_sender(|b| {
+        b.send_queue_max_messages(150)
+            .send_queue_pressure_raise(100)
+            .send_queue_pressure_clear(20)
+            .send_queue_stuck_timeout(Duration::from_secs(600));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    let healthy = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused, &healthy]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+    assert!(s.pressure(paused.peer_id).is_empty());
+
+    // 8 KiB messages: the transport window takes about 32 of them, the rest is queued.
+    s.publish_range(topic, 0..90, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    assert!(
+        s.pressure(paused.peer_id).is_empty(),
+        "raised too early: queued {:?}",
+        s.snapshot().await
+    );
+
+    s.publish_range(topic, 90..140, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        s.pressure(paused.peer_id),
+        vec![true],
+        "raised exactly once when the queue passed 100"
+    );
+    let snapshot = s.snapshot().await;
+    assert!(snapshot.queued >= 100, "the backlog is visible: {snapshot:?}");
+    assert_eq!(snapshot.dropped, 0);
+
+    // More messages than the cap: drops are counted, the signal stays raised and is not reported again.
+    s.publish_range(topic, 140..400, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    let snapshot = s.snapshot().await;
+    assert!(snapshot.dropped > 0, "{snapshot:?}");
+    assert!(
+        snapshot.max_per_connection <= snapshot.queued && snapshot.max_per_connection >= 100,
+        "{snapshot:?}"
+    );
+    assert!(snapshot.max_per_connection <= 150, "the cap holds: {snapshot:?}");
+    assert_eq!(s.pressure(paused.peer_id), vec![true]);
+
+    paused.drv.resume();
+    wait_for("the signal is cleared", Duration::from_secs(30), || {
+        s.pressure(paused.peer_id).len() == 2
+    })
+    .await;
+    assert_eq!(s.pressure(paused.peer_id), vec![true, false]);
+    wait_for("the queue is empty", Duration::from_secs(30), || {
+        received(&paused).last() == Some(&399)
+    })
+    .await;
+    let after = s.snapshot().await;
+    assert_eq!(after.queued, 0);
+    assert_eq!(after.dropped, snapshot.dropped, "the drop count is kept");
+    paused.drv.stop();
+    healthy.drv.stop();
+    s.stop();
+}
+
+/// T-RQ1.8: a period at the cap raises the signal, and closing the connection clears it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_period_at_the_cap_raises_and_closing_clears_the_signal() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-pressure-close";
+    let s = spawn_test_sender(|b| {
+        b.send_queue_max_messages(30)
+            .send_queue_pressure_raise(1000)
+            .send_queue_pressure_clear(5)
+            .send_queue_stuck_timeout(Duration::from_secs(3));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+
+    // Far below the raise threshold of 1,000, but past the cap of 30: the period starts.
+    s.publish_range(topic, 0..120, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.pressure(paused.peer_id), vec![true]);
+    let dropped = s.snapshot().await.dropped;
+    assert!(dropped > 0);
+
+    // The period runs out, the connection is closed and the signal is cleared.
+    wait_for("the stuck peer is closed", Duration::from_secs(15), || {
+        s.pressure(paused.peer_id).len() == 2
+    })
+    .await;
+    assert_eq!(s.pressure(paused.peer_id), vec![true, false]);
+    assert!(!s.is_connected(paused.peer_id).await);
+    let snapshot = s.snapshot().await;
+    assert_eq!(
+        (snapshot.queued, snapshot.dropped),
+        (0, dropped),
+        "the drop count outlives the connection"
+    );
+    paused.drv.stop();
+    s.stop();
+}
+
+/// T-RQ1.9 and the last part of T-MP12: with the data queue at its cap toward a paused peer, a
+/// priority message is not dropped and arrives before the queued data messages after the resume.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_priority_message_arrives_first_after_resume() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-priority";
+    let s = spawn_test_sender(|b| {
+        b.send_queue_max_messages(40)
+            .send_queue_stuck_timeout(Duration::from_secs(600));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+
+    const PRIORITY: u32 = 100_000;
+    s.publish_range(topic, 0..300, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    let snapshot = s.snapshot().await;
+    assert_eq!(snapshot.queued, 40, "the data queue is at its cap");
+    assert!(snapshot.dropped > 0);
+    // A priority message, then more data: the priority message is not part of the data queue.
+    s.publish_marked(topic, PRIORITY..PRIORITY + 1, 1024, true).await;
+    s.publish_range(topic, 300..320, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    assert_eq!(s.snapshot().await.queued, 40);
+
+    paused.drv.resume();
+    wait_for("the newest message arrived", Duration::from_secs(30), || {
+        received(&paused).last() == Some(&319)
+    })
+    .await;
+    let got = received(&paused);
+    let at = got
+        .iter()
+        .position(|i| *i == PRIORITY)
+        .expect("the priority message was dropped");
+    // What the transport window already held comes first. Of the queued data, the priority message
+    // is ahead of all.
+    let first_queued = got
+        .iter()
+        .position(|i| (280..320).contains(i) && *i != PRIORITY)
+        .expect("queued data arrived");
+    assert!(
+        at < first_queued,
+        "priority at {at}, first queued data at {first_queued}: {got:?}"
+    );
+    assert_eq!(got.iter().filter(|i| **i == PRIORITY).count(), 1);
+    paused.drv.stop();
+    s.stop();
+}
+
+/// T-RQ1.9: a 257th queued priority RPC closes the connection, and the close is logged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_priority_lane_overflow_closes_the_connection() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-priority-cap";
+    let s = spawn_test_sender(|b| {
+        b.send_queue_stuck_timeout(Duration::from_secs(600));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    let healthy = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused, &healthy]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+    // Fill the transport window with data so that the priority lane cannot be written.
+    s.publish_paced(topic, 0..120, 8 * 1024, 4, &[&healthy]).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+
+    // 256 priority messages are held; the connection stays.
+    s.publish_marked(topic, 1000..1256, 512, true).await;
+    async_std::task::sleep(Duration::from_millis(500)).await;
+    assert!(s.is_connected(paused.peer_id).await, "closed at 256 priority RPCs");
+    // The 257th closes it.
+    s.publish_marked(topic, 1256..1257, 512, true).await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.is_connected(paused.peer_id).await {
+        assert!(
+            Instant::now() < deadline,
+            "the 257th priority RPC did not close the connection"
+        );
+        async_std::task::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(s.is_connected(healthy.peer_id).await);
+    let closing = log_lines_with("priority lane");
+    assert_eq!(closing.len(), 1, "close lines: {closing:?}");
+    assert!(closing[0].contains(&paused.peer_id.to_string()));
+    paused.drv.stop();
+    healthy.drv.stop();
+    s.stop();
+}
+
+/// T-MP10 (send queue part), with the production node: the counters the daemon records on every poll show the
+/// backlog toward a paused peer and the data RPCs dropped under the default cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_production_node_exposes_the_queue_counters() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let queued = Arc::new(AtomicUsize::new(0));
+    let max_per_peer = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicU64::new(0));
+    let (q, m, d) = (queued.clone(), max_per_peer.clone(), dropped.clone());
+    let mut s = ProdSender::start_with_poll(move |swarm| {
+        let snapshot = swarm.behaviour().send_queue_snapshot();
+        q.store(snapshot.queued, Ordering::Relaxed);
+        m.store(snapshot.max_per_connection, Ordering::Relaxed);
+        d.store(snapshot.dropped, Ordering::Relaxed);
+    })
+    .await;
+    let topics = topic_names("gsq-mp10", 1);
+    let paused = spawn_fast_receiver(&topics[0], s.port);
+    wait_ready(&mut s, &topics[0], &[&paused]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+    assert_eq!(
+        (queued.load(Ordering::Relaxed), dropped.load(Ordering::Relaxed)),
+        (0, 0)
+    );
+
+    // 8 KiB messages: the default 4 MiB cap holds 512 of them, the transport window about 32 more.
+    for i in 0..900u32 {
+        s.publish(&topics, payload(i, 8 * 1024)).await;
+    }
+    s.peers().await; // a barrier: the commands are processed in order
+    wait_for("drops are counted", Duration::from_secs(30), || {
+        dropped.load(Ordering::Relaxed) > 0
+    })
+    .await;
+    let (queued_now, max_now, dropped_now) = (
+        queued.load(Ordering::Relaxed),
+        max_per_peer.load(Ordering::Relaxed),
+        dropped.load(Ordering::Relaxed),
+    );
+    assert!((400..=520).contains(&queued_now), "queued {queued_now}");
+    assert_eq!(max_now, queued_now, "one connection holds the whole backlog");
+    assert!(dropped_now >= 200, "dropped {dropped_now}");
+
+    paused.drv.resume();
+    wait_for("the backlog drains", Duration::from_secs(60), || {
+        queued.load(Ordering::Relaxed) == 0
+    })
+    .await;
+    assert!(
+        dropped.load(Ordering::Relaxed) >= dropped_now,
+        "the drop count never falls"
+    );
+    paused.drv.stop();
+    s.shutdown();
+}
+
+impl TestSender {
+    /// The queue signal changes reported for `peer`, in order.
+    fn signal(&self, peer: PeerId) -> Vec<bool> {
+        self.signal_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| *p == peer)
+            .map(|(_, raised)| *raised)
+            .collect()
+    }
+}
+
+/// T-MP5: a data queue that stays non-empty for 2 s raises the queue signal, one that empties within 2 s does not,
+/// and the signal clears after 5 s of an empty queue (CRD ch.32 §32.9B R-MP2 item 2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mp5_queue_signal_follows_a_non_empty_queue() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-mp5-signal";
+    let s = spawn_test_sender(|b| {
+        // Far from the pressure thresholds, so that only the time-based part of the signal acts.
+        b.send_queue_pressure_raise(10_000)
+            .send_queue_stuck_timeout(Duration::from_secs(600));
+    });
+    let paused = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&paused]).await;
+    async_std::task::sleep(Duration::from_millis(800)).await;
+    paused.drv.pause().await;
+
+    // The transport window takes about 32 messages of 8 KiB; the rest is queued.
+    let started = Instant::now();
+    s.publish_range(topic, 0..80, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(1200)).await;
+    assert!(s.snapshot().await.queued > 0, "the queue holds data");
+    assert_eq!(s.signal(paused.peer_id), Vec::<bool>::new(), "not raised before 2 s");
+    wait_for("the queue signal is raised", Duration::from_secs(10), || {
+        !s.signal(paused.peer_id).is_empty()
+    })
+    .await;
+    let raised_after = started.elapsed();
+    assert!(
+        raised_after >= Duration::from_millis(1900) && raised_after < Duration::from_secs(4),
+        "raised after {raised_after:?}"
+    );
+    assert_eq!(s.signal(paused.peer_id), vec![true]);
+
+    // Resumed, the queue drains; the signal clears 5 s after it is empty.
+    paused.drv.resume();
+    wait_for("the queue is empty", Duration::from_secs(30), || {
+        received(&paused).last() == Some(&79)
+    })
+    .await;
+    let emptied = Instant::now();
+    async_std::task::sleep(Duration::from_millis(4000)).await;
+    assert_eq!(s.signal(paused.peer_id), vec![true], "not cleared before 5 s");
+    wait_for("the queue signal is cleared", Duration::from_secs(10), || {
+        s.signal(paused.peer_id).len() == 2
+    })
+    .await;
+    assert!(
+        emptied.elapsed() >= Duration::from_secs(4),
+        "cleared after {:?}",
+        emptied.elapsed()
+    );
+    assert_eq!(s.signal(paused.peer_id), vec![true, false]);
+
+    // A burst the receiver takes at once (queue emptied within 2 s) raises nothing.
+    s.publish_range(topic, 100..110, 1024).await;
+    async_std::task::sleep(Duration::from_millis(3000)).await;
+    assert_eq!(s.signal(paused.peer_id), vec![true, false]);
+    paused.drv.stop();
+    s.stop();
 }

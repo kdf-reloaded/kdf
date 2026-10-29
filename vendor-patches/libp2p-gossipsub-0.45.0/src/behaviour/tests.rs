@@ -5266,3 +5266,281 @@ fn test_graft_without_subscribe() {
     // We unsubscribe from the topic.
     let _ = gs.unsubscribe(&Topic::new(topic));
 }
+
+fn publish_events_by_lane<D: DataTransform, F: TopicSubscriptionFilter>(
+    gs: &Behaviour<D, F>,
+) -> (usize, usize) {
+    // (priority, normal): the NotifyHandler events that carry a published message.
+    let mut priority = 0;
+    let mut normal = 0;
+    for e in gs.events.iter() {
+        match e {
+            ToSwarm::NotifyHandler {
+                event: HandlerIn::PriorityMessage(m),
+                ..
+            } if !m.publish.is_empty() => priority += 1,
+            ToSwarm::NotifyHandler {
+                event: HandlerIn::Message(m),
+                ..
+            } if !m.publish.is_empty() => normal += 1,
+            _ => {}
+        }
+    }
+    (priority, normal)
+}
+
+#[test]
+// A published message marked as priority is queued through the priority lane of every
+// connection it is written to; an unmarked one is not (CRD ch.28 §28.9B RQ1 item 9).
+fn test_priority_publish_uses_the_priority_lane() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(3)
+        .topics(vec![String::from("t")])
+        .to_subscribe(true)
+        .create_network();
+    flush_events(&mut gs);
+
+    gs.publish_with_priority(Topic::new("t"), vec![1u8; 10], true)
+        .unwrap();
+    let (priority, normal) = publish_events_by_lane(&gs);
+    assert!(priority > 0);
+    assert_eq!(normal, 0);
+
+    flush_events(&mut gs);
+    gs.publish(Topic::new("t"), vec![2u8; 10]).unwrap();
+    let (priority, normal) = publish_events_by_lane(&gs);
+    assert_eq!(priority, 0);
+    assert!(normal > 0);
+}
+
+#[test]
+// A propagated message marked as priority is queued through the priority lane, an unmarked one is
+// not.
+fn test_priority_propagate_uses_the_priority_lane() {
+    let (mut gs, peers, _) = inject_nodes1()
+        .peer_no(3)
+        .topics(vec![String::from("t")])
+        .to_subscribe(true)
+        .create_network();
+    let id = gs.publish(Topic::new("t"), vec![3u8; 10]).unwrap();
+
+    flush_events(&mut gs);
+    assert!(gs.propagate_message_with_priority(&id, &peers[0], true).unwrap());
+    let (priority, normal) = publish_events_by_lane(&gs);
+    assert!(priority > 0);
+    assert_eq!(normal, 0);
+
+    flush_events(&mut gs);
+    assert!(gs.propagate_message(&id, &peers[0]).unwrap());
+    let (priority, normal) = publish_events_by_lane(&gs);
+    assert_eq!(priority, 0);
+    assert!(normal > 0);
+}
+
+fn pressure_events<D: DataTransform, F: TopicSubscriptionFilter>(
+    gs: &Behaviour<D, F>,
+) -> Vec<(PeerId, bool)> {
+    gs.events
+        .iter()
+        .filter_map(|e| match e {
+            ToSwarm::GenerateEvent(Event::SendQueuePressure {
+                peer_id, raised, ..
+            }) => Some((*peer_id, *raised)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+// The pressure signal is reported once per change, a closed connection counts as cleared, and the
+// queue counters stay available for metrics (CRD ch.28 §28.9B RQ1 item 8, T-RQ1.8).
+fn test_send_queue_pressure_and_snapshot() {
+    let config = ConfigBuilder::default()
+        .send_queue_max_messages(3)
+        .send_queue_pressure_raise(100)
+        .build()
+        .unwrap();
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .gs_config(config)
+        .create_network();
+
+    let peer = PeerId::random();
+    let conn = ConnectionId::new_unchecked(7);
+    let endpoint = ConnectedPoint::Dialer {
+        address: Multiaddr::empty(),
+        role_override: Endpoint::Dialer,
+    };
+    let mut handler = gs
+        .handle_established_outbound_connection(conn, peer, &Multiaddr::empty(), Endpoint::Dialer)
+        .unwrap();
+    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+        peer_id: peer,
+        connection_id: conn,
+        endpoint: &endpoint,
+        failed_addresses: &[],
+        other_established: 0,
+    }));
+
+    // Five data RPCs into a queue of three: two are dropped.
+    for tag in 0..5u8 {
+        libp2p_swarm::ConnectionHandler::on_behaviour_event(&mut handler, HandlerIn::Message(proto::RPC {
+            subscriptions: vec![],
+            publish: vec![proto::Message {
+                from: None,
+                data: Some(vec![tag; 10]),
+                seqno: None,
+                topic: "t".into(),
+                signature: None,
+                key: None,
+            }],
+            control: None,
+        }));
+    }
+    assert_eq!(
+        gs.send_queue_snapshot(),
+        crate::SendQueueSnapshot {
+            queued: 3,
+            max_per_connection: 3,
+            dropped: 2
+        }
+    );
+
+    // A raised level is reported once and counts for the node only while the peer is a relay.
+    flush_events(&mut gs);
+    gs.on_connection_handler_event(peer, conn, HandlerEvent::SendQueuePressure { raised: true });
+    assert_eq!(pressure_events(&gs), vec![(peer, true)]);
+    assert!(!gs.relay_send_queue_pressure());
+    gs.connected_relays.insert(peer);
+    assert!(gs.relay_send_queue_pressure());
+    gs.on_connection_handler_event(peer, conn, HandlerEvent::SendQueuePressure { raised: true });
+    assert_eq!(pressure_events(&gs).len(), 1);
+
+    // Closing the connection reports the level as cleared and keeps the dropped count.
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: peer,
+        connection_id: conn,
+        endpoint: &endpoint,
+        handler,
+        remaining_established: 0,
+    }));
+    assert_eq!(pressure_events(&gs), vec![(peer, true), (peer, false)]);
+    assert!(!gs.relay_send_queue_pressure());
+    assert_eq!(
+        gs.send_queue_snapshot(),
+        crate::SendQueueSnapshot {
+            queued: 0,
+            max_per_connection: 0,
+            dropped: 2
+        }
+    );
+}
+
+#[test]
+// A connected relay joining the relay mesh is reported once (CRD ch.32 §32.9B R-MP4).
+fn test_relay_mesh_join_is_reported() {
+    let (mut gs, peers, _) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    flush_events(&mut gs);
+    let relay_joined = |gs: &Behaviour<_, _>| {
+        gs.events
+            .iter()
+            .filter(|e| matches!(e, ToSwarm::GenerateEvent(Event::RelayMeshJoined { .. })))
+            .count()
+    };
+    gs.handle_i_am_relay(&peers[0], true);
+    assert_eq!(relay_joined(&gs), 1);
+    // A second notice for a peer already in the mesh reports nothing more.
+    gs.handle_i_am_relay(&peers[0], true);
+    assert_eq!(relay_joined(&gs), 1);
+}
+
+#[test]
+// The queue signal toward a relay connection is counted and reported once, a closed connection clears it, and the
+// close of the last connection to a relay is reported (CRD ch.32 §32.9B R-MP2 item 2).
+fn test_queue_signal_and_relay_connection_close() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let endpoint = ConnectedPoint::Dialer {
+        address: Multiaddr::empty(),
+        role_override: Endpoint::Dialer,
+    };
+    let signal_events = |gs: &Behaviour<_, _>| {
+        gs.events
+            .iter()
+            .filter_map(|e| match e {
+                ToSwarm::GenerateEvent(Event::SendQueueSignal { raised, .. }) => Some(*raised),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let relay_closes = |gs: &Behaviour<_, _>| {
+        gs.events
+            .iter()
+            .filter(|e| matches!(e, ToSwarm::GenerateEvent(Event::RelayConnectionClosed { .. })))
+            .count()
+    };
+    let connect = |gs: &mut Behaviour<_, _>, id: usize, relay: bool| {
+        let peer = PeerId::random();
+        let conn = ConnectionId::new_unchecked(id);
+        let handler = gs
+            .handle_established_outbound_connection(conn, peer, &Multiaddr::empty(), Endpoint::Dialer)
+            .unwrap();
+        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: conn,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        if relay {
+            gs.connected_relays.insert(peer);
+        }
+        (peer, conn, handler)
+    };
+    let (relay, relay_conn, relay_handler) = connect(&mut gs, 1, true);
+    let (other, other_conn, other_handler) = connect(&mut gs, 2, false);
+    flush_events(&mut gs);
+
+    // A signal toward a non-relay peer is not a relay signal.
+    gs.on_connection_handler_event(other, other_conn, HandlerEvent::SendQueueSignal { raised: true });
+    assert!(!gs.relay_queue_signal());
+    assert_eq!(gs.queue_signals_raised(), 0);
+    gs.on_connection_handler_event(relay, relay_conn, HandlerEvent::SendQueueSignal { raised: true });
+    gs.on_connection_handler_event(relay, relay_conn, HandlerEvent::SendQueueSignal { raised: true });
+    assert!(gs.relay_queue_signal());
+    assert_eq!(gs.queue_signals_raised(), 1);
+    assert_eq!(signal_events(&gs), vec![true, true]);
+
+    // Closing the connection clears the signal and reports the close of the relay.
+    flush_events(&mut gs);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: relay,
+        connection_id: relay_conn,
+        endpoint: &endpoint,
+        handler: relay_handler,
+        remaining_established: 0,
+    }));
+    assert!(!gs.relay_queue_signal());
+    assert_eq!(signal_events(&gs), vec![false]);
+    assert_eq!(relay_closes(&gs), 1);
+
+    // The close of a connection to a non-relay peer is no relay close.
+    flush_events(&mut gs);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: other,
+        connection_id: other_conn,
+        endpoint: &endpoint,
+        handler: other_handler,
+        remaining_established: 0,
+    }));
+    assert_eq!(relay_closes(&gs), 0);
+}

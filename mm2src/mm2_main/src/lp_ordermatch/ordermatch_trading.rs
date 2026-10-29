@@ -127,16 +127,21 @@ pub(crate) fn maker_order_created_p2p_notify(
         rel_protocol_info,
     };
 
-    let to_broadcast = new_protocol::OrdermatchMessage::MakerOrderCreated(message.clone());
-    let (key_pair, peer_id) = match order.p2p_keypair() {
-        Some(k) => (k, Some(k.libp2p_peer_id())),
-        None => (ctx.secp256k1_key_pair(), None),
+    let key_pair = match order.p2p_keypair() {
+        Some(k) => k,
+        None => ctx.secp256k1_key_pair(),
     };
 
-    let encoded_msg = encode_and_sign(&to_broadcast, key_pair.private_ref()).unwrap();
-    let orderbook_item: OrderbookItem = (message, hex::encode(key_pair.public_slice())).into();
+    // The local state is updated at once; only the gossip message waits in the outbox (CRD ch.32 R-MP1 item 3).
+    let orderbook_item: OrderbookItem = (message.clone(), hex::encode(key_pair.public_slice())).into();
     insert_or_update_my_order(&ctx, orderbook_item, order);
-    broadcast_p2p_msg(&ctx, vec![topic], encoded_msg, peer_id);
+    publish_maker_order_message(
+        &ctx,
+        order.p2p_keypair(),
+        order.uuid,
+        topic,
+        OutboxMessage::Created(message),
+    );
 }
 
 #[cfg(all(test, feature = "ibc-routing-for-swaps"))]
@@ -251,25 +256,269 @@ pub(crate) fn maker_order_updated_p2p_notify(
     message: new_protocol::MakerOrderUpdated,
     p2p_privkey: Option<&KeyPair>,
 ) {
-    let msg: new_protocol::OrdermatchMessage = message.clone().into();
-    let (secret, peer_id) = match p2p_privkey {
-        Some(k) => (k.private_bytes(), Some(k.libp2p_peer_id())),
-        None => (ctx.secp256k1_key_pair().private_bytes(), None),
-    };
-    let encoded_msg = encode_and_sign(&msg, &secret).unwrap();
     process_my_maker_order_updated(&ctx, &message);
-    broadcast_p2p_msg(&ctx, vec![topic], encoded_msg, peer_id);
+    publish_maker_order_message(
+        &ctx,
+        p2p_privkey,
+        message.uuid(),
+        topic,
+        OutboxMessage::Updated(message),
+    );
 }
 
 pub(crate) fn maker_order_cancelled_p2p_notify(ctx: MmArc, order: &MakerOrder) {
-    let message = new_protocol::OrdermatchMessage::MakerOrderCancelled(new_protocol::MakerOrderCancelled {
+    let message = new_protocol::MakerOrderCancelled {
         uuid: order.uuid.into(),
         timestamp: now_ms() / 1000,
         pair_trie_root: H64::default(),
-    });
+    };
     delete_my_order(&ctx, order.uuid, order.p2p_privkey.as_ref());
     log::debug!("maker_order_cancelled_p2p_notify called, message {:?}", message);
-    broadcast_ordermatch_message(&ctx, vec![order.orderbook_topic()], message, order.p2p_keypair());
+    publish_maker_order_message(
+        &ctx,
+        order.p2p_keypair(),
+        order.uuid,
+        order.orderbook_topic(),
+        OutboxMessage::Cancelled(message),
+    );
+}
+
+/// The pubkey, as hex, a maker-order message signed with `key_pair` is published under: the per-order key, or
+/// the persistent key of the node.
+fn maker_pubkey_hex(ctx: &MmArc, key_pair: Option<&KeyPair>) -> String {
+    match key_pair {
+        Some(key_pair) => hex::encode(key_pair.public_slice()),
+        None => hex::encode(ctx.secp256k1_key_pair().public_slice()),
+    }
+}
+
+/// Publishes what the outbox released. The cancellation leaves with priority, like every swap-negotiation
+/// message, because `broadcast_ordermatch_message` marks the priority by message kind.
+fn publish_released(ctx: &MmArc, releases: Vec<Release>) {
+    for release in releases {
+        let message = match release.message {
+            OutboxMessage::Created(created) => new_protocol::OrdermatchMessage::MakerOrderCreated(created),
+            OutboxMessage::Updated(updated) => new_protocol::OrdermatchMessage::MakerOrderUpdated(updated),
+            OutboxMessage::Cancelled(cancelled) => new_protocol::OrdermatchMessage::MakerOrderCancelled(cancelled),
+        };
+        broadcast_ordermatch_message(ctx, [release.topic], message, release.key_pair.as_ref());
+    }
+}
+
+/// Publishes what the outbox released, and remembers when it last released a created or updated message, which a
+/// relay close needs (CRD ch.32 R-MP2 item 2).
+///
+/// The releases were counted as in flight under the outbox lock that released them (`count_in_flight`); they stop being
+/// in flight here, once they are handed to the swarm, so that a keep-alive waits for them (CRD ch.32 R-MP3 items 2, 3).
+fn publish_outbox_releases(ctx: &MmArc, ordermatch_ctx: &OrdermatchContext, releases: Vec<Release>) {
+    let count = releases.len();
+    if releases
+        .iter()
+        .any(|release| !matches!(release.message, OutboxMessage::Cancelled(_)))
+    {
+        ordermatch_ctx
+            .maker_outbox
+            .last_release_ms
+            .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
+    publish_released(ctx, releases);
+    ordermatch_ctx
+        .maker_outbox
+        .in_flight
+        .fetch_sub(count, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Counts `releases` as in flight. It is called while the outbox lock that released them is still held, so that no
+/// reader sees them neither pending nor in flight.
+fn count_in_flight(ordermatch_ctx: &OrdermatchContext, releases: &[Release]) {
+    ordermatch_ctx
+        .maker_outbox
+        .in_flight
+        .fetch_add(releases.len(), std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The log line of a signal, a rate change or a change of the degraded mode (CRD ch.32 R-MP2 item 5). No order
+/// content.
+fn log_outbox_rate(line: RateLog) {
+    let pubkey = &line.pubkey[..line.pubkey.len().min(16)];
+    let signal = line
+        .signal
+        .map_or(String::new(), |kind| format!(" (a {} signal came)", kind.as_str()));
+    if line.degraded {
+        log::warn!(
+            "Maker publication of pubkey {}{}: a relay is not keeping up, the update rate is {:.3} messages/s and \
+             created and updated messages are not published; peers learn the changes through the keep-alive \
+             synchronization",
+            pubkey,
+            signal,
+            line.rate
+        );
+    } else {
+        log::info!(
+            "Maker publication of pubkey {}{}: the update rate is {:.3} messages/s",
+            pubkey,
+            signal,
+            line.rate
+        );
+    }
+}
+
+/// Hands a maker-order message to the outbox of its pubkey (CRD ch.32 §32.9B R-MP1, R-MP2), and publishes at once
+/// what the outbox lets go: a cancellation, and the oldest pending messages while the budget allows.
+/// With `maker_update_coalescing` set to `false` the message is published at once, as without the outbox.
+pub(crate) fn publish_maker_order_message(
+    ctx: &MmArc,
+    key_pair: Option<&KeyPair>,
+    uuid: Uuid,
+    topic: String,
+    message: OutboxMessage,
+) {
+    let ordermatch_ctx = if maker_update_coalescing(ctx) {
+        match OrdermatchContext::from_ctx(ctx) {
+            Ok(ordermatch_ctx) => Some(ordermatch_ctx),
+            Err(e) => {
+                log::error!("No ordermatch context for the maker outbox, publishing at once: {}", e);
+                None
+            },
+        }
+    } else {
+        None
+    };
+    let Some(ordermatch_ctx) = ordermatch_ctx else {
+        let release = Release {
+            topic,
+            message,
+            key_pair: key_pair.copied(),
+        };
+        publish_released(ctx, vec![release]);
+        return;
+    };
+
+    let pubkey = maker_pubkey_hex(ctx, key_pair);
+    let (releases, log_line) = {
+        let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+        let (releases, log_line) = outboxes.enqueue(
+            now_ms(),
+            relay_queue_signal(ctx),
+            maker_update_rate_max(ctx),
+            &pubkey,
+            key_pair.copied(),
+            uuid,
+            topic,
+            message,
+        );
+        count_in_flight(&ordermatch_ctx, &releases);
+        (releases, log_line)
+    };
+    log_line.into_iter().for_each(log_outbox_rate);
+    publish_outbox_releases(ctx, &ordermatch_ctx, releases);
+}
+
+/// The close of the last connection to a relay (CRD ch.32 §32.9B R-MP2 item 2, the close signal). It is a signal if
+/// an outbox holds a pending created or updated message, or released one within the preceding 30 seconds; every
+/// outbox then drops to the floor in degraded mode.
+pub(crate) fn relay_connection_closed(ctx: &MmArc) {
+    let Ok(ordermatch_ctx) = OrdermatchContext::from_ctx(ctx) else {
+        return;
+    };
+    let now = now_ms();
+    let last_release = ordermatch_ctx
+        .maker_outbox
+        .last_release_ms
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+    if close_is_signal(outboxes.has_pending(), Some(last_release), now) {
+        // The line that enters degraded mode is logged at once (R-MP2 item 5).
+        outboxes
+            .signal(now, SignalKind::Close)
+            .into_iter()
+            .for_each(log_outbox_rate);
+        ordermatch_ctx
+            .maker_outbox
+            .close_signals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// One step of the outbox: adapts the rate and releases what the budget allows. It also records the outbox
+/// gauges (CRD ch.32 R-MP5).
+pub(crate) fn pump_maker_outbox(ctx: &MmArc) {
+    let Ok(ordermatch_ctx) = OrdermatchContext::from_ctx(ctx) else {
+        return;
+    };
+    let ceiling = maker_update_rate_max(ctx);
+    let queue_signal = relay_queue_signal(ctx);
+    let (releases, log_lines, metrics) = {
+        let mut outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+        let (releases, log_lines) = outboxes.tick(now_ms(), queue_signal, ceiling);
+        count_in_flight(&ordermatch_ctx, &releases);
+        (releases, log_lines, outboxes.metrics(ceiling))
+    };
+    log_lines.into_iter().for_each(log_outbox_rate);
+    publish_outbox_releases(ctx, &ordermatch_ctx, releases);
+
+    mm_gauge!(ctx.metrics, "p2p.outbox.pending", metrics.pending as i64);
+    // Gauges hold integers: the rate is reported in thousandths of a message per second.
+    mm_gauge!(ctx.metrics, "p2p.outbox.rate", (metrics.rate * 1000.0).round() as i64);
+    mm_gauge!(ctx.metrics, "p2p.outbox.pressure", i64::from(queue_signal));
+    mm_gauge!(ctx.metrics, "p2p.outbox.degraded", i64::from(metrics.degraded));
+    mm_gauge!(
+        ctx.metrics,
+        "p2p.outbox.signals.queue.count",
+        relay_queue_signal_count(ctx) as i64
+    );
+    mm_gauge!(
+        ctx.metrics,
+        "p2p.outbox.signals.close.count",
+        ordermatch_ctx
+            .maker_outbox
+            .close_signals
+            .load(std::sync::atomic::Ordering::Relaxed) as i64
+    );
+}
+
+/// How often the outbox is stepped. A release is at most this late when the budget allows it.
+const OUTBOX_PUMP_INTERVAL_SECS: f64 = 0.1;
+
+pub async fn maker_outbox_loop(ctx: MmArc) {
+    while !ctx.is_stopping() {
+        pump_maker_outbox(&ctx);
+        Timer::sleep(OUTBOX_PUMP_INTERVAL_SECS).await;
+    }
+}
+
+/// How long after a relay joined the relay mesh the keep-alive round is published (CRD ch.32 R-MP4 asks for
+/// within 5 seconds). The delay lets further relays that join at the same time share the one round.
+const RECONNECT_ROUND_DELAY_SECS: f64 = 1.0;
+
+/// Schedules the keep-alive round that follows a relay joining the relay mesh (CRD ch.32 R-MP4): one
+/// keep-alive per pair per maker pubkey, each after the bounded wait of R-MP3 item 2. Joins within the delay share
+/// one round.
+pub(crate) fn schedule_reconnect_keep_alive_round(ctx: MmArc) {
+    let Ok(ordermatch_ctx) = OrdermatchContext::from_ctx(&ctx) else {
+        return;
+    };
+    if ordermatch_ctx
+        .maker_outbox
+        .reconnect_round_pending
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    spawn(async move {
+        Timer::sleep(RECONNECT_ROUND_DELAY_SECS).await;
+        ordermatch_ctx
+            .maker_outbox
+            .reconnect_round_pending
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        if ctx.is_stopping() {
+            return;
+        }
+        let Ok(crypto_ctx) = CryptoCtx::from_ctx(&ctx) else {
+            return;
+        };
+        broadcast_keep_alives_for_own_pubkeys(&ctx, &ordermatch_ctx, &crypto_ctx.mm2_internal_pubkey_hex()).await;
+    });
 }
 
 pub struct BalanceUpdateOrdermatchHandler {
@@ -386,15 +635,56 @@ pub(crate) async fn keep_alive_payload_for_pub(
         .await
 }
 
+/// The longest a maker pubkey's keep-alives wait for the pending messages of their pairs (CRD ch.32 §32.9B R-MP3
+/// item 2).
+const KEEP_ALIVE_MAX_WAIT_MS: u64 = 10_000;
+
+/// Waits until the pending outbox messages of the pairs `topics` of `pubkey` have been released within the budget, for
+/// at most `max_wait_ms`, or until the outbox is degraded (CRD ch.32 §32.9B R-MP3 item 2). The pump does the
+/// releasing; the wait never releases anything itself.
+pub(crate) async fn wait_for_pairs_to_drain(
+    ordermatch_ctx: &OrdermatchContext,
+    pubkey: &str,
+    topics: &[String],
+    max_wait_ms: u64,
+) {
+    let started = now_ms();
+    loop {
+        // A released message that is still being handed to the swarm counts as pending: the keep-alive must not
+        // overtake it (R-MP3 item 3).
+        let (pending, degraded) = {
+            let outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+            let in_flight = ordermatch_ctx
+                .maker_outbox
+                .in_flight
+                .load(std::sync::atomic::Ordering::SeqCst);
+            (
+                outboxes.pending_for_topics(pubkey, topics) + in_flight,
+                outboxes.is_degraded(pubkey),
+            )
+        };
+        if pending == 0 || degraded || now_ms().saturating_sub(started) >= max_wait_ms {
+            return;
+        }
+        Timer::sleep(KEEP_ALIVE_WAIT_POLL_SECS).await;
+    }
+}
+
+/// How often the wait of R-MP3 item 2 looks at the outbox.
+const KEEP_ALIVE_WAIT_POLL_SECS: f64 = 0.1;
+
 /// Publishes the keep-alives of `pubkey` (CRD ch.32 R-K2a): one message per advertisable pair,
 /// carrying that pair's root alone, on that pair's topic only.
+///
+/// Before them, the node waits up to 10 seconds in total for the pending outbox messages of those pairs to be released
+/// within the budget, and not at all in degraded mode (R-MP3 item 2).
 pub(crate) async fn broadcast_keep_alive_for_pub(
     ctx: &MmArc,
     ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     p2p_privkey: Option<&KeyPair>,
 ) {
-    let trie_roots = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
+    let mut trie_roots = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
         Ok(Some(roots)) => roots,
         Ok(None) => return,
         Err(TrieNotCaughtUp) => {
@@ -405,6 +695,29 @@ pub(crate) async fn broadcast_keep_alive_for_pub(
             return;
         },
     };
+
+    // CRD ch.32 R-MP3 item 2: the changes of the pairs leave before the keep-alives that account for them, where the
+    // budget allows. The roots are read again after a wait, so that they are current.
+    let topics: Vec<String> = trie_roots
+        .keys()
+        .map(|alb_pair| orderbook_topic_from_ordered_pair(alb_pair))
+        .collect();
+    let must_wait = {
+        let outboxes = ordermatch_ctx.maker_outbox.outboxes.lock();
+        let in_flight = ordermatch_ctx
+            .maker_outbox
+            .in_flight
+            .load(std::sync::atomic::Ordering::SeqCst);
+        outboxes.pending_for_topics(pubkey, &topics) + in_flight > 0 && !outboxes.is_degraded(pubkey)
+    };
+    if must_wait {
+        wait_for_pairs_to_drain(ordermatch_ctx, pubkey, &topics, KEEP_ALIVE_MAX_WAIT_MS).await;
+        trie_roots = match keep_alive_payload_for_pub(ordermatch_ctx, pubkey, TRIE_CATCH_UP_BOUND_MS).await {
+            Ok(Some(roots)) => roots,
+            Ok(None) => return,
+            Err(TrieNotCaughtUp) => return,
+        };
+    }
 
     let timestamp = now_ms() / 1000;
     for (alb_pair, root) in trie_roots {
@@ -430,21 +743,31 @@ pub async fn broadcast_maker_orders_keep_alive_loop(ctx: MmArc) {
     while !ctx.is_stopping() {
         Timer::sleep(MIN_ORDER_KEEP_ALIVE_INTERVAL as f64).await;
         let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).expect("from_ctx failed");
-        let my_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
-        for (_, order_mutex) in my_orders {
-            let order = order_mutex.lock().await;
-            if let Some(p2p_privkey) = order.p2p_privkey {
-                // Artem Vitae
-                // I tried if let Some(p2p_privkey) = order_mutex.lock().await.p2p_privkey
-                // but it seems to keep holding the guard
-                drop(order);
-                let pubsecp = hex::encode(p2p_privkey.public_slice());
-                broadcast_keep_alive_for_pub(&ctx, &ordermatch_ctx, &pubsecp, Some(p2p_privkey.key_pair())).await;
-            }
-        }
-
-        broadcast_keep_alive_for_pub(&ctx, &ordermatch_ctx, &persistent_pubsecp, None).await;
+        broadcast_keep_alives_for_own_pubkeys(&ctx, &ordermatch_ctx, &persistent_pubsecp).await;
     }
+}
+
+/// The keep-alives of every pubkey of this node's maker orders: the per-order keys, then the persistent one.
+/// It serves the regular tick and the round after a relay joined the relay mesh (CRD ch.32 R-MP4).
+pub(crate) async fn broadcast_keep_alives_for_own_pubkeys(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    persistent_pubsecp: &str,
+) {
+    let my_orders = ordermatch_ctx.maker_orders_ctx.lock().clone_orders();
+    for (_, order_mutex) in my_orders {
+        let order = order_mutex.lock().await;
+        if let Some(p2p_privkey) = order.p2p_privkey {
+            // Artem Vitae
+            // I tried if let Some(p2p_privkey) = order_mutex.lock().await.p2p_privkey
+            // but it seems to keep holding the guard
+            drop(order);
+            let pubsecp = hex::encode(p2p_privkey.public_slice());
+            broadcast_keep_alive_for_pub(ctx, ordermatch_ctx, &pubsecp, Some(p2p_privkey.key_pair())).await;
+        }
+    }
+
+    broadcast_keep_alive_for_pub(ctx, ordermatch_ctx, persistent_pubsecp, None).await;
 }
 
 pub(crate) fn broadcast_ordermatch_message(
@@ -458,7 +781,14 @@ pub(crate) fn broadcast_ordermatch_message(
         None => (ctx.secp256k1_key_pair().private_bytes(), None),
     };
     let encoded_msg = encode_and_sign(&msg, &secret).unwrap();
-    broadcast_p2p_msg(ctx, topics.into_iter().collect(), encoded_msg, peer_id);
+    // CRD ch.32 §32.9B R-MP1 item 2: the cancellation and the swap-negotiation messages leave with priority.
+    broadcast_p2p_msg_with_priority(
+        ctx,
+        topics.into_iter().collect(),
+        encoded_msg,
+        peer_id,
+        msg.is_priority(),
+    );
 }
 
 #[cfg_attr(test, mockable)]

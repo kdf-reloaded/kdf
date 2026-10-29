@@ -60,8 +60,8 @@ use timed_map::TimedMap;
 use trie_db::NodeCodec as NodeCodecT;
 use uuid::Uuid;
 
-use crate::mm2::lp_network::{broadcast_p2p_msg, request_any_relay, request_one_peer, subscribe_to_topic, Libp2pPeerId,
-                             P2PRequest};
+use crate::mm2::lp_network::{broadcast_p2p_msg_with_priority, relay_queue_signal, relay_queue_signal_count,
+                             request_any_relay, request_one_peer, subscribe_to_topic, Libp2pPeerId, P2PRequest};
 use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, check_balance_for_taker_swap,
                           check_other_coin_balance_for_swap, insert_new_swap_to_db, is_pubkey_banned,
                           lp_atomic_locktime, run_maker_swap, run_taker_swap, swap_versioning::SwapVersion,
@@ -116,6 +116,12 @@ mod ordermatch_wasm_db;
 #[path = "lp_ordermatch/ordermatch_types.rs"]
 mod ordermatch_types;
 pub use ordermatch_types::*;
+
+#[path = "lp_ordermatch/maker_outbox.rs"] mod maker_outbox;
+pub(crate) use maker_outbox::*;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "lp_ordermatch/maker_outbox_lab_tests.rs"]
+mod maker_outbox_lab_tests;
 
 #[path = "lp_ordermatch/ordermatch_orderbook.rs"]
 mod ordermatch_orderbook;
@@ -400,6 +406,8 @@ pub(crate) struct OrdermatchContext {
     /// Pending MakerReserved messages for a specific TakerOrder UUID
     /// Used to select a trade with the best price upon matching
     pending_maker_reserved: AsyncMutex<HashMap<Uuid, Vec<MakerReserved>>>,
+    /// The outbox of the maker-order messages of this node (CRD ch.32 §32.9B R-MP1).
+    pub maker_outbox: MakerOutbox,
     #[cfg(target_arch = "wasm32")]
     ordermatch_db: ConstructibleDb<OrdermatchDb>,
 }
@@ -430,6 +438,7 @@ impl Default for OrdermatchContext {
             orderbook_subscriptions: PaRwLock::new(HashMap::default()),
             sync_answer_deferral: Default::default(),
             pending_maker_reserved: Default::default(),
+            maker_outbox: Default::default(),
             orderbook_tickers: Default::default(),
             original_tickers: Default::default(),
         }
@@ -473,6 +482,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
         sync_answer_deferral: Default::default(),
         pending_maker_reserved: Default::default(),
+        maker_outbox: Default::default(),
         orderbook_tickers,
         original_tickers,
         #[cfg(target_arch = "wasm32")]
@@ -502,6 +512,7 @@ impl OrdermatchContext {
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
                 pending_maker_reserved: Default::default(),
+                maker_outbox: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
             })
@@ -524,6 +535,7 @@ impl OrdermatchContext {
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
                 pending_maker_reserved: Default::default(),
+                maker_outbox: Default::default(),
                 orderbook_tickers: Default::default(),
                 original_tickers: Default::default(),
                 ordermatch_db: ConstructibleDb::new(&ctx2),

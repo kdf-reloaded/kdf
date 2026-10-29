@@ -514,14 +514,29 @@ fn refresh_liveness_from_order_message(ctx: &MmArc, pubkey: &str) {
 }
 
 /// Attempts to decode a message and process it returning whether the message is valid and worth rebroadcasting
-pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, msg: &[u8], i_am_relay: bool) -> bool {
+pub async fn process_msg(ctx: MmArc, topics: Vec<String>, from_peer: String, msg: &[u8], i_am_relay: bool) -> bool {
+    process_msg_with_priority(ctx, topics, from_peer, msg, i_am_relay)
+        .await
+        .0
+}
+
+/// Like [`process_msg`]; the second value tells whether a relay propagates the message with priority (CRD ch.32
+/// §32.9B R-MP1 item 2): a cancellation or a swap-negotiation message.
+pub async fn process_msg_with_priority(
+    ctx: MmArc,
+    _topics: Vec<String>,
+    from_peer: String,
+    msg: &[u8],
+    i_am_relay: bool,
+) -> (bool, bool) {
     match decode_signed::<new_protocol::OrdermatchMessage>(msg) {
         Ok((message, _sig, pubkey)) => {
             if is_pubkey_banned(&ctx, &pubkey.unprefixed().into()) {
                 log::warn!("Pubkey {} is banned", pubkey.to_hex());
-                return false;
+                return (false, false);
             }
-            match message {
+            let priority = message.is_priority();
+            let propagate = match message {
                 new_protocol::OrdermatchMessage::MakerOrderCreated(created_msg) => {
                     let order: OrderbookItem = (created_msg, hex::encode(pubkey.to_bytes().as_slice())).into();
                     insert_or_update_order(&ctx, order);
@@ -562,11 +577,12 @@ pub async fn process_msg(ctx: MmArc, _topics: Vec<String>, from_peer: String, ms
                     }
                     accepted
                 },
-            }
+            };
+            (propagate, priority)
         },
         Err(e) => {
             log::error!("Error {} while decoding signed message", e);
-            false
+            (false, false)
         },
     }
 }

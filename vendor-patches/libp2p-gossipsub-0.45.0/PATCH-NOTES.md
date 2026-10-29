@@ -103,8 +103,62 @@ one that answers pings and reads no gossip.
 `src/behaviour/tests.rs` changes only for the new `Handler::new` arguments.
 
 **Tests.** `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib -- send_queue:: handler::tests`
-(15 tests), and `cargo test -p mm2_p2p --test gossip_send_queue` (in-process, five fast tests).
+(29 tests), and `cargo test -p mm2_p2p --test gossip_send_queue` (in-process, fast tests).
 The six upstream failures listed under "Test status" are unchanged.
+
+## Pressure signal and priority lane (not security-related)
+
+An amendment to the send queue above, for the maker publication rate control: CRD ch.28 §28.9B RQ1
+items 8 and 9 and CRD ch.32 §32.9B (Reloaded-original). The wire is unchanged.
+
+**Why.** A node that publishes faster than a relay reads cannot move a keep-alive past the messages
+it has already queued. The application needs to know when a connection is falling behind, and
+cancellations and swap negotiation messages must not wait behind queued order updates.
+
+**What changed.**
+
+1. **`src/send_queue.rs`** -- `SendQueue` gains a *priority lane*, a separate FIFO that `pop`
+   serves before everything else. A priority RPC does not count toward the data cap and is never
+   dropped. A lane that already holds 256 RPCs (`priority_max`) refuses the next one and reports an
+   overflow once. It also derives a *pressure* level from the data queue: raised when the queue
+   reaches 256 data RPCs (`pressure_raise`) or a period at the cap starts, cleared when it is at 64 or
+   fewer (`pressure_clear`) with no period running. `take_pressure_change` hands out each change once.
+   `SendQueueStats` (queued data RPCs and dropped count, atomics shared with the behaviour) and
+   `SendQueueSnapshot` serve the metrics.
+2. **`src/handler.rs`** -- `HandlerIn::PriorityMessage` queues into the lane. `HandlerEvent`
+   gains `SendQueuePressure { raised }`, emitted from `poll`; a lane overflow is reported as
+   `SendQueueStuck` (the behaviour closes the connection) with a log line naming the peer.
+3. **`src/behaviour.rs`** -- `publish_with_priority`, `publish_from_with_priority` and
+   `propagate_message_with_priority` mark every copy of the message they write as priority
+   (`forward_msg`, `send_message` and `notify_primary` take the mark; all other callers pass
+   `false`). Gossipsub does not tell message kinds apart; the application chooses. The behaviour
+   turns `SendQueuePressure` into `Event::SendQueuePressure { peer_id, connection_id, raised }`,
+   reports a closed connection as cleared, and keeps the counters of closed connections in the
+   dropped total. `send_queue_snapshot()` returns the sums, `relay_send_queue_pressure()` tells
+   whether any connection to a connected relay is raised. `Event::RelayMeshJoined { peer_id }` is
+   emitted when a connected relay is added to the relay mesh (used for the keep-alive round after a
+   reconnect).
+4. **`src/config.rs`** -- `ConfigBuilder::send_queue_pressure_raise`, `send_queue_pressure_clear`
+   and `send_queue_priority_max` (and getters); defaults 256, 64 and 256. KDF's own configuration
+   keeps the defaults.
+
+**Queue signal and relay close** (CRD ch.32 §32.9B R-MP2 item 2, ch.28 §28.9B RQ1 item 8, amended
+2026-10-28). The maker publication budget needs two signals that a relay is not keeping up.
+
+5. **`src/send_queue.rs`** -- the *queue signal*: raised when the data queue has held at least one
+   data RPC for 2 seconds without becoming empty, or the pressure level of item 8 is raised; cleared
+   when the data queue has been empty for 5 seconds and the pressure level is cleared. Timing takes
+   the current time as an argument (`update_signal`, `signal_deadline`, `pop_at`).
+6. **`src/handler.rs`** -- `HandlerEvent::SendQueueSignal { raised }`, reported once per change. The
+   handler's timer now serves the earliest of the stuck deadline and the signal deadline.
+7. **`src/behaviour.rs`** -- `Event::SendQueueSignal`, `relay_queue_signal()` (the signal is raised
+   toward a connected relay), `queue_signals_raised()` (how often it was raised toward a relay) and
+   `Event::RelayConnectionClosed { peer_id }`, emitted when the last connection to a relay closes.
+8. **`src/config.rs`** -- `send_queue_signal_raise_after` and `send_queue_signal_clear_after`, for tests.
+
+**Tests.** Unit tests in `send_queue.rs` and `handler.rs` (included in the filter above) and four
+in `src/behaviour/tests.rs`, run with the filter `test_priority_ test_send_queue_ test_relay_mesh_join`;
+in-process tests in `mm2_p2p/tests/gossip_send_queue.rs`.
 
 ## Manifest changes (not security-related)
 
@@ -128,7 +182,8 @@ resolve fresh.
 ## Test status
 
 `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib`
-→ **139 passed, 6 failed** (124 passed before the send queue change added 15 tests).
+→ **158 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
+the pressure signal and the priority lane, and 6 more with the queue signal).
 
 Those 6 (`test_flood_publish`, `do_forward_messages_to_explicit_peers`,
 `test_do_not_use_floodsub_in_fanout`, `test_publish_to_floodsub_peers_without_flood_publish`,
