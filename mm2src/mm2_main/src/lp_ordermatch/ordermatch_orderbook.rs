@@ -1331,8 +1331,10 @@ pub(crate) const EARLY_PURGE_MIN_INTERVAL_MS: u64 = 5_000;
 /// The most queued batches the worker applies as one sequence (CRD ch.32 R-K5 item 1).
 pub(crate) const DRAIN_MAX_BATCHES: usize = 1024;
 /// The most events the worker applies as one sequence (CRD ch.32 R-K5 item 1). A single batch larger
-/// than this is applied alone.
-pub(crate) const DRAIN_MAX_EVENTS: usize = 16_384;
+/// than this is applied alone. It bounds how long the worker holds the trie store lock, which the
+/// readers that hold the orderbook lock wait for: measured in release on a loaded machine, 2,048 events of
+/// new orders took a median of 26 to 45 ms, 4,096 events 52 to 90 ms and 16,384 events 232 to 374 ms.
+pub(crate) const DRAIN_MAX_EVENTS: usize = 2048;
 
 impl TrieStore {
     /// Apply one queued batch and count it. A batch made only of the test-only `Flush` barrier is not
@@ -1704,7 +1706,12 @@ pub(crate) fn take_waiting_batches(
 
 /// Apply `batches` as one sequence under the caller's hold of the trie store lock, purge early if
 /// due, and report the counters the sequence moved. `reported` is what has been reported already.
-fn apply_sequence(store: &mut TrieStore, batches: Vec<Vec<TrieOp>>, metrics: &MetricsWeak, reported: &mut (u64, u64)) {
+pub(crate) fn apply_sequence(
+    store: &mut TrieStore,
+    batches: Vec<Vec<TrieOp>>,
+    metrics: &MetricsWeak,
+    reported: &mut (u64, u64),
+) {
     store.apply_batches(batches);
     store.purge_if_loaded(now_ms());
     let (early_purges, evicted) = (store.early_purges, store.history_evicted);

@@ -1609,10 +1609,15 @@ the leftovers of an applied update cost:
 
 1. *Drain in bulk.* When the worker wakes it takes the batch that woke it and
    every further batch already waiting in the queue, up to 1,024 batches or
-   16,384 events, whichever comes first, and applies them as one sequence under
+   2,048 events, whichever comes first, and applies them as one sequence under
    one acquisition of the trie-store lock. A batch that would pass the event
    bound starts the next sequence, and a batch larger than the bound is applied
-   alone. By R-T3a the outcome is exactly that
+   alone. The event bound limits how long the trie-store lock is held, and with
+   it how long a reader that took the orderbook lock first (the synchronization
+   answer, the order-book request and the keep-alive consistency check of
+   R-T3b) can wait behind the worker: measured in a release build, a sequence
+   of 2,048 new orders applies in about 45 ms on one pair, and 16,384 events took
+   about 370 ms. By R-T3a the outcome is exactly that
    of applying the batches one by one; only the delta history may hold fewer
    entries, because a root that exists only between two merged batches is never
    stored. The node's own keep-alive never advertises such a root (R-T3b item 2
@@ -1643,8 +1648,12 @@ the leftovers of an applied update cost:
 No item changes a wire shape. The one effect a peer can see is a full snapshot
 where a delta would have been sent, for a root that, under item 1, is no longer
 stored; every requester can apply it (R-Q5), and it happens only while the
-worker is behind. It is a divergence to record in the operator-facing
-compatibility documents.
+worker is behind. The cost is the full order set of one slice (one pubkey and
+pair) in place of the changed orders only, per such request, so a relay that
+merges while many peers ask pays more outbound bytes exactly when it is busy;
+the answer is no larger than the one a peer that has just joined receives for
+that slice. It is a divergence to record in the
+operator-facing compatibility documents.
 
 **R-K6 (a cap on each pair's delta history; Reloaded-original, 2026-10-29).** The
 delta history of a `(pubkey, pair)` slice (R-P5, R-T4) holds at most 2,048

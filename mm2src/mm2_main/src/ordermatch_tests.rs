@@ -7415,7 +7415,7 @@ mod trie_store_memory_retention {
 
     /// T-K5: bounds of one sequence, and the batch that does not fit starts the next one.
     #[test]
-    fn t_k5_the_drain_takes_at_most_1024_batches_or_16384_events() {
+    fn t_k5_the_drain_takes_at_most_1024_batches_or_2048_events() {
         let op = |n: u64| insert_op(MAKER, MAKER, trie_op_uuid(n), 1000 + n);
         let take = |rx: &mut mpsc::UnboundedReceiver<Vec<TrieOp>>, carry: &mut Option<Vec<TrieOp>>| {
             let first = carry.take().unwrap_or_else(|| rx.try_recv().unwrap());
@@ -7435,27 +7435,28 @@ mod trie_store_memory_retention {
         drop(tx);
         assert_eq!(rx.try_recv().err(), Some(TryRecvError::Closed));
 
-        // events bound: 500 events a batch, 32 of them are 16,000 events, the 33rd would pass 16,384
+        // events bound: 500 events a batch, 4 of them are 2,000 events, the 5th would pass 2,048
+        assert_eq!((DRAIN_MAX_EVENTS, DRAIN_MAX_BATCHES), (2048, 1024));
         let (tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
         for b in 0..40 {
             tx.unbounded_send((0..500).map(|n| op(b * 500 + n)).collect()).unwrap();
         }
         let mut carry = None;
         let (batches, _) = take(&mut rx, &mut carry);
-        assert_eq!(batches.len(), 32);
-        assert!(carry.is_some(), "the 33rd batch waits for the next sequence");
+        assert_eq!(batches.len(), 4);
+        assert!(carry.is_some(), "the 5th batch waits for the next sequence");
         let (batches, _) = take(&mut rx, &mut carry);
-        assert_eq!(batches.len(), 8, "the carried batch is the first of the next sequence");
-        assert!(carry.is_none());
+        assert_eq!(batches.len(), 4, "the carried batch is the first of the next sequence");
+        assert!(carry.is_some());
 
         // a batch beyond the bound is applied alone
         let (tx2, mut rx2) = mpsc::unbounded::<Vec<TrieOp>>();
-        tx2.unbounded_send((0..20_000).map(op).collect()).unwrap();
+        tx2.unbounded_send((0..5_000).map(op).collect()).unwrap();
         tx2.unbounded_send(vec![op(1)]).unwrap();
         let mut carry = None;
         let (batches, _) = take(&mut rx2, &mut carry);
         assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].len(), 20_000);
+        assert_eq!(batches[0].len(), 5_000);
         let (batches, _) = take(&mut rx2, &mut carry);
         assert_eq!(batches.len(), 1);
 
@@ -7609,7 +7610,7 @@ mod trie_store_memory_retention {
         let store = Arc::new(PaMutex::new(TrieStore::default()));
         let (tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
         let mut n = 0;
-        // 110,000 new orders in 100 batches: 7 sequences of 14 batches, then 2 batches
+        // 110,000 new orders in 100 batches of 1,100: two of them pass the event bound, so a batch is a sequence
         for _ in 0..100 {
             let batch = (0..1100)
                 .map(|_| {
@@ -7626,7 +7627,7 @@ mod trie_store_memory_retention {
         assert_eq!(store.applied_batches, 100);
         assert_eq!(
             store.early_purges, 1,
-            "the purge came after the 7th sequence, 107,800 updates"
+            "the purge came with the 91st batch, 100,100 updates"
         );
         assert_eq!(counters(&ctx)["orderbook.trie_store.early_purges"], 1);
         assert!(
@@ -7739,15 +7740,21 @@ mod trie_store_memory_retention {
 
     // ---- measurement harness of docs/plans/orderbook-queue-and-history-caps.md (ignored by default)
     //
-    // cargo test --release -p mm2_main --lib measure_burst_retention -- --ignored --nocapture --test-threads=1
+    // cargo test --release -p mm2_main --lib --features counting-alloc measure_burst_retention -- --ignored --nocapture --test-threads=1
+    //
+    // The feature `counting-alloc` installs the counting allocator (`counting_alloc` below) as the
+    // allocator of the whole test binary; without it the harness is not compiled and the tests run on
+    // the system allocator.
     //
     // With KDF_HARNESS_LEGACY_WORKER set, the worker applies one queued batch at a time with no early
     // purge, the way it did before R-K5 (compile with the cap `TRIE_DIFF_HISTORY_CAP` raised to
     // `usize::MAX` for the full "before" picture of R-K6).
 
     /// The deltas live a minute instead of the production 300 s so that the run can wait them out.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     const HARNESS_TTL: Duration = Duration::from_secs(60);
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     fn install_legacy_worker(ctx: &MmArc) {
         let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
         let (trie_ops_tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
@@ -7773,8 +7780,10 @@ mod trie_store_memory_retention {
         from_ctx(&ctx.ordermatch_ctx, move || Ok(octx)).unwrap();
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     fn mb(bytes: isize) -> f64 { bytes as f64 / 1_048_576. }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     fn measure(legacy: bool, stalled: bool) {
         use super::counting_alloc;
         const UPDATES: u64 = 120_480;
@@ -7862,6 +7871,7 @@ mod trie_store_memory_retention {
     }
 
     #[test]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
     #[ignore = "measurement harness of docs/plans/orderbook-queue-and-history-caps.md, run alone"]
     fn measure_burst_retention() {
         let legacy = std::env::var("KDF_HARNESS_LEGACY_WORKER").is_ok();
@@ -7869,12 +7879,112 @@ mod trie_store_memory_retention {
             measure(legacy, stalled);
         }
     }
+
+    // ---- how long the worker holds the trie store lock (ignored harness)
+    //
+    // cargo test --release -p mm2_main --lib measure_lock_hold -- --ignored --nocapture --test-threads=1
+    //
+    // The readers that take the orderbook lock and then wait for the trie store lock wait as long as the
+    // worker holds it, so the hold of one sequence (`apply_sequence`: apply, early purge if due, report)
+    // is what the other users of the orderbook can be made to wait for.
+
+    /// `events` insertions of new orders (distinct uuids from `first`), round-robin over `pubkeys` pubkeys and
+    /// `pairs` pairs.
+    fn new_orders(first: u64, events: u64, pubkeys: u64, pairs: u64) -> Vec<TrieOp> {
+        (first..first + events)
+            .map(|n| {
+                let pubkey = format!("02{:064x}", n % pubkeys);
+                let uuid = trie_op_uuid(n);
+                TrieOp::Insert {
+                    alb_pair: format!("P{}:KMD", (n / pubkeys) % pairs),
+                    order: trie_op_item(&pubkey, "P", "KMD", uuid, 1000 + n),
+                    pubkey,
+                    uuid,
+                }
+            })
+            .collect()
+    }
+
+    fn in_batches(ops: Vec<TrieOp>, batch_len: usize) -> Vec<Vec<TrieOp>> {
+        let mut batches = Vec::new();
+        let mut ops = ops.into_iter().peekable();
+        while ops.peek().is_some() {
+            batches.push(ops.by_ref().take(batch_len).collect());
+        }
+        batches
+    }
+
+    #[test]
+    #[ignore = "measurement harness, run alone"]
+    fn measure_lock_hold() {
+        const PREFILL: u64 = 30_000;
+        const PER_CONFIG: u64 = 65_536;
+        let (ctx, ..) = make_ctx_for_tests();
+        let metrics = ctx.metrics.weak();
+        let ms = |since: std::time::Instant| since.elapsed().as_secs_f64() * 1000.;
+
+        // (a) and (c): sequences of N events (batches of 16 events) on distinct new orders, over a store
+        // that already holds 30,000 orders
+        for (what, pubkeys, pairs) in [("1 pubkey x 1 pair", 1, 1), ("100 pubkeys x 25 pairs", 100, 25)] {
+            for sequence_events in [16_384u64, 4_096, 2_048, 1_024] {
+                let mut store = TrieStore::default();
+                store.apply_batches(in_batches(new_orders(0, PREFILL, pubkeys, pairs), 16));
+                store.leaf_updates_since_purge = 0;
+                let mut holds = Vec::new();
+                let mut reported = (0, 0);
+                for k in 0..PER_CONFIG / sequence_events {
+                    let first = PREFILL + k * sequence_events;
+                    let batches = in_batches(new_orders(first, sequence_events, pubkeys, pairs), 16);
+                    let started = std::time::Instant::now();
+                    apply_sequence(&mut store, batches, &metrics, &mut reported);
+                    holds.push(ms(started));
+                }
+                assert_eq!(store.early_purges, 0, "the purge would be part of the hold");
+                holds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "LOCKHOLD apply_sequence {what}: events_per_sequence={sequence_events} sequences={} \
+                     median_ms={:.1} p90_ms={:.1} max_ms={:.1}",
+                    holds.len(),
+                    holds[holds.len() / 2],
+                    holds[holds.len() * 9 / 10],
+                    holds[holds.len() - 1]
+                );
+            }
+        }
+
+        // (b): the early purge of a store holding 100,000 replaced leaves
+        for live in [30u64, 30_000] {
+            let mut store = TrieStore::default();
+            store.apply_batches(in_batches(new_orders(0, live, 1, 1), 16));
+            store.leaf_updates_since_purge = 0;
+            for i in 0..EARLY_PURGE_LEAF_UPDATES {
+                let uuid = trie_op_uuid(i % live);
+                let op = TrieOp::Insert {
+                    pubkey: format!("02{:064x}", 0),
+                    alb_pair: "P0:KMD".to_owned(),
+                    uuid,
+                    order: trie_op_item(&format!("02{:064x}", 0), "P", "KMD", uuid, 10_000_000 + i),
+                };
+                store.apply_batches(vec![vec![op]]);
+            }
+            let stored_before = stored_nodes(&store);
+            let started = std::time::Instant::now();
+            assert!(store.purge_if_loaded(now_ms() + 10_000));
+            println!(
+                "LOCKHOLD early purge: live_orders={live} stored_nodes_before={stored_before} \
+                 stored_nodes_after={} purge_ms={:.1}",
+                stored_nodes(&store),
+                ms(started)
+            );
+        }
+    }
 }
 
-/// A counting `#[global_allocator]` for the ignored measurement harness of `trie_store_memory_retention`.
-/// It always counts the live bytes (one relaxed atomic add or subtract per call); the peak is followed
+/// A counting `#[global_allocator]` for the ignored measurement harness of `trie_store_memory_retention`,
+/// compiled only with the cargo feature `counting-alloc` so that normal test runs keep the system
+/// allocator. It always counts the live bytes (one relaxed atomic add or subtract per call); the peak is followed
 /// only while the harness asks for it.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
 mod counting_alloc {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};

@@ -24,7 +24,7 @@ The queue between the order handlers and the trie worker has no limit and
 costs about 1.9 KB per queued update while the worker lags. A hard bound is not
 possible without a wait on the producer (forbidden by ch.32 R-T3b item 3) or the
 loss of an event (the trie and the read index would diverge). So the worker is
-made fast instead: it takes everything waiting, up to 1,024 batches or 16,384
+made fast instead: it takes everything waiting, up to 1,024 batches or 2,048
 events, and applies it as one sequence (R-K5 item 1). The result equals
 one-by-one application (R-T3a); only the delta history gets fewer entries, and a
 requester holding a root that fell inside a merged sequence gets a full snapshot.
@@ -83,6 +83,34 @@ the 120,480-update burst of the retention work (peak live bytes, and bytes 330 s
 after the burst) and a sustained-rate run showing the node store stays below the
 early-purge bound.
 
+## Review finding and measurement of the lock hold (2026-10-29)
+
+The review of the first implementation noted that readers take the orderbook lock
+and then wait for the trie-store lock, so a long hold by the worker stalls every
+orderbook user. Measured in a release build on a loaded host (30,000 stored
+orders, 65,536 new events on distinct uuids, one sequence timed):
+
+| Events per sequence | One pair, median | 100 pubkeys x 25 pairs, median |
+|---|---|---|
+| 16,384 | 374 ms | 232 ms |
+| 4,096 | 90 ms | 52 ms |
+| 2,048 (chosen) | 45 ms | 26 ms |
+| 1,024 | 20 ms | 13 ms |
+
+The bound was lowered from 16,384 to 2,048 events so that a sequence stays under
+about 50 ms at the median. The one-batch-at-a-time hold of the old worker was
+shorter, which is the price of the bulk drain; a time-based bound (apply in
+chunks and release the lock after about 25 ms) is feasible, is about 30 lines,
+and was not built.
+
 ## Open points for the maintainer
 
-None at this time. Moving the status of this plan is the maintainer's.
+1. The early purge runs inside the worker's lock hold, after the apply. Measured
+   in the same build: 79 ms with 30 live orders and about 300,000 stored nodes,
+   280 ms with 30,000 live orders and about 640,000 stored nodes. It happens at
+   most once per 5 seconds and only under sustained load; the ten-minute purge
+   has the same cost today. Options: leave it; lower the 100,000-update threshold
+   (roughly a quarter of the cost per purge at 25,000, but four times as many
+   purges); or make the purge incremental (a larger change).
+
+Moving the status of this plan is the maintainer's.

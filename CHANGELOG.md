@@ -322,7 +322,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed
 
 - **The order-book store no longer grows without bound when a maker updates orders very fast.** The
-  node now applies queued order updates in bulk (up to 1,024 at a time), drops the unused entries of
+  node now applies queued order updates in bulk (up to 1,024 batches or 2,048 events at a time), drops the unused entries of
   its node store as soon as 100,000 updates have piled up (at most every five seconds) instead of
   only every ten minutes, and keeps at most 2,048 stored changes per maker and pair. In a test
   of 120,480 updates for 30 orders the memory left after the node caught up fell from 134 MB to
