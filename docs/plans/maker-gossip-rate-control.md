@@ -307,3 +307,21 @@ If the maintainer wants it, in addition to or instead of A:
 3. Tests 1–9.
 4. A swaplab run on the lab setup of 2026-10-28, before and after.
 5. CHANGELOG, in plain words.
+
+## Deferred work
+
+Recorded 2026-10-29, after the lab runs of the merged design. None of these is
+bound by the CRD yet. The default ceiling and the climb step were measured and
+decided the same day (CRD ch.32 D8: 20 per second, +0.5 per second every
+30 seconds) and are not deferred.
+
+- **A budget that reads the TCP send queue.** Toward a relay whose bandwidth is
+  limited, the backlog first builds in the kernel's send queue, below the
+  handler queue that the queue signal watches. A signal from the send-queue
+  depth would fire earlier in that mode. It needs a per-connection reading of
+  the socket's send queue, which the transport does not expose today.
+- **A slow start per new relay connection.** The first signal comes only after
+  the load has started, so a burst can still cost one expiry of the maker's
+  orders per new relay connection (CRD ch.32 D7, the part still open). A low
+  starting rate for each new connection would close that gap. It was not
+  chosen on 2026-10-28; decide after more field data.

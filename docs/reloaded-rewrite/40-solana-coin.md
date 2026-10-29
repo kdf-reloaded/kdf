@@ -274,9 +274,10 @@ default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the default.
 It is recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch
 exists".
 
-> **Status (2026-10-28).** Not implemented. In this repository a transport
-> failure embeds the lower layer's text, which carries the node's full URL,
-> and the node client derives a debug form that prints the URL.
+> **Status (2026-10-28).** Implemented. Transport failures name the node
+> host-only through the shared helper (`coins/node_url.rs`), and the node
+> client's debug form shows the node host-only. T40.10 covers it; the test
+> against the live devnet needs network access.
 
 ## 40.6 Reloaded status (informative)
 

@@ -391,7 +391,7 @@ impl HDAddressBalanceScanner for SiaAddressScanner {
             .client
             .get_address_events(address.clone())
             .await
-            .map_to_mm(|e| BalanceError::Transport(e.to_string()))?;
+            .map_to_mm(|e| BalanceError::Transport(sia_text(&e)))?;
         Ok(!events.is_empty())
     }
 }
@@ -450,7 +450,7 @@ impl HDWalletBalanceOps for SiaCoin {
             .client
             .address_balance(address.clone())
             .await
-            .map_to_mm(|e| BalanceError::Transport(e.to_string()))?;
+            .map_to_mm(|e| BalanceError::Transport(sia_text(&e)))?;
         Ok(CoinBalance {
             spendable: hastings_to_siacoin(balance.siacoins),
             unspendable: hastings_to_siacoin(balance.immature_siacoins),

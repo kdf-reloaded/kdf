@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use uuid::Uuid;
 
 /// R-MP2 item 1: the default of `maker_update_rate_max`, messages per second per maker pubkey.
-pub(crate) const DEFAULT_MAKER_UPDATE_RATE_MAX: f64 = 10.0;
+pub(crate) const DEFAULT_MAKER_UPDATE_RATE_MAX: f64 = 20.0;
 /// R-MP2 item 1: the burst is this many times the rate.
 const BURST_FACTOR: f64 = 10.0;
 /// R-MP2 item 3: the rate in degraded mode, messages per second.
@@ -25,7 +25,7 @@ const DEGRADED_FOR_MS: u64 = 5 * 60_000;
 /// R-MP2 item 3: the rate rises by this much, in messages per second, ...
 const RAISE_STEP: f64 = 0.5;
 /// ... this often.
-const RAISE_INTERVAL_MS: u64 = 60_000;
+const RAISE_INTERVAL_MS: u64 = 30_000;
 /// R-MP2 item 3 and D7: the trip rate is forgotten this long after the last signal.
 const TRIP_FORGOTTEN_AFTER_MS: u64 = 30 * 60_000;
 /// R-MP2 item 5: the minimum time between two log lines of one pubkey.
@@ -800,6 +800,33 @@ mod tests {
         assert_eq!(total, 100);
     }
 
+    // T-MP4: with no `maker_update_rate_max` setting, the ceiling is 20/s and the burst 200.
+    #[test]
+    fn the_default_ceiling_is_twenty_per_second_with_a_burst_of_two_hundred() {
+        assert_eq!(DEFAULT_MAKER_UPDATE_RATE_MAX, 20.0);
+        let mut outboxes = MakerOutboxes::default();
+        let now = 1_000_000;
+        let uuids: Vec<Uuid> = (0..450).map(|_| Uuid::new_v4()).collect();
+        let mut released = 0;
+        for uuid in &uuids {
+            released += enqueue_with(
+                &mut outboxes,
+                now,
+                false,
+                DEFAULT_MAKER_UPDATE_RATE_MAX,
+                *uuid,
+                "t",
+                update_msg(*uuid, 1),
+            )
+            .len();
+        }
+        assert_eq!(released, 200);
+        assert_eq!(outboxes.pending_of(PK), 250);
+        // One second later the ceiling lets 20 more leave.
+        let (out, _) = outboxes.tick(now + 1_000, false, DEFAULT_MAKER_UPDATE_RATE_MAX);
+        assert_eq!(out.len(), 20);
+    }
+
     #[test]
     fn oldest_slot_leaves_first_and_a_merge_keeps_the_slot() {
         let mut outboxes = MakerOutboxes::default();
@@ -893,7 +920,7 @@ mod tests {
         assert!(!outboxes.is_degraded(PK));
     }
 
-    // T-MP4: the rate rises by 0.5/s every 60 s and stops one step below the trip rate: with a trip rate of 3/s, at
+    // T-MP4: the rate rises by 0.5/s every 30 s and stops one step below the trip rate: with a trip rate of 3/s, at
     // 2.5/s.
     #[test]
     fn the_climb_stops_one_step_below_the_trip_rate() {
@@ -903,15 +930,15 @@ mod tests {
         let left = t0 + 5 * MIN;
         run(&mut outboxes, t0, left, 10_000, 3.0, 0);
         assert_eq!(outboxes.rate_of(PK, 3.0), 0.5);
-        for (minutes, expected) in [(1, 1.0), (2, 1.5), (3, 2.0), (4, 2.5), (5, 2.5), (20, 2.5)] {
-            run(&mut outboxes, left, left + minutes * MIN, 10_000, 3.0, 0);
+        for (secs, expected) in [(30, 1.0), (60, 1.5), (90, 2.0), (120, 2.5), (150, 2.5), (1_200, 2.5)] {
+            run(&mut outboxes, left, left + secs * 1_000, 10_000, 3.0, 0);
             // Between the steps the rate does not move.
-            assert_eq!(outboxes.rate_of(PK, 3.0), expected, "after {} min of climbing", minutes);
+            assert_eq!(outboxes.rate_of(PK, 3.0), expected, "after {} s of climbing", secs);
         }
         // Not one step earlier.
         let mut outboxes = outboxes_with_pk(t0, 3.0);
         outboxes.signal(t0, SignalKind::Close);
-        run(&mut outboxes, t0, left + MIN - 10_000, 10_000, 3.0, 0);
+        run(&mut outboxes, t0, left + 30_000 - 10_000, 10_000, 3.0, 0);
         assert_eq!(outboxes.rate_of(PK, 3.0), 0.5);
     }
 
@@ -954,12 +981,12 @@ mod tests {
         let mut outboxes = outboxes_with_pk(t0, CEILING);
         outboxes.signal(t0, SignalKind::Close);
         let left = t0 + 5 * MIN;
-        run(&mut outboxes, t0, left + 4 * MIN, 10_000, CEILING, 0);
+        run(&mut outboxes, t0, left + 2 * MIN, 10_000, CEILING, 0);
         assert_eq!(outboxes.rate_of(PK, CEILING), 2.5);
-        outboxes.signal(left + 4 * MIN + 1_000, SignalKind::Close);
+        outboxes.signal(left + 2 * MIN + 1_000, SignalKind::Close);
         assert!(outboxes.is_degraded(PK));
-        let again = left + 4 * MIN + 1_000 + 5 * MIN;
-        run(&mut outboxes, left + 4 * MIN, again + 20 * MIN, 10_000, CEILING, 0);
+        let again = left + 2 * MIN + 1_000 + 5 * MIN;
+        run(&mut outboxes, left + 2 * MIN, again + 20 * MIN, 10_000, CEILING, 0);
         assert_eq!(
             outboxes.rate_of(PK, CEILING),
             2.0,
@@ -1050,7 +1077,7 @@ mod tests {
         let uuid = Uuid::new_v4();
         enqueue(&mut outboxes, t0, false, uuid, "t", update_msg(uuid, 1));
         let _ = outboxes.signal(t0, SignalKind::Close);
-        // The climb back up changes the rate every minute: one line each time, never faster.
+        // The climb back up changes the rate every 30 s: a line at most once a minute, never faster.
         let mut lines = Vec::new();
         for s in 0..=1_200 {
             let (_, logs) = outboxes.tick(t0 + s * 1_000, false, CEILING);

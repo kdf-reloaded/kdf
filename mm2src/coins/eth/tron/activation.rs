@@ -14,7 +14,7 @@
 
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
-use crate::eth::node_url::host_only;
+use crate::node_url::host_only;
 
 use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
                  EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
@@ -119,9 +119,8 @@ pub async fn tron_coin_from_conf_and_request(
     // never dispatch RPCs through this provider; it exists only to satisfy
     // the shared `EthCoinImpl` shape.
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
-    let web3 =
-        crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes(ticker, urls), event_handlers)
-            .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
+    let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes(ticker, urls), event_handlers)
+        .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
 
     if req["swap_contract_address"].is_string() {
         warn!("TRON coin '{ticker}': swap_contract_address ignored (TRON swaps not yet wired)");
@@ -262,9 +261,9 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(err.contains("not a valid URI"), "{err}");
+        assert!(err.contains("not a valid URI"), "the invalid-URI reason is missing");
         for secret in ["user", "secret", "APIKEY", "token=X", "bad host"] {
-            assert!(!err.contains(secret), "{secret} in {err}");
+            assert!(!err.contains(secret), "a credential part is rendered");
         }
     }
 

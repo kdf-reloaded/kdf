@@ -77,7 +77,7 @@ impl From<AccountError> for WithdrawError {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SolanaActivationParams {
     confirmation_commitment: CommitmentLevel,
     /// Single-endpoint shorthand. Kept for backwards compatibility
@@ -91,6 +91,25 @@ pub struct SolanaActivationParams {
     /// quarantined for `QUARANTINE_TTL_SECS` and traffic moves on.
     #[serde(default)]
     client_urls: Vec<String>,
+}
+
+/// The debug form names each node by its host-only form (CRD ch.40 R40.5A.1, ch.35 R35.1.17).
+impl std::fmt::Debug for SolanaActivationParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let client_urls: Vec<String> = self
+            .client_urls
+            .iter()
+            .map(|url| crate::node_url::host_only(url))
+            .collect();
+        f.debug_struct("SolanaActivationParams")
+            .field("confirmation_commitment", &self.confirmation_commitment)
+            .field(
+                "client_url",
+                &self.client_url.as_deref().map(crate::node_url::host_only),
+            )
+            .field("client_urls", &client_urls)
+            .finish()
+    }
 }
 
 impl SolanaActivationParams {

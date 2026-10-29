@@ -36,7 +36,11 @@ impl SiaCoin {
                 Err(e) => {
                     warn!(
                         "utxo_from_txid({}, {}) attempt {}/{} failed, retrying: {}",
-                        txid, vout_index, attempt, ATTEMPTS, e
+                        txid,
+                        vout_index,
+                        attempt,
+                        ATTEMPTS,
+                        sia_text(&e)
                     );
                     last_err = Some(e);
                     if attempt < ATTEMPTS {
@@ -288,7 +292,7 @@ impl SiaCoin {
             Err(e) => {
                 debug!(
                     "SiaCoin::new_validate_fee: fee_tx not found on chain {}, checking mempool",
-                    e
+                    sia_text(&e)
                 );
                 match self.client.get_unconfirmed_transaction(&fee_txid).await? {
                     Some(tx) => {

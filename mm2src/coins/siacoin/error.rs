@@ -26,12 +26,17 @@ use uuid::Uuid;
 
 use crypto::privkey::PrivKeyError;
 
+use crate::node_url::scrub_urls_in_text;
 use crate::siacoin::client_error::{BroadcastTransactionError, ClientError, CurrentHeightError,
                                    FindWhereUtxoSpentError, GetMedianTimestampError, GetUnconfirmedTransactionError,
                                    UtxoFromTxidError};
 use crate::siacoin::{Address, Currency, Event, EventDataWrapper, Hash256, Hash256Error, KeypairError, PreimageError,
                      PublicKeyError, SiaTransaction, SiacoinOutput, TransactionId, V2TransactionBuilderError};
 use crate::{DexFee, TransactionEnum};
+
+/// The text of an error that comes from the external Sia library or its HTTP client, with every URL in it reduced
+/// to its host-only form (CRD ch.20 R-N1): the library's request errors carry the full request URL.
+pub(crate) fn sia_text(error: &dyn std::fmt::Display) -> String { scrub_urls_in_text(&error.to_string()) }
 
 // =====================================================================
 // 1. Conversion / parse errors
@@ -170,7 +175,7 @@ pub enum SendTakerFeeError {
     MyKeypair(#[from] SiaCoinMyKeypairError),
     #[error("[taker-fee] funding failed: {0}")]
     FundTx(#[from] V2TransactionBuilderError),
-    #[error("[taker-fee] broadcast failed: {0}")]
+    #[error("[taker-fee] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
 }
 
@@ -189,7 +194,7 @@ pub enum SendMakerPaymentError {
     ParseSecretHash(#[from] Hash256Error),
     #[error("[maker-payment] funding failed: {0}")]
     FundTx(#[from] V2TransactionBuilderError),
-    #[error("[maker-payment] broadcast failed: {0}")]
+    #[error("[maker-payment] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
 }
 
@@ -208,7 +213,7 @@ pub enum SendTakerPaymentError {
     SecretHashLength(#[from] Hash256Error),
     #[error("[taker-payment] funding failed: {0}")]
     FundTx(#[from] V2TransactionBuilderError),
-    #[error("[taker-payment] broadcast failed: {0}")]
+    #[error("[taker-payment] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
 }
 
@@ -230,11 +235,11 @@ pub enum SendRefundHltcError {
     MyKeypair(#[from] SiaCoinMyKeypairError),
     #[error("[refund-hltc] arg parse failed: {0}")]
     ParseArgs(#[from] SiaRefundPaymentArgsError),
-    #[error("[refund-hltc] utxo lookup failed: {0}")]
+    #[error("[refund-hltc] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
     #[error("[refund-hltc] HTLC SpendPolicy unsatisfied: {0}")]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
-    #[error("[refund-hltc] broadcast failed: {0}")]
+    #[error("[refund-hltc] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
     #[error("[refund-hltc] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend")]
     HtlcBelowMinerFee { htlc_value: Currency, miner_fee: Currency },
@@ -255,11 +260,11 @@ pub enum TakerSpendsMakerPaymentError {
     ParseSecret(#[from] PreimageError),
     #[error("[taker-spends-maker] secret_hash parse failed: {0}")]
     ParseSecretHash(#[from] Hash256Error),
-    #[error("[taker-spends-maker] utxo lookup failed: {0}")]
+    #[error("[taker-spends-maker] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
     #[error("[taker-spends-maker] HTLC SpendPolicy unsatisfied: {0}")]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
-    #[error("[taker-spends-maker] broadcast failed: {0}")]
+    #[error("[taker-spends-maker] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
     #[error(
         "[taker-spends-maker] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend"
@@ -282,11 +287,11 @@ pub enum MakerSpendsTakerPaymentError {
     ParseSecret(#[from] PreimageError),
     #[error("[maker-spends-taker] secret_hash parse failed: {0}")]
     ParseSecretHash(#[from] Hash256Error),
-    #[error("[maker-spends-taker] utxo lookup failed: {0}")]
+    #[error("[maker-spends-taker] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
     #[error("[maker-spends-taker] HTLC SpendPolicy unsatisfied: {0}")]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
-    #[error("[maker-spends-taker] broadcast failed: {0}")]
+    #[error("[maker-spends-taker] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
     #[error(
         "[maker-spends-taker] HTLC value {htlc_value} is not larger than the miner fee {miner_fee}, refusing to spend"
@@ -301,7 +306,7 @@ pub enum MakerSpendsTakerPaymentError {
 pub enum ValidateFeeError {
     #[error("[validate-fee] arg parse failed: {0}")]
     ParseArgs(#[from] SiaValidateFeeArgsError),
-    #[error("[validate-fee] mempool fetch failed: {0}")]
+    #[error("[validate-fee] mempool fetch failed: {}", sia_text(.0))]
     FetchMempool(#[from] GetUnconfirmedTransactionError),
     #[error("[validate-fee] tx {0} not found on chain or in mempool")]
     TxNotFound(TransactionId),
@@ -309,7 +314,7 @@ pub enum ValidateFeeError {
     EventVariant(Event),
     #[error("[validate-fee] tx {txid} confirmed before min_block_number {min_block_number}")]
     MininumConfirmedHeight { txid: TransactionId, min_block_number: u64 },
-    #[error("[validate-fee] current_height fetch failed: {0}")]
+    #[error("[validate-fee] current_height fetch failed: {}", sia_text(.0))]
     FetchHeight(#[from] CurrentHeightError),
     #[error("[validate-fee] tx {txid} in mempool before height {min_block_number}")]
     MininumMempoolHeight { txid: TransactionId, min_block_number: u64 },
@@ -420,7 +425,7 @@ pub enum SiaCoinSiaExtractSecretError {
 /// Errors raised while testing whether an HTLC is refundable yet.
 #[derive(Debug, Error)]
 pub enum SiaCoinSiaCanRefundHtlcError {
-    #[error("[can-refund] median_timestamp fetch failed: {0}")]
+    #[error("[can-refund] median_timestamp fetch failed: {}", sia_text(.0))]
     FetchTimestamp(#[from] GetMedianTimestampError),
 }
 
@@ -431,7 +436,7 @@ pub enum SiaWaitForHTLCTxSpendError {
     ParseArgs(#[from] SiaWaitForHTLCTxSpendArgsError),
     #[error("[wait-htlc] timed out waiting for spend of tx {txid} vout 0")]
     Timeout { txid: TransactionId },
-    #[error("[wait-htlc] find_where_utxo_spent failed: {0}")]
+    #[error("[wait-htlc] find_where_utxo_spent failed: {}", sia_text(.0))]
     FindWhereUtxoSpent(#[from] Box<FindWhereUtxoSpentError>),
 }
 
@@ -442,7 +447,7 @@ pub enum SiaWaitForHTLCTxSpendError {
 /// Errors raised while building a `SiaCoin` from configuration.
 #[derive(Debug, Error)]
 pub enum SiaCoinBuilderError {
-    #[error("[builder] client init failed: {0}")]
+    #[error("[builder] client init failed: {}", sia_text(.0))]
     Client(#[from] ClientError),
     #[error("[builder] DEX fee pubkey hex invalid: {0}")]
     FeePubkeyHex(String),

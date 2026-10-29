@@ -37,7 +37,7 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
     let key_pair = test_key_pair();
     let my_addr = key_pair.address();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec![node.rpc_url.clone()]),
+        crate::node_url::listed_nodes("TEST", vec![node.rpc_url.clone()]),
         vec![],
     )
     .unwrap();

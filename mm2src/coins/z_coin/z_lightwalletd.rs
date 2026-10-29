@@ -27,10 +27,12 @@ mod htlc_index;
 pub(crate) use htlc_index::{p2sh_hash_of, DetectionLog, FundingFound, HtlcAddressing, HtlcIndexError, IndexEncoding,
                             OutputRef, SentOutcome, SpendOutcome};
 
-use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, ZCoinShieldedHistory};
+use super::z_coin_wallet_db::{dedupe_lightwalletd_endpoints, scrub_lightwalletd_text, ZCoinShieldedHistory};
 use super::z_rpc::z_coin_grpc;
 use super::ZcoinConsensusParams;
 use crate::big_decimal_from_sat_unsigned;
+use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
+use crate::node_url::lightwalletd_endpoint_label;
 use crate::utxo::rpc_clients::{BlockHashOrHeight, EstimateFeeMethod, EstimateFeeMode, SpentOutputInfo, UnspentInfo,
                                UnspentMap, UtxoRpcClientOps, UtxoRpcError, UtxoRpcFut, UtxoRpcResult};
 use async_trait::async_trait;
@@ -114,9 +116,19 @@ pub enum LightwalletdError {
     #[display(fmt = "{} failed on every admitted lightwalletd endpoint: {}", op, errors)]
     AllFailed { op: &'static str, errors: String },
     /// The service answered the broadcast with a failure; reproducing it elsewhere would hide the
-    /// reason, so it is never retried on further endpoints (R39.11.4).
-    #[display(fmt = "lightwalletd rejected the transaction (code {}): {}", code, message)]
-    BroadcastRejected { code: i32, message: String },
+    /// reason, so it is never retried on further endpoints (R39.11.4). `endpoint` is the host-only name of
+    /// the endpoint that rejected it (R39.11.30).
+    #[display(
+        fmt = "lightwalletd endpoint {} rejected the transaction (code {}): {}",
+        endpoint,
+        code,
+        message
+    )]
+    BroadcastRejected {
+        endpoint: String,
+        code: i32,
+        message: String,
+    },
     /// The tip read cannot be corroborated against what this activation already saw (R39.11.11).
     #[display(
         fmt = "the lightwalletd chain tip {} is more than {} blocks behind height {} already observed; refusing to \
@@ -820,6 +832,8 @@ pub(crate) struct WindowRead {
 pub(crate) struct WindowError {
     /// The node could not serve a transaction in the window (R39.11.4b): bisectable.
     pub serve_failure: bool,
+    /// The attempt failed at transport level (R39.11.31(a)): the endpoint is suspended.
+    pub transport: bool,
     pub message: String,
 }
 
@@ -830,6 +844,7 @@ impl From<&EndpointError> for WindowError {
     fn from(error: &EndpointError) -> Self {
         WindowError {
             serve_failure: matches!(error, EndpointError::Service(_) | EndpointError::NotFound(_)),
+            transport: matches!(error, EndpointError::Transport(_)),
             message: error.to_string(),
         }
     }
@@ -873,18 +888,46 @@ fn mined_height(raw: u64) -> Option<u64> {
     }
 }
 
+/// The gRPC status codes that count as a transport-level failure of the attempt: the endpoint is suspended
+/// after one (R39.11.31(a)).
+pub(crate) fn is_transport_code(code: Code) -> bool {
+    matches!(
+        code,
+        Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Aborted | Code::ResourceExhausted
+    )
+}
+
 fn status_error(status: tonic::Status) -> EndpointError {
     let message = format!("{}: {}", status.code(), status.message());
     if mentions_no_address_index(status.message()) {
         return EndpointError::NoAddressIndex(message);
     }
+    if is_transport_code(status.code()) {
+        return EndpointError::Transport(message);
+    }
     match status.code() {
-        Code::Unavailable | Code::DeadlineExceeded | Code::Cancelled | Code::Aborted | Code::ResourceExhausted => {
-            EndpointError::Transport(message)
-        },
         Code::NotFound => EndpointError::NotFound(message),
         _ => EndpointError::Service(message),
     }
+}
+
+/// What the callers that walk the endpoints themselves (the compact-block download, the mempool poll) tell the
+/// backend about each endpoint, so that the suspension of R39.11.31 sees every attempt.
+pub(crate) trait EndpointHealth: Send + Sync {
+    /// The name a text uses for `server` (R39.11.29).
+    fn name(&self, server: &str) -> String;
+    /// An attempt on `server` failed at transport level (R39.11.31(a)).
+    fn transport_failed(&self, server: &str, failure: &str);
+    /// `server` answered (R39.11.31(b)).
+    fn answered(&self, server: &str);
+}
+
+impl EndpointHealth for LightwalletdBackend {
+    fn name(&self, server: &str) -> String { LightwalletdBackend::name(self, server) }
+
+    fn transport_failed(&self, server: &str, failure: &str) { self.suspend_on_failure(server, failure) }
+
+    fn answered(&self, server: &str) { self.reset_suspension(server) }
 }
 
 type GrpcClient = super::z_coin_wallet_db::LightwalletdClient;
@@ -904,6 +947,7 @@ impl GrpcTransport {
         if let Some(client) = self.clients.lock().get(server).cloned() {
             return Ok(client);
         }
+        // `connect_lightwalletd` already scrubs the endpoint's URL out of its error text.
         let client = ZCoinShieldedHistory::connect_lightwalletd(server)
             .await
             .map_err(EndpointError::Transport)?;
@@ -1046,6 +1090,7 @@ impl LightwalletdTransport for GrpcTransport {
                 txs: Vec::new(),
                 error: Some(WindowError {
                     serve_failure: false,
+                    transport: false,
                     message: format!("refusing the history range {}..={}", start, end),
                 }),
             };
@@ -1057,6 +1102,7 @@ impl LightwalletdTransport for GrpcTransport {
                     txs: Vec::new(),
                     error: Some(WindowError {
                         serve_failure: false,
+                        transport: matches!(e, EndpointError::Transport(_)),
                         message: e.to_string(),
                     }),
                 }
@@ -1097,6 +1143,7 @@ impl LightwalletdTransport for GrpcTransport {
                         txs,
                         error: Some(WindowError {
                             serve_failure: false,
+                            transport: true,
                             message: "GetTaddressTxids stream timed out".to_owned(),
                         }),
                     };
@@ -1411,9 +1458,17 @@ struct CachedAdmission {
     outcome: AdmissionOutcome,
 }
 
+/// Reads the wall clock, in seconds since the epoch; a test injects its own (R39.11.31(b)).
+type Clock = Arc<dyn Fn() -> f64 + Send + Sync>;
+
 pub(crate) struct LightwalletdBackend {
     transport: Arc<dyn LightwalletdTransport>,
+    /// The configured endpoints, in configured order, as the transport connects to them. They are credentials:
+    /// a text names an endpoint through [`Self::name`].
     servers: Vec<String>,
+    /// Per endpoint of [`Self::servers`], the host-only name every log line, error text and status message
+    /// uses (R39.11.29). Unique within the list.
+    labels: Vec<String>,
     policy: AdmissionPolicy,
     /// How the coin encodes the two address forms of an HTLC; script-hash queries from the generic
     /// address methods are refused, the HTLC probe is the only caller that issues them (R39.11.4d).
@@ -1432,12 +1487,16 @@ pub(crate) struct LightwalletdBackend {
     no_address_index: Mutex<HashMap<String, String>>,
     /// What the HTLC detection in flight for a redeem-script hash read last (R39.5.5).
     detection_progress: Mutex<HashMap<[u8; 20], String>>,
+    /// The suspension of each endpoint that failed at transport level (R39.11.31). Held in memory for the life
+    /// of this backend: a new activation starts with none, and re-evaluating admission clears none.
+    suspensions: Mutex<HashMap<String, Suspension>>,
+    clock: Clock,
 }
 
 impl fmt::Debug for LightwalletdBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LightwalletdBackend")
-            .field("servers", &self.servers)
+            .field("servers", &self.labels)
             .finish()
     }
 }
@@ -1450,17 +1509,29 @@ impl LightwalletdBackend {
         addressing: HtlcAddressing,
     ) -> Self {
         // Every construction path ends here, so each endpoint votes once everywhere (R39.11.7b).
-        let (servers, duplicates) = dedupe_lightwalletd_endpoints(servers);
+        let configured = servers;
+        let (servers, duplicates) = dedupe_lightwalletd_endpoints(configured.clone());
+        let position = |spelling: &str| configured.iter().position(|s| s == spelling).unwrap_or_default();
         for (dropped, kept) in &duplicates {
             common::log::warn!(
                 "lightwalletd endpoint {} names the same endpoint as {} and is ignored",
-                dropped,
-                kept
+                lightwalletd_endpoint_label(dropped, position(dropped)),
+                lightwalletd_endpoint_label(kept, position(kept))
             );
+        }
+        let mut labels: Vec<String> = Vec::with_capacity(servers.len());
+        for server in &servers {
+            let mut label = lightwalletd_endpoint_label(server, position(server));
+            // Two endpoints on one host differ only by a path; the label stays unique within the list.
+            if labels.contains(&label) {
+                label = format!("{} (entry {})", label, position(server) + 1);
+            }
+            labels.push(label);
         }
         LightwalletdBackend {
             transport,
             servers,
+            labels,
             policy,
             addressing,
             index_encodings: Mutex::new(HashMap::new()),
@@ -1471,7 +1542,72 @@ impl LightwalletdBackend {
             endpoint_budget: HTLC_DETECTION_ENDPOINT_BUDGET,
             no_address_index: Mutex::new(HashMap::new()),
             detection_progress: Mutex::new(HashMap::new()),
+            suspensions: Mutex::new(HashMap::new()),
+            clock: Arc::new(common::now_float),
         }
+    }
+
+    /// The name a text uses for `server`, one of the endpoints this backend was built with (R39.11.29): its
+    /// host-only form, or a placeholder with its position in the configured list.
+    pub(crate) fn name(&self, server: &str) -> String {
+        match self.servers.iter().position(|s| s == server) {
+            Some(index) => self.labels[index].clone(),
+            None => lightwalletd_endpoint_label(server, 0),
+        }
+    }
+
+    /// Replaces the clock the suspensions are measured by.
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Removes the endpoint's URL from a lower layer's `text` before it is logged or returned (R39.11.29).
+    pub(crate) fn scrub(&self, text: &str, server: &str) -> String { scrub_lightwalletd_text(text, server) }
+
+    // ---- suspension (R39.11.31) ----------------------------------------------------------------
+
+    fn now(&self) -> f64 { (self.clock)() }
+
+    /// Whether `server` is suspended right now.
+    pub(crate) fn is_suspended(&self, server: &str) -> bool {
+        let now = self.now();
+        self.suspensions
+            .lock()
+            .get(server)
+            .map_or(false, |suspension| suspension.is_suspended(now))
+    }
+
+    /// Suspends `server` after a transport-level failure (R39.11.31(a), (b)): 20 s the first time, doubling with
+    /// each further failure before its next answer, up to 12 hours.
+    pub(crate) fn suspend_on_failure(&self, server: &str, failure: &str) {
+        let secs = self
+            .suspensions
+            .lock()
+            .entry(server.to_owned())
+            .or_default()
+            .on_failure(self.now(), SUSPENSION_BASE, SUSPENSION_CAP);
+        common::log::debug!(
+            "lightwalletd endpoint {} suspended for {:.0} s after a transport-level failure: {}",
+            self.name(server),
+            secs,
+            self.scrub(failure, server)
+        );
+    }
+
+    /// A successful answer of any method resets `server` (R39.11.31(b)).
+    pub(crate) fn reset_suspension(&self, server: &str) {
+        if let Some(suspension) = self.suspensions.lock().get_mut(server) {
+            suspension.on_success();
+        }
+    }
+
+    /// `endpoints` with the suspended ones moved behind the others: the unsuspended ones first, in configured
+    /// order, then the suspended ones, in configured order (R39.11.31(c), (d)).
+    pub(crate) fn unsuspended_first(&self, endpoints: Vec<String>) -> Vec<String> {
+        let (suspended, ready): (Vec<String>, Vec<String>) = endpoints.into_iter().partition(|s| self.is_suspended(s));
+        ready.into_iter().chain(suspended).collect()
     }
 
     #[cfg(test)]
@@ -1485,16 +1621,29 @@ impl LightwalletdBackend {
         *self.cached.lock() = None;
     }
 
+    /// The cached admitted endpoints (configured spelling), in configured order.
     fn fresh_admission(&self) -> Option<Vec<String>> {
         self.cached
             .lock()
             .as_ref()
             .filter(|cached| cached.at.elapsed() < ADMISSION_REEVALUATION_INTERVAL)
-            .map(|cached| cached.outcome.admitted.clone())
+            .map(|cached| self.to_servers(&cached.outcome.admitted))
+    }
+
+    /// The configured spelling of each endpoint named by one of `labels`.
+    fn to_servers(&self, labels: &[String]) -> Vec<String> {
+        labels
+            .iter()
+            .filter_map(|label| self.labels.iter().position(|l| l == label))
+            .map(|index| self.servers[index].clone())
+            .collect()
     }
 
     /// The endpoints that may be used, in configured order. Re-evaluated every
     /// [`ADMISSION_REEVALUATION_INTERVAL`], never cached for the coin's lifetime.
+    ///
+    /// The probe asks every configured endpoint, suspended or not (R39.11.31(e)), so that a suspension never
+    /// changes the branch vote, the consensus height or the failure reported.
     pub(crate) async fn admitted(&self) -> Result<Vec<String>, LightwalletdError> {
         if let Some(admitted) = self.fresh_admission() {
             return Ok(admitted);
@@ -1504,24 +1653,38 @@ impl LightwalletdBackend {
             return Ok(admitted);
         }
 
-        let probes = join_all(self.servers.iter().cloned().map(|server| {
-            let transport = self.transport.clone();
-            async move {
-                let probe = match tokio::time::timeout(PROBE_TIMEOUT, transport.light_info(&server)).await {
-                    Ok(Ok(info)) => {
-                        let cache_height =
-                            match tokio::time::timeout(PROBE_TIMEOUT, transport.cache_height(&server)).await {
-                                Ok(result) => result.map_err(|e| e.to_string()),
-                                Err(_) => Err("GetLatestBlock timed out".to_owned()),
-                            };
-                        Ok(AdmissionProbe { info, cache_height })
-                    },
-                    Ok(Err(e)) => Err(e.to_string()),
-                    Err(_) => Err("GetLightdInfo timed out".to_owned()),
-                };
-                (server, probe)
-            }
-        }))
+        // Admission works on the endpoints' names, which are unique within the list (R39.11.29).
+        let probes = join_all(
+            self.servers
+                .iter()
+                .cloned()
+                .zip(self.labels.iter().cloned())
+                .map(|(server, label)| {
+                    let transport = self.transport.clone();
+                    async move {
+                        let probe = match tokio::time::timeout(PROBE_TIMEOUT, transport.light_info(&server)).await {
+                            Ok(Ok(info)) => {
+                                self.reset_suspension(&server);
+                                let cache_height =
+                                    match tokio::time::timeout(PROBE_TIMEOUT, transport.cache_height(&server)).await {
+                                        Ok(result) => result.map_err(|e| self.probe_failure(&server, e)),
+                                        Err(_) => {
+                                            self.suspend_on_failure(&server, "GetLatestBlock timed out");
+                                            Err("GetLatestBlock timed out".to_owned())
+                                        },
+                                    };
+                                Ok(AdmissionProbe { info, cache_height })
+                            },
+                            Ok(Err(e)) => Err(self.probe_failure(&server, e)),
+                            Err(_) => {
+                                self.suspend_on_failure(&server, "GetLightdInfo timed out");
+                                Err("GetLightdInfo timed out".to_owned())
+                            },
+                        };
+                        (label, probe)
+                    }
+                }),
+        )
         .await;
 
         let store = self.wallet.lock().clone();
@@ -1557,7 +1720,7 @@ impl LightwalletdBackend {
                         common::log::warn!("could not record consensus branch {:08x}: {}", branch, e);
                     }
                 }
-                let admitted = outcome.admitted.clone();
+                let admitted = self.to_servers(&outcome.admitted);
                 *self.cached.lock() = Some(CachedAdmission {
                     at: Instant::now(),
                     outcome,
@@ -1572,8 +1735,25 @@ impl LightwalletdBackend {
         }
     }
 
+    /// What one failed admission read of `server` becomes: a text free of the endpoint's URL, and a suspension
+    /// when the failure is at transport level (R39.11.31(e)).
+    fn probe_failure(&self, server: &str, error: EndpointError) -> String {
+        let text = self.scrub(&error.to_string(), server);
+        if matches!(error, EndpointError::Transport(_)) {
+            self.suspend_on_failure(server, &text);
+        }
+        text
+    }
+
+    /// The admitted endpoints in the order an operation tries them: those that are not suspended in configured
+    /// order, then the suspended ones in configured order (R39.11.31(c), (d)). Admission itself is unchanged by
+    /// suspension.
+    pub(crate) async fn admitted_ordered(&self) -> Result<Vec<String>, LightwalletdError> {
+        self.admitted().await.map(|admitted| self.unsuspended_first(admitted))
+    }
+
     /// The endpoints excluded by the latest admission decision, each with its reason
-    /// (R39.11.7a(f)).
+    /// (R39.11.7a(f)). The endpoint is named host-only (R39.11.29).
     pub(crate) fn excluded_endpoints(&self) -> Vec<(String, String)> {
         self.cached
             .lock()
@@ -1589,9 +1769,10 @@ impl LightwalletdBackend {
             .unwrap_or_default()
     }
 
-    /// Runs `call` on the admitted endpoints in configured order. The operation fails only after
-    /// every admitted endpoint has failed (R39.11.3); a service-level broadcast rejection stops at
-    /// once, because every honest endpoint would reproduce it (R39.11.4).
+    /// Runs `call` on the admitted endpoints: those that are not suspended first, in configured order, then
+    /// the suspended ones (R39.11.31). The operation fails only after every admitted endpoint has failed
+    /// (R39.11.3); a service-level broadcast rejection stops at once, because every honest endpoint would
+    /// reproduce it (R39.11.4), and suspends nothing (R39.11.31(h)).
     ///
     /// Passing admission does not make an endpoint usable for every method -- one endpoint answers
     /// `GetLightdInfo` and then fails the method actually needed -- so a failure here moves on to the
@@ -1601,19 +1782,37 @@ impl LightwalletdBackend {
         op: &'static str,
         call: impl Fn(Arc<dyn LightwalletdTransport>, String) -> BoxFuture<'static, Result<T, EndpointError>>,
     ) -> Result<T, LightwalletdError> {
-        let admitted = self.admitted().await?;
+        self.call_for(op, None, call).await
+    }
+
+    /// [`Self::call`] for a broadcast: `txid` is the identifier of the transaction, computed locally, that a
+    /// rejection names in its log line (R39.11.30).
+    async fn call_for<T>(
+        &self,
+        op: &'static str,
+        txid: Option<&str>,
+        call: impl Fn(Arc<dyn LightwalletdTransport>, String) -> BoxFuture<'static, Result<T, EndpointError>>,
+    ) -> Result<T, LightwalletdError> {
+        let admitted = self.admitted_ordered().await?;
         let mut errors = Vec::new();
         let mut explicitly_missing = false;
         for server in admitted {
             match call(self.transport.clone(), server.clone()).await {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    self.reset_suspension(&server);
+                    return Ok(value);
+                },
                 Err(EndpointError::Rejected { code, message }) => {
-                    return Err(LightwalletdError::BroadcastRejected { code, message });
+                    return Err(self.rejected(&server, txid, code, message));
                 },
                 Err(e) => {
                     explicitly_missing |= matches!(e, EndpointError::NotFound(_));
-                    common::log::debug!("lightwalletd {} on {} failed: {}", op, server, e);
-                    errors.push(format!("{}: {}", server, e));
+                    let text = self.scrub(&e.to_string(), &server);
+                    if matches!(e, EndpointError::Transport(_)) {
+                        self.suspend_on_failure(&server, &text);
+                    }
+                    common::log::debug!("lightwalletd {} on {} failed: {}", op, self.name(&server), text);
+                    errors.push(format!("{}: {}", self.name(&server), text));
                 },
             }
         }
@@ -1623,6 +1822,25 @@ impl LightwalletdBackend {
             return Err(LightwalletdError::NoSuchTransaction(errors));
         }
         Err(LightwalletdError::AllFailed { op, errors })
+    }
+
+    /// The error of a broadcast that `server` rejected, and the one `warn` line that says so (R39.11.30). The
+    /// rejection does not suspend the endpoint.
+    fn rejected(&self, server: &str, txid: Option<&str>, code: i32, message: String) -> LightwalletdError {
+        let endpoint = self.name(server);
+        let message = self.scrub(&message, server);
+        common::log::warn!(
+            "lightwalletd endpoint {} rejected transaction {}: code {}, message {}",
+            endpoint,
+            txid.unwrap_or("(identifier not computed)"),
+            code,
+            message
+        );
+        LightwalletdError::BroadcastRejected {
+            endpoint,
+            code,
+            message,
+        }
     }
 
     /// A tip read plus the highest tip seen before it. This is the only height source of the coin.
@@ -1695,7 +1913,12 @@ impl LightwalletdBackend {
     }
 
     pub(crate) async fn send_transaction(&self, data: Vec<u8>) -> Result<(), LightwalletdError> {
-        self.call("SendTransaction", move |t, s| {
+        // The identifier is computed from the bytes, as the broadcast path does (the service answers with a
+        // status only); a rejection names it (R39.11.30).
+        let txid = ZTransaction::read(data.as_slice(), BranchId::Sapling)
+            .map(|parsed| format!("{:?}", txid_internal_to_display(*parsed.txid().as_ref())))
+            .unwrap_or_else(|_| "(unreadable transaction)".to_owned());
+        self.call_for("SendTransaction", Some(&txid), move |t, s| {
             let data = data.clone();
             async move { t.send_transaction(&s, data).await }.boxed()
         })

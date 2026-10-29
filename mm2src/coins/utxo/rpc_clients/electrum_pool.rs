@@ -20,6 +20,7 @@ use super::electrum_measure::{block_interval_from_conf, eligible_servers, is_slo
                               Measurement, Measuring, RoundServer, ServerQuality};
 use super::electrum_rpc_client::{open_session, server_spec, HeaderNotified, ServerSpec, Session, SessionEnded};
 use super::*;
+use crate::endpoint_suspension::{Suspension, SUSPENSION_BASE, SUSPENSION_CAP};
 use common::log::{debug, warn};
 use futures::channel::mpsc as futures_mpsc;
 use futures::future::{join_all, select as select_future, BoxFuture, Either as EitherFuture};
@@ -78,8 +79,8 @@ impl Default for ElectrumPoolTimings {
             ping_interval: Duration::from_secs(30),
             maintenance_interval: Duration::from_secs(5 * 60),
             short_repass: Duration::from_secs(1),
-            suspension_base: Duration::from_secs(20),
-            suspension_cap: Duration::from_secs(12 * 60 * 60),
+            suspension_base: SUSPENSION_BASE,
+            suspension_cap: SUSPENSION_CAP,
             call_budget: Duration::from_secs(60),
             budget_reserve: Duration::from_secs(5),
             round_floor: Duration::from_secs(5),
@@ -281,34 +282,6 @@ impl Default for ElectrumPoolOptions {
     }
 }
 
-/// The time a failing server stays out of the maintenance passes (CRD ch.38 R38.6.4d item 1).
-///
-/// The state is a pure function of the failures it has seen and of the times they happened, so the
-/// 12-hour cap is tested by feeding it timestamps instead of waiting.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(super) struct Suspension {
-    /// Disconnections and failed attempts since the last successful connection.
-    failures: u32,
-    /// The time (seconds since the epoch) the suspension lapses.
-    until: f64,
-}
-
-impl Suspension {
-    /// Records a disconnection or a failed attempt at `now` and returns the length of the suspension in seconds.
-    pub(super) fn on_failure(&mut self, now: f64, timings: &ElectrumPoolTimings) -> f64 {
-        let doubled = timings.suspension_base.as_secs_f64() * 2f64.powi(self.failures.min(60) as i32);
-        let secs = doubled.min(timings.suspension_cap.as_secs_f64());
-        self.failures = self.failures.saturating_add(1);
-        self.until = now + secs;
-        secs
-    }
-
-    /// A successful connection resets the server: its next suspension is the base one again.
-    pub(super) fn on_success(&mut self) { *self = Suspension::default(); }
-
-    pub(super) fn is_suspended(&self, now: f64) -> bool { now < self.until }
-}
-
 /// The budget of one round of attempts (CRD ch.38 R38.6.4j item 2): the smaller of the per-attempt
 /// bound `attempt_cap` (establishment plus request) and an equal share of what remains of the call's
 /// budget after the reserve, for each of the `rounds_left` rounds still to make, never below the floor.
@@ -366,6 +339,9 @@ pub(super) struct ServerSlot {
     id: usize,
     rank: AtomicUsize,
     addr: String,
+    /// The only form in which texts name the server: `host:port`, or a placeholder with the server's position
+    /// in the request when the address cannot be reduced to a host (CRD ch.38 R38.6.9a).
+    label: String,
     establish_timeout: Duration,
     spec: Result<ServerSpec, String>,
     /// Held while a connection of this server is being established, so two attempts never both connect.
@@ -374,13 +350,17 @@ pub(super) struct ServerSlot {
 }
 
 impl ServerSlot {
-    fn new(id: usize, req: &ElectrumRpcRequest, timings: &ElectrumPoolTimings) -> ServerSlot {
+    fn new(id: usize, listed_position: usize, req: &ElectrumRpcRequest, timings: &ElectrumPoolTimings) -> ServerSlot {
         let spec = server_spec(req);
         let removed = spec.as_ref().err().cloned();
+        // Only a host with a port is a name; anything else (a bare word may be a secret) is a placeholder.
+        let label =
+            electrum_server_name(&req.url).unwrap_or_else(|| format!("{UNNAMED_SERVER} #{}", listed_position + 1));
         ServerSlot {
             id,
             rank: AtomicUsize::new(id),
             addr: req.url.clone(),
+            label,
             establish_timeout: req.request_timeout().unwrap_or(timings.establishment),
             spec,
             connect_lock: AsyncMutex::new(()),
@@ -571,32 +551,42 @@ impl PoolShared {
     /// Adds `req` to the pool. A server that cannot be used by this build stays in the list, at its
     /// rank, as removed (R38.6.4d item 3), and the reason is returned.
     pub(super) fn add_server(&self, req: &ElectrumRpcRequest) -> Result<(), String> {
+        let position = self.slots().len();
+        self.add_server_at(position, req).map_err(|(_, reason)| reason)
+    }
+
+    /// Like [`Self::add_server`] for the server at `listed_position` of the activation request. The error
+    /// carries the name a text may use for the server.
+    fn add_server_at(&self, listed_position: usize, req: &ElectrumRpcRequest) -> Result<(), (String, String)> {
         let mut servers = self.servers.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let slot = Arc::new(ServerSlot::new(servers.len(), req, &self.timings));
+        let slot = Arc::new(ServerSlot::new(servers.len(), listed_position, req, &self.timings));
         let removed = slot.removed_reason();
+        let label = slot.label.clone();
         servers.push(slot);
         match removed {
-            Some(reason) => Err(reason),
+            Some(reason) => Err((label, reason)),
             None => Ok(()),
         }
     }
 
     /// Adds the servers, given in the listed order, ranked by the pool's order (R38.6.4b-R): the order is
-    /// drawn here, once. Returns the servers this build cannot use, with the reason.
-    pub(super) fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(ElectrumRpcRequest, String)> {
+    /// drawn here, once. Returns the servers this build cannot use: the name a text may use for each (CRD ch.38
+    /// R38.6.9a) and the reason.
+    pub(super) fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(String, String)> {
+        let listed: Vec<(usize, ElectrumRpcRequest)> = reqs.iter().cloned().enumerate().collect();
         let ordered = if self.measuring().is_some() {
             // The uniform draw serves as the rank until the activation round has been measured (R38.6.4l item 5).
             self.with_draw(|draw| {
-                let mut positions: Vec<usize> = (0..reqs.len()).collect();
+                let mut positions: Vec<usize> = (0..listed.len()).collect();
                 shuffle(&mut positions, draw);
-                positions.into_iter().map(|position| reqs[position].clone()).collect()
+                positions.into_iter().map(|position| listed[position].clone()).collect()
             })
         } else {
-            self.order.arrange(reqs.to_vec())
+            self.order.arrange(listed)
         };
         ordered
             .into_iter()
-            .filter_map(|req| self.add_server(&req).err().map(|reason| (req, reason)))
+            .filter_map(|(position, req)| self.add_server_at(position, &req).err())
             .collect()
     }
 
@@ -620,7 +610,9 @@ impl PoolShared {
     }
 
     fn slot_by_addr(&self, addr: &str) -> Option<Arc<ServerSlot>> {
-        self.slots().into_iter().find(|slot| slot.addr == addr)
+        self.slots()
+            .into_iter()
+            .find(|slot| slot.addr == addr || slot.label == addr)
     }
 
     /// The servers not removed from the pool, in priority order.
@@ -691,8 +683,8 @@ impl PoolShared {
                     candidate: !state.maintained && state.removed.is_none(),
                     connected: state.session.as_ref().map_or(false, |session| !session.is_closed()),
                     removed: state.removed.is_some(),
-                    suspended_until: suspended.then_some(state.suspension.until),
-                    suspension_level: state.suspension.failures,
+                    suspended_until: suspended.then_some(state.suspension.until()),
+                    suspension_level: state.suspension.failures(),
                     smoothed_ms: state.quality.smoothed.value_ms(),
                     samples: state.quality.smoothed.samples(),
                     activation_ms: state.quality.activation_ms,
@@ -893,16 +885,20 @@ impl PoolShared {
             EstablishError::Removed(reason) => {
                 warn!(
                     "{}: Electrum server {} is removed from the pool: {}",
-                    self.ticker, slot.addr, reason
+                    self.ticker, slot.label, reason
                 );
                 slot.state().removed = Some(reason.clone());
                 reason
             },
             EstablishError::Recoverable(error) => {
-                let secs = slot.state().suspension.on_failure(now_float(), &self.timings);
+                let secs = slot.state().suspension.on_failure(
+                    now_float(),
+                    self.timings.suspension_base,
+                    self.timings.suspension_cap,
+                );
                 debug!(
                     "{}: Electrum server {} could not be connected ({}), suspended for {:.0} s",
-                    self.ticker, slot.addr, error, secs
+                    self.ticker, slot.label, error, secs
                 );
                 error
             },
@@ -922,7 +918,9 @@ impl PoolShared {
             }
             state.session = None;
             state.maintained = false;
-            state.suspension.on_failure(now_float(), &self.timings);
+            state
+                .suspension
+                .on_failure(now_float(), self.timings.suspension_base, self.timings.suspension_cap);
         }
         self.session_epoch.fetch_add(1, AtomicOrdering::Relaxed);
         self.request_resubscribe();
@@ -1139,7 +1137,7 @@ impl PoolShared {
                         }
                     }
                 },
-                ProbeStep::Connected(slot, _, Err(e)) => failures.record(&slot.addr, e),
+                ProbeStep::Connected(slot, _, Err(e)) => failures.record(&slot.label, e),
                 ProbeStep::Measured(slot, session, measurement) => {
                     measurements.extend(measurement);
                     self.offer_probed(&slot, &session);
@@ -1187,7 +1185,7 @@ impl PoolShared {
             eligible.len(),
             self.slots()
                 .iter()
-                .map(|slot| slot.addr.as_str())
+                .map(|slot| slot.label.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -1285,7 +1283,7 @@ impl PoolShared {
         let response = match session.request(&request, timeout).await {
             Ok(response) => response,
             Err(e) => {
-                debug!("{}: measuring {} failed: {}", self.ticker, slot.addr, e);
+                debug!("{}: measuring {} failed: {}", self.ticker, slot.label, e);
                 if stored {
                     self.close_slot_session(slot, session);
                 }
@@ -1399,7 +1397,7 @@ impl PoolShared {
                 state.quality.poor_until = now + self.timings.poor_demotion.as_secs_f64();
                 any = true;
                 let reason = if slow { "slow" } else { "behind the chain" };
-                debug!("{}: Electrum server {} is poor ({})", self.ticker, slot.addr, reason);
+                debug!("{}: Electrum server {} is poor ({})", self.ticker, slot.label, reason);
             }
         }
         any
@@ -1450,7 +1448,9 @@ impl PoolShared {
         session.close();
         let mut state = slot.state();
         if state.session.is_none() {
-            state.suspension.on_failure(now_float(), &self.timings);
+            state
+                .suspension
+                .on_failure(now_float(), self.timings.suspension_base, self.timings.suspension_cap);
         }
     }
 
@@ -1481,7 +1481,7 @@ impl PoolShared {
                         Err(e) => {
                             debug!(
                                 "{}: Electrum server {} could not be measured: {}",
-                                pool.ticker, slot.addr, e
+                                pool.ticker, slot.label, e
                             );
                             return (slot, None, None);
                         },
@@ -1527,7 +1527,7 @@ impl PoolShared {
             eligible.len(),
             replacement
                 .and_then(|id| self.slot_by_id(id))
-                .map_or("none".to_owned(), |slot| slot.addr.clone())
+                .map_or("none".to_owned(), |slot| slot.label.clone())
         );
 
         let mut chosen = None;
@@ -1570,7 +1570,7 @@ impl PoolShared {
             self.demote(&poor);
             debug!(
                 "{}: Electrum server {} replaces {} in the maintained set",
-                self.ticker, slot.addr, poor.addr
+                self.ticker, slot.label, poor.label
             );
         }
     }
@@ -1627,7 +1627,7 @@ impl PoolShared {
             considered.insert(next.id);
             match self.ensure_connected(&next, None).await {
                 Ok((session, _)) => self.join_maintained(&next, &session),
-                Err(e) => debug!("{}: maintenance could not connect {}: {}", self.ticker, next.addr, e),
+                Err(e) => debug!("{}: maintenance could not connect {}: {}", self.ticker, next.label, e),
             }
         }
     }
@@ -1794,8 +1794,8 @@ impl PoolShared {
             tried.push(slot.id);
             let attempt_timeout = round.min(timings.request).min(remaining);
             match self.request_on(slot, &session, request, attempt_timeout).await {
-                Ok(response) => return Some((JsonRpcRemoteAddr(slot.addr.clone()), response)),
-                Err(e) => failures.record(&slot.addr, e),
+                Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                Err(e) => failures.record(&slot.label, e),
             }
         }
 
@@ -1825,8 +1825,8 @@ impl PoolShared {
                 .collect();
             while let Some((slot, result)) = attempts.next().await {
                 match result {
-                    Ok(response) => return Some((JsonRpcRemoteAddr(slot.addr.clone()), response)),
-                    Err(e) => failures.record(&slot.addr, e),
+                    Ok(response) => return Some((JsonRpcRemoteAddr(slot.label.clone()), response)),
+                    Err(e) => failures.record(&slot.label, e),
                 }
             }
         }
@@ -1846,7 +1846,7 @@ impl PoolShared {
                 Some(session) => self.request_on(slot, &session, request, self.timings.request).await,
                 None => Err("not connected".to_owned()),
             };
-            (slot.addr.clone(), result)
+            (slot.label.clone(), result)
         });
         let mut failures = Failures::default();
         let mut answer = None;
@@ -1885,9 +1885,10 @@ impl PoolShared {
         to_addr: &str,
     ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
         let Some(slot) = self.slot_by_addr(to_addr) else {
-            return Err(format!("{}: unknown Electrum server {}", self.ticker, to_addr));
+            let named = electrum_server_name(to_addr).unwrap_or_else(|| UNNAMED_SERVER.to_owned());
+            return Err(format!("{}: unknown Electrum server {}", self.ticker, named));
         };
-        let failure = |error: String| format!("{}: Electrum server {}: {}", self.ticker, to_addr, error);
+        let failure = |error: String| format!("{}: Electrum server {}: {}", self.ticker, slot.label, error);
         if let Some(reason) = slot.removed_reason() {
             return Err(failure(format!("the server was removed from the pool: {}", reason)));
         }
@@ -1899,7 +1900,7 @@ impl PoolShared {
             return self
                 .request_on(&slot, &session, &request, self.timings.request)
                 .await
-                .map(|response| (JsonRpcRemoteAddr(slot.addr.clone()), response))
+                .map(|response| (JsonRpcRemoteAddr(slot.label.clone()), response))
                 .map_err(failure);
         }
         let opened = OpenedByCall::default();
@@ -1910,7 +1911,7 @@ impl PoolShared {
         .await;
         self.release_opened(&opened);
         result
-            .map(|response| (JsonRpcRemoteAddr(slot.addr.clone()), response))
+            .map(|response| (JsonRpcRemoteAddr(slot.label.clone()), response))
             .map_err(failure)
     }
 }
@@ -2096,7 +2097,7 @@ mod budget_tests {
         assert!(!suspension.is_suspended(now));
         let mut lengths = Vec::new();
         for _ in 0..20 {
-            let secs = suspension.on_failure(now, &timings);
+            let secs = suspension.on_failure(now, timings.suspension_base, timings.suspension_cap);
             assert!(suspension.is_suspended(now));
             assert!(suspension.is_suspended(now + secs - 0.5));
             assert!(!suspension.is_suspended(now + secs));
@@ -2112,7 +2113,7 @@ mod budget_tests {
         suspension.on_success();
         assert!(!suspension.is_suspended(now));
         assert_eq!(
-            suspension.on_failure(now, &timings) as u64,
+            suspension.on_failure(now, timings.suspension_base, timings.suspension_cap) as u64,
             20,
             "the next suspension is again 20 s"
         );
@@ -2124,8 +2125,11 @@ mod budget_tests {
         let timings = ElectrumPoolTimings::default();
         let mut suspension = Suspension::default();
         for _ in 0..10_000 {
-            suspension.on_failure(0., &timings);
+            suspension.on_failure(0., timings.suspension_base, timings.suspension_cap);
         }
-        assert_eq!(suspension.on_failure(0., &timings) as u64, 12 * 3600);
+        assert_eq!(
+            suspension.on_failure(0., timings.suspension_base, timings.suspension_cap) as u64,
+            12 * 3600
+        );
     }
 }

@@ -11,6 +11,17 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
+- **Node and server addresses and credentials no longer appear in logs, error texts or debug output.**
+  Every log line, error text and status message now names a node or server by scheme, host and port
+  only (Electrum servers as `host:port`), for Tron, Tendermint, Electrum, the native coin daemon,
+  lightwalletd, Solana and the Siacoin wallet daemon, and nothing prints a password, API key,
+  Authorization or header value, or the userinfo, path or query of a URL. A Tendermint node's response
+  body is no longer logged. The debug-build RPC wire dump is not affected. A shielded coin's
+  broadcast error and a warning log line now name the lightwalletd endpoint that rejected the
+  transaction, and a lightwalletd endpoint that fails to connect or answer is tried after the others
+  for a growing time (20 seconds, doubling, up to 12 hours) until it answers again. More in ch.35
+  R35.1.17 and ch.39 §39.11.6.
+
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
@@ -68,12 +79,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
   updates, so the book vanished on every node. Now the maker keeps one pending message per order,
-  the latest values win, and the messages leave at a bounded rate (at most 10 per second per maker
-  key, a burst of 100). When a relay stops keeping up, either its send queue stays backed up for
+  the latest values win, and the messages leave at a bounded rate (at most 20 per second per maker
+  key, a burst of 200). When a relay stops keeping up, either its send queue stays backed up for
   2 seconds or the last connection to it closes while order messages are in flight, the rate drops
   sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
   the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
-  0.5 per second every minute, and stops one step below the rate at which the relay failed; after
+  0.5 per second every 30 seconds, and stops one step below the rate at which the relay failed; after
   30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
   messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
   at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
@@ -83,7 +94,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
   keep-alives. One short gap remains: the first signal comes only after the load has started, so a
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
-  `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
   `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
   JSON `false` turns it off. More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md).
   Detail: PR #148; CRD ch.32 §32.9B, ch.28 §28.9B.

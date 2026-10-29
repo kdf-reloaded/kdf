@@ -5536,12 +5536,12 @@ less and less often, and a server that answers is back at once.
 > is offered. They are recorded in `docs/GLEEC_COMPATIBILITY.md` with "none --
 > no switch exists".
 
-> **Status (2026-10-28).** Not implemented. In this repository every log line
-> and error of the lightwalletd backend names an endpoint by its configured
-> string; `BroadcastRejected` carries the code and message without the
-> endpoint and is not logged; and no endpoint is ever suspended: each
-> operation tries every admitted endpoint in configured order and connects a
-> dead one again on every call.
+> **Status (2026-10-28).** Implemented. The lightwalletd backend names every
+> endpoint host-only; `BroadcastRejected` carries the endpoint and is logged
+> once at warn level; and an endpoint that fails at transport level is
+> suspended on the schedule Electrum uses (`coins/endpoint_suspension.rs`).
+> Admission still probes every endpoint, and an operation tries suspended
+> endpoints before it fails. T39.11.t–T39.11.v cover it.
 
 #### Tests
 
@@ -5938,18 +5938,18 @@ See the second code-quality finding above. Decide between proving the import
 before answering and answering undetermined for an unknown address whose swap start
 block predates the import.
 
-D39.11.k **Admission probes suspended endpoints.** *(Open -- conservative
-reading taken; 2026-10-28.)* The decision of 2026-10-28 names admission among
+D39.11.k **Admission probes suspended endpoints.** *(Decided 2026-10-29,
+maintainer: as implemented.)* The decision of 2026-10-28 names admission among
 the places that skip a suspended endpoint. R39.11.31(e) does not: the probe asks
 every configured endpoint. Skipping a suspended endpoint there would leave it
 out of the branch vote and the consensus height, so a suspension could change
 which branch a fresh wallet settles on, and R39.11.7a was written to keep that
 choice independent of which endpoints happen to answer. The cost is one probe
-per suspended endpoint per evaluation, every 300 s. To be confirmed by the
-maintainer.
+per suspended endpoint per evaluation, every 300 s. The maintainer confirmed
+this reading.
 
-D39.11.l **Which failures suspend, and suspension per endpoint.** *(Open --
-conservative reading taken; 2026-10-28.)* R39.11.31(a) counts as
+D39.11.l **Which failures suspend, and suspension per endpoint.** *(Decided
+2026-10-29, maintainer: as implemented.)* R39.11.31(a) counts as
 transport-level the failures this repository's lightwalletd client already
 treats as transport failures, the five gRPC codes included. Two readings are
 open:
@@ -5960,13 +5960,14 @@ open:
   one method with a gateway error, which reaches the client as `UNAVAILABLE`,
   is suspended for every method, though it may serve the others.
 
-To be confirmed by the maintainer.
+The maintainer confirmed this reading.
 
-D39.11.m **Naming an unparsable entry by its position.** *(Open; 2026-10-28.)*
+D39.11.m **Naming an unparsable entry by its position.** *(Decided 2026-10-29,
+maintainer: as implemented, placeholder and position; chapter 35 R35.1.14 now
+says the same.)*
 R39.11.29 and chapter 38 R38.6.9a name an entry that cannot be parsed by a
-placeholder and its position in the configured list; chapter 35 R35.1.14 does
-not say how such an entry is named. If the maintainer prefers the placeholder
-alone, the three chapters should agree.
+placeholder and its position in the configured list. Chapter 35 R35.1.14 now
+says the same for EVM nodes, where the position comes from R35.1.16.
 
 D39.11.n **The "invalid address list" rejection keeps the ordinary failure class -- after
 the beta.** *(Recorded 2026-10-29.)* As R39.11.4a's status note says, the node's rejection

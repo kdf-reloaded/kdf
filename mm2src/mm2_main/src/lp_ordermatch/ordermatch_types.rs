@@ -200,7 +200,7 @@ pub(crate) fn maker_update_coalescing(ctx: &MmArc) -> bool {
 }
 
 /// CRD ch.32 §32.9B R-MP2 item 1: the MM2.json number `maker_update_rate_max`, the ceiling of the rate at
-/// which the outbox releases created and updated messages, per second per maker pubkey. The default is 10;
+/// which the outbox releases created and updated messages, per second per maker pubkey. The default is 20;
 /// a value that is not a positive finite number is ignored.
 pub(crate) fn maker_update_rate_max(ctx: &MmArc) -> f64 {
     ctx.conf["maker_update_rate_max"]

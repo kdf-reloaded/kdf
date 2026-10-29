@@ -1,3 +1,4 @@
+use crate::node_url::lightwalletd_endpoint_label;
 use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawInProgressStatus, WithdrawTaskHandle};
@@ -50,6 +51,7 @@ use script::{Builder as ScriptBuilder, Opcode, Script, TransactionInputSigner};
 use serde_json::{json, Value as Json};
 use serialization::{deserialize, CoinVariant};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, Weak};
 #[cfg(not(target_arch = "wasm32"))]
@@ -671,7 +673,7 @@ impl ZcoinMode {
 }
 
 /// How a shielded coin is to reach the chain, as requested at activation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ZcoinBackend {
     /// A full node reached through its RPC. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
@@ -684,6 +686,30 @@ pub enum ZcoinBackend {
         light_wallet_d_servers: Vec<String>,
         electrum_servers: Vec<ElectrumRpcRequest>,
     },
+}
+
+/// The debug form names each lightwalletd endpoint by its host-only form (CRD ch.35 R35.1.17, ch.39 R39.11.29).
+impl fmt::Debug for ZcoinBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinBackend::Native => f.write_str("Native"),
+            ZcoinBackend::Light {
+                light_wallet_d_servers,
+                electrum_servers,
+            } => {
+                let endpoints: Vec<String> = light_wallet_d_servers
+                    .iter()
+                    .enumerate()
+                    .map(|(position, server)| lightwalletd_endpoint_label(server, position))
+                    .collect();
+                f.debug_struct("Light")
+                    .field("light_wallet_d_servers", &endpoints)
+                    .field("electrum_servers", electrum_servers)
+                    .finish()
+            },
+        }
+    }
 }
 
 impl ZcoinBackend {
@@ -2214,11 +2240,15 @@ impl ZCoin {
                 Vec::new()
             },
         };
-        let observed = self
-            .z_fields
-            .shielded_history
-            .fetch_pending_receipts(&servers, tip)
-            .await;
+        let observed = match self.lightwalletd() {
+            Some(client) => {
+                self.z_fields
+                    .shielded_history
+                    .fetch_pending_receipts(&servers, client.backend().as_ref(), tip)
+                    .await
+            },
+            None => Vec::new(),
+        };
 
         let mut rebuilt = HashMap::with_capacity(observed.len());
         for receipt in observed {

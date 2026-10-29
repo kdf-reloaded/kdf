@@ -2014,9 +2014,17 @@ async fn rq1_production_node_exposes_the_queue_counters() {
     for i in 0..900u32 {
         s.publish(&topics, payload(i, 8 * 1024)).await;
     }
-    s.peers().await; // a barrier: the commands are processed in order
-    wait_for("drops are counted", Duration::from_secs(30), || {
-        dropped.load(Ordering::Relaxed) > 0
+    // A barrier: the commands are processed in order. The first drop is counted while the burst is still being
+    // processed, so the numbers are read only after the drop count has stopped growing for a second; the paused
+    // peer takes nothing, so the queue stays full.
+    s.peers().await;
+    let mut settled = (0u64, Instant::now());
+    wait_for("the drop count settles", Duration::from_secs(30), || {
+        let now = dropped.load(Ordering::Relaxed);
+        if now != settled.0 {
+            settled = (now, Instant::now());
+        }
+        now > 0 && settled.1.elapsed() >= Duration::from_secs(1)
     })
     .await;
     let (queued_now, max_now, dropped_now) = (

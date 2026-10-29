@@ -212,7 +212,7 @@ impl SiaCoin {
                 .client
                 .dispatcher(request)
                 .await
-                .map_err(|e| SiaHistoryFetchError::Transport(e.to_string()))?;
+                .map_err(|e| SiaHistoryFetchError::Transport(sia_text(&e)))?;
             let page_len = page.len() as i64;
             all.extend(page);
             if page_len < EVENTS_PAGE_LEN {

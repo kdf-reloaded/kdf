@@ -646,7 +646,11 @@ R35.1.14 **Host-only node naming (Reloaded; clean-room original; no switch).**
 Every log line and every error text the EVM coin layer emits that names a
 node shall render the node **host-only**: scheme, host and, when present,
 port -- `https://rpc.example.org:8545` -- with the path, query, fragment and
-userinfo stripped. This covers at least: the activation-time node probe and
+userinfo stripped. A configured URL that cannot be parsed into a scheme and a
+host is never echoed: it is named by a fixed placeholder, and a log line under
+R35.1.16 adds its position in the list, as for Electrum servers and
+lightwalletd endpoints (maintainer decision 2026-10-29, chapter 39 D39.11.m).
+This covers at least: the activation-time node probe and
 its per-node failure logs; the per-node failure and cutoff logs of R35.1.8 and
 R35.1.10; the all-failed error of R35.1.11, which shall list the hosts tried
 and nothing more of their URLs; the nonce and broadcast logs of R35.1.12; and
@@ -813,10 +817,10 @@ form is the default, and an opt-in to print credentials would be an opt-in to
 weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 "none -- no switch exists".
 
-> **Status (2026-10-28).** Not implemented yet. In this repository the node
-> entry of the EVM transport derives a debug form that prints the configured
-> URL, and so does the transport that holds the list. The TRON client already
-> hides its node list in its debug form.
+> **Status (2026-10-28).** Implemented. The EVM transport, its node entries,
+> the activation request and the fee-service URLs have debug forms that show
+> URLs host-only and secrets as set (T35.36). The RPC wire dump marks the
+> removed URL parts in its redacted mode (T35.35).
 
 ---
 

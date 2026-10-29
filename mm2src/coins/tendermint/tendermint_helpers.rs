@@ -3,6 +3,7 @@ use super::htlc::{ClaimHtlcMsg, CreateHtlcMsg, HtlcType, QueryHtlcRequestProto, 
 use super::rpc::*;
 use super::tendermint_types::*;
 use super::IRIS_PREFIX;
+use crate::node_url::{host_only, scrub_urls_in_text};
 use crate::utxo::sat_from_big_decimal;
 use crate::utxo::utxo_common::{big_decimal_from_sat, big_decimal_from_sat_unsigned};
 use crate::{CoinBalance, HistorySyncState, MarketCoinOps, TransactionDetails, TransactionEnum, TransactionErr,
@@ -60,19 +61,16 @@ impl TendermintCommons for TendermintCoin {
                     return Ok(client);
                 },
                 Err(health_error) => {
+                    // A node is named by its host-only form in every text (CRD ch.36 R36.5A.1).
+                    let node = host_only(&client.uri().to_string());
+                    let health_error = scrub_urls_in_text(&health_error.to_string());
                     debug!(
                         "Healthcheck failed on Tendermint RPC node {} ({}): {}",
-                        i,
-                        client.uri(),
-                        health_error
+                        i, node, health_error
                     );
                     match client.abci_info().await {
                         Ok(_) => {
-                            debug!(
-                                "Tendermint RPC node {} ({}) accepted by abci_info fallback",
-                                i,
-                                client.uri()
-                            );
+                            debug!("Tendermint RPC node {} ({}) accepted by abci_info fallback", i, node);
                             client_impl.rpc_clients.rotate_left(i);
                             return Ok(client);
                         },
@@ -80,9 +78,9 @@ impl TendermintCommons for TendermintCoin {
                             errors.push(format!(
                                 "node {} ({}): health={}, abci_info={}",
                                 i,
-                                client.uri(),
+                                node,
                                 health_error,
-                                abci_error
+                                scrub_urls_in_text(&abci_error.to_string())
                             ));
                         },
                     }
