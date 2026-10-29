@@ -129,6 +129,36 @@ impl Config {
         self.send_queue.stuck_timeout
     }
 
+    /// Data queue depth at which the send queue pressure signal of a connection is raised
+    /// (default is 256).
+    pub fn send_queue_pressure_raise(&self) -> usize {
+        self.send_queue.pressure_raise
+    }
+
+    /// Data queue depth at or below which the send queue pressure signal is cleared (default is
+    /// 64).
+    pub fn send_queue_pressure_clear(&self) -> usize {
+        self.send_queue.pressure_clear
+    }
+
+    /// Maximum number of RPCs queued in the priority lane of one connection. A priority RPC
+    /// past it closes the connection (default is 256).
+    pub fn send_queue_priority_max(&self) -> usize {
+        self.send_queue.priority_max
+    }
+
+    /// How long the data queue toward a connection must hold something before the queue signal is
+    /// raised (default is 2 seconds).
+    pub fn send_queue_signal_raise_after(&self) -> Duration {
+        self.send_queue.signal_raise_after
+    }
+
+    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
+    /// seconds).
+    pub fn send_queue_signal_clear_after(&self) -> Duration {
+        self.send_queue.signal_clear_after
+    }
+
     // Overlay network parameters.
     /// Number of heartbeats to keep in the `memcache` (default is 5).
     pub fn history_length(&self) -> usize {
@@ -646,6 +676,40 @@ impl ConfigBuilder {
     /// 60 seconds).
     pub fn send_queue_stuck_timeout(&mut self, stuck_timeout: Duration) -> &mut Self {
         self.config.send_queue.stuck_timeout = stuck_timeout;
+        self
+    }
+
+    /// The data queue depth at which the pressure signal of a connection is raised (default is
+    /// 256).
+    pub fn send_queue_pressure_raise(&mut self, raise: usize) -> &mut Self {
+        self.config.send_queue.pressure_raise = raise;
+        self
+    }
+
+    /// The data queue depth at or below which the pressure signal is cleared (default is 64).
+    pub fn send_queue_pressure_clear(&mut self, clear: usize) -> &mut Self {
+        self.config.send_queue.pressure_clear = clear;
+        self
+    }
+
+    /// How long the data queue must hold something before the queue signal is raised (default is
+    /// 2 seconds).
+    pub fn send_queue_signal_raise_after(&mut self, after: Duration) -> &mut Self {
+        self.config.send_queue.signal_raise_after = after;
+        self
+    }
+
+    /// How long the data queue must stay empty before the queue signal is cleared (default is 5
+    /// seconds).
+    pub fn send_queue_signal_clear_after(&mut self, after: Duration) -> &mut Self {
+        self.config.send_queue.signal_clear_after = after;
+        self
+    }
+
+    /// The maximum number of RPCs queued in the priority lane of one connection (default is
+    /// 256). A priority RPC past it closes the connection.
+    pub fn send_queue_priority_max(&mut self, max: usize) -> &mut Self {
+        self.config.send_queue.priority_max = max;
         self
     }
 

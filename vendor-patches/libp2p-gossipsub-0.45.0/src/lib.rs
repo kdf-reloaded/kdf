@@ -165,6 +165,7 @@ pub use self::peer_score::{
     score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams, PeerScoreThresholds,
     TopicScoreParams,
 };
+pub use self::send_queue::SendQueueSnapshot;
 pub use self::subscription_filter::{
     AllowAllSubscriptionFilter, CallbackSubscriptionFilter, CombinedSubscriptionFilters,
     MaxCountSubscriptionFilter, RegexSubscriptionFilter, TopicSubscriptionFilter,

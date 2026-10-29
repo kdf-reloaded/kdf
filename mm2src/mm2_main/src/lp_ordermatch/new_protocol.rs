@@ -20,6 +20,22 @@ pub enum OrdermatchMessage {
     MakerConnected(MakerConnected),
 }
 
+impl OrdermatchMessage {
+    /// Whether the message is published, and propagated by a relay, with priority (CRD ch.32
+    /// §32.9B R-MP1 item 2): the cancellation and the four swap-negotiation messages. No other
+    /// ordermatch message is, the keep-alive in particular (R-MP3).
+    pub fn is_priority(&self) -> bool {
+        matches!(
+            self,
+            OrdermatchMessage::MakerOrderCancelled(_)
+                | OrdermatchMessage::TakerRequest(_)
+                | OrdermatchMessage::MakerReserved(_)
+                | OrdermatchMessage::TakerConnect(_)
+                | OrdermatchMessage::MakerConnected(_)
+        )
+    }
+}
+
 impl From<PubkeyKeepAlive> for OrdermatchMessage {
     fn from(keep_alive: PubkeyKeepAlive) -> Self { OrdermatchMessage::PubkeyKeepAlive(keep_alive) }
 }
@@ -135,7 +151,7 @@ pub struct PubkeyKeepAlive {
     pub timestamp: u64,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Eq, Deserialize, PartialEq, Serialize)]
 pub struct MakerOrderCancelled {
     pub uuid: CompactUuid,
     pub timestamp: u64,
@@ -245,6 +261,14 @@ impl MakerOrderUpdated {
         match self {
             MakerOrderUpdated::V1(v1) => v1.uuid.into(),
             MakerOrderUpdated::V2(v2) => v2.uuid.into(),
+        }
+    }
+
+    /// The timestamp of the message.
+    pub fn timestamp(&self) -> u64 {
+        match self {
+            MakerOrderUpdated::V1(v1) => v1.timestamp,
+            MakerOrderUpdated::V2(v2) => v2.timestamp,
         }
     }
 }

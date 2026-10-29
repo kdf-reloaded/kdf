@@ -5854,6 +5854,7 @@ dependencies = [
  "kdf_walletconnect",
  "lazy_static",
  "libc",
+ "libp2p",
  "mm2_core",
  "mm2_db",
  "mm2_err_handle",

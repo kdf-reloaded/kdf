@@ -1,4 +1,9 @@
 use super::*;
+use common::mm_number::DecimalMemo;
+use std::sync::LazyLock;
+
+/// Number of entries the memo of unreserved available amounts holds before it is emptied.
+const UNRESERVED_AVAILABLE_MEMO_CAPACITY: usize = 32_768;
 
 pub(crate) fn get_true() -> bool { true }
 
@@ -186,6 +191,22 @@ pub(crate) fn pre_trade_spend_check_enabled(ctx: &MmArc) -> bool {
 /// explicit JSON `false` makes `update_maker_order` broadcast an update that changes nothing.
 pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
     ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
+}
+
+/// CRD ch.32 §32.9B R-MP1 item 5: the MM2.json boolean `maker_update_coalescing`, default `true`. Only an
+/// explicit JSON `false` makes every maker-order message leave at once, as without the outbox.
+pub(crate) fn maker_update_coalescing(ctx: &MmArc) -> bool {
+    ctx.conf["maker_update_coalescing"].as_bool() != Some(false)
+}
+
+/// CRD ch.32 §32.9B R-MP2 item 1: the MM2.json number `maker_update_rate_max`, the ceiling of the rate at
+/// which the outbox releases created and updated messages, per second per maker pubkey. The default is 10;
+/// a value that is not a positive finite number is ignored.
+pub(crate) fn maker_update_rate_max(ctx: &MmArc) -> f64 {
+    ctx.conf["maker_update_rate_max"]
+        .as_f64()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(DEFAULT_MAKER_UPDATE_RATE_MAX)
 }
 
 /// CRD ch.59 R59.6.1a: the MM2.json boolean `order_messages_refresh_liveness`, default `true`. Only an
@@ -1013,6 +1034,23 @@ pub(crate) fn zero_rat() -> BigRational { BigRational::zero() }
 
 impl MakerOrder {
     pub(crate) fn available_amount(&self) -> MmNumber { &self.max_base_vol - &self.reserved_amount() }
+
+    /// The decimal rendering of [`MakerOrder::available_amount`] for RPC answers.
+    ///
+    /// An order without matches reserves nothing, so its available amount is a function of `max_base_vol`
+    /// alone, and the rendering is memoized under the exact `max_base_vol` (a separate memo from the one for
+    /// plain decimals, because the subtraction can reduce a fraction that was stored unreduced). An order
+    /// with matches is computed in full.
+    pub(crate) fn available_amount_rendered(&self) -> RenderedDecimal {
+        if self.matches.is_empty() {
+            static UNRESERVED_AVAILABLE: LazyLock<DecimalMemo> =
+                LazyLock::new(|| DecimalMemo::with_capacity(UNRESERVED_AVAILABLE_MEMO_CAPACITY));
+            UNRESERVED_AVAILABLE
+                .get_or_compute_with(self.max_base_vol.as_ratio(), || self.available_amount().to_decimal())
+        } else {
+            self.available_amount().to_rendered_decimal()
+        }
+    }
 
     pub(crate) fn reserved_amount(&self) -> MmNumber {
         self.matches.iter().fold(

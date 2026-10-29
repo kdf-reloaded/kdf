@@ -23,6 +23,7 @@ use std::{
     collections::{hash_map::Entry, BTreeSet, HashMap, HashSet, VecDeque},
     fmt,
     net::IpAddr,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -55,6 +56,7 @@ use crate::mcache::MessageCache;
 use crate::metrics::{Churn, Config as MetricsConfig, Inclusion, Metrics, Penalty};
 use crate::peer_score::{PeerScore, PeerScoreParams, PeerScoreThresholds, RejectReason};
 use crate::protocol::SIGNING_PREFIX;
+use crate::send_queue::{SendQueueSnapshot, SendQueueStats};
 use crate::subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter};
 use crate::time_cache::{DuplicateCache, TimeCache};
 use crate::topic::{Hasher, Topic, TopicHash};
@@ -156,6 +158,30 @@ pub enum Event {
     },
     /// A peer that does not support gossipsub has connected.
     GossipsubNotSupported { peer_id: PeerId },
+    /// The pressure level of the send queue toward a connection changed (CRD ch.28 §28.9B RQ1
+    /// item 8). Reported once per change; a closed connection counts as cleared.
+    SendQueuePressure {
+        /// The peer of the connection.
+        peer_id: PeerId,
+        /// The connection.
+        connection_id: ConnectionId,
+        /// `true` when the level was raised, `false` when it was cleared.
+        raised: bool,
+    },
+    /// A relay peer was added to this node's relay mesh while connected (CRD ch.32 §32.9B R-MP4).
+    RelayMeshJoined { peer_id: PeerId },
+    /// The queue signal of the send queue toward a connection changed (CRD ch.32 §32.9B R-MP2 item 2). Reported
+    /// once per change; a closed connection counts as cleared.
+    SendQueueSignal {
+        /// The peer of the connection.
+        peer_id: PeerId,
+        /// The connection.
+        connection_id: ConnectionId,
+        /// `true` when the signal was raised, `false` when it was cleared.
+        raised: bool,
+    },
+    /// The last connection to a relay closed (CRD ch.32 §32.9B R-MP2 item 2, the close signal).
+    RelayConnectionClosed { peer_id: PeerId },
 }
 
 /// A data structure for storing configuration for publishing messages. See [`MessageAuthenticity`]
@@ -366,6 +392,19 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     peer_connections: HashMap<PeerId, Vec<(ConnectionId, ConnectedPoint)>>,
 
     connected_addresses: Vec<Multiaddr>,
+
+    /// Counters of the send queue of every established connection, for metrics.
+    send_queue_stats: HashMap<ConnectionId, Arc<SendQueueStats>>,
+
+    /// Data RPCs dropped on connections that are closed by now.
+    send_queue_dropped_closed: u64,
+
+    /// Connections whose send queue pressure level is raised.
+    pressured_connections: HashMap<ConnectionId, PeerId>,
+
+    /// Connections whose send queue signal is raised, and how many times a signal was raised toward a relay.
+    signalled_connections: HashMap<ConnectionId, PeerId>,
+    queue_signals_raised: u64,
 }
 
 impl<D, F> Behaviour<D, F>
@@ -516,6 +555,11 @@ where
             connected_relays: HashSet::new(),
             peer_connections: HashMap::new(),
             connected_addresses: Vec::new(),
+            send_queue_stats: HashMap::new(),
+            send_queue_dropped_closed: 0,
+            pressured_connections: HashMap::new(),
+            signalled_connections: HashMap::new(),
+            queue_signals_raised: 0,
         })
     }
 }
@@ -680,6 +724,37 @@ where
         data: impl Into<Vec<u8>>,
         source: PeerId,
     ) -> Result<MessageId, PublishError> {
+        self.publish_from_with_priority(topic, data, source, false)
+    }
+
+    /// Publishes a message like [`Self::publish`], through the priority lane of every send
+    /// queue it is written to when `priority` is set (CRD ch.28 §28.9B RQ1 item 9).
+    pub fn publish_with_priority(
+        &mut self,
+        topic: impl Into<TopicHash>,
+        data: impl Into<Vec<u8>>,
+        priority: bool,
+    ) -> Result<MessageId, PublishError> {
+        self.publish_from_with_priority(
+            topic,
+            data,
+            *(self
+                .publish_config
+                .get_own_id()
+                .expect("own id can not be empty")),
+            priority,
+        )
+    }
+
+    /// Publishes a message like [`Self::publish_from`], through the priority lane of every send
+    /// queue it is written to when `priority` is set (CRD ch.28 §28.9B RQ1 item 9).
+    pub fn publish_from_with_priority(
+        &mut self,
+        topic: impl Into<TopicHash>,
+        data: impl Into<Vec<u8>>,
+        source: PeerId,
+        priority: bool,
+    ) -> Result<MessageId, PublishError> {
         let data = data.into();
         let topic = topic.into();
 
@@ -709,7 +784,13 @@ where
 
         let topic_hash = raw_message.topic.clone();
 
-        self.forward_msg(&msg_id, raw_message.clone(), Some(&source), HashSet::new())?;
+        self.forward_msg(
+            &msg_id,
+            raw_message.clone(),
+            Some(&source),
+            HashSet::new(),
+            priority,
+        )?;
 
         let mut recipient_peers = HashSet::new();
         // if not subscribed to the topic, use fanout peers
@@ -754,7 +835,7 @@ where
         // Send to peers we know are subscribed to the topic.
         for peer_id in recipient_peers.iter() {
             debug!("Sending message to peer: {:?}", peer_id);
-            self.notify_primary(*peer_id, event.clone());
+            self.notify_primary_with_priority(*peer_id, event.clone(), priority);
         }
 
         Ok(msg_id)
@@ -771,6 +852,17 @@ where
         &mut self,
         message_id: &MessageId,
         propagation_source: &PeerId,
+    ) -> Result<bool, PublishError> {
+        self.propagate_message_with_priority(message_id, propagation_source, false)
+    }
+
+    /// Propagates a message like [`Self::propagate_message`], through the priority lane of
+    /// every send queue it is written to when `priority` is set (CRD ch.28 §28.9B RQ1 item 9).
+    pub fn propagate_message_with_priority(
+        &mut self,
+        message_id: &MessageId,
+        propagation_source: &PeerId,
+        priority: bool,
     ) -> Result<bool, PublishError> {
         let (raw_message, originating_peers) = match self.mcache.validate(message_id) {
             Some((raw_message, originating_peers)) => (raw_message.clone(), originating_peers),
@@ -791,6 +883,7 @@ where
             raw_message,
             Some(propagation_source),
             originating_peers,
+            priority,
         )?;
 
         Ok(true)
@@ -848,6 +941,7 @@ where
                     raw_message,
                     Some(propagation_source),
                     originating_peers,
+                    false,
                 )?;
                 return Ok(true);
             }
@@ -1914,6 +2008,7 @@ where
                     raw_message,
                     Some(propagation_source),
                     HashSet::new(),
+                    false,
                 )
                 .is_err()
             {
@@ -2761,6 +2856,7 @@ where
         message: RawMessage,
         propagation_source: Option<&PeerId>,
         originating_peers: HashSet<PeerId>,
+        priority: bool,
     ) -> Result<bool, PublishError> {
         // message is fully validated inform peer_score
         if let Some((peer_score, ..)) = &mut self.peer_score {
@@ -2821,7 +2917,7 @@ where
                 }
 
                 debug!("Sending message: {:?} to peer {:?}", msg_id, peer);
-                self.send_message(*peer, event.clone())?;
+                self.send_message_with_priority(*peer, event.clone(), priority)?;
                 if let Some(m) = self.metrics.as_mut() {
                     m.msg_sent(&message.topic, msg_bytes);
                 }
@@ -2849,7 +2945,7 @@ where
 
                 if Some(&relay) != propagation_source && Some(relay) != message_source {
                     debug!("Sending message: {:?} to relay {:?}", msg_id, relay);
-                    self.notify_primary(relay, event.clone());
+                    self.notify_primary_with_priority(relay, event.clone(), priority);
                 }
             }
             r = true;
@@ -2991,6 +3087,17 @@ where
     /// Send a [`Rpc`] message to a peer. This will wrap the message in an arc if it
     /// is not already an arc.
     fn send_message(&mut self, peer_id: PeerId, message: proto::RPC) -> Result<(), PublishError> {
+        self.send_message_with_priority(peer_id, message, false)
+    }
+
+    /// Like [`Self::send_message`]; a `priority` message is queued in the priority lane of the
+    /// connection (CRD ch.28 §28.9B RQ1 item 9).
+    fn send_message_with_priority(
+        &mut self,
+        peer_id: PeerId,
+        message: proto::RPC,
+        priority: bool,
+    ) -> Result<(), PublishError> {
         // If the message is oversized, try and fragment it. If it cannot be fragmented, log an
         // error and drop the message (all individual messages should be small enough to fit in the
         // max_transmit_size)
@@ -3000,7 +3107,11 @@ where
         for message in messages {
             self.events.push_back(ToSwarm::NotifyHandler {
                 peer_id,
-                event: HandlerIn::Message(message),
+                event: if priority {
+                    HandlerIn::PriorityMessage(message)
+                } else {
+                    HandlerIn::Message(message)
+                },
                 handler: NotifyHandler::Any,
             })
         }
@@ -3237,6 +3348,28 @@ where
             ..
         }: ConnectionClosed<<Self as NetworkBehaviour>::ConnectionHandler>,
     ) {
+        // Keep the dropped count of the closed connection, and report its pressure as cleared.
+        if let Some(stats) = self.send_queue_stats.remove(&connection_id) {
+            self.send_queue_dropped_closed =
+                self.send_queue_dropped_closed.saturating_add(stats.dropped());
+        }
+        if self.signalled_connections.remove(&connection_id).is_some() {
+            self.events
+                .push_back(ToSwarm::GenerateEvent(Event::SendQueueSignal {
+                    peer_id,
+                    connection_id,
+                    raised: false,
+                }));
+        }
+        if self.pressured_connections.remove(&connection_id).is_some() {
+            self.events
+                .push_back(ToSwarm::GenerateEvent(Event::SendQueuePressure {
+                    peer_id,
+                    connection_id,
+                    raised: false,
+                }));
+        }
+
         // Remove IP from peer scoring system
         if let Some((peer_score, ..)) = &mut self.peer_score {
             if let Some(ip) = get_ip_addr(endpoint.get_remote_address()) {
@@ -3349,7 +3482,10 @@ where
             self.outbound_peers.remove(&peer_id);
 
             self.relays_mesh.remove(&peer_id);
-            self.connected_relays.remove(&peer_id);
+            if self.connected_relays.remove(&peer_id) {
+                self.events
+                    .push_back(ToSwarm::GenerateEvent(Event::RelayConnectionClosed { peer_id }));
+            }
             self.included_to_relays_mesh.remove(&peer_id);
             self.peer_connections.remove(&peer_id);
 
@@ -3518,31 +3654,43 @@ where
     }
 
     fn notify_primary(&mut self, peer_id: PeerId, event: Rpc) {
+        self.notify_primary_with_priority(peer_id, event, false)
+    }
+
+    fn notify_primary_with_priority(&mut self, peer_id: PeerId, event: Rpc, priority: bool) {
         if let Some(points) = self.peer_connections.get(&peer_id) {
             if !points.is_empty() {
                 let conn_id = points[0].0;
-                return self.notify_one(peer_id, conn_id, event);
+                return self.notify_one(peer_id, conn_id, event, priority);
             }
         }
 
         warn!("Expected at least one connection of the peer '{}'", peer_id);
 
-        self.notify_any(peer_id, event.clone());
+        self.notify_any(peer_id, event.clone(), priority);
     }
 
-    fn notify_any(&mut self, peer_id: PeerId, event: Rpc) {
+    fn handler_message(event: Rpc, priority: bool) -> HandlerIn {
+        if priority {
+            HandlerIn::PriorityMessage(event.into_protobuf())
+        } else {
+            HandlerIn::Message(event.into_protobuf())
+        }
+    }
+
+    fn notify_any(&mut self, peer_id: PeerId, event: Rpc, priority: bool) {
         self.events.push_back(ToSwarm::NotifyHandler {
             peer_id,
             handler: NotifyHandler::Any,
-            event: HandlerIn::Message(event.into_protobuf()),
+            event: Self::handler_message(event, priority),
         });
     }
 
-    fn notify_one(&mut self, peer_id: PeerId, conn_id: ConnectionId, event: Rpc) {
+    fn notify_one(&mut self, peer_id: PeerId, conn_id: ConnectionId, event: Rpc, priority: bool) {
         self.events.push_back(ToSwarm::NotifyHandler {
             peer_id,
             handler: NotifyHandler::One(conn_id),
-            event: HandlerIn::Message(event.into_protobuf()),
+            event: Self::handler_message(event, priority),
         });
     }
 
@@ -3590,11 +3738,21 @@ where
         debug!("Completed IAmrelay handling for peer: {:?}", peer_id);
     }
 
+    /// Reports that a connected relay joined the relay mesh (CRD ch.32 §32.9B R-MP4).
+    fn report_relay_mesh_joined(&mut self, peer_id: PeerId) {
+        if self.connected_relays.contains(&peer_id) {
+            self.events
+                .push_back(ToSwarm::GenerateEvent(Event::RelayMeshJoined { peer_id }));
+        }
+    }
+
     /// Adds peers to relays mesh and notifies them they are added
     fn add_peers_to_relays_mesh(&mut self, peers: Vec<PeerId>) {
         for peer in &peers {
             // other mesh size is unknown at this point
-            self.relays_mesh.insert(*peer, 0);
+            if self.relays_mesh.insert(*peer, 0).is_none() {
+                self.report_relay_mesh_joined(*peer);
+            }
         }
         for peer in peers {
             self.notify_included_to_relay_mesh(peer);
@@ -3619,7 +3777,13 @@ where
                         self.notify_excluded_from_relay_mesh(*peer_id);
                     } else {
                         debug!("Adding peer {:?} to relays_mesh", peer_id);
-                        self.relays_mesh.insert(*peer_id, other_mesh_size);
+                        if self
+                            .relays_mesh
+                            .insert(*peer_id, other_mesh_size)
+                            .is_none()
+                        {
+                            self.report_relay_mesh_joined(*peer_id);
+                        }
                     }
                 } else {
                     debug!("Adding peer {:?} to included_to_relays_mesh", peer_id);
@@ -3673,6 +3837,47 @@ where
         self.connected_relays.len()
     }
 
+    /// The send queue counters of all connections, for metrics (CRD ch.28 §28.9B RQ1 item 8).
+    pub fn send_queue_snapshot(&self) -> SendQueueSnapshot {
+        let mut snapshot = SendQueueSnapshot {
+            dropped: self.send_queue_dropped_closed,
+            ..SendQueueSnapshot::default()
+        };
+        for stats in self.send_queue_stats.values() {
+            let queued = stats.queued();
+            snapshot.queued = snapshot.queued.saturating_add(queued);
+            snapshot.max_per_connection = snapshot.max_per_connection.max(queued);
+            snapshot.dropped = snapshot.dropped.saturating_add(stats.dropped());
+        }
+        snapshot
+    }
+
+    /// Whether the send queue pressure level is raised for any connection to a relay (CRD ch.28
+    /// §28.9B RQ1 item 8).
+    pub fn relay_send_queue_pressure(&self) -> bool {
+        self.pressured_connections
+            .values()
+            .any(|peer| self.connected_relays.contains(peer))
+    }
+
+    /// Whether the queue signal is raised toward any connection to a relay (CRD ch.32 §32.9B R-MP2 item 2).
+    pub fn relay_queue_signal(&self) -> bool {
+        self.signalled_connections
+            .values()
+            .any(|peer| self.connected_relays.contains(peer))
+    }
+
+    /// How many times the queue signal was raised toward a relay connection since start.
+    pub fn queue_signals_raised(&self) -> u64 {
+        self.queue_signals_raised
+    }
+
+    fn register_send_queue(&mut self, connection_id: ConnectionId, handler: &Handler) {
+        if let Some(stats) = handler.send_queue_stats() {
+            self.send_queue_stats.insert(connection_id, stats);
+        }
+    }
+
     /// Get count of received messages in the [`GossipsubConfig::duplicate_cache_time`] period.
     pub fn get_received_messages_in_period(&self) -> (Duration, usize) {
         (self.duplicate_cache.ttl(), self.duplicate_cache.len())
@@ -3718,32 +3923,36 @@ where
 
     fn handle_established_inbound_connection(
         &mut self,
-        _: ConnectionId,
+        connection_id: ConnectionId,
         peer_id: PeerId,
         _: &Multiaddr,
         _: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        Ok(Handler::new(
+        let handler = Handler::new(
             self.config.protocol_config(),
             self.config.idle_timeout(),
             peer_id,
             self.config.send_queue_config(),
-        ))
+        );
+        self.register_send_queue(connection_id, &handler);
+        Ok(handler)
     }
 
     fn handle_established_outbound_connection(
         &mut self,
-        _: ConnectionId,
+        connection_id: ConnectionId,
         peer_id: PeerId,
         _: &Multiaddr,
         _: Endpoint,
     ) -> Result<THandler<Self>, ConnectionDenied> {
-        Ok(Handler::new(
+        let handler = Handler::new(
             self.config.protocol_config(),
             self.config.idle_timeout(),
             peer_id,
             self.config.send_queue_config(),
-        ))
+        );
+        self.register_send_queue(connection_id, &handler);
+        Ok(handler)
     }
 
     fn on_connection_handler_event(
@@ -3760,6 +3969,43 @@ where
                     peer_id: propagation_source,
                     connection: CloseConnection::One(connection_id),
                 });
+            }
+            HandlerEvent::SendQueuePressure { raised } => {
+                let changed = if raised {
+                    self.pressured_connections
+                        .insert(connection_id, propagation_source)
+                        .is_none()
+                } else {
+                    self.pressured_connections.remove(&connection_id).is_some()
+                };
+                if changed {
+                    self.events
+                        .push_back(ToSwarm::GenerateEvent(Event::SendQueuePressure {
+                            peer_id: propagation_source,
+                            connection_id,
+                            raised,
+                        }));
+                }
+            }
+            HandlerEvent::SendQueueSignal { raised } => {
+                let changed = if raised {
+                    self.signalled_connections
+                        .insert(connection_id, propagation_source)
+                        .is_none()
+                } else {
+                    self.signalled_connections.remove(&connection_id).is_some()
+                };
+                if changed {
+                    if raised && self.connected_relays.contains(&propagation_source) {
+                        self.queue_signals_raised += 1;
+                    }
+                    self.events
+                        .push_back(ToSwarm::GenerateEvent(Event::SendQueueSignal {
+                            peer_id: propagation_source,
+                            connection_id,
+                            raised,
+                        }));
+                }
             }
             HandlerEvent::PeerKind(kind) => {
                 // We have identified the protocol this peer is using

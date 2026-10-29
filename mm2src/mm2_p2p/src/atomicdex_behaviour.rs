@@ -145,11 +145,17 @@ pub enum AdexBehaviourCmd {
     PublishMsg {
         topics: Vec<String>,
         msg: Vec<u8>,
+        /// Queue the message in the priority lane of every connection it is written to
+        /// (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
     },
     PublishMsgFrom {
         topics: Vec<String>,
         msg: Vec<u8>,
         from: PeerId,
+        /// Queue the message in the priority lane of every connection it is written to
+        /// (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
     },
     /// Request relays sequential until a response is received.
     RequestAnyRelay {
@@ -197,6 +203,9 @@ pub enum AdexBehaviourCmd {
     PropagateMessage {
         message_id: MessageId,
         propagation_source: PeerId,
+        /// Queue the propagated message in the priority lane of every connection it is written
+        /// to (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
     },
 }
 
@@ -261,7 +270,21 @@ pub enum AdexBehaviourEvent {
         /// See [`AdexBehaviourCmd::SendResponse`].
         response_channel: AdexResponseChannel,
     },
+    /// A connected relay joined this node's relay mesh (CRD ch.32 §32.9B R-MP4). The application
+    /// uses it to publish the keep-alive round that follows a reconnect.
+    RelayMeshJoined {
+        /// The relay that joined the mesh.
+        peer_id: PeerId,
+    },
+    /// The last connection to a relay closed (CRD ch.32 §32.9B R-MP2 item 2, the close signal).
+    RelayConnectionClosed {
+        /// The relay.
+        peer_id: PeerId,
+    },
 }
+
+/// Aggregate counters of the gossip send queues, for metrics (CRD ch.32 §32.9B R-MP5).
+pub use libp2p::gossipsub::SendQueueSnapshot;
 
 /// AtomicDEX libp2p Network behaviour implementation.
 ///
@@ -291,6 +314,28 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
         GossipsubEvent::Subscribed { peer_id, topic } => Some(AdexBehaviourEvent::Subscribed { peer_id, topic }),
         GossipsubEvent::Unsubscribed { peer_id, topic } => Some(AdexBehaviourEvent::Unsubscribed { peer_id, topic }),
         GossipsubEvent::GossipsubNotSupported { .. } => None,
+        // The pressure level feeds the queue signal inside the behaviour, and the application reads that
+        // (`relay_queue_signal`), so it always sees the current level and not a stream of changes it could miss.
+        GossipsubEvent::SendQueuePressure {
+            peer_id,
+            connection_id,
+            raised,
+        } => {
+            debug!(
+                "Gossip send queue pressure toward peer {} on connection {:?}: {}",
+                peer_id,
+                connection_id,
+                if raised { "raised" } else { "cleared" }
+            );
+            None
+        },
+        GossipsubEvent::RelayMeshJoined { peer_id } => Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }),
+        // The queue signal is read from the behaviour (`relay_queue_signal`), so the application always sees the
+        // current level.
+        GossipsubEvent::SendQueueSignal { .. } => None,
+        GossipsubEvent::RelayConnectionClosed { peer_id } => {
+            Some(AdexBehaviourEvent::RelayConnectionClosed { peer_id })
+        },
     }
 }
 
@@ -415,20 +460,31 @@ impl AtomicDexBehaviour {
                     error!("Error subscribing to topic {}: {:?}", topic, e);
                 }
             },
-            AdexBehaviourCmd::PublishMsg { topics, msg } => {
+            AdexBehaviourCmd::PublishMsg { topics, msg, priority } => {
                 for topic in topics {
-                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(Topic::new(topic), msg.clone()) {
+                    if let Err(e) =
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish_with_priority(Topic::new(topic), msg.clone(), priority)
+                    {
                         error!("Error publishing message: {:?}", e);
                     }
                 }
             },
-            AdexBehaviourCmd::PublishMsgFrom { topics, msg, from } => {
+            AdexBehaviourCmd::PublishMsgFrom {
+                topics,
+                msg,
+                from,
+                priority,
+            } => {
                 for topic in topics {
-                    if let Err(e) = swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .publish_from(Topic::new(topic), msg.clone(), from)
-                    {
+                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish_from_with_priority(
+                        Topic::new(topic),
+                        msg.clone(),
+                        from,
+                        priority,
+                    ) {
                         error!("Error publishing message from {}: {:?}", from, e);
                     }
                 }
@@ -563,12 +619,13 @@ impl AtomicDexBehaviour {
             AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source,
+                priority,
             } => {
-                if let Err(e) = swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .propagate_message(&message_id, &propagation_source)
-                {
+                if let Err(e) = swarm.behaviour_mut().gossipsub.propagate_message_with_priority(
+                    &message_id,
+                    &propagation_source,
+                    priority,
+                ) {
                     error!("Error propagating message {}: {:?}", message_id, e);
                 }
             },
@@ -587,6 +644,16 @@ impl AtomicDexBehaviour {
     pub fn received_messages_in_period(&self) -> (Duration, usize) { self.gossipsub.get_received_messages_in_period() }
 
     pub fn connected_peers_len(&self) -> usize { self.gossipsub.get_num_peers() }
+
+    /// The send queue counters of all connections (CRD ch.32 §32.9B R-MP5).
+    pub fn send_queue_snapshot(&self) -> SendQueueSnapshot { self.gossipsub.send_queue_snapshot() }
+
+    /// Whether the queue signal of CRD ch.32 §32.9B R-MP2 item 2 is raised toward any connection to a relay: the
+    /// data queue has held something for 2 seconds, or the pressure level of CRD ch.28 §28.9B RQ1 item 8 is raised.
+    pub fn relay_queue_signal(&self) -> bool { self.gossipsub.relay_queue_signal() }
+
+    /// How many times the queue signal was raised toward a relay connection since start.
+    pub fn queue_signals_raised(&self) -> u64 { self.gossipsub.queue_signals_raised() }
 }
 
 /// Dispatches an event produced by the composed [`AtomicDexBehaviour`] to the application layer.

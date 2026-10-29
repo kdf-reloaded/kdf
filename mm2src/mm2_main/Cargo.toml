@@ -148,6 +148,11 @@ hyper-util = { version = "0.1", default-features = false, features = ["server-au
 tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net", "signal"] }
 rustls-pemfile = "2.2"
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The in-process slow-relay scenario of `lp_ordermatch/maker_outbox_lab_tests.rs` builds a plain gossipsub relay
+# next to the production swarm. Same pin and feature set as `mm2_p2p`.
+libp2p = { workspace = true, features = ["gossipsub", "noise", "ping", "macros", "yamux"] }
+
 [dev-dependencies]
 crypto = { path = "../crypto", features = ["test-helpers"] }
 mocktopus = "0.8.0"

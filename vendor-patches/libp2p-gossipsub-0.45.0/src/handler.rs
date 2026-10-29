@@ -20,7 +20,7 @@
 
 use crate::protocol::{GossipsubCodec, ProtocolConfig};
 use crate::rpc_proto::proto;
-use crate::send_queue::{DropLog, SendQueue, SendQueueConfig};
+use crate::send_queue::{DropLog, SendQueue, SendQueueConfig, SendQueueStats};
 use crate::types::{PeerKind, RawMessage, Rpc};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
@@ -39,6 +39,7 @@ use libp2p_identity::PeerId;
 use libp2p_swarm::Stream;
 use std::{
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
@@ -60,9 +61,16 @@ pub enum HandlerEvent {
     /// An inbound or outbound substream has been established with the peer and this informs over
     /// which protocol. This message only occurs once per connection.
     PeerKind(PeerKind),
-    /// The send queue toward the peer has stayed at its cap for the whole stuck period. The
-    /// behaviour closes the connection.
+    /// The send queue toward the peer has stayed at its cap for the whole stuck period, or its
+    /// priority lane overflowed. The behaviour closes the connection.
     SendQueueStuck,
+    /// The pressure level of the send queue toward the peer changed (CRD ch.28 §28.9B RQ1 item
+    /// 8). Reported once per change.
+    SendQueuePressure { raised: bool },
+    /// The queue signal toward the peer changed (CRD ch.32 §32.9B R-MP2 item 2): the data queue
+    /// has held something for 2 seconds, or the pressure level is raised; it clears after 5
+    /// seconds of an empty data queue with the pressure level cleared. Reported once per change.
+    SendQueueSignal { raised: bool },
 }
 
 /// A message sent from the behaviour to the handler.
@@ -70,6 +78,9 @@ pub enum HandlerEvent {
 pub enum HandlerIn {
     /// A gossipsub message to send.
     Message(proto::RPC),
+    /// A gossipsub message to send through the priority lane of the send queue (CRD ch.28
+    /// §28.9B RQ1 item 9).
+    PriorityMessage(proto::RPC),
     /// The peer has joined the mesh.
     JoinedMesh,
     /// The peer has left the mesh.
@@ -109,7 +120,7 @@ pub struct EnabledHandler {
     send_queue: SendQueue,
 
     /// Wakes the handler when the queue's stuck deadline passes.
-    stuck_timer: Option<Ticker>,
+    stuck_timer: Option<(Instant, Ticker)>,
 
     /// Flag indicating that an outbound substream is being established to prevent duplicate
     /// requests.
@@ -199,6 +210,14 @@ impl Handler {
             in_mesh: false,
         })
     }
+
+    /// The counters of the send queue, for metrics. `None` for a disabled handler.
+    pub fn send_queue_stats(&self) -> Option<Arc<SendQueueStats>> {
+        match self {
+            Handler::Enabled(handler) => Some(handler.send_queue.stats()),
+            Handler::Disabled(_) => None,
+        }
+    }
 }
 
 impl EnabledHandler {
@@ -221,34 +240,74 @@ impl EnabledHandler {
         }
     }
 
-    /// Reports a connection that stayed at the send queue cap for the whole stuck period, and
-    /// keeps a timer armed for the deadline otherwise.
+    fn push_to_priority_lane(&mut self, rpc: proto::RPC) {
+        // A failed push is reported by `poll_send_queue_stuck`, which closes the connection.
+        self.send_queue.push_priority(rpc);
+    }
+
+    /// The pressure level change of the send queue, if any.
+    fn pressure_event(&mut self) -> Option<HandlerEvent> {
+        self.send_queue
+            .take_pressure_change()
+            .map(|raised| HandlerEvent::SendQueuePressure { raised })
+    }
+
+    /// The queue signal change of the send queue, if any.
+    fn signal_event(&mut self) -> Option<HandlerEvent> {
+        self.send_queue
+            .take_signal_change()
+            .map(|raised| HandlerEvent::SendQueueSignal { raised })
+    }
+
+    /// Reports a connection whose priority lane overflowed or that stayed at the send queue cap
+    /// for the whole stuck period, re-evaluates the queue signal, and keeps a timer armed for the
+    /// next deadline of either.
     fn poll_send_queue_stuck(&mut self, cx: &mut Context<'_>) -> Option<HandlerEvent> {
-        let Some(deadline) = self.send_queue.stuck_deadline() else {
-            self.stuck_timer = None;
-            return None;
-        };
-        let now = Instant::now();
-        if now >= deadline {
-            self.stuck_timer = None;
-            let report = self.send_queue.take_stuck(now)?;
+        if self.send_queue.take_priority_overflow() {
             log::warn!(
-                "Closing the connection to peer {}: gossip send queue at its limit for {:?}, \
-                 {} messages dropped",
+                "Closing the connection to peer {}: gossip priority lane at its limit of {} \
+                 messages, {} messages dropped",
                 self.peer_id,
-                report.at_cap,
-                report.total_dropped
+                self.send_queue.priority_len(),
+                self.send_queue.total_dropped()
             );
             return Some(HandlerEvent::SendQueueStuck);
         }
-        let timer = self
-            .stuck_timer
-            .get_or_insert_with(|| Ticker::new(deadline - now));
-        // A tick only means the deadline is near or the period changed: drop the timer and
-        // re-evaluate on the next poll.
-        if timer.poll_next_unpin(cx).is_ready() {
+        let now = Instant::now();
+        self.send_queue.update_signal(now);
+        if let Some(deadline) = self.send_queue.stuck_deadline() {
+            if now >= deadline {
+                self.stuck_timer = None;
+                let report = self.send_queue.take_stuck(now)?;
+                log::warn!(
+                    "Closing the connection to peer {}: gossip send queue at its limit for {:?}, \
+                     {} messages dropped",
+                    self.peer_id,
+                    report.at_cap,
+                    report.total_dropped
+                );
+                return Some(HandlerEvent::SendQueueStuck);
+            }
+        }
+        let next = [self.send_queue.stuck_deadline(), self.send_queue.signal_deadline()]
+            .into_iter()
+            .flatten()
+            .min();
+        let Some(next) = next else {
             self.stuck_timer = None;
-            cx.waker().wake_by_ref();
+            return None;
+        };
+        // An earlier deadline than the armed one replaces the timer.
+        if self.stuck_timer.as_ref().map_or(true, |(armed, _)| next < *armed) {
+            self.stuck_timer = Some((next, Ticker::new(next.saturating_duration_since(now))));
+        }
+        if let Some((_, timer)) = self.stuck_timer.as_mut() {
+            // A tick only means a deadline is near or the queue changed: drop the timer and
+            // re-evaluate on the next poll.
+            if timer.poll_next_unpin(cx).is_ready() {
+                self.stuck_timer = None;
+                cx.waker().wake_by_ref();
+            }
         }
         None
     }
@@ -300,6 +359,9 @@ impl EnabledHandler {
         >,
     > {
         if let Some(event) = self.poll_send_queue_stuck(cx) {
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
+        }
+        if let Some(event) = self.pressure_event().or_else(|| self.signal_event()) {
             return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
         }
 
@@ -461,6 +523,11 @@ impl EnabledHandler {
             }
         }
 
+        // Writing the queue may have lowered the pressure level or emptied it.
+        if let Some(event) = self.pressure_event().or_else(|| self.signal_event()) {
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(event));
+        }
+
         Poll::Pending
     }
 }
@@ -489,6 +556,7 @@ impl ConnectionHandler for Handler {
         match self {
             Handler::Enabled(handler) => match message {
                 HandlerIn::Message(m) => handler.push_to_send_queue(m),
+                HandlerIn::PriorityMessage(m) => handler.push_to_priority_lane(m),
                 HandlerIn::JoinedMesh => {
                     handler.in_mesh = true;
                 }
@@ -677,6 +745,7 @@ mod tests {
                 max_messages,
                 max_bytes: 1 << 20,
                 stuck_timeout,
+                ..SendQueueConfig::default()
             },
         )
     }
@@ -761,5 +830,122 @@ mod tests {
                 ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)
             ));
         }
+    }
+
+    fn handler_with(config: SendQueueConfig) -> Handler {
+        Handler::new(
+            ProtocolConfig::default(),
+            Duration::from_secs(120),
+            PeerId::random(),
+            config,
+        )
+    }
+
+    fn poll_all(h: &mut Handler) -> Vec<HandlerEvent> {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut events = vec![];
+        while let Poll::Ready(ev) = ConnectionHandler::poll(h, &mut cx) {
+            if let ConnectionHandlerEvent::NotifyBehaviour(ev) = ev {
+                events.push(ev);
+            }
+        }
+        events
+    }
+
+    fn pressure_changes(events: &[HandlerEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|ev| match ev {
+                HandlerEvent::SendQueuePressure { raised } => Some(*raised),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pressure_changes_are_reported_to_the_behaviour_once() {
+        let mut h = handler_with(SendQueueConfig {
+            pressure_raise: 6,
+            pressure_clear: 2,
+            ..SendQueueConfig::default()
+        });
+        for tag in 0..5u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        assert_eq!(pressure_changes(&poll_all(&mut h)), Vec::<bool>::new());
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(5)));
+        assert_eq!(pressure_changes(&poll_all(&mut h)), vec![true]);
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(6)));
+        assert_eq!(pressure_changes(&poll_all(&mut h)), Vec::<bool>::new());
+        // Drain to the low mark (no substream exists, so the test pops the queue directly).
+        let q = &mut enabled(&mut h).send_queue;
+        while q.data_count() > 2 {
+            q.pop();
+        }
+        assert_eq!(pressure_changes(&poll_all(&mut h)), vec![false]);
+        assert_eq!(pressure_changes(&poll_all(&mut h)), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn priority_messages_go_to_the_priority_lane_and_overflow_closes_the_connection() {
+        let mut h = handler_with(SendQueueConfig {
+            priority_max: 3,
+            ..SendQueueConfig::default()
+        });
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(1)));
+        for tag in 10..13u8 {
+            h.on_behaviour_event(HandlerIn::PriorityMessage(data_rpc(tag)));
+        }
+        {
+            let q = &enabled(&mut h).send_queue;
+            assert_eq!((q.priority_len(), q.data_count()), (3, 1));
+        }
+        let is_stuck = |events: &[HandlerEvent]| {
+            events
+                .iter()
+                .filter(|ev| matches!(ev, HandlerEvent::SendQueueStuck))
+                .count()
+        };
+        assert_eq!(is_stuck(&poll_all(&mut h)), 0);
+        // The fourth priority RPC does not fit: the connection is reported for closing, once.
+        h.on_behaviour_event(HandlerIn::PriorityMessage(data_rpc(13)));
+        assert_eq!(is_stuck(&poll_all(&mut h)), 1);
+        assert_eq!(is_stuck(&poll_all(&mut h)), 0);
+        // The priority RPCs are written first, in order.
+        let q = &mut enabled(&mut h).send_queue;
+        let mut tags = vec![];
+        while let Some(rpc) = q.pop() {
+            tags.push(rpc.publish[0].data.as_ref().unwrap()[0]);
+        }
+        assert_eq!(tags, vec![10, 11, 12, 1]);
+    }
+
+    #[test]
+    fn queue_signal_is_reported_after_the_raise_time_and_cleared_after_the_clear_time() {
+        let mut h = handler_with(SendQueueConfig {
+            signal_raise_after: Duration::from_millis(100),
+            signal_clear_after: Duration::from_millis(150),
+            ..SendQueueConfig::default()
+        });
+        let signals = |events: &[HandlerEvent]| {
+            events
+                .iter()
+                .filter_map(|ev| match ev {
+                    HandlerEvent::SendQueueSignal { raised } => Some(*raised),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(1)));
+        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(signals(&poll_all(&mut h)), vec![true]);
+        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
+        // The queue is emptied; the clear time has to pass.
+        while enabled(&mut h).send_queue.pop().is_some() {}
+        assert_eq!(signals(&poll_all(&mut h)), Vec::<bool>::new());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(signals(&poll_all(&mut h)), vec![false]);
     }
 }

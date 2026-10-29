@@ -296,7 +296,7 @@ impl TestNode {
         let mut published = vec![];
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
-                AdexBehaviourCmd::PublishMsg { topics, msg } => published.push((topics, msg)),
+                AdexBehaviourCmd::PublishMsg { topics, msg, .. } => published.push((topics, msg)),
                 _ => panic!("only publications are expected on the command channel"),
             }
         }
