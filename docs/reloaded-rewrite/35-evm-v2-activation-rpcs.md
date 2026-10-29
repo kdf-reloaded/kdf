@@ -822,7 +822,7 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > URLs host-only and secrets as set (T35.36). The RPC wire dump marks the
 > removed URL parts in its redacted mode (T35.35).
 >
-> *Shared HTTP driver (2026-10-29, PR #TBD).* An HTTP request that finishes
+> *Shared HTTP driver (2026-10-29, PR #165).* An HTTP request that finishes
 > after its caller has stopped waiting is logged once, at the normal level. The
 > line names the host-only form of the request URL and how the request ended:
 > its own time bound was reached, an answer arrived and was discarded, or it
