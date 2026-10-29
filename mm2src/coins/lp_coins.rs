@@ -214,6 +214,7 @@ macro_rules! ok_or_retry_after_sleep_sync {
     };
 }
 
+pub mod activation_locks;
 pub mod coin_balance;
 #[doc(hidden)]
 #[cfg(test)]
@@ -224,8 +225,10 @@ pub mod hd_wallet;
 pub mod hd_wallet_storage;
 #[cfg(not(target_arch = "wasm32"))] pub mod lightning;
 // R39.6.1: z_coin is available on WASM (with IndexedDB storage backend).
+pub(crate) mod endpoint_suspension;
 pub mod my_tx_history_v2;
 pub mod nft;
+pub mod node_url;
 pub mod qrc20;
 pub mod request_fee_scope;
 pub mod rpc_command;

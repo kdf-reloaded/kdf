@@ -460,7 +460,7 @@ fn run(params: Params) -> Outcome {
     }
     let setup_started = Instant::now();
     loop {
-        let pending = octx.maker_outbox.outboxes.lock().metrics(10.0).pending;
+        let pending = octx.maker_outbox.outboxes.lock().metrics(20.0).pending;
         let known = relay.state.model.lock().unwrap().len();
         if pending == 0 && known == params.orders {
             break;
@@ -768,7 +768,7 @@ fn check_t_mp8(outcome: &Outcome) {
     );
 }
 
-/// The harness with a relay that keeps up (it reads 20 per second, the maker releases at most 10): no signal, the rate
+/// The harness with a relay that keeps up (it reads 20 per second, the maker releases at most 20): no signal, the rate
 /// stays at the ceiling, the keep-alives arrive promptly and the relay's order set equals the maker's. This is a
 /// pipeline check of the harness that T-MP8 uses, not the slow-relay scenario.
 ///

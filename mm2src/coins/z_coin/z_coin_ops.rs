@@ -67,7 +67,7 @@ impl ZCoin {
             op: "admission",
             reason: "the coin is not in Light mode",
         })?;
-        client.backend().admitted().await
+        client.backend().admitted_ordered().await
     }
 
     /// The endpoints excluded by the latest admission decision, each with its reason (R39.11.7a(f)).
@@ -229,12 +229,17 @@ impl ZCoin {
             .await
             .map_err(|e| ShieldedFetchError::BeforeSync(e.to_string()))?;
         let servers = admitted.as_slice();
+        let backend = self
+            .lightwalletd()
+            .ok_or_else(|| ShieldedFetchError::BeforeSync("the coin is not in Light mode".to_owned()))?
+            .backend();
         self.z_fields
             .shielded_history
             .fetch_compact_blocks_from_lightwalletd(
                 self.ticker(),
                 &self.z_fields.consensus_params,
                 servers,
+                backend.as_ref(),
                 target_height,
                 requested_start_height,
                 skip_sync_params,

@@ -1,5 +1,6 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order, electrum_spread_reads};
 use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
@@ -236,6 +237,43 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
     }
 }
 
+/// The secp256k1 secret of the address a UTXO coin activates under the global HD wallet:
+/// `m/<derivation_path>/<account>'/<chain>/<address_id>` of `path_to_address` (by default account 0,
+/// the external chain and address 0, e.g. `m/44'/141'/0'/0/0`).
+///
+/// A shielded coin takes its transparent key from this same derivation (CRD ch.39 R39.6.4,
+/// "Transparent key under HD").
+///
+/// # Errors
+///
+/// Fails when a child number is out of range or the derivation fails.
+pub fn derive_activated_hd_secret(
+    global_hd_ctx: &GlobalHDAccountArc,
+    derivation_path: &HDPathToCoin,
+    path_to_address: &PathToAddress,
+) -> UtxoCoinBuildResult<crypto::Secp256k1Secret> {
+    let mut full_path = derivation_path.to_derivation_path();
+    // account (hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.account_id, true)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create hardened child number".to_owned()))?,
+    );
+    // chain (non-hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.chain as u32, false)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
+    );
+    // address index (non-hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.address_id, false)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
+    );
+
+    global_hd_ctx
+        .derive_secp256k1_secret(&full_path)
+        .mm_err(|e| UtxoCoinBuildError::Internal(e.to_string()))
+}
+
 #[async_trait]
 pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWithHardwareWalletBuilder {
     async fn build_utxo_fields_with_global_hd(
@@ -254,27 +292,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
         let path_to_address = self.activation_params().path_to_address.clone().unwrap_or_default();
 
-        // Build the full derivation path to the activated address.
-        let mut full_path = derivation_path.to_derivation_path();
-        // account (hardened)
-        full_path.push(
-            crypto::ChildNumber::new(path_to_address.account_id, true)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create hardened child number".to_owned()))?,
-        );
-        // chain (non-hardened)
-        full_path.push(
-            crypto::ChildNumber::new(path_to_address.chain as u32, false)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
-        );
-        // address index (non-hardened)
-        full_path.push(
-            crypto::ChildNumber::new(path_to_address.address_id, false)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
-        );
-
-        let secret = global_hd_ctx
-            .derive_secp256k1_secret(&full_path)
-            .mm_err(|e| UtxoCoinBuildError::Internal(e.to_string()))?;
+        let secret = derive_activated_hd_secret(&global_hd_ctx, &derivation_path, &path_to_address)?;
 
         let private = Private {
             prefix: conf.wif_prefix,
@@ -496,7 +514,9 @@ pub(crate) async fn build_electrum_client(
         block_interval: electrum_block_interval(coin_conf),
     });
     for (server, e) in client.add_servers(&servers) {
-        log!("Error " (e) " using " [server] ". Address won't be used");
+        // A server is named as `host:port` or by a placeholder, never by its configured string (CRD ch.38
+        // R38.6.9a).
+        log!("Error " (e) " using " (server) ". Address won't be used");
     }
     // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
     // coin lands here) leaves the pool; with none left there is nothing to wait for.

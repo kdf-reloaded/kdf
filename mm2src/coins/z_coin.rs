@@ -1,7 +1,10 @@
+use crate::node_url::lightwalletd_endpoint_label;
+use crate::rpc_command::get_my_address::PathToAddress;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawInProgressStatus, WithdrawTaskHandle};
 use crate::utxo::rpc_clients::{ElectrumRpcRequest, UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps, UtxoRpcError,
                                UtxoRpcFut, UtxoRpcResult};
+use crate::utxo::utxo_builder::derive_activated_hd_secret;
 use crate::utxo::utxo_builder::{UtxoCoinBuildError, UtxoCoinBuildResult, UtxoCoinBuilderCommonOps,
                                 UtxoCoinWithIguanaPrivKeyBuilder, UtxoFieldsWithIguanaPrivKeyBuilder};
 use crate::utxo::utxo_common::{big_decimal_from_sat_unsigned, payment_script};
@@ -48,6 +51,7 @@ use script::{Builder as ScriptBuilder, Opcode, Script, TransactionInputSigner};
 use serde_json::{json, Value as Json};
 use serialization::{deserialize, CoinVariant};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, Weak};
 #[cfg(not(target_arch = "wasm32"))]
@@ -86,6 +90,8 @@ use zcash_client_sqlite::WalletDb;
 use zcash_proofs::prover::LocalTxProver;
 
 #[cfg(not(target_arch = "wasm32"))] mod z_htlc;
+mod z_htlc_key;
+pub use z_htlc_key::derive_swap_htlc_key_pair;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod z_htlc_live_probe;
 #[cfg(not(target_arch = "wasm32"))]
@@ -664,7 +670,7 @@ impl ZcoinMode {
 }
 
 /// How a shielded coin is to reach the chain, as requested at activation.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ZcoinBackend {
     /// A full node reached through its RPC. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
@@ -677,6 +683,30 @@ pub enum ZcoinBackend {
         light_wallet_d_servers: Vec<String>,
         electrum_servers: Vec<ElectrumRpcRequest>,
     },
+}
+
+/// The debug form names each lightwalletd endpoint by its host-only form (CRD ch.35 R35.1.17, ch.39 R39.11.29).
+impl fmt::Debug for ZcoinBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinBackend::Native => f.write_str("Native"),
+            ZcoinBackend::Light {
+                light_wallet_d_servers,
+                electrum_servers,
+            } => {
+                let endpoints: Vec<String> = light_wallet_d_servers
+                    .iter()
+                    .enumerate()
+                    .map(|(position, server)| lightwalletd_endpoint_label(server, position))
+                    .collect();
+                f.debug_struct("Light")
+                    .field("light_wallet_d_servers", &endpoints)
+                    .field("electrum_servers", electrum_servers)
+                    .finish()
+            },
+        }
+    }
 }
 
 impl ZcoinBackend {
@@ -1734,12 +1764,13 @@ pub async fn z_coin_from_conf_and_params(
     backend: ZcoinBackend,
 ) -> Result<ZCoin, MmError<ZCoinBuildError>> {
     let z_key = shielded_spending_key_for_policy(ctx, secp_priv_key, account, &protocol_info)?;
+    let transparent_secret = transparent_secret_for_policy(ctx, conf, secp_priv_key)?;
     z_coin_from_conf_and_params_with_z_key(
         ctx,
         ticker,
         conf,
         params,
-        secp_priv_key,
+        &transparent_secret,
         #[cfg(not(target_arch = "wasm32"))]
         ctx.dbdir(),
         #[cfg(not(target_arch = "wasm32"))]
@@ -1749,6 +1780,43 @@ pub async fn z_coin_from_conf_and_params(
         backend,
     )
     .await
+}
+
+/// Selects the coin's transparent secp256k1 secret according to the active key policy
+/// (R39.6.4, "Transparent key under HD"; CRD ch.39 D39.5.a):
+///
+/// - **Iguana / legacy passphrase:** the coin's iguana secret, as before.
+/// - **HD (BIP39) wallet:** the key the UTXO builder activates for a UTXO coin's default
+///   address, `m/<derivation_path>/0'/0/0` of the coins-file `derivation_path`; the
+///   activation request cannot change it (its `account` selects only the Sapling account).
+///
+/// This secret is the coin's transparent key for every transparent use, and so the base key of
+/// the per-swap HTLC key (R39.5.9).
+///
+/// # Errors
+/// Returns [`ZCoinBuildError::HdDerivationError`] when the crypto context is unavailable, or
+/// when the HD policy is active and the coin entry has no usable `derivation_path`.
+pub(crate) fn transparent_secret_for_policy(
+    ctx: &MmArc,
+    conf: &Json,
+    secp_priv_key: &[u8],
+) -> Result<Vec<u8>, MmError<ZCoinBuildError>> {
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+    match crypto_ctx.key_pair_policy() {
+        KeyPairPolicy::Iguana => Ok(secp_priv_key.to_vec()),
+        KeyPairPolicy::GlobalHDAccount(hd_ctx) => {
+            if conf["derivation_path"].is_null() {
+                return MmError::err(ZCoinBuildError::HdDerivationError(
+                    "derivation_path is required for the HD-derived transparent key of a shielded coin".to_owned(),
+                ));
+            }
+            let derivation_path: HDPathToCoin = serde_json::from_value(conf["derivation_path"].clone())
+                .map_to_mm(|e| ZCoinBuildError::HdDerivationError(format!("invalid derivation_path: {e}")))?;
+            let secret = derive_activated_hd_secret(hd_ctx, &derivation_path, &PathToAddress::default())
+                .mm_err(|e| ZCoinBuildError::HdDerivationError(e.to_string()))?;
+            Ok(secret.as_slice().to_vec())
+        },
+    }
 }
 
 /// Selects the shielded (Sapling ZIP32) spending key according to the active key
@@ -2169,11 +2237,15 @@ impl ZCoin {
                 Vec::new()
             },
         };
-        let observed = self
-            .z_fields
-            .shielded_history
-            .fetch_pending_receipts(&servers, tip)
-            .await;
+        let observed = match self.lightwalletd() {
+            Some(client) => {
+                self.z_fields
+                    .shielded_history
+                    .fetch_pending_receipts(&servers, client.backend().as_ref(), tip)
+                    .await
+            },
+            None => Vec::new(),
+        };
 
         let mut rebuilt = HashMap::with_capacity(observed.len());
         for receipt in observed {

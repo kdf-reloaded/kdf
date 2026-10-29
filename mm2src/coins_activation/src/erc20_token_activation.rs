@@ -5,7 +5,7 @@
 //! a custom token), builds the token on top of an activated platform, and serves the single-token RPC and its
 //! task variant.
 
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::init_token::{InitTokenActivationOps, InitTokenError, InitTokenInProgressStatus, InitTokenTaskHandle,
                         InitTokenTaskManagerShared};
 use crate::platform_coin_with_tokens::{CustomTokenError, InitTokensAsMmCoinsError, RegisterTokenInfo};
@@ -448,6 +448,10 @@ pub async fn enable_evm_token(
     ctx: MmArc,
     req: EnableEvmTokenRequest,
 ) -> MmResult<EvmTokenActivationResult, EnableTokenError> {
+    // R55.1.12: the lock is held through registration; the checks below are the ones that follow the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+        .await
+        .map_to_mm(EnableTokenError::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableTokenError::TokenIsAlreadyActivated(req.ticker));
     }

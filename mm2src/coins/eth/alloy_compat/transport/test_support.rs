@@ -4,7 +4,7 @@
 use super::*;
 use crate::eth::alloy_compat::provider::provider_from_transport;
 use crate::eth::alloy_compat::KdfProvider;
-use crate::eth::node_url::listed_nodes;
+use crate::node_url::listed_nodes;
 use serde_json::{json, Value as Json};
 use std::sync::atomic::{AtomicBool, Ordering};
 

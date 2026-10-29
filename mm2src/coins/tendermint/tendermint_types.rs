@@ -1,4 +1,5 @@
 use super::rpc::*;
+use crate::node_url::host_only;
 use crate::{HistorySyncState, PrivKeyNotAllowed, PrivKeyPolicy, TransactionEnum};
 use cosmrs::proto::cosmos::tx::v1beta1::TxRaw;
 use cosmrs::proto::prost::{DecodeError, Message};
@@ -17,6 +18,7 @@ use rpc::v1::types::Bytes as BytesJson;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -81,6 +83,16 @@ pub struct RpcNode {
     pub(crate) url: String,
     #[serde(default)]
     pub(crate) komodo_proxy: bool,
+}
+
+/// The debug form names the node by its host-only form (CRD ch.36 R36.5A.2).
+impl fmt::Debug for RpcNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RpcNode")
+            .field("url", &host_only(&self.url))
+            .field("komodo_proxy", &self.komodo_proxy)
+            .finish()
+    }
 }
 
 impl RpcNode {

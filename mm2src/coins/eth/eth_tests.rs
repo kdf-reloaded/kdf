@@ -62,8 +62,7 @@ fn eth_coin_for_test_with_netid_and_decimals(
     netid: u16,
     decimals: u8,
 ) -> (MmArc, EthCoin) {
-    let web3 =
-        crate::eth::alloy_compat::build_provider(crate::eth::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
     let web3_instances = vec![Web3Instance {
         web3: web3.clone(),
         is_parity: true,
@@ -183,7 +182,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         .address();
 
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
         vec![],
     )
     .unwrap();
@@ -370,7 +369,7 @@ fn test_wait_for_payment_spend_timeout() {
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
         vec![],
     )
     .unwrap();
@@ -545,7 +544,7 @@ mod search_for_swap_tx_spend_scripted {
         )
         .unwrap();
         let web3 = crate::eth::alloy_compat::build_provider(
-            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            crate::node_url::listed_nodes("TEST", vec![url.to_owned()]),
             vec![],
         )
         .unwrap();
@@ -1429,7 +1428,7 @@ fn test_message_hash() {
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
         vec![],
     )
     .unwrap();
@@ -1483,7 +1482,7 @@ fn test_sign_verify_message() {
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
         vec![],
     )
     .unwrap();
@@ -1669,7 +1668,7 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
     let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap();
 
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
         vec![],
     )
     .unwrap();
@@ -2259,7 +2258,7 @@ mod swap_send_path_wire_form {
         )
         .unwrap();
         let web3 = crate::eth::alloy_compat::build_provider(
-            crate::eth::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            crate::node_url::listed_nodes("TEST", vec![url.to_owned()]),
             vec![],
         )
         .unwrap();
@@ -2795,7 +2794,7 @@ mod scripted_node_ports {
             .into_iter()
             .map(|url| Web3Instance {
                 web3: crate::eth::alloy_compat::build_provider(
-                    crate::eth::node_url::listed_nodes("TEST", vec![url]),
+                    crate::node_url::listed_nodes("TEST", vec![url]),
                     vec![],
                 )
                 .unwrap(),

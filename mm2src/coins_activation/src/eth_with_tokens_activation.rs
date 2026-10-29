@@ -16,6 +16,7 @@ use coins::eth::{eth_coin_from_params_with_global_hd, eth_coin_from_params_with_
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::nft::{fetch_and_store_owned_nfts, Chain, ChainTicker, EnableNftError, NftCtx, NftInfo, NftProvider};
+use coins::node_url::{host_only, ServiceUrl};
 use coins::rpc_command::get_my_address::PathToAddress;
 use coins::{is_wallet_only_conf, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, UnexpectedDerivationMethod};
 use common::executor::spawn;
@@ -35,6 +36,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value as Json;
 use std::collections::HashMap;
+use std::fmt;
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
 use std::time::Duration;
 
@@ -53,13 +55,23 @@ impl TokenOf for EthCoin {
 /// The CoinNode table of the public docs names the proxy flag `komodo_auth`; every docs example and the reference
 /// use `komodo_proxy`, so only that spelling is read and `komodo_auth` is ignored. The docs examples also show a
 /// `ws_url` that the reference does not consume; it is accepted and ignored (CRD ch.35 R35.1.1, erratum).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct EthNode {
     pub url: String,
     /// The endpoint sits behind the signed proxy. Carried for wire parity: requests are not proxy-signed.
     #[serde(default)]
     #[allow(dead_code)]
     pub komodo_proxy: bool,
+}
+
+/// The debug form names the node by its host-only form (CRD ch.35 R35.1.17).
+impl fmt::Debug for EthNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EthNode")
+            .field("url", &host_only(&self.url))
+            .field("komodo_proxy", &self.komodo_proxy)
+            .finish()
+    }
 }
 
 /// The JSON-RPC transport of the platform coin (CRD R35.1.4a).
@@ -180,7 +192,7 @@ pub struct EthWithTokensActivationRequest {
     #[serde(default, deserialize_with = "lenient")]
     tx_history: Option<bool>,
     #[serde(default, deserialize_with = "lenient")]
-    gas_station_url: Option<String>,
+    gas_station_url: Option<ServiceUrl>,
     #[serde(default, deserialize_with = "lenient")]
     gas_station_decimals: Option<u8>,
     #[serde(default, deserialize_with = "lenient")]
@@ -483,7 +495,7 @@ fn activation_params(
         required_confirmations: request.required_confirmations,
         default_required_confirmations: coins::eth::V2_EVM_REQUIRED_CONFIRMATIONS,
         tx_history: request.tx_history(),
-        gas_station_url: request.gas_station_url.clone(),
+        gas_station_url: request.gas_station_url.as_ref().map(|url| url.as_str().to_owned()),
         gas_station_decimals: request.gas_station_decimals,
         gas_station_policy: request.gas_station_policy.unwrap_or_default(),
         swap_gas_fee_policy,
@@ -601,6 +613,14 @@ impl PlatformWithTokensActivationOps for EthCoin {
             .await
             .mm_err(ActivationErr::from),
         }
+    }
+
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
+        activation_request
+            .erc20_tokens_requests
+            .iter()
+            .map(|token| token.ticker.clone())
+            .collect()
     }
 
     fn token_initializers(

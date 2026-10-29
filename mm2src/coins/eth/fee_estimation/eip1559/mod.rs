@@ -22,16 +22,12 @@ use serde::Deserialize;
 /// The text of a failed request to the fee-estimation service at `url` (CRD R35.1.14): the service is named
 /// host-only, and a copy of the URL embedded in the lower layer's message is replaced the same way.
 pub(crate) fn fee_service_transport_error(err: &mm2_net::transport::SlurpError, url: &str) -> String {
-    crate::eth::node_url::scrub_node_url(&err.to_string(), url)
+    crate::node_url::scrub_node_url(&err.to_string(), url)
 }
 
 /// The text of an HTTP status other than 200 from the fee-estimation service at `url`, naming it host-only.
 pub(crate) fn fee_service_status_error(url: &str, status: http::StatusCode) -> String {
-    format!(
-        "{} failed with status code {}",
-        crate::eth::node_url::host_only(url),
-        status
-    )
+    format!("{} failed with status code {}", crate::node_url::host_only(url), status)
 }
 
 /// Number of priority tiers we always emit (low, medium, high).

@@ -148,7 +148,8 @@ pub trait SwapOps {
     }
 
     /// Whether this coin's HTLC script is unique to one swap by construction: the key it pays to is
-    /// random per swap ([`SwapOps::get_htlc_key_pair`]) and the secret hash is fresh, so no payment to
+    /// unique per swap (random, or derived from the swap's unique input, see
+    /// [`SwapOps::derives_swap_htlc_key`]) and the secret hash is fresh, so no payment to
     /// the script can exist unless the swap sent it (CRD ch.39 R39.5.4, R39.11.27). The swap layer uses
     /// this to skip the already-sent question in a swap this process started a moment ago.
     ///
@@ -202,6 +203,22 @@ pub trait SwapOps {
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>>;
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
+
+    /// Whether this coin's per-swap HTLC key is derived from the swap (CRD ch.39 R39.5.6) rather than
+    /// taken from [`SwapOps::get_htlc_key_pair`]. A derived key is never saved with the swap: every
+    /// later use derives it again with [`SwapOps::derive_swap_htlc_key_pair`].
+    fn derives_swap_htlc_key(&self) -> bool { false }
+
+    /// This node's HTLC key pair for one swap, derived from the coin's transparent key and
+    /// `swap_unique_input` (R39.5.7: the maker's secret-hash bytes, the taker's 16 raw uuid bytes).
+    /// Only a coin whose [`SwapOps::derives_swap_htlc_key`] is true has one.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a coin that does not derive its key, and when the derivation fails.
+    fn derive_swap_htlc_key_pair(&self, _swap_unique_input: &[u8]) -> Result<KeyPair, String> {
+        ERR!("This coin does not derive a per-swap HTLC key")
+    }
 
     /// This node's hash-time-locked-contract public key for this coin, in the
     /// form the legacy negotiation carries (CRD ch.51 R63).

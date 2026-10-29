@@ -689,6 +689,7 @@ impl LightwalletdTransport for Scripted {
                 txs: Vec::new(),
                 error: Some(WindowError {
                     serve_failure: false,
+                    transport: false,
                     message: "502 Bad Gateway".to_owned(),
                 }),
             };
@@ -698,6 +699,7 @@ impl LightwalletdTransport for Scripted {
                 txs: Vec::new(),
                 error: Some(WindowError {
                     serve_failure: true,
+                    transport: false,
                     message: "no such mempool or blockchain transaction".to_owned(),
                 }),
             };
@@ -842,7 +844,7 @@ async fn an_older_build_that_filed_the_rows_under_script_hash_is_handled() {
     assert_eq!(
         outcome,
         SpendOutcome::NotSpent(NotSpentProof::UnspentOutputListed {
-            server: "a".to_owned(),
+            server: "https://a".to_owned(),
             encoding: IndexEncoding::ScriptHash
         })
     );
@@ -1041,7 +1043,7 @@ async fn every_history_request_failing_is_stopped_after_few_requests() {
 
     let outcome = backend.detect_output_spend(&output(), 0, &LOG).await.unwrap();
     assert!(
-        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "b"),
+        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "https://b"),
         "{outcome:?}"
     );
     assert_eq!(
@@ -1065,7 +1067,7 @@ async fn the_named_failure_carries_the_nodes_last_error_text_verbatim() {
     let failure = evidence[0].history.as_ref().unwrap().failure.clone().unwrap();
     assert!(
         failure.starts_with(&format!(
-            "lightwalletd a: PubkeyHash form, history of {address} stopped: could not serve 5 heights of window "
+            "lightwalletd https://a: PubkeyHash form, history of {address} stopped: could not serve 5 heights of window "
         )),
         "{failure}"
     );
@@ -1126,12 +1128,15 @@ async fn an_endpoint_over_its_time_budget_counts_as_failed() {
     match error {
         HtlcIndexError::Incomplete(message) => {
             assert!(
-                message.contains("lightwalletd slow: PubkeyHash form, history of"),
+                message.contains("lightwalletd https://slow: PubkeyHash form, history of"),
                 "{message}"
             );
             assert!(message.contains("time budget"), "{message}");
             // The second form never gets a request once the budget is used up, and says so.
-            assert!(message.contains("lightwalletd slow: ScriptHash form"), "{message}");
+            assert!(
+                message.contains("lightwalletd https://slow: ScriptHash form"),
+                "{message}"
+            );
         },
         other => panic!("{other:?}"),
     }
@@ -1139,7 +1144,7 @@ async fn an_endpoint_over_its_time_budget_counts_as_failed() {
     let both = backend(&transport, &["slow", "fast"]).with_endpoint_budget(budget);
     let outcome = both.detect_output_spend(&output(), FUNDING_HEIGHT, &LOG).await.unwrap();
     assert!(
-        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "fast"),
+        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "https://fast"),
         "{outcome:?}"
     );
 }
@@ -1194,7 +1199,7 @@ async fn an_endpoint_without_an_address_index_is_marked_and_the_next_endpoint_de
         .await
         .unwrap();
     assert!(
-        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "good"),
+        matches!(outcome, SpendOutcome::Spent(ref s) if s.server == "https://good"),
         "{outcome:?}"
     );
     let node_said = backend.no_address_index_message("noindex").expect("marked");
@@ -1446,7 +1451,10 @@ async fn a_dropped_detection_leaves_the_endpoint_and_form_it_read_last_and_a_fin
     .await;
     assert!(bounded.is_err(), "the detection was still running");
     let progress = backend.detection_progress(&hash()).expect("the last read is kept");
-    assert!(progress.starts_with("slow, PubkeyHash form, history of "), "{progress}");
+    assert!(
+        progress.starts_with("https://slow, PubkeyHash form, history of "),
+        "{progress}"
+    );
 
     let transport = Arc::new(Scripted::default());
     transport.serve("a", clean_endpoint_with_spend(FUNDING_HEIGHT));

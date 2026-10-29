@@ -509,27 +509,37 @@ impl LightwalletdBackend {
         let deadline = started + self.endpoint_budget;
         let budget = self.endpoint_budget;
         let mut out = Vec::with_capacity(2);
+        // The endpoint is named host-only in every text and in the evidence (CRD ch.39 R39.11.29).
+        let name = self.name(server);
         for encoding in [IndexEncoding::PubkeyHash, IndexEncoding::ScriptHash] {
             let address = self.addressing.address(encoding, hash).to_string();
             self.note_progress(
                 hash,
-                format!("{}, {:?} form, GetAddressUtxos of {}", server, encoding, address),
+                format!("{}, {:?} form, GetAddressUtxos of {}", name, encoding, address),
             );
-            let utxos = within_budget(deadline, self.transport.address_utxos(server, &address))
-                .await
-                .map_or_else(
-                    || {
-                        Err(format!(
-                            "lightwalletd {}: {:?} form, GetAddressUtxos of {}: the {:?} time budget for this \
-                             detection on this endpoint was used up",
-                            server, encoding, address, budget
-                        ))
-                    },
-                    |result| result.map_err(|e| e.to_string()),
-                );
+            let utxos = match within_budget(deadline, self.transport.address_utxos(server, &address)).await {
+                None => Err(format!(
+                    "lightwalletd {}: {:?} form, GetAddressUtxos of {}: the {:?} time budget for this detection on \
+                     this endpoint was used up",
+                    name, encoding, address, budget
+                )),
+                Some(Ok(rows)) => {
+                    self.reset_suspension(server);
+                    Ok(rows)
+                },
+                Some(Err(e)) => {
+                    let text = self.scrub(&e.to_string(), server);
+                    if matches!(e, EndpointError::Transport(_)) {
+                        self.suspend_on_failure(server, &text);
+                    }
+                    Err(text)
+                },
+            };
             let history = {
                 let transport = self.transport.clone();
                 let (history_address, history_server) = (address.clone(), server.to_owned());
+                let this = self;
+                let history_name = name.clone();
                 read_history(
                     from,
                     to,
@@ -540,7 +550,7 @@ impl LightwalletdBackend {
                             hash,
                             format!(
                                 "{}, {:?} form, history of {} blocks {}..={}",
-                                history_server, encoding, history_address, start, end
+                                history_name, encoding, history_address, start, end
                             ),
                         );
                         let transport = transport.clone();
@@ -548,11 +558,23 @@ impl LightwalletdBackend {
                         let server = history_server.clone();
                         async move {
                             match within_budget(deadline, transport.taddr_txids(&server, &address, start, end)).await {
-                                Some(read) => read,
+                                Some(mut read) => {
+                                    match read.error.as_mut() {
+                                        Some(error) => {
+                                            error.message = this.scrub(&error.message, &server);
+                                            if error.transport {
+                                                this.suspend_on_failure(&server, &error.message);
+                                            }
+                                        },
+                                        None => this.reset_suspension(&server),
+                                    }
+                                    read
+                                },
                                 None => WindowRead {
                                     txs: Vec::new(),
                                     error: Some(WindowError {
                                         serve_failure: false,
+                                        transport: false,
                                         message: format!(
                                             "the {:?} time budget for this detection on this endpoint was used up in \
                                          the history read of blocks {}..={}",
@@ -569,7 +591,7 @@ impl LightwalletdBackend {
                     read.failure = read.failure.map(|failure| {
                         format!(
                             "lightwalletd {}: {:?} form, history of {} stopped: {}",
-                            server, encoding, address, failure
+                            name, encoding, address, failure
                         )
                     });
                     read
@@ -601,14 +623,14 @@ impl LightwalletdBackend {
             log.line(format!(
                 "HTLC detection for {}: {} {:?} form: {}, {} ms elapsed on this endpoint{}",
                 log.coin,
-                server,
+                name,
                 encoding,
                 summary,
                 started.elapsed().as_millis(),
                 stopped
             ));
             out.push(FormEvidence {
-                server: server.to_owned(),
+                server: name.clone(),
                 encoding,
                 utxos,
                 history,
@@ -649,7 +671,7 @@ impl LightwalletdBackend {
             common::log::warn!(
                 "lightwalletd {} keeps no address index and is skipped by HTLC detection for the rest of this \
                  activation; the node said: {}",
-                server,
+                self.name(server),
                 message
             );
         }
@@ -720,7 +742,7 @@ impl LightwalletdBackend {
         if !admitted.is_empty() && admitted.iter().all(|server| marks.contains_key(server)) {
             let listed: Vec<String> = admitted
                 .iter()
-                .map(|server| format!("{} (node message: {})", server, marks[server]))
+                .map(|server| format!("{} (node message: {})", self.name(server), marks[server]))
                 .collect();
             return Err(HtlcIndexError::NoAddressIndex(listed.join(", ")));
         }
@@ -747,7 +769,7 @@ impl LightwalletdBackend {
     fn note_encodings(&self, server: &str, forms: &[FormEvidence]) {
         let answered = forms
             .iter()
-            .filter(|ev| ev.server == server)
+            .filter(|ev| ev.server == self.name(server))
             .find(|ev| {
                 ev.utxos.as_ref().map_or(false, |rows| !rows.is_empty())
                     || ev.history.as_ref().map_or(false, |h| !h.transactions.is_empty())
@@ -758,7 +780,7 @@ impl LightwalletdBackend {
             if previous != Some(encoding) {
                 common::log::info!(
                     "lightwalletd {} answers HTLC address queries under the {:?} form (was {:?})",
-                    server,
+                    self.name(server),
                     encoding,
                     previous
                 );
@@ -832,7 +854,7 @@ impl LightwalletdBackend {
         log: &DetectionLog<'_>,
     ) -> Result<SpendOutcome, HtlcIndexError> {
         let admitted = self
-            .admitted()
+            .admitted_ordered()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
         self.all_without_address_index(&admitted)?;
@@ -858,9 +880,10 @@ impl LightwalletdBackend {
             if let Some(message) = self.no_address_index_message(&server) {
                 log.line(format!(
                     "HTLC spend detection for {}: {} skipped: no address index",
-                    log.coin, server
+                    log.coin,
+                    self.name(&server)
                 ));
-                evidence.push(skipped_no_address_index(&server, &message));
+                evidence.push(skipped_no_address_index(&self.name(&server), &message));
                 continue;
             }
             let forms = self.form_evidence(&server, hash, from, to, log).await;
@@ -908,7 +931,7 @@ impl LightwalletdBackend {
         log: &DetectionLog<'_>,
     ) -> Result<SentOutcome, HtlcIndexError> {
         let admitted = self
-            .admitted()
+            .admitted_ordered()
             .await
             .map_err(|e| HtlcIndexError::Lookup(e.to_string()))?;
         self.all_without_address_index(&admitted)?;
@@ -932,9 +955,10 @@ impl LightwalletdBackend {
             if let Some(message) = self.no_address_index_message(&server) {
                 log.line(format!(
                     "HTLC already-sent detection for {}: {} skipped: no address index",
-                    log.coin, server
+                    log.coin,
+                    self.name(&server)
                 ));
-                evidence.push(skipped_no_address_index(&server, &message));
+                evidence.push(skipped_no_address_index(&self.name(&server), &message));
                 continue;
             }
             let forms = self.form_evidence(&server, hash, from, to, log).await;

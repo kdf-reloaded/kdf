@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   show the order messages waiting to be sent, the release rate, whether the relays are falling
   behind, and how often a relay did. They carry no peer and no order. More in CRD ch.32 §32.9B.
 
+- **Node and server addresses and credentials no longer appear in logs, error texts or debug output.**
+  Every log line, error text and status message now names a node or server by scheme, host and port
+  only (Electrum servers as `host:port`), for Tron, Tendermint, Electrum, the native coin daemon,
+  lightwalletd, Solana and the Siacoin wallet daemon, and nothing prints a password, API key,
+  Authorization or header value, or the userinfo, path or query of a URL. A Tendermint node's response
+  body is no longer logged. The debug-build RPC wire dump is not affected. A shielded coin's
+  broadcast error and a warning log line now name the lightwalletd endpoint that rejected the
+  transaction, and a lightwalletd endpoint that fails to connect or answer is tried after the others
+  for a growing time (20 seconds, doubling, up to 12 hours) until it answers again. More in ch.35
+  R35.1.17 and ch.39 §39.11.6.
+
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia
@@ -97,12 +108,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
   updates, so the book vanished on every node. Now the maker keeps one pending message per order,
-  the latest values win, and the messages leave at a bounded rate (at most 10 per second per maker
-  key, a burst of 100). When a relay stops keeping up, either its send queue stays backed up for
+  the latest values win, and the messages leave at a bounded rate (at most 20 per second per maker
+  key, a burst of 200). When a relay stops keeping up, either its send queue stays backed up for
   2 seconds or the last connection to it closes while order messages are in flight, the rate drops
   sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
   the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
-  0.5 per second every minute, and stops one step below the rate at which the relay failed; after
+  0.5 per second every 30 seconds, and stops one step below the rate at which the relay failed; after
   30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
   messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
   at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
@@ -112,7 +123,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
   keep-alives. One short gap remains: the first signal comes only after the load has started, so a
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
-  `MM2.json` number `maker_update_rate_max` to change the ceiling of 10 per second. Set the boolean
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
   `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
   JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
 
@@ -320,6 +331,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
   More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
   (R-K5, R-K6). Detail: PR #TBD.
+- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
+  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
+  spent the taker's payment. A maker that failed during negotiation could be picked again for the
+  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
+  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
+  lifted with `unban_pubkeys`. Detail: CRD ch.59 R59.5.2, R59.5.4.
+- **Two activations of the same coin no longer run at the same time.** If a coin is activated again
+  while its first activation is still running, through any activation method or the legacy `enable`
+  and `electrum`, the second now waits for the first. If the first activated the coin, the second
+  ends with the usual already-activated error and builds nothing; if the first failed, the second
+  goes ahead. Before, the two built the coin in parallel. A second ARRR activation already waited,
+  but then built the coin a second time over the wallet database the first coin was using, and only
+  then failed. A platform activation that brings tokens also waits for activations of those tokens.
+  Callers get the same answers as before; only the second call can return later. Detail: PR #156;
+  CRD ch.55 R55.1.12.
 - **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
   test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
   reused the coin the first had just spent, because the Electrum servers had not yet caught up with
@@ -361,6 +387,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   script, and the transaction builder rejected it. Recovery now always signs with the private key that
   belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
   key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
+- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before, each
+  swap got a random key that was saved in the swap file, so a swap started by another KDF implementation
+  could not be recovered here, nor one of ours there. The key is now computed from the wallet's transparent
+  key and the swap (the secret hash for the maker, the swap UUID for the taker), and it is never saved: it
+  is computed again on restart and on recovery, so either implementation can recover a swap with the same
+  seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
+  the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
+  fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
+  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
@@ -790,6 +825,13 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
   decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
   Detail: PR #123.
+
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
+  list of deferred activation work now records the per-ticker serialization of activations (PR #156)
+  and the refusal of a future ARRR sync date (PR #22) as implemented.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — still parked: it now
+  records, for after the beta, that a Lightning node whose activation failed, or that was disabled,
+  keeps its listening port and background work, so a retry on that port fails (PR #156).
 
 ### Known limitations
 

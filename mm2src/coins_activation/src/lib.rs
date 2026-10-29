@@ -40,4 +40,6 @@ pub use standalone_coin::{cancel_init_standalone_coin, init_standalone_coin, ini
                           init_standalone_coin_user_action};
 pub use token::enable_token;
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod activation_serialization_tests;
 #[cfg(test)] mod tests;

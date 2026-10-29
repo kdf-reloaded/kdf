@@ -11037,7 +11037,7 @@ mod maker_publication_tests {
                 json!({ "maker_update_coalescing": other })
             )));
         }
-        assert_eq!(maker_update_rate_max(&ctx_with(json!({}))), 10.0);
+        assert_eq!(maker_update_rate_max(&ctx_with(json!({}))), 20.0);
         assert_eq!(
             maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": 25 }))),
             25.0
@@ -11050,7 +11050,7 @@ mod maker_publication_tests {
         for bad in [json!(0), json!(-3), json!("fast"), json!(null), json!(true)] {
             assert_eq!(
                 maker_update_rate_max(&ctx_with(json!({ "maker_update_rate_max": bad }))),
-                10.0
+                20.0
             );
         }
     }
@@ -11621,5 +11621,120 @@ mod maker_publication_tests {
                 assert!(metric["labels"].as_object().unwrap().is_empty(), "{metric}");
             }
         }
+    }
+}
+
+/// CRD ch.59 T4 (R59.5.1, R59.5.2): a failed negotiation penalises the maker, the record names the swap
+/// and the outcome, and a later `MakerReserved` from that maker is dropped at the dispatch boundary,
+/// before it can reach the selection of §59.3. The other two penalising outcomes still penalise, and
+/// an outcome outside R59.5.2 does not.
+mod negotiation_failure_penalty {
+    use super::*;
+    use crate::mm2::lp_swap::{list_banned_pubkeys_rpc, penalise_maker_if_due, TakerSwapEvent};
+
+    fn taker_node() -> MmArc {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("negotiation-failure-penalty-taker").unwrap())
+            .unwrap();
+        ctx
+    }
+
+    /// The maker's signing secret and its key in the form the penalty map stores (without the prefix).
+    fn maker(passphrase: &str) -> ([u8; 32], chain::hash::H256) {
+        let (pubkey, secret) = pubkey_and_secret_for_test(passphrase);
+        let bytes = hex::decode(pubkey).unwrap();
+        (secret, chain::hash::H256::from(&bytes[1..]))
+    }
+
+    fn maker_reserved(secret: &[u8; 32], taker_order_uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerReserved {
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            taker_order_uuid: taker_order_uuid.into(),
+            maker_order_uuid: Uuid::new_v4().into(),
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerReserved(msg), secret).unwrap()
+    }
+
+    fn banned(ctx: &MmArc, maker: chain::hash::H256) -> bool { is_pubkey_banned(ctx, &maker.into()) }
+
+    fn listed(ctx: &MmArc) -> Json {
+        let response = block_on(list_banned_pubkeys_rpc(ctx.clone())).unwrap();
+        json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn t4_failed_negotiation_penalises_the_maker_and_its_reservation_is_dropped() {
+        let ctx = taker_node();
+        let (secret, maker_key) = maker("negotiation-failure-penalty-maker");
+        let swap_uuid = Uuid::new_v4();
+
+        let event = TakerSwapEvent::NegotiateFailed("maker sent negotiated = false".into());
+        penalise_maker_if_due(&ctx, maker_key, &swap_uuid, &event);
+
+        // The record exists and names the swap and the outcome (R59.5.2).
+        assert!(banned(&ctx, maker_key));
+        let listed = listed(&ctx).to_string();
+        assert!(listed.contains(&swap_uuid.to_string()), "{}", listed);
+        assert!(listed.contains("NegotiateFailed"), "{}", listed);
+
+        // A reservation from the penalised maker for a fresh taker order is dropped (R59.5.1) ...
+        let taker_order_uuid = Uuid::new_v4();
+        let reserved = maker_reserved(&secret, taker_order_uuid);
+        assert!(!block_on(process_msg(
+            ctx.clone(),
+            vec![],
+            "peer".to_owned(),
+            &reserved,
+            false
+        )));
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(block_on(ordermatch_ctx.pending_maker_reserved.lock()).is_empty());
+
+        // ... while the same message from a maker that is not penalised is accepted.
+        let (other_secret, other_key) = maker("negotiation-failure-penalty-other-maker");
+        assert!(!banned(&ctx, other_key));
+        let reserved = maker_reserved(&other_secret, taker_order_uuid);
+        assert!(block_on(process_msg(
+            ctx.clone(),
+            vec![],
+            "peer".to_owned(),
+            &reserved,
+            false
+        )));
+    }
+
+    #[test]
+    fn t4_the_other_two_outcomes_still_penalise() {
+        let ctx = taker_node();
+        let (_, validate_key) = maker("negotiation-failure-penalty-validate");
+        let (_, spend_key) = maker("negotiation-failure-penalty-spend");
+
+        let event = TakerSwapEvent::MakerPaymentValidateFailed("invalid payment".into());
+        penalise_maker_if_due(&ctx, validate_key, &Uuid::new_v4(), &event);
+        let event = TakerSwapEvent::TakerPaymentWaitForSpendFailed("never spent".into());
+        penalise_maker_if_due(&ctx, spend_key, &Uuid::new_v4(), &event);
+
+        assert!(banned(&ctx, validate_key));
+        assert!(banned(&ctx, spend_key));
+    }
+
+    #[test]
+    fn t4_an_outcome_outside_the_rule_does_not_penalise() {
+        let ctx = taker_node();
+        let (_, maker_key) = maker("negotiation-failure-penalty-not-banned");
+
+        let event = TakerSwapEvent::MakerPaymentWaitConfirmFailed("slow chain".into());
+        penalise_maker_if_due(&ctx, maker_key, &Uuid::new_v4(), &event);
+
+        assert!(!banned(&ctx, maker_key));
+        assert_eq!(listed(&ctx), json!({}));
     }
 }

@@ -87,6 +87,22 @@ fn tokens(tickers: &[&str]) -> Json { Json::Array(tickers.iter().map(|ticker| js
 // T35.1 -- T35.3: backend failures (R35.1.6)
 // ---------------------------------------------------------------------------
 
+/// CRD ch.55 R55.1.12: the activation locks the tickers of the tokens the request registers beside the platform.
+#[test]
+fn the_requested_token_tickers_are_the_erc20_tickers_of_the_request() {
+    let nodes = vec![refusing_url()];
+    let req = request(
+        &nodes,
+        json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "DAI-ERC20"]) }),
+    );
+    assert_eq!(
+        <EthCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&req.request),
+        ["USDT-ERC20", "DAI-ERC20"]
+    );
+    let none = request(&nodes, json!({}));
+    assert!(<EthCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&none.request).is_empty());
+}
+
 #[test]
 fn every_node_answering_502_or_refusing_connections_is_transport_string_502() {
     let ctx = iguana_ctx();
@@ -1317,5 +1333,22 @@ fn the_v2_and_task_routes_reject_an_unrecognised_swap_gas_fee_policy() {
     }
     for good in ["Legacy", "Low", "Medium", "High"] {
         assert!(serde_json::from_value::<Req>(request_json(&[], json!({ "swap_gas_fee_policy": good }))).is_ok());
+    }
+}
+
+/// T35.36: the debug form of the parsed request names every node and the gas station host-only.
+#[test]
+fn t35_36_the_debug_form_of_the_request_is_host_only() {
+    let node = "https://user:secret@rpc.example.org:8545/v3/APIKEY?token=X".to_owned();
+    let req: Req = serde_json::from_value(request_json(
+        &[node],
+        json!({ "gas_station_url": "https://gas.example.org/v3/GASKEY?key=Y" }),
+    ))
+    .unwrap();
+    let rendered = format!("{req:?}");
+    assert!(rendered.contains("https://rpc.example.org:8545"), "{rendered}");
+    assert!(rendered.contains("https://gas.example.org"), "{rendered}");
+    for secret in ["user", "secret", "/v3/", "APIKEY", "GASKEY", "token=", "key=Y"] {
+        assert!(!rendered.contains(secret), "a credential part is rendered");
     }
 }

@@ -2473,3 +2473,60 @@ fn t38_6_4l_13_without_an_eligible_candidate_the_poor_server_stays() {
         }
     });
 }
+
+/// T38.6.9.1 (R38.6.9a, native build): a server whose address carries userinfo, a path or a query is named by
+/// `host:port` or by the placeholder and its list position, and no text or debug form carries more.
+#[test]
+fn t38_6_9_1_servers_are_named_host_and_port_only() {
+    use crate::node_url::UNNAMED_SERVER;
+    const SECRETS: [&str; 4] = ["user", "secret", "/ws/", "token"];
+    block_on(async {
+        let down = StubServer::start(StubBehavior::Down).await;
+        let down_request = down.request();
+        let listed = vec![
+            ElectrumRpcRequest {
+                url: "user:secret@127.0.0.1:50002".to_owned(),
+                ..down_request.clone()
+            },
+            ElectrumRpcRequest {
+                url: "tcp://127.0.0.1:50002/ws/x?token=y".to_owned(),
+                ..down_request.clone()
+            },
+            ElectrumRpcRequest {
+                url: "secret".to_owned(),
+                ..down_request.clone()
+            },
+            down_request.clone(),
+        ];
+        let mut client = ElectrumClientImpl::new(TICKER.into(), vec![]);
+        client.configure_pool(ElectrumPoolOptions {
+            client_name: Some(CLIENT_NAME.into()),
+            timings: test_timings(),
+            ..Default::default()
+        });
+        let removed = client.add_servers(&listed);
+        assert_eq!(removed.len(), 3, "three of the four addresses are unusable");
+        let names: Vec<&str> = removed.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            names[..2].iter().all(|name| *name == "127.0.0.1:50002"),
+            "reducible addresses are named host:port: {names:?}"
+        );
+        assert_eq!(names[2], format!("{UNNAMED_SERVER} #3"));
+        let client = Arc::new(client);
+        let failure = client.activation_probe().await.unwrap_err();
+        let texts: Vec<String> = removed
+            .iter()
+            .map(|(name, reason)| format!("{name}: {reason}"))
+            .chain([failure, format!("{:?}", listed), format!("{:?}", client)])
+            .collect();
+        for text in &texts {
+            for secret in SECRETS {
+                assert!(!text.contains(secret), "a credential part reaches a text");
+            }
+        }
+        assert!(
+            texts[texts.len() - 3].contains(&down.addr()),
+            "the refusing server is named host:port"
+        );
+    });
+}

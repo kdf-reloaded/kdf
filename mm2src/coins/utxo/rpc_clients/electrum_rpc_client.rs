@@ -31,8 +31,8 @@ enum ElectrumConfig {
 }
 
 /// What it takes to connect one listed server, parsed and checked once when the server joins the pool.
-#[derive(Debug)]
 pub(crate) struct ServerSpec {
+    /// `host:port`, the only form in which the server is named (CRD ch.38 R38.6.9a).
     addr: String,
     config: ElectrumConfig,
     #[cfg(not(target_arch = "wasm32"))]
@@ -44,28 +44,44 @@ pub(crate) struct ServerSpec {
     ws_url: String,
 }
 
+/// The debug form shows `host:port` only; the WebSocket URL of the browser build is not part of it.
+impl fmt::Debug for ServerSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerSpec")
+            .field("addr", &self.addr)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Splits `host:port` (an IPv6 literal is written `[::1]:port`) into the host and the port.
+///
+/// The address must be exactly a host and a port: a scheme, userinfo, path, query or fragment makes it unusable.
+/// No error text echoes the address (CRD ch.38 R38.6.9a).
 #[cfg(not(target_arch = "wasm32"))]
 fn parse_host_port(addr: &str) -> Result<(String, u16), String> {
-    let (host, port) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| format!("'{}' is not a host:port address", addr))?;
+    const NOT_HOST_PORT: &str = "the address is not a host:port address";
+    if electrum_host_port(addr).as_deref() != Some(addr) {
+        return Err(NOT_HOST_PORT.to_owned());
+    }
+    let (host, port) = addr.rsplit_once(':').ok_or_else(|| NOT_HOST_PORT.to_owned())?;
     let host = match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
         Some(ipv6) => ipv6,
-        None if host.contains(':') => return Err(format!("'{}' is not a host:port address", addr)),
+        None if host.contains(':') => return Err(NOT_HOST_PORT.to_owned()),
         None => host,
     };
     if host.is_empty() {
-        return Err(format!("'{}' has no host", addr));
+        return Err("the address has no host".to_owned());
     }
     let port = port
         .parse::<u16>()
-        .map_err(|e| format!("'{}' has no valid port: {}", addr, e))?;
+        .map_err(|e| format!("the address has no valid port: {}", e))?;
     Ok((host.to_owned(), port))
 }
 
 /// Attempts to process the request (parse url, etc) and build up what is needed to connect the server.
-/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3).
+/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3). No error text echoes the configured
+/// address (CRD ch.38 R38.6.9a).
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
     let (host, port) = parse_host_port(&req.url)?;
@@ -73,9 +89,7 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
         ElectrumProtocol::TCP => ElectrumConfig::TCP,
         ElectrumProtocol::SSL => {
             let uri: Uri = try_s!(req.url.parse());
-            let host = uri
-                .host()
-                .ok_or(ERRL!("Couldn't retrieve host from addr {}", req.url))?;
+            let host = uri.host().ok_or(ERRL!("Couldn't retrieve a host from the address"))?;
 
             // check the dns name (IP literals are rejected here, as they always were)
             try_s!(DnsName::try_from(host));
@@ -93,6 +107,7 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
     };
 
     Ok(ServerSpec {
+        // The address is exactly `host:port` (checked above), so it names the server in logs.
         addr: req.url.clone(),
         config,
         host,
@@ -101,17 +116,17 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
 }
 
 /// Attempts to process the request (parse url, etc) and build up what is needed to connect the server.
-/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3).
+/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3). No error text echoes the configured
+/// address (CRD ch.38 R38.6.9a).
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
     let uri: Uri = try_s!(req.url.parse());
 
     if uri.scheme().is_some() {
         return ERR!(
-            "There has not to be a scheme in the url: {}. \
+            "There has not to be a scheme in the url. \
             'ws://' scheme is used by default. \
-            Consider using 'protocol: \"WSS\"' in the electrum request to switch to the 'wss://' scheme.",
-            req.url
+            Consider using 'protocol: \"WSS\"' in the electrum request to switch to the 'wss://' scheme."
         );
     }
 
@@ -124,7 +139,8 @@ pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String
     };
 
     Ok(ServerSpec {
-        addr: req.url.clone(),
+        // Only the host and the port name the server; the WebSocket URL keeps the rest of the address.
+        addr: electrum_host_port(&req.url).ok_or_else(|| "the address has no usable host".to_owned())?,
         config,
         ws_url,
     })
@@ -414,9 +430,7 @@ impl ElectrumClientImpl {
 
     /// Adds the servers, given in the listed order, ranked by the pool's order: drawn once at random, or
     /// the listed order (CRD ch.38 R38.6.4b-R). Returns the servers this build cannot use, with the reason.
-    pub fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(ElectrumRpcRequest, String)> {
-        self.pool.add_servers(reqs)
-    }
+    pub fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(String, String)> { self.pool.add_servers(reqs) }
 
     /// The activation probe (CRD ch.38 R38.6.4k-R): connects every server of the pool at once and
     /// returns when the first connection is established, or fails with the failure of each server.

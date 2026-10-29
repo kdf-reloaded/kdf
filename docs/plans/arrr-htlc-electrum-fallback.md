@@ -57,3 +57,12 @@ Each step is its own pull request and stays green and reviewable on its own.
   asked to run one, or should the published list be reordered so index-capable
   `lightwalletd` servers come first? That is for the coins-file maintainers, not this
   repository.
+
+## Deferred work
+
+- **Naming an unparsable fallback server by its position** (recorded
+  2026-10-29). The ZHTLC Electrum fallback names a server it cannot parse with
+  the placeholder alone, because its methods see only the address string. The
+  Electrum pool and lightwalletd add the server's position in the configured
+  list (CRD ch.38 R38.6.9a, ch.39 R39.11.29). Pass the position to the fallback
+  as well, so two unparsable entries can be told apart.

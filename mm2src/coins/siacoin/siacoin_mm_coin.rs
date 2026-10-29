@@ -114,7 +114,7 @@ impl SiaCoin {
             .client
             .utxo_from_txid(&payment_tx.txid(), HTLC_VOUT_INDEX)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| sia_text(&e))?;
 
         let miner_fee = Currency::DEFAULT_FEE;
         let htlc_utxo_amount = htlc_utxo.output.siacoin_output.value;
@@ -177,7 +177,7 @@ impl WatcherOps for SiaCoin {
                     .client
                     .get_unconfirmed_transaction(&fee_txid)
                     .await
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| sia_text(&e))?
                 {
                     Some(tx) => tx,
                     None => return Err(format!("fee tx {} not found on chain or in mempool", fee_txid)),
@@ -316,7 +316,7 @@ impl WatcherOps for SiaCoin {
             .client
             .get_address_events(htlc_address)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| sia_text(&e))?;
 
         for event in events {
             let spend_tx = match event.data {
@@ -379,7 +379,7 @@ impl MmCoin for SiaCoin {
                     .client
                     .get_unconfirmed_transaction(&txid)
                     .await
-                    .map_to_mm(|e| RawTransactionError::Transport(e.to_string()))?
+                    .map_to_mm(|e| RawTransactionError::Transport(sia_text(&e)))?
                     .or_mm_err(|| RawTransactionError::HashNotExist(req.tx_hash.clone()))?,
             };
 

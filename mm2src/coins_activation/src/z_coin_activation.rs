@@ -5,6 +5,7 @@ use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoin
                              InitStandaloneCoinTaskManagerShared};
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, IguanaWalletBalance};
+use coins::node_url::lightwalletd_endpoint_label;
 use coins::utxo::rpc_clients::ElectrumRpcRequest;
 use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
 use coins::z_coin::{z_coin_from_conf_and_params, ZCoin, ZCoinBuildError, ZcoinBackend, ZcoinProtocolInfo};
@@ -22,6 +23,7 @@ use rpc_task::RpcTaskError;
 use ser_error_derive::SerializeErrorType;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -149,7 +151,7 @@ impl InitStandaloneCoinInitialStatus for ZcoinInProgressStatus {
     fn initial_status() -> Self { ZcoinInProgressStatus::ActivatingCoin }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "rpc", content = "rpc_data")]
 pub enum ZcoinRpcMode {
     /// Full-node backend. It exists only on native builds: on WASM the name is an unknown variant and
@@ -189,6 +191,38 @@ pub enum ZcoinRpcMode {
         #[serde(default)]
         skip_sync_params: Option<bool>,
     },
+}
+
+/// The debug form names each lightwalletd endpoint by its host-only form (CRD ch.35 R35.1.17, ch.39 R39.11.29).
+impl fmt::Debug for ZcoinRpcMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinRpcMode::Native => f.write_str("Native"),
+            ZcoinRpcMode::Light {
+                electrum_servers,
+                min_connected,
+                max_connected,
+                light_wallet_d_servers,
+                sync_params,
+                skip_sync_params,
+            } => {
+                let endpoints: Vec<String> = light_wallet_d_servers
+                    .iter()
+                    .enumerate()
+                    .map(|(position, server)| lightwalletd_endpoint_label(server, position))
+                    .collect();
+                f.debug_struct("Light")
+                    .field("electrum_servers", electrum_servers)
+                    .field("min_connected", min_connected)
+                    .field("max_connected", max_connected)
+                    .field("light_wallet_d_servers", &endpoints)
+                    .field("sync_params", sync_params)
+                    .field("skip_sync_params", skip_sync_params)
+                    .finish()
+            },
+        }
+    }
 }
 
 /// Shielded sync starting point (R39.6.2). This is the externally *dictated*
@@ -660,17 +694,6 @@ impl InitStandaloneCoinActivationOps for ZCoin {
 
     fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &ZcoinTaskManagerShared {
         &activation_ctx.init_z_coin_task_manager
-    }
-
-    async fn acquire_activation_guard(
-        ctx: MmArc,
-        ticker: &str,
-    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
-        let activation_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(ZcoinInitError::Internal)?;
-        let lock = activation_ctx
-            .z_coin_activation_lock(ticker)
-            .map_to_mm(ZcoinInitError::Internal)?;
-        Ok(Some(Box::new(lock.lock_owned().await)))
     }
 
     async fn init_standalone_coin(

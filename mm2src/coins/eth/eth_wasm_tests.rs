@@ -29,7 +29,7 @@ async fn test_send() {
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8565".into()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8565".into()]),
         vec![],
     )
     .unwrap();

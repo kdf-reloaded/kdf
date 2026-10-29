@@ -2100,6 +2100,17 @@ follow-up to PR #62, together with the `docs/COMPAT_SWITCHES.md`
 documentation the switch requires (`docs/GLEEC_COMPATIBILITY.md` row,
 `RELOADED_VS_GLEEC.md` entry, `CHANGELOG.md`).
 
+**D4.** *A discarded coin's header loop (deferred past the beta, 2026-10-29).*
+The header-sync loop of R37.2.1 reaches its coin through a weak reference, but
+holds the coin for the whole of each pass, including the 60-second wait that
+ends it. Suppose an activation builds an SPV-enabled coin and then fails, so
+the coin is never registered. The coin then stays alive, with its Electrum
+client, for up to one more pass and wait. During that time its loop can write
+the ticker's header storage while the loop of a retried activation writes it
+too. Under [Chapter 55](55-coin-activation-wire-contract.md) R55.1.12 a retry
+waits for the earlier activation, but not for this loop. Releasing the coin
+before the wait is deferred.
+
 ## 37.10 Provenance Footer
 
 - *Inputs:* the project's own revision history and current tree, for the
@@ -2763,3 +2774,8 @@ documentation the switch requires (`docs/GLEEC_COMPATIBILITY.md` row,
   there does not infer from the absence of a clearance pointer that one is
   pending; the resolution block of §37.9 D3 and the §37.8 criteria point
   to that note.
+- *Clean-context addition (2026-10-29, forbidden corpus not consulted):*
+  §37.9 D4 is Reloaded-original. It records a behavior of this repository's
+  own header-sync loop, found while R55.1.12 of Chapter 55 was implemented.
+  It adds no reference content, so chapter 01 R38 is not engaged and no
+  clearance above is widened.

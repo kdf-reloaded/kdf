@@ -3,14 +3,15 @@ use super::check_balance::{check_base_coin_balance_for_swap, check_my_coin_balan
 use super::pubkey_banning::ban_pubkey_on_failed_swap;
 use super::swap_lock::{SwapLock, SwapLockOps};
 use super::trade_preimage::{TradePreimageRequest, TradePreimageRpcError, TradePreimageRpcResult};
+use super::{already_sent_check_pubkey, check_held_htlc_key, derive_htlc_pubkeys, recover_within, recovery_key_pairs,
+            resolve_recovery_htlc_key, restored_htlc_key_pair, select_secret_hash_algo, start_htlc_key_pair,
+            validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryKeyRequest, RecoveryStage,
+            RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
 use super::{broadcast_my_swap_status, broadcast_swap_message_every, check_other_coin_balance_for_swap,
             compute_dex_fee_with_taker_pubkey, get_locked_amount, recv_swap_msg, swap_topic, AtomicSwap, LockedAmount,
             MySwapInfo, NegotiationDataMsg, NegotiationDataV2, NegotiationDataV3, RecoveredSwap, RecoveredSwapAction,
             SavedSwap, SavedSwapIo, SavedTradeFee, SwapConfirmationsSettings, SwapError, SwapMsg, SwapsContext,
             TransactionIdentifier, WAIT_CONFIRM_INTERVAL};
-use super::{derive_htlc_pubkeys, recover_within, resolve_recovery_htlc_key, select_secret_hash_algo,
-            validate_wire_pubkey, HtlcDetectionParams, PaymentOwner, RecoveryKeyRequest, RecoveryStage,
-            RecoveryStages, RECOVER_FUNDS_TOTAL_BOUND};
 use crate::mm2::lp_dispatcher::{DispatcherContext, LpEvents};
 use crate::mm2::lp_network::subscribe_to_topic;
 use crate::mm2::lp_ordermatch::{check_pre_trade_spend_safety, untradable_coin_ticker, MakerOrderBuilder,
@@ -126,6 +127,15 @@ impl TakerNegotiationData {
     fn other_taker_coin_htlc_pub(&self) -> H264 { self.taker_coin_htlc_pubkey.unwrap_or(self.taker_pubkey).into() }
 }
 
+/// The swap-unique input of the maker's derived HTLC key (CRD ch.39 R39.5.7): the secret-hash bytes as saved,
+/// or for a swap that predates that member the hash of the saved secret under the default algorithm.
+fn maker_htlc_key_input(data: &MakerSwapData) -> Vec<u8> {
+    data.secret_hash
+        .clone()
+        .map(|h| h.0)
+        .unwrap_or_else(|| dhash160(&data.secret.0).take().to_vec())
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct MakerSwapData {
     pub taker_coin: String,
@@ -235,12 +245,31 @@ impl MakerSwap {
     fn apply_event(&self, event: MakerSwapEvent) {
         match event {
             MakerSwapEvent::Started(data) => {
-                if let Some(keypair) = data.maker_coin_htlc_privkey {
-                    self.w().my_maker_coin_htlc_keypair = keypair.into_inner();
+                // CRD ch.39 R39.5.6/R39.5.11: a shielded coin's key is re-derived from the swap's secret hash
+                // and never read from the record; a swap saved by an earlier build keeps its saved pair.
+                let swap_unique_input = maker_htlc_key_input(&data);
+                let saved_pub_maker: Option<H264> = data.maker_coin_htlc_pubkey.map(Into::into);
+                let saved_pub_taker: Option<H264> = data.taker_coin_htlc_pubkey.map(Into::into);
+                if let Some(keypair) = restored_htlc_key_pair(
+                    &self.maker_coin,
+                    &self.uuid,
+                    &swap_unique_input,
+                    data.maker_coin_htlc_privkey
+                        .map(SerializableSecp256k1Keypair::into_inner),
+                    saved_pub_maker,
+                ) {
+                    self.w().my_maker_coin_htlc_keypair = keypair;
                 }
 
-                if let Some(keypair) = data.taker_coin_htlc_privkey {
-                    self.w().my_taker_coin_htlc_keypair = keypair.into_inner();
+                if let Some(keypair) = restored_htlc_key_pair(
+                    &self.taker_coin,
+                    &self.uuid,
+                    &swap_unique_input,
+                    data.taker_coin_htlc_privkey
+                        .map(SerializableSecp256k1Keypair::into_inner),
+                    saved_pub_taker,
+                ) {
+                    self.w().my_taker_coin_htlc_keypair = keypair;
                 }
 
                 // ch.51 R63: the negotiated key is the one the coin derived at
@@ -495,10 +524,37 @@ impl MakerSwap {
         let maker_coin_swap_contract_address = self.maker_coin.swap_contract_address();
         let taker_coin_swap_contract_address = self.taker_coin.swap_contract_address();
 
+        // ch.51 R71/R72: 32-byte SHA-256 instead of the 20-byte default
+        // whenever either coin's own payment construction commits to a
+        // native 32-byte hash (Sia, Lightning, a Tendermint-family coin) --
+        // computed once here and persisted in `secret_hash` below, rather
+        // than re-derived from `secret` at each later use, so every
+        // reference to this swap's secret hash agrees for its whole life.
+        let secret_hash_algo = select_secret_hash_algo(&self.maker_coin, &self.taker_coin);
+        let secret_hash = secret_hash_algo.hash_secret(&secret);
+
         // ch.51 R63: negotiate the key each coin actually uses, not this
-        // node's secp256k1 key on behalf of both.
-        let maker_coin_htlc_key_pair = self.maker_coin.get_htlc_key_pair();
-        let taker_coin_htlc_key_pair = self.taker_coin.get_htlc_key_pair();
+        // node's secp256k1 key on behalf of both. A shielded coin's key is
+        // derived from the secret hash (CRD ch.39 R39.5.6/R39.5.7) and is not
+        // saved with the swap.
+        let (maker_coin_htlc_key_pair, maker_coin_htlc_privkey) =
+            match start_htlc_key_pair(&self.maker_coin, &secret_hash) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
+                        ERRL!("{}", e).into(),
+                    )]))
+                },
+            };
+        let (taker_coin_htlc_key_pair, taker_coin_htlc_privkey) =
+            match start_htlc_key_pair(&self.taker_coin, &secret_hash) {
+                Ok(keys) => keys,
+                Err(e) => {
+                    return Ok((Some(MakerSwapCommand::Finish), vec![MakerSwapEvent::StartFailed(
+                        ERRL!("{}", e).into(),
+                    )]))
+                },
+            };
         let (maker_coin_htlc_pubkey, taker_coin_htlc_pubkey) = match derive_htlc_pubkeys(
             &self.ctx,
             &self.maker_coin,
@@ -514,19 +570,11 @@ impl MakerSwap {
             },
         };
 
-        // ch.51 R71/R72: 32-byte SHA-256 instead of the 20-byte default
-        // whenever either coin's own payment construction commits to a
-        // native 32-byte hash (Sia, Lightning, a Tendermint-family coin) --
-        // computed once here and persisted in `secret_hash` below, rather
-        // than re-derived from `secret` at each later use, so every
-        // reference to this swap's secret hash agrees for its whole life.
-        let secret_hash_algo = select_secret_hash_algo(&self.maker_coin, &self.taker_coin);
-
         let data = MakerSwapData {
             taker_coin: self.taker_coin.ticker().to_owned(),
             maker_coin: self.maker_coin.ticker().to_owned(),
             taker: self.taker.bytes.into(),
-            secret_hash: Some(secret_hash_algo.hash_secret(&secret).into()),
+            secret_hash: Some(secret_hash.into()),
             secret: secret.into(),
             started_at,
             lock_duration: self.payment_locktime,
@@ -545,9 +593,9 @@ impl MakerSwap {
             taker_payment_spend_trade_fee: Some(SavedTradeFee::from(taker_payment_spend_trade_fee)),
             maker_coin_swap_contract_address,
             taker_coin_swap_contract_address,
-            maker_coin_htlc_privkey: maker_coin_htlc_key_pair.map(SerializableSecp256k1Keypair::from),
+            maker_coin_htlc_privkey,
             maker_coin_htlc_pubkey: Some(maker_coin_htlc_pubkey.into()),
-            taker_coin_htlc_privkey: taker_coin_htlc_key_pair.map(SerializableSecp256k1Keypair::from),
+            taker_coin_htlc_privkey,
             taker_coin_htlc_pubkey: Some(taker_coin_htlc_pubkey.into()),
             p2p_privkey: self.p2p_privkey.map(SerializableSecp256k1Keypair::from),
         };
@@ -1287,6 +1335,22 @@ impl MakerSwap {
         Ok((swap, command))
     }
 
+    /// The pre-check of CRD ch.39 R39.5.11 for a swap about to be resumed: the HTLC key held for each leg of a
+    /// coin that derives it is the key whose public half the swap saved.
+    fn check_rederived_htlc_keys(&self) -> Result<(), String> {
+        let (maker_keypair, taker_keypair, maker_pub, taker_pub) = {
+            let r = self.r();
+            (
+                r.my_maker_coin_htlc_keypair,
+                r.my_taker_coin_htlc_keypair,
+                r.my_maker_coin_htlc_pub,
+                r.my_taker_coin_htlc_pub,
+            )
+        };
+        check_held_htlc_key(&self.maker_coin, &self.uuid, &maker_keypair, &maker_pub)?;
+        check_held_htlc_key(&self.taker_coin, &self.uuid, &taker_keypair, &taker_pub)
+    }
+
     /// Recovers the swap's funds within [`RECOVER_FUNDS_TOTAL_BOUND`] (CRD ch.39 R39.5.5).
     pub async fn recover_funds(&self) -> Result<RecoveredSwap, String> {
         self.recover_funds_within(RECOVER_FUNDS_TOTAL_BOUND).await
@@ -1316,6 +1380,14 @@ impl MakerSwap {
             let other_taker_coin_htlc_pub = selfi.r().other_taker_coin_htlc_pub;
             let my_taker_coin_htlc_pub = selfi.r().my_taker_coin_htlc_pub;
             let my_taker_coin_htlc_keypair = selfi.r().my_taker_coin_htlc_keypair;
+            let swap_unique_input = maker_htlc_key_input(&selfi.r().data);
+            let saved_taker_coin_privkey = selfi.r().data.taker_coin_htlc_privkey;
+            let (derived_keypair, saved_keypair) = recovery_key_pairs(
+                &selfi.taker_coin,
+                &swap_unique_input,
+                my_taker_coin_htlc_keypair,
+                &saved_taker_coin_privkey,
+            )?;
 
             let taker_coin_start_block = selfi.r().data.taker_coin_start_block;
             let taker_coin_swap_contract_address = selfi.r().data.taker_coin_swap_contract_address.clone();
@@ -1329,7 +1401,8 @@ impl MakerSwap {
                 coin: &selfi.taker_coin,
                 owner: PaymentOwner::Other,
                 per_swap_pubkey: my_taker_coin_htlc_pub,
-                per_swap_keypair: my_taker_coin_htlc_keypair,
+                derived_keypair,
+                saved_keypair,
                 other_pubkey: other_taker_coin_htlc_pub.as_slice(),
                 time_lock: timelock,
                 secret_hash,
@@ -1432,18 +1505,33 @@ impl MakerSwap {
         let maker_coin_swap_contract_address = self.r().data.maker_coin_swap_contract_address.clone();
         let my_maker_coin_htlc_keypair = self.r().my_maker_coin_htlc_keypair;
         let my_maker_coin_htlc_pub = self.r().my_maker_coin_htlc_pub;
+        let swap_unique_input = maker_htlc_key_input(&self.r().data);
+        let saved_maker_coin_privkey = self.r().data.maker_coin_htlc_privkey;
+        let (derived_keypair, saved_keypair) = recovery_key_pairs(
+            &self.maker_coin,
+            &swap_unique_input,
+            my_maker_coin_htlc_keypair,
+            &saved_maker_coin_privkey,
+        )?;
 
         let maybe_maker_payment = self.r().maker_payment.clone();
         let maker_payment = match maybe_maker_payment {
             Some(tx) => tx.tx_hex.0.clone(),
             None => {
+                // R39.5.11(c): a derived key searches with the key it re-derives.
+                let search_pub = try_s!(already_sent_check_pubkey(
+                    &self.maker_coin,
+                    &derived_keypair,
+                    &saved_keypair,
+                    my_maker_coin_htlc_pub
+                ));
                 stages.enter(
                     RecoveryStage::CheckPaymentSent,
                     &self.maker_coin,
                     None,
                     Some(HtlcDetectionParams {
                         time_lock: maker_payment_lock,
-                        first_pub: my_maker_coin_htlc_pub.to_vec(),
+                        first_pub: search_pub.to_vec(),
                         second_pub: other_maker_coin_htlc_pub.to_vec(),
                         secret_hash: secret_hash.0.to_vec(),
                     }),
@@ -1452,7 +1540,7 @@ impl MakerSwap {
                     self.maker_coin
                         .check_if_my_payment_sent(
                             maker_payment_lock,
-                            my_maker_coin_htlc_pub.as_slice(),
+                            search_pub.as_slice(),
                             other_maker_coin_htlc_pub.as_slice(),
                             &secret_hash.0,
                             maker_coin_start_block,
@@ -1475,7 +1563,8 @@ impl MakerSwap {
                 coin: &self.maker_coin,
                 owner: PaymentOwner::Mine,
                 per_swap_pubkey: my_maker_coin_htlc_pub,
-                per_swap_keypair: my_maker_coin_htlc_keypair,
+                derived_keypair,
+                saved_keypair,
                 other_pubkey: other_maker_coin_htlc_pub.as_slice(),
                 time_lock: maker_payment_lock,
                 secret_hash: &secret_hash.0,
@@ -2200,6 +2289,15 @@ pub async fn run_maker_swap(swap: RunMakerSwapInput, ctx: MmArc) {
         } => match MakerSwap::load_from_db_by_uuid(ctx, maker_coin, taker_coin, &swap_uuid).await {
             Ok((swap, command)) => match command {
                 Some(c) => {
+                    // CRD ch.39 R39.5.11: the re-derived HTLC key must be the one the swap negotiated.
+                    if let Err(e) = swap.check_rederived_htlc_keys() {
+                        warn!(
+                            "{} Hint: start the node with the wallet (seed and key policy) the swap was started \
+                             with; the swap then resumes, and recover_funds_of_swap can recover it.",
+                            e
+                        );
+                        return;
+                    }
                     log!("Swap " (uuid) " kick started.");
                     (swap, c)
                 },
@@ -2535,7 +2633,7 @@ mod maker_swap_tests {
             .into_mm_arc()
     }
 
-    fn eth_tx_for_test() -> SignedEthTx {
+    pub(super) fn eth_tx_for_test() -> SignedEthTx {
         // raw transaction bytes of https://etherscan.io/tx/0x0869be3e5d4456a29d488a533ad6c118620fef450f36778aecf31d356ff8b41f
         let tx_bytes = [
             248, 240, 3, 133, 1, 42, 5, 242, 0, 131, 2, 73, 240, 148, 133, 0, 175, 192, 188, 82, 20, 114, 128, 130, 22,
@@ -4037,3 +4135,7 @@ mod maker_swap_tests {
         assert_eq!(SENDS.load(Ordering::SeqCst), 0);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "maker_derived_htlc_key_tests.rs"]
+mod maker_derived_htlc_key_tests;
