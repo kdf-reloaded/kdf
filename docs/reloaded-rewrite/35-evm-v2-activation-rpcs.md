@@ -832,6 +832,18 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > cutoff, since the transport's own line for that attempt is at debug level.
 > The `mm2_net` tests check the line for a URL carrying userinfo, a key in the
 > path and a token in the query.
+>
+> *Errors of the shared HTTP layer (2026-10-29, PR #165).* Every error the
+> shared HTTP layer (`mm2_net`) builds names its request URL in the host-only
+> form, on the native and the wasm target. Every text built from such an error
+> follows, as does every error type that copies it: NFT providers, the swap
+> aggregator API, the market-maker price service, the Telegram notifier, the
+> gRPC-web client, Tendermint RPC on wasm and the gas station. An error text a
+> lower layer produces for the request has the URL removed as well. Before,
+> such errors rendered the full URL, path and query included. The Telegram
+> notifier's URL carries its bot token, though no caller shows its errors
+> today. The tests use a URL carrying userinfo, a key in the path and a token
+> in the query, plus a Telegram-shaped URL.
 
 ---
 
@@ -2441,4 +2453,5 @@ tests it.
   *Shared HTTP driver* paragraph of the R35.1.17 status note is
   Reloaded-original. It records the maintainer decision of 2026-10-29 to
   name the host of an abandoned request, from this repository's own code, so
-  chapter 01 R38 is not engaged.
+  chapter 01 R38 is not engaged. The same holds for the *Errors of the shared
+  HTTP layer* paragraph, which applies R35.1.17 to the errors of that layer.

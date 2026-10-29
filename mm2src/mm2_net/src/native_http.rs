@@ -97,8 +97,10 @@ impl From<http::Error> for SlurpError {
 
 /// Executes a Hyper request, returning the response status, headers and body.
 pub async fn slurp_req(request: Request<Vec<u8>>) -> SlurpResult {
-    let uri = request.uri().to_string();
+    // The only form of the request URI that leaves this function (CRD ch.35 R35.1.17): the URI can carry a
+    // credential, and the errors below, their `Display` and everything that copies them are rendered in logs.
     let host = host_only_uri(request.uri());
+    let uri = host.clone();
     let (head, body) = request.into_parts();
     let request = Request::from_parts(head, Full::new(Bytes::from(body)));
 
@@ -137,8 +139,9 @@ pub async fn slurp_req_bounded(request: Request<Vec<u8>>, timeout_s: f64) -> Slu
     use hyper::rt::Timer as _;
     use hyper_util::rt::TokioTimer;
 
-    let uri = request.uri().to_string();
+    // The only form of the request URI that leaves this function (CRD ch.35 R35.1.17), see `slurp_req`.
     let host = host_only_uri(request.uri());
+    let uri = host.clone();
     let (head, body) = request.into_parts();
     let request = Request::from_parts(head, Full::new(Bytes::from(body)));
     let bound = Duration::from_secs_f64(timeout_s.max(0.));
@@ -217,11 +220,12 @@ mod tests {
     use crate::native_http::{abandoned_line, slurp_post_json, slurp_req, slurp_req_bounded, slurp_url, Ended};
     use crate::transport::SlurpError;
     use common::block_on;
+    use mm2_err_handle::prelude::*;
 
     #[test]
     fn test_slurp_req() {
-        let (status, headers, body) = block_on(slurp_url("https://httpbin.org/get")).unwrap();
-        assert!(status.is_success(), "{:?} {:?} {:?}", status, headers, body);
+        let (status, _headers, _body) = block_on(slurp_url("https://httpbin.org/get")).unwrap();
+        assert!(status.is_success(), "the request did not succeed");
     }
 
     /// Serves one canned HTTP/1.1 response on a loopback port and returns the port.
@@ -260,9 +264,12 @@ mod tests {
         let err = block_on(slurp_url(&format!("http://127.0.0.1:{port}/"))).unwrap_err();
         match err.into_inner() {
             SlurpError::Transport { error, .. } => {
-                assert!(error.contains("Connect") && error.contains(": "), "{error}")
+                assert!(
+                    error.contains("Connect") && error.contains(": "),
+                    "the error text does not carry the cause chain"
+                )
             },
-            other => panic!("unexpected error {other:?}"),
+            _ => panic!("unexpected kind of error"),
         }
     }
 
@@ -295,13 +302,13 @@ mod tests {
         match err.into_inner() {
             SlurpError::Timeout { uri, error } => {
                 assert!(uri.contains(&port.to_string()));
-                assert!(error.contains("0.5"), "{error}");
+                assert!(error.contains("0.5"), "the timeout text does not name the bound");
             },
-            other => panic!("unexpected error {other:?}"),
+            _ => panic!("unexpected kind of error"),
         }
         assert!(
             elapsed >= Duration::from_millis(400) && elapsed < Duration::from_secs(3),
-            "{elapsed:?}"
+            "the call did not end within the bound"
         );
         assert_eq!(
             peer.join().unwrap(),
@@ -324,7 +331,7 @@ mod tests {
     }
 
     /// A URL as a configured node or service has it: a credential in the userinfo, the path and the query.
-    const SECRET_PARTS: [&str; 3] = ["hunter2", "APIKEY", "token=X"];
+    const SECRET_PARTS: [&str; 4] = ["bob", "hunter2", "APIKEY", "token=X"];
 
     fn assert_no_secret(text: &str) {
         for (i, secret) in SECRET_PARTS.iter().enumerate() {
@@ -412,7 +419,10 @@ mod tests {
             if let Some(line) = LOGGED.lock().unwrap().iter().find(|l| l.contains(needle)) {
                 return line.clone();
             }
-            assert!(std::time::Instant::now() < deadline, "no log line with '{needle}'");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the expected log line did not appear"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -476,5 +486,81 @@ mod tests {
         for line in LOGGED.lock().unwrap().iter() {
             assert_no_secret(line);
         }
+    }
+
+    /// Every text built from the error of a request to a URL that carries secrets names `host` and none of them.
+    fn assert_error_names_the_host_only(err: &MmError<SlurpError>, host: &str) {
+        for text in [err.to_string(), format!("{err:?}"), format!("{:?}", err.get_inner())] {
+            assert!(
+                text.contains(host),
+                "the host-only form is missing from the rendered error"
+            );
+            assert_no_secret(&text);
+        }
+        match err.get_inner() {
+            SlurpError::Timeout { uri, .. }
+            | SlurpError::Transport { uri, .. }
+            | SlurpError::ErrorDeserializing { uri, .. } => {
+                assert!(uri == host, "the uri field is not the host-only form")
+            },
+            _ => panic!("unexpected kind of error"),
+        }
+    }
+
+    /// The URL of a node or service as it is configured: a credential in the userinfo, the path and the query.
+    fn secret_url(scheme: &str, port: u16) -> String {
+        format!("{scheme}://bob:hunter2@127.0.0.1:{port}/v3/APIKEY?token=X")
+    }
+
+    /// The `error` text is built from the source chain of the lower layers. Connecting (refused, and a TLS
+    /// handshake against a plain-text peer) is the path on which they could repeat the URL.
+    #[test]
+    fn test_a_slurp_error_names_the_host_only_and_so_does_the_error_chain_under_it() {
+        // Nothing listens on the port.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let request = || {
+            http::Request::builder()
+                .uri(secret_url("http", port))
+                .body(b"{}".to_vec())
+                .unwrap()
+        };
+        let err = block_on(slurp_req(request())).unwrap_err();
+        assert_error_names_the_host_only(&err, &format!("http://127.0.0.1:{port}"));
+        let err = block_on(slurp_req_bounded(request(), 5.)).unwrap_err();
+        assert_error_names_the_host_only(&err, &format!("http://127.0.0.1:{port}"));
+
+        // A TLS client against a peer that answers in plain text.
+        let port = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let tls = http::Request::builder()
+            .uri(secret_url("https", port))
+            .body(b"{}".to_vec())
+            .unwrap();
+        let err = block_on(slurp_req(tls)).unwrap_err();
+        assert_error_names_the_host_only(&err, &format!("https://127.0.0.1:{port}"));
+    }
+
+    #[test]
+    fn test_a_bounded_timeout_names_the_host_only() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.read(&mut request);
+        });
+        let request = http::Request::builder()
+            .uri(secret_url("http", port))
+            .body(b"{}".to_vec())
+            .unwrap();
+        let err = block_on(slurp_req_bounded(request, 0.3)).unwrap_err();
+        assert!(matches!(err.get_inner(), SlurpError::Timeout { .. }));
+        assert_error_names_the_host_only(&err, &format!("http://127.0.0.1:{port}"));
+        peer.join().unwrap();
     }
 }

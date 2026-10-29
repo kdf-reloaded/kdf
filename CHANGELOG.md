@@ -329,6 +329,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the failure, without the error text). It stays one line per abandoned request at the normal log
   level.
   Detail: PR #165; CRD ch.35 R35.1.17.
+- **HTTP error messages no longer show the full URL of the server.** An error from a request to an
+  NFT provider, the 1inch API, the market-maker price service, a gRPC-web server or, in the browser
+  build, a Tendermint node used to print the whole URL, path and query included, and so any API key
+  in them. Such an error now names only the scheme, host and port. The Telegram notifier's errors
+  are covered too, though none is shown today. Detail: PR #165; CRD ch.35 R35.1.17.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the
