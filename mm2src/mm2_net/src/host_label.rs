@@ -38,28 +38,33 @@ mod tests {
 
     fn label(uri: &str) -> String { host_only_uri(&Uri::from_str(uri).unwrap()) }
 
+    /// Failure messages are static text (CRD ch.35 R35.1.17): never the rendered text or a secret part.
+    fn assert_label(actual: &str, expected: &str) {
+        assert!(actual == expected, "the label differs from the expected host-only form");
+    }
+
     fn assert_no_secret(text: &str) {
-        for secret in SECRETS {
-            assert!(!text.contains(secret), "'{secret}' leaked into '{text}'");
+        for (i, secret) in SECRETS.iter().enumerate() {
+            assert!(!text.contains(secret), "secret part {i} leaked into the rendered text");
         }
     }
 
     #[test]
     fn userinfo_path_query_and_fragment_are_dropped() {
         let text = label("https://user:hunter2@node.example:8545/v3/APIKEY?token=X#frag");
-        assert_eq!(text, "https://node.example:8545");
+        assert_label(&text, "https://node.example:8545");
         assert_no_secret(&text);
     }
 
     #[test]
     fn a_missing_port_stays_missing() {
-        assert_eq!(label("https://node.example/v3/APIKEY"), "https://node.example");
+        assert_label(&label("https://node.example/v3/APIKEY"), "https://node.example");
     }
 
     #[test]
     fn ipv6_keeps_its_brackets() {
-        assert_eq!(label("http://[::1]:8545/key/APIKEY"), "http://[::1]:8545");
-        assert_eq!(label("https://[2001:db8::1]/key/APIKEY"), "https://[2001:db8::1]");
+        assert_label(&label("http://[::1]:8545/key/APIKEY"), "http://[::1]:8545");
+        assert_label(&label("https://[2001:db8::1]/key/APIKEY"), "https://[2001:db8::1]");
     }
 
     #[test]
@@ -67,7 +72,7 @@ mod tests {
         for raw in ["/v3/APIKEY?token=X", "*", "node.example:8545/APIKEY"] {
             if let Ok(uri) = Uri::from_str(raw) {
                 let text = host_only_uri(&uri);
-                assert_eq!(text, UNNAMED_NODE, "{raw}");
+                assert_label(&text, UNNAMED_NODE);
                 assert_no_secret(&text);
             }
         }

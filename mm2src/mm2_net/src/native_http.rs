@@ -327,8 +327,8 @@ mod tests {
     const SECRET_PARTS: [&str; 3] = ["hunter2", "APIKEY", "token=X"];
 
     fn assert_no_secret(text: &str) {
-        for secret in SECRET_PARTS {
-            assert!(!text.contains(secret), "'{secret}' leaked into '{text}'");
+        for (i, secret) in SECRET_PARTS.iter().enumerate() {
+            assert!(!text.contains(secret), "secret part {i} leaked into the rendered text");
         }
     }
 
@@ -337,7 +337,10 @@ mod tests {
     #[test]
     fn test_abandoned_line_for_each_outcome() {
         let host = label_of("https://user:hunter2@node.example:8545/v3/APIKEY?token=X");
-        assert_eq!(host, "https://node.example:8545");
+        assert!(
+            host == "https://node.example:8545",
+            "the label differs from the host-only form"
+        );
         let cases = [
             (
                 Ended::BoundReached(11.),
@@ -355,7 +358,10 @@ mod tests {
         ];
         for (ended, expected) in cases {
             let line = abandoned_line(&host, &ended);
-            assert_eq!(line, expected);
+            assert!(
+                line == expected,
+                "the line for an outcome differs from its expected text"
+            );
             assert_no_secret(&line);
         }
     }
@@ -364,9 +370,9 @@ mod tests {
     fn test_abandoned_line_names_no_host_when_the_uri_has_none() {
         let host = crate::host_label::host_only_uri(&"/v3/APIKEY?token=X".parse().unwrap());
         let line = abandoned_line(&host, &Ended::Failed("invalid request"));
-        assert_eq!(
-            line,
-            "HTTP request to <invalid node URL> failed (invalid request) after its caller had stopped waiting"
+        assert!(
+            line == "HTTP request to <invalid node URL> failed (invalid request) after its caller had stopped waiting",
+            "the line for a URI without a host differs from its expected text"
         );
         assert_no_secret(&line);
     }
@@ -435,7 +441,10 @@ mod tests {
             .unwrap();
         start_and_abandon(slurp_req_bounded(request, 0.5));
         let line = wait_for_line_with(&format!("127.0.0.1:{port} ended at its 0.5 s bound"));
-        assert!(line.ends_with("after its caller had stopped waiting"), "{line}");
+        assert!(
+            line.ends_with("after its caller had stopped waiting"),
+            "the line does not end as expected"
+        );
         assert_no_secret(&line);
         peer.join().unwrap();
 
@@ -457,7 +466,10 @@ mod tests {
             .unwrap();
         start_and_abandon(slurp_req(request));
         let line = wait_for_line_with(&format!("127.0.0.1:{port} got an answer"));
-        assert!(line.contains("the answer is discarded"), "{line}");
+        assert!(
+            line.contains("the answer is discarded"),
+            "the line does not say the answer is discarded"
+        );
         assert_no_secret(&line);
         peer.join().unwrap();
 
