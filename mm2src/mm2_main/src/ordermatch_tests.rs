@@ -10275,13 +10275,13 @@ mod maker_publication_tests {
     #[test]
     fn settings_are_read_like_the_existing_switches() {
         let ctx_with = |conf: Json| MmCtxBuilder::new().with_conf(conf).into_mm_arc();
-        assert!(maker_update_coalescing(&ctx_with(json!({}))));
-        assert!(!maker_update_coalescing(&ctx_with(
-            json!({ "maker_update_coalescing": false })
+        assert!(!maker_update_coalescing(&ctx_with(json!({}))));
+        assert!(maker_update_coalescing(&ctx_with(
+            json!({ "maker_update_coalescing": true })
         )));
-        // Only a JSON `false` turns the outbox off.
-        for other in [json!(true), json!("false"), json!(0), json!(null)] {
-            assert!(maker_update_coalescing(&ctx_with(
+        // Only a JSON `true` turns the outbox on.
+        for other in [json!(false), json!("true"), json!(1), json!(null)] {
+            assert!(!maker_update_coalescing(&ctx_with(
                 json!({ "maker_update_coalescing": other })
             )));
         }
@@ -10307,7 +10307,7 @@ mod maker_publication_tests {
     /// pending message of the order. The local state and the update are not delayed.
     #[test]
     fn t_mp2_cancellation_is_released_at_once_with_priority() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let order = own_order("DOC", "MARTY");
         // The burst of the budget is one message: the creation uses it.
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
@@ -10339,7 +10339,7 @@ mod maker_publication_tests {
     /// priority, with the outbox full; a created, an updated and a keep-alive message are not priority.
     #[test]
     fn t_mp3_swap_messages_bypass_the_outbox_and_carry_priority() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let (a, b) = (own_order("DOC", "MARTY"), own_order("DOC", "MARTY"));
         maker_order_created_p2p_notify(ctx.clone(), &a, vec![], vec![]);
         maker_order_created_p2p_notify(ctx.clone(), &b, vec![], vec![]);
@@ -10414,7 +10414,7 @@ mod maker_publication_tests {
     /// T-MP9: below the ceiling every update is published as it is made; nothing is merged.
     #[test]
     fn t_mp9_healthy_relay_gets_every_update_at_once() {
-        let (ctx, mut rx) = node(json!({}));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true }));
         let order = own_order("DOC", "MARTY");
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
         for price in 2..32 {
@@ -10435,11 +10435,16 @@ mod maker_publication_tests {
         assert_eq!(pending(&ctx), 0);
     }
 
-    /// T-MP11: with `maker_update_coalescing` set to `false` every message is published at once; with the
-    /// default the same sequence is held back by the budget.
+    /// T-MP11: with no `maker_update_coalescing` setting, with `false` and with a value that is not a JSON boolean
+    /// every message is published at once; with `true` the same sequence goes through the outbox and is held back by
+    /// the budget.
     #[test]
     fn t_mp11_switch_publishes_every_message_at_once() {
-        let run = |conf: Json| {
+        let run = |setting: Option<Json>| {
+            let mut conf = json!({ "maker_update_rate_max": 0.1 });
+            if let Some(setting) = setting {
+                conf["maker_update_coalescing"] = setting;
+            }
             let (ctx, mut rx) = node(conf);
             let order = own_order("DOC", "MARTY");
             maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
@@ -10448,11 +10453,16 @@ mod maker_publication_tests {
             }
             (drain(&mut rx).len(), pending(&ctx))
         };
-        assert_eq!(
-            run(json!({ "maker_update_rate_max": 0.1, "maker_update_coalescing": false })),
-            (6, 0)
-        );
-        assert_eq!(run(json!({ "maker_update_rate_max": 0.1 })), (1, 1));
+        for setting in [
+            None,
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(1)),
+            Some(json!(null)),
+        ] {
+            assert_eq!(run(setting.clone()), (6, 0), "setting {setting:?}");
+        }
+        assert_eq!(run(Some(json!(true))), (1, 1));
     }
 
     /// T-MP12 (propagation): a relay propagates a cancellation with priority and a created message without.
@@ -10610,7 +10620,7 @@ mod maker_publication_tests {
     #[test]
     fn t_mp6_the_changes_of_a_pair_precede_its_keep_alive_within_the_wait() {
         // 2 messages per second, a burst of 20.
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 2.0 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 2.0 }));
         let warm_up = exhaust_the_burst(&maker, &mut rx, 20);
         let orders = [
             own_order("DOC", "MARTY"),
@@ -10672,7 +10682,7 @@ mod maker_publication_tests {
     /// bounded wait does not end, and the keep-alive does not overtake it.
     #[test]
     fn t_mp6_a_released_message_still_in_flight_holds_the_keep_alive_back() {
-        let (maker, _rx) = node(json!({}));
+        let (maker, _rx) = node(json!({ "maker_update_coalescing": true }));
         let octx = OrdermatchContext::from_ctx(&maker).unwrap();
         let topics = vec![own_order("DOC", "MARTY").orderbook_topic()];
         octx.maker_outbox
@@ -10702,7 +10712,7 @@ mod maker_publication_tests {
     #[test]
     fn t_mp6_with_more_pending_than_the_budget_releases_the_keep_alives_leave_after_ten_seconds() {
         // 0.5 messages per second, a burst of 5.
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let _ = exhaust_the_burst(&maker, &mut rx, 5);
         for _ in 0..20 {
             maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
@@ -10733,7 +10743,7 @@ mod maker_publication_tests {
     /// T-MP6 (third part): in degraded mode the keep-alives leave at the tick.
     #[test]
     fn t_mp6_in_degraded_mode_the_keep_alives_leave_at_the_tick() {
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let _ = exhaust_the_burst(&maker, &mut rx, 5);
         for _ in 0..4 {
             maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
@@ -10754,7 +10764,7 @@ mod maker_publication_tests {
     /// release within 30 seconds; the outbox then drops to the floor in degraded mode.
     #[test]
     fn t_mp5_a_relay_close_is_a_signal_only_with_recent_maker_traffic() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
         // No traffic: no signal.
         relay_connection_closed(&ctx);
@@ -10785,7 +10795,7 @@ mod maker_publication_tests {
     /// joined in the same moment; a later join starts another round.
     #[test]
     fn t_mp7_a_relay_joining_the_mesh_triggers_one_keep_alive_per_pair() {
-        let (ctx, mut rx) = node(json!({}));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true }));
         for (base, rel) in [("DOC", "MARTY"), ("C1", "C2"), ("C1", "C2")] {
             maker_order_created_p2p_notify(ctx.clone(), &own_order(base, rel), vec![], vec![]);
         }
@@ -10836,7 +10846,7 @@ mod maker_publication_tests {
     /// mode and the signals, and carry no label (no peer identity, no content).
     #[test]
     fn t_mp10_outbox_gauges_follow_the_state() {
-        let (ctx, _rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, _rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let order = own_order("DOC", "MARTY");
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
         for price in 2..5 {
