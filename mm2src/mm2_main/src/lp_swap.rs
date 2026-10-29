@@ -95,6 +95,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[path = "lp_swap/dex_fee.rs"] mod dex_fee;
 pub(crate) use recovery_bound::{recover_within, HtlcDetectionParams, RecoveryStage, RecoveryStages,
                                 RECOVER_FUNDS_TOTAL_BOUND};
+pub(crate) use refund_retry::{retried_refund_rejection, NON_FINAL_REFUND_RETRY_SECS};
 
 #[allow(unused_imports)]
 pub use dex_fee::{compute_dex_fee, compute_dex_fee_with_taker_pubkey, dex_fee_amount, dex_fee_amount_from_taker_coin};
@@ -106,6 +107,7 @@ pub(crate) use dex_fee::{compute_dex_fee_v2_with_taker_pubkey_from_coin, dex_fee
 #[path = "lp_swap/pubkey_banning.rs"] mod pubkey_banning;
 #[path = "lp_swap/recovery_bound.rs"] mod recovery_bound;
 #[path = "lp_swap/recreate_swap_data.rs"] mod recreate_swap_data;
+#[path = "lp_swap/refund_retry.rs"] mod refund_retry;
 #[path = "lp_swap/saved_swap.rs"] mod saved_swap;
 #[path = "lp_swap/swap_events.rs"] pub(crate) mod swap_events;
 #[path = "lp_swap/swap_lock.rs"] mod swap_lock;
@@ -1089,6 +1091,14 @@ pub(crate) struct RecoveryKeyRequest<'a> {
     pub(crate) stages: &'a RecoveryStages,
 }
 
+/// Whether `keypair` is the key pair `pubkey` was negotiated from: the public key the coin derives for the
+/// pair's public half is `pubkey` (on a secp256k1 chain the pair's own public key; a coin that signs with
+/// another curve derives its field from the pair).
+fn htlc_keypair_owns_pubkey(coin: &MmCoinEnum, keypair: &KeyPair, pubkey: &H264) -> bool {
+    coin.derive_htlc_pubkey(keypair.public())
+        .is_ok_and(|derived| derived[..] == pubkey[..])
+}
+
 /// Whether a payment step skips the already-sent question (CRD ch.39 R39.11.27). It does when this process
 /// started the swap (it was not restored from its saved log), the log holds no payment event of this
 /// role, and the paying coin's HTLC key is random per swap, so no payment to the script can exist
@@ -1118,6 +1128,12 @@ pub(crate) fn skips_already_sent_question(
 /// Picks the HTLC key a recovery uses for a payment (CRD ch.39 R39.5.4): the swap's own key first, then the
 /// coin's persistent key, whichever first rebuilds the script the payment pays. The persistent key is a
 /// candidate only when it differs from the swap's key. A payment that matches neither is a hard stop.
+///
+/// A key is a key pair: the private key returned is the one that belongs to the public key that matched. A
+/// swap record whose saved private key does not belong to its saved public key is signed with the persistent
+/// key pair when the saved public key is the persistent one; otherwise the saved public key is a candidate
+/// that can be matched but not signed with, and when it is the one the payment pays recovery stops, before
+/// anything is built, naming the public key.
 pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Result<RecoveryHtlcKey, String> {
     req.stages
         .enter(RecoveryStage::ResolveHtlcKey, req.coin, Some(req.payment_tx), None);
@@ -1127,21 +1143,28 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
         pubkey: H264::from(&**persistent_keypair.public()),
         keypair: *persistent_keypair,
     };
-    let per_swap = RecoveryHtlcKey {
-        kind: RecoveryHtlcKeyKind::PerSwap,
-        pubkey: req.per_swap_pubkey,
-        keypair: req.per_swap_keypair,
-    };
-    let mut candidates = vec![per_swap];
-    if persistent.pubkey != per_swap.pubkey {
-        candidates.push(persistent);
+    // Each candidate is a public key to match the payment with and, if one is held, the key pair that signs.
+    let mut candidates: Vec<(RecoveryHtlcKeyKind, H264, Option<KeyPair>)> = Vec::with_capacity(2);
+    if htlc_keypair_owns_pubkey(req.coin, &req.per_swap_keypair, &req.per_swap_pubkey) {
+        candidates.push((
+            RecoveryHtlcKeyKind::PerSwap,
+            req.per_swap_pubkey,
+            Some(req.per_swap_keypair),
+        ));
+    } else if persistent.pubkey == req.per_swap_pubkey {
+        candidates.push((persistent.kind, persistent.pubkey, Some(persistent.keypair)));
+    } else {
+        candidates.push((RecoveryHtlcKeyKind::PerSwap, req.per_swap_pubkey, None));
+    }
+    if persistent.pubkey != req.per_swap_pubkey {
+        candidates.push((persistent.kind, persistent.pubkey, Some(persistent.keypair)));
     }
 
     let mut other_script_payment = None;
-    for candidate in &candidates {
+    for (kind, pubkey, keypair) in &candidates {
         let (first, second) = match req.owner {
-            PaymentOwner::Mine => (candidate.pubkey.as_slice(), req.other_pubkey),
-            PaymentOwner::Other => (req.other_pubkey, candidate.pubkey.as_slice()),
+            PaymentOwner::Mine => (pubkey.as_slice(), req.other_pubkey),
+            PaymentOwner::Other => (req.other_pubkey, pubkey.as_slice()),
         };
         match try_s!(
             req.coin
@@ -1149,12 +1172,25 @@ pub(crate) async fn resolve_recovery_htlc_key(req: RecoveryKeyRequest<'_>) -> Re
                 .await
         ) {
             HtlcPaymentCheck::Pays => {
+                let Some(keypair) = keypair else {
+                    return ERR!(
+                        "No private key is held for the HTLC public key {}, which the {} payment pays: the \
+                         private key saved with the swap does not belong to it and it is not the persistent \
+                         key -- recovery stops before anything is built",
+                        hex::encode(pubkey.as_slice()),
+                        req.coin.ticker()
+                    );
+                };
                 info!(
                     "Swap recovery of a {} payment: the {} rebuilds the HTLC script it pays",
                     req.coin.ticker(),
-                    candidate.kind.label()
+                    kind.label()
                 );
-                return Ok(*candidate);
+                return Ok(RecoveryHtlcKey {
+                    kind: *kind,
+                    pubkey: *pubkey,
+                    keypair: *keypair,
+                });
             },
             HtlcPaymentCheck::PaysAnotherScript { payment_id } => other_script_payment = Some(payment_id),
         }

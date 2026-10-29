@@ -450,6 +450,65 @@ choice.
 
 ---
 
+## 36.5A Node naming, credentials and node responses in logs (Reloaded-original)
+
+The rules of this section bind what the Tendermint coin layer's texts and
+renderings may say about an RPC node of `nodes[]` (R36.1.2). They bind no wire
+shape: the human-readable `error` text stays unbound except for what these
+rules forbid it to carry.
+
+R36.5A.1 **Host-only naming of Tendermint nodes (Reloaded; clean-room
+original; maintainer decision 2026-10-26; no switch).** Every log line, error
+text and status message the Tendermint coin layer emits that names a node
+shall name it in the host-only form of [chapter 35](35-evm-v2-activation-rpcs.md)
+R35.1.14: scheme, host and, when present, port, with the userinfo, path, query
+and fragment stripped. This covers at least:
+
+- the per-node logs of node selection, including a failed health check and
+  the fallback check that follows it;
+- the error a caller receives when no node is usable, and the per-node
+  details it lists;
+- the activation error for a node URL that cannot be used. It shall not echo
+  the configured string: an entry without a usable scheme and host is named
+  by a fixed placeholder;
+- any lower-layer text (HTTP client, TLS, DNS) embedded in one of these
+  texts. A full URL that arrives from a lower layer is replaced by its
+  host-only form before the text is logged or returned.
+
+The rule applies to the native and the browser build alike.
+
+R36.5A.2 **Credentials in renderings (Reloaded; clean-room original;
+maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.17 applies to
+the Tendermint coin layer: the coin's node list, each per-node client, and the
+node entries of the activation request render a node URL in host-only form
+only, and no rendering prints a header value or other credential the
+configuration supplies. The scope limit of R35.1.17 for the RPC wire dump
+applies here too.
+
+R36.5A.3 **Node response bodies are not logged (Reloaded; clean-room
+original; maintainer decision 2026-10-28, D36.3).** No log line, at any
+level, shall carry the body of a node's response, in whole or in part. A log
+line about a response may carry the request kind, the node in host-only form,
+the outcome and the body's size in bytes. This rule binds log lines only. An error text
+that quotes the node's own error code and message is governed by R36.5A.1
+alone.
+
+These three rules state Reloaded's own behavior; this chapter records nothing
+about the reference's logging. They have no opt-back switch, for the reason
+chapter 35 R35.1.14 gives: node access reaches no peer and the rules only
+protect the operator, so by the second arm of the default-side rule
+(`docs/COMPAT_SWITCHES.md`) the Reloaded form is the default, and an opt-in to
+print credentials would be an opt-in to weaken security. They are recorded in
+`docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+> **Status (2026-10-28).** Not implemented yet. In this repository the
+> node-selection logs and the "every node unavailable" error name each node by
+> its full URI, the invalid-URL activation error echoes the configured string,
+> the per-node HTTP client derives a debug form that prints its URI, and the
+> native client logs every response body at debug level.
+
+---
+
 ## 36.6 Task-based activation (delivered via [Chapter 48](48-platform-coin-task-activation.md) substrate)
 
 R36.6.1 The published KDF surface exposes the task-managed Tendermint platform
@@ -682,6 +741,20 @@ unknown ticker it returns a `task_id`, and `status` then returns HTTP 200
 T36.13 *Task in-progress value.* While a Tendermint task is running its status
 `details` is the string `ActivatingCoin`.
 
+T36.14 *Host-only naming and credentials (R36.5A.1, R36.5A.2).* Activate with
+two nodes whose URLs carry userinfo, a path segment and a query string, both
+refusing connections. The activation error, each node-selection log line and
+the debug form of the coin's node list and of the parsed request contain each
+node's host-only form and none of the userinfo, path or query parts. A node
+URL that cannot be used fails activation with an error that does not contain
+the configured string. Run on the native build; on the browser build once a
+browser test harness exists.
+
+T36.15 *No response bodies in logs (R36.5A.3).* With log capture at the most
+verbose level, a request whose answer carries a marker string succeeds, and
+no captured line contains the marker. A line that reports the answer may
+carry its size.
+
 ## 36.9 Deferred Work
 
 D36.1 Hardware-wallet (Trezor/Ledger-native) Tendermint activation is not part
@@ -689,6 +762,17 @@ of the reference and is not specified here.
 
 D36.2 The task-managed single-token family (`task::enable_tendermint_token::*`)
 is not routed by the reference and is deferred.
+
+D36.3 *(Resolved 2026-10-28, maintainer decision, for Tendermint; the second
+question stays open.)* *Node response bodies in logs.* R36.5A.3 forbids
+response bodies in log lines at every level. A looser reading would allow them
+at trace level only. The stricter reading was taken because a trace level can
+be switched on in the field, and a body then reaches a shared log. The
+maintainer kept the rule: a log line names a body's size only. Still open:
+whether the same rule should bind the other
+node families, whose error texts carry the body of a non-success answer
+(chapter 38 §38.6.9 for the native UTXO daemon, chapter 20 §20.8 for the Sia
+wallet daemon).
 
 ## 36.10 Baseline Verifications
 
@@ -754,3 +838,11 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   identifier, internal decomposition, or error/log string literal was carried
   into this chapter; the code-quality findings of §36.7 are restated as
   behaviour.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):*
+  §36.5A (R36.5A.1 -- R36.5A.3 and the status note), T36.14, T36.15 and D36.3
+  are Reloaded-original. They rest on the maintainer decision of 2026-10-26
+  (host-only node naming everywhere, except the RPC wire dump, which keeps its
+  own secrets switch), his decision of 2026-10-28 on D36.3 and this
+  repository's own code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required.

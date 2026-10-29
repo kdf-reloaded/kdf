@@ -121,6 +121,13 @@ Unknown members of `activation_params` and of `client_conf` are ignored. A
 `server_url` that is not a valid absolute URL, a missing `client_conf`, or a
 wrongly typed member is a request-parse failure (`InvalidRequest`, §55.1).
 
+> **Naming and credentials (pointer, 2026-10-28).** What a log line, an error
+> text or the debug form of a value may show of `server_url`, `password` and
+> `headers` is bound by [Chapter 20](20-siacoin-integration.md) §20.8 R-N1 and
+> R-N2: the server in host-only form, and no password or header value. This
+> includes the `error` member of the `CoinCreationError` and the `Transport`
+> text of §46.5. Not yet implemented (ch. 20 D10).
+
 R46.1.3 The signing policy is taken from the in-context wallet (the standard
 private-key build policy shared by the other standalone coins); the request
 carries no per-call key-policy selector. Only the single-key ("Iguana") policy
@@ -441,3 +448,7 @@ error.
   client library (client configuration and construction behaviour).
 - *Forbidden corpus:* consulted by the KDF Spec Reader role for this revision
   (reference tags above); output limited to the clean-channel wire contract.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
+  pointer note after R46.1.2 is Reloaded-original. It rests on the maintainer
+  decision of 2026-10-26 (host-only node naming everywhere) and binds nothing
+  beyond chapter 20 R-N1 and R-N2.
