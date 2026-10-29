@@ -25,9 +25,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
 - **§39.6 (T-PORT, implemented):** WASM support, activation-time sync tuning /
   sync-from-date, Sapling parameter integrity verification, sourcing consensus
   parameters / checkpoint / HD path from `protocol_data`, and HD-derived
-  shielded key-policy derivation are all implemented. One narrow platform gap
-  remains: WASM shielded-transaction *building* (blocked by the absent
-  `LocalTxProver` parameter files; §39.6.1). Under an HD wallet the shielded
+  shielded key-policy derivation are all implemented, except on WASM: the
+  WASM build compiles the shielded coin but refuses its activation, because
+  it has no shielded wallet database, and shielded-transaction *building*
+  would also need the `LocalTxProver` parameter files it lacks (§39.6.1,
+  R39.10.1 remaining deviation 1; corrected 2026-10-29). Under an HD wallet the shielded
   Sapling key is HD-derived per R39.6.4 §2; since maintainer Decision D39.5.a
   (2026-10-28) the coin's transparent secp256k1 key is HD-derived too, at the
   coins-file `derivation_path` (R39.6.4 §2, R39.5.9); implemented by
@@ -79,9 +81,11 @@ required-but-unimplemented extensions). Mixed treatment -- see §39.0.
 
 R39.1.1 The shielded coin (`ZCoin`) is a UTXO-derived coin type that adds a
 Sapling shielded layer. This was originally built on the **native** target
-only; §39.6.1's required port has since made it buildable and activatable on
-the WASM target as well, with one narrow gap (shielded transaction *building*
-stays native-only -- see §39.6.1 for the exact boundary and status).
+only; §39.6.1's required port has since made it buildable on the WASM target
+as well, but a WASM build refuses its activation, because that build has no
+shielded wallet database, and shielded transaction *building* stays
+native-only (see §39.6.1 for the exact boundary and status, and R39.10.1 for
+the activation error).
 
 R39.1.2 A shielded coin's `coins`-config `protocol` field is a tagged object
 with `type` = `"ZHTLC"` **and a required `protocol_data` object**. The
@@ -686,11 +690,14 @@ WASM build and reports a shielded balance.
 > targets. Shielded transaction *building* remains native-only, because the
 > Sapling local prover (and the parameter files it needs) is unavailable in WASM.
 >
-> **Status update (2026-10-29).** This stays a known limitation of the beta. In a WASM
-> build a shielded coin activates and reports its shielded balance, but a withdrawal,
-> the parsing of a swap transaction and a trade-fee estimate are refused, so the coin
-> can neither withdraw nor take part in a swap. The release notes list it under known
-> limitations. Building shielded transactions in WASM is deferred (D39.6.a).
+> **Status update (2026-10-29).** The note above is out of date on activation, and
+> the acceptance of R39.6.1 is not met. Since 2026-10-11 a WASM build has refused
+> every shielded activation with `CoinCreationError` `{ticker, error}`, stating that
+> shielded activation is not available in the WebAssembly build (R39.10.1, remaining
+> deviation 1). That build has no shielded wallet database, so it has no real balance
+> to report, and the coin is never built or registered there. Shielded transaction
+> building would also stay native-only, as above. This is a known limitation of the
+> beta, listed in the release notes; shielded coins in WASM are deferred (D39.6.a).
 
 ### 39.6.2 Activation-time sync tuning / sync-from-date
 R39.6.2 The activation request shall optionally accept sync-control parameters so
@@ -1124,10 +1131,10 @@ mainnet constants.
 
 #### Deferred Work (§39.6)
 
-D39.6.a **Shielded transaction building in WASM -- after the beta.** *(Recorded
-2026-10-29.)* A WASM build needs a Sapling prover that runs in the browser and a way to
-obtain the Sapling parameter files there (§39.6.1). Until then a shielded coin is
-view-only in WASM.
+D39.6.a **Shielded coins in WASM -- after the beta.** *(Recorded 2026-10-29.)* A WASM
+build needs a shielded wallet database in the browser (the logical data model of
+R39.8.0j), a Sapling prover that runs there, and a way to obtain the Sapling parameter
+files (§39.6.1). Until then a WASM build refuses to activate a shielded coin (R39.10.1).
 
 D39.6.b **The discovered Ironwood activation height is not persisted -- after the beta.**
 *(Recorded 2026-10-29.)* A height found by discovery (R39.6.4e(c)) is kept in memory only
