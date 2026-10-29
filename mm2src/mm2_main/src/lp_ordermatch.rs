@@ -70,9 +70,10 @@ use crate::mm2::lp_swap::{calc_max_maker_vol, check_balance_for_maker_swap, chec
 
 pub use best_orders::{best_orders_rpc, best_orders_rpc_v2};
 use maker_balance_watch::{start_maker_balance_watch, BalanceWatches};
-use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, save_maker_order_on_update,
-                        save_my_new_maker_order, save_my_new_taker_order, MyActiveOrders, MyOrdersFilteringHistory,
-                        MyOrdersHistory, MyOrdersStorage};
+use my_orders_storage::{delete_my_maker_order, delete_my_taker_order, save_my_new_maker_order,
+                        save_my_new_taker_order, MyActiveOrders, MyOrdersFilteringHistory, MyOrdersHistory,
+                        MyOrdersStorage};
+use order_write_gate::{OrderWriteGate, PublishedState, RemovedMakerOrder};
 pub use orderbook_depth::orderbook_depth_rpc;
 pub use orderbook_rpc::{orderbook_rpc, orderbook_rpc_v2};
 
@@ -98,6 +99,8 @@ mod my_orders_storage;
 pub(crate) mod order_events;
 #[path = "lp_ordermatch/order_requests_tracker.rs"]
 mod order_requests_tracker;
+#[path = "lp_ordermatch/order_write_gate.rs"]
+mod order_write_gate;
 #[path = "lp_ordermatch/orderbook_depth.rs"] mod orderbook_depth;
 #[path = "lp_ordermatch/orderbook_events.rs"]
 pub(crate) mod orderbook_events;
@@ -192,6 +195,11 @@ pub struct MakerOrdersContext {
     count_by_tickers: HashMap<String, usize>,
     /// The balance watches of the base coins that have active orders (CRD ch.60 R60.4.5).
     balance_watches: BalanceWatches,
+    /// The write gate of each order (CRD ch.12 R7b). The entry of a removed order stays while a writer still
+    /// holds its gate, so the mark of the removal is not lost to a late writer.
+    write_gates: HashMap<Uuid, Arc<OrderWriteGate>>,
+    /// The orders whose gate was marked removed and is not dropped from `write_gates` yet.
+    removed_gates: Vec<Uuid>,
 }
 
 impl MakerOrdersContext {
@@ -201,7 +209,53 @@ impl MakerOrdersContext {
             order_tickers: HashMap::new(),
             count_by_tickers: HashMap::new(),
             balance_watches: BalanceWatches::default(),
+            write_gates: HashMap::new(),
+            removed_gates: Vec::new(),
         }
+    }
+
+    /// Drops the gates of removed orders that no writer holds any more. Only the recorded removals are looked at,
+    /// so the cost does not grow with the number of orders.
+    fn sweep_write_gates(&mut self) {
+        let write_gates = &mut self.write_gates;
+        self.removed_gates.retain(|uuid| {
+            let released = match write_gates.get(uuid) {
+                // A new order may have taken the uuid since: its gate is live and stays.
+                Some(gate) if gate.is_removed() => Arc::strong_count(gate) == 1,
+                Some(_) => true,
+                None => true,
+            };
+            if released {
+                if write_gates.get(uuid).is_some_and(|gate| gate.is_removed()) {
+                    write_gates.remove(uuid);
+                }
+                return false;
+            }
+            true
+        });
+    }
+
+    /// The write gate of an order that leaves the container, marked as removed in the same step: no writer
+    /// publishes a state of the order from now on.
+    fn retire_write_gate(&mut self, uuid: Uuid) -> Arc<OrderWriteGate> {
+        let gate = self.write_gates.entry(uuid).or_default().clone();
+        gate.mark_removed();
+        self.removed_gates.push(uuid);
+        gate
+    }
+
+    /// Gives `uuid` a new write gate.
+    fn new_write_gate(&mut self, uuid: Uuid) {
+        self.sweep_write_gates();
+        self.write_gates.insert(uuid, Arc::new(OrderWriteGate::default()));
+    }
+
+    /// The write gate of an order that is in the container, `None` for one that is not.
+    pub(crate) fn live_write_gate(&self, uuid: &Uuid) -> Option<Arc<OrderWriteGate>> {
+        if !self.orders.contains_key(uuid) {
+            return None;
+        }
+        self.write_gates.get(uuid).cloned()
     }
 
     /// Counts one order less for `ticker`; the last order of a base coin ends that coin's balance watch.
@@ -230,18 +284,28 @@ impl MakerOrdersContext {
 
         self.order_tickers.insert(uuid, ticker.clone());
         *self.count_by_tickers.entry(ticker).or_insert(0) += 1;
+        self.new_write_gate(uuid);
     }
 
     /// Remove an order by UUID.  Returns the `Arc<AsyncMutex<MakerOrder>>` if it
     /// was present.
     pub fn remove_order(&mut self, uuid: &Uuid) -> Option<Arc<AsyncMutex<MakerOrder>>> {
-        let removed = self.orders.remove(uuid);
-        if removed.is_some() {
-            if let Some(ticker) = self.order_tickers.remove(uuid) {
-                self.decrement_ticker_count(&ticker);
-            }
+        self.remove_order_with_gate(uuid).map(|(order, _)| order)
+    }
+
+    /// Like [`MakerOrdersContext::remove_order`], and also returns the order's write gate, which is marked as
+    /// removed in the same step (see [`RemovedMakerOrder::take_out`]).
+    pub(crate) fn remove_order_with_gate(
+        &mut self,
+        uuid: &Uuid,
+    ) -> Option<(Arc<AsyncMutex<MakerOrder>>, Arc<OrderWriteGate>)> {
+        self.sweep_write_gates();
+        let removed = self.orders.remove(uuid)?;
+        if let Some(ticker) = self.order_tickers.remove(uuid) {
+            self.decrement_ticker_count(&ticker);
         }
-        removed
+        let gate = self.retire_write_gate(*uuid);
+        Some((removed, gate))
     }
 
     /// Get an order by UUID (returns a clone of the `Arc`).
@@ -278,19 +342,24 @@ impl MakerOrdersContext {
         }
         self.order_tickers.insert(uuid, ticker.clone());
         *self.count_by_tickers.entry(ticker).or_insert(0) += 1;
+        self.new_write_gate(uuid);
     }
 
     /// Collect all expired orders (those whose TTL has elapsed) and clean up
     /// ticker tracking.  Returns the expired entries for the caller to handle
-    /// cancellation / P2P notification.
-    pub fn drop_expired(&mut self) -> Vec<(Uuid, Arc<AsyncMutex<MakerOrder>>)> {
+    /// cancellation / P2P notification. The write gate of each is returned with it, marked as removed in the same
+    /// step (see [`RemovedMakerOrder::already_dropped`]).
+    pub(crate) fn drop_expired(&mut self) -> Vec<(Uuid, Arc<AsyncMutex<MakerOrder>>, Arc<OrderWriteGate>)> {
         let expired = self.orders.drop_expired_entries();
-        for (uuid, _) in &expired {
-            if let Some(ticker) = self.order_tickers.remove(uuid) {
+        let mut dropped = Vec::with_capacity(expired.len());
+        for (uuid, order) in expired {
+            if let Some(ticker) = self.order_tickers.remove(&uuid) {
                 self.decrement_ticker_count(&ticker);
             }
+            let gate = self.retire_write_gate(uuid);
+            dropped.push((uuid, order, gate));
         }
-        expired
+        dropped
     }
 
     /// Iterate over all order UUIDs.
