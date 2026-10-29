@@ -51,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
+  call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
+  12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
+  answer is byte for byte the same. `setprice`, `update_maker_order` and `order_status` share the
+  speed-up for the order they return. If the answer cannot be written, `my_orders` now returns an error
+  instead of stopping the node. More in [`my-orders-speed`](docs/plans/my-orders-speed.md).
+  Detail: PR #154.
+
 - **Fee readings are reused across order-posting requests.** `setprice`, `update_maker_order`,
   `buy`, `sell`, `trade_preimage`, `max_maker_vol` and `max_taker_vol` (and the maker balance
   watch) may reuse the dynamic-fee estimate of a UTXO coin, the node's minimum relay fee of a coin
@@ -276,6 +284,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
   and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
   Test-only; the node itself is unchanged.
+- **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #149; CRD ch.12 R7a, R7b.
 - **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
   shielded-coin payment now waits until the chain's median time (the clock the network judges lock
   times by) has passed the lock time, and a refund the network still rejects as not yet final is
@@ -665,6 +674,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for the newer swaps), and a token inherits its platform coin's block. We ignored them and used 150000 for every swap call, which is too low on some chains, so swap transactions on chains such as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used for every swap call, the trade-fee estimates and the approval; a value that is not a whole number stops that coin from activating and names the key. Where the coins file sets nothing, the defaults now match the other KDF implementations: for example a platform-coin payment is 65000 and its refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57 R57.5, R57.6.
 
+- **Tests now cover an EVM token that sets its own gas limits while its platform coin sets none.** The token's own `gas_limit` block is used for its sends, swap payments, spends and refunds and for the fee quotes, and a limit it leaves out takes the built-in default, never a value from the platform coin's entry. The test uses the limits of a coins file running in production.
+
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
@@ -730,7 +741,8 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
   read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
-  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
+  order's file and database writes leave the order's lock (Decision AM) in PR #149.
 
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
