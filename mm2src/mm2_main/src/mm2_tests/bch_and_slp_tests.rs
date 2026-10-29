@@ -13,8 +13,10 @@ const T_BCH_ELECTRUMS: &[&str] = &[
 fn t_bch_electrums_legacy_json() -> Vec<Json> { T_BCH_ELECTRUMS.iter().map(|url| json!({ "url": url })).collect() }
 
 /// How many times [`withdraw_and_send_bch`] rebuilds and rebroadcasts after a mempool conflict.
+#[cfg(not(target_arch = "wasm32"))]
 const BCH_CONFLICT_RETRIES: usize = 12;
 /// How long [`withdraw_and_send_bch`] waits before each retry.
+#[cfg(not(target_arch = "wasm32"))]
 const BCH_CONFLICT_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 /// Withdraws 0.00001 BCH to `to` from the test wallet, checks the transaction's addresses, and
@@ -26,6 +28,7 @@ const BCH_CONFLICT_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// spending the same wallet at the same time ends the same way. Both clear once the servers have
 /// caught up, so a conflict rebuilds the withdrawal after a pause instead of failing the test; any
 /// other broadcast error still fails at once.
+#[cfg(not(target_arch = "wasm32"))]
 fn withdraw_and_send_bch(mm: &MarketMakerIt, to: &str, expected_from: &str) {
     for attempt in 1..=BCH_CONFLICT_RETRIES + 1 {
         let withdraw = block_on(mm.rpc(&json! ({
