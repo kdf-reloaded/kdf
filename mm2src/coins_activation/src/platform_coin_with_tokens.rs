@@ -1,5 +1,7 @@
+use crate::context::lock_activation;
 use crate::prelude::*;
 use async_trait::async_trait;
+use coins::activation_locks::ActivationGuard;
 use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 #[cfg(not(target_arch = "wasm32"))]
@@ -185,6 +187,11 @@ pub trait PlatformWithTokensActivationOps: Into<MmCoinEnum> {
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>>;
+
+    /// The tickers of the tokens that the request registers beside the platform coin. The activation locks them
+    /// together with the platform ticker, so no other activation builds or registers one of them meanwhile
+    /// (CRD ch.55 R55.1.12).
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String>;
 
     /// Reports the activated platform and its tokens once the tokens are enabled.
     ///
@@ -392,6 +399,24 @@ impl HttpStatusCode for EnablePlatformCoinWithTokensError {
     }
 }
 
+/// Waits for the activation locks of the platform ticker and of the tickers of the tokens the request registers
+/// (CRD ch.55 R55.1.12). They are acquired in one sorted order, so overlapping requests cannot deadlock.
+async fn lock_platform_activation<Platform>(
+    ctx: &MmArc,
+    ticker: &str,
+    request: &Platform::ActivationRequest,
+) -> Result<ActivationGuard, MmError<EnablePlatformCoinWithTokensError>>
+where
+    Platform: PlatformWithTokensActivationOps,
+{
+    let token_tickers = Platform::requested_token_tickers(request);
+    let mut tickers: Vec<&str> = token_tickers.iter().map(String::as_str).collect();
+    tickers.push(ticker);
+    lock_activation(ctx, &tickers)
+        .await
+        .map_to_mm(EnablePlatformCoinWithTokensError::Internal)
+}
+
 pub async fn enable_platform_coin_with_tokens<Platform>(
     ctx: MmArc,
     req: EnablePlatformCoinWithTokensReq<Platform::ActivationRequest>,
@@ -402,6 +427,9 @@ where
 {
     Platform::check_one_shot_request(&req.request).mm_err(Into::into)?;
 
+    // R55.1.12: the platform and every token the request registers are locked until the registration is done.
+    // The check below is the one that follows the wait.
+    let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
             req.ticker,
@@ -523,6 +551,9 @@ where
     use coins::hd_pubkey::RpcTaskXPubExtractor;
     use crypto::CryptoCtx;
 
+    // R55.1.12: the platform and every token the request registers are locked until the registration is done.
+    // The check below is the one that follows the wait.
+    let _activation_guard = lock_platform_activation::<Platform>(&ctx, &req.ticker, &req.request).await?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
             req.ticker,

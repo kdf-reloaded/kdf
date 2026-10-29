@@ -7977,6 +7977,772 @@ mod t60_7_maker_balance_watch_tests {
     }
 }
 
+/// CRD ch.12 R7a, R7b (maintainer Decision AM): a maker order's own lock is held for in-memory work only, and the
+/// storage writes of one order keep the order of its changes. T7 and T8.
+mod t12_7_order_lock_io_tests {
+    use super::*;
+    use crate::mm2::database::my_orders::CREATE_MY_ORDERS_TABLE;
+    use crate::mm2::lp_ordermatch::my_orders_storage::{write_maker_order_state, MyOrdersError};
+    use crate::mm2::lp_ordermatch::order_write_gate::PublishedState;
+    use coins::{BalanceError, CoinsContext, MarketCoinOps, MmCoinEnum, TradeFee};
+    use futures::future::poll_fn;
+    use futures::{FutureExt, TryFutureExt};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::task::{Context, Poll};
+
+    const ORDER_JSON: &str = r#"{"max_base_vol":"1","max_base_vol_rat":[[1,[1]],[1,[1]]],"min_base_vol":"0","min_base_vol_rat":[[0,[]],[1,[1]]],"price":"1","price_rat":[[1,[1]],[1,[1]]],"created_at":1589265312093,"updated_at":1589265312093,"base":"ETH","rel":"JST","matches":{"2f9afe84-7a89-4194-8947-45fba563118f":{"request":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.2","rel_amount_rat":[[1,[1]],[1,[5]]],"action":"Buy","uuid":"2f9afe84-7a89-4194-8947-45fba563118f","method":"request","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"0000000000000000000000000000000000000000000000000000000000000000","match_by":{"type":"Any"}},"reserved":{"base":"ETH","rel":"JST","base_amount":"0.1","base_amount_rat":[[1,[1]],[1,[10]]],"rel_amount":"0.1","rel_amount_rat":[[1,[1]],[1,[10]]],"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"reserved","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"connect":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connect","sender_pubkey":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3","dest_pub_key":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed"},"connected":{"taker_order_uuid":"2f9afe84-7a89-4194-8947-45fba563118f","maker_order_uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3","method":"connected","sender_pubkey":"c6a78589e18b482aea046975e6d0acbdea7bf7dbf04d9d5bd67fda917815e3ed","dest_pub_key":"031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3"},"last_updated":1589265314408}},"started_swaps":["2f9afe84-7a89-4194-8947-45fba563118f"],"uuid":"5f6516ea-ccaa-453a-9e37-e1c2c0d527e3"}"#;
+
+    fn bd(s: &str) -> BigDecimal { s.parse().unwrap() }
+
+    /// A node with two test coins, real order files in a temporary directory and an in-memory history database.
+    struct Node {
+        ctx: MmArc,
+        dbdir: std::path::PathBuf,
+        p2p_rx: mpsc::Receiver<AdexBehaviourCmd>,
+    }
+
+    impl Drop for Node {
+        fn drop(&mut self) { std::fs::remove_dir_all(&self.dbdir).ok(); }
+    }
+
+    impl Node {
+        fn new() -> Node {
+            TestCoin::min_trading_vol.mock_safe(|_| MockResult::Return(MmNumber::from("0.0001")));
+            TestCoin::min_tx_amount.mock_safe(|_| MockResult::Return(bd("0")));
+            TestCoin::get_sender_trade_fee.mock_safe(|coin, _value, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from("0.1"),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::pin(async move { Ok(fee) }))
+            });
+            TestCoin::get_receiver_trade_fee.mock_safe(|coin, _stage| {
+                let fee = TradeFee {
+                    coin: coin.ticker().to_owned(),
+                    amount: MmNumber::from("0.1"),
+                    paid_from_trading_vol: false,
+                };
+                MockResult::Return(Box::new(futures01::future::ok(fee)))
+            });
+            let dbdir = std::env::temp_dir().join(format!("kdf-order-lock-io-{}", Uuid::new_v4()));
+            let conf = json!({ "dbdir": dbdir.to_string_lossy(), "pre_trade_spend_check": false });
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            ctx.secp256k1_key_pair
+                .pin(key_pair_from_seed("passphrase").unwrap())
+                .unwrap();
+            let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+            for ticker in ["DYN", "KMD"] {
+                block_on(coins_ctx.add_coin(MmCoinEnum::Test(TestCoin::new(ticker)))).unwrap();
+            }
+            std::fs::create_dir_all(my_maker_orders_dir(&ctx)).unwrap();
+            std::fs::create_dir_all(my_orders_history_dir(&ctx)).unwrap();
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute(CREATE_MY_ORDERS_TABLE, []).unwrap();
+            let _ = ctx.sqlite_connection.pin(Arc::new(Mutex::new(connection)));
+            let (tx, p2p_rx) = mpsc::channel(1000);
+            P2PContext::new(tx).store_to_mm_arc(&ctx);
+            Node { ctx, dbdir, p2p_rx }
+        }
+
+        fn ordermatch_ctx(&self) -> Arc<OrdermatchContext> { OrdermatchContext::from_ctx(&self.ctx).unwrap() }
+
+        /// Adds an own maker order DYN/KMD (volume 10, minimum 1, price 0.5) to the container. With `on_disk` it is
+        /// also saved, as `setprice` saves a new order. It is old enough for an update to change `updated_at`.
+        fn add_order(&self, on_disk: bool, save_in_history: bool) -> (MakerOrder, Arc<AsyncMutex<MakerOrder>>) {
+            let base = MmCoinEnum::Test(TestCoin::new("DYN"));
+            let rel = MmCoinEnum::Test(TestCoin::new("KMD"));
+            let mut order = MakerOrderBuilder::new(&base, &rel)
+                .with_max_base_vol(MmNumber::from("10"))
+                .with_min_base_vol(Some(MmNumber::from("1")))
+                .with_price(MmNumber::from("0.5"))
+                .with_conf_settings(OrderConfirmationsSettings::default())
+                .with_save_in_history(save_in_history)
+                .build_unchecked();
+            order.created_at -= 10_000;
+            order.updated_at = Some(order.created_at);
+            order.save_in_history = save_in_history;
+            if on_disk {
+                block_on(save_my_new_maker_order(self.ctx.clone(), &order)).unwrap();
+            }
+            let handle = Arc::new(AsyncMutex::new(order.clone()));
+            self.ordermatch_ctx()
+                .maker_orders_ctx
+                .lock()
+                .add_order(&order, handle.clone());
+            (order, handle)
+        }
+
+        fn in_container(&self, uuid: &Uuid) -> bool { self.ordermatch_ctx().maker_orders_ctx.lock().contains_key(uuid) }
+
+        fn active_record(&self, uuid: &Uuid) -> Option<MakerOrder> {
+            let path = my_maker_order_file_path(&self.ctx, uuid);
+            std::fs::read(path).ok().map(|bytes| json::from_slice(&bytes).unwrap())
+        }
+
+        fn history_entry(&self, uuid: Uuid) -> Option<MakerOrder> {
+            match block_on(MyOrdersStorage::new(self.ctx.clone()).load_order_from_history(uuid)) {
+                Ok(Order::Maker(order)) => Some(order),
+                _ => None,
+            }
+        }
+    }
+
+    fn update_price_req(uuid: Uuid, price: &'static str) -> MakerOrderUpdateReq {
+        MakerOrderUpdateReq {
+            uuid,
+            new_price: Some(MmNumber::from(price)),
+            max: None,
+            volume_delta: None,
+            min_volume: None,
+            base_confs: None,
+            base_nota: None,
+            rel_confs: None,
+            rel_nota: None,
+        }
+    }
+
+    /// An unfinished match that has been waiting longer than the match timeout.
+    fn stale_match() -> MakerMatch {
+        let order: MakerOrder = json::from_str(ORDER_JSON).unwrap();
+        let mut stale = order.matches.into_values().next().unwrap();
+        stale.connect = None;
+        stale.connected = None;
+        stale.last_updated = 1;
+        stale
+    }
+
+    /// Pends once, so that an operation that uses it stays open across a poll.
+    fn yield_once() -> impl Future<Output = ()> {
+        let mut yielded = false;
+        poll_fn(move |cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+    }
+
+    /// What the mocked storage operations of one test saw.
+    #[derive(Clone, Default)]
+    struct StorageProbe {
+        /// How many operations ran.
+        calls: Arc<AtomicUsize>,
+        /// How many times the order's lock was taken while an operation was open.
+        blocked: Arc<AtomicUsize>,
+    }
+
+    impl StorageProbe {
+        /// While a mocked storage operation is open, the test tries to take the order's lock, as `my_orders` and
+        /// `order_status` would.
+        async fn open(&self, order: Arc<AsyncMutex<MakerOrder>>) {
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            for _ in 0..2 {
+                if order.try_lock().is_none() {
+                    self.blocked.fetch_add(1, AtomicOrdering::SeqCst);
+                }
+                yield_once().await;
+            }
+        }
+
+        fn assert_ran_without_the_lock(&self, operations: usize) {
+            assert_eq!(
+                self.calls.load(AtomicOrdering::SeqCst),
+                operations,
+                "the storage operation ran"
+            );
+            assert_eq!(
+                self.blocked.load(AtomicOrdering::SeqCst),
+                0,
+                "the order's lock was taken while a storage operation was open"
+            );
+        }
+    }
+
+    /// The deletion from storage is held open and finds out whether the order's lock is free.
+    fn mock_delete_probing(order: Arc<AsyncMutex<MakerOrder>>) -> StorageProbe {
+        let probe = StorageProbe::default();
+        let seen = probe.clone();
+        delete_my_maker_order.mock_safe(move |_, _, _| {
+            let (seen, order) = (seen.clone(), order.clone());
+            MockResult::Return(Box::new(
+                async move {
+                    seen.open(order).await;
+                    Ok(())
+                }
+                .boxed()
+                .compat(),
+            ))
+        });
+        probe
+    }
+
+    /// The write of a changed order is held open and finds out whether the order's lock is free.
+    fn mock_write_probing(order: Arc<AsyncMutex<MakerOrder>>) -> StorageProbe {
+        let probe = StorageProbe::default();
+        let seen = probe.clone();
+        write_maker_order_state.mock_safe(move |_, _, _| {
+            let (seen, order) = (seen.clone(), order.clone());
+            MockResult::Return(Box::new(
+                async move {
+                    seen.open(order).await;
+                    Ok(())
+                }
+                .boxed()
+                .compat(),
+            ))
+        });
+        probe
+    }
+
+    // ---- T7: no storage operation runs under the order's lock ------------------------------------------------
+
+    #[test]
+    fn t7_balance_update_handler_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle);
+
+        // The balance 0.5 supports a volume below the order's minimum: the order is cancelled.
+        let handler = BalanceUpdateOrdermatchHandler::new(node.ctx.clone());
+        let coin = MmCoinEnum::Test(TestCoin::new("DYN"));
+        block_on(handler.balance_updated(&coin, &bd("0.5")));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_balance_check_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        block_on(handle.lock()).max_base_vol = MmNumber::from("0.5");
+        let probe = mock_delete_probing(handle);
+
+        block_on(check_balance_for_maker_orders(node.ctx.clone(), &node.ordermatch_ctx()));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_timed_out_matches_are_stored_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        block_on(handle.lock()).matches.insert(Uuid::new_v4(), stale_match());
+        let probe = mock_write_probing(handle.clone());
+
+        block_on(handle_timed_out_maker_matches(node.ctx.clone(), &node.ordermatch_ctx()));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(block_on(handle.lock()).matches.is_empty());
+        assert!(node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_expired_order_is_deleted_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle.clone());
+        // The order's own timeout has elapsed (the container's clock is the real one, so a short one is used).
+        let ordermatch_ctx = node.ordermatch_ctx();
+        ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .orders
+            .insert_expirable_unchecked(order.uuid, handle, Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(50));
+
+        block_on(cancel_expired_maker_orders(&node.ctx, &node.ordermatch_ctx()));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_cancel_order_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle);
+
+        block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid })).unwrap();
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_cancel_order_rpc_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle);
+
+        block_on(cancel_order_rpc(node.ctx.clone(), json!({ "uuid": order.uuid }))).unwrap();
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_cancel_previous_orders_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle);
+
+        block_on(cancel_previous_maker_orders(
+            &node.ctx,
+            &node.ordermatch_ctx(),
+            "DYN",
+            "KMD",
+        ));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_cancel_all_orders_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_delete_probing(handle);
+
+        let (cancelled, _) = block_on(cancel_orders_by(&node.ctx, CancelBy::All)).unwrap();
+
+        probe.assert_ran_without_the_lock(1);
+        assert_eq!(cancelled, vec![order.uuid]);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    #[test]
+    fn t7_update_maker_order_stores_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let probe = mock_write_probing(handle.clone());
+
+        let updated = block_on(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6"))).unwrap();
+
+        probe.assert_ran_without_the_lock(1);
+        assert_eq!(updated.price, MmNumber::from("0.6"));
+        assert_eq!(block_on(handle.lock()).price, MmNumber::from("0.6"));
+    }
+
+    /// The reconciliation pass cancels an order whose balance cannot be read (the precedent of this change).
+    #[test]
+    fn t7_reconciliation_cancel_deletes_outside_the_lock() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        TestCoin::my_balance.mock_safe(|_| {
+            MockResult::Return(Box::new(futures01::future::result(MmError::err(
+                BalanceError::Transport("down".to_owned()),
+            ))))
+        });
+        let probe = mock_delete_probing(handle);
+
+        block_on(reconcile_missing_own_maker_orders(&node.ctx, &node.ordermatch_ctx()));
+
+        probe.assert_ran_without_the_lock(1);
+        assert!(!node.in_container(&order.uuid));
+    }
+
+    // ---- T8: the storage order of one order ------------------------------------------------------------------
+
+    /// A mocked write that is held open until `release`, then writes for real (as the unmocked function does) and
+    /// records the price it wrote.
+    #[derive(Clone, Default)]
+    struct HeldWrites {
+        started: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        fail: Arc<AtomicBool>,
+        written: Arc<Mutex<Vec<MmNumber>>>,
+    }
+
+    impl HeldWrites {
+        /// Every write waits for `release`, then fails if `fail` is set.
+        fn install(node: &Node) -> HeldWrites {
+            let held = HeldWrites::default();
+            let seen = held.clone();
+            let ctx = node.ctx.clone();
+            write_maker_order_state.mock_safe(move |_, order, with_history| {
+                let (seen, ctx) = (seen.clone(), ctx.clone());
+                MockResult::Return(Box::new(
+                    async move {
+                        seen.started.fetch_add(1, AtomicOrdering::SeqCst);
+                        poll_fn(|cx| {
+                            if seen.released.load(AtomicOrdering::SeqCst) {
+                                Poll::Ready(())
+                            } else {
+                                cx.waker().wake_by_ref();
+                                Poll::Pending
+                            }
+                        })
+                        .await;
+                        if seen.fail.load(AtomicOrdering::SeqCst) {
+                            return MmError::err(MyOrdersError::ErrorSaving("disk full".to_owned()));
+                        }
+                        let storage = MyOrdersStorage::new(ctx);
+                        storage.update_active_maker_order(&order).await?;
+                        if with_history && order.save_in_history {
+                            storage.update_maker_order_in_filtering_history(&order).await?;
+                        }
+                        seen.written.lock().unwrap().push(order.price.clone());
+                        Ok(())
+                    }
+                    .boxed()
+                    .compat(),
+                ))
+            });
+            held
+        }
+
+        fn release(&self) { self.released.store(true, AtomicOrdering::SeqCst); }
+
+        fn started(&self) -> usize { self.started.load(AtomicOrdering::SeqCst) }
+    }
+
+    /// Polls `fut` until `until` holds, with a waker that does nothing. The future must not finish before.
+    fn poll_until<F: Future + Unpin>(fut: &mut F, until: impl Fn() -> bool) {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..10_000 {
+            if until() {
+                return;
+            }
+            if Pin::new(&mut *fut).poll(&mut cx).is_ready() {
+                panic!("the future finished before the awaited point");
+            }
+        }
+        panic!("the awaited point was not reached");
+    }
+
+    /// Polls `fut` a number of times, with a waker that does nothing. The future must not finish.
+    fn poll_pending<F: Future + Unpin>(fut: &mut F, times: usize) {
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        for _ in 0..times {
+            assert!(
+                Pin::new(&mut *fut).poll(&mut cx).is_pending(),
+                "the future finished while it had to wait"
+            );
+        }
+    }
+
+    /// T8 (a), at the gate: two states are published in the order of two changes, and their writes are completed in
+    /// the reverse order. Only the newer state is stored.
+    #[test]
+    fn t8_a_newer_state_wins_when_writes_complete_in_reverse_order() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(false, false);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let record = written.clone();
+        write_maker_order_state.mock_safe(move |_, order, _| {
+            record.lock().unwrap().push(order.price.clone());
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        let ordermatch_ctx = node.ordermatch_ctx();
+
+        let (first, second) = {
+            let mut locked = block_on(handle.lock());
+            locked.price = MmNumber::from("0.6");
+            let first = PublishedState::publish(&ordermatch_ctx, &locked, true).unwrap();
+            locked.price = MmNumber::from("0.7");
+            let second = PublishedState::publish(&ordermatch_ctx, &locked, true).unwrap();
+            (first, second)
+        };
+        // The newer one completes first; the older one must not write over it.
+        block_on(second.complete(&node.ctx)).unwrap();
+        block_on(first.complete(&node.ctx)).unwrap();
+
+        assert_eq!(*written.lock().unwrap(), vec![MmNumber::from("0.7")]);
+        assert!(node.in_container(&order.uuid));
+    }
+
+    /// T8 (a), through the RPC: a second update runs while the first one's write is open. The writes reach storage
+    /// in the order of the changes, and the newer state is the one stored.
+    #[test]
+    fn t8_a_two_updates_write_in_the_order_of_their_changes() {
+        let node = Node::new();
+        let (order, _handle) = node.add_order(true, false);
+        let held = HeldWrites::install(&node);
+
+        let mut first = Box::pin(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6")));
+        poll_until(&mut first, || held.started() == 1);
+        let mut second = Box::pin(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.7")));
+        poll_pending(&mut second, 100);
+        held.release();
+        let (first, second) = block_on(async { futures::join!(first, second) });
+
+        first.unwrap();
+        second.unwrap();
+        let written = held.written.lock().unwrap().clone();
+        assert_eq!(written, vec![MmNumber::from("0.6"), MmNumber::from("0.7")]);
+        assert_eq!(node.active_record(&order.uuid).unwrap().price, MmNumber::from("0.7"));
+    }
+
+    /// T8 (b): a cancellation that runs while an update's write is open leaves no active record, and its history
+    /// entry carries the updated state.
+    #[test]
+    fn t8_b_cancel_during_an_update_write_leaves_no_active_record() {
+        let node = Node::new();
+        let (order, _handle) = node.add_order(true, true);
+        let held = HeldWrites::install(&node);
+
+        let mut update = Box::pin(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6")));
+        poll_until(&mut update, || held.started() == 1);
+        // The order's lock is free, so the cancellation goes through up to the deletion, which waits for the write.
+        let mut cancel = Box::pin(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid }));
+        poll_until(&mut cancel, || !node.in_container(&order.uuid));
+        assert!(
+            node.active_record(&order.uuid).is_some(),
+            "the deletion waits for the write"
+        );
+        held.release();
+        let (update, cancel) = block_on(async { futures::join!(update, cancel) });
+
+        update.unwrap();
+        cancel.unwrap();
+        assert!(node.active_record(&order.uuid).is_none(), "no active record");
+        assert_eq!(node.history_entry(order.uuid).unwrap().price, MmNumber::from("0.6"));
+    }
+
+    /// T8 (b), the write has been published but not started when the order is cancelled: the removal writes the
+    /// unwritten state before it deletes, so the history carries it, and the late completion writes nothing.
+    #[test]
+    fn t8_b_cancel_before_a_published_write_starts_carries_the_updated_state() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(true, true);
+        let ordermatch_ctx = node.ordermatch_ctx();
+
+        let published = {
+            let mut locked = block_on(handle.lock());
+            locked.price = MmNumber::from("0.6");
+            locked.updated_at = Some(now_ms());
+            PublishedState::publish(&ordermatch_ctx, &locked, true).unwrap()
+        };
+        block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid })).unwrap();
+        block_on(published.complete(&node.ctx)).unwrap();
+
+        assert!(node.active_record(&order.uuid).is_none(), "no active record");
+        assert_eq!(node.history_entry(order.uuid).unwrap().price, MmNumber::from("0.6"));
+    }
+
+    /// T8 (c): the removal of timed-out matches is being stored when the order is cancelled. The record is not
+    /// recreated, and the history carries the order without the matches.
+    #[test]
+    fn t8_c_timed_out_match_save_during_a_cancel_does_not_resurrect() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(true, true);
+        block_on(handle.lock()).matches.insert(Uuid::new_v4(), stale_match());
+        let held = HeldWrites::install(&node);
+        let ordermatch_ctx = node.ordermatch_ctx();
+
+        let mut timed_out = Box::pin(handle_timed_out_maker_matches(node.ctx.clone(), &ordermatch_ctx));
+        poll_until(&mut timed_out, || held.started() == 1);
+        let mut cancel = Box::pin(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid }));
+        poll_until(&mut cancel, || !node.in_container(&order.uuid));
+        held.release();
+        let ((), cancel) = block_on(async { futures::join!(timed_out, cancel) });
+
+        cancel.unwrap();
+        assert!(node.active_record(&order.uuid).is_none(), "no active record");
+        let history = node.history_entry(order.uuid).unwrap();
+        assert!(history.matches.is_empty());
+    }
+
+    /// T8 (c), a stale handle: a path that took the order's handle before the cancellation and changes the order
+    /// afterwards publishes nothing, so nothing is written for the removed order.
+    #[test]
+    fn t8_c_a_stale_handle_publishes_nothing_after_the_removal() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(true, true);
+        let writes = Arc::new(AtomicUsize::new(0));
+        let counted = writes.clone();
+        write_maker_order_state.mock_safe(move |_, _, _| {
+            counted.fetch_add(1, AtomicOrdering::SeqCst);
+            MockResult::Return(Box::new(futures01::future::ok(())))
+        });
+        block_on(cancel_order(node.ctx.clone(), CancelOrderReq { uuid: order.uuid })).unwrap();
+
+        let published = {
+            let mut locked = block_on(handle.lock());
+            locked.matches.insert(Uuid::new_v4(), stale_match());
+            PublishedState::publish(&node.ordermatch_ctx(), &locked, false)
+        };
+
+        assert!(published.is_none());
+        assert_eq!(writes.load(AtomicOrdering::SeqCst), 0);
+        assert!(node.active_record(&order.uuid).is_none());
+    }
+
+    /// T8 (d): the write of an update fails. The RPC fails and the order in memory returns to its state before
+    /// the update.
+    #[test]
+    fn t8_d_a_failing_update_write_restores_the_order() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(true, false);
+        let held = HeldWrites::install(&node);
+        held.fail.store(true, AtomicOrdering::SeqCst);
+        held.release();
+
+        let err = block_on(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6"))).unwrap_err();
+
+        assert!(err.contains("Error on saving updated order state"), "{}", err);
+        assert_eq!(*block_on(handle.lock()), order, "back to the state before the update");
+        assert_eq!(node.active_record(&order.uuid).unwrap().price, order.price);
+    }
+
+    /// T8 (d): another path changes the order while the update's write is open, and then the write fails. The RPC
+    /// fails, and the later change stays.
+    #[test]
+    fn t8_d_a_failing_update_write_leaves_a_later_change_alone() {
+        let node = Node::new();
+        let (order, handle) = node.add_order(true, false);
+        let held = HeldWrites::install(&node);
+        held.fail.store(true, AtomicOrdering::SeqCst);
+
+        let mut update = Box::pin(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6")));
+        poll_until(&mut update, || held.started() == 1);
+        // The balance handler lowers the maximum volume, say.
+        block_on(handle.lock()).max_base_vol = MmNumber::from("7");
+        held.release();
+        let err = block_on(update).unwrap_err();
+
+        assert!(err.contains("Error on saving updated order state"), "{}", err);
+        let after = block_on(handle.lock()).clone();
+        assert_eq!(after.max_base_vol, MmNumber::from("7"), "the later change stays");
+        assert_eq!(after.price, MmNumber::from("0.6"), "and so does what it was applied to");
+    }
+
+    /// What an order-updated announcement carries.
+    #[derive(Debug, PartialEq)]
+    struct Announced {
+        price: Option<MmNumber>,
+        max_volume: Option<MmNumber>,
+        min_volume: Option<MmNumber>,
+        conf_settings: Option<OrderConfirmationsSettings>,
+    }
+
+    impl Node {
+        /// The order-updated announcements published since the last call, in order.
+        fn announced_updates(&mut self) -> Vec<Announced> {
+            let mut announced = Vec::new();
+            while let Ok(cmd) = self.p2p_rx.try_recv() {
+                if let AdexBehaviourCmd::PublishMsg { msg, .. } | AdexBehaviourCmd::PublishMsgFrom { msg, .. } = cmd {
+                    if let Ok((new_protocol::OrdermatchMessage::MakerOrderUpdated(update), ..)) =
+                        decode_signed::<new_protocol::OrdermatchMessage>(&msg)
+                    {
+                        announced.push(Announced {
+                            price: update.new_price(),
+                            max_volume: update.new_max_volume(),
+                            min_volume: update.new_min_volume(),
+                            conf_settings: update.new_conf_settings(),
+                        });
+                    }
+                }
+            }
+            announced
+        }
+    }
+
+    /// T8 (e): the balance-update handler lowers the order's volume while an update's write is open. The update's
+    /// announcement, sent after the write, carries the lowered available volume (and the update's price), so the
+    /// last announcement of the volume matches the order.
+    #[test]
+    fn t8_e_the_update_announcement_carries_the_volume_after_a_lowering_during_the_write() {
+        let mut node = Node::new();
+        let (order, handle) = node.add_order(true, false);
+        let held = HeldWrites::install(&node);
+
+        let mut update = Box::pin(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6")));
+        poll_until(&mut update, || held.started() == 1);
+        // The balance supports 4.9 (the fee is 0.1): the maximum volume 10 is lowered and announced.
+        let handler = BalanceUpdateOrdermatchHandler::new(node.ctx.clone());
+        block_on(handler.balance_updated(&MmCoinEnum::Test(TestCoin::new("DYN")), &bd("5")));
+        assert_eq!(block_on(handle.lock()).max_base_vol, MmNumber::from("4.9"));
+        held.release();
+        block_on(update).unwrap();
+
+        let announced = node.announced_updates();
+        assert_eq!(announced.len(), 2, "{:?}", announced);
+        assert_eq!(announced[0].max_volume, Some(MmNumber::from("4.9")), "the lowering");
+        assert_eq!(
+            announced[1].max_volume,
+            Some(MmNumber::from("4.9")),
+            "the update, after it"
+        );
+        assert_eq!(announced[1].price, Some(MmNumber::from("0.6")));
+        assert_eq!(block_on(handle.lock()).price, MmNumber::from("0.6"));
+    }
+
+    /// T8 (e): with no change during the write the announcement is what the update always sent: the price it set,
+    /// the available volume, the confirmation settings, and no minimum volume.
+    #[test]
+    fn t8_e_the_update_announcement_is_unchanged_without_a_change_during_the_write() {
+        let mut node = Node::new();
+        let (order, _handle) = node.add_order(true, false);
+
+        block_on(update_maker_order(&node.ctx, update_price_req(order.uuid, "0.6"))).unwrap();
+        assert_eq!(node.announced_updates(), vec![Announced {
+            price: Some(MmNumber::from("0.6")),
+            max_volume: Some(MmNumber::from("10")),
+            min_volume: None,
+            conf_settings: order.conf_settings,
+        }]);
+
+        // A minimum volume is carried when the update sets it, and the price is not when it does not.
+        let mut req = update_price_req(order.uuid, "0.6");
+        req.new_price = None;
+        req.min_volume = Some(MmNumber::from("2"));
+        block_on(update_maker_order(&node.ctx, req)).unwrap();
+        assert_eq!(node.announced_updates(), vec![Announced {
+            price: None,
+            max_volume: Some(MmNumber::from("10")),
+            min_volume: Some(MmNumber::from("2")),
+            conf_settings: order.conf_settings,
+        }]);
+    }
+
+    /// The gate of a removed order is dropped at a later add or remove, once no writer holds it; one that a writer
+    /// holds stays until then, and keeps its mark.
+    #[test]
+    fn t12_7_gates_of_removed_orders_are_swept_when_no_writer_holds_them() {
+        let node = Node::new();
+        let ordermatch_ctx = node.ordermatch_ctx();
+        let (kept, _) = node.add_order(false, false);
+        let (held, _) = node.add_order(false, false);
+        let (dropped, _) = node.add_order(false, false);
+        let held_gate = ordermatch_ctx
+            .maker_orders_ctx
+            .lock()
+            .live_write_gate(&held.uuid)
+            .unwrap();
+
+        ordermatch_ctx.maker_orders_ctx.lock().remove_order(&held.uuid);
+        ordermatch_ctx.maker_orders_ctx.lock().remove_order(&dropped.uuid);
+        assert!(held_gate.is_removed(), "marked in the step that removed the order");
+        assert_eq!(ordermatch_ctx.maker_orders_ctx.lock().write_gates.len(), 3);
+
+        // The next add sweeps: `dropped` is released, `held` is kept because a writer still holds its gate.
+        node.add_order(false, false);
+        {
+            let orders = ordermatch_ctx.maker_orders_ctx.lock();
+            assert_eq!(orders.write_gates.len(), 3);
+            assert!(orders.write_gates.contains_key(&kept.uuid) && orders.write_gates.contains_key(&held.uuid));
+            assert!(!orders.write_gates.contains_key(&dropped.uuid));
+            assert_eq!(orders.removed_gates, vec![held.uuid]);
+        }
+        drop(held_gate);
+        node.add_order(false, false);
+        let orders = ordermatch_ctx.maker_orders_ctx.lock();
+        assert!(!orders.write_gates.contains_key(&held.uuid));
+        assert!(orders.removed_gates.is_empty());
+    }
+}
+
 /// CRD ch.59 R59.6.1a (T12): maker-order messages count as liveness for a public key the node already
 /// holds a record for. Messages go through `process_msg` signed with a real key, so the signature
 /// verification and the key form the store uses are exercised; the passage of time is simulated by
@@ -10103,5 +10869,120 @@ mod maker_publication_tests {
                 assert!(metric["labels"].as_object().unwrap().is_empty(), "{metric}");
             }
         }
+    }
+}
+
+/// CRD ch.59 T4 (R59.5.1, R59.5.2): a failed negotiation penalises the maker, the record names the swap
+/// and the outcome, and a later `MakerReserved` from that maker is dropped at the dispatch boundary,
+/// before it can reach the selection of §59.3. The other two penalising outcomes still penalise, and
+/// an outcome outside R59.5.2 does not.
+mod negotiation_failure_penalty {
+    use super::*;
+    use crate::mm2::lp_swap::{list_banned_pubkeys_rpc, penalise_maker_if_due, TakerSwapEvent};
+
+    fn taker_node() -> MmArc {
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        ctx.secp256k1_key_pair
+            .pin(key_pair_from_seed("negotiation-failure-penalty-taker").unwrap())
+            .unwrap();
+        ctx
+    }
+
+    /// The maker's signing secret and its key in the form the penalty map stores (without the prefix).
+    fn maker(passphrase: &str) -> ([u8; 32], chain::hash::H256) {
+        let (pubkey, secret) = pubkey_and_secret_for_test(passphrase);
+        let bytes = hex::decode(pubkey).unwrap();
+        (secret, chain::hash::H256::from(&bytes[1..]))
+    }
+
+    fn maker_reserved(secret: &[u8; 32], taker_order_uuid: Uuid) -> Vec<u8> {
+        let msg = new_protocol::MakerReserved {
+            base: "DOC".into(),
+            rel: "MARTY".into(),
+            base_amount: BigRational::from_integer(1.into()),
+            rel_amount: BigRational::from_integer(1.into()),
+            taker_order_uuid: taker_order_uuid.into(),
+            maker_order_uuid: Uuid::new_v4().into(),
+            conf_settings: OrderConfirmationsSettings::default(),
+            base_protocol_info: None,
+            rel_protocol_info: None,
+            swap_version: SwapVersion::default(),
+        };
+        encode_and_sign(&new_protocol::OrdermatchMessage::MakerReserved(msg), secret).unwrap()
+    }
+
+    fn banned(ctx: &MmArc, maker: chain::hash::H256) -> bool { is_pubkey_banned(ctx, &maker.into()) }
+
+    fn listed(ctx: &MmArc) -> Json {
+        let response = block_on(list_banned_pubkeys_rpc(ctx.clone())).unwrap();
+        json::from_slice::<Json>(response.body()).unwrap()["result"].clone()
+    }
+
+    #[test]
+    fn t4_failed_negotiation_penalises_the_maker_and_its_reservation_is_dropped() {
+        let ctx = taker_node();
+        let (secret, maker_key) = maker("negotiation-failure-penalty-maker");
+        let swap_uuid = Uuid::new_v4();
+
+        let event = TakerSwapEvent::NegotiateFailed("maker sent negotiated = false".into());
+        penalise_maker_if_due(&ctx, maker_key, &swap_uuid, &event);
+
+        // The record exists and names the swap and the outcome (R59.5.2).
+        assert!(banned(&ctx, maker_key));
+        let listed = listed(&ctx).to_string();
+        assert!(listed.contains(&swap_uuid.to_string()), "{}", listed);
+        assert!(listed.contains("NegotiateFailed"), "{}", listed);
+
+        // A reservation from the penalised maker for a fresh taker order is dropped (R59.5.1) ...
+        let taker_order_uuid = Uuid::new_v4();
+        let reserved = maker_reserved(&secret, taker_order_uuid);
+        assert!(!block_on(process_msg(
+            ctx.clone(),
+            vec![],
+            "peer".to_owned(),
+            &reserved,
+            false
+        )));
+        let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        assert!(block_on(ordermatch_ctx.pending_maker_reserved.lock()).is_empty());
+
+        // ... while the same message from a maker that is not penalised is accepted.
+        let (other_secret, other_key) = maker("negotiation-failure-penalty-other-maker");
+        assert!(!banned(&ctx, other_key));
+        let reserved = maker_reserved(&other_secret, taker_order_uuid);
+        assert!(block_on(process_msg(
+            ctx.clone(),
+            vec![],
+            "peer".to_owned(),
+            &reserved,
+            false
+        )));
+    }
+
+    #[test]
+    fn t4_the_other_two_outcomes_still_penalise() {
+        let ctx = taker_node();
+        let (_, validate_key) = maker("negotiation-failure-penalty-validate");
+        let (_, spend_key) = maker("negotiation-failure-penalty-spend");
+
+        let event = TakerSwapEvent::MakerPaymentValidateFailed("invalid payment".into());
+        penalise_maker_if_due(&ctx, validate_key, &Uuid::new_v4(), &event);
+        let event = TakerSwapEvent::TakerPaymentWaitForSpendFailed("never spent".into());
+        penalise_maker_if_due(&ctx, spend_key, &Uuid::new_v4(), &event);
+
+        assert!(banned(&ctx, validate_key));
+        assert!(banned(&ctx, spend_key));
+    }
+
+    #[test]
+    fn t4_an_outcome_outside_the_rule_does_not_penalise() {
+        let ctx = taker_node();
+        let (_, maker_key) = maker("negotiation-failure-penalty-not-banned");
+
+        let event = TakerSwapEvent::MakerPaymentWaitConfirmFailed("slow chain".into());
+        penalise_maker_if_due(&ctx, maker_key, &Uuid::new_v4(), &event);
+
+        assert!(!banned(&ctx, maker_key));
+        assert_eq!(listed(&ctx), json!({}));
     }
 }

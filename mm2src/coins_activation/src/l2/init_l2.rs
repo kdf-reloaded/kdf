@@ -1,6 +1,6 @@
 /// Task-based L2 activation framework. Long-running L2 activations
 /// run as background RPC tasks with progress and cancellation support.
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::l2::enable_l2::L2ProtocolParams;
 use crate::l2::l2_activation_errors::{CancelL2ActivationError, L2ActivationError, L2ActivationStatusError,
                                       L2ActivationUserActionError};
@@ -118,6 +118,17 @@ where
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
+        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
+        // ticker is checked again once it is ours, because the activation that held it may have registered the coin.
+        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+            .await
+            .map_err(|e| MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(e))))?;
+        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
+            return Err(MmError::new(L2::ActivationError::from(
+                RegisterCoinError::CoinIsInitializedAlready { coin: self.ticker },
+            )));
+        }
+
         let (coin, result) = L2::init_l2(
             &self.ctx,
             self.platform_coin,

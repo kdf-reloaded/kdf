@@ -128,6 +128,116 @@ container's contents MUST first take the lock, copy out what they need
 handles they want), drop the lock, and then perform their `await`-bearing
 work outside the critical section.
 
+**R7a.** *A maker order's own lock is held for in-memory work only
+(Reloaded; clean-room original; maintainer Decision AM, 2026-10-28).*
+The per-order lock that the container hands out with each order MUST NOT
+be held across an `await` of I/O -- a file write, move or delete, a
+database statement, or a network read -- on these paths:
+
+1. the balance-update handler of the order-matching layer;
+2. the periodic check that cancels orders whose available amount fell
+   below their minimum volume;
+3. the periodic removal of timed-out matches;
+4. the cancellation of an order whose own timeout elapsed (§12.8);
+5. order cancellation: `cancel_order` in both of its forms, the
+   cancellation of a pair's previous orders when a new order replaces
+   them, and `cancel_all_orders`;
+6. `update_maker_order`.
+
+Each of these paths copies what it needs under a brief lock and releases
+the lock. It then does its I/O with no order lock held. Where it applies
+a change, it locks the order again, re-checks that the order is still in
+the container and, where the change depends on it, that the order is
+unchanged since the copy, and only then applies. A synchronous
+announcement to peers (an order-updated or order-cancelled message) is
+not I/O in this sense. It stays under the lock, so that peers receive an
+order's announcements in the order of its changes. `update_maker_order`
+announces only after its write has succeeded, so it locks the order
+again to announce. That announcement takes every value it carries from
+the order's state at the moment it is sent: the available volume, the
+confirmation settings, and the price and minimum volume where the update
+changed them. The last announcement of each value then matches the order
+even when another path changed the order during the write. It is not
+sent for an order that has left the container. A reader of the order
+-- `my_orders`, `order_status`, the node's own orders in `orderbook`, the
+keep-alive broadcast -- therefore never waits for an I/O operation of
+these paths.
+
+The paths that negotiate a match (a taker's request and a taker's
+connect message) keep their writes under the order's lock and are outside
+this rule, but they take part in the ordering of R7b.
+
+**R7b.** *Storage order (Reloaded; clean-room original; Decision AM).*
+Taking I/O out of the order's lock MUST NOT change what storage ends up
+holding. For one order:
+
+1. the stored active record and the order's history entry follow its
+   state changes in the order in which they were made under the order's
+   lock: a write that carries an older state never replaces one that
+   carries a newer state;
+2. once the order has been removed from the container, no write recreates
+   its active record, and the history entry of the removal carries the
+   order's last state;
+3. a failing write is handled as before. For `update_maker_order` the
+   RPC fails, and the order in memory returns to its state before the
+   update unless it has changed again since. For the other paths the
+   failure is logged.
+
+> **As-built note (2026-10-28, clean-side record).** R7a and R7b are
+> implemented in `lp_ordermatch/order_write_gate.rs` and the paths of
+> `ordermatch_trading.rs`.
+>
+> *The gate.* Each maker order has a write gate (`OrderWriteGate`), kept
+> in a side map of the maker-order store next to the order, and created
+> when the order enters the store.
+>
+> - A writer publishes the order's state to the gate under the order's
+>   lock (`PublishedState`). The gate keeps one unwritten snapshot, the
+>   newest, stamped with a ticket. The flag that asks for the history row
+>   to be updated as well is kept when a newer snapshot replaces an older
+>   one.
+> - The writer completes its ticket after releasing the lock. Completion
+>   takes the gate's I/O lock and writes the snapshot unless an earlier
+>   completion already wrote it or a newer one. A ticket covered by a
+>   failed write reports that failure.
+> - The gate is marked removed in the same step in which the order leaves
+>   the store. From then on publishing returns nothing and completion
+>   writes nothing.
+> - The removal's deletion (`RemovedMakerOrder`) takes the I/O lock,
+>   writes any snapshot still unwritten, and then deletes the order, so
+>   the history entry carries the last state.
+> - The gate never takes the order's lock.
+> - The entry of a removed order is dropped from the side map at a later
+>   insertion or removal, once no writer holds its gate. Only recorded
+>   removals are visited.
+> - The one storage function every changed state passes through is
+>   `write_maker_order_state`. It replaces the earlier update-save
+>   function.
+>
+> *The paths.* Besides the six of R7a, two more paths used to delete
+> under the order's lock or remove an order outside it, and now follow
+> the same pattern: `cancel_all_orders`, and the cancellation step of the
+> reconciliation of chapter 60 R60.4.6 item 5. The expiry step moved
+> unchanged into `cancel_expired_maker_orders`, so a test can run it.
+> `update_maker_order` now also re-checks, after re-locking, that the
+> order is still in the store, so an update that waited on a cancellation
+> fails instead of recreating the record. The negotiation paths write
+> through the gate with the order's lock held
+> (`store_negotiated_maker_order`), and skip an order that has left the
+> store.
+>
+> *Observable differences.* Two remain:
+>
+> - `cancel_all_orders` announces the cancellations of maker orders
+>   before it removes the taker orders, not after.
+> - When two updates of one order overlap and change the same value,
+>   their announcements may interleave. Both carry the order's value at
+>   the time they are sent.
+>
+> *Tests.* T7 and T8 are in `ordermatch_tests.rs`, module
+> `t12_7_order_lock_io_tests`, together with a test of the side-map
+> sweep.
+
 ## 12.5 Bound TTL Semantics
 
 **R8.** Insertion takes one of two backings based on whether a
@@ -240,6 +350,25 @@ broadcast P2P cancellation notification, an appended history record
 on-disk active-order record. The substrate-internal test or integration
 test MUST observe all three.
 
+**T7.** *No I/O under the order's lock (R7a).* For each path of R7a,
+while its file or database operation is in progress (a test double holds
+the operation open), the order's lock can be taken at once, so
+`my_orders` and `order_status` answer without waiting. A mutation that
+moves the operation back under the lock makes the test fail.
+
+**T8.** *Storage order (R7b).* (a) Two updates of one order whose writes
+complete in reverse order leave the newer state stored. (b) A
+cancellation that runs while an update's write is in progress leaves no
+active record, and its history entry carries the updated state. (c) A
+timed-out match removed while the order is being cancelled does not
+recreate the active record. (d) A failing write in `update_maker_order`
+fails the RPC and restores the order's previous state in memory, and it
+leaves alone a later change made by another path. (e) When the
+balance-update handler lowers the order's volume while an update's write
+is in progress, the update's announcement, sent after the write, carries
+the lowered available volume. With no change during the write, the
+announcement is the same message the update sent before R7a.
+
 ## 12.11 Deferred Work
 
 **D1.** A richer per-order duration type (replacing `Option<u16>`
@@ -259,6 +388,15 @@ the wire shape is part of this chapter's contract.
 immediately upon the next expiry, rather than waiting for the next
 iteration boundary) is deferred; the current substrate accepts up to
 one period of latency between TTL expiry and routed cancellation.
+
+**D5.** *Match-negotiation writes under the order's lock (post-beta
+candidate; Decision AM scope, 2026-10-28).* When a taker's request
+reserves part of an order, and when a taker's connect message is
+accepted, the order's active record is still written while the order's
+lock is held. These are the paths R7a leaves out, and they take part in
+the write ordering of R7b. Taking these writes out of the lock as well
+would mean re-checking a reservation after the write, so it waits for a
+separate maintainer decision.
 
 ## 12.12 External References
 
@@ -321,3 +459,9 @@ auto-expiry reason (R13) is purely additive.
 - *Author of this chapter:* clean-room round-2 driving-spec working
   set.
 - *Forbidden corpus:* not consulted.
+- *Clean-side addition (2026-10-28), R7a, R7b, T7, T8, D5 and the as-built
+  note after R7b:* written by a context that never read the forbidden
+  corpus, from the maintainer's Decision AM and from this repository's own
+  code (the per-order lock sites of the order-matching layer and its
+  storage functions). They are Reloaded-original and state no reference
+  behavior, so chapter 01 R38 is not engaged.

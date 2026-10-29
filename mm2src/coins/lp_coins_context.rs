@@ -1,4 +1,5 @@
 use super::*;
+use crate::activation_locks::{ActivationGuard, ActivationLocks};
 use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 
 #[derive(Clone, Debug)]
@@ -109,6 +110,8 @@ pub struct CoinsContext {
     /// A map from a currency ticker symbol to the corresponding coin.
     /// Similar to `LP_coins`.
     pub(crate) coins: AsyncMutex<HashMap<String, MmCoinEnum>>,
+    /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
+    activation_locks: ActivationLocks,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
@@ -139,6 +142,7 @@ impl CoinsContext {
             explicit_fee_estimate_cache_secs(&ctx.conf)?;
             Ok(CoinsContext {
                 coins: AsyncMutex::new(HashMap::new()),
+                activation_locks: ActivationLocks::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
@@ -153,6 +157,17 @@ impl CoinsContext {
                 block_headers_storage_db: ConstructibleDb::new_shared(ctx),
             })
         })))
+    }
+
+    /// Waits until no other activation of any of `tickers` is running and returns the guard that holds their
+    /// activation locks (CRD ch.55 R55.1.12).
+    ///
+    /// Every activation path takes this before it builds anything and keeps the guard until it has registered
+    /// the coin and finished the steps that belong to the activation. After the wait it must check again
+    /// whether the ticker is registered, because the activation it waited for may have registered it. A path
+    /// that registers several tickers names all of them. The lock is not reentrant: a path holds one guard.
+    pub async fn lock_activation(&self, tickers: &[&str]) -> Result<ActivationGuard, String> {
+        self.activation_locks.lock(tickers).await
     }
 
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {

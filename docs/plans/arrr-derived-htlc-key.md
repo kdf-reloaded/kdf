@@ -16,15 +16,17 @@
    R39.5.4; pointers from ch.51.
 2. **Key-pair consistency fix** (R39.5.4). It is the safety net: the named "no private key held"
    stop. A separate pull request.
-3. **Code.** The ZCoin HTLC key is derived per R39.5.8 (the maker uses the secret hash, the taker
+3. **Code — done.** The ZCoin HTLC key is derived per R39.5.8 (the maker uses the secret hash, the taker
    the uuid). It is used for payment, spend and refund, and re-derived on restart and in
    recovery, with the candidate order (1) derived, (2) a saved key that belongs to the saved
    pubkey, (3) persistent.
    - The private key is no longer written to the swap record.
    - Swaps already in flight keep their saved key and keep working.
    - Under an HD wallet the base key is the transparent key at `derivation_path` (D39.5.a).
-4. **Bit-exact check (T39.5.a).** A vector from a reference-made ARRR swap on a throwaway
-   non-HD test wallet. The code from step 3 is not merged before this passes.
+4. **Bit-exact check (T39.5.a) — done.** A vector from a reference-made ARRR swap on a throwaway
+   non-HD test wallet. The code from step 3 is not merged before this passes. The vector
+   came from two swept throwaway wallets on 2026-10-28, and the derivation matches it bit for
+   bit for both roles, plus two low-S cases computed from the rule.
    - The `Negotiated` events' `taker_pubkey` / `maker_pubkey` are 33 zero bytes in both
      implementations. Reloaded parses that value and uses the HTLC public keys instead, so a
      vector needs only the `Started` and `Negotiated` HTLC public keys.

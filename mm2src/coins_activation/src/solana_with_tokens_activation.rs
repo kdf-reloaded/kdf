@@ -193,6 +193,14 @@ impl PlatformWithTokensActivationOps for SolanaCoin {
         Ok(platform_coin)
     }
 
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
+        activation_request
+            .spl_tokens_requests
+            .iter()
+            .map(|token| token.ticker.clone())
+            .collect()
+    }
+
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>> {

@@ -6,7 +6,7 @@
 //! (R48.11.5) and the registration and cancel rules (R48.11.7). A token family supplies only what is specific
 //! to it through [`InitTokenActivationOps`].
 
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::platform_coin_with_tokens::CustomTokenError;
 use crate::prelude::*;
 use crate::token::TokenProtocolParams;
@@ -227,6 +227,15 @@ impl<Token: InitTokenActivationOps> RpcTask for InitTokenTask<Token> {
     }
 
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
+        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
+        // ticker is checked again once it is ours, because the activation that held it may have registered the token.
+        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+            .await
+            .map_to_mm(InitTokenError::Internal)?;
+        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
+            return MmError::err(InitTokenError::TokenIsAlreadyActivated { ticker: self.ticker });
+        }
+
         let (token, result) = Token::init_token(
             &self.ctx,
             &self.ticker,

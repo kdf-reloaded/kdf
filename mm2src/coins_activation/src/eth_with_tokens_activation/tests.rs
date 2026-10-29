@@ -87,6 +87,22 @@ fn tokens(tickers: &[&str]) -> Json { Json::Array(tickers.iter().map(|ticker| js
 // T35.1 -- T35.3: backend failures (R35.1.6)
 // ---------------------------------------------------------------------------
 
+/// CRD ch.55 R55.1.12: the activation locks the tickers of the tokens the request registers beside the platform.
+#[test]
+fn the_requested_token_tickers_are_the_erc20_tickers_of_the_request() {
+    let nodes = vec![refusing_url()];
+    let req = request(
+        &nodes,
+        json!({ "erc20_tokens_requests": tokens(&["USDT-ERC20", "DAI-ERC20"]) }),
+    );
+    assert_eq!(
+        <EthCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&req.request),
+        ["USDT-ERC20", "DAI-ERC20"]
+    );
+    let none = request(&nodes, json!({}));
+    assert!(<EthCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&none.request).is_empty());
+}
+
 #[test]
 fn every_node_answering_502_or_refusing_connections_is_transport_string_502() {
     let ctx = iguana_ctx();

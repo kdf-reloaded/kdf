@@ -61,14 +61,25 @@ pub async fn save_my_new_taker_order(ctx: MmArc, order: &TakerOrder) -> MyOrders
     Ok(())
 }
 
-pub async fn save_maker_order_on_update(ctx: MmArc, order: &MakerOrder) -> MyOrdersResult<()> {
-    let storage = MyOrdersStorage::new(ctx);
-    storage.update_active_maker_order(order).await?;
+/// Writes the state of a maker order to storage: its active record, and the history database row when
+/// `with_history` is set and the order is kept in the history. Every write of a changed maker order goes
+/// through the order's write gate (CRD ch.12 R7b), which calls this function with no order lock held.
+#[cfg_attr(test, mockable)]
+pub fn write_maker_order_state(
+    ctx: MmArc,
+    order: MakerOrder,
+    with_history: bool,
+) -> BoxFut<(), MmError<MyOrdersError>> {
+    let fut = async move {
+        let storage = MyOrdersStorage::new(ctx);
+        storage.update_active_maker_order(&order).await?;
 
-    if order.save_in_history {
-        storage.update_maker_order_in_filtering_history(order).await?;
-    }
-    Ok(())
+        if with_history && order.save_in_history {
+            storage.update_maker_order_in_filtering_history(&order).await?;
+        }
+        Ok(())
+    };
+    Box::new(fut.boxed().compat())
 }
 
 #[cfg_attr(test, mockable)]

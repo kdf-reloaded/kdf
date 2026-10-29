@@ -662,17 +662,6 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         &activation_ctx.init_z_coin_task_manager
     }
 
-    async fn acquire_activation_guard(
-        ctx: MmArc,
-        ticker: &str,
-    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
-        let activation_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(ZcoinInitError::Internal)?;
-        let lock = activation_ctx
-            .z_coin_activation_lock(ticker)
-            .map_to_mm(ZcoinInitError::Internal)?;
-        Ok(Some(Box::new(lock.lock_owned().await)))
-    }
-
     async fn init_standalone_coin(
         ctx: MmArc,
         ticker: String,

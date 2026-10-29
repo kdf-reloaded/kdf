@@ -89,7 +89,8 @@
 > taker payment can no longer pick the same note. The residual gap is the one named below:
 > `withdraw` builds through `gen_tx` and the caller broadcasts, so a withdrawal is not
 > recorded (CRD ch.39 D39.8.0e) -- *since fixed, see above* -- and T39.8.0h's
-> broadcast/restart/concurrency cases are still uncovered (D39.8.0f).
+> broadcast/restart/concurrency cases are still uncovered (D39.8.0f) -- *since covered by the
+> harness of 2026-10-25, see above*.
 >
 > **Context:** implemented 2026-09-22; specification is now CRD ch.39 §39.8.0.7
 > (R39.8.0ao–R39.8.0at, T39.8.0h), which supersedes the design sketch below.
@@ -120,11 +121,13 @@
 > which our own recording would have satisfied immediately — that predicate was
 > corrected to require a mined height, with a regression test.
 >
-> Known gaps: T39.8.0h is only partially covered. The withdrawal-side cases and expiry
-> release now have tests that drive a real shielded wallet database (a scanned note, a real
-> spend proof, a recorded transaction); the broadcast-rejection, restart, scan-transition and
-> concurrent-send cases do not (CRD ch.39 D39.8.0f). The testing section below states the
-> intended cases and stands as the specification for that work.
+> Known gaps (updated 2026-10-29): none in test coverage. Every case T39.8.0h names is
+> covered for the Light-mode send path: the withdrawal-side cases and expiry release by
+> tests over a real shielded wallet database (a scanned note, a real spend proof, a recorded
+> transaction), and the broadcast-rejection, restart, scan-transition and concurrent-send
+> cases by the harness of 2026-10-25 (CRD ch.39 D39.8.0f, closed). The open items are the two
+> named in the Status line, both after the beta (CRD ch.39 D39.8.0j). The testing section
+> below states the cases as they were specified.
 
 ## The protocol constraint this plan lives under
 

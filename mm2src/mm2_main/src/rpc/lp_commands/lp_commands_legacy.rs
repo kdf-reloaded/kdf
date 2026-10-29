@@ -17,7 +17,7 @@
 //  marketmaker
 //
 
-use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, MmCoinEnum};
+use coins::{disable_coin as disable_coin_impl, lp_coinfind, lp_coininit, CoinBalance, CoinsContext, MmCoinEnum};
 use common::custom_futures::FutureTimerExt;
 use common::executor::{spawn, Timer};
 use common::log::{error, warn};
@@ -187,6 +187,9 @@ async fn legacy_activation_response(
 /// Enable a coin in the Electrum mode.
 pub async fn electrum(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+    // CRD ch.55 R55.1.12: the activation holds the ticker's lock through registration and the balance read, and
+    // `lp_coininit` checks again whether the ticker is registered once the lock is ours.
+    let _activation_guard = try_s!(try_s!(CoinsContext::from_ctx(&ctx)).lock_activation(&[&ticker]).await);
     let coin: MmCoinEnum = try_s!(lp_coininit(&ctx, &ticker, &req).await);
     // The balance read is bounded, and the coin is deregistered when it fails (CRD ch.55 R55.4.6).
     legacy_activation_response(&ctx, &coin, Some(ELECTRUM_BALANCE_READ_TIMEOUT_SECS), false).await
@@ -195,6 +198,8 @@ pub async fn electrum(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String
 /// Enable a coin in the local wallet mode.
 pub async fn enable(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, String> {
     let ticker = try_s!(req["coin"].as_str().ok_or("No 'coin' field")).to_owned();
+    // CRD ch.55 R55.1.12: see `electrum`.
+    let _activation_guard = try_s!(try_s!(CoinsContext::from_ctx(&ctx)).lock_activation(&[&ticker]).await);
     let coin: MmCoinEnum = try_s!(lp_coininit(&ctx, &ticker, &req).await);
     // `enable` does not bound its balance read, but like `electrum` it deregisters its coin when the read
     // fails, unless the compatibility switch asks for the reference behavior (CRD ch.55 R55.4.6).
@@ -619,6 +624,174 @@ mod tests {
         let err = block_on(enable(ctx.clone(), json!({ "method": "enable", "coin": "SC" }))).unwrap_err();
         assert!(!err.contains("not supported by lp_coininit"), "{err}");
         assert!(block_on(lp_coinfind(&ctx, "SC")).unwrap().is_none());
+    }
+
+    /// CRD ch.55 T55.21: the legacy `enable` and `electrum` take part in the serialization of same-ticker
+    /// activations. A Sia coin whose walletd is unreachable stands in for a coin the legacy path builds: if the
+    /// call did not wait for the lock, it would fail at the walletd, not with the "already initialized" answer.
+    #[cfg(not(target_arch = "wasm32"))]
+    mod serialized_activation {
+        use super::*;
+        use crypto::CryptoCtx;
+        use futures::future::{abortable, AbortHandle, Aborted};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        type LegacyAnswer = Result<Response<Vec<u8>>, String>;
+
+        fn sia_ctx(tickers: &[&str]) -> MmArc {
+            let coins: Vec<Json> = tickers
+                .iter()
+                .map(|ticker| {
+                    json!({ "coin": ticker, "mm2": 1, "required_confirmations": 1, "protocol": { "type": "SIA" } })
+                })
+                .collect();
+            let ctx = MmCtxBuilder::new().with_conf(json!({ "coins": coins })).into_mm_arc();
+            CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy serialized activation test passphrase")
+                .unwrap();
+            ctx
+        }
+
+        fn request(method: &str, ticker: &str) -> Json {
+            // Nothing listens on port 1 of the loopback interface.
+            json!({
+                "method": method,
+                "coin": ticker,
+                "client_conf": { "server_url": "http://127.0.0.1:1/", "timeout": 2 },
+                "tx_history": false,
+            })
+        }
+
+        struct Call {
+            answer: mpsc::Receiver<Result<LegacyAnswer, Aborted>>,
+            abort: AbortHandle,
+        }
+
+        impl Call {
+            fn start(ctx: &MmArc, method: &'static str, ticker: &str) -> Call {
+                let (ctx, request) = (ctx.clone(), request(method, ticker));
+                let (call, abort) = abortable(async move {
+                    match method {
+                        "enable" => enable(ctx, request).await,
+                        _ => electrum(ctx, request).await,
+                    }
+                });
+                let (tx, answer) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(block_on(call));
+                });
+                Call { answer, abort }
+            }
+
+            /// The answer, or `None` when the call has not finished within the settle time.
+            fn answer_within(&self, wait: Duration) -> Option<Result<LegacyAnswer, Aborted>> {
+                self.answer.recv_timeout(wait).ok()
+            }
+        }
+
+        const SETTLE: Duration = Duration::from_millis(300);
+        const LONG: Duration = Duration::from_secs(30);
+
+        fn register(ctx: &MmArc, ticker: &str) {
+            block_on(lp_register_coin(
+                ctx,
+                TestCoin::new(ticker).into(),
+                RegisterCoinParams {
+                    ticker: ticker.to_owned(),
+                    tx_history: false,
+                },
+            ))
+            .unwrap_or_else(|e| panic!("cannot register {ticker}: {e}"));
+        }
+
+        fn hold(ctx: &MmArc, ticker: &str) -> coins::activation_locks::ActivationGuard {
+            block_on(CoinsContext::from_ctx(ctx).unwrap().lock_activation(&[ticker])).unwrap()
+        }
+
+        /// (a) and (c): another activation of the ticker is running; the call waits, and once that activation
+        /// has registered the coin the call ends with the legacy "already initialized" error, building nothing.
+        #[test]
+        fn t55_21_legacy_calls_wait_for_a_running_activation_and_end_already_initialized() {
+            for method in ["enable", "electrum"] {
+                let ctx = sia_ctx(&["SC"]);
+                let running = hold(&ctx, "SC");
+                let call = Call::start(&ctx, method, "SC");
+                assert!(call.answer_within(SETTLE).is_none(), "{method} did not wait");
+
+                register(&ctx, "SC");
+                drop(running);
+                let answer = call
+                    .answer_within(LONG)
+                    .expect("the call finishes")
+                    .expect("not aborted");
+                let err = answer.unwrap_err();
+                assert!(err.contains("already initialized"), "{method}: {err}");
+                assert!(block_on(lp_coinfind(&ctx, "SC")).unwrap().is_some());
+            }
+        }
+
+        /// (b): the activation that held the lock failed and registered nothing; the call proceeds with its own
+        /// activation (here it reaches the unreachable walletd, so it does not end "already initialized").
+        #[test]
+        fn t55_21_legacy_calls_proceed_when_the_running_activation_failed() {
+            for method in ["enable", "electrum"] {
+                let ctx = sia_ctx(&["SC"]);
+                let running = hold(&ctx, "SC");
+                let call = Call::start(&ctx, method, "SC");
+                assert!(call.answer_within(SETTLE).is_none(), "{method} did not wait");
+
+                drop(running);
+                let answer = call
+                    .answer_within(LONG)
+                    .expect("the call finishes")
+                    .expect("not aborted");
+                let err = answer.unwrap_err();
+                assert!(!err.contains("already initialized"), "{method}: {err}");
+                assert!(block_on(lp_coinfind(&ctx, "SC")).unwrap().is_none());
+            }
+        }
+
+        /// (d): a different ticker does not wait for the held one.
+        #[test]
+        fn t55_21_legacy_calls_for_different_tickers_do_not_wait() {
+            let ctx = sia_ctx(&["SC", "SC2"]);
+            let _running = hold(&ctx, "SC");
+            let call = Call::start(&ctx, "enable", "SC2");
+            let answer = call
+                .answer_within(LONG)
+                .expect("the call does not wait")
+                .expect("not aborted");
+            let err = answer.unwrap_err();
+            assert!(!err.contains("already initialized"), "{err}");
+        }
+
+        /// (e): cancelling a call that is still waiting registers nothing and deregisters nothing.
+        #[test]
+        fn t55_21_cancelling_a_waiting_legacy_call_registers_and_deregisters_nothing() {
+            let ctx = sia_ctx(&["SC"]);
+            let running = hold(&ctx, "SC");
+            let call = Call::start(&ctx, "enable", "SC");
+            assert!(call.answer_within(SETTLE).is_none());
+            register(&ctx, "SC");
+            call.abort.abort();
+            assert!(matches!(call.answer_within(LONG), Some(Err(Aborted))));
+            drop(running);
+            assert!(
+                block_on(lp_coinfind(&ctx, "SC")).unwrap().is_some(),
+                "the coin of the holder was removed"
+            );
+
+            // The holder failed: the cancelled call must not have gone on to activate the coin.
+            let ctx = sia_ctx(&["SC"]);
+            let running = hold(&ctx, "SC");
+            let call = Call::start(&ctx, "enable", "SC");
+            assert!(call.answer_within(SETTLE).is_none());
+            call.abort.abort();
+            assert!(matches!(call.answer_within(LONG), Some(Err(Aborted))));
+            drop(running);
+            std::thread::sleep(SETTLE);
+            assert!(block_on(lp_coinfind(&ctx, "SC")).unwrap().is_none());
+        }
     }
 
     /// TRON and Solana are postponed for this beta: the legacy `enable` and `electrum` refuse every coin of

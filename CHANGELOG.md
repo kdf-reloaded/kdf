@@ -310,6 +310,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
+  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
+  spent the taker's payment. A maker that failed during negotiation could be picked again for the
+  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
+  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
+  lifted with `unban_pubkeys`. Detail: CRD ch.59 R59.5.2, R59.5.4.
+- **Two activations of the same coin no longer run at the same time.** If a coin is activated again
+  while its first activation is still running, through any activation method or the legacy `enable`
+  and `electrum`, the second now waits for the first. If the first activated the coin, the second
+  ends with the usual already-activated error and builds nothing; if the first failed, the second
+  goes ahead. Before, the two built the coin in parallel. A second ARRR activation already waited,
+  but then built the coin a second time over the wallet database the first coin was using, and only
+  then failed. A platform activation that brings tokens also waits for activations of those tokens.
+  Callers get the same answers as before; only the second call can return later. Detail: PR #156;
+  CRD ch.55 R55.1.12.
+- **Tests: the BCH withdrawal test no longer fails when the testnet servers lag behind.** The
+  test sends three withdrawals in a row from one shared testnet wallet. Twice in CI, the second one
+  reused the coin the first had just spent, because the Electrum servers had not yet caught up with
+  that spend, and the network refused it as a conflict. On a conflict the test now waits 10 seconds
+  and builds the withdrawal again, up to 12 times. Any other refusal still fails the test at once.
+  Test-only; the node itself is unchanged.
+- **Listing, cancelling or updating an order no longer waits for another path's file or database write.** The balance-update handler, the periodic balance check, the removal of timed-out matches, an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while they wrote the order's file and history row, so `my_orders`, `order_status` and other calls on that order waited for the disk. They now write after releasing the lock, and re-check the order before applying a result. One order's writes still land in the order of its changes, and a cancelled order's record is never written back. Detail: PR #149; CRD ch.12 R7a, R7b.
 - **An ARRR swap refund no longer fails as "non-final" right after the lock time.** The refund of a
   shielded-coin payment now waits until the chain's median time (the clock the network judges lock
   times by) has passed the lock time, and a refund the network still rejects as not yet final is
@@ -344,6 +366,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   script, and the transaction builder rejected it. Recovery now always signs with the private key that
   belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
   key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
+- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before, each
+  swap got a random key that was saved in the swap file, so a swap started by another KDF implementation
+  could not be recovered here, nor one of ours there. The key is now computed from the wallet's transparent
+  key and the swap (the secret hash for the maker, the swap UUID for the taker), and it is never saved: it
+  is computed again on restart and on recovery, so either implementation can recover a swap with the same
+  seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
+  the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
+  fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
+  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
@@ -699,6 +730,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **EVM swaps now use the gas limits from your coins file instead of one fixed number.** The coins file can set per-coin limits (`gas_limit` for the HTLC calls, sends and refunds, `gas_limit_v2` for the newer swaps), and a token inherits its platform coin's block. We ignored them and used 150000 for every swap call, which is too low on some chains, so swap transactions on chains such as Base and Arbitrum could fail on-chain. Limits are now read when the coin is activated and used for every swap call, the trade-fee estimates and the approval; a value that is not a whole number stops that coin from activating and names the key. Where the coins file sets nothing, the defaults now match the other KDF implementations: for example a platform-coin payment is 65000 and its refund 100000, so the trade fee shown for a platform coin goes down. Detail: PR #105; CRD ch.57 R57.5, R57.6.
 
+- **Tests now cover an EVM token that sets its own gas limits while its platform coin sets none.** The token's own `gas_limit` block is used for its sends, swap payments, spends and refunds and for the fee quotes, and a limit it leaves out takes the built-in default, never a value from the platform coin's entry. The test uses the limits of a coins file running in production.
+
 ### Plans touched
 
 Plans this cycle moved, in any sense; each plan file carries the detail.
@@ -764,12 +797,20 @@ Plans this cycle moved, in any sense; each plan file carries the detail.
   fee reuse, read spreading and balance polling are written (PR #95). Legacy-address batching, one fee
   read per request and concurrent gas-price queries shipped (PR #114). The balance watch for coins
   with maker orders shipped (PR #116). The fee cache with per-coin and adaptive lifetimes, read
-  spreading, the spend check on every update and the reconciliation lock fix are in PR #128.
+  spreading, the spend check on every update and the reconciliation lock fix are in PR #128. The
+  order's file and database writes leave the order's lock (Decision AM) in PR #149.
 
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new: which EVM swap
   transactions use a fixed gas limit and which an estimate, Base and Monad measurements, and the
   decision that per-chain `gas_limit` blocks in the coins file, not the multiplier, are the knob.
   Detail: PR #123.
+
+- [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — still parked: its
+  list of deferred activation work now records the per-ticker serialization of activations (PR #156)
+  and the refusal of a future ARRR sync date (PR #22) as implemented.
+- [`lightning-activation-features`](docs/plans/lightning-activation-features.md) — still parked: it now
+  records, for after the beta, that a Lightning node whose activation failed, or that was disabled,
+  keeps its listening port and background work, so a retry on that port fails (PR #156).
 
 ### Known limitations
 
