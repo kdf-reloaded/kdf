@@ -310,6 +310,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
+  Before, a taker banned a maker only when the maker's payment failed validation or the maker never
+  spent the taker's payment. A maker that failed during negotiation could be picked again for the
+  taker's next order. Now that maker's offers are ignored for an hour, so a second attempt goes to a
+  different maker, as other KDF nodes already do. The ban appears in `list_banned_pubkeys` and can be
+  lifted with `unban_pubkeys`. Detail: CRD ch.59 R59.5.2, R59.5.4.
 - **Two activations of the same coin no longer run at the same time.** If a coin is activated again
   while its first activation is still running, through any activation method or the legacy `enable`
   and `electrum`, the second now waits for the first. If the first activated the coin, the second
@@ -360,6 +366,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   script, and the transaction builder rejected it. Recovery now always signs with the private key that
   belongs to the matching public key: the coin's own persistent key when that is the one. If it holds no such
   key, the error now says so, naming the key. Detail: PR #142; CRD ch.39 R39.5.4.
+- **An ARRR swap's HTLC key is now derived from the wallet, as other KDF nodes derive it.** Before, each
+  swap got a random key that was saved in the swap file, so a swap started by another KDF implementation
+  could not be recovered here, nor one of ours there. The key is now computed from the wallet's transparent
+  key and the swap (the secret hash for the maker, the swap UUID for the taker), and it is never saved: it
+  is computed again on restart and on recovery, so either implementation can recover a swap with the same
+  seed. Under an HD wallet the wallet's transparent key for ARRR and other shielded coins is now the key at
+  the coin's `derivation_path` (for ARRR `m/44'/141'/0'/0/0`), and activating such a coin under an HD wallet
+  fails if its coin entry has no `derivation_path`; with a passphrase wallet nothing changes. Swaps already
+  in progress keep their saved key. Detail: PR #152; CRD ch.39 R39.5.6–R39.5.11.
 - **A peer that cannot keep up no longer makes a node's memory grow without limit.** The queue of
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
