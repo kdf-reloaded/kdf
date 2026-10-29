@@ -327,10 +327,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   swap went on to refund the payment. If the maker had claimed it, the refund was rejected and the
   swap ended as failed: the taker got the maker's coins only by running `recover_funds_of_swap` before
   the maker's own lock time ran out, and lost both sides otherwise. Now the taker checks the chain
-  before the refund, every 5 minutes while it waits to refund, and after a rejected refund; when the
+  before the refund, every few minutes while it waits to refund, and after a rejected refund; when the
   maker has claimed the payment, the taker reads the secret and claims the maker's payment, as in a
-  normal swap. A refund already on the chain, after a restart, now ends the swap as refunded. Detail:
-  CRD ch.51 R31a.
+  normal swap. Such a swap still lists the earlier error events, so a wallet may show it as failed
+  although the trade completed. A refund already on the chain, after a restart, now ends the swap as
+  refunded. Detail: CRD ch.51 R31a.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the

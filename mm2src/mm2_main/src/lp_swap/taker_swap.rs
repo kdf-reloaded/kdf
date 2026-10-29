@@ -21,6 +21,7 @@ use crate::mm2::MM_VERSION;
 use coins::request_fee_scope::with_request_fee_scope;
 use coins::{lp_coinfind, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend, MmCoinEnum, PaymentInstructions,
             TradeFee, TradePreimageValue, ValidatePaymentInput};
+use common::custom_futures::FutureTimerExt;
 use common::executor::Timer;
 use common::log::{debug, error, warn};
 use common::mm_number::{BigDecimal, MmNumber};
@@ -44,9 +45,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use uuid::Uuid;
 
-/// Longest step of the refund chain's wait for the taker payment lock time; after each step the chain is
-/// asked whether the maker has spent the payment (CRD ch.51 R31a item 2).
-const REFUND_WAIT_CHAIN_CHECK_SECS: f64 = 300.;
+/// The waits of the taker's refund chain (CRD ch.39 R39.5.13, ch.51 R31a); tests shorten them.
+#[derive(Clone, Copy, Debug)]
+struct RefundPacing {
+    /// Wait after a refund rejected as non-final, before the next attempt (R39.5.13).
+    non_final_retry_secs: f64,
+    /// Longest step of the wait for the taker payment to become refundable (R31a item 2).
+    max_wait_step_secs: f64,
+    /// Shortest step, so a refund gate that answers "wait 0 s" again and again does not spin.
+    min_wait_step_secs: f64,
+    /// Least time between two looks at the chain during the wait (R31a item 2).
+    chain_look_interval_secs: f64,
+    /// Longest one look at the chain may take; a look that takes longer counts as failed.
+    chain_look_timeout_secs: f64,
+}
+
+const REFUND_PACING: RefundPacing = RefundPacing {
+    non_final_retry_secs: NON_FINAL_REFUND_RETRY_SECS,
+    max_wait_step_secs: 300.,
+    min_wait_step_secs: 5.,
+    chain_look_interval_secs: 60.,
+    chain_look_timeout_secs: 120.,
+};
 
 construct_detailed!(DetailedAmount, amount);
 
@@ -1863,20 +1883,22 @@ impl TakerSwap {
     }
 
     async fn refund_taker_payment(&self) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
-        self.refund_taker_payment_retrying(NON_FINAL_REFUND_RETRY_SECS).await
+        self.refund_taker_payment_paced(REFUND_PACING).await
     }
 
-    /// [`TakerSwap::refund_taker_payment`] with the wait after a non-final rejection given, so a test can
-    /// shorten it (CRD ch.39 R39.5.13).
-    async fn refund_taker_payment_retrying(
+    /// [`TakerSwap::refund_taker_payment`] with its waits given, so a test can shorten them (CRD ch.39
+    /// R39.5.13, ch.51 R31a).
+    async fn refund_taker_payment_paced(
         &self,
-        non_final_retry_secs: f64,
+        pacing: RefundPacing,
     ) -> Result<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>), String> {
+        let non_final_retry_secs = pacing.non_final_retry_secs;
         // CRD ch.51 R31a item 1: a payment the maker has already spent, or that is already refunded, ends the
         // refund chain before it starts.
-        if let Some(outcome) = self.refund_outcome_from_chain().await {
+        if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
             return Ok(outcome);
         }
+        let mut last_chain_look_ms = now_ms();
 
         let locktime = self.r().data.taker_payment_lock;
         let transaction = loop {
@@ -1884,10 +1906,17 @@ impl TakerSwap {
                 match self.taker_coin.can_refund_htlc(locktime).compat().await {
                     Ok(CanRefundHtlc::CanRefundNow) => break,
                     Ok(CanRefundHtlc::HaveToWait(to_sleep)) => {
-                        // R31a item 2: the wait for the lock time is cut into steps, each followed by a look
-                        // at the chain.
-                        Timer::sleep((to_sleep as f64).min(REFUND_WAIT_CHAIN_CHECK_SECS)).await;
-                        if let Some(outcome) = self.refund_outcome_from_chain().await {
+                        // R31a item 2: the wait for the lock time is cut into steps; after a step the chain is
+                        // looked at when the previous look is old enough, so a gate that answers "wait a few
+                        // seconds" again and again does not search the chain each time.
+                        let step = (to_sleep as f64).clamp(pacing.min_wait_step_secs, pacing.max_wait_step_secs);
+                        Timer::sleep(step).await;
+                        let since_look_secs = now_ms().saturating_sub(last_chain_look_ms) as f64 / 1000.;
+                        if since_look_secs < pacing.chain_look_interval_secs {
+                            continue;
+                        }
+                        last_chain_look_ms = now_ms();
+                        if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
                             return Ok(outcome);
                         }
                     },
@@ -1932,7 +1961,7 @@ impl TakerSwap {
 
                     // R31a item 3: before the rejection ends the swap, the chain is asked once more; a maker
                     // that spent the payment is the usual cause.
-                    if let Some(outcome) = self.refund_outcome_from_chain().await {
+                    if let Some(outcome) = self.refund_outcome_from_chain(pacing.chain_look_timeout_secs).await {
                         return Ok(outcome);
                     }
 
@@ -1975,10 +2004,13 @@ impl TakerSwap {
     ///
     /// A spend by the maker reveals the secret, so the swap goes on to spend the maker payment, exactly as
     /// after R30's wait; a refund already on chain ends the swap as refunded. `None` when neither is found,
-    /// when the search or the secret extraction fails (the refund chain then goes on as before), and when
-    /// the swap has already recorded a spend of the taker payment (a resumed swap whose spend of the maker
-    /// payment failed must not go round again).
-    async fn refund_outcome_from_chain(&self) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
+    /// when the search or the secret extraction fails or the search takes longer than `timeout_secs` (the
+    /// refund chain then goes on as before), and when the swap has already recorded a spend of the taker
+    /// payment (a resumed swap whose spend of the maker payment failed must not go round again).
+    async fn refund_outcome_from_chain(
+        &self,
+        timeout_secs: f64,
+    ) -> Option<(Option<TakerSwapCommand>, Vec<TakerSwapEvent>)> {
         if self.r().taker_payment_spend.is_some() {
             return None;
         }
@@ -2001,13 +2033,21 @@ impl TakerSwap {
                 taker_coin_start_block,
                 &taker_coin_swap_contract_address,
             )
+            .timeout_secs(timeout_secs)
             .await;
         let found = match found {
-            Ok(found) => found?,
-            Err(e) => {
+            Ok(Ok(found)) => found?,
+            Ok(Err(e)) => {
                 warn!(
                     "Swap {}: could not look for a spend of the taker payment, going on with the refund: {}",
                     self.uuid, e
+                );
+                return None;
+            },
+            Err(timeout) => {
+                warn!(
+                    "Swap {}: the look for a spend of the taker payment did not finish, going on with the refund: {}",
+                    self.uuid, timeout
                 );
                 return None;
             },
@@ -4584,6 +4624,18 @@ mod taker_swap_tests {
         matches!(events, [TakerSwapEvent::TakerPaymentRefundFailed(_)])
     }
 
+    /// The refund chain's waits shortened for a test: no floor on a wait step and a look at the chain after
+    /// every step.
+    fn fast_pacing() -> RefundPacing {
+        RefundPacing {
+            non_final_retry_secs: 0.01,
+            max_wait_step_secs: 0.01,
+            min_wait_step_secs: 0.,
+            chain_look_interval_secs: 0.,
+            chain_look_timeout_secs: 5.,
+        }
+    }
+
     #[test]
     fn a_non_final_rejection_is_retried_through_the_gate_and_the_next_success_refunds() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4594,7 +4646,7 @@ mod taker_swap_tests {
         mock_gate_open_counting(&GATES);
         mock_refund_rejected_then_accepted(2, NON_FINAL_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(
@@ -4626,7 +4678,7 @@ mod taker_swap_tests {
         mock_shielded_rejection_recognition();
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
@@ -4643,7 +4695,7 @@ mod taker_swap_tests {
         mock_shielded_rejection_recognition();
         mock_refund_rejected_then_accepted(usize::MAX, NON_FINAL_TEXT, &SENDS);
 
-        let (_, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(is_refund_failed(&events), "{events:?}");
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
@@ -4658,7 +4710,7 @@ mod taker_swap_tests {
         let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
         mock_refund_rejected_then_accepted(usize::MAX, NON_FINAL_TEXT, &SENDS);
 
-        let (_, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(is_refund_failed(&events), "{events:?}");
         assert_eq!(SENDS.load(Ordering::SeqCst), 1);
@@ -4712,7 +4764,7 @@ mod taker_swap_tests {
         mock_gate_open_counting(&GATES);
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
         assert_eq!(SEARCHES.load(Ordering::SeqCst), 1);
@@ -4737,12 +4789,111 @@ mod taker_swap_tests {
         });
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
         assert_eq!(SEARCHES.load(Ordering::SeqCst), 3);
         assert_eq!(GATES.load(Ordering::SeqCst), 2);
         assert_eq!(SENDS.load(Ordering::SeqCst), 0);
+    }
+
+    /// T51.31a.7: a gate that answers "wait 0 s" again and again does not make the chain be searched on each
+    /// step; within the look interval only the look on entry is made, and the refund goes through as before.
+    #[test]
+    fn r31a_short_wait_steps_do_not_search_the_chain_each_time() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static GATES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_chain(usize::MAX, spent_by_the_maker, &SEARCHES);
+        TestCoin::can_refund_htlc.mock_safe(|_, _| {
+            let answer = if GATES.fetch_add(1, Ordering::SeqCst) < 5 {
+                CanRefundHtlc::HaveToWait(0)
+            } else {
+                CanRefundHtlc::CanRefundNow
+            };
+            MockResult::Return(Box::new(futures01::future::ok(answer)))
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+        let pacing = RefundPacing {
+            chain_look_interval_secs: 3600.,
+            ..fast_pacing()
+        };
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(pacing)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(GATES.load(Ordering::SeqCst), 6);
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 1, "only the look on entry");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    /// T51.31a.8: a search that fails, a spend whose secret cannot be read and a search that does not finish
+    /// all leave the refund chain as it was: the terminal rejection still ends in the refund failure.
+    #[test]
+    fn r31a_a_failed_search_leaves_the_refund_chain_as_it_was() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, mut published) = taker_swap_ready_to_refund(100);
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::ready(Err(
+                "all electrums are down".to_owned()
+            ))))
+        });
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(matches!(next, Some(TakerSwapCommand::Finish)));
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+        assert_eq!(published_count(&mut published), 0);
+    }
+
+    #[test]
+    fn r31a_a_spend_without_a_readable_secret_leaves_the_refund_chain_as_it_was() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEARCHES: AtomicUsize = AtomicUsize::new(0);
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        mock_chain(0, spent_by_the_maker, &SEARCHES);
+        TestCoin::extract_secret.mock_safe(|_, _, _| MockResult::Return(Err("no secret in the spend".to_owned())));
+        mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
+
+        assert!(is_refund_failed(&events), "{events:?}");
+        assert_eq!(SEARCHES.load(Ordering::SeqCst), 2);
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn r31a_a_search_that_does_not_finish_leaves_the_refund_chain_as_it_was() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SENDS: AtomicUsize = AtomicUsize::new(0);
+        let (taker_swap, _published) = taker_swap_ready_to_refund(100);
+        TestCoin::search_for_swap_tx_spend_my.mock_safe(|_, _, _, _, _, _, _, _| {
+            MockResult::Return(Box::pin(futures::future::pending::<
+                Result<Option<FoundSwapTxSpend>, String>,
+            >()))
+        });
+        mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
+        let pacing = RefundPacing {
+            chain_look_timeout_secs: 0.05,
+            ..fast_pacing()
+        };
+
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(pacing)).unwrap();
+
+        assert!(
+            matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
+            "{events:?}"
+        );
+        assert_eq!(SENDS.load(Ordering::SeqCst), 1);
     }
 
     /// T51.31a.3: a terminal refund rejection asks the chain once more; the maker's spend found then replaces
@@ -4756,7 +4907,7 @@ mod taker_swap_tests {
         mock_chain(1, spent_by_the_maker, &SEARCHES);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert_goes_on_to_spend_the_maker_payment(next, &events, &taker_swap);
         assert_eq!(SEARCHES.load(Ordering::SeqCst), 2, "on entry and after the rejection");
@@ -4775,7 +4926,7 @@ mod taker_swap_tests {
         mock_chain(usize::MAX, spent_by_the_maker, &SEARCHES);
         mock_refund_rejected_then_accepted(usize::MAX, SCRIPT_FAILURE_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(is_refund_failed(&events), "{events:?}");
@@ -4799,7 +4950,7 @@ mod taker_swap_tests {
         mock_chain(0, spent_by_the_maker, &SEARCHES);
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
-        let (_, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (_, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(
             matches!(events.as_slice(), [TakerSwapEvent::TakerPaymentRefunded(_)]),
@@ -4819,7 +4970,7 @@ mod taker_swap_tests {
         mock_chain(0, already_refunded, &SEARCHES);
         mock_refund_rejected_then_accepted(0, NON_FINAL_TEXT, &SENDS);
 
-        let (next, events) = block_on(taker_swap.refund_taker_payment_retrying(0.01)).unwrap();
+        let (next, events) = block_on(taker_swap.refund_taker_payment_paced(fast_pacing())).unwrap();
 
         assert!(matches!(next, Some(TakerSwapCommand::Finish)));
         assert!(

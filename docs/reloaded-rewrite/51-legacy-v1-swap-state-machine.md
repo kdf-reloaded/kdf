@@ -526,9 +526,13 @@ for a spend or a refund of the taker payment, with the swap's own HTLC
 public key, at three points:
 
 1. once on entry, before the refundability wait;
-2. after each step of the wait for the payment to become refundable, a
-   step lasting at most 300 seconds, so that a spend made during the wait
-   is claimed before the taker payment locktime rather than after it;
+2. during the wait for the payment to become refundable, which is cut
+   into steps of at most 300 seconds and at least 5 seconds: after a step,
+   when at least 60 seconds have passed since the previous look, so that
+   a spend made during the wait is claimed before the taker payment
+   locktime rather than after it, while a refundability check that keeps
+   answering "a few seconds more" (a chain whose median time has not yet
+   reached the locktime) does not search the chain on every step;
 3. once after a refund attempt is rejected for a reason that ends the
    chain, before `TakerPaymentRefundFailed` is emitted. A rejection that
    R18 retries (R39.5.13) is retried as before.
@@ -540,13 +544,20 @@ and the swap continues at `STAGE-SPEND-MAKER-PAYMENT` (R31). The
 rejected refund is not published. A refund of the taker payment found on
 chain (a restart after the refund was broadcast) MUST emit
 `TakerPaymentRefunded` with that transaction and end the chain, without
-building another refund. When the search fails, finds nothing, or finds
+building another refund. One look is bounded to 120 seconds. When the
+search fails, does not finish within that bound, finds nothing, or finds
 a spend whose secret cannot be extracted, the chain continues exactly as
 R31 states. A swap whose record already holds a spend of the taker
 payment (resumed after `MakerPaymentSpendFailed`, whose resume stage is
 the refund chain, R32) MUST NOT look again, so that a failed spend of the
 maker payment cannot lead back to the same spend; its refund chain is
 the one R31 states.
+
+A swap completed this way keeps the error events that sent it into the
+refund chain (`TakerPaymentWaitConfirmFailed` or
+`TakerPaymentWaitForSpendFailed`, and `TakerPaymentWaitRefundStarted`),
+followed by `MakerPaymentSpent`, and `recover_funds_of_swap` reports it
+as not recoverable because the maker payment is spent.
 
 The event set and the resume map of R32 are unchanged: the addition
 emits only existing event types, and the only new event order it
@@ -1645,9 +1656,18 @@ taker swap in its refund chain and the chain answers mocked:
 5. a swap whose record already holds a spend of the taker payment does
    not look and refunds as R31 states;
 6. a refund already on chain emits `TakerPaymentRefunded` with that
-   transaction, builds nothing and publishes nothing.
+   transaction, builds nothing and publishes nothing;
+7. a refundability check that answers "wait 0 s" five times before the
+   payment becomes refundable leads, within the 60-second look interval,
+   to no look besides the one on entry, and the refund goes through;
+8. a search that fails, a spend whose secret cannot be extracted, and a
+   search that does not finish within its bound each leave the chain as
+   R31 states (a terminal rejection still ends in
+   `TakerPaymentRefundFailed`; an accepted refund still ends in
+   `TakerPaymentRefunded`).
 
-*(Added 2026-10-29 with R31a.)*
+*(Added 2026-10-29 with R31a; items 7 and 8 added 2026-10-30 after
+review.)*
 
 ## 51.13 Deferred Work
 
