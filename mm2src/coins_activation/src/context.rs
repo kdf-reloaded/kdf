@@ -8,11 +8,10 @@ use crate::utxo_activation::{BchTaskManagerShared, QtumTaskManagerShared, UtxoSt
 use crate::z_coin_activation::ZcoinTaskManagerShared;
 #[cfg(not(target_arch = "wasm32"))]
 use coins::lightning::LightningCoin;
-use futures::lock::Mutex as AsyncMutex;
+use coins::{activation_locks::ActivationGuard, CoinsContext};
 use mm2_core::mm_ctx::{from_ctx, MmArc};
 use rpc_task::RpcTaskManager;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 pub struct CoinsActivationContext {
     pub(crate) init_utxo_standard_task_manager: UtxoStandardTaskManagerShared,
@@ -23,13 +22,20 @@ pub struct CoinsActivationContext {
     pub(crate) init_erc20_task_manager: InitTokenTaskManagerShared<coins::eth::EthCoin>,
     pub(crate) init_tendermint_task_manager: TendermintTaskManagerShared,
     pub(crate) init_z_coin_task_manager: ZcoinTaskManagerShared,
-    z_coin_activation_locks: ZCoinActivationLocks,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) init_lightning_task_manager: L2TaskManagerShared<LightningCoin>,
     /// The registry of the task-framework tests, which drive a scripted coin through the standalone-coin family.
     #[cfg(test)]
     pub(crate) init_test_coin_task_manager:
         crate::standalone_coin::InitStandaloneCoinTaskManagerShared<coins::TestCoin>,
+    /// The registries of the serialized-activation tests, which drive a scripted coin through the other families.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) init_test_platform_task_manager:
+        crate::init_platform_coin_with_tokens::InitPlatformCoinWithTokensTaskManagerShared<coins::TestCoin>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) init_test_token_task_manager: InitTokenTaskManagerShared<coins::TestCoin>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) init_test_l2_task_manager: L2TaskManagerShared<coins::TestCoin>,
 }
 
 impl CoinsActivationContext {
@@ -45,59 +51,26 @@ impl CoinsActivationContext {
                 init_erc20_task_manager: RpcTaskManager::new_shared(),
                 init_tendermint_task_manager: RpcTaskManager::new_shared(),
                 init_z_coin_task_manager: RpcTaskManager::new_shared(),
-                z_coin_activation_locks: ZCoinActivationLocks::default(),
                 #[cfg(not(target_arch = "wasm32"))]
                 init_lightning_task_manager: RpcTaskManager::new_shared(),
                 #[cfg(test)]
                 init_test_coin_task_manager: RpcTaskManager::new_shared(),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                init_test_platform_task_manager: RpcTaskManager::new_shared(),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                init_test_token_task_manager: RpcTaskManager::new_shared(),
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                init_test_l2_task_manager: RpcTaskManager::new_shared(),
             })
         })
     }
-
-    pub(crate) fn z_coin_activation_lock(&self, ticker: &str) -> Result<Arc<AsyncMutex<()>>, String> {
-        self.z_coin_activation_locks.lock_for(ticker)
-    }
 }
 
-#[derive(Default)]
-struct ZCoinActivationLocks {
-    by_ticker: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
-}
-
-impl ZCoinActivationLocks {
-    fn lock_for(&self, ticker: &str) -> Result<Arc<AsyncMutex<()>>, String> {
-        let mut by_ticker = self
-            .by_ticker
-            .lock()
-            .map_err(|error| format!("ZCoin activation lock registry is unavailable: {}", error))?;
-        by_ticker.retain(|_, lock| lock.strong_count() > 0);
-        if let Some(lock) = by_ticker.get(ticker).and_then(Weak::upgrade) {
-            return Ok(lock);
-        }
-
-        let lock = Arc::new(AsyncMutex::new(()));
-        by_ticker.insert(ticker.to_owned(), Arc::downgrade(&lock));
-        Ok(lock)
-    }
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn zcoin_activation_locks_are_shared_only_by_ticker() {
-        let locks = ZCoinActivationLocks::default();
-        let arrr_first = locks.lock_for("ARRR").unwrap();
-        let arrr_second = locks.lock_for("ARRR").unwrap();
-        let other = locks.lock_for("ZEC").unwrap();
-        assert!(Arc::ptr_eq(&arrr_first, &arrr_second));
-        assert!(!Arc::ptr_eq(&arrr_first, &other));
-
-        let guard = arrr_first.try_lock_owned().unwrap();
-        assert!(arrr_second.try_lock_owned().is_none());
-        assert!(other.try_lock_owned().is_some());
-        drop(guard);
-        assert!(arrr_second.try_lock_owned().is_some());
-    }
+/// Waits for the activation locks of `tickers` and returns the guard that holds them (CRD ch.55 R55.1.12).
+///
+/// Every activation path calls this before it builds anything and keeps the guard until the coin is registered
+/// and the steps that belong to the activation are done. After the wait the path checks again whether its
+/// ticker is registered.
+pub(crate) async fn lock_activation(ctx: &MmArc, tickers: &[&str]) -> Result<ActivationGuard, String> {
+    CoinsContext::from_ctx(ctx)?.lock_activation(tickers).await
 }

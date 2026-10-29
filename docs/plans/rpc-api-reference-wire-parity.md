@@ -306,10 +306,9 @@ Two related, non-divergence notes are also recorded in the governing chapter:
    `docs/plans/lightning-activation-features.md`, legacy EVM `enable` under an
    HD wallet (`UPSTREAM-PARITY-GAPS.md`), custom tokens not being wallet-only
    (kdf-reloaded/kdf#16), the held Z-coin Light-mode Electrum policy (ch.39),
-   the decided but not yet implemented per-ticker serialization of
-   concurrent activations (ch.55 R55.1.12), and the decided but not yet
-   implemented GLEEC behavior for a Z-coin sync date in the future (ch.39
-   §39.10, Reloaded status item 2; lands with §39.11).
+   the per-ticker serialization of concurrent activations (ch.55 R55.1.12,
+   implemented in PR #156), and the GLEEC behavior for a Z-coin sync date in
+   the future (ch.39 §39.10, Reloaded status item 2, implemented in PR #22).
 2. Part 2 first, rules only: §43.8, ch.00 R7, the ch.01 R3 row, the checklist,
    the AGENTS.md item, the Spec Reader role change. Commit them with a ch.01 R25
    announcement. The CI guard lands in the same PR, with the register

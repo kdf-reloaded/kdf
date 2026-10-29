@@ -214,6 +214,7 @@ macro_rules! ok_or_retry_after_sleep_sync {
     };
 }
 
+pub mod activation_locks;
 pub mod coin_balance;
 #[doc(hidden)]
 #[cfg(test)]

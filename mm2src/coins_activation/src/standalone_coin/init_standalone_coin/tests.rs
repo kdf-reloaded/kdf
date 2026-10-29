@@ -2,6 +2,12 @@
 //! scripted coin so the real `init`/`status`/`user_action`/`cancel` handlers run end to end.
 
 use super::*;
+use crate::activation_serialization_tests::{case_a_second_waits_and_the_coin_is_built_once,
+                                            case_b_second_proceeds_after_a_failure,
+                                            case_c_two_paths_wait_for_each_other,
+                                            case_d_different_tickers_do_not_wait, case_e_cancel_while_waiting,
+                                            outcome_of_status, scripted_build, Family, L2OneShot, PlatformOneShot,
+                                            Running, TokenOneShot, TokenTask};
 use crate::prelude::CurrentBlock;
 use coins::{CoinProtocol, RegisterCoinError, TestCoin};
 use common::{block_on, HttpStatusCode, StatusCode};
@@ -69,12 +75,13 @@ impl InitStandaloneCoinActivationOps for TestCoin {
 
     async fn init_standalone_coin(
         _ctx: MmArc,
-        _ticker: String,
+        ticker: String,
         _coin_conf: Json,
-        _activation_request: &ScriptedRequest,
+        activation_request: &ScriptedRequest,
         _protocol_info: ScriptedProtocol,
         _task_handle: &InitStandaloneCoinTaskHandle<Self>,
     ) -> MmResult<Self, InitStandaloneCoinError> {
+        scripted_build(&ticker, &activation_request.script).await;
         Ok(TestCoin::default())
     }
 
@@ -86,7 +93,8 @@ impl InitStandaloneCoinActivationOps for TestCoin {
     ) -> MmResult<ScriptedResult, InitStandaloneCoinError> {
         match activation_request.script.as_str() {
             "ok" => {},
-            "fail" => {
+            "gate" => {},
+            "fail" | "gate_fail" => {
                 return MmError::err(InitStandaloneCoinError::CoinCreationError {
                     ticker: TICKER.to_owned(),
                     error: "scripted failure".to_owned(),
@@ -448,3 +456,49 @@ fn every_family_answers_an_unknown_or_foreign_task_id_with_no_such_task() {
         json!({ "status": "InProgress", "details": "ActivatingCoin" })
     );
 }
+
+/// The standalone-coin task, driven by the cases of T55.21 (CRD ch. 55 R55.1.12).
+struct StandaloneTask;
+
+impl Family for StandaloneTask {
+    const NAME: &'static str = "standalone task";
+
+    fn start(ctx: &MmArc, ticker: &str, script: &str) -> Running {
+        let mut request = init_request(script);
+        request.ticker = ticker.to_owned();
+        let task_id = block_on(init_standalone_coin::<TestCoin>(ctx.clone(), request))
+            .unwrap_or_else(|e| panic!("init failed: {}", e))
+            .task_id;
+        let (status_ctx, cancel_ctx) = (ctx.clone(), ctx.clone());
+        Running::new(
+            move || outcome_of_status(&status(&status_ctx, task_id, false), "CoinIsAlreadyActivated"),
+            move || {
+                cancel(&cancel_ctx, task_id).unwrap_or_else(|e| panic!("cancel failed: {}", e));
+            },
+        )
+    }
+}
+
+#[test]
+fn t55_21_a_second_waits_and_the_coin_is_built_once() {
+    case_a_second_waits_and_the_coin_is_built_once::<StandaloneTask>();
+}
+
+#[test]
+fn t55_21_b_second_proceeds_after_a_failure() { case_b_second_proceeds_after_a_failure::<StandaloneTask>(); }
+
+#[test]
+fn t55_21_c_a_standalone_task_and_other_paths_of_one_ticker_wait_for_each_other() {
+    case_c_two_paths_wait_for_each_other::<StandaloneTask, StandaloneTask>();
+    case_c_two_paths_wait_for_each_other::<StandaloneTask, PlatformOneShot>();
+    case_c_two_paths_wait_for_each_other::<StandaloneTask, TokenOneShot>();
+    case_c_two_paths_wait_for_each_other::<StandaloneTask, L2OneShot>();
+    case_c_two_paths_wait_for_each_other::<PlatformOneShot, StandaloneTask>();
+    case_c_two_paths_wait_for_each_other::<TokenTask, StandaloneTask>();
+}
+
+#[test]
+fn t55_21_d_different_tickers_do_not_wait() { case_d_different_tickers_do_not_wait::<StandaloneTask>(); }
+
+#[test]
+fn t55_21_e_cancel_while_waiting() { case_e_cancel_while_waiting::<StandaloneTask>(); }
