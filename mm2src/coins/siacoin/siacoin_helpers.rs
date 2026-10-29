@@ -116,3 +116,61 @@ impl SiaCoin {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod node_naming_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SERVER: &str = "http://127.0.0.1:1/wallet/api?key=KEYPART";
+    const PASSWORD: &str = "walletdpass";
+
+    fn client_conf() -> SiaClientConf {
+        serde_json::from_value(json!({ "server_url": SERVER, "password": PASSWORD, "timeout": 2 })).unwrap()
+    }
+
+    fn assert_host_only(text: &str) {
+        assert!(text.contains("http://127.0.0.1:1"), "{text}");
+        for secret in ["wallet/api", "KEYPART", PASSWORD] {
+            assert!(!text.contains(secret), "a credential part reaches a text");
+        }
+    }
+
+    /// T-N1 (R-N1): the activation error against a closed port names the server host-only.
+    #[test]
+    fn the_activation_error_names_the_server_host_only() {
+        let error = common::block_on(SiaClient::new(client_conf())).err().unwrap();
+        assert_host_only(&SiaCoinBuilderError::Client(error).to_string());
+    }
+
+    /// T-N1 (R-N2): the debug forms of the request and of the configuration hide the password and its encoded
+    /// header value.
+    #[test]
+    fn the_debug_forms_hide_the_password() {
+        let request: SiaCoinActivationRequest = serde_json::from_value(json!({
+            "client_conf": { "server_url": SERVER, "password": PASSWORD },
+        }))
+        .unwrap();
+        let encoded = base64::encode(&format!(":{PASSWORD}"));
+        for rendered in [
+            format!("{request:?}"),
+            format!("{:?}", RedactedClientConf(&client_conf())),
+        ] {
+            assert_host_only(&rendered);
+            assert!(!rendered.contains(&encoded), "the encoded header value is rendered");
+        }
+    }
+
+    /// T-N2 (R-N1, R53.4.8): the text of a failed read, as the `Transport` error and the history path build it,
+    /// names the server host-only.
+    #[test]
+    fn a_failed_read_names_the_server_host_only() {
+        let client = common::block_on(async {
+            // The probe of `SiaClient::new` fails against a closed port, so a client is not available: the
+            // request error of an endpoint call is produced by the same library path.
+            SiaClient::new(client_conf()).await
+        });
+        let error = client.err().unwrap();
+        assert_host_only(&sia_text(&error));
+    }
+}

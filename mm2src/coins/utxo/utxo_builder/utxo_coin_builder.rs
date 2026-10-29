@@ -514,7 +514,9 @@ pub(crate) async fn build_electrum_client(
         block_interval: electrum_block_interval(coin_conf),
     });
     for (server, e) in client.add_servers(&servers) {
-        log!("Error " (e) " using " [server] ". Address won't be used");
+        // A server is named as `host:port` or by a placeholder, never by its configured string (CRD ch.38
+        // R38.6.9a).
+        log!("Error " (e) " using " (server) ". Address won't be used");
     }
     // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
     // coin lands here) leaves the pool; with none left there is nothing to wait for.

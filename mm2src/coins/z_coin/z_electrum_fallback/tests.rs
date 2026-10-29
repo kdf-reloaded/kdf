@@ -146,6 +146,9 @@ impl ElectrumReads for ScriptedElectrum {
         let key = hex::encode(txid.0);
         self.answer(server, "transaction".to_owned(), |s| s.transactions.get(&key).cloned())
     }
+
+    /// The scripted identifiers are not addresses: they name themselves.
+    fn server_name(&self, server: &str) -> String { server.to_owned() }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -776,6 +779,61 @@ async fn the_error_names_the_conditions_of_both_sources() {
         "{text}"
     );
     assert!(text.contains("b: history too large"), "{text}");
+}
+
+/// Reads that name a server as the production reads do: by the address it was configured with.
+#[derive(Debug)]
+struct AsConfigured(Arc<ScriptedElectrum>);
+
+#[async_trait]
+impl ElectrumReads for AsConfigured {
+    async fn servers(&self) -> Result<Vec<String>, String> { self.0.servers().await }
+
+    async fn tip_height(&self, server: &str) -> Result<u64, String> { self.0.tip_height(server).await }
+
+    async fn block_header(&self, server: &str, height: u64) -> Result<Vec<u8>, String> {
+        self.0.block_header(server, height).await
+    }
+
+    async fn history(&self, server: &str, script_hash: &str) -> Result<Vec<HistoryItem>, String> {
+        self.0.history(server, script_hash).await
+    }
+
+    async fn unspent(&self, server: &str, script_hash: &str) -> Result<Vec<UnspentItem>, String> {
+        self.0.unspent(server, script_hash).await
+    }
+
+    async fn transaction(&self, server: &str, txid: &H256Json) -> Result<Vec<u8>, String> {
+        self.0.transaction(server, txid).await
+    }
+}
+
+/// CRD ch.38 R38.6.9a, ch.35 R35.1.17: a condition names a server as `host:port`, or by a placeholder when
+/// its configured address has no host and port, never by the configured string.
+#[tokio::test]
+async fn the_conditions_name_a_server_as_host_and_port_only() {
+    let with_credentials = "alice:pw1@electrum.example.org:50002/ws/KEYA?token=tok1";
+    let bare_word = "bareword-KEYB";
+    let mut rig = Rig::new(&[with_credentials, bare_word]);
+    rig.fallback = ElectrumFallback::new("ARRR", Arc::new(AsConfigured(rig.electrum.clone())));
+    rig.electrum
+        .edit(with_credentials, |s| s.tip = Some(Err("connection refused".to_owned())));
+    rig.electrum
+        .edit(bare_word, |s| s.history = Some(Err("history too large".to_owned())));
+
+    let reasons = conditions(rig.sent().await);
+
+    assert_eq!(reasons, vec![
+        "electrum.example.org:50002: its tip could not be read: connection refused".to_owned(),
+        format!("{UNNAMED_SERVER}: history too large"),
+    ]);
+    let all = reasons.join("; ");
+    assert!(
+        ["alice", "pw1", "KEYA", "KEYB", "tok1"]
+            .iter()
+            .all(|part| !all.contains(part)),
+        "a configured address part is rendered"
+    );
 }
 
 /// The overall budget of a question (CRD ch.38 R38.6.4j) ends a question that a server never answers, and

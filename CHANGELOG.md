@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   show the order messages waiting to be sent, the release rate, whether the relays are falling
   behind, and how often a relay did. They carry no peer and no order. More in CRD ch.32 §32.9B.
 
+- **Node and server addresses and credentials no longer appear in logs, error texts or debug output.**
+  Every log line, error text and status message now names a node or server by scheme, host and port
+  only (Electrum servers as `host:port`), for Tron, Tendermint, Electrum, the native coin daemon,
+  lightwalletd, Solana and the Siacoin wallet daemon, and nothing prints a password, API key,
+  Authorization or header value, or the userinfo, path or query of a URL. A Tendermint node's response
+  body is no longer logged. The debug-build RPC wire dump is not affected. A shielded coin's
+  broadcast error and a warning log line now name the lightwalletd endpoint that rejected the
+  transaction, and a lightwalletd endpoint that fails to connect or answer is tried after the others
+  for a growing time (20 seconds, doubling, up to 12 hours) until it answers again. More in ch.35
+  R35.1.17 and ch.39 §39.11.6.
+
 - **Orders too small to be spent at current fees are now refused.** `setprice`, `update_maker_order`,
   `buy`, `sell` and `trade_preimage` refuse an order whose smallest trade would leave a UTXO-family
   or Sia payment unspendable, meaning below the current spend-fee estimate plus dust, or the Sia

@@ -24,13 +24,55 @@ pub struct SiaCoinConf {
     pub required_confirmations: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct SiaCoinActivationRequest {
     #[serde(default)]
     pub tx_history: bool,
     pub required_confirmations: Option<u64>,
     pub gap_limit: Option<u32>,
     pub client_conf: SiaClientConf,
+}
+
+/// A debug view of the walletd client configuration that shows the server in host-only form and no secret:
+/// the external library's own debug form prints the password and the browser build's header values (CRD ch.20
+/// R-N2, ch.35 R35.1.17). The configuration type is defined by the external Sia library, so its own `Debug`
+/// is never used for it.
+pub struct RedactedClientConf<'a>(pub &'a SiaClientConf);
+
+impl fmt::Debug for RedactedClientConf<'_> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Conf")
+            .field("server_url", &crate::node_url::host_only(self.0.server_url.as_str()))
+            .field(
+                "password",
+                &self.0.password.as_ref().map(|_| crate::node_url::SECRET_SET),
+            )
+            .field("timeout", &self.0.timeout)
+            .finish()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut header_names: Vec<&String> = self.0.headers.keys().collect();
+        header_names.sort();
+        f.debug_struct("Conf")
+            .field("server_url", &crate::node_url::host_only(self.0.server_url.as_str()))
+            .field("headers", &header_names)
+            .finish()
+    }
+}
+
+/// The debug form redacts the client configuration (CRD ch.20 R-N2).
+impl fmt::Debug for SiaCoinActivationRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SiaCoinActivationRequest")
+            .field("tx_history", &self.tx_history)
+            .field("required_confirmations", &self.required_confirmations)
+            .field("gap_limit", &self.gap_limit)
+            .field("client_conf", &RedactedClientConf(&self.client_conf))
+            .finish()
+    }
 }
 
 #[derive(Debug, Display)]

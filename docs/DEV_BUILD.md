@@ -176,7 +176,9 @@ for development and debugging; the compiled code is dormant until activated at r
 
 - **Compile-time guard:** Feature flag gates the code paths
 - **Runtime gate:** `MM2_RPC_WIRE_DUMP=1` environment variable activates dumping
-- **Secret redaction:** Default behavior redacts sensitive data (mnemonics, keys, etc.)
+- **Secret redaction:** Default behavior redacts sensitive data (mnemonics, keys, etc.). A URL in a string value
+  keeps its scheme, host and port, and its userinfo, path, query and fragment are each shown as `<redacted>`
+  (a path of `/` alone is kept); a server address without a scheme, such as an Electrum `host:port`, is unchanged.
 - **Full dump:** Set `MM2_RPC_WIRE_DUMP_SECRETS=1` to dump unredacted (use with caution)
 
 **Release profile note:** See section 4.2 (`unsafe-rpc-wire-dump-release-override`) for using

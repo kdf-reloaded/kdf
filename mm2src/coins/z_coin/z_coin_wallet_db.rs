@@ -1,5 +1,7 @@
+use super::z_lightwalletd::{is_transport_code, EndpointHealth};
 use super::z_rpc::z_coin_grpc;
 use super::{CheckPointBlockInfo, ShieldedFetchError, ZCoinBuildError, ZcoinConsensusParams, ZcoinDecryptionParams};
+use crate::node_url::{host_only, lightwalletd_endpoint_url, scrub_node_url, scrub_urls_in_text, UNNAMED_NODE};
 use crate::utxo::utxo_common::big_decimal_from_sat_unsigned;
 use common::mm_number::BigDecimal;
 use common::{calc_total_pages, log, PagingOptionsEnum};
@@ -14,6 +16,7 @@ use sapling::zip32::ExtendedFullViewingKey;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
@@ -381,6 +384,7 @@ impl ZCoinShieldedHistory {
         ticker: &str,
         consensus_params: &ZcoinConsensusParams,
         servers: &[String],
+        health: &dyn EndpointHealth,
         target_height: u64,
         requested_start_height: Option<u64>,
         skip_sync_params: bool,
@@ -438,15 +442,40 @@ impl ZCoinShieldedHistory {
         // chain-state query; only then is an overall failure a retriable mid-sync failure.
         let mut sync_started = false;
         for server in servers {
+            let name = health.name(server);
+            // Set when the attempt failed at transport level, which suspends the endpoint (CRD ch.39 R39.11.31).
+            let transport_failed = AtomicBool::new(false);
             match self
-                .fetch_compact_blocks_from_server(consensus_params.clone(), server, fetch_plan, target_height, progress)
+                .fetch_compact_blocks_from_server(
+                    consensus_params.clone(),
+                    server,
+                    &name,
+                    fetch_plan,
+                    target_height,
+                    progress,
+                    &transport_failed,
+                )
                 .await
             {
-                Ok(fetched_height) => return Ok(fetched_height),
+                Ok(fetched_height) => {
+                    health.answered(server);
+                    return Ok(fetched_height);
+                },
                 Err(e) => {
-                    log::warn!("ZCoin lightwalletd server {} failed: {}", server, e);
+                    let e = match e {
+                        ShieldedFetchError::BeforeSync(text) => {
+                            ShieldedFetchError::BeforeSync(scrub_lightwalletd_text(&text, server))
+                        },
+                        ShieldedFetchError::DuringSync(text) => {
+                            ShieldedFetchError::DuringSync(scrub_lightwalletd_text(&text, server))
+                        },
+                    };
+                    if transport_failed.load(AtomicOrdering::Relaxed) {
+                        health.transport_failed(server, &e.to_string());
+                    }
+                    log::warn!("ZCoin lightwalletd server {} failed: {}", name, e);
                     sync_started |= matches!(e, ShieldedFetchError::DuringSync(_));
-                    errors.push(format!("{}: {}", server, e));
+                    errors.push(format!("{}: {}", name, e));
                 },
             }
         }
@@ -589,28 +618,35 @@ impl ZCoinShieldedHistory {
             .map_err(|e| e.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fetch_compact_blocks_from_server(
         &self,
         consensus_params: ZcoinConsensusParams,
         server: &str,
+        name: &str,
         fetch_plan: LightwalletdFetchPlan,
         target_height: u64,
         progress: &(dyn Fn(u64, u64) + Send + Sync),
+        transport_failed: &AtomicBool,
     ) -> Result<u64, ShieldedFetchError> {
         let started = Instant::now();
         let start_height = fetch_plan.start_height;
         log::info!(
             "ZCoin lightwalletd server {} scan started: compact block range {}..={}",
-            server,
+            name,
             start_height,
             target_height
         );
 
         // Connecting, the local resets and the initial chain-state query below happen before any block
         // is downloaded: a failure there means the sync could not start (CRD ch.39 R39.10.14).
-        let mut client = Self::connect_lightwalletd(server)
-            .await
-            .map_err(ShieldedFetchError::BeforeSync)?;
+        let mut client = match Self::connect_lightwalletd(server).await {
+            Ok(client) => client,
+            Err(e) => {
+                transport_failed.store(true, AtomicOrdering::Relaxed);
+                return Err(ShieldedFetchError::BeforeSync(e));
+            },
+        };
 
         if fetch_plan.reset_stale_empty_checkpoint {
             log::info!(
@@ -657,7 +693,7 @@ impl ZCoinShieldedHistory {
         while batch_start <= target_height {
             let batch_end = std::cmp::min(target_height, batch_start + LIGHTWALLETD_BLOCK_BATCH_SIZE - 1);
             fetched_height = self
-                .fetch_compact_block_batch_from_server(&mut client, batch_start, batch_end)
+                .fetch_compact_block_batch_from_server(&mut client, batch_start, batch_end, transport_failed)
                 .await
                 .map_err(ShieldedFetchError::DuringSync)?;
             if fetched_height < batch_end {
@@ -672,7 +708,7 @@ impl ZCoinShieldedHistory {
 
         log::info!(
             "ZCoin lightwalletd server {} scan fetched compact blocks through {} in {:?}",
-            server,
+            name,
             fetched_height,
             started.elapsed()
         );
@@ -872,14 +908,17 @@ impl ZCoinShieldedHistory {
 
     pub(crate) async fn connect_lightwalletd(server: &str) -> Result<LightwalletdClient, String> {
         let endpoint_url = lightwalletd_endpoint(server);
+        // The error text of every step is free of the endpoint's URL (CRD ch.39 R39.11.29).
+        let scrubbed =
+            |e: &(dyn StdError + 'static)| scrub_lightwalletd_text(&lightwalletd_error_with_sources(e), server);
         let endpoint = Endpoint::from_shared(endpoint_url.clone())
-            .map_err(|e| lightwalletd_error_with_sources(&e))?
+            .map_err(|e| scrubbed(&e))?
             .connect_timeout(LIGHTWALLETD_CONNECT_TIMEOUT)
             .timeout(LIGHTWALLETD_REQUEST_TIMEOUT);
         let endpoint = if endpoint_url.starts_with("https://") {
             endpoint
                 .tls_config(ClientTlsConfig::new().with_enabled_roots())
-                .map_err(|e| lightwalletd_error_with_sources(&e))?
+                .map_err(|e| scrubbed(&e))?
         } else {
             endpoint
         };
@@ -889,7 +928,7 @@ impl ZCoinShieldedHistory {
             .keep_alive_while_idle(true)
             .connect()
             .await
-            .map_err(|e| lightwalletd_error_with_sources(&e))?;
+            .map_err(|e| scrubbed(&e))?;
         Ok(z_coin_grpc::compact_tx_streamer_client::CompactTxStreamerClient::new(
             endpoint,
         ))
@@ -1139,6 +1178,7 @@ impl ZCoinShieldedHistory {
         client: &mut LightwalletdClient,
         start_height: u64,
         target_height: u64,
+        transport_failed: &AtomicBool,
     ) -> Result<u64, String> {
         let started = Instant::now();
         log::debug!(
@@ -1159,12 +1199,16 @@ impl ZCoinShieldedHistory {
         let response = tokio::time::timeout(LIGHTWALLETD_REQUEST_TIMEOUT, client.get_block_range(request))
             .await
             .map_err(|_| {
+                transport_failed.store(true, AtomicOrdering::Relaxed);
                 format!(
                     "GetBlockRange timed out for compact block batch {}..{}",
                     start_height, target_height
                 )
             })?
-            .map_err(|e| lightwalletd_error_with_sources(&e))?
+            .map_err(|e| {
+                transport_failed.store(is_transport_code(e.code()), AtomicOrdering::Relaxed);
+                lightwalletd_error_with_sources(&e)
+            })?
             .into_inner();
         let mut stream = response;
 
@@ -1174,6 +1218,7 @@ impl ZCoinShieldedHistory {
             let Some(block) = tokio::time::timeout(LIGHTWALLETD_REQUEST_TIMEOUT, stream.next())
                 .await
                 .map_err(|_| {
+                    transport_failed.store(true, AtomicOrdering::Relaxed);
                     format!(
                         "lightwalletd compact block stream timed out for batch {}..{}",
                         start_height, target_height
@@ -1182,7 +1227,10 @@ impl ZCoinShieldedHistory {
             else {
                 break;
             };
-            let block = block.map_err(|e| lightwalletd_error_with_sources(&e))?;
+            let block = block.map_err(|e| {
+                transport_failed.store(is_transport_code(e.code()), AtomicOrdering::Relaxed);
+                lightwalletd_error_with_sources(&e)
+            })?;
             if block.height != expected_height {
                 return Err(format!(
                     "lightwalletd returned compact block height {}, expected {} in batch {}..{}",
@@ -1764,12 +1812,17 @@ impl ZCoinStoredHistoryRow {
     }
 }
 
-fn lightwalletd_endpoint(server: &str) -> String {
-    if server.starts_with("http://") || server.starts_with("https://") {
-        server.to_owned()
-    } else {
-        format!("https://{}", server)
+fn lightwalletd_endpoint(server: &str) -> String { lightwalletd_endpoint_url(server) }
+
+/// Rewrites `text`, produced by a lower layer (gRPC, HTTP/2, TLS, DNS) for the endpoint `server`, so that it no
+/// longer carries that endpoint's URL (CRD ch.39 R39.11.29).
+pub(crate) fn scrub_lightwalletd_text(text: &str, server: &str) -> String {
+    let endpoint = lightwalletd_endpoint(server);
+    let mut out = scrub_node_url(text, &endpoint);
+    if !server.is_empty() && host_only(&endpoint) == UNNAMED_NODE {
+        out = out.replace(server, UNNAMED_NODE);
     }
+    scrub_urls_in_text(&out)
 }
 
 /// The identity of a configured lightwalletd endpoint (R39.11.7b): the form the transport connects
@@ -6879,7 +6932,12 @@ impl ZCoinShieldedHistory {
     /// Returns an empty set rather than an error when the backend cannot be
     /// reached or the response is unusable: a pending view is advisory, and
     /// R39.8.0ai requires it to degrade to zero rather than fail the balance.
-    pub(crate) async fn fetch_pending_receipts(&self, servers: &[String], tip: u64) -> Vec<PendingReceipt> {
+    pub(crate) async fn fetch_pending_receipts(
+        &self,
+        servers: &[String],
+        health: &dyn EndpointHealth,
+        tip: u64,
+    ) -> Vec<PendingReceipt> {
         use sapling::keys::PreparedIncomingViewingKey;
         use sapling::note::ExtractedNoteCommitment;
         use sapling::note_encryption::{try_sapling_compact_note_decryption, CompactOutputDescription};
@@ -6899,17 +6957,28 @@ impl ZCoinShieldedHistory {
         );
 
         for server in servers {
+            let name = health.name(server);
             let mut client = match Self::connect_lightwalletd(server).await {
                 Ok(client) => client,
                 Err(e) => {
-                    log::debug!("ZCoin mempool poll: {server} unreachable: {e}");
+                    health.transport_failed(server, &e);
+                    log::debug!("ZCoin mempool poll: {name} unreachable: {e}");
                     continue;
                 },
             };
             let stream = match client.get_mempool_tx(z_coin_grpc::Exclude { txid: Vec::new() }).await {
-                Ok(resp) => resp.into_inner(),
+                Ok(resp) => {
+                    health.answered(server);
+                    resp.into_inner()
+                },
                 Err(e) => {
-                    log::debug!("ZCoin mempool poll: {server} rejected GetMempoolTx: {e}");
+                    if is_transport_code(e.code()) {
+                        health.transport_failed(server, &scrub_lightwalletd_text(&e.to_string(), server));
+                    }
+                    log::debug!(
+                        "ZCoin mempool poll: {name} rejected GetMempoolTx: {}",
+                        scrub_lightwalletd_text(&e.to_string(), server)
+                    );
                     continue;
                 },
             };
@@ -6920,7 +6989,10 @@ impl ZCoinShieldedHistory {
                 let tx = match tx {
                     Ok(tx) => tx,
                     Err(e) => {
-                        log::debug!("ZCoin mempool poll: stream from {server} ended early: {e}");
+                        log::debug!(
+                            "ZCoin mempool poll: stream from {name} ended early: {}",
+                            scrub_lightwalletd_text(&e.to_string(), server)
+                        );
                         break;
                     },
                 };

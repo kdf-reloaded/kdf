@@ -125,7 +125,7 @@ fn t35_31_the_broadcast_does_not_wait_for_a_node_that_never_answers() {
 #[test]
 fn t35_34_a_failing_node_of_the_nonce_gathering_is_named_with_ticker_and_list_position() {
     let capturing = install_log_capture();
-    let listed = crate::eth::node_url::listed_nodes("T3534NONCE", vec![NODE_1.into(), NODE_2.into(), NODE_3.into()]);
+    let listed = crate::node_url::listed_nodes("T3534NONCE", vec![NODE_1.into(), NODE_2.into(), NODE_3.into()]);
     let mut instances = Vec::new();
     for (i, node) in listed.into_iter().enumerate() {
         let failing = i == 1;

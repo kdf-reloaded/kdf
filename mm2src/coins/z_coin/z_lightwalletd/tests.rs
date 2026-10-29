@@ -633,7 +633,7 @@ async fn an_excluded_endpoint_is_never_asked_for_anything() {
         "an off-branch endpoint must not be used"
     );
     assert_eq!(backend.excluded_endpoints().len(), 1);
-    assert_eq!(backend.excluded_endpoints()[0].0, "fork");
+    assert_eq!(backend.excluded_endpoints()[0].0, "https://fork");
 }
 
 /// D39.11.g: an endpoint can pass admission and still fail the method that is actually needed.
@@ -720,6 +720,7 @@ async fn a_rejected_broadcast_is_reported_and_not_retried_elsewhere() {
 
     let err = backend.send_transaction(vec![1, 2, 3]).await.unwrap_err();
     assert_eq!(err, LightwalletdError::BroadcastRejected {
+        endpoint: "https://first".to_owned(),
         code: -26,
         message: "tx-expiring-soon".to_owned()
     });
@@ -1138,6 +1139,7 @@ fn tx_at(height: u64, tag: u8) -> RawTx {
 fn serve_failure() -> WindowError {
     WindowError {
         serve_failure: true,
+        transport: false,
         message: "No information available about transaction".to_owned(),
     }
 }
@@ -1304,6 +1306,7 @@ async fn a_transport_failure_ends_the_read_without_claiming_a_clean_answer() {
             txs: vec![tx_at(3, 1)],
             error: Some(WindowError {
                 serve_failure: false,
+                transport: true,
                 message: "connection reset".to_owned(),
             }),
         })
@@ -1337,6 +1340,7 @@ fn refusing_every_request(calls: Arc<Mutex<usize>>) -> impl FnMut(u64, u64) -> f
             txs: Vec::new(),
             error: Some(WindowError {
                 serve_failure: true,
+                transport: false,
                 message: "Internal error: the node could not serve a transaction".to_owned(),
             }),
         })
@@ -1393,6 +1397,7 @@ async fn four_unservable_heights_in_a_window_are_tolerated_and_a_fifth_is_not() 
                 txs: Vec::new(),
                 error: failing.then(|| WindowError {
                     serve_failure: true,
+                    transport: false,
                     message: "no such mempool or blockchain transaction".to_owned(),
                 }),
             })
@@ -1898,7 +1903,7 @@ async fn the_backend_probes_the_cache_and_never_uses_a_stale_cache_endpoint() {
     assert_eq!(transport.called("mathnodes", "tip"), 0);
     let excluded = backend.excluded_endpoints();
     assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0].0, "mathnodes");
+    assert_eq!(excluded[0].0, "https://mathnodes");
 }
 
 /// T39.11.7b / R39.11.7b: `[A, A, B]` with A and B on different branches is two endpoints with one
@@ -1974,4 +1979,345 @@ async fn only_duplicates_is_one_endpoint() {
         other => panic!("{other:?}"),
     }
     assert_eq!(transport.called("a", "info"), 1);
+}
+
+// ---------------------------------------------------------------------------------------------
+// R39.11.29 -- R39.11.31: naming, the endpoint that rejected, suspension
+// ---------------------------------------------------------------------------------------------
+
+mod naming_and_suspension {
+    use super::*;
+    use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+
+    struct Bound;
+    impl WalletBranchStore for Bound {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(scanned_wallet(IRONWOOD_BRANCH)) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+
+    fn transport_failure() -> EndpointError { EndpointError::Transport("connection reset".to_owned()) }
+
+    /// A backend whose clock the test moves, over endpoints `a`, `b` and `c` that are all healthy.
+    fn clocked(transport: &Arc<FakeTransport>, servers: &[&str]) -> (LightwalletdBackend, Arc<Mutex<f64>>) {
+        let now = Arc::new(Mutex::new(1_000.0));
+        let clock = now.clone();
+        let backend = backend_over(transport, servers).with_clock(Arc::new(move || *clock.lock()));
+        backend.bind_wallet(Arc::new(Bound));
+        (backend, now)
+    }
+
+    fn fail_next_tip(transport: &FakeTransport, server: &str) {
+        transport
+            .scripts
+            .lock()
+            .get_mut(server)
+            .unwrap()
+            .tips
+            .push_back(Err(transport_failure()));
+    }
+
+    fn serve_all(transport: &FakeTransport, servers: &[&str]) {
+        for server in servers {
+            transport.serve(server, healthy(&[]));
+            transport.scripts.lock().get_mut(*server).unwrap().tip_floor = Some(ARRR_TIP);
+        }
+    }
+
+    /// T39.11.v: 20 s, doubling, reset by an answer; suspended endpoints are asked last.
+    #[tokio::test]
+    async fn a_transport_failure_suspends_with_a_doubling_backoff_and_an_answer_resets_it() {
+        let transport = Arc::new(FakeTransport::default());
+        serve_all(&transport, &["a", "b", "c"]);
+        let (backend, now) = clocked(&transport, &["a", "b", "c"]);
+
+        fail_next_tip(&transport, "a");
+        backend.fresh_tip().await.unwrap();
+        assert_eq!(transport.called("a", "tip"), 1);
+        assert!(backend.is_suspended("a"));
+
+        // While suspended, `a` is sent nothing and `b` is asked first.
+        backend.fresh_tip().await.unwrap();
+        backend.fresh_tip().await.unwrap();
+        assert_eq!(transport.called("a", "tip"), 1);
+        assert_eq!(transport.called("b", "tip"), 3);
+
+        *now.lock() += 19.0;
+        assert!(backend.is_suspended("a"));
+        *now.lock() += 1.0;
+        assert!(!backend.is_suspended("a"), "20 s is the first suspension");
+
+        // The second failure doubles it.
+        fail_next_tip(&transport, "a");
+        backend.fresh_tip().await.unwrap();
+        assert_eq!(transport.called("a", "tip"), 2);
+        *now.lock() += 39.0;
+        assert!(backend.is_suspended("a"));
+        *now.lock() += 1.0;
+        assert!(!backend.is_suspended("a"), "40 s is the second suspension");
+
+        // An answer resets it: the next suspension is 20 s again.
+        backend.fresh_tip().await.unwrap();
+        assert_eq!(transport.called("a", "tip"), 3);
+        fail_next_tip(&transport, "a");
+        backend.fresh_tip().await.unwrap();
+        *now.lock() += 20.0;
+        assert!(!backend.is_suspended("a"), "an answer reset the schedule");
+
+        // The cap is the shared one.
+        for _ in 0..40 {
+            fail_next_tip(&transport, "a");
+            backend.fresh_tip().await.unwrap();
+            *now.lock() += 13.0 * 3600.0;
+        }
+        fail_next_tip(&transport, "a");
+        backend.fresh_tip().await.unwrap();
+        *now.lock() += 12.0 * 3600.0 - 1.0;
+        assert!(backend.is_suspended("a"));
+        *now.lock() += 1.0;
+        assert!(!backend.is_suspended("a"));
+    }
+
+    /// T39.11.v: suspension never decides an outcome alone, and the error names each endpoint once.
+    #[tokio::test]
+    async fn suspended_endpoints_are_tried_before_the_operation_fails() {
+        let transport = Arc::new(FakeTransport::default());
+        serve_all(&transport, &[
+            "https://a.naming.example:1",
+            "https://b.naming.example:2",
+            "https://c.naming.example:3",
+        ]);
+        let servers = [
+            "https://a.naming.example:1",
+            "https://b.naming.example:2",
+            "https://c.naming.example:3",
+        ];
+        let (backend, _now) = clocked(&transport, &servers);
+        fail_next_tip(&transport, servers[0]);
+        fail_next_tip(&transport, servers[1]);
+        backend.fresh_tip().await.unwrap();
+        assert!(backend.is_suspended(servers[0]) && backend.is_suspended(servers[1]));
+
+        // `c` fails now; `a` and `b` are tried after it, still fail, and only then does the operation fail.
+        for server in servers {
+            let mut scripts = transport.scripts.lock();
+            let script = scripts.get_mut(server).unwrap();
+            script.tip_floor = None;
+            script.tips.push_back(Err(transport_failure()));
+        }
+        let before: Vec<usize> = servers.iter().map(|s| transport.called(s, "tip")).collect();
+        let err = backend.fresh_tip().await.unwrap_err();
+        for (server, before) in servers.iter().zip(before) {
+            assert_eq!(
+                transport.called(server, "tip"),
+                before + 1,
+                "every admitted endpoint is attempted"
+            );
+        }
+        let text = err.to_string();
+        for host in ["a.naming.example:1", "b.naming.example:2", "c.naming.example:3"] {
+            assert_eq!(text.matches(host).count(), 1, "{text}");
+        }
+    }
+
+    /// T39.11.v: admission probes a suspended endpoint, and its branch still counts in the vote.
+    #[tokio::test]
+    async fn admission_probes_suspended_endpoints_and_their_branch_still_counts() {
+        let transport = Arc::new(FakeTransport::default());
+        serve_all(&transport, &["a", "b"]);
+        transport.serve("c", stale_fork());
+        let (backend, _now) = clocked(&transport, &["a", "b", "c"]);
+        backend.bind_wallet(Arc::new(NoBinding));
+
+        // `a` and `b` are on one branch, `c` on another: without `a`'s vote there is no strict majority.
+        backend.suspend_on_failure("a", "connection reset");
+        assert!(backend.is_suspended("a"));
+        let probes_before = transport.called("a", "info");
+        let admitted = backend.admitted().await.unwrap();
+        assert_eq!(admitted, vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(
+            transport.called("a", "info"),
+            probes_before + 1,
+            "the suspended endpoint was probed"
+        );
+        // A successful server-information read resets it.
+        assert!(!backend.is_suspended("a"));
+    }
+
+    struct NoBinding;
+    impl WalletBranchStore for NoBinding {
+        fn state(&self) -> Result<WalletBranchState, String> { Ok(WalletBranchState::default()) }
+
+        fn record(&self, _: u32) -> Result<(), String> { Ok(()) }
+    }
+
+    /// T39.11.v: only a transport-level failure suspends; every service-level answer leaves the endpoint alone.
+    #[tokio::test]
+    async fn service_level_answers_never_suspend() {
+        let transport = Arc::new(FakeTransport::default());
+        let mut a = healthy(&[]);
+        a.transaction = Some(Err(EndpointError::NotFound("unknown txid".to_owned())));
+        a.send = Some(Err(EndpointError::Rejected {
+            code: -26,
+            message: "rejected".to_owned(),
+        }));
+        a.balance = Some(Err(EndpointError::NoAddressIndex(
+            "No information available for address".to_owned(),
+        )));
+        a.tips = VecDeque::from([Err(EndpointError::Service("undecodable answer".to_owned()))]);
+        transport.serve("a", a);
+        let (backend, _now) = clocked(&transport, &["a"]);
+
+        assert!(matches!(
+            backend.transaction([1; 32]).await,
+            Err(LightwalletdError::NoSuchTransaction(_))
+        ));
+        assert!(!backend.is_suspended("a"));
+        assert!(matches!(
+            backend.send_transaction(vec![1, 2, 3]).await,
+            Err(LightwalletdError::BroadcastRejected { .. })
+        ));
+        assert!(!backend.is_suspended("a"));
+        assert!(backend.fresh_tip().await.is_err());
+        assert!(!backend.is_suspended("a"));
+        assert!(backend.taddr_balance(Vec::new()).await.is_err());
+        assert!(!backend.is_suspended("a"));
+        // A new backend starts with nothing suspended.
+        assert!(!clocked(&transport, &["a"]).0.is_suspended("a"));
+    }
+
+    /// T39.11.v: with every endpoint unreachable, activation still reports it after attempting each one.
+    #[tokio::test]
+    async fn every_endpoint_unreachable_is_reported_after_attempting_each() {
+        let transport = Arc::new(FakeTransport::default());
+        let mut down = Script::default();
+        down.info = Some(Err(transport_failure()));
+        transport.serve("https://a.naming.example:1", down);
+        let mut down = Script::default();
+        down.info = Some(Err(transport_failure()));
+        transport.serve("https://b.naming.example:2", down);
+        let (backend, _now) = clocked(&transport, &[
+            "https://a.naming.example:1",
+            "https://b.naming.example:2",
+        ]);
+        backend.suspend_on_failure("https://a.naming.example:1", "earlier failure");
+
+        let err = backend.admitted().await.unwrap_err();
+        assert!(matches!(err, LightwalletdError::AllUnreachable(_)), "{err:?}");
+        assert_eq!(transport.called("https://a.naming.example:1", "info"), 1);
+        assert_eq!(transport.called("https://b.naming.example:2", "info"), 1);
+        assert!(
+            backend.is_suspended("https://b.naming.example:2"),
+            "a failed probe suspends"
+        );
+    }
+
+    /// T39.11.u: a rejection names the endpoint, logs one warn line, is not retried and suspends nothing.
+    #[tokio::test]
+    async fn a_rejection_names_the_endpoint_in_the_error_and_in_one_warn_line() {
+        let capturing = install_log_capture();
+        let first = "https://user:secret@first.rejecting.example:9067/path?key=SECRET";
+        let transport = Arc::new(FakeTransport::default());
+        let mut a = healthy(&[]);
+        a.send = Some(Err(EndpointError::Rejected {
+            code: -26,
+            message: "tx-expiring-soon".to_owned(),
+        }));
+        transport.serve(first, a);
+        let mut b = healthy(&[]);
+        b.send = Some(Ok(()));
+        transport.serve("https://second.rejecting.example:9067", b);
+        let (backend, _now) = clocked(&transport, &[first, "https://second.rejecting.example:9067"]);
+
+        let err = backend.send_transaction(vec![1, 2, 3]).await.unwrap_err();
+        assert_eq!(err, LightwalletdError::BroadcastRejected {
+            endpoint: "https://first.rejecting.example:9067".to_owned(),
+            code: -26,
+            message: "tx-expiring-soon".to_owned(),
+        });
+        let text = err.to_string();
+        assert!(text.contains("https://first.rejecting.example:9067") && text.contains("-26"));
+        assert!(text.contains("tx-expiring-soon"));
+        assert_eq!(transport.called("https://second.rejecting.example:9067", "send"), 0);
+        assert!(!backend.is_suspended(first));
+
+        if capturing {
+            let lines: Vec<String> = captured_log_lines()
+                .into_iter()
+                .filter(|line| line.contains("first.rejecting.example"))
+                .collect();
+            let warns: Vec<&String> = lines.iter().filter(|line| line.starts_with("WARN ")).collect();
+            assert_eq!(warns.len(), 1, "{lines:?}");
+            assert!(warns[0].contains("https://first.rejecting.example:9067"));
+            assert!(warns[0].contains("code -26") && warns[0].contains("tx-expiring-soon"));
+        }
+    }
+
+    /// T39.11.t: no text, log line or debug form carries more of an endpoint than its host-only name.
+    #[tokio::test]
+    async fn endpoints_are_named_host_only_everywhere() {
+        let capturing = install_log_capture();
+        let failing = "https://user:secret@failing.naming.example:9067/path?key=SECRET";
+        let healthy_a = "http://user:secret@a.naming.example:9067/path?key=SECRET";
+        let healthy_b = "b.naming.example:9067/path?key=SECRET";
+        let fork = "https://fork.naming.example:9067/path?key=SECRET";
+        let transport = Arc::new(FakeTransport::default());
+        let mut failing_script = Script::default();
+        failing_script.info = Some(Err(EndpointError::Transport(format!("connect to {failing} refused"))));
+        transport.serve(failing, failing_script);
+        transport.serve(healthy_a, healthy(&[]));
+        transport.serve(healthy_b, healthy(&[]));
+        transport.serve(fork, stale_fork());
+        for server in [healthy_a, healthy_b] {
+            transport.scripts.lock().get_mut(server).unwrap().tip_floor = Some(ARRR_TIP);
+        }
+        let servers = [failing, healthy_a, healthy_b, fork, "not a url SECRET"];
+        let (backend, _now) = clocked(&transport, &servers);
+        backend.bind_wallet(Arc::new(NoBinding));
+
+        let mut texts = vec![format!("{backend:?}")];
+        // The excluded set, a failing operation and a lower-layer text.
+        backend.admitted().await.unwrap();
+        for (server, reason) in backend.excluded_endpoints() {
+            texts.push(format!("{server} {reason}"));
+        }
+        // A detection error and the all-failed error.
+        transport.scripts.lock().get_mut(healthy_a).unwrap().tip_floor = None;
+        transport.scripts.lock().get_mut(healthy_b).unwrap().tip_floor = None;
+        for server in [healthy_a, healthy_b] {
+            transport
+                .scripts
+                .lock()
+                .get_mut(server)
+                .unwrap()
+                .tips
+                .push_back(Err(EndpointError::Transport(format!(
+                    "error sending request for url ({}) failed",
+                    crate::node_url::lightwalletd_endpoint_url(server)
+                ))));
+        }
+        texts.push(backend.fresh_tip().await.unwrap_err().to_string());
+        texts.push(backend.scrub(&format!("dns error for {failing}"), failing));
+
+        for text in &texts {
+            for secret in ["user", "secret", "SECRET", "/path", "key="] {
+                assert!(!text.contains(secret), "a credential part reaches a text");
+            }
+        }
+        assert!(texts.iter().any(|t| t.contains("https://failing.naming.example:9067")));
+        // An entry without a scheme takes the scheme the client uses.
+        assert_eq!(backend.name(healthy_b), "https://b.naming.example:9067");
+        // An entry that cannot be parsed is named by the placeholder and its list position.
+        assert_eq!(backend.name("not a url SECRET"), "<invalid lightwalletd endpoint> #5");
+        if capturing {
+            for line in captured_log_lines()
+                .into_iter()
+                .filter(|l| l.contains("naming.example"))
+            {
+                for secret in ["user", "secret", "SECRET", "/path", "key="] {
+                    assert!(!line.contains(secret), "a credential part reaches a log line");
+                }
+            }
+        }
+    }
 }

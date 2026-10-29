@@ -35,7 +35,7 @@ use alloy::providers::{Provider, RootProvider};
 use alloy::rpc::client::RpcClient;
 
 use crate::eth::alloy_compat::transport::AlloyTransport;
-use crate::eth::node_url::ListedNode;
+use crate::node_url::ListedNode;
 use crate::RpcTransportEventHandlerShared;
 
 /// Concrete provider type used by every EVM coin in the project.

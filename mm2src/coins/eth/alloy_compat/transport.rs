@@ -49,7 +49,7 @@ use common::log::{debug, warn};
 use futures::future::{select, Either};
 use tower::Service;
 
-use crate::eth::node_url::{host_only, scrub_node_url, ListedNode, NodeSlot};
+use crate::node_url::{host_only, scrub_node_url, ListedNode, NodeSlot};
 use crate::{RpcTransportEventHandler, RpcTransportEventHandlerShared};
 
 /// Per-node bound of the failover path (CRD ch.35 R35.1.10): one attempt, from connecting to the decoded body,
@@ -81,7 +81,7 @@ struct Inner {
     cutoff_s: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Node {
     /// The configured URL; it is a credential, so it is only ever used to send and to scrub.
     configured: String,
@@ -90,6 +90,13 @@ struct Node {
     label: String,
     /// The coin's ticker and the node's position in the coin's list as the request gave it (R35.1.16).
     slot: NodeSlot,
+}
+
+/// The debug form names the node by its host-only form only (CRD ch.35 R35.1.17).
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node").field("node", &self.label).finish()
+    }
 }
 
 impl Node {

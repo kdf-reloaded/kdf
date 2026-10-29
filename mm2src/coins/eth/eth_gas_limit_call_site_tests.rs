@@ -55,7 +55,7 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
     )
     .unwrap();
     let web3 = crate::eth::alloy_compat::build_provider(
-        crate::eth::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".to_owned()]),
+        crate::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".to_owned()]),
         vec![],
     )
     .unwrap();

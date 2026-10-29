@@ -27,6 +27,7 @@ use super::z_lightwalletd::{p2sh_hash_of, txid_internal_to_display, DetectionLog
                             ADMISSION_REEVALUATION_INTERVAL};
 use super::z_tx_read::{read_tx, txid_display};
 use crate::coin_conf;
+use crate::node_url::{electrum_server_name, UNNAMED_SERVER};
 use crate::utxo::rpc_clients::electrum_pool::round_budget;
 use crate::utxo::rpc_clients::{electrum_script_hash, ElectrumClient, ElectrumPoolTimings, ElectrumRpcRequest};
 use crate::utxo::utxo_builder::build_electrum_client;
@@ -92,6 +93,12 @@ pub(crate) trait ElectrumReads: Send + Sync + fmt::Debug + 'static {
     async fn unspent(&self, server: &str, script_hash: &str) -> Result<Vec<UnspentItem>, String>;
     /// `blockchain.transaction.get`: the raw transaction bytes.
     async fn transaction(&self, server: &str, txid: &H256Json) -> Result<Vec<u8>, String>;
+    /// The only form in which a log line, error text or status message names `server`: `host:port`, or a
+    /// placeholder when the address cannot be reduced to one, never the configured string (CRD ch.38
+    /// R38.6.9a, ch.35 R35.1.17).
+    fn server_name(&self, server: &str) -> String {
+        electrum_server_name(server).unwrap_or_else(|| UNNAMED_SERVER.to_owned())
+    }
 }
 
 /// The Electrum reads over the shared client. The client is built, with chapter 38's policies, when the
@@ -348,7 +355,10 @@ impl Walk<'_> {
             let remaining = self.deadline.saturating_duration_since(now);
             let left = self.servers.len() - self.next;
             if remaining.is_zero() {
-                let unasked: Vec<&str> = self.servers[self.next..].iter().map(String::as_str).collect();
+                let unasked: Vec<String> = self.servers[self.next..]
+                    .iter()
+                    .map(|server| self.fallback.name(server))
+                    .collect();
                 self.conditions.push(format!(
                     "the time budget of {:?} for this question was used up before {} could be asked",
                     self.fallback.budget,
@@ -368,7 +378,9 @@ impl Walk<'_> {
                 .await
             {
                 Ok(()) => return Some((server, turn_deadline)),
-                Err(condition) => self.conditions.push(format!("{}: {}", server, condition)),
+                Err(condition) => self
+                    .conditions
+                    .push(format!("{}: {}", self.fallback.name(&server), condition)),
             }
         }
         None
@@ -401,6 +413,9 @@ impl ElectrumFallback {
 
     /// Records the outcome of a vetting and logs it: one `info` line at a server's first use, and a line
     /// when the outcome changes; an unchanged outcome is only a `debug` line (R39.11.25(e)).
+    /// How a text names `server` (see [`ElectrumReads::server_name`]).
+    fn name(&self, server: &str) -> String { self.reads.server_name(server) }
+
     fn announce(&self, server: &str, result: &Result<(), String>, identity: &str) {
         let ok = result.is_ok();
         let previous = {
@@ -411,11 +426,15 @@ impl ElectrumFallback {
         let line = match result {
             Ok(()) => format!(
                 "Electrum fallback of {}: server {} passed its chain-identity and tip check ({})",
-                self.ticker, server, identity
+                self.ticker,
+                self.name(server),
+                identity
             ),
             Err(reason) => format!(
                 "Electrum fallback of {}: server {} is not used: {}",
-                self.ticker, server, reason
+                self.ticker,
+                self.name(server),
+                reason
             ),
         };
         match previous {
@@ -683,7 +702,7 @@ impl ElectrumFallback {
                     log.line(format!(
                         "HTLC already-sent detection for {}: Electrum {} answered: {}",
                         log.coin,
-                        server,
+                        self.name(&server),
                         match &answer {
                             SentAnswer::Sent(tx) => format!("sent, payment transaction {:?}", txid_display(tx)),
                             SentAnswer::NotSent => "not sent (its script history is complete and empty)".to_owned(),
@@ -691,7 +710,7 @@ impl ElectrumFallback {
                     ));
                     return Ok(answer);
                 },
-                Err(condition) => walk.conditions.push(format!("{}: {}", server, condition)),
+                Err(condition) => walk.conditions.push(format!("{}: {}", self.name(&server), condition)),
             }
         }
         log.line(format!(
@@ -710,7 +729,7 @@ impl ElectrumFallback {
         deadline: TokioInstant,
         progress: &Progress<'_>,
     ) -> Result<SentAnswer, String> {
-        progress.set(format!("Electrum {}, script history", server));
+        progress.set(format!("Electrum {}, script history", self.name(server)));
         let history = bounded(
             deadline,
             "the script history read",
@@ -722,7 +741,7 @@ impl ElectrumFallback {
         }
         let mut problems = Vec::new();
         for item in &history {
-            progress.set(format!("Electrum {}, transaction {:?}", server, item.txid));
+            progress.set(format!("Electrum {}, transaction {:?}", self.name(server), item.txid));
             match self.read_transaction(server, item, deadline).await {
                 Ok(tx) if pays_script(&tx, script_pubkey) => return Ok(SentAnswer::Sent(tx)),
                 Ok(_) => {},
@@ -807,7 +826,7 @@ impl ElectrumFallback {
                     log.line(format!(
                         "HTLC spend detection for {}: Electrum {} answered: {}",
                         log.coin,
-                        server,
+                        self.name(&server),
                         match &answer {
                             SpendAnswer::Spent { tx, input_index } => {
                                 format!("spent by {:?}, input {}", txid_display(tx), input_index)
@@ -817,7 +836,7 @@ impl ElectrumFallback {
                     ));
                     return Ok(answer);
                 },
-                Err(condition) => walk.conditions.push(format!("{}: {}", server, condition)),
+                Err(condition) => walk.conditions.push(format!("{}: {}", self.name(&server), condition)),
             }
         }
         log.line(format!(
@@ -836,7 +855,7 @@ impl ElectrumFallback {
         deadline: TokioInstant,
         progress: &Progress<'_>,
     ) -> Result<SpendAnswer, String> {
-        progress.set(format!("Electrum {}, script history", server));
+        progress.set(format!("Electrum {}, script history", self.name(server)));
         let history = bounded(
             deadline,
             "the script history read",
@@ -846,7 +865,7 @@ impl ElectrumFallback {
         let funding = txid_internal_to_display(output.txid);
         let mut problems = Vec::new();
         for item in history.iter().filter(|item| item.txid != funding) {
-            progress.set(format!("Electrum {}, transaction {:?}", server, item.txid));
+            progress.set(format!("Electrum {}, transaction {:?}", self.name(server), item.txid));
             match self.read_transaction(server, item, deadline).await {
                 Ok(tx) => {
                     let spender = tx.transparent_bundle().and_then(|bundle| {
@@ -865,7 +884,7 @@ impl ElectrumFallback {
         if !problems.is_empty() {
             return Err(problems.join("; "));
         }
-        progress.set(format!("Electrum {}, unspent listing", server));
+        progress.set(format!("Electrum {}, unspent listing", self.name(server)));
         let unspent = bounded(
             deadline,
             "the unspent listing read",
