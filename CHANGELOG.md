@@ -325,6 +325,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A taker that falls back to a refund now takes the maker's coins when the maker has already
+  claimed the taker's payment.** When a taker could not confirm its own payment, for example during
+  a node or server outage, or stopped waiting at the lock time just before the maker claimed it, the
+  swap went on to refund the payment. If the maker had claimed it, the refund was rejected and the
+  swap ended as failed: the taker got the maker's coins only by running `recover_funds_of_swap` before
+  the maker's own lock time ran out, and lost both sides otherwise. Now the taker checks the chain
+  before the refund, every few minutes while it waits to refund, and after a rejected refund; when the
+  maker has claimed the payment, the taker reads the secret and claims the maker's payment, as in a
+  normal swap. Such a swap still lists the earlier error events, so a wallet may show it as failed
+  although the trade completed. A refund already on the chain, after a restart, now ends the swap as
+  refunded. Detail: CRD ch.51 R31a.
 - **The log line about an abandoned HTTP request now says which host it was.** When a request
   finished after its caller had stopped waiting, the node logged only "drive03 receiver is dropped".
   This happens, for example, each time an EVM node misses the failover cutoff and the next node

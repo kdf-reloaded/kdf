@@ -510,6 +510,64 @@ with taker-side event names: prepare emits `TakerPaymentRefundStarted`,
 execute emits `TakerPaymentRefunded` or `TakerPaymentRefundFailed`, and
 finalize emits `TakerPaymentRefundFinished`.
 
+**R31a.** *The taker's refund chain claims a payment the maker has spent
+(Reloaded addition, 2026-10-29, Decision AV).* The taker enters its
+refund chain from failures that do not prove the maker has not spent the
+taker payment: its own wait for the payment's confirmations failed
+(`TakerPaymentWaitConfirmFailed`), or its wait for the spend ended at the
+locktime (`TakerPaymentWaitForSpendFailed`) while the maker may spend just
+after it. The maker can spend the taker payment until the taker's refund
+is on chain, and such a spend makes the refund invalid. A refund chain
+that only builds the refund ends in `TakerPaymentRefundFailed` with the
+maker holding both payments until the maker payment locktime (R10, later
+than the taker payment locktime of R22), after which the maker can refund
+its own payment too. The taker execute stage therefore MUST look on chain
+for a spend or a refund of the taker payment, with the swap's own HTLC
+public key, at three points:
+
+1. once on entry, before the refundability wait;
+2. during the wait for the payment to become refundable, which is cut
+   into steps of at most 300 seconds and at least 5 seconds: after a step,
+   when at least 60 seconds have passed since the previous look, so that
+   a spend made during the wait is claimed before the taker payment
+   locktime rather than after it, while a refundability check that keeps
+   answering "a few seconds more" (a chain whose median time has not yet
+   reached the locktime) does not search the chain on every step;
+3. once after a refund attempt is rejected for a reason that ends the
+   chain, before `TakerPaymentRefundFailed` is emitted. A rejection that
+   R18 retries (R39.5.13) is retried as before.
+
+A spend found at any point MUST be handled as R30 handles the spend it
+observes: the secret is extracted from the spending transaction,
+`TakerPaymentSpent` is emitted carrying that transaction and the secret,
+and the swap continues at `STAGE-SPEND-MAKER-PAYMENT` (R31). The
+rejected refund is not published. A refund of the taker payment found on
+chain (a restart after the refund was broadcast) MUST emit
+`TakerPaymentRefunded` with that transaction and end the chain, without
+building another refund. One look is bounded to 120 seconds. When the
+search fails, does not finish within that bound, finds nothing, or finds
+a spend whose secret cannot be extracted, the chain continues exactly as
+R31 states. A swap whose record already holds a spend of the taker
+payment (resumed after `MakerPaymentSpendFailed`, whose resume stage is
+the refund chain, R32) MUST NOT look again, so that a failed spend of the
+maker payment cannot lead back to the same spend; its refund chain is
+the one R31 states.
+
+A swap completed this way keeps the error events that sent it into the
+refund chain (`TakerPaymentWaitConfirmFailed` or
+`TakerPaymentWaitForSpendFailed`, and `TakerPaymentWaitRefundStarted`),
+followed by `MakerPaymentSpent`, and `recover_funds_of_swap` reports it
+as not recoverable because the maker payment is spent.
+
+The event set and the resume map of R32 are unchanged: the addition
+emits only existing event types, and the only new event order it
+produces (`TakerPaymentSpent` after `TakerPaymentWaitRefundStarted`)
+resumes where R32 already sends `TakerPaymentSpent`. The persisted log
+shape of chapter 44 is unchanged. This rule records no claim about the
+reference implementation; it closes a path on which a taker otherwise
+depends on a manual `recover_funds_of_swap` within the maker payment's
+locktime.
+
 **R32.** *Taker event set and resume map.* The taker machine MUST use
 exactly the thirty-one event types below with exactly these resume
 stages.
@@ -1379,6 +1437,7 @@ and the 33-byte key width of R62 MUST NOT be relaxed, on either netid.
 | Clock-agreement tolerance is exactly 60 seconds on both sides          | R12, R24      |
 | Maker locktime uses the multiplier; taker locktime does not            | R10, R22, R25 |
 | A negative negotiation acknowledgement is transmitted, once, on seven conditions | R33, R34, R35 |
+| A taker in its refund chain claims a taker payment the maker has spent, instead of failing the refund | R31a |
 | Refusal is broadcast before the failure event is persisted             | R36           |
 | No refusal message exists after the negotiation stage                  | R38           |
 | Refusal causes the refused taker to penalise the maker for one hour    | R40           |
@@ -1580,6 +1639,36 @@ browser-build node: nothing is stored. Deliver a payload that is neither
 the signed envelope nor the R48 object: it is dropped with no store
 change. *(Added 2026-10-27 with R50A; passed the KDF Dirty Gate on 2026-10-28.)*
 
+**T29.** *The refund chain claims a spent taker payment (R31a).* With a
+taker swap in its refund chain and the chain answers mocked:
+
+1. a spend found on entry emits `TakerPaymentSpent` with the extracted
+   secret and continues at `STAGE-SPEND-MAKER-PAYMENT`; the
+   refundability wait is not entered and no refund is built;
+2. with the wait answering "not yet" and the spend appearing after its
+   second step, the same outcome follows after exactly two steps, and no
+   refund is built;
+3. a refund rejected for a terminal reason, with the spend appearing
+   then, gives the same outcome instead of `TakerPaymentRefundFailed`,
+   and the rejected refund is not published;
+4. with nothing on chain, the rejection ends in `TakerPaymentRefundFailed`
+   as R31 states, after the entry look and the post-rejection look;
+5. a swap whose record already holds a spend of the taker payment does
+   not look and refunds as R31 states;
+6. a refund already on chain emits `TakerPaymentRefunded` with that
+   transaction, builds nothing and publishes nothing;
+7. a refundability check that answers "wait 0 s" five times before the
+   payment becomes refundable leads, within the 60-second look interval,
+   to no look besides the one on entry, and the refund goes through;
+8. a search that fails, a spend whose secret cannot be extracted, and a
+   search that does not finish within its bound each leave the chain as
+   R31 states (a terminal rejection still ends in
+   `TakerPaymentRefundFailed`; an accepted refund still ends in
+   `TakerPaymentRefunded`).
+
+*(Added 2026-10-29 with R31a; items 7 and 8 added 2026-10-30 after
+review.)*
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1770,6 +1859,11 @@ reference rows alike.
   comparison of every added line against identifier, literal, comment-phrase,
   path and version-control-identifier lists; the mechanical gate tool was not
   run (prose). *Measure:* 0.02 against the 0.10 threshold.)
+  (Addition of 2026-10-29: R31a, its invariant row and T29 are a
+  Reloaded addition written in a clean session from this workspace's own
+  taker refund chain and recovery code and from R30, R31 and R32 of this
+  chapter; no reference input was consulted, the rule makes no parity
+  claim, and no Dirty Gate pass is needed.)
   Otherwise
   consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the legacy swap state
