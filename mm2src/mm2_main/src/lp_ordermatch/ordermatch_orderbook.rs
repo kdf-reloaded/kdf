@@ -181,7 +181,7 @@ async fn request_sync_state(
     deferral_ms: u64,
 ) -> Option<SyncPubkeyOrderbookStateRes> {
     let sent_ms = now_ms();
-    if let Some(response) = ask_for_sync_state(ctx, pubkey, trie_roots.clone(), peer).await {
+    if let Some(response) = ask_for_sync_state(ctx, ordermatch_ctx, pubkey, trie_roots.clone(), peer, 1).await {
         return Some(response);
     }
 
@@ -198,27 +198,49 @@ async fn request_sync_state(
     if still_unsynchronized.is_empty() {
         return None;
     }
-    ask_for_sync_state(ctx, pubkey, still_unsynchronized, peer).await
+    ask_for_sync_state(ctx, ordermatch_ctx, pubkey, still_unsynchronized, peer, 2).await
 }
 
-/// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`. Any outcome but an answer
-/// (an error, "no data", a timeout, a transport failure) is `None`.
+/// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`; `attempt` is 1 for the
+/// request and 2 for the re-ask. Any outcome but an answer (an error, "no data", a timeout, a transport
+/// failure) is `None`. This is the only place where an own synchronization request is logged (CRD ch.32
+/// R-Q6a): the first request and the re-ask both pass here.
 async fn ask_for_sync_state(
     ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
     pubkey: &str,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
     peer: &str,
+    attempt: u8,
 ) -> Option<SyncPubkeyOrderbookStateRes> {
+    let pairs = if debug_enabled() {
+        pairs_label(trie_roots.keys())
+    } else {
+        String::new()
+    };
     let req = OrdermatchRequest::SyncPubkeyOrderbookState {
         pubkey: pubkey.to_owned(),
         trie_roots,
     };
-    match request_one_peer::<SyncPubkeyOrderbookStateRes>(ctx.clone(), P2PRequest::Ordermatch(req), peer.to_owned())
-        .await
-    {
-        Ok(Some(response)) => Some(response),
-        _ => None,
-    }
+    let started_ms = now_ms();
+    let result =
+        request_one_peer::<SyncPubkeyOrderbookStateRes>(ctx.clone(), P2PRequest::Ordermatch(req), peer.to_owned())
+            .await;
+    let now = now_ms();
+    let (class, error) = classify_sync_request(&result);
+    ordermatch_ctx.sync_log.request(
+        &RequestEvent {
+            peer,
+            pubkey,
+            pairs: &pairs,
+            attempt,
+            class,
+            elapsed_ms: now.saturating_sub(started_ms),
+            error,
+        },
+        now,
+    );
+    result.ok().flatten()
 }
 
 /// The entries of `trie_roots` whose pair this node still holds at the all-zero placeholder for `pubkey`.
@@ -989,6 +1011,36 @@ pub(crate) struct SyncPubkeyOrderbookStateRes {
     pub(crate) conf_infos: HashMap<Uuid, OrderConfirmationsSettings>,
 }
 
+/// Why a synchronization answer failed, by kind (CRD ch.32 R-Q6a). The kind is decided where the failure
+/// happens, never from the text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SyncAnswerFailure {
+    /// A requested pair has no root.
+    MissingPair,
+    /// A requested pair is held at the all-zero placeholder root.
+    Placeholder,
+    /// Any other trie or getter failure.
+    Trie,
+}
+
+impl From<SyncAnswerFailure> for AnswerClass {
+    fn from(failure: SyncAnswerFailure) -> Self {
+        match failure {
+            SyncAnswerFailure::MissingPair => AnswerClass::MissingPair,
+            SyncAnswerFailure::Placeholder => AnswerClass::Placeholder,
+            SyncAnswerFailure::Trie => AnswerClass::TrieError,
+        }
+    }
+}
+
+/// The failure of a synchronization answer. `text` is what the peer is sent, in the form the `ERRL!` and
+/// `try_s!` macros give it (the file name and line, then the reason).
+#[derive(Debug)]
+pub(crate) struct SyncAnswerError {
+    pub(crate) failure: SyncAnswerFailure,
+    pub(crate) text: String,
+}
+
 /// CRD ch.32 R-T3b items 2 and 3: the answer is built from the trie store as it stands, without
 /// waiting and without refusing. While the worker still has queued events, a full snapshot leaves
 /// out an order the read index no longer holds; once it has caught up, such an order is the
@@ -998,6 +1050,15 @@ pub(crate) fn process_sync_pubkey_orderbook_state(
     pubkey: String,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
 ) -> Result<Option<SyncPubkeyOrderbookStateRes>, String> {
+    process_sync_pubkey_orderbook_state_classified(ctx, pubkey, trie_roots).map_err(|e| e.text)
+}
+
+/// [`process_sync_pubkey_orderbook_state`] with the kind of the failure, for the logging of R-Q6a.
+pub(crate) fn process_sync_pubkey_orderbook_state_classified(
+    ctx: MmArc,
+    pubkey: String,
+    trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+) -> Result<Option<SyncPubkeyOrderbookStateRes>, SyncAnswerError> {
     let ordermatch_ctx = OrdermatchContext::from_ctx(&ctx).unwrap();
     // Lock order: `orderbook`, then `trie_store`.
     let orderbook = ordermatch_ctx.orderbook.lock();
@@ -1016,20 +1077,20 @@ fn build_sync_pubkey_orderbook_state_answer(
     pubkey: &str,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
     on_missing: MissingValue,
-) -> Result<Option<SyncPubkeyOrderbookStateRes>, String> {
+) -> Result<Option<SyncPubkeyOrderbookStateRes>, SyncAnswerError> {
     let pubkey_state = match trie_store.pubkeys_state.get(pubkey) {
         Some(s) => s,
         None => return Ok(None),
     };
 
     let order_getter = |uuid: &Uuid| orderbook.order_set.get(uuid).cloned();
-    let pair_orders_diff: Result<HashMap<_, _>, _> = trie_roots
+    let pair_orders_diff: Result<HashMap<_, _>, SyncAnswerError> = trie_roots
         .into_iter()
         .map(|(pair, root)| {
-            let actual_pair_root = pubkey_state
-                .trie_roots
-                .get(&pair)
-                .ok_or(ERRL!("No pair trie root for {}", pair))?;
+            let actual_pair_root = pubkey_state.trie_roots.get(&pair).ok_or_else(|| SyncAnswerError {
+                failure: SyncAnswerFailure::MissingPair,
+                text: ERRL!("No pair trie root for {}", pair),
+            })?;
 
             let delta_result = match pubkey_state.order_pairs_trie_state_history.get(&pair) {
                 Some(history) => DeltaOrFullTrie::from_history(
@@ -1044,12 +1105,23 @@ fn build_sync_pubkey_orderbook_state_answer(
                     .map(DeltaOrFullTrie::FullTrie),
             };
 
-            let delta = try_s!(delta_result);
+            // The held root of a placeholder pair is all zeros, which no trie has: the read fails there.
+            let delta = delta_result.map_err(|e| SyncAnswerError {
+                failure: if *actual_pair_root == H64::default() {
+                    SyncAnswerFailure::Placeholder
+                } else {
+                    SyncAnswerFailure::Trie
+                },
+                text: ERRL!("{}", e),
+            })?;
             Ok((pair, delta))
         })
         .collect();
 
-    let pair_orders_diff = try_s!(pair_orders_diff);
+    let pair_orders_diff = pair_orders_diff.map_err(|e| SyncAnswerError {
+        failure: e.failure,
+        text: ERRL!("{}", e.text),
+    })?;
     let mut protocol_infos = HashMap::new();
     let mut conf_infos = HashMap::new();
     let pair_orders_diff = pair_orders_diff

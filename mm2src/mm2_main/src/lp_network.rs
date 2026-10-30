@@ -31,6 +31,7 @@ use mm2_metrics::{ClockOps, MetricsOps};
 use mm2_p2p::atomicdex_behaviour::{AdexBehaviourCmd, AdexBehaviourEvent, AdexCmdTx, AdexEventRx, AdexResponse,
                                    AdexResponseChannel};
 use mm2_p2p::peers_exchange::PeerAddresses;
+use mm2_p2p::request_response::LocalFailure;
 use mm2_p2p::{decode_message, decode_signed, encode_and_sign, encode_message, pub_sub_topic, DecodingError,
               GossipsubMessage, Libp2pPublic, Libp2pSecpPublic, MessageId, NetworkPorts, PeerId, TOPIC_SEPARATOR};
 #[cfg(test)] use mocktopus::macros::*;
@@ -64,7 +65,12 @@ pub enum P2PRequestError {
     EncodeError(String),
     DecodeError(String),
     SendError(String),
+    /// The peer answered with an error.
     ResponseError(String),
+    /// This node's own request failed without an answer from the peer (CRD ch.32 R-Q6a classification); the
+    /// text is the same as it was when this was a [`P2PRequestError::ResponseError`].
+    #[display(fmt = "{}", _1)]
+    LocalResponseError(LocalFailure, String),
     #[display(fmt = "Expected 1 response, found {}", _0)]
     ExpectedSingleResponseError(usize),
 }
@@ -554,7 +560,7 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     match response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?
     {
         Some((from_peer, response)) => {
             let response = decode_message::<T>(&response)?;
@@ -567,7 +573,10 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
 pub enum PeerDecodedResponse<T> {
     Ok(T),
     None,
+    /// The peer answered with an error.
     Err(String),
+    /// This node's own request failed without an answer, or its answer could not be decoded.
+    LocalErr(LocalFailure, String),
 }
 
 #[allow(dead_code)]
@@ -590,7 +599,7 @@ pub async fn request_relays<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -615,7 +624,7 @@ pub async fn request_peers<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -637,6 +646,7 @@ pub async fn request_one_peer<T: de::DeserializeOwned>(
         PeerDecodedResponse::Ok(response) => Ok(Some(response)),
         PeerDecodedResponse::None => Ok(None),
         PeerDecodedResponse::Err(e) => MmError::err(P2PRequestError::ResponseError(e)),
+        PeerDecodedResponse::LocalErr(kind, e) => MmError::err(P2PRequestError::LocalResponseError(kind, e)),
     }
 }
 
@@ -649,10 +659,11 @@ fn parse_peers_responses<T: de::DeserializeOwned>(
             let res = match res {
                 AdexResponse::Ok { response } => match decode_message::<T>(&response) {
                     Ok(res) => PeerDecodedResponse::Ok(res),
-                    Err(e) => PeerDecodedResponse::Err(ERRL!("{}", e)),
+                    Err(e) => PeerDecodedResponse::LocalErr(LocalFailure::Decode, ERRL!("{}", e)),
                 },
                 AdexResponse::None => PeerDecodedResponse::None,
                 AdexResponse::Err { error } => PeerDecodedResponse::Err(error),
+                AdexResponse::LocalErr { kind, error } => PeerDecodedResponse::LocalErr(kind, error),
             };
             (peer_id, res)
         })

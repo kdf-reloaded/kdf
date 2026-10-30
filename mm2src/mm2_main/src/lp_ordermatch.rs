@@ -133,6 +133,10 @@ mod sync_answer_deferral;
 pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_retry_ms,
                                       SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
 
+#[path = "lp_ordermatch/sync_log.rs"] mod sync_log;
+pub(crate) use sync_log::{classify_sync_request, debug_enabled, pairs_label, AnswerClass, AnswerEvent, AnswerPath,
+                          AtOnce, RequestEvent, SyncLog};
+
 #[path = "lp_ordermatch/ordermatch_trading.rs"]
 mod ordermatch_trading;
 pub use ordermatch_trading::*;
@@ -398,6 +402,8 @@ pub(crate) struct OrdermatchContext {
     pub orderbook_subscriptions: PaRwLock<HashMap<String, OrderbookRequestingState>>,
     /// Own synchronization requests in flight and the peers' requests parked behind them (CRD ch.32 R-Q5b).
     pub sync_answer_deferral: SyncAnswerDeferral,
+    /// The counters behind the summary line of the order-book synchronization logging (CRD ch.32 R-Q6a).
+    pub sync_log: SyncLog,
     /// The map from coin original ticker to the orderbook ticker
     /// It is used to share the same orderbooks for concurrently activated coins with different protocols
     /// E.g. BTC and BTC-Segwit
@@ -436,6 +442,7 @@ impl Default for OrdermatchContext {
             trie_ops_tx,
             orderbook_subscriptions: PaRwLock::new(HashMap::default()),
             sync_answer_deferral: Default::default(),
+            sync_log: Default::default(),
             pending_maker_reserved: Default::default(),
             maker_outbox: Default::default(),
             orderbook_tickers: Default::default(),
@@ -480,6 +487,7 @@ pub fn init_ordermatch_context(ctx: &MmArc) -> OrdermatchInitResult<()> {
         trie_ops_tx,
         orderbook_subscriptions: PaRwLock::new(HashMap::default()),
         sync_answer_deferral: Default::default(),
+        sync_log: Default::default(),
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
         orderbook_tickers,
@@ -510,6 +518,7 @@ impl OrdermatchContext {
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
+                sync_log: Default::default(),
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
                 orderbook_tickers: Default::default(),
@@ -533,6 +542,7 @@ impl OrdermatchContext {
                 trie_ops_tx,
                 orderbook_subscriptions: PaRwLock::new(HashMap::default()),
                 sync_answer_deferral: Default::default(),
+                sync_log: Default::default(),
                 pending_maker_reserved: Default::default(),
                 maker_outbox: Default::default(),
                 orderbook_tickers: Default::default(),

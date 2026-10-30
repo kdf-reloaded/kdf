@@ -139,6 +139,14 @@ pub struct RequestResponseBehaviour {
     timeout_reports: TimeoutReports,
 }
 
+/// The kind of a failure of an outbound request: a timeout, or any other transport failure.
+fn outbound_failure_kind(error: &OutboundFailure) -> LocalFailure {
+    match error {
+        OutboundFailure::Timeout => LocalFailure::Timeout,
+        _ => LocalFailure::Transport,
+    }
+}
+
 impl RequestResponseBehaviour {
     pub fn sender(&self) -> RequestResponseSender { self.tx.clone() }
 
@@ -226,7 +234,8 @@ impl RequestResponseBehaviour {
                     },
                     _ => error!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error),
                 }
-                let err_response = PeerResponse::Err {
+                let err_response = PeerResponse::LocalErr {
+                    kind: outbound_failure_kind(&error),
                     err: format!("{:?}", error),
                 };
                 self.process_response(request_id, err_response);
@@ -381,11 +390,37 @@ pub struct PeerRequest {
     pub req: Vec<u8>,
 }
 
+/// Why a request of this node failed without an answer from the peer. It is known only locally and never
+/// crosses the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalFailure {
+    /// The request-response timeout of libp2p or the local pending-request timeout expired.
+    Timeout,
+    /// Any other failure to send the request or to receive an answer: a closed connection, a failed dial,
+    /// an unsupported protocol, an I/O error, a full command channel.
+    Transport,
+    /// The answer arrived but this node could not decode it. It is created by the application layer, which
+    /// owns the decoding; this crate never produces it.
+    Decode,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PeerResponse {
-    Ok { res: Vec<u8> },
+    Ok {
+        res: Vec<u8>,
+    },
     None,
-    Err { err: String },
+    Err {
+        err: String,
+    },
+    /// A failure of this node's own request, with its [`LocalFailure`] kind. The variant stays last so the
+    /// indices of the wire variants above do not move, and it is skipped by serde: it is never written to a
+    /// peer and never read from one.
+    #[serde(skip)]
+    LocalErr {
+        kind: LocalFailure,
+        err: String,
+    },
 }
 
 macro_rules! try_io {
@@ -473,8 +508,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Protocol, TimeoutReports, TIMEOUT_REPORT_WINDOW};
+    use super::{outbound_failure_kind, LocalFailure, OutboundFailure, PeerResponse, Protocol, TimeoutReports,
+                TIMEOUT_REPORT_WINDOW};
+    use crate::atomicdex_behaviour::AdexResponse;
+    use crate::{decode_message, encode_message};
     use libp2p::PeerId;
+    use serde::{Deserialize, Serialize};
     use std::time::Duration;
     use wasm_timer::Instant;
 
@@ -530,5 +569,92 @@ mod tests {
         // The interval did not flush yet; the next timeout opens a new window and keeps the summary of the old.
         assert!(reports.record(peer, start + Duration::from_secs(61)));
         assert_eq!(reports.flush(start + Duration::from_secs(62)), vec![(peer, 2)]);
+    }
+
+    /// The wire form of `PeerResponse` before the local failure variant existed.
+    #[derive(Deserialize, Serialize)]
+    enum WirePeerResponse {
+        Ok { res: Vec<u8> },
+        None,
+        Err { err: String },
+    }
+
+    #[test]
+    fn the_wire_variants_are_encoded_as_before() {
+        let pairs = [
+            (
+                encode_message(&PeerResponse::Ok { res: vec![1, 2] }),
+                encode_message(&WirePeerResponse::Ok { res: vec![1, 2] }),
+            ),
+            (
+                encode_message(&PeerResponse::None),
+                encode_message(&WirePeerResponse::None),
+            ),
+            (
+                encode_message(&PeerResponse::Err { err: "e".to_owned() }),
+                encode_message(&WirePeerResponse::Err { err: "e".to_owned() }),
+            ),
+        ];
+        for (now, before) in pairs {
+            assert_eq!(now.unwrap(), before.unwrap());
+        }
+        // And a peer's bytes still decode.
+        let bytes = encode_message(&WirePeerResponse::Err { err: "e".to_owned() }).unwrap();
+        assert!(matches!(
+            decode_message::<PeerResponse>(&bytes).unwrap(),
+            PeerResponse::Err { err } if err == "e"
+        ));
+    }
+
+    #[test]
+    fn a_local_failure_is_never_written_to_a_peer_nor_read_from_one() {
+        let local = PeerResponse::LocalErr {
+            kind: LocalFailure::Timeout,
+            err: "Timeout".to_owned(),
+        };
+        assert!(encode_message(&local).is_err());
+
+        // The answer to a peer's request never carries a local failure: it is sent as a plain error.
+        let adex = AdexResponse::LocalErr {
+            kind: LocalFailure::Transport,
+            error: "ConnectionClosed".to_owned(),
+        };
+        match PeerResponse::from(adex) {
+            PeerResponse::Err { err } => assert_eq!(err, "ConnectionClosed"),
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn outbound_failures_are_a_timeout_or_a_transport_failure() {
+        assert_eq!(outbound_failure_kind(&OutboundFailure::Timeout), LocalFailure::Timeout);
+        for error in [
+            OutboundFailure::DialFailure,
+            OutboundFailure::ConnectionClosed,
+            OutboundFailure::UnsupportedProtocols,
+        ] {
+            assert_eq!(outbound_failure_kind(&error), LocalFailure::Transport, "{:?}", error);
+        }
+    }
+
+    #[test]
+    fn a_local_failure_reaches_the_application_with_its_kind() {
+        let local = PeerResponse::LocalErr {
+            kind: LocalFailure::Timeout,
+            err: "Timeout".to_owned(),
+        };
+        assert_eq!(AdexResponse::from(local), AdexResponse::LocalErr {
+            kind: LocalFailure::Timeout,
+            error: "Timeout".to_owned(),
+        });
+        // A peer's error stays a peer's error.
+        assert_eq!(
+            AdexResponse::from(PeerResponse::Err {
+                err: "Timeout".to_owned()
+            }),
+            AdexResponse::Err {
+                error: "Timeout".to_owned()
+            }
+        );
     }
 }
