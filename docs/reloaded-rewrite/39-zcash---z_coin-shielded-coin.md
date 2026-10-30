@@ -5899,13 +5899,23 @@ supersedes the known-issue form above.* The flag selects a notarized confirmatio
 and a ZHTLC coin has none; the plain depth of `required_confirmations` is the only measure
 there is, so the flag is accepted and has no effect (R39.11.4e as amended). The known-issue
 form failed such a swap once a payment was on chain, and the funds came back only by
-refund after the swap's lock times had passed. Matching can
-only lower a node's flag, never raise it, so with the coin reporting `false` no counterparty
-setting reintroduces the wait. The swap lock time no longer takes the notarization
-multiplier from this coin; both peers still compute it from both sides' settings, so they
-agree, and with the current coins entry (`false`) nothing changes. An operator no longer
-needs to edit the coins file. The item is closed in
+refund after the swap's lock times had passed. A counterparty's settings can never raise
+the flag a node waits with, so with the coin reporting `false` no counterparty setting
+reintroduces the wait. The swap lock time no longer takes the notarization multiplier from
+this node's setting for the coin. Both peers compute the lock time from the confirmation
+settings both sides sent when the order matched, so they agree: a peer that still sends
+`true` for the coin (a coins file from an older revision) makes it four times as long on
+both sides, as before. The published coins file sets `false` for ARRR (D39.11.i), so
+peers that use it get the ordinary lock time. A peer that computed a different lock time
+would be stopped by the taker's check of the maker's lock time at negotiation, before
+any payment. An operator no longer needs to edit the coins file. The item is closed in
 `docs/plans/arrr-ironwood-compatibility.md` §11.6.
+
+*Known residual (2026-10-30).* An order whose `base_nota` / `rel_nota` explicitly sets
+`true` for the coin still advertises it, and that still makes the swap lock time four
+times as long on both sides. It no longer changes any wait. Clearing an explicit order
+value would take a coin-type check in each place that builds an order's settings, so it
+is left as it is.
 
 D39.11.g **The serving node's transaction index is an unverifiable operational
 precondition for swap-path spend detection.** Without it the node cannot serve the

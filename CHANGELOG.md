@@ -77,9 +77,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `base_nota`/`rel_nota`, and now has no effect: a warning names the coin, the coin reports
   `false`, and a swap counts ordinary confirmations. Before, such a swap failed once a payment was on
   chain, and the funds came back only by refund after the swap's lock times had passed.
-  Older coins files that set the flag for ARRR need no edit. GLEEC KDF waits for a notarized
-  count instead; no switch restores that, because no such count exists here. Detail: CRD ch.39
-  R39.11.4e, D39.11.f.
+  Older coins files that set the flag for ARRR need no edit. A peer whose coins file still sets
+  it makes the swap lock time four times as long on both sides, as before; the published coins
+  file sets `false` for ARRR. GLEEC KDF honors the flag through a notarized confirmation count;
+  no switch restores that, because no such count exists here. Detail: CRD ch.39 R39.11.4e,
+  D39.11.f, D39.11.i.
 
 - **Quieter logs while a shielded coin such as ARRR is enabled.** Keeping the shielded wallet up to
   date logged six `info` lines on every new block. A sync that only adds the next block now logs

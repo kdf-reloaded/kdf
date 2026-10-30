@@ -2747,6 +2747,8 @@ impl MarketCoinOps for ZCoin {
             // (R39.11.16a).
             z_tx_read::wait_for_confirmations(self, tx, confirmations, requires_nota, wait_until, check_every)
         }
+        // Never reached with a live coin: a WASM build refuses every shielded activation (CRD ch.39
+        // R39.10.1), so `requires_nota` needs no handling here.
         #[cfg(target_arch = "wasm32")]
         {
             utxo_common::wait_for_confirmations(
