@@ -98,6 +98,8 @@ pub struct Config {
     iwant_followup_time: Duration,
     published_message_ids_cache_time: Duration,
     send_queue: SendQueueConfig,
+    stuck_relay_guard_interval: Duration,
+    stuck_relay_min_remaining: usize,
     pub i_am_relay: bool,
 }
 
@@ -108,6 +110,18 @@ impl Config {
 
     pub(crate) fn send_queue_config(&self) -> SendQueueConfig {
         self.send_queue
+    }
+
+    /// Time within which a second relay is not closed as stuck after one was closed (CRD ch.28 §28.9B RQ1 item 5,
+    /// guard for relays; default is 30 seconds).
+    pub fn stuck_relay_guard_interval(&self) -> Duration {
+        self.stuck_relay_guard_interval
+    }
+
+    /// Number of relays that must remain connected after a stuck relay is closed; with fewer, the close is held
+    /// back (default is 2).
+    pub fn stuck_relay_min_remaining(&self) -> usize {
+        self.stuck_relay_min_remaining
     }
 
     /// Maximum number of queued data RPCs (RPCs that carry published or forwarded messages)
@@ -515,6 +529,8 @@ impl Default for ConfigBuilder {
                 iwant_followup_time: Duration::from_secs(3),
                 published_message_ids_cache_time: Duration::from_secs(10),
                 send_queue: SendQueueConfig::default(),
+                stuck_relay_guard_interval: Duration::from_secs(30),
+                stuck_relay_min_remaining: 2,
                 i_am_relay: false,
             },
             invalid_protocol: false,
@@ -713,6 +729,20 @@ impl ConfigBuilder {
     /// to count toward the repeated-drops criterion (default is 25).
     pub fn send_queue_drop_share_percent(&mut self, percent: u32) -> &mut Self {
         self.config.send_queue.drop_share_percent = percent;
+        self
+    }
+
+    /// The time within which a stuck relay is not closed after another relay was closed as stuck (default is 30
+    /// seconds).
+    pub fn stuck_relay_guard_interval(&mut self, interval: Duration) -> &mut Self {
+        self.config.stuck_relay_guard_interval = interval;
+        self
+    }
+
+    /// The number of relays that must remain connected after a stuck relay is closed; with fewer, the close is
+    /// held back (default is 2).
+    pub fn stuck_relay_min_remaining(&mut self, min_remaining: usize) -> &mut Self {
+        self.config.stuck_relay_min_remaining = min_remaining;
         self
     }
 
@@ -1042,6 +1072,8 @@ impl std::fmt::Debug for Config {
         let _ = builder.field("fanout_ttl", &self.fanout_ttl);
         let _ = builder.field("idle_timeout", &self.idle_timeout);
         let _ = builder.field("send_queue", &self.send_queue);
+        let _ = builder.field("stuck_relay_guard_interval", &self.stuck_relay_guard_interval);
+        let _ = builder.field("stuck_relay_min_remaining", &self.stuck_relay_min_remaining);
         let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
         let _ = builder.field("validate_messages", &self.validate_messages);
         let _ = builder.field("allow_self_origin", &self.allow_self_origin);

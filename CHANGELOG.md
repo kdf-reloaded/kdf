@@ -424,8 +424,10 @@ it and, where one exists, the CRD rule, for readers who want more.
   exchange repairs what a dropped message carried. A peer is disconnected, on every connection it holds
   to the node, when it stays at the limit for a full minute or loses at least a quarter of the messages
   sent to it in each of three minutes in a row. It resynchronizes when it reconnects. Seeds usually hold
-  two connections to each other, and closing only one used to move the backlog onto the other. A peer
-  that keeps up never reaches the limit.
+  two connections to each other, and closing only one used to move the backlog onto the other. A node
+  closes at most one of its relays this way within 30 seconds, and never one that would leave it with
+  fewer than two; meanwhile that relay's queue keeps dropping its oldest messages. A peer that keeps up
+  never reaches the limit.
   Messages are also sent in the order they were queued, where a backlog used to go out newest first.
   The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
   minute. Cancellations and swap negotiation messages go out ahead of the others, through a lane of

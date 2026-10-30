@@ -549,6 +549,23 @@ impl SendQueue {
         })
     }
 
+    /// Starts a new stuck evaluation after the behaviour held back the close of this connection (CRD ch.28 §28.9B
+    /// RQ1 item 5, guard for relays): the connection can be reported again, a period at the cap that is still
+    /// running starts afresh at `now`, and the repeated-drops series starts over with a new window. The next report
+    /// comes no earlier than a full new period, or a full new series of windows.
+    pub fn restart_stuck(&mut self, now: Instant) {
+        self.stuck_reported = false;
+        if self.period_start.is_some() {
+            self.period_start = Some(now);
+        }
+        self.window_start = Some(now);
+        self.window_queued = 0;
+        self.window_dropped = 0;
+        self.window_series = 0;
+        self.last_window_share = 0;
+        self.repeated_drops_share = None;
+    }
+
     /// Closes the current window of the repeated-drops criterion if it has ended at `now`, and starts a new one.
     /// The window is evaluated lazily, on a push, a pop or a `take_stuck`; a drop only happens on a push. If more
     /// than one window has passed since the window started, at least one was empty, so the series is reset.
@@ -1036,6 +1053,73 @@ mod tests {
             StuckReason::RepeatedDrops { share_percent: 40 }.to_string(),
             "dropping 40% of the messages queued in the last window"
         );
+    }
+
+    #[test]
+    fn a_restart_at_the_cap_reports_again_only_after_a_full_new_period() {
+        let mut q = queue(2, 1 << 20, 60);
+        let t0 = Instant::now();
+        for i in 0..3u8 {
+            q.push(data_rpc(i, 10), t0);
+        }
+        assert!(q.take_stuck(at(t0, 60)).is_some());
+        assert_eq!(q.take_stuck(at(t0, 61)), None);
+        q.restart_stuck(at(t0, 70));
+        // No report at once, and none before the new period ends; the old deadline is gone.
+        assert_eq!(q.stuck_deadline(), Some(at(t0, 130)));
+        assert_eq!(q.take_stuck(at(t0, 70)), None);
+        assert_eq!(q.take_stuck(at(t0, 129)), None);
+        let report = q.take_stuck(at(t0, 130)).unwrap();
+        assert_eq!(report.reason, StuckReason::AtCap {
+            at_cap: Duration::from_secs(60)
+        });
+        assert_eq!(report.total_dropped, 1);
+        // Reported once again, not repeatedly.
+        assert_eq!(q.take_stuck(at(t0, 131)), None);
+        assert_eq!(q.take_stuck(at(t0, 400)), None);
+    }
+
+    #[test]
+    fn a_restart_of_a_queue_that_has_drained_reports_nothing() {
+        let mut q = queue(8, 1 << 20, 60);
+        let t0 = Instant::now();
+        for i in 0..9u8 {
+            q.push(data_rpc(i, 10), t0);
+        }
+        assert!(q.take_stuck(at(t0, 60)).is_some());
+        // The queue drains to half or less, which ends the period, and then the report is held back.
+        while q.data_count() > 4 {
+            q.pop_at(at(t0, 61));
+        }
+        assert_eq!(q.stuck_deadline(), None);
+        q.restart_stuck(at(t0, 62));
+        assert_eq!(q.stuck_deadline(), None);
+        assert_eq!(q.take_stuck(at(t0, 500)), None);
+    }
+
+    #[test]
+    fn a_restart_starts_the_series_of_windows_over() {
+        let mut q = window_queue(6, 600);
+        let t0 = Instant::now();
+        for w in 0..3 {
+            drop_window_with(&mut q, at(t0, w * 10), 8);
+        }
+        assert_eq!(
+            q.take_stuck(at(t0, 30)).unwrap().reason,
+            StuckReason::RepeatedDrops { share_percent: 25 }
+        );
+        q.restart_stuck(at(t0, 30));
+        assert_eq!(q.take_stuck(at(t0, 30)), None);
+        // Two new windows are not enough, three are.
+        for w in 3..6 {
+            drop_window_with(&mut q, at(t0, w * 10), 8);
+            assert_eq!(q.take_stuck(at(t0, w * 10 + 9)), None);
+        }
+        assert_eq!(
+            q.take_stuck(at(t0, 60)).unwrap().reason,
+            StuckReason::RepeatedDrops { share_percent: 25 }
+        );
+        assert_eq!(q.take_stuck(at(t0, 61)), None);
     }
 
     fn pressure_queue(raise: usize, clear: usize, priority_max: usize) -> SendQueue {

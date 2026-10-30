@@ -20,7 +20,9 @@
 
 use crate::protocol::{GossipsubCodec, ProtocolConfig};
 use crate::rpc_proto::proto;
-use crate::send_queue::{DropLog, PriorityPush, SendQueue, SendQueueConfig, SendQueueStats, SpillLog};
+use crate::send_queue::{
+    DropLog, PriorityPush, SendQueue, SendQueueConfig, SendQueueStats, SpillLog, StuckReport,
+};
 use crate::types::{PeerKind, RawMessage, Rpc};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
@@ -63,8 +65,9 @@ pub enum HandlerEvent {
     PeerKind(PeerKind),
     /// The send queue toward the peer has stayed at its cap for the whole stuck period, or has lost a large
     /// share of its data RPCs in several consecutive windows. The behaviour closes every connection to the
-    /// peer (CRD ch.28 §28.9B RQ1 item 5).
-    SendQueueStuck,
+    /// peer, or holds the close of a relay back (CRD ch.28 §28.9B RQ1 item 5); it logs either, the handler
+    /// does not.
+    SendQueueStuck(StuckReport),
     /// The pressure level of the send queue toward the peer changed (CRD ch.28 §28.9B RQ1 item
     /// 8). Reported once per change.
     SendQueuePressure { raised: bool },
@@ -86,6 +89,9 @@ pub enum HandlerIn {
     JoinedMesh,
     /// The peer has left the mesh.
     LeftMesh,
+    /// The behaviour held back the close of this connection after it reported the send queue as stuck: start a
+    /// new stuck evaluation (CRD ch.28 §28.9B RQ1 item 5, guard for relays).
+    RestartStuck,
 }
 
 /// The maximum number of inbound or outbound substreams attempts we allow.
@@ -293,13 +299,7 @@ impl EnabledHandler {
         self.send_queue.update_signal(now);
         if let Some(report) = self.send_queue.take_stuck(now) {
             self.stuck_timer = None;
-            log::warn!(
-                "Closing every connection to peer {}: gossip send queue {}, {} messages dropped",
-                self.peer_id,
-                report.reason,
-                report.total_dropped
-            );
-            return Some(HandlerEvent::SendQueueStuck);
+            return Some(HandlerEvent::SendQueueStuck(report));
         }
         let next = [self.send_queue.stuck_deadline(), self.send_queue.signal_deadline()]
             .into_iter()
@@ -575,6 +575,10 @@ impl ConnectionHandler for Handler {
                 HandlerIn::LeftMesh => {
                     handler.in_mesh = false;
                 }
+                HandlerIn::RestartStuck => {
+                    handler.send_queue.restart_stuck(Instant::now());
+                    handler.stuck_timer = None;
+                }
             },
             Handler::Disabled(_) => {
                 log::debug!("Handler is disabled. Dropping message {:?}", message);
@@ -811,7 +815,7 @@ mod tests {
         let is_stuck = |ev: &ConnectionHandlerEvent<_, _, HandlerEvent, Void>| {
             matches!(
                 ev,
-                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)
+                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck(_))
             )
         };
         // Before the period is over: only the outbound substream request.
@@ -821,6 +825,41 @@ mod tests {
         assert_eq!(events.iter().filter(|ev| is_stuck(ev)).count(), 1);
         // Reported once per period.
         assert!(!poll_events(&mut h).iter().any(is_stuck));
+    }
+
+    #[test]
+    fn a_restart_after_a_held_back_report_waits_for_a_new_period_and_does_not_loop() {
+        let mut h = handler(2, Duration::from_millis(200));
+        for tag in 0..3u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stuck_events = |h: &mut Handler| {
+            let mut n = 0;
+            while let Poll::Ready(ev) = ConnectionHandler::poll(h, &mut cx) {
+                if matches!(ev, ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck(_))) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        assert_eq!(stuck_events(&mut h), 0);
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(stuck_events(&mut h), 1);
+        // The behaviour holds the close back: the handler restarts, and says nothing until a new period has passed.
+        h.on_behaviour_event(HandlerIn::RestartStuck);
+        for _ in 0..50 {
+            assert_eq!(stuck_events(&mut h), 0);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(stuck_events(&mut h), 0);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(stuck_events(&mut h), 1);
+        // One report per new period, however often the handler is polled.
+        for _ in 0..50 {
+            assert_eq!(stuck_events(&mut h), 0);
+        }
     }
 
     #[test]
@@ -840,7 +879,7 @@ mod tests {
         let mut stuck_events = |h: &mut Handler| {
             let mut n = 0;
             while let Poll::Ready(ev) = ConnectionHandler::poll(h, &mut cx) {
-                if matches!(ev, ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)) {
+                if matches!(ev, ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck(_))) {
                     n += 1;
                 }
             }
@@ -876,7 +915,7 @@ mod tests {
         while let Poll::Ready(ev) = ConnectionHandler::poll(&mut h, &mut cx) {
             assert!(!matches!(
                 ev,
-                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)
+                ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck(_))
             ));
         }
     }
@@ -953,7 +992,7 @@ mod tests {
         let is_stuck = |events: &[HandlerEvent]| {
             events
                 .iter()
-                .filter(|ev| matches!(ev, HandlerEvent::SendQueueStuck))
+                .filter(|ev| matches!(ev, HandlerEvent::SendQueueStuck(_)))
                 .count()
         };
         assert_eq!(is_stuck(&poll_all(&mut h)), 0);

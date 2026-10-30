@@ -955,6 +955,7 @@ fn log_lines_with(needle: &str) -> Vec<String> {
 /// A plain gossipsub node that listens on the in-memory transport; unlike the production node its
 /// send queue limits can be configured.
 struct TestSender {
+    peer_id: PeerId,
     port: u64,
     drv: Driven<Gossipsub>,
     /// The send queue pressure changes the behaviour reported: (peer, raised).
@@ -1001,6 +1002,7 @@ fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
         },
     ));
     TestSender {
+        peer_id,
         port,
         drv: Driven { ctl: ctl_tx },
         pressure_events,
@@ -1375,6 +1377,120 @@ async fn rq1_stuck_peer_with_two_connections_loses_both() {
         r.drv.stop();
     }
     s.stop();
+}
+
+/// T-RQ1.12 (RQ1 item 5, guard for relays): a node with exactly two connected relays, one of which stops reading,
+/// keeps both connections. The close is held back and the stuck evaluation restarts, so the held-back report comes
+/// again only once per new period, not in a loop; the queue toward the held-back relay stays within its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_stuck_relay_is_held_back_when_only_two_relays_are_connected() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    const PERIOD: Duration = Duration::from_secs(3);
+    const CAP: usize = 32;
+    let r1 = spawn_test_sender(|_| {});
+    let r2 = spawn_test_sender(|_| {});
+    let mut builder = gossip_builder(false);
+    builder
+        .history_length(2)
+        .history_gossip(1)
+        .heartbeat_initial_delay(Duration::from_millis(100))
+        .heartbeat_interval(Duration::from_millis(100))
+        .send_queue_max_messages(CAP)
+        .send_queue_stuck_timeout(PERIOD);
+    let node = spawn_receiver_with(&[], r1.port, builder.build().expect("valid gossipsub config"));
+    let addr: Multiaddr = format!("/memory/{}", r2.port).parse().unwrap();
+    node.drv
+        .run(move |swarm| {
+            swarm.dial(addr).expect("dial the second relay");
+        })
+        .await;
+
+    // Both relays are connected and in the node's relay mesh.
+    let relays = Arc::new(AtomicUsize::new(0));
+    let mesh = Arc::new(AtomicUsize::new(0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (relays_cb, mesh_cb) = (relays.clone(), mesh.clone());
+        node.drv
+            .run(move |swarm| {
+                let gs = &swarm.behaviour().gossipsub;
+                relays_cb.store(gs.connected_relays_len(), Ordering::Relaxed);
+                mesh_cb.store(gs.relay_mesh_len(), Ordering::Relaxed);
+            })
+            .await;
+        if relays.load(Ordering::Relaxed) == 2 && mesh.load(Ordering::Relaxed) == 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the node never saw two relays");
+        async_std::task::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The first relay stops reading; the node publishes a stream toward both.
+    r1.drv.pause().await;
+    let topic = IdentTopic::new("gsq-rq1-guard");
+    for batch in 0..100u32 {
+        let t = topic.clone();
+        node.drv
+            .run(move |swarm| {
+                for i in 0..4 {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(t.clone(), payload(batch * 4 + i, 1024));
+                }
+            })
+            .await;
+        async_std::task::sleep(Duration::from_millis(10)).await;
+    }
+
+    let held = || log_lines_with("Holding back the close of relay");
+    wait_for("the close is held back", PERIOD + Duration::from_secs(8), || {
+        !held().is_empty()
+    })
+    .await;
+    assert!(
+        held()[0].contains(&r1.peer_id.to_string()),
+        "held-back lines: {:?}",
+        held()
+    );
+    // One more period of the restarted evaluation; a loop of immediate re-reports would log hundreds of lines.
+    async_std::task::sleep(PERIOD * 2).await;
+    let lines = held();
+    assert!(
+        (2..=4).contains(&lines.len()),
+        "expected one line per new period, got {}: {lines:?}",
+        lines.len()
+    );
+    assert!(lines.iter().all(|l| l.contains(&r1.peer_id.to_string())));
+
+    let connected = Arc::new(AtomicUsize::new(0));
+    let (connected_cb, r1_id, r2_id) = (connected.clone(), r1.peer_id, r2.peer_id);
+    node.drv
+        .run(move |swarm| {
+            let both = swarm.is_connected(&r1_id) && swarm.is_connected(&r2_id);
+            connected_cb.store(both as usize, Ordering::Relaxed);
+        })
+        .await;
+    assert_eq!(connected.load(Ordering::Relaxed), 1, "a relay was closed");
+    assert!(log_lines_with("Closing every connection").is_empty());
+    // The queue toward the held-back relay stays within its cap while it drops the oldest.
+    let queued = Arc::new(AtomicUsize::new(usize::MAX));
+    let queued_cb = queued.clone();
+    node.drv
+        .run(move |swarm| {
+            queued_cb.store(
+                swarm.behaviour().gossipsub.send_queue_snapshot().max_per_connection,
+                Ordering::Relaxed,
+            )
+        })
+        .await;
+    assert!(queued.load(Ordering::Relaxed) <= CAP, "queue above its cap: {queued:?}");
+
+    r1.drv.resume();
+    node.drv.stop();
+    r1.stop();
+    r2.stop();
 }
 
 /// Scenario A: healthy baseline, receiver polled throughout.
