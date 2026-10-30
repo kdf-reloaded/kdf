@@ -215,6 +215,8 @@ macro_rules! ok_or_retry_after_sleep_sync {
 }
 
 pub mod activation_locks;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) mod answer_stub;
 pub mod coin_balance;
 #[doc(hidden)]
 #[cfg(test)]

@@ -64,29 +64,33 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 #### Order book and peer-to-peer network
 
-- **A maker that changes its orders faster than its relays can take them no longer loses its whole
-  order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
+- **A maker that changes its orders faster than its relays can take them can keep its order book
+  (opt-in).** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
-  updates, so the book vanished on every node. Now the maker keeps one pending message per order,
-  the latest values win, and the messages leave at a bounded rate (at most 20 per second per maker
-  key, a burst of 200). When a relay stops keeping up, either its send queue stays backed up for
-  2 seconds or the last connection to it closes while order messages are in flight, the rate drops
-  sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
-  the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
-  0.5 per second every 30 seconds, and stops one step below the rate at which the relay failed; after
-  30 quiet minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending
-  messages of its pairs to go out within that rate, and no longer forces them out; it does not wait
-  at all while the rate is lowered. A cancellation or a swap negotiation message is never delayed
-  and jumps ahead of queued order updates. A peer may see an order's latest price a moment later, or
-  only at the next keep-alive synchronization, and may never see an intermediate value of an order
-  that changes quickly. Your own order list and the answers of `setprice`, `update_maker_order` and
+  updates, so the book vanished on every node. This protection is **off by default** for now: set
+  the `MM2.json` boolean `maker_update_coalescing` to `true` to turn it on (only a JSON `true`
+  does). Without it, every order message is sent at once, as GLEEC KDF does. A field run showed
+  that, in a network where relays and makers also run GLEEC KDF, held-back updates make peers ask
+  relays for order state the relays do not have yet, and an ordinary relay disconnect lowers the
+  rate. With it turned on, the maker keeps one pending message per order, the latest values win, and
+  the messages leave at a bounded rate (at most 20 per second per maker key, a burst of 200). When a
+  relay stops keeping up, either its send queue stays backed up for 2 seconds or the last connection
+  to it closes while order messages are in flight, the rate drops sharply to 0.5 per second and
+  order updates stop being sent. Peers then learn the changes through the keep-alive
+  synchronization. Five minutes after the last such signal the rate climbs back by 0.5 per second
+  every 30 seconds, and stops one step below the rate at which the relay failed; after 30 quiet
+  minutes it climbs to the ceiling. A keep-alive now waits up to 10 seconds for the pending messages
+  of its pairs to go out within that rate, and no longer forces them out; it does not wait at all
+  while the rate is lowered. A cancellation or a swap negotiation message is never delayed and jumps
+  ahead of queued order updates. A peer may see an order's latest price a moment later, or only at
+  the next keep-alive synchronization, and may never see an intermediate value of an order that
+  changes quickly. Your own order list and the answers of `setprice`, `update_maker_order` and
   `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
   keep-alives. One short gap remains: the first signal comes only after the load has started, so a
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
-  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
-  `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
-  JSON `false` turns it off. More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md).
-  Detail: PR #148, PR #159; CRD ch.32 §32.9B, D8, ch.28 §28.9B.
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. More in
+  [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: PR #148, PR #159,
+  PR #166; CRD ch.32 §32.9B, D8, D9, ch.28 §28.9B.
 - **`update_maker_order` no longer broadcasts an update that changes nothing.** A market-making bot
   that re-submits all of its orders on every refresh used to send one message per order to every
   node, even when price, volumes and confirmations stayed the same. Such an update is still saved and
@@ -712,6 +716,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   transaction first seen unconfirmed stayed unconfirmed in the history. Detail: PR #84; CRD ch.38
   R38.5A.10.
 
+#### Errors from coin and wallet daemons
+
+- **The native coin daemon's and the Sia wallet daemon's error texts no longer quote the daemon's raw
+  answer.** They carry the daemon's error code, its message and the answer's size only. Detail:
+  PR #163; CRD ch.38 §38.6.9, ch.20 §20.8.
+
 #### EVM coins
 
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
@@ -854,9 +864,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`lightning-ldk-upgrade`](docs/plans/lightning-ldk-upgrade.md) — new, parked: scoping only; it
   records the local LDK patch (PR #66).
 - [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — new, parked: a maker's
-  order messages leave at a bounded rate that drops when a relay falls behind (PRs #129, #143,
-  #148), with defaults measured in the lab (PR #159) and the follow-ups done (PR #160); two
-  deferred items await field data.
+  order messages can leave at a bounded rate that drops when a relay falls behind (PRs #129, #143,
+  #148), with defaults measured in the lab (PR #159) and the follow-ups done (PR #160). After a
+  field run it became opt-in (PR #166); the plan lists what comes before it is the default again,
+  and two deferred items await field data.
 - [`my-orders-speed`](docs/plans/my-orders-speed.md) — new and done: `my_orders` answers about 4 to
   12 times faster with 2,000 orders (PR #154).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders

@@ -458,9 +458,10 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Ten more behaviors, in the order book, fee readings, Electrum and the shielded history, differ
-from GLEEC KDF by default, each with one top-level `MM2.json` switch. The value below gives the GLEEC-compatible behavior; the row of each
-switch in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
+Nine more behaviors, in the order book, fee readings, Electrum and the shielded history, differ
+from GLEEC KDF by default, each with one top-level `MM2.json` switch. The value below gives the
+GLEEC-compatible behavior; the row of each switch in
+[`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
@@ -474,11 +475,13 @@ switch in [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the
 - `order_messages_refresh_liveness: false` — only keep-alives keep a maker's order book alive.
 - `sync_answer_deferral_ms: 0` — a sync request for a pair this node is still synchronizing is
   answered at once.
-- `maker_update_coalescing: false` — every maker-order message is published at once.
 - `shielded_history_unmined_sends: false` — an own ARRR send is listed in the history only once
   mined.
 - `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
   baseline does; what GLEEC KDF does here is not established.
+
+A tenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`: every
+maker-order message is published at once, and `true` turns on the maker's rate control.
 
 ## Detail sections
 
