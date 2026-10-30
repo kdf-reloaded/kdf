@@ -103,7 +103,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
   it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
   network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
-  once at info level, then at debug level. Detail: PR #TBD; CRD ch.28 R8c.
+  once at info level, then at debug level. Detail: PR #170; CRD ch.28 R8c.
 - **Quieter peer-to-peer logs on seeds and relays under load.** Four warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
@@ -115,7 +115,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   - A request that times out is now a warning, not an error. Further timeouts toward the same peer
     are counted in one line per minute.
 
-  Detail: PR #TBD.
+  Detail: PR #170.
 
 #### Order posting, fees and balances
 
