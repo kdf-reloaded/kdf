@@ -182,6 +182,8 @@ where
         };
         let outputs = vec![TransactionOutput { value, script_pubkey }];
 
+        // Kept for the pending entry noted below: the inputs the signed transaction consumes, with their values.
+        let candidate_unspents = unspents.clone();
         let mut tx_builder = UtxoTxBuilder::new(coin)
             .with_from_address(self.sender_address())
             .add_available_inputs(unspents)
@@ -224,10 +226,29 @@ where
             coin: Some(ticker.clone()),
             amount: big_decimal_from_sat(fee_amount as i64, decimals),
         };
-        let tx_hex = match coin.addr_format() {
-            UtxoAddressFormat::Segwit => serialize_with_flags(&signed, SERIALIZE_TRANSACTION_WITNESS).into(),
-            _ => serialize(&signed).into(),
+        let tx_bytes = match coin.addr_format() {
+            UtxoAddressFormat::Segwit => serialize_with_flags(&signed, SERIALIZE_TRANSACTION_WITNESS),
+            _ => serialize(&signed),
         };
+
+        // Note the signed transaction as a pending withdraw (CRD ch.38 R38.5B.9 item 1). The recently-spent record
+        // is not written here: it is written only when the broadcast of exactly these bytes is accepted.
+        // The lock is taken only now, after signing, and released at once.
+        let spent_by_tx: Vec<_> = candidate_unspents
+            .into_iter()
+            .filter(|unspent| {
+                signed
+                    .inputs
+                    .iter()
+                    .any(|input| input.previous_output == unspent.outpoint)
+            })
+            .collect();
+        coin.as_ref()
+            .recently_spent_outpoints
+            .lock()
+            .await
+            .note_pending_withdraw(&tx_bytes, spent_by_tx, signed.hash(), signed.outputs.clone());
+        let tx_hex = tx_bytes.into();
         Ok(TransactionDetails {
             tx_json: None,
             from: vec![self.sender_address_string()],

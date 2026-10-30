@@ -51,6 +51,8 @@ struct StubState {
     /// How long the stub waits before it serves an accepted connection.
     accept_delay: Mutex<Duration>,
     results: Mutex<HashMap<String, Json>>,
+    /// Methods that answer a JSON-RPC error with the given message instead of a result; they win over `results`.
+    errors: Mutex<HashMap<String, String>>,
     /// Canned results of the script-hash methods, per `(method, script hash)`; they win over `results`.
     scripthash_results: Mutex<HashMap<(String, String), Json>>,
     /// Every message (a request, or a batch of them) the stub received, in the order it arrived.
@@ -101,6 +103,7 @@ impl StubServer {
             version: Mutex::new("1.4".to_owned()),
             accept_delay: Mutex::new(Duration::ZERO),
             results: Mutex::new(HashMap::new()),
+            errors: Mutex::new(HashMap::new()),
             scripthash_results: Mutex::new(HashMap::new()),
             messages: Mutex::new(Vec::new()),
             requests: Mutex::new(HashMap::new()),
@@ -199,6 +202,18 @@ impl StubServer {
     pub fn set_result(&self, method: &str, result: Json) {
         self.state.results.lock().unwrap().insert(method.to_owned(), result);
     }
+
+    /// Makes `method` answer a JSON-RPC error with `message` (the other methods keep their results).
+    pub fn set_error(&self, method: &str, message: &str) {
+        self.state
+            .errors
+            .lock()
+            .unwrap()
+            .insert(method.to_owned(), message.to_owned());
+    }
+
+    /// Makes `method` answer its canned result again.
+    pub fn clear_error(&self, method: &str) { self.state.errors.lock().unwrap().remove(method); }
 
     /// The result `method` (`blockchain.scripthash.get_balance`, `blockchain.scripthash.listunspent`, ...)
     /// answers for the script hash `scripthash`, the first parameter of the request. It wins over
@@ -346,6 +361,10 @@ fn answer(state: &StubState, behavior: StubBehavior, request: &Json, subscribed:
         (_, "server.ping") => result(Json::Null),
         (StubBehavior::BlackHoleRequests, _) => None,
         (StubBehavior::JsonRpcError, _) => error("stub error"),
+        _ if state.errors.lock().unwrap().contains_key(&method) => {
+            let message = state.errors.lock().unwrap().get(&method).cloned().unwrap_or_default();
+            error(&message)
+        },
         (_, "blockchain.headers.subscribe") if state.tip.lock().unwrap().is_some() => {
             subscribed.store(true, Ordering::SeqCst);
             let height = state.tip.lock().unwrap().unwrap_or_default();
