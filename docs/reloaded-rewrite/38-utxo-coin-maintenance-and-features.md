@@ -32,6 +32,16 @@ Reloaded ships some of it and lacks the rest, so the chapter is split:
   in the equal-height tie-break of the legacy UTXO history and in serving the
   mmrpc-2.0 method from the legacy file; the divergence notes under R38.5A.1
   and R38.5A.7 state what must change.
+- **§38.5B (T-DOC, reference-bound; cleared by the Dirty Gate on 2026-10-30):** the recently-spent
+  output record of a UTXO coin -- which paths write it (swap-side sends after
+  an accepted broadcast; neither `withdraw` nor `send_raw_transaction`), how
+  the unspent listing is composed from the backend answer and the record, the
+  rejection shape of a refused broadcast on each RPC path, and the record's
+  lifetime -- distilled from the reference states through the two-team
+  workflow and cleared by the Dirty Gate (§38.9). Reloaded matched the reference
+  here until maintainer Decision BE (2026-10-30): a withdraw's spend is now
+  recorded once its broadcast is accepted (R38.5B.9); D38.5B.1--D38.5B.4 hold
+  the decisions.
 - **§38.6 (T-PORT, required, NOT yet in reloaded):** capabilities verified
   **absent** in reloaded that must be ported -- PoSV support, Taproot output
   parsing & withdraw guard, P2PK show/spend, Electrum connection prioritisation
@@ -644,6 +654,352 @@ remaining transactions of the pass shall still be stored.
 T38.5A.8 *BCH and SLP maturation.* A test shall store an unconfirmed BCH row
 and present a listing that reports its hash at a positive height, and assert
 that the stored row takes that height.
+
+## 38.5B Spent-output bookkeeping across user withdrawals and broadcasts (T-DOC, reference-bound)
+
+> **Cleared (chapter 01 R40).** R38.5B.1--R38.5B.8, D38.5B.1--D38.5B.3,
+> T38.5B.1--T38.5B.5 and the notes under them were written on 2026-10-30 by the
+> KDF Spec Reader under the chapter-01 two-team workflow (§1.4A), from the
+> reference states `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A (which
+> agree on every fact bound here) and from the row *baseline anchor (R1)*, and
+> were cleared by the KDF Dirty Gate on 2026-10-30 (record in §38.9). The
+> field observation and the decision items describe this repository and the
+> maintainer's choices, not the reference.
+
+> **Scope.** A UTXO coin keeps, per activated coin instance, an in-memory
+> record of the outputs this node has recently spent by transactions it built
+> and broadcast itself, together with the outputs those transactions created
+> that pay back to the coin's own address script (its change). The unspent
+> listing consults the record so that an output already spent by this node --
+> but still listed by a backend that has not yet indexed the broadcast -- is
+> dropped from the list and the spending transaction's own-script outputs are
+> offered in its place. The record exists at the row *baseline anchor (R1)*
+> and in this repository; this section binds which paths write it, how the
+> listing is composed from the backend answer and the record, what a backend
+> rejection of a broadcast looks like on each RPC path, and the record's
+> lifetime. It binds no wire shape beyond the legacy error body of R38.5B.6.
+> The field names of the `withdraw` request and the `send_raw_transaction`
+> carriers are bound by [Chapter 49](49-withdrawal-task-path.md) and
+> [Chapter 20](20-siacoin-integration.md) R-W8, not here.
+
+R38.5B.1 **Who writes the record.** (Reference-bound at both rows; also the
+baseline's behaviour.) A spend is entered into the recently-spent record only
+by the coin layer's own build-and-broadcast operations: the sends from the
+coin's address that the swap engine orders (payments, fee outputs, spends of
+own-address inputs during a swap) and the UTXO merge operation of R38.5.2 when
+it is asked to broadcast. The entry is made **after** the backend has accepted
+the broadcast, never at build or signing time; a broadcast the backend rejects
+enters nothing. The entry records the inputs the transaction consumed and
+those of its outputs that pay to the coin's own address script; outputs to
+any other script are not recorded.
+
+R38.5B.2 **Withdraw neither writes nor broadcasts.** (Reference-bound at both
+rows; also the baseline's behaviour.) The user withdraw path -- the direct
+`withdraw` method and the `task::withdraw::*` family of
+[Chapter 49](49-withdrawal-task-path.md) -- obtains its candidate inputs through
+the same listing as every other spend (R38.5B.4) and therefore honours the
+record, but it does not write to it: not when the transaction is built, not
+when it is signed, and not afterwards. For a UTXO coin the withdraw path has
+no broadcast step of its own at either row, so no broadcast-time hook exists
+either; the request's `broadcast` member (chapter 49 R49.1, a coin-family
+field) is not consumed by the UTXO family, and the external-wallet signing
+route of the UTXO family at the later row never asks the external wallet to
+broadcast. The signed transaction is returned to the caller, who broadcasts
+it (or does not) by a separate call. Two withdraws issued in succession
+without an intervening broadcast that the backend has indexed therefore
+select from the same candidate set and may spend the same inputs; the
+reference does not prevent this.
+
+R38.5B.3 **`send_raw_transaction` does not write the record.**
+(Reference-bound at both rows; also the baseline's behaviour.) The legacy
+`send_raw_transaction` method decodes the supplied carrier and hands the
+transaction bytes to the backend's broadcast call. It does not parse the
+transaction, does not determine which of the node's own outputs the
+transaction spends or creates, and writes nothing to the recently-spent
+record on success or on failure. There is no mmrpc-2.0 broadcast method for
+UTXO coins at either row, and the only mmrpc-2.0 paths that produce a UTXO
+transaction (`withdraw`, `task::withdraw::*`) do not broadcast (R38.5B.2).
+Consequently a withdraw-then-broadcast pair performed by a client leaves the
+record exactly as it was: the inputs that pair spent stay eligible for the
+next listing until the backend itself stops listing them.
+
+> **Reloaded divergence (maintainer Decision BE, 2026-10-30).** R38.5B.2 and
+> R38.5B.3 describe the reference and this repository before Decision BE. They
+> no longer hold for a UTXO coin's own withdraw followed by
+> `send_raw_transaction` of that withdraw's bytes: R38.5B.9 records the spend
+> at the accepted broadcast. That a withdraw writes nothing to the record at
+> build or signing time, and that a broadcast of bytes the node did not build
+> writes nothing, still hold.
+
+R38.5B.4 **Composition of the unspent listing.** (Reference-bound at both
+rows; also the baseline's behaviour.) Every listing a spend is built from --
+the single-address list and the multi-address map, in their all-outputs and
+mature-only forms -- is composed as follows, in order:
+
+1. a fresh query to the backend for the address's unspent outputs (Electrum
+   `blockchain.scripthash.listunspent`, or the native daemon's unspent
+   listing); the answer is not cached and no earlier answer is reused;
+2. under the record's lock, every listed output the record knows as spent by
+   this node is removed and the record's replacement outputs for it are
+   added; the replacement is applied again to what was added, until no listed
+   output is known as spent (a chain of own spends resolves to the last
+   change output);
+3. sorting into the coin's canonical input order and removal of duplicates.
+
+Because step 1 is a live query, a listing issued after a broadcast reflects
+the backend's view at that instant. For an Electrum server that has indexed
+the transaction, the view already omits the spent inputs and lists the
+unconfirmed change; until then it still lists the spent inputs. Nothing in
+the coin layer refreshes or invalidates a listing after a broadcast: the next
+caller simply queries again. For spendability, an unconfirmed output that is
+not a coinbase output counts as mature; only coinbase outputs are withheld
+until the configured maturity (R38.2). An unconfirmed change output is thus
+eligible as soon as the backend lists it.
+
+R38.5B.5 **Serialization of own-address spends.** (Reference-bound at both
+rows; also the baseline's behaviour.) Two locks order concurrent spends from
+the coin's address. The listing of R38.5B.4 returns the record's lock to its
+caller still held; a build-and-broadcast path of R38.5B.1 keeps it from the
+listing through the broadcast and the record entry, so a concurrent listing
+waits until the entry is made. The withdraw path releases the record's lock
+as soon as the listing returns and instead holds a process-wide UTXO build
+lock from the listing through signing, released when the signed transaction
+is returned. Two withdraws are therefore serialized against each other during
+building, but nothing orders a withdraw's result against a later listing once
+it has returned.
+
+R38.5B.6 **Rejection shape on the legacy broadcast path.** (Reference-bound
+at both rows; also the baseline's behaviour.) When the backend refuses a
+`send_raw_transaction` broadcast -- a mempool conflict (the transaction spends
+an input that a transaction already in the backend's mempool spends) included
+-- the method fails with HTTP status 500 and the legacy error body
+`{"error": "<text>"}`. The text is the baseline's legacy error form (a
+source-location prefix followed by the rendered error), and the rendered
+error carries the backend's JSON-RPC error object, server message included,
+as the shared JSON-RPC client renders a server-side error response. No part
+of the server's message is matched, classified or translated anywhere in the
+UTXO coin layer at either row: every backend refusal -- conflict, missing
+input, fee too low, already known -- takes this one shape and differs only in
+the embedded text. The success body is `{"tx_hash": "<hex>"}`.
+
+R38.5B.7 **Rejection shape on mmrpc-2.0 paths.** (Reference-bound at both
+rows.) No mmrpc-2.0 UTXO path performs a broadcast, so a backend rejection of
+a broadcast cannot arise on one: the `status: "Error"` payload of chapter 49
+R49.20 never carries a broadcast refusal for a UTXO coin, and the typed
+withdrawal error enumeration is never reached by a UTXO broadcast failure.
+The swap engine's own broadcasts (R38.5B.1) report a refusal to the swap
+state machine as a failed send that carries the signed transaction for
+recovery; that path is not an RPC and has no RPC error shape.
+
+R38.5B.8 **Lifetime of the record.** (Reference-bound at both rows; also the
+baseline's behaviour.) The record has no time-to-live, no size bound and no
+eviction. An entry lives until the coin instance is dropped (deactivation) or
+until the record is replaced wholesale, which happens at both rows only when
+a hardware wallet's enabled address is (re)established: the record is then
+replaced by an empty one keyed to the new address's script. The record is
+keyed to exactly one script -- the coin's single address at activation -- and
+tracks replacement outputs only for that script; for an HD coin with several
+addresses, outputs paying to other addresses of the same coin are never
+offered as replacements. An unbroadcast withdraw never had an entry, so
+nothing of it expires; a build-and-broadcast whose broadcast failed has no
+entry either (R38.5B.1).
+
+> **Reloaded divergence (maintainer Decision BE, 2026-10-30).** The record's
+> lifetime and its single-script keying are unchanged. The pending entries of
+> R38.5B.9 are not entries of the record: they have their own short lifetime
+> and hide nothing, and an entry they promote into the record then has the
+> lifetime described here.
+
+> *Consequence (informative).* Because nothing evicts an entry, a recorded
+> transaction that later leaves the mempool unconfirmed (replaced, expired or
+> never relayed) keeps its inputs hidden from the listing and keeps its change
+> offered as spendable until deactivation. The reference accepts this; this
+> section records it so that a Reloaded divergence (D38.5B.1) is weighed
+> against it. Decision BE accepts it for the beta and extends it to promoted
+> withdraw entries (D38.5B.2).
+
+R38.5B.9 **A withdraw's spend is recorded when its broadcast is accepted.**
+(Reloaded-original; maintainer Decision BE, 2026-10-30, option (b) of
+D38.5B.1. A deliberate divergence from the reference of the kind
+`docs/COMPAT_SWITCHES.md` "The default-side rule" arm 2: no peer observes it.
+It carries no compatibility switch, D38.5B.3.)
+
+1. *Pending entry.* When the user withdraw path of a UTXO coin -- the direct
+   `withdraw` method and the `task::withdraw::*` family -- has built and signed
+   its transaction, it keeps a pending entry for it in memory: the inputs the
+   transaction consumes with their values, those outputs that pay to the
+   record's script (R38.5B.8), and the transaction's hash. The entry is keyed
+   by a digest (SHA-256) of the exact serialized transaction bytes that the
+   withdraw returns as the transaction hex, so the key does not depend on the
+   coin's transaction-hash algorithm. The record itself is not written at that
+   time (R38.5B.2 stands for build and signing). The record's lock is taken
+   only for this short entry, after signing, never held across signing.
+2. *Promotion.* When the legacy `send_raw_transaction` method hands exactly
+   those bytes to the backend and the backend accepts the broadcast, the
+   pending entry is removed and its inputs and own-script outputs are entered
+   into the recently-spent record as an entry of R38.5B.1. The broadcast
+   helper that does this is the shared one of the standard UTXO coin, BCH and
+   Qtum; the byte-carrier form of the same helper behaves alike. A refused
+   broadcast promotes nothing and leaves the pending entry to age out.
+   Bytes that match no pending entry -- a transaction built elsewhere, or
+   re-serialized by the caller -- promote nothing and change nothing, exactly
+   as before.
+3. *The pending entries are not the record.* A pending entry is neither
+   consulted by the listing (R38.5B.4) nor offered as a replacement, so it
+   hides no input and offers no output; an unbroadcast withdraw therefore
+   hides nothing. A pending entry is dropped ten minutes after it was made, or
+   earlier as the oldest when more than 64 are held; both bounds only limit
+   memory. They must not be confused with the lifetime of the record
+   (R38.5B.8, D38.5B.2): an entry promoted into the record has that lifetime,
+   which has no expiry.
+4. *Not covered.* SLP, shielded (ZHTLC), Sia, EVM, Tendermint and Lightning
+   coins keep their own withdraw and broadcast paths and are unchanged. The
+   record's single-script keying (R38.5B.8) is unchanged, so only a change
+   paying to the coin's single address is offered as a replacement; the
+   spent inputs are excluded for any sender address (D38.5B.4).
+5. *Unchanged.* R38.5B.1, R38.5B.4--R38.5B.7: the listing composition, the
+   locks, and the legacy rejection shape (HTTP 500 and the `error` body, with
+   no classification of the server's text).
+6. *Effect.* A withdraw issued after the broadcast of an earlier withdraw was
+   accepted excludes that withdraw's inputs and may spend its change, whether
+   or not the backend has indexed the broadcast. Two withdraws both built
+   before the first broadcast still select the same inputs, as the reference
+   does.
+
+> **Code-quality finding (informative; corpus, trigger 2 -- a comment states
+> the problem).** The reference's own source acknowledges, at both rows, that
+> the single-script keying of R38.5B.8 is a known limitation for HD wallets
+> and names per-script keying as the intended improvement. Proposed treatment
+> for this repository: key the record by address script (one record per
+> script of the coin), so that every address of an HD coin gets the
+> protection of R38.5B.4 step 2; the behaviour of R38.5B.1--R38.5B.7 is
+> unchanged by that keying. This repository's own activation code carries
+> the same admission.
+
+> **Field observation (this repository, 2026-10-30; permitted-input class
+> R6, not corpus).** On Reloaded dev at the state the maintainer named
+> (the dev state of 2026-10-30 that the maintainer named), a client issued two
+> `withdraw` + `send_raw_transaction` pairs for DOGE from one address three
+> seconds apart. Both withdraws selected the same input; the Electrum server
+> rejected the second broadcast as a mempool conflict, surfaced exactly as
+> R38.5B.6 describes (HTTP 500, `error` body with the server's text). A third
+> withdraw 46 s later spent the unconfirmed change of the first, as R38.5B.4
+> predicts. This repository's code matches the reference at every point of
+> R38.5B.1--R38.5B.8: the withdraw path reads the listing and discards the
+> record's lock without writing, and no broadcast RPC writes the record. The
+> field behaviour is therefore parity, not drift. Whether Reloaded should
+> diverge is D38.5B.1--D38.5B.3.
+
+D38.5B.1 *(Decided 2026-10-30, maintainer Decision BE: option (b), in the
+pending-entry form of R38.5B.9, which needs neither a parse of the broadcast
+transaction nor a lookup of the consumed outputs' values.)* **Should Reloaded
+record a withdraw's spend?** Options, each a deliberate divergence from the reference
+of the kind `docs/COMPAT_SWITCHES.md` "The default-side rule" arm 2 (no peer
+observes it): (a) keep parity (R38.5B.2 as written); (b) enter the spend at
+`send_raw_transaction` time for a UTXO coin, by parsing the broadcast
+transaction, matching its inputs and outputs against the coin's own address
+script and entering the inputs and own-script outputs once the backend
+accepts the broadcast -- which keeps the "only after acceptance" invariant of
+R38.5B.1 and needs the consumed outputs' values, which the raw transaction
+does not carry (they are available from the coin's transaction cache or the
+backend); (c) enter the spend when the withdraw is built, which covers the
+case the field observation shows but breaks R38.5B.1's invariant: a withdraw
+the client never broadcasts would hide its inputs for the life of the coin
+instance unless an expiry (D38.5B.2) is added. Option (b) preserves every
+invariant of this section; (c) alone is not recommended.
+
+D38.5B.2 *(Decided 2026-10-30, maintainer Decision BE: no expiry of recorded
+entries for the beta, parity with R38.5B.8. The pending entries of R38.5B.9
+keep their own short lifetime and cap, which only bound memory and hide
+nothing. A later expiry as a multiple of the chain's measured block time is
+a post-beta plan: `docs/plans/withdraw-entry-expiry-by-block-time.md`.)*
+**Expiry.** The reference has none
+(R38.5B.8). If D38.5B.1 chooses (c), or independently to close the
+consequence note under R38.5B.8, an entry could be dropped when the backend
+confirms the spending transaction (its inputs are then gone from the
+backend's own listing and the entry is redundant), when the backend reports
+the transaction unknown after a bounded time, or after a fixed time-to-live.
+Any expiry must keep the transitive replacement of R38.5B.4 step 2 consistent
+(dropping a middle link of a chain must not resurrect an input the later link
+still spends).
+
+D38.5B.3 *(Decided 2026-10-30, maintainer Decision BE: unconditional, no
+switch.)* **Switch.** Whether a divergence
+under D38.5B.1 is unconditional or carries a compatibility switch (default
+on, `false` restoring reference behaviour) as R38.6.4a and R38.6.4l do. No
+peer observes it, so the switch would exist only for A/B comparison against
+the reference.
+
+D38.5B.4 *(Deferred past the beta, maintainer Decision BE, 2026-10-30.)*
+**Per-script keying of the record.** The code-quality finding above proposes
+one record per address script of the coin, so that every address of an HD coin
+gets the protection of R38.5B.4 step 2 and its change can be offered as a
+replacement. Decision BE defers it: the field defect concerned a single
+address, and the change touches the coin builders and the hardware-wallet
+address re-establishment hook. It is carried in the post-beta plan
+`docs/plans/withdraw-entry-expiry-by-block-time.md`.
+
+### Tests (§38.5B)
+
+T38.5B.1 *Record written only after acceptance.* A test with a mocked backend
+shall drive a swap-side send from the coin's address, let the backend accept
+the broadcast, and then have the same backend keep listing the spent input;
+the next listing shall omit that input and offer the transaction's own-script
+output in its place. A second run in which the backend rejects the broadcast
+shall leave the next listing unchanged.
+
+T38.5B.2 *Withdraw alone writes nothing to the record.* A test shall build
+two withdraws in succession from one address against a backend whose listing
+does not change between them, without broadcasting either, and assert that
+both returned transactions spend the same input and that the listing after
+both is unchanged (R38.5B.2 and R38.5B.9 item 3).
+
+T38.5B.3 *An accepted broadcast of a withdraw's bytes records the spend.* A
+test shall build a withdraw, broadcast its returned transaction hex through
+`send_raw_transaction` against a backend that accepts it and keeps listing the
+input, and assert that the next listing omits that input and offers the
+transaction's own-script output in its place, and that a second withdraw
+excludes the first one's input and may spend its change (R38.5B.9 items 2
+and 6). The same assertions shall hold for the task-based withdraw.
+
+T38.5B.4 *Legacy rejection shape.* A test shall make the mocked backend answer
+a broadcast with a JSON-RPC error object and assert that
+`send_raw_transaction` returns HTTP 500 with a JSON body whose single member
+`error` is a string containing the server's message text, and that a second
+backend error with different text yields the same status and the same body
+shape.
+
+T38.5B.5 *Unconfirmed change is spendable; coinbase is not.* A test shall
+present a listing with an unconfirmed non-coinbase output and an immature
+coinbase output and assert that only the former is offered to a spend.
+
+T38.5B.6 *A refused broadcast records nothing.* A test shall build a withdraw
+and broadcast it against a backend that refuses it; the next listing shall be
+unchanged and a following withdraw shall select the same input, and the
+pending entry shall still age out (R38.5B.9 item 2).
+
+T38.5B.7 *An unbroadcast withdraw hides nothing.* A test shall build a
+withdraw, never broadcast it, and assert that the listing is unchanged at
+once and after the pending lifetime has passed, that no phantom change output
+is offered, and that the pending entry is gone after that lifetime
+(R38.5B.9 item 3).
+
+T38.5B.8 *Bytes the node did not build promote nothing.* A test shall
+broadcast a transaction that no withdraw built, and one whose hex a caller
+re-serialized after a withdraw, against a backend that accepts them, and
+assert that the record and the next listing are unchanged (R38.5B.9
+item 2).
+
+T38.5B.9 *The pending entries are bounded.* A test shall build more withdraws
+than the cap without broadcasting and assert that no more than 64 pending
+entries are kept and that the oldest are the ones dropped, and that an entry
+older than ten minutes is dropped when the next entry is made (R38.5B.9
+item 3).
+
+T38.5B.10 *An entry promoted into the record does not expire.* A test shall
+promote a withdraw's entry and assert that the listing still omits the
+input and offers the change after a period far beyond the pending lifetime
+(R38.5B.9 item 3, D38.5B.2).
 
 ---
 
@@ -2176,6 +2532,8 @@ R38.8.6 **Tests (two-direction, observable).**
 - KMD reward computation follows R38.4.1–R38.4.1B on every surface of
   R38.4.1A, and the exact-value tests of R38.4.3 pass (issue #11 vector:
   3,488 base units, not 1,744,260).
+- §38.5B (cleared by the Dirty Gate on 2026-10-30; R38.5B.9 by maintainer
+  Decision BE): T38.5B.1 to T38.5B.10 pass.
 - Each Part-B item (R38.6.1--R38.6.9) is implemented with the acceptance test
   stated inline, and its coins-config keys / RPC field additions are documented
   alongside the implementation. For §38.6.6 that means the values of
@@ -2467,3 +2825,53 @@ R38.8.6 **Tests (two-direction, observable).**
   the maintainer decision AU of 2026-10-29, the public JSON-RPC error format
   and this repository's own code. They take no forbidden-class input, so
   chapter 01 R38 is not engaged and no gate pass is required.
+- *Spent-output bookkeeping item (§38.5B, 2026-10-30) -- cleared by the Dirty
+  Gate (chapter 01 R40).* R38.5B.1--R38.5B.8, the scope note, the consequence
+  note, the code-quality finding, D38.5B.1--D38.5B.3, T38.5B.1--T38.5B.5,
+  the §38.0 scope line, the §38.7 bullet and the pointer sentence in
+  [Chapter 49](49-withdrawal-task-path.md) §49.6 were written by the Spec
+  Reader under the two-team workflow at the rows `v2.6.0-beta` and
+  `v3.0.0-beta` of chapter 02 §2.15A, which agree on every fact bound there
+  (the record type, the withdraw builder and the listing functions are
+  identical between the rows; the broadcast client differs between the rows
+  only outside the broadcast call), and at the row *baseline anchor (R1)*.
+  Corpus-sourced: the confirmation that each fact of R38.5B.1--R38.5B.8
+  persists at both rows, the external-wallet signing sentence of R38.5B.2
+  (later row only), the mmrpc-2.0 absence facts of R38.5B.3 and R38.5B.7, and
+  the admission the code-quality finding reports. Baseline-derived
+  (permitted-input class R1, independently checkable in this repository's
+  own history): the existence of the record, the after-acceptance entry of
+  R38.5B.1, the withdraw builder's discarding of the record's lock
+  (R38.5B.2), the forwarding-only `send_raw_transaction` (R38.5B.3), the
+  listing composition and maturity rule (R38.5B.4), the two locks
+  (R38.5B.5), the legacy error body (R38.5B.6) and the absence of eviction
+  (R38.5B.8). Not corpus-sourced: the field observation (class R6, this
+  project's own run of 2026-10-30), the decision items, the tests, the
+  parity statement about this repository, and the Electrum method string
+  (public protocol). The Spec Reader read no state not already tabled in
+  chapter 02 §2.15A, so no row was added. *Dirty Gate clearance, 2026-10-30:*
+  PASS. Scope attestation: the extent examined was the UTXO coin layer's
+  spent-output bookkeeping (the recently-spent record and its lifetime), the
+  user withdraw builder for UTXO coins (direct and task-based), the legacy
+  raw-transaction broadcast RPC and its error rendering through the shared
+  JSON-RPC client, the unspent-listing composition, the hardware-wallet
+  address re-establishment hook, and the legacy and mmrpc-2.0 dispatch surface
+  for broadcast; compared at `v2.6.0-beta` (13 files read or searched),
+  `v3.0.0-beta` (the same subsystem; 8 of those files diffed against the
+  earlier row plus a repository-wide text search; the record type, the
+  withdraw builder and the listing functions are unchanged between the rows)
+  and the baseline anchor (R1) (6 files read or searched); a repository-wide
+  mechanical search for mempool-conflict matching at the two later rows
+  returned nothing in the UTXO and RPC layers. Method: reading combined with
+  mechanical text search (git grep and git diff at the tabled commits);
+  `tools/clean_room_gate.py` was not run (the section has no code blocks).
+  Measure: 0.03 on the discretionary-expression basis against the R35
+  residual-similarity standard.
+- *Reloaded-original addition (2026-10-30, maintainer Decision BE), clean
+  side.* R38.5B.9, the divergence notes after R38.5B.3 and R38.5B.8, the
+  decided states of D38.5B.1--D38.5B.3, D38.5B.4, the rewritten T38.5B.2 and
+  T38.5B.3, T38.5B.6--T38.5B.10 and the §38.7 bullet were written by a session
+  that never read the corpus. They rest on the maintainer's Decision BE of
+  2026-10-30, the cleared text of R38.5B.1--R38.5B.8 and this repository's own
+  code. They take no forbidden-class input, so chapter 01 R38 is not engaged
+  and no further gate pass is required.
