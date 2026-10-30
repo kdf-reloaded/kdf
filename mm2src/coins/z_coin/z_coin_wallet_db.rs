@@ -167,6 +167,12 @@ pub(crate) struct ZCoinShieldedHistory {
     /// deliberately re-anchored by a caller-supplied sync start. The two are
     /// otherwise indistinguishable until a scan finds its first transaction.
     birth_anchor_height: u64,
+    /// Set once a scan has completed since this history was opened, which ends the
+    /// first sync pass of the activation (see [`sync_pass_log_level`]).
+    first_pass_done: Arc<AtomicBool>,
+    /// The lightwalletd endpoint that served the last successful compact-block fetch, so
+    /// that a pass served by another endpoint is logged at `info`.
+    last_fetch_server: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -223,6 +229,21 @@ fn default_window_applied(
     plan: &LightwalletdFetchPlan,
 ) -> bool {
     requested_start_height.is_none() && !skip_sync_params && (!had_scanned_state || plan.reset_stale_empty_checkpoint)
+}
+
+/// The level of the routine lines of one shielded sync pass: the fetch plan, the start and end
+/// of the compact-block fetch, the checkpoint tree-state request, and the start and end of the
+/// wallet scan. After activation a pass runs about once per block, so a pass that only adds
+/// the next block logs them at `debug`. A pass stays at `info` when it is the first one since
+/// activation, resets local scan state, or covers more than one block. A pass served by
+/// another endpoint than the last one is raised to `info` by its caller; failures, resets and
+/// reorg rewinds keep their own `warn` and `info` lines.
+fn sync_pass_log_level(first_pass: bool, resets_state: bool, blocks: u64) -> log::log_crate::Level {
+    if first_pass || resets_state || blocks > 1 {
+        log::log_crate::Level::Info
+    } else {
+        log::log_crate::Level::Debug
+    }
 }
 
 impl ZCoinShieldedHistory {
@@ -372,6 +393,8 @@ impl ZCoinShieldedHistory {
             extfvk: extfvk.clone(),
             initial_chain_state: Arc::new(Mutex::new(initial_chain_state)),
             birth_anchor_height,
+            first_pass_done: Arc::new(AtomicBool::new(false)),
+            last_fetch_server: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -426,7 +449,13 @@ impl ZCoinShieldedHistory {
             );
         }
 
-        log::info!(
+        let pass_level = sync_pass_log_level(
+            !self.first_pass_done.load(AtomicOrdering::Relaxed),
+            fetch_plan.reset_stale_empty_checkpoint || fetch_plan.reset_scan_state,
+            target_height.saturating_sub(fetch_plan.start_height).saturating_add(1),
+        );
+        log::log_crate::log!(
+            pass_level,
             "ZCoin lightwalletd fetch plan: service={}, start_height={}, target_height={}, requested_start_height={:?}, reset_stale_empty_checkpoint={}, reset_scan_state={}, servers={}",
             LIGHTWALLETD_GRPC_SERVICE,
             fetch_plan.start_height,
@@ -445,6 +474,7 @@ impl ZCoinShieldedHistory {
             let name = health.name(server);
             // Set when the attempt failed at transport level, which suspends the endpoint (CRD ch.39 R39.11.31).
             let transport_failed = AtomicBool::new(false);
+            let level = self.endpoint_log_level(server, pass_level);
             match self
                 .fetch_compact_blocks_from_server(
                     consensus_params.clone(),
@@ -454,11 +484,13 @@ impl ZCoinShieldedHistory {
                     target_height,
                     progress,
                     &transport_failed,
+                    level,
                 )
                 .await
             {
                 Ok(fetched_height) => {
                     health.answered(server);
+                    *self.last_fetch_server.lock() = Some(server.clone());
                     return Ok(fetched_height);
                 },
                 Err(e) => {
@@ -491,6 +523,16 @@ impl ZCoinShieldedHistory {
         } else {
             ShieldedFetchError::BeforeSync(error)
         })
+    }
+
+    /// The level of one endpoint's fetch lines in a pass: `info` when the last successful fetch
+    /// was served by another endpoint, or by none yet; the pass level otherwise.
+    fn endpoint_log_level(&self, server: &str, pass_level: log::log_crate::Level) -> log::log_crate::Level {
+        if self.last_fetch_server.lock().as_deref() == Some(server) {
+            pass_level
+        } else {
+            log::log_crate::Level::Info
+        }
     }
 
     fn lightwalletd_fetch_plan(
@@ -628,10 +670,12 @@ impl ZCoinShieldedHistory {
         target_height: u64,
         progress: &(dyn Fn(u64, u64) + Send + Sync),
         transport_failed: &AtomicBool,
+        level: log::log_crate::Level,
     ) -> Result<u64, ShieldedFetchError> {
         let started = Instant::now();
         let start_height = fetch_plan.start_height;
-        log::info!(
+        log::log_crate::log!(
+            level,
             "ZCoin lightwalletd server {} scan started: compact block range {}..={}",
             name,
             start_height,
@@ -668,7 +712,7 @@ impl ZCoinShieldedHistory {
         // height -- resuming above it would leave the rewound blocks unscanned.
         let start_height = if start_height > 0 {
             let anchor = self
-                .ensure_lightwalletd_chain_state(&mut client, consensus_params.clone(), start_height - 1)
+                .ensure_lightwalletd_chain_state(&mut client, consensus_params.clone(), start_height - 1, level)
                 .await
                 .map_err(ShieldedFetchError::BeforeSync)?;
             if anchor + 1 != start_height {
@@ -706,7 +750,8 @@ impl ZCoinShieldedHistory {
             batch_start = batch_end + 1;
         }
 
-        log::info!(
+        log::log_crate::log!(
+            level,
             "ZCoin lightwalletd server {} scan fetched compact blocks through {} in {:?}",
             name,
             fetched_height,
@@ -964,6 +1009,7 @@ impl ZCoinShieldedHistory {
         tree_states: &mut S,
         consensus_params: ZcoinConsensusParams,
         checkpoint_height: u64,
+        level: log::log_crate::Level,
     ) -> Result<u64, String> {
         let scanned_height = self.scanned_block_height()?;
         if scanned_height.is_some_and(|height| height != checkpoint_height) {
@@ -991,7 +1037,14 @@ impl ZCoinShieldedHistory {
         // never recovers (R39.8.0al).
         let mut anchor_height = checkpoint_height;
         for attempt in 0..=ZCOIN_MAX_REORG_REWINDS {
-            log::info!(
+            // A request after a rewind is part of a reorg recovery, so it stays at `info`.
+            let attempt_level = if attempt == 0 {
+                level
+            } else {
+                log::log_crate::Level::Info
+            };
+            log::log_crate::log!(
+                attempt_level,
                 "ZCoin lightwalletd requesting wallet checkpoint tree state at height {}",
                 anchor_height
             );
@@ -1515,11 +1568,18 @@ impl ZCoinShieldedHistory {
                 initial_scanned_height,
                 target_height
             );
+            self.first_pass_done.store(true, AtomicOrdering::Relaxed);
             return Ok(initial_scanned_height);
         }
 
         let started = Instant::now();
-        log::info!(
+        let level = sync_pass_log_level(
+            !self.first_pass_done.load(AtomicOrdering::Relaxed),
+            false,
+            target_height - initial_scanned_height,
+        );
+        log::log_crate::log!(
+            level,
             "ZCoin shielded wallet DB scan started: scanned_height={}, target_height={}, blocks_per_iteration={}, inter_iteration_interval_ms={}, compact_blocks_path={}, wallet_db_path={}",
             initial_scanned_height,
             target_height,
@@ -1652,11 +1712,13 @@ impl ZCoinShieldedHistory {
             .map(|block| u64::from(u32::from(block.block_height())))
             .unwrap_or(scanned_height);
         if scanned_height >= target_height {
-            log::info!(
+            log::log_crate::log!(
+                level,
                 "ZCoin shielded wallet DB scan finished through height {} in {:?}",
                 scanned_height,
                 started.elapsed()
             );
+            self.first_pass_done.store(true, AtomicOrdering::Relaxed);
             Ok(scanned_height)
         } else {
             Err(format!(
@@ -3106,6 +3168,7 @@ fn split_group_concat(value: String) -> Vec<String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use common::log::log_crate::Level;
     use db_common::sqlite::rusqlite::params;
     use rand::{rngs::StdRng, SeedableRng};
     use sapling::{note_encryption::{sapling_note_encryption, SaplingDomain},
@@ -3916,6 +3979,38 @@ pub(crate) mod tests {
         // would otherwise skip forward.
         assert!(!warns(&open_checkpointed_test_history(42), 10_000, None, true));
         assert!(!warns(&open_test_history(), 10_000, None, true));
+    }
+
+    #[test]
+    fn only_a_routine_one_block_sync_pass_logs_at_debug() {
+        assert_eq!(sync_pass_log_level(false, false, 1), Level::Debug);
+        assert_eq!(sync_pass_log_level(true, false, 1), Level::Info);
+        assert_eq!(sync_pass_log_level(false, true, 1), Level::Info);
+        assert_eq!(sync_pass_log_level(false, false, 2), Level::Info);
+    }
+
+    #[test]
+    fn the_first_sync_pass_ends_with_the_first_completed_scan() {
+        let history = open_checkpointed_test_history(10);
+        let poll_view = history.clone();
+        // A scan that falls short leaves the first pass open.
+        history
+            .scan_cached_blocks_to_height(test_params(), 11, 1_000, 0, |_, _| {})
+            .unwrap_err();
+        assert!(!poll_view.first_pass_done.load(AtomicOrdering::Relaxed));
+        history
+            .scan_cached_blocks_to_height(test_params(), 10, 1_000, 0, |_, _| {})
+            .unwrap();
+        assert!(poll_view.first_pass_done.load(AtomicOrdering::Relaxed));
+    }
+
+    #[test]
+    fn a_fetch_served_by_another_endpoint_logs_at_info() {
+        let history = open_test_history();
+        assert_eq!(history.endpoint_log_level("https://a", Level::Debug), Level::Info);
+        *history.last_fetch_server.lock() = Some("https://a".to_owned());
+        assert_eq!(history.endpoint_log_level("https://a", Level::Debug), Level::Debug);
+        assert_eq!(history.endpoint_log_level("https://b", Level::Debug), Level::Info);
     }
 
     #[test]
@@ -4767,7 +4862,8 @@ pub(crate) mod tests {
             requested: Vec::new(),
         };
         let anchor =
-            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip)).unwrap();
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip, Level::Info))
+                .unwrap();
 
         assert_eq!(
             source.requested.first(),
@@ -4881,7 +4977,8 @@ pub(crate) mod tests {
             states: chain,
             requested: Vec::new(),
         };
-        let anchor = common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params, tip)).unwrap();
+        let anchor =
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params, tip, Level::Info)).unwrap();
 
         assert_eq!(anchor, tip);
         assert_eq!(source.requested, vec![tip]);
@@ -4921,7 +5018,8 @@ pub(crate) mod tests {
             requested: Vec::new(),
         };
         let anchor =
-            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip)).unwrap();
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip, Level::Info))
+                .unwrap();
 
         assert_eq!(
             anchor, expected,
@@ -5007,7 +5105,8 @@ pub(crate) mod tests {
             requested: Vec::new(),
         };
         let anchor =
-            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip)).unwrap();
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip, Level::Info))
+                .unwrap();
 
         assert_eq!(
             anchor, FIXTURE_CHECKPOINT_HEIGHT,
@@ -5158,7 +5257,8 @@ pub(crate) mod tests {
             requested: Vec::new(),
         };
         let anchor =
-            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip)).unwrap();
+            common::block_on(history.ensure_lightwalletd_chain_state(&mut source, params.clone(), tip, Level::Info))
+                .unwrap();
         assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
         let rebuild_backups = backup_files(&db_dir);
         assert_eq!(rebuild_backups.len(), 1, "{:?}", rebuild_backups);
@@ -5170,6 +5270,7 @@ pub(crate) mod tests {
                 &mut source,
                 params.clone(),
                 FIXTURE_CHECKPOINT_HEIGHT,
+                Level::Info,
             ))
             .unwrap();
             assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
@@ -5215,6 +5316,7 @@ pub(crate) mod tests {
                 &mut source,
                 test_params(),
                 FIXTURE_CHECKPOINT_HEIGHT,
+                Level::Info,
             ))
             .unwrap();
             assert_eq!(anchor, FIXTURE_CHECKPOINT_HEIGHT);
