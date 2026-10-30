@@ -207,6 +207,10 @@ pub enum AdexBehaviourCmd {
         /// to (CRD ch.28 §28.9B RQ1 item 9).
         priority: bool,
     },
+    /// Mark a cached message as validated without forwarding it (CRD ch.32 R-F3b, D11).
+    ValidateMessage {
+        message_id: MessageId,
+    },
 }
 
 /// The structure is the same as `PeerResponse`,
@@ -628,6 +632,12 @@ impl AtomicDexBehaviour {
                 ) {
                     error!("Error propagating message {}: {:?}", message_id, e);
                 }
+            },
+            AdexBehaviourCmd::ValidateMessage { message_id } => {
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .validate_message_without_forwarding(&message_id);
             },
         }
     }

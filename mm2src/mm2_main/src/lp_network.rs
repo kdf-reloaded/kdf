@@ -417,7 +417,8 @@ pub(crate) async fn process_p2p_message(
         }
     }
 
-    if !orderbook_pairs.is_empty() {
+    let orderbook_message = !orderbook_pairs.is_empty();
+    if orderbook_message {
         let process_fut = lp_ordermatch::process_msg_with_priority(
             ctx.clone(),
             orderbook_pairs,
@@ -436,9 +437,19 @@ pub(crate) async fn process_p2p_message(
     }
 
     if to_propagate && i_am_relay {
-        propagate_message_with_priority(&ctx, message_id, peer_id, priority);
+        if relay_sends_second_copy(priority, orderbook_message) {
+            propagate_message_with_priority(&ctx, message_id, peer_id, priority);
+        } else {
+            validate_message(&ctx, message_id);
+        }
     }
 }
+
+/// Whether a relay sends the application-level second copy of a message (CRD ch.32 R-F3b, amended, D11).
+/// A priority message keeps it, and so does a message outside the orderbook topics; for any other orderbook
+/// message the gossip-layer forward is the only copy. The relay validates the message in its message cache either
+/// way.
+fn relay_sends_second_copy(priority: bool, orderbook_message: bool) -> bool { priority || !orderbook_message }
 
 fn process_p2p_request(
     ctx: MmArc,
@@ -678,6 +689,16 @@ pub fn propagate_message_with_priority(ctx: &MmArc, message_id: MessageId, propa
     };
 }
 
+/// Marks a cached message as validated without forwarding it (CRD ch.32 R-F3b, D11).
+pub fn validate_message(ctx: &MmArc, message_id: MessageId) {
+    let ctx = ctx.clone();
+    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
+    let cmd = AdexBehaviourCmd::ValidateMessage { message_id };
+    if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
+        log::error!("validate_message cmd_tx.send error {:?}", e);
+    };
+}
+
 pub fn add_reserved_peer_addresses(ctx: &MmArc, peer: PeerId, addresses: PeerAddresses) {
     let ctx = ctx.clone();
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
@@ -770,13 +791,30 @@ pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<De
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_connection_healthcheck, peer_healthcheck_topic};
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic, relay_sends_second_copy};
     use common::block_on;
     use mm2_core::mm_ctx::MmCtxBuilder;
 
     #[test]
     fn peer_healthcheck_topic_is_prefixed_by_peer() {
         assert_eq!(peer_healthcheck_topic("12D3KooWtest"), "peer_healthcheck/12D3KooWtest");
+    }
+
+    /// T-F3d: a relay sends the second copy of a priority message and of a message outside the orderbook topics, and
+    /// not of any other orderbook message (CRD ch.32 R-F3b, D11).
+    #[test]
+    fn relay_sends_second_copy_for_priority_and_non_orderbook_messages() {
+        // (priority, orderbook message)
+        assert!(!relay_sends_second_copy(false, true), "ordinary orderbook message");
+        assert!(relay_sends_second_copy(true, true), "cancellation or swap negotiation");
+        assert!(
+            relay_sends_second_copy(false, false),
+            "swap, swap v2 or watcher message"
+        );
+        assert!(
+            relay_sends_second_copy(true, false),
+            "priority outside the orderbook topics"
+        );
     }
 
     #[test]

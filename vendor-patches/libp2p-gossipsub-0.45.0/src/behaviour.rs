@@ -898,6 +898,27 @@ where
         Ok(true)
     }
 
+    /// Marks a message stored in the message cache as validated without forwarding it
+    /// (CRD ch.32 R-F3b, D11). The message is then announced in IHAVE and served for IWANT like
+    /// one passed to [`Self::propagate_message`], but nothing is written to any peer and no other
+    /// state changes.
+    ///
+    /// Returns true if the message was found in the cache and false if it was not (in which case a
+    /// miss is counted in the metrics).
+    pub fn validate_message_without_forwarding(&mut self, message_id: &MessageId) -> bool {
+        if self.mcache.validate(message_id).is_some() {
+            return true;
+        }
+        debug!(
+            "Message not in cache. Ignoring validation. Message Id: {}",
+            message_id
+        );
+        if let Some(metrics) = self.metrics.as_mut() {
+            metrics.memcache_miss();
+        }
+        false
+    }
+
     /// This function should be called when [`Config::validate_messages()`] is `true` after
     /// the message got validated by the caller. Messages are stored in the ['Memcache'] and
     /// validation is expected to be fast enough that the messages should still exist in the cache.
