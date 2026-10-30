@@ -29,6 +29,9 @@ regtest-netid = ["mm2_net_config/regtest-netid"]
 unsafe-rpc-wire-dump = []
 # Escape hatch for controlled release debugging. Never enable in production builds.
 unsafe-rpc-wire-dump-release-override = []
+# Test-only: installs a counting global allocator in the test binaries for the memory measurement
+# harness of the order-book trie store (`measure_burst_retention`). Never enable on a build that ships.
+counting-alloc = []
 
 [[bin]]
 name = "kdf"

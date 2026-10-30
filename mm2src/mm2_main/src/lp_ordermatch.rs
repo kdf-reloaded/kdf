@@ -32,7 +32,7 @@ use common::{bits256, log, new_uuid, now_ms, HttpStatusCode};
 use crypto::privkey::SerializableSecp256k1Keypair;
 use crypto::CryptoCtx;
 use derive_more::Display;
-use futures::channel::mpsc::{unbounded, UnboundedSender};
+use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver, UnboundedSender};
 #[cfg(test)] use futures::channel::oneshot;
 use futures::{compat::Future01CompatExt, lock::Mutex as AsyncMutex, StreamExt, TryFutureExt};
 use hash256_std_hasher::Hash256StdHasher;
@@ -42,6 +42,7 @@ use keys::{AddressFormat, KeyPair};
 use mm2_core::mm_ctx::{from_ctx, MmArc, MmWeak};
 use mm2_err_handle::prelude::*;
 use mm2_event_stream::StreamerId;
+use mm2_metrics::MetricsWeak;
 use mm2_p2p::{decode_signed, encode_and_sign, encode_message, pub_sub_topic, TopicPrefix, TOPIC_SEPARATOR};
 #[cfg(test)] use mocktopus::macros::*;
 use num_traits::identities::Zero;
@@ -419,16 +420,14 @@ impl Default for OrdermatchContext {
     /// runtime or the `common::executor` threadpool).
     fn default() -> Self {
         let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
-        let (trie_ops_tx, mut trie_ops_rx) = unbounded::<Vec<TrieOp>>();
-        let ts = trie_store.clone();
+        let (trie_ops_tx, trie_ops_rx) = unbounded::<Vec<TrieOp>>();
         // Drive the worker on the common executor so trie ops are applied even in
         // unit-test contexts that don't have a full MmCtx runtime.
-        common::executor::spawn(async move {
-            while let Some(ops) = trie_ops_rx.next().await {
-                let mut store = ts.lock();
-                store.apply_batch(ops);
-            }
-        });
+        common::executor::spawn(run_trie_store_worker(
+            trie_ops_rx,
+            trie_store.clone(),
+            MetricsWeak::default(),
+        ));
         OrdermatchContext {
             maker_orders_ctx: Default::default(),
             my_taker_orders: Default::default(),

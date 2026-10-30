@@ -325,6 +325,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The order-book store no longer grows without bound when a maker updates orders very fast.** The
+  node now applies queued order updates in bulk (up to 1,024 batches or 2,048 events at a time), drops the unused entries of
+  its node store as soon as 100,000 updates have piled up (at most every five seconds) instead of
+  only every ten minutes, and keeps at most 2,048 stored changes per maker and pair. In a test
+  of 120,480 updates for 30 orders the memory left after the node caught up fell from 134 MB to
+  26 MB (3 MB when the node was held back first). A peer that is behind, or asks about a state older
+  than the kept changes, receives the full set of orders instead of a delta; nothing else changes
+  for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
+  More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
+  (R-K5, R-K6). Detail: PR #164.
 - **The native coin daemon's and the Sia wallet daemon's error texts no longer quote the daemon's raw
   answer.** They carry the daemon's error code, its message and the answer's size only. More in CRD
   ch.38 §38.6.9 and ch.20 §20.8.
