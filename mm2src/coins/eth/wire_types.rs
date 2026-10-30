@@ -113,6 +113,12 @@ pub struct CallRequest {
     pub gas: Option<U256>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "gasPrice")]
     pub gas_price: Option<U256>,
+    /// EIP-1559 fee cap. Sent instead of, never together with, `gas_price` (CRD ch.56 R6).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "maxFeePerGas")]
+    pub max_fee_per_gas: Option<U256>,
+    /// EIP-1559 tip cap, sent with `max_fee_per_gas`.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "maxPriorityFeePerGas")]
+    pub max_priority_fee_per_gas: Option<U256>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<U256>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,6 +427,8 @@ mod tests {
             to: H160::from_low_u64_be(5),
             gas: Some(21_000.into()),
             gas_price: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
             value: Some(5_000_000.into()),
             data: Some(vec![1, 2, 3].into()),
         };

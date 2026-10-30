@@ -1,6 +1,6 @@
 use super::taker_swap::MaxTakerVolumeLessThanDust;
 use super::{get_locked_amount, get_locked_amount_by_other_swaps};
-use coins::{BalanceError, MmCoinEnum, TradeFee, TradePreimageError};
+use coins::{BalanceError, FeeCapBelowBaseFee, MmCoinEnum, TradeFee, TradePreimageError};
 use common::log::debug;
 use common::mm_number::{BigDecimal, MmNumber};
 use derive_more::Display;
@@ -214,6 +214,9 @@ pub enum CheckBalanceError {
     },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// An EVM node rejected an estimation or a transaction for a fee cap below the block base fee (CRD ch.56 R5).
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -227,6 +230,7 @@ impl From<BalanceError> for CheckBalanceError {
             e @ BalanceError::UnexpectedDerivationMethod(_) | e @ BalanceError::WalletStorageError(_) => {
                 CheckBalanceError::InternalError(e.to_string())
             },
+            BalanceError::FeeCapBelowBaseFee(rejection) => CheckBalanceError::FeeCapBelowBaseFee(rejection),
             BalanceError::Internal(internal) => CheckBalanceError::InternalError(internal),
         }
     }
@@ -271,6 +275,7 @@ impl CheckBalanceError {
                 threshold,
             },
             TradePreimageError::Transport(transport) => CheckBalanceError::Transport(transport),
+            TradePreimageError::FeeCapBelowBaseFee(rejection) => CheckBalanceError::FeeCapBelowBaseFee(rejection),
             TradePreimageError::InternalError(internal) => CheckBalanceError::InternalError(internal),
         }
     }

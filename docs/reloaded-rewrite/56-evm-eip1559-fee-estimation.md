@@ -48,6 +48,61 @@ multipliers, the number of history blocks requested, the percentile
 list, and every Rust-side data-shape decision are discretionary and are
 **not** bound here.
 
+## 56.1A Motivating field observation (2026-10-30)
+
+A community maintainer running Reloaded `dev` at `d369906c2` against a
+public, load-balanced Ethereum mainnet endpoint reported one failed
+maker-side request. The node answered that request with a generic
+server error (JSON-RPC code `-32000`) whose text stated that the
+request had *failed with N gas* because the *max fee per gas* was *less
+than the block base fee*, and appended the two amounts: the submitted
+cap of `260384509` wei against a base fee of `289502753` wei
+(permitted-input class R6, public-network observation). Three facts
+follow from the numbers alone and need no implementation reading:
+
+- the ratio of the two amounts is about 1.112, i.e. **one** full block's
+  maximum base-fee rise (one-eighth, §56.3) separates the price the
+  daemon used from the base fee the node validated against;
+- the submitted cap exceeds the previous block's implied base fee
+  (`289502753 / 1.125`) by roughly three million wei — the size of a
+  node's suggested tip on a quiet chain, not of any headroom factor;
+- the text is the Geth-family phrasing of R5, and the *failed with N
+  gas* prefix is the phrasing a node uses when it rejects a
+  **gas-limit estimation**, not a broadcast.
+
+Reloaded's own tree had already implemented the freshest-anchor rule
+R1 on 2026-10-18 (commit `4410edeaa`, contained in `d369906c2`), so the
+symptom is **not** the oldest-element defect of §56.1. The arithmetic
+instead matches a request priced from a plain *gas price* with no
+headroom that was one block stale by the time the node validated it;
+§56.4 (R6, the code-quality finding beneath it) and D5 state what the
+daemon must do about it. The field report is recorded here as the
+motivating observation for R5 and R6.
+
+> **Clean-side correction (2026-10-30; Reloaded's own tree at
+> `d369906c2`, no forbidden-class input).** The failed request was not a
+> swap step, and no swap was in progress. The call chain in the logged
+> line places it in the balance check of a `setprice` order placement
+> (`ordermatch_trading.rs:2364`, then `maker_swap.rs:2438`):
+> - **The request** was the gas-limit estimation of the ERC-20 `approve`
+>   that a token's first V1 payment needs (`eth_mm_coin.rs:218`,
+>   `eth_impl.rs:412`).
+> - **Its price** was the legacy gas price of
+>   [Chapter 57](57-evm-fee-inputs.md) R57.2.1: the larger of the node's own
+>   suggestion and the mined block's base fee raised by 13 percent (R57.2.2).
+>   Inside an order-posting request that price may be a reading reused from
+>   the short cache of R57.2.6.
+>
+> The two amounts therefore fit two mechanisms that one log line cannot
+> tell apart:
+> - a plain node price one block stale, as the bullets above read it;
+> - a reused fee-history reading two or more blocks old: the base fee the
+>   node validated against is about 1.256 times the mined base fee such a
+>   reading implies.
+>
+> R6 covers both, because the fee fields of an estimation are fetched for
+> that request and never reused.
+
 ## 56.2 Subsystem Shape
 
 The estimator is a pure function of one input — a decoded
@@ -103,6 +158,26 @@ The dictated facts the estimator MUST honour are:
   this case — it is still the freshest base fee the response carries —
   so the selection rule is uniform across both client behaviours.
 
+- **Fee-cap validation by the node (addendum 2026-10-30).** EVM clients validate a transaction's fee cap against the
+  current block base fee, and several do so already at **gas-limit
+  estimation** when the estimation request carries fee fields, not only
+  at broadcast. The Geth family does so whenever the estimation request
+  carries a non-zero price or cap; Nethermind does so strictly from
+  release 1.36.0. The same clients treat a request that
+  carries only a legacy `gasPrice` as if both EIP-1559 caps were equal to
+  that price, so a legacy price below the base fee is rejected with the
+  same fee-cap text as a type-2 cap would be. Consequences for the
+  daemon: (i) a price taken from the node without headroom can be
+  rejected one block later on a chain whose blocks are full (the
+  observation of §56.1A). Two full blocks raise the base fee by about
+  26.6 percent (one-eighth twice, as above), so a few blocks of staleness
+  defeat a modest headroom. On a fast-block chain (for instance Gnosis,
+  §56.6) that is a few seconds. In Reloaded's own tree, the order-posting
+  short cache of [Chapter 57](57-evm-fee-inputs.md) R57.2.6 keeps a
+  reading for at least two seconds, which spans several blocks of a
+  sub-second chain (clean-side observation). (ii) The rejection is a
+  node-dictated, recognisable condition, bound in R5.
+
 ## 56.4 Bound Estimator Contract Surface
 
 **R1.** *Base-fee anchor selection.* When the simple EVM fee-per-gas
@@ -140,6 +215,113 @@ alter the swap or withdraw transaction-construction contracts; those
 consumers receive the corrected, higher (freshest) estimate
 transparently.
 
+> *R5 and R6 below are the addendum of 2026-10-30, see §56.1A and §56.10.*
+
+**R5.** *Typed classification of a fee-cap-below-base-fee rejection.* On
+every EVM path that presents a fee cap to a node — gas-limit estimation
+for a swap step or a trade preimage, the withdraw gas-details estimation
+of [Chapter 57](57-evm-fee-inputs.md) R57.7.3, and the broadcast of a
+signed transaction — a node error whose text contains one of the
+following node-observable phrasings MUST be surfaced as the typed
+"fee cap below base fee" error of the EVM coin layer, never as a raw
+transport or internal error:
+
+- `max fee per gas less than block base fee` — the Geth-family text
+  (also emitted by several Geth-derived clients), and the text of the
+  §56.1A observation;
+- `fee cap less than block base fee` — the alternative Geth-family
+  phrasing;
+- `miner premium is negative` — the text Nethermind emits for the same
+  condition in releases **before 1.38.0** (Nethermind from 1.36.0
+  validates the cap at gas estimation; from 1.38.0 it no longer uses
+  this phrasing, so a deployment that must also cover newer Nethermind
+  relies on the two Geth-family texts above being matched as well).
+
+Recognition MUST be by containment, exactly as the node spells the
+phrase, because nodes wrap it: the observed form carried a
+*failed with N gas:* prefix and a trailing `maxFeePerGas: <wei>,
+baseFee: <wei>` pair. Where that pair is present the typed error SHOULD
+carry both amounts so a user sees the cap they offered and the base fee
+the chain required; the unit presented to the user is discretionary. A
+`-32000` error whose text contains none of the three phrasings MUST NOT
+be classified under this rule. The list is a floor: a further
+node-dictated phrasing for the same condition MAY be added, with its
+client and version range recorded in §56.3.
+
+**R6.** *Fee fields of a gas-limit estimation request.* A gas-limit
+estimation request issued for a transaction the daemon is about to sign
+MUST carry the fee fields the transaction will be signed with, priced
+from a fetch made for that transaction: when the swap gas-fee policy of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.6.6 is an EIP-1559 tier,
+both caps of that tier's estimate (R1–R3 headroom included) and no
+legacy price; when the policy is legacy, the legacy price. The same rule
+already binds the withdraw path as R57.7.3; R6 extends it to the swap
+and trade-preimage paths, where today only a legacy price is ever
+supplied (see the code-quality finding below). An estimate or price
+fetched for one swap step MUST NOT be reused for a later step; each step
+fetches afresh. The trade-preimage path includes the fee previews of order
+posting. The fee fields of an estimation request are therefore exempt from
+the request-scoped reuse and the short cache of
+[Chapter 57](57-evm-fee-inputs.md) R57.2.6. They are fetched for that
+request even inside an order-posting request, whose other fee figures may
+still reuse a reading. *(This exemption is a clean-side addition of
+2026-10-30, maintainer Decision AZ.)* Rationale: a node that validates the cap at estimation
+(§56.3) validates whatever the request carries, and a legacy price
+taken from the node has no headroom at all, so one full block defeats it
+— the mechanism of §56.1A.
+
+> **Code-quality finding (informative, Reloaded's own tree).** Two
+> estimation sites always price the estimation request with the legacy
+> gas price of `eth_impl.rs:3194`, whatever the swap gas-fee policy is:
+> - the swap-side gas-limit estimation helper at
+>   `mm2src/coins/eth/eth_impl.rs:2623-2638`, which estimates the ERC-20
+>   `approve` that precedes a V1 token payment and the approve figure of a
+>   token's trade preimage;
+> - the taker-fee preview's estimation at
+>   `mm2src/coins/eth/eth_mm_coin.rs:302-313`.
+>
+> The estimation request shape at `mm2src/coins/eth/wire_types.rs:108-121`
+> has no field for either EIP-1559 cap. Under an EIP-1559 tier policy the
+> approve is then signed with the tier's capped pair
+> (`eth_impl.rs:1255-1269`), while its gas limit was estimated under a
+> different, headroom-free price. The swap payment, spend and refund use
+> configured limits (R57.5.3a) and send no estimation request. *(Line
+> references and the approve-only scope were refreshed on the clean side
+> against `d369906c2`, whose EVM code equals dev `99b289817`.)* That is
+> the contradiction with
+> R57.7.3's rationale, and the arithmetic of §56.1A fits it exactly.
+> Proposed fix: give the estimation request optional `maxFeePerGas` /
+> `maxPriorityFeePerGas` members (dictated JSON names), fill them from
+> the same tier estimate the signing path uses, and omit `gasPrice` in
+> that case; keep the legacy member for the legacy policy. No typed
+> fee-cap error exists in the tree yet, so the R5 variant must be added
+> to the EVM coin layer's error types alongside. *(Trigger: a
+> contradiction between two things read side by side — ch. 57 R57.7.3
+> and the swap-path estimation helpers.)*
+
+> **As-built note (2026-10-30, clean-side record).** PR #174 implements R5,
+> R6 and D5 as decided.
+> - **Classification (R5).** The three phrasings are recognised by
+>   containment wherever the EVM coin layer reads a node's answer to an
+>   estimation or a broadcast. The typed error carries the cap and the base
+>   fee when the node quotes them, and the host-only node label of
+>   [Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.17.
+> - **On the wire.** The withdraw, trade-preimage and maximum-maker-volume
+>   RPCs report the typed error as the `error_type` `FeeCapBelowBaseFee`.
+>   Its `error_data` gives the amounts as decimal wei strings. The HTTP
+>   status is 500, as for a transport error.
+> - **`send_raw_transaction`.** Its error is a plain string, so it reports
+>   the same text.
+> - **Fee fields (R6).** Every estimation request carries the fee fields
+>   of the coin's swap gas-fee policy, fetched for it outside the request
+>   scope and the short cache. The withdraw path carries the legacy price
+>   (R57.7.2). The approve that precedes a V1 token payment is estimated
+>   and signed with one fetch.
+> - **Retry (D5).** One fresh retry applies to estimations only, and a
+>   rejection discards the chain's cached gas price.
+> - **Out of scope.** The NFT withdraw estimation is classified in the text
+>   of its error only; it is not a typed variant there.
+
 ## 56.5 Tests
 
 **T1.** *Freshest-base-fee regression (the fix).* Given a synthesized
@@ -159,6 +341,40 @@ fee.
 empty `baseFeePerGas` array, the estimator MUST return a well-formed
 estimate (zero base-fee anchor plus the priority-fee term) rather than
 erroring or panicking (R2).
+
+> *T4–T6 are the addendum of 2026-10-30.*
+
+**T4.** *Fee-cap rejection classification (R5).* For each of the three
+phrasings of R5, a node error constructed as the node would emit it —
+the phrase embedded in a longer `-32000` message with the observed
+*failed with N gas:* prefix and the trailing `maxFeePerGas` / `baseFee`
+pair, and once more bare — MUST map to the typed fee-cap-below-base-fee
+error, and where the pair is present the error MUST carry both amounts.
+A `-32000` message of similar shape whose text names an unrelated
+condition (for instance an insufficient-funds text) MUST NOT map to it.
+The test is deterministic and needs no node.
+
+**T5.** *Estimation request carries the signing fee fields (R6).*
+Against a mock node that records request bodies: with an EIP-1559 tier
+policy selected, the `eth_estimateGas` request issued for a swap step and
+the one issued for a trade preimage MUST carry `maxFeePerGas` and
+`maxPriorityFeePerGas` equal to the pair the subsequently signed
+transaction carries, and no `gasPrice`; with the legacy policy they MUST
+carry `gasPrice` only. The test MUST fail against the present tree. In
+Reloaded's tree the swap-step request is the one for the ERC-20 `approve`
+that precedes a V1 token payment; the payment itself uses a configured
+limit (clean-side note).
+
+**T6.** *The field symptom, end to end (R5, R6, D5).* Against a mock
+node whose base fee rises by one-eighth between the daemon's price
+query and its estimation call, and which rejects an estimation whose
+cap (or legacy price) is below the new base fee with the Geth-family
+text of R5: a swap step priced the legacy way MUST surface the typed
+error of R5 (reproducing §56.1A, not a transport error); the same step
+under an EIP-1559 tier with R6 in place MUST be accepted, because the
+tier's headroom (R3) covers one block's rise. If D5 is resolved in
+favour of a refresh-and-retry, the legacy-priced step MUST succeed on
+the retry instead.
 
 ## 56.6 Upstream Divergence (informative)
 
@@ -187,6 +403,16 @@ Reloaded additionally hardens the percentile selection against an empty
 reward slice (R2) — a path upstream still leaves able to panic — making
 the reloaded estimator a strict superset on the malformed-input path.
 
+*Addendum 2026-10-30.* Two further divergences,
+stated as behaviour: (a) upstream recognises the fee-cap rejection only
+on the withdraw gas-details surface, whereas R5 binds the recognition on
+every path that presents a cap, because the §56.1A observation came
+from a swap step; (b) upstream's gas-limit estimation requests carry the
+fee fields of the selected gas policy (the legacy price or the EIP-1559
+pair) — the behaviour R6 binds — which Reloaded's swap path does not yet
+do. Both are Reloaded stating a requirement upstream meets only in part
+or in another place, not a reproduction of upstream expression.
+
 ## 56.7 Deferred Work
 
 **D1.** *Provider-side fee estimation.* Deriving the estimate from an
@@ -194,17 +420,44 @@ external gas-oracle / provider API instead of (or as a fallback to)
 `eth_feeHistory` is out of scope for this chapter; only the
 history-based simple estimator's base-fee selection is bound here.
 
-**D2.** *Withdraw fee-cap error classification.* When a transaction is
+**D2.** *Withdraw fee-cap error classification — resolved into R5
+(addendum 2026-10-30).* When a transaction is
 submitted with an explicit `maxFeePerGas` that is below the node's
 current block base fee, strict EVM clients reject the request. Mapping
 the client's textual rejection (the external-client error strings that
 signal "fee cap below the block base fee" — see §56.6) into a typed,
 user-meaningful "fee cap below base fee" error — rather than surfacing a
-raw transport error — is part of the withdraw gas-details estimation
-surface, **not** the fee-per-gas estimator bound here. That
-error-classification surface is not yet present in the reloaded tree (it
-arrived upstream with the Tron withdrawal feature); binding it is
-deferred to the chapter that ports that surface.
+raw transport error — was originally deferred to the chapter porting the
+withdraw gas-details surface. The §56.1A field report showed the same
+rejection on a swap step, so the classification is now bound here as R5
+for every path that presents a cap; the withdraw-specific fee-form work
+remains with [Chapter 57](57-evm-fee-inputs.md) §57.7, which R5
+cross-references. D2 is kept as the record of the earlier deferral.
+
+**D5.** *Reaction to a typed fee-cap rejection (addendum 2026-10-30).* Once R5 yields the typed error, the daemon can
+either fail the step with it or refresh the estimate (R1–R3, or the
+legacy price) and retry the request once before failing. The proposed
+default is one refresh-and-retry at the same tier, then the typed error:
+the condition is by construction transient (one block of base-fee
+movement) and a swap step that fails for it costs the user a trade.
+Whether to retry, how many times, and whether a retry may step up one
+tier are maintainer decisions and are not bound here; T6 states the
+observable outcome for each resolution.
+
+*Decided 2026-10-30 (maintainer Decision AZ, clean-side record):*
+- **Estimation.** When a gas-limit estimation draws the typed error of
+  R5, the daemon fetches the fee fields once more, fresh and at the same
+  tier (or the same legacy source), and retries the estimation once. A
+  second rejection fails the step with the typed error. T6's retry branch
+  applies.
+- **Broadcast.** A transaction a node refuses at broadcast for this
+  reason surfaces the typed error. It is not re-signed or retried inside
+  the send.
+- **Tier.** The tier is never stepped up silently.
+- **Cache.** As a detail of R6's exemption, a typed fee-cap rejection also
+  discards the chain's cached gas-price reading of
+  [Chapter 57](57-evm-fee-inputs.md) R57.2.6. The next order-posting
+  request then reads the price fresh.
 
 **D3.** *Reported `base_fee` versus Chapter 10 R36.* [Chapter 10](10-sse-streaming.md)
 R36 binds the fee-estimation stream's `base_fee` field as the "next-block
@@ -302,3 +555,85 @@ does not reach this chapter. Deferred by maintainer decision on 2026-10-18.
     and deferred item D3 (added when the chapter was brought onto the current
     branch) state Reloaded's own observations and take no forbidden-class
     input; they are not covered by either pass and need none.
+- *Addendum of 2026-10-30, passed the KDF Dirty Gate on 2026-10-30
+  (chapter 01 R40, T1).* The addendum comprises:
+  - §56.1A;
+  - the fee-cap bullet of §56.3;
+  - R5, R6 and the code-quality finding beneath them;
+  - T4–T6;
+  - the closing paragraph of §56.6;
+  - D2 as amended, and D5.
+
+  It was authored by the KDF Spec Reader under the two-team procedure of
+  §1.4A. Its inputs:
+  - *Permitted classes:* R6 (a community maintainer's field report of
+    2026-10-30 against a public Ethereum mainnet endpoint — the two
+    amounts and the error code of §56.1A); R4 (the fee-cap validation
+    behaviour and error phrasings of third-party EVM clients — Geth and
+    its derivatives, Nethermind with the version boundaries 1.36.0 and
+    1.38.0 — which those clients dictate); R1 (Reloaded's own tree at
+    `d369906c2` for the code-quality finding and the §56.1A statement
+    that R1 was already implemented there). No client publication is
+    cited here for the two Nethermind version boundaries. They stand as
+    the Spec Reader recorded them, and the same boundaries appear in §56.6,
+    which the gate cleared on 2026-06-26. A later edit that checks them
+    against the client's public release history should add that
+    citation.
+  - *Forbidden corpus, scoped record:* consulted on 2026-10-30, through a
+    third party's reproduction of the upstream fix's change description
+    and through the local lineage history, for four facts only: (i) that
+    the upstream fix anchors on the trailing fee-history element and adds
+    the pre-1.38.0 Nethermind phrasing to the recognised set — the same
+    change the second gate pass of 2026-06-26 already covered; (ii) that
+    upstream's recognition lives only on the withdraw gas-details surface
+    (§56.6 (a)); (iii) that upstream's gas-limit estimation requests carry
+    the selected gas policy's fee fields (§56.6 (b)); (iv) the lineage
+    facts reported to the maintainer outside this chapter — that the
+    estimator first appeared in a 2024 post-anchor revision, is present
+    with the oldest-element anchor in the public releases `v2.6.0-beta`
+    and `v3.0.0-beta`, and was not yet corrected in the v3 development
+    lineage as held locally. Reference versions: `v2.6.0-beta`,
+    `v3.0.0-beta`, and the v3 development lineage as consulted on
+    2026-10-30. These public designations, as held in the local lineage,
+    are as precise as the record goes. Nothing else was taken: the phrasings of R5 are client
+    dictated (R4), the arithmetic of §56.1A is Reloaded's own, and no
+    private identifier, body, helper decomposition or discretionary
+    constant of the corpus was reproduced.
+  - *Dirty Gate verdict and scope attestation (chapter 01 R39, R40):*
+    **PASS** on 2026-10-30, discretionary-expression measure 0.04, with no
+    finding in any R39 category.
+    - *Extent:* the forbidden-class material within this chapter's own
+      scope at the public releases `v2.6.0-beta` and `v3.0.0-beta` as held
+      in the local lineage, which is as precise as the record goes. That
+      material is the EVM EIP-1559 simple estimator, the fee-cap rejection
+      classification surface of the withdraw gas details, and the
+      construction of gas-limit estimation requests on the swap,
+      trade-preimage and withdraw paths. It also covers one
+      third-party-supplied reproduction of an upstream change
+      description.
+    - *Quantity:* two corpus source files read in five regions, about 400
+      lines, plus that reproduction; 341 identifier tokens extracted.
+    - *Method:* reading, plus a mechanical sweep of those tokens against
+      the 232 added lines of the four files the addendum changed.
+      `tools/clean_room_gate.py` was not run because the candidate has no
+      code blocks.
+    - *Measure:* 0.04, against the standard "no finding in any R39
+      category and discretionary similarity materially below 0.10".
+- *Clean-side edits after the verdict (2026-10-30; Reloaded-original, no
+  forbidden-class input).* A session that never read the corpus wrote
+  these from Reloaded's own tree at `d369906c2` (whose EVM code equals dev
+  `99b289817`), the logged line of §56.1A and maintainer Decision AZ:
+  - the correction note of §56.1A (an order-placement fee preview, not a
+    swap step, and the second mechanism through the short cache);
+  - the exemption sentence of R6 for the request scope and the short cache
+    of chapter 57 R57.2.6;
+  - the refreshed line references and the approve-only scope of the
+    code-quality finding, and the matching note under T5;
+  - the EIP-1559 arithmetic and the short-cache observation in the fee-cap
+    bullet of §56.3;
+  - the record of the maintainer's decision under D5;
+  - the removal of the gate-pending markers once the verdict above was
+    recorded.
+
+  Chapter 01 R38 is not engaged by these edits, and they need no gate
+  pass.

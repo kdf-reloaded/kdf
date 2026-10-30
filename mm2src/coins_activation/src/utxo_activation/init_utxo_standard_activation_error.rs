@@ -93,7 +93,8 @@ impl InitUtxoStandardError {
     /// Maps a failure of the balance query.
     pub fn from_balance_err(err: BalanceError, ticker: String) -> Self {
         match err {
-            BalanceError::Transport(_) | BalanceError::InvalidResponse(_) => {
+            // A balance read sends no fee cap; the arm keeps the node's text so the conversion is total.
+            BalanceError::Transport(_) | BalanceError::InvalidResponse(_) | BalanceError::FeeCapBelowBaseFee(_) => {
                 InitUtxoStandardError::Transport(err.to_string())
             },
             BalanceError::Internal(_) | BalanceError::WalletStorageError(_) => {

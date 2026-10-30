@@ -1,4 +1,78 @@
 use super::*;
+use ethereum_types::U256;
+
+/// An EVM node rejected a transaction, or a gas-limit estimation, because its fee cap (a `maxFeePerGas`, or
+/// the legacy price a node treats as one) is below the block base fee (CRD ch.56 R5).
+///
+/// Every error type that can carry the rejection holds this one payload as its own variant, so the
+/// condition is never flattened into a transport or internal error. The amounts are those the node
+/// quoted, when it quoted them; both are in wei.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FeeCapBelowBaseFee {
+    /// The cap the transaction or the estimation request offered.
+    #[serde(with = "optional_wei_decimal")]
+    pub max_fee_per_gas: Option<U256>,
+    /// The block base fee the node validated it against.
+    #[serde(with = "optional_wei_decimal")]
+    pub base_fee: Option<U256>,
+    /// The node label the transport appended to the node's text, in its host-only form (CRD ch.35 R35.1.17).
+    pub node: Option<String>,
+}
+
+impl FeeCapBelowBaseFee {
+    /// An amount in gwei with the exact wei in parentheses, e.g. `0.260384509 gwei (260384509 wei)`.
+    fn amount_text(wei: U256) -> String {
+        let gwei = U256::from(1_000_000_000u64);
+        let (whole, fraction) = (wei / gwei, (wei % gwei).as_u64());
+        let fraction = format!("{fraction:09}");
+        let fraction = fraction.trim_end_matches('0');
+        if fraction.is_empty() {
+            format!("{whole} gwei ({wei} wei)")
+        } else {
+            format!("{whole}.{fraction} gwei ({wei} wei)")
+        }
+    }
+}
+
+impl fmt::Display for FeeCapBelowBaseFee {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The fee cap is below the block base fee")?;
+        match (self.max_fee_per_gas, self.base_fee) {
+            (Some(cap), Some(base)) => write!(
+                f,
+                ": the fee cap offered was {}, the base fee {}",
+                Self::amount_text(cap),
+                Self::amount_text(base)
+            )?,
+            (Some(cap), None) => write!(f, ": the fee cap offered was {}", Self::amount_text(cap))?,
+            (None, Some(base)) => write!(f, ": the base fee was {}", Self::amount_text(base))?,
+            (None, None) => {},
+        }
+        if let Some(node) = &self.node {
+            write!(f, " (node {node})")?;
+        }
+        Ok(())
+    }
+}
+
+/// `Option<U256>` as a decimal string in the JSON of an error, not the hexadecimal of `U256`'s own form.
+mod optional_wei_decimal {
+    use ethereum_types::U256;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(value: &Option<U256>, serializer: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(wei) => serializer.serialize_some(&wei.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<U256>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| U256::from_dec_str(&text).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
 
 #[derive(Debug, Deserialize, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
@@ -98,6 +172,10 @@ pub enum TradePreimageError {
     AmountIsTooSmall { amount: BigDecimal, threshold: BigDecimal },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// CRD ch.56 R5: an EVM node rejected the estimation or the transaction for a fee cap below the block
+    /// base fee.
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -193,6 +271,9 @@ pub enum BalanceError {
     UnexpectedDerivationMethod(UnexpectedDerivationMethod),
     #[display(fmt = "Wallet storage error: {}", _0)]
     WalletStorageError(String),
+    /// CRD ch.56 R5: an EVM node rejected the request for a fee cap below the block base fee.
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal: {}", _0)]
     Internal(String),
 }
@@ -364,6 +445,9 @@ impl From<BalanceError> for DelegationError {
                 DelegationError::DelegationOpsNotSupported { reason: e.to_string() }
             },
             e @ BalanceError::WalletStorageError(_) => DelegationError::InternalError(e.to_string()),
+            // A balance read sends no fee cap; the arm exists so the conversion is total, and it keeps the node's
+            // text instead of dropping it.
+            e @ BalanceError::FeeCapBelowBaseFee(_) => DelegationError::Transport(e.to_string()),
             BalanceError::Internal(internal) => DelegationError::InternalError(internal),
         }
     }
@@ -525,6 +609,10 @@ pub enum WithdrawError {
     UnknownAccount { account_id: u32 },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// CRD ch.56 R5: an EVM node rejected the gas estimation or the transaction for a fee cap below the
+    /// block base fee. Its `error_data` carries the amounts in wei as decimal strings.
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
     /// CRD R47.5.6a / R47.6.7: the requested withdraw is unsupported under the
@@ -584,6 +672,8 @@ impl HttpStatusCode for WithdrawError {
             | WithdrawError::FoundUnexpectedDevice(_) => StatusCode::GONE,
             WithdrawError::HardwareWalletInternal(_)
             | WithdrawError::Transport(_)
+            // A node's verdict on a fee the daemon chose, transient by nature: not a fault of the request.
+            | WithdrawError::FeeCapBelowBaseFee(_)
             | WithdrawError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -597,6 +687,7 @@ impl From<BalanceError> for WithdrawError {
             BalanceError::Transport(error) | BalanceError::InvalidResponse(error) => WithdrawError::Transport(error),
             BalanceError::UnexpectedDerivationMethod(e) => WithdrawError::from(e),
             e @ BalanceError::WalletStorageError(_) => WithdrawError::InternalError(e.to_string()),
+            BalanceError::FeeCapBelowBaseFee(rejection) => WithdrawError::FeeCapBelowBaseFee(rejection),
             BalanceError::Internal(internal) => WithdrawError::InternalError(internal),
         }
     }
