@@ -759,6 +759,24 @@ queue per connection of the RPCs waiting to be written to that peer.
    when it redials, what it sends, and that it holds nothing against the
    closer. The ping safeguard of R9 closes every connection to a peer in
    the same way.
+
+   **Guard for relays** *(amended 2026-10-30, maintainer decision AY).*
+   A shared cause can make several relay connections stuck at once, for
+   example this node's own uplink being saturated. Closing them all would
+   leave the node without relays. When the stuck peer is one of this
+   node's connected relays, the node therefore holds back the close if
+   either holds:
+   - another relay was closed under this item within the last **30
+     seconds**, the period of the relay-connection maintenance;
+   - after the close, fewer than **2** relays would remain connected.
+
+   A held-back connection stays open, and item 4 keeps dropping its
+   oldest data RPCs, so its memory stays within the cap of item 2. The
+   node starts a new stuck evaluation for it: a new period at the cap
+   and a new series of windows. It closes the peer when that evaluation
+   finds it stuck again and no guard condition holds. The node logs one
+   INFO line per held-back close, naming the peer ID and the condition.
+   A peer that is not a relay is closed without this guard.
 6. **Logging.** The first drop toward a peer logs one warning naming the
    peer ID, the queued count and the queued bytes. Further drops toward
    that peer log at most one summary line per 60 seconds (the period of
@@ -767,9 +785,9 @@ queue per connection of the RPCs waiting to be written to that peer.
    warning with the peer ID, the criterion that applied (the time at the
    cap, or the share dropped in the last window), and the total dropped.
    No message content is logged.
-7. **Settings.** The two limits, the 60-second period, and the 3 windows
-   and 25 % share of item 5 are fixed values of the vendored gossipsub
-   crate. Its configuration builder
+7. **Settings.** The two limits, the 60-second period, the 3 windows
+   and 25 % share of item 5, and the 30-second interval and 2 remaining
+   relays of its guard are fixed values of the vendored gossipsub crate. Its configuration builder
    MAY override them, for tests. They are not an `MM2.json` setting.
 8. **Pressure signal** *(amendment, maintainer decision AO,
    2026-10-28).* The handler reports a pressure level to the application
@@ -1036,6 +1054,16 @@ does not come back until it is short of relays.
   - A connection that drops 20 % in each window is not reported stuck.
   - Neither is one that drops 25 % in two windows and none in the third.
   - A window in which nothing was queued breaks the series.
+- **T-RQ1.12** *Guard for relays (item 5; added 2026-10-30, decision AY).*
+  The guard interval and the stuck periods are shortened by test
+  configuration.
+  - Two relays become stuck within the guard interval: the first is
+    closed, the second is held back and stays connected.
+  - With only 2 relays connected, a stuck relay is held back.
+  - A held-back relay that is still stuck after a new evaluation, with no
+    guard condition holding, is closed on every connection.
+  - A stuck peer that is not a relay is closed at once.
+  - While a relay is held back, its data queue stays within its cap.
 
 ## 28.10 Tests (test invariants)
 
@@ -1201,7 +1229,9 @@ holds nothing against this node for the close. This is a divergence to
 record in the operator-facing compatibility documents when adopted; it
 changes no wire shape. *Decided 2026-10-30 by the maintainer (decision
 AY), pre-beta: adopted, together with the repeated-drops criterion of
-RQ1 item 5. A swaplab run gates the merge.*
+RQ1 item 5. A swaplab run gates the merge.* *Amended 2026-10-30 (decision
+AY): a guard holds back the close of a relay when another relay was
+closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
 
 ## 28.11A Open Questions
 
@@ -1452,9 +1482,9 @@ hardening carried by the pinned fork).
     mechanical gate tool was not run (prose, no code blocks).
   - *Measure:* 0.03 against the 0.10 threshold.
 - *Scoped addition (2026-10-30, maintainer decision AY).* It covers the
-  amended RQ1 items 5, 6 and 7, T-RQ1.6, T-RQ1.11, and the decision line
-  of D8. Its first wording also amended item 9 and T-RQ1.9; decision BC,
-  above, replaced those. It is Reloaded-original.
+  amended RQ1 items 5, 6 and 7, T-RQ1.6, T-RQ1.11, the relay guard of
+  item 5 with T-RQ1.12, and the decision lines of D8. Its first wording
+  also amended item 9 and T-RQ1.9; decision BC, above, replaced those. It is Reloaded-original.
   - *Inputs:* this repository's vendored send queue and connection
     handler, and the field run of 2026-10-30 on a public network. RQ1a
     supplies the reference facts.
