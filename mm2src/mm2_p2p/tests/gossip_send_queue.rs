@@ -1021,6 +1021,21 @@ impl TestSender {
             .await;
     }
 
+    /// The number of established connections of the node, over all peers.
+    async fn established_connections(&self) -> u32 {
+        let out = Arc::new(AtomicUsize::new(0));
+        let out_cb = out.clone();
+        self.drv
+            .run(move |swarm| {
+                out_cb.store(
+                    swarm.network_info().connection_counters().num_established() as usize,
+                    Ordering::Relaxed,
+                )
+            })
+            .await;
+        out.load(Ordering::Relaxed) as u32
+    }
+
     async fn is_connected(&self, peer: PeerId) -> bool {
         let out = Arc::new(AtomicUsize::new(0));
         let out_cb = out.clone();
@@ -1240,8 +1255,9 @@ async fn rq1_byte_cap_drops_oldest() {
     assert_newest_kept_oldest_dropped(&run, 6, 300);
 }
 
-/// T-RQ1.6 and T-RQ1.7: a peer at the cap for the full (shortened) period is disconnected; a peer
-/// that drains before the period ends is not. The drop warning appears once per peer, and closing
+/// T-RQ1.6 and T-RQ1.7: a peer at the cap for the full (shortened) period is disconnected on every
+/// connection (see `rq1_stuck_peer_with_two_connections_loses_both`); a peer that drains before the
+/// period ends is not. The drop warning appears once per peer, and closing
 /// logs one line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
@@ -1284,7 +1300,7 @@ async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
     assert!(s.is_connected(drains.peer_id).await, "the draining peer was closed");
     assert!(s.is_connected(healthy.peer_id).await, "the healthy peer was closed");
 
-    let closing = log_lines_with("Closing the connection");
+    let closing = log_lines_with("Closing every connection");
     assert_eq!(closing.len(), 1, "close lines: {closing:?}");
     assert!(closing[0].contains(&stuck.peer_id.to_string()));
     for (name, r) in [("stuck", &stuck), ("draining", &drains)] {
@@ -1298,6 +1314,64 @@ async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
         "healthy peer was logged"
     );
     for r in [&stuck, &drains, &healthy] {
+        r.drv.stop();
+    }
+    s.stop();
+}
+
+/// T-RQ1.6 (amended, RQ1 item 5): the stuck peer holds two connections to the node. Gossipsub writes its
+/// data to one of them, which becomes stuck, and both are closed, so the stream does not move to the other
+/// connection. A healthy peer keeps its connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_stuck_peer_with_two_connections_loses_both() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-stuck-two";
+    const PERIOD: Duration = Duration::from_secs(6);
+    let s = spawn_test_sender(|b| {
+        b.send_queue_max_messages(32).send_queue_stuck_timeout(PERIOD);
+    });
+    let stuck = spawn_fast_receiver(topic, s.port);
+    let healthy = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&stuck, &healthy]).await;
+    assert_eq!(s.established_connections().await, 2);
+
+    // The stuck peer dials the node a second time.
+    let addr: Multiaddr = format!("/memory/{}", s.port).parse().unwrap();
+    stuck
+        .drv
+        .run(move |swarm| {
+            swarm.dial(addr).expect("second dial");
+        })
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.established_connections().await != 3 {
+        assert!(Instant::now() < deadline, "the second connection was never established");
+        async_std::task::sleep(Duration::from_millis(20)).await;
+    }
+
+    stuck.drv.pause().await;
+    s.publish_paced(topic, 0..1200, 1024, 8, &[&healthy]).await;
+
+    // Once the period has passed, no connection to the stuck peer is left.
+    let deadline = Instant::now() + PERIOD + Duration::from_secs(10);
+    while s.is_connected(stuck.peer_id).await {
+        assert!(
+            Instant::now() < deadline,
+            "a connection to the stuck peer was never closed"
+        );
+        async_std::task::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        s.established_connections().await,
+        1,
+        "only the healthy peer's connection is left"
+    );
+    assert!(s.is_connected(healthy.peer_id).await, "the healthy peer was closed");
+    let closing = log_lines_with("Closing every connection");
+    assert_eq!(closing.len(), 1, "close lines: {closing:?}");
+    assert!(closing[0].contains(&stuck.peer_id.to_string()));
+    for r in [&stuck, &healthy] {
         r.drv.stop();
     }
     s.stop();
@@ -1979,7 +2053,7 @@ async fn rq1_priority_lane_overflow_joins_the_data_queue() {
     let full = log_lines_with("priority lane");
     assert_eq!(full.len(), 1, "priority lane lines: {full:?}");
     assert!(full[0].contains(&paused.peer_id.to_string()) && full[0].contains("256"));
-    assert!(log_lines_with("Closing the connection").is_empty());
+    assert!(log_lines_with("Closing every connection").is_empty());
 
     paused.drv.resume();
     wait_for("the last spilled message arrived", Duration::from_secs(30), || {

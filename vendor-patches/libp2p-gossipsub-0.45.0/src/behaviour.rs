@@ -3981,11 +3981,14 @@ where
     ) {
         match handler_event {
             HandlerEvent::SendQueueStuck => {
-                // The peer has not drained its send queue for the whole stuck period: close this
-                // connection. It may reconnect and resynchronize.
+                // The peer's send queue is stuck (at its cap for the whole period, or repeated drops;
+                // CRD ch.28 §28.9B RQ1 item 5): close every connection to the peer, not only this one.
+                // Gossipsub writes a peer's data to one connection only, so closing just this one would
+                // move the same stream to another connection while the peer stays in every mesh. The
+                // ping safeguard does the same. The peer may reconnect and resynchronize.
                 self.events.push_back(ToSwarm::CloseConnection {
                     peer_id: propagation_source,
-                    connection: CloseConnection::One(connection_id),
+                    connection: CloseConnection::All,
                 });
             }
             HandlerEvent::SendQueuePressure { raised } => {

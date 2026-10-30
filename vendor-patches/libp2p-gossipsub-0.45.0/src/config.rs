@@ -129,6 +129,23 @@ impl Config {
         self.send_queue.stuck_timeout
     }
 
+    /// Length of one window of the repeated-drops criterion of the send queue (default is 60 seconds).
+    pub fn send_queue_drop_window(&self) -> Duration {
+        self.send_queue.drop_window
+    }
+
+    /// Number of consecutive windows, each with at least the configured share of the queued data RPCs dropped, after
+    /// which a connection is closed (default is 3).
+    pub fn send_queue_drop_windows(&self) -> u32 {
+        self.send_queue.drop_windows
+    }
+
+    /// Share, in percent, of the data RPCs queued in a window that must have been dropped in it for the window to
+    /// count toward the repeated-drops criterion (default is 25).
+    pub fn send_queue_drop_share_percent(&self) -> u32 {
+        self.send_queue.drop_share_percent
+    }
+
     /// Data queue depth at which the send queue pressure signal of a connection is raised
     /// (default is 256).
     pub fn send_queue_pressure_raise(&self) -> usize {
@@ -676,6 +693,26 @@ impl ConfigBuilder {
     /// 60 seconds).
     pub fn send_queue_stuck_timeout(&mut self, stuck_timeout: Duration) -> &mut Self {
         self.config.send_queue.stuck_timeout = stuck_timeout;
+        self
+    }
+
+    /// The length of one window of the repeated-drops criterion of the send queue (default is 60 seconds).
+    pub fn send_queue_drop_window(&mut self, window: Duration) -> &mut Self {
+        self.config.send_queue.drop_window = window;
+        self
+    }
+
+    /// The number of consecutive windows with a large dropped share after which a connection is closed (default is
+    /// 3).
+    pub fn send_queue_drop_windows(&mut self, windows: u32) -> &mut Self {
+        self.config.send_queue.drop_windows = windows;
+        self
+    }
+
+    /// The share, in percent, of the data RPCs queued in a window that must have been dropped in it for the window
+    /// to count toward the repeated-drops criterion (default is 25).
+    pub fn send_queue_drop_share_percent(&mut self, percent: u32) -> &mut Self {
+        self.config.send_queue.drop_share_percent = percent;
         self
     }
 

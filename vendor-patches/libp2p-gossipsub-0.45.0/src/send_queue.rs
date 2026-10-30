@@ -4,7 +4,8 @@
 //! published or forwarded messages ("data RPCs") are capped by count and encoded size; when a new
 //! data RPC does not fit, the oldest queued data RPCs are dropped. All other RPCs ("control
 //! RPCs") are never counted and never dropped. A connection that stays at the cap for a whole
-//! period is reported as stuck so the behaviour can close it.
+//! period, or that loses a large share of its data RPCs in several consecutive windows, is
+//! reported as stuck so the behaviour can close every connection to the peer (RQ1 item 5).
 //!
 //! Reloaded change: CRD ch.28 §28.9B RQ1 items 8 and 9. The queue also keeps a separate FIFO
 //! *priority lane* that is written before everything else, is never dropped and has its own count
@@ -34,6 +35,14 @@ pub const DEFAULT_SEND_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// interval between two drop summary log lines.
 pub const DEFAULT_SEND_QUEUE_STUCK_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Default length of one window of the repeated-drops criterion (CRD ch.28 §28.9B RQ1 item 5).
+pub const DEFAULT_SEND_QUEUE_DROP_WINDOW: Duration = Duration::from_secs(60);
+/// Default number of consecutive windows with a large dropped share after which a connection is stuck.
+pub const DEFAULT_SEND_QUEUE_DROP_WINDOWS: u32 = 3;
+/// Default share, in percent, of the data RPCs queued in a window that must have been dropped for the window to
+/// count toward the repeated-drops criterion.
+pub const DEFAULT_SEND_QUEUE_DROP_SHARE_PERCENT: u32 = 25;
+
 /// Default data queue depth at which the pressure signal is raised (CRD ch.28 §28.9B RQ1 item 8).
 pub const DEFAULT_SEND_QUEUE_PRESSURE_RAISE: usize = 256;
 /// Default data queue depth at or below which the pressure signal is cleared.
@@ -56,6 +65,14 @@ pub struct SendQueueConfig {
     pub max_bytes: usize,
     /// Time at the cap after which the connection is closed.
     pub stuck_timeout: Duration,
+    /// Length of one window of the repeated-drops criterion.
+    pub drop_window: Duration,
+    /// Number of consecutive windows with at least `drop_share_percent` dropped after which the connection is
+    /// closed.
+    pub drop_windows: u32,
+    /// Share, in percent, of the data RPCs queued in a window that must have been dropped in it for the window to
+    /// count.
+    pub drop_share_percent: u32,
     /// Data queue depth at which the pressure signal is raised.
     pub pressure_raise: usize,
     /// Data queue depth at or below which the pressure signal is cleared (with no period at the
@@ -77,6 +94,9 @@ impl Default for SendQueueConfig {
             max_messages: DEFAULT_SEND_QUEUE_MAX_MESSAGES,
             max_bytes: DEFAULT_SEND_QUEUE_MAX_BYTES,
             stuck_timeout: DEFAULT_SEND_QUEUE_STUCK_TIMEOUT,
+            drop_window: DEFAULT_SEND_QUEUE_DROP_WINDOW,
+            drop_windows: DEFAULT_SEND_QUEUE_DROP_WINDOWS,
+            drop_share_percent: DEFAULT_SEND_QUEUE_DROP_SHARE_PERCENT,
             pressure_raise: DEFAULT_SEND_QUEUE_PRESSURE_RAISE,
             pressure_clear: DEFAULT_SEND_QUEUE_PRESSURE_CLEAR,
             priority_max: DEFAULT_SEND_QUEUE_PRIORITY_MAX,
@@ -147,11 +167,38 @@ pub enum PriorityPush {
     },
 }
 
-/// A connection that stayed at the cap for the whole period.
+/// Why a connection is reported as stuck (CRD ch.28 §28.9B RQ1 item 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StuckReason {
+    /// The data queue stayed at its cap for the whole period.
+    AtCap {
+        /// How long the connection has been at the cap.
+        at_cap: Duration,
+    },
+    /// Each of the configured number of consecutive windows dropped at least the configured share of the data
+    /// RPCs queued in it.
+    RepeatedDrops {
+        /// The share, in whole percent, of the data RPCs queued in the last window that was dropped.
+        share_percent: u64,
+    },
+}
+
+impl std::fmt::Display for StuckReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StuckReason::AtCap { at_cap } => write!(f, "at its limit for {at_cap:?}"),
+            StuckReason::RepeatedDrops { share_percent } => {
+                write!(f, "dropping {share_percent}% of the messages queued in the last window")
+            },
+        }
+    }
+}
+
+/// A connection reported as stuck.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StuckReport {
-    /// How long the connection has been at the cap.
-    pub at_cap: Duration,
+    /// The criterion that applied.
+    pub reason: StuckReason,
     /// Number of data RPCs dropped on this connection.
     pub total_dropped: u64,
 }
@@ -182,8 +229,18 @@ pub struct SendQueue {
     data_bytes: usize,
     /// Start of the current period at the cap, if any.
     period_start: Option<Instant>,
-    /// Whether the current period has already been reported as stuck.
+    /// Whether this connection has already been reported as stuck, by either criterion. A connection is reported at
+    /// most once.
     stuck_reported: bool,
+    /// Start of the current window of the repeated-drops criterion, and the data RPCs queued and dropped in it.
+    window_start: Option<Instant>,
+    window_queued: u64,
+    window_dropped: u64,
+    /// Consecutive closed windows that dropped at least the configured share, and the share of the last one.
+    window_series: u32,
+    last_window_share: u64,
+    /// Set when the series reached the configured count; handed out once by `take_stuck`.
+    repeated_drops_share: Option<u64>,
     total_dropped: u64,
     dropped_since_log: u64,
     last_log: Option<Instant>,
@@ -209,6 +266,12 @@ impl SendQueue {
             data_bytes: 0,
             period_start: None,
             stuck_reported: false,
+            window_start: None,
+            window_queued: 0,
+            window_dropped: 0,
+            window_series: 0,
+            last_window_share: 0,
+            repeated_drops_share: None,
             total_dropped: 0,
             dropped_since_log: 0,
             last_log: None,
@@ -255,6 +318,7 @@ impl SendQueue {
     /// Queues an RPC. A data RPC that does not fit evicts the oldest queued data RPCs first.
     /// Returns what to log, if anything.
     pub fn push(&mut self, rpc: proto::RPC, now: Instant) -> Option<DropLog> {
+        self.roll_window(now);
         let log = self.push_inner(rpc, now);
         self.after_change(now);
         log
@@ -377,6 +441,7 @@ impl SendQueue {
         }
 
         let size = rpc.get_size();
+        self.window_queued = self.window_queued.saturating_add(1);
         let queued_before = (self.data_count, self.data_bytes);
         let mut dropped = 0u64;
         // A lone RPC larger than the byte cap evicts everything else and is queued anyway.
@@ -396,9 +461,9 @@ impl SendQueue {
         }
         if self.period_start.is_none() {
             self.period_start = Some(now);
-            self.stuck_reported = false;
         }
         self.total_dropped += dropped;
+        self.window_dropped = self.window_dropped.saturating_add(dropped);
         self.dropped_since_log += dropped;
         match self.last_log {
             None => {
@@ -425,6 +490,7 @@ impl SendQueue {
 
     /// Like [`Self::pop`], with the current time given.
     pub fn pop_at(&mut self, now: Instant) -> Option<proto::RPC> {
+        self.roll_window(now);
         if let Some(rpc) = self.priority.pop_front() {
             return Some(rpc);
         }
@@ -456,17 +522,68 @@ impl SendQueue {
         self.period_start?.checked_add(self.config.stuck_timeout)
     }
 
-    /// Reports the connection as stuck, once, if it has been at the cap for the whole period.
+    /// Reports the connection as stuck, once, if it has been at the cap for the whole period or the
+    /// repeated-drops criterion is met (CRD ch.28 §28.9B RQ1 item 5). The two criteria share one
+    /// "already reported" state, so a connection is reported at most once.
     pub fn take_stuck(&mut self, now: Instant) -> Option<StuckReport> {
-        let deadline = self.stuck_deadline()?;
-        if now < deadline {
+        self.roll_window(now);
+        if self.stuck_reported {
             return None;
         }
+        if let Some(deadline) = self.stuck_deadline() {
+            if now >= deadline {
+                self.stuck_reported = true;
+                return Some(StuckReport {
+                    reason: StuckReason::AtCap {
+                        at_cap: now.saturating_duration_since(self.period_start?),
+                    },
+                    total_dropped: self.total_dropped,
+                });
+            }
+        }
+        let share_percent = self.repeated_drops_share.take()?;
         self.stuck_reported = true;
         Some(StuckReport {
-            at_cap: now.saturating_duration_since(self.period_start?),
+            reason: StuckReason::RepeatedDrops { share_percent },
             total_dropped: self.total_dropped,
         })
+    }
+
+    /// Closes the current window of the repeated-drops criterion if it has ended at `now`, and starts a new one.
+    /// The window is evaluated lazily, on a push, a pop or a `take_stuck`; a drop only happens on a push. If more
+    /// than one window has passed since the window started, at least one was empty, so the series is reset.
+    fn roll_window(&mut self, now: Instant) {
+        let Some(start) = self.window_start else {
+            self.window_start = Some(now);
+            return;
+        };
+        let elapsed = now.saturating_duration_since(start);
+        if elapsed < self.config.drop_window {
+            return;
+        }
+        // The window that has just ended counts toward the series only if something was queued in it and the
+        // dropped share reached the configured one.
+        let queued = u128::from(self.window_queued);
+        let dropped = u128::from(self.window_dropped);
+        if queued > 0 && dropped * 100 >= queued * u128::from(self.config.drop_share_percent) {
+            self.window_series = self.window_series.saturating_add(1);
+            self.last_window_share = u64::try_from(dropped * 100 / queued).unwrap_or(u64::MAX);
+            if self.window_series >= self.config.drop_windows && !self.stuck_reported {
+                self.repeated_drops_share.get_or_insert(self.last_window_share);
+            }
+        } else {
+            self.window_series = 0;
+        }
+        self.window_queued = 0;
+        self.window_dropped = 0;
+        let two_windows = self.config.drop_window.saturating_mul(2);
+        if elapsed >= two_windows {
+            // At least one window passed with nothing queued: it breaks the series.
+            self.window_series = 0;
+            self.window_start = Some(now);
+        } else {
+            self.window_start = Some(start.checked_add(self.config.drop_window).unwrap_or(now));
+        }
     }
 
     fn evict_oldest_data(&mut self) {
@@ -676,7 +793,9 @@ mod tests {
         }
         assert_eq!(q.take_stuck(t0 + Duration::from_secs(59)), None);
         let report = q.take_stuck(t0 + Duration::from_secs(60)).unwrap();
-        assert_eq!(report.at_cap, Duration::from_secs(60));
+        assert_eq!(report.reason, StuckReason::AtCap {
+            at_cap: Duration::from_secs(60)
+        });
         assert_eq!(report.total_dropped, 1);
         assert_eq!(q.take_stuck(t0 + Duration::from_secs(90)), None);
     }
@@ -756,6 +875,167 @@ mod tests {
         q.push(data_rpc(1, 10), now);
         assert_eq!(q.stuck_deadline(), None);
         assert_eq!(q.take_stuck(now), None);
+    }
+
+    /// A queue for the repeated-drops tests: windows of 10 s, 3 windows, 25 %.
+    fn window_queue(max_messages: usize, stuck_secs: u64) -> SendQueue {
+        SendQueue::new(SendQueueConfig {
+            max_messages,
+            max_bytes: 1 << 20,
+            stuck_timeout: Duration::from_secs(stuck_secs),
+            drop_window: Duration::from_secs(10),
+            drop_windows: 3,
+            drop_share_percent: 25,
+            ..SendQueueConfig::default()
+        })
+    }
+
+    /// One window starting at `t`: `n` data RPCs are queued at `t`, then the queue drains to empty at `t + 5 s`,
+    /// so no period at the cap lasts longer than 5 s.
+    fn drop_window_with(q: &mut SendQueue, t: Instant, n: u8) {
+        for i in 0..n {
+            q.push(data_rpc(i, 10), t);
+        }
+        let drain_at = t + Duration::from_secs(5);
+        while q.pop_at(drain_at).is_some() {}
+        assert_eq!(q.stuck_deadline(), None);
+    }
+
+    fn at(t0: Instant, secs: u64) -> Instant { t0 + Duration::from_secs(secs) }
+
+    #[test]
+    fn three_consecutive_windows_with_a_quarter_dropped_report_repeated_drops_once() {
+        // Cap 6, 8 RPCs per window: 2 of 8 = 25 % dropped in each window, and the queue is drained inside each.
+        let mut q = window_queue(6, 60);
+        let t0 = Instant::now();
+        for w in 0..3 {
+            drop_window_with(&mut q, at(t0, w * 10), 8);
+        }
+        // The third window has not ended yet.
+        assert_eq!(q.take_stuck(at(t0, 29)), None);
+        let report = q.take_stuck(at(t0, 30)).unwrap();
+        assert_eq!(report.reason, StuckReason::RepeatedDrops { share_percent: 25 });
+        assert_eq!(report.total_dropped, 6);
+        // Reported once, also while the stream goes on.
+        assert_eq!(q.take_stuck(at(t0, 31)), None);
+        for w in 3..8 {
+            drop_window_with(&mut q, at(t0, w * 10), 8);
+            assert_eq!(q.take_stuck(at(t0, w * 10 + 9)), None);
+        }
+    }
+
+    #[test]
+    fn a_fifth_of_the_queued_rpcs_dropped_in_every_window_is_not_stuck() {
+        // Cap 4, 5 RPCs per window: 1 of 5 = 20 % dropped.
+        let mut q = window_queue(4, 60);
+        let t0 = Instant::now();
+        for w in 0..8 {
+            drop_window_with(&mut q, at(t0, w * 10), 5);
+            assert_eq!(q.take_stuck(at(t0, w * 10 + 9)), None);
+        }
+        assert_eq!(q.take_stuck(at(t0, 90)), None);
+        assert_eq!(q.total_dropped(), 8);
+    }
+
+    #[test]
+    fn two_windows_with_a_quarter_dropped_and_a_window_without_drops_is_not_stuck() {
+        let mut q = window_queue(6, 60);
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 8);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        // The third window queues RPCs but drops none: the series is broken.
+        drop_window_with(&mut q, at(t0, 20), 6);
+        assert_eq!(q.take_stuck(at(t0, 30)), None);
+        // One more window of 25 % does not make it three in a row.
+        drop_window_with(&mut q, at(t0, 30), 8);
+        assert_eq!(q.take_stuck(at(t0, 40)), None);
+    }
+
+    #[test]
+    fn an_empty_window_between_two_dropping_windows_resets_the_series() {
+        let mut q = window_queue(6, 60);
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 8);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        // Nothing is queued in the window from 20 s to 30 s.
+        drop_window_with(&mut q, at(t0, 30), 8);
+        drop_window_with(&mut q, at(t0, 40), 8);
+        // Four windows with drops in total, but never three in a row.
+        assert_eq!(q.take_stuck(at(t0, 50)), None);
+        // The third in a row since the empty window is reported when it has ended.
+        drop_window_with(&mut q, at(t0, 50), 8);
+        assert_eq!(q.take_stuck(at(t0, 59)), None);
+        let report = q.take_stuck(at(t0, 60)).unwrap();
+        assert_eq!(report.reason, StuckReason::RepeatedDrops { share_percent: 25 });
+    }
+
+    #[test]
+    fn a_pop_that_finds_a_window_ended_closes_it() {
+        let mut q = window_queue(6, 60);
+        let t0 = Instant::now();
+        drop_window_with(&mut q, at(t0, 0), 8);
+        drop_window_with(&mut q, at(t0, 10), 8);
+        for i in 0..3u8 {
+            q.push(data_rpc(i, 10), at(t0, 20));
+        }
+        // The pop at 31 s finds the window from 20 s ended; it queued 3 RPCs and dropped none.
+        q.pop_at(at(t0, 31));
+        drop_window_with(&mut q, at(t0, 31), 8);
+        assert_eq!(q.take_stuck(at(t0, 41)), None);
+    }
+
+    #[test]
+    fn at_cap_report_and_repeated_drops_report_never_both_happen() {
+        // The queue is never drained: both criteria are met at 30 s. The at-cap report wins, and the
+        // repeated-drops criterion stays quiet afterwards.
+        let mut q = window_queue(6, 30);
+        let t0 = Instant::now();
+        for w in 0..3 {
+            for i in 0..8u8 {
+                q.push(data_rpc(i, 10), at(t0, w * 10));
+            }
+        }
+        let report = q.take_stuck(at(t0, 30)).unwrap();
+        assert!(matches!(report.reason, StuckReason::AtCap { .. }));
+        for w in 3..12 {
+            for i in 0..8u8 {
+                q.push(data_rpc(i, 10), at(t0, w * 10));
+            }
+            assert_eq!(q.take_stuck(at(t0, w * 10 + 5)), None);
+        }
+        assert_eq!(q.take_stuck(at(t0, 200)), None);
+    }
+
+    #[test]
+    fn repeated_drops_report_first_leaves_the_at_cap_deadline_quiet() {
+        // The repeated-drops series is met at 30 s, before the at-cap period of 100 s ends.
+        let mut q = window_queue(6, 100);
+        let t0 = Instant::now();
+        for w in 0..3 {
+            for i in 0..8u8 {
+                q.push(data_rpc(i, 10), at(t0, w * 10));
+            }
+        }
+        let report = q.take_stuck(at(t0, 30)).unwrap();
+        assert!(matches!(report.reason, StuckReason::RepeatedDrops { .. }));
+        assert_eq!(q.stuck_deadline(), None);
+        assert_eq!(q.take_stuck(at(t0, 100)), None);
+        assert_eq!(q.take_stuck(at(t0, 500)), None);
+    }
+
+    #[test]
+    fn the_stuck_reasons_read_as_log_text() {
+        assert_eq!(
+            StuckReason::AtCap {
+                at_cap: Duration::from_secs(60)
+            }
+            .to_string(),
+            "at its limit for 60s"
+        );
+        assert_eq!(
+            StuckReason::RepeatedDrops { share_percent: 40 }.to_string(),
+            "dropping 40% of the messages queued in the last window"
+        );
     }
 
     fn pressure_queue(raise: usize, clear: usize, priority_max: usize) -> SendQueue {

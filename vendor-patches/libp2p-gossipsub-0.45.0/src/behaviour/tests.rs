@@ -5439,6 +5439,31 @@ fn test_send_queue_pressure_and_snapshot() {
 }
 
 #[test]
+// A stuck send queue closes every connection to the peer, not only the reporting one (CRD ch.28 §28.9B RQ1
+// item 5, T-RQ1.6).
+fn test_send_queue_stuck_closes_every_connection_to_the_peer() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let peer = PeerId::random();
+    flush_events(&mut gs);
+    gs.on_connection_handler_event(peer, ConnectionId::new_unchecked(3), HandlerEvent::SendQueueStuck);
+    let closes: Vec<_> = gs
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            ToSwarm::CloseConnection { peer_id, connection } => Some((*peer_id, connection.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].0, peer);
+    assert!(matches!(closes[0].1, CloseConnection::All));
+}
+
+#[test]
 // A connected relay joining the relay mesh is reported once (CRD ch.32 §32.9B R-MP4).
 fn test_relay_mesh_join_is_reported() {
     let (mut gs, peers, _) = inject_nodes1()

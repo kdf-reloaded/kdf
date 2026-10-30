@@ -61,8 +61,9 @@ pub enum HandlerEvent {
     /// An inbound or outbound substream has been established with the peer and this informs over
     /// which protocol. This message only occurs once per connection.
     PeerKind(PeerKind),
-    /// The send queue toward the peer has stayed at its cap for the whole stuck period. The
-    /// behaviour closes the connection.
+    /// The send queue toward the peer has stayed at its cap for the whole stuck period, or has lost a large
+    /// share of its data RPCs in several consecutive windows. The behaviour closes every connection to the
+    /// peer (CRD ch.28 §28.9B RQ1 item 5).
     SendQueueStuck,
     /// The pressure level of the send queue toward the peer changed (CRD ch.28 §28.9B RQ1 item
     /// 8). Reported once per change.
@@ -283,24 +284,22 @@ impl EnabledHandler {
             .map(|raised| HandlerEvent::SendQueueSignal { raised })
     }
 
-    /// Reports a connection that stayed at the send queue cap for the whole stuck period,
-    /// re-evaluates the queue signal, and keeps a timer armed for the next deadline of either.
+    /// Reports a connection that stayed at the send queue cap for the whole stuck period or that met the
+    /// repeated-drops criterion, re-evaluates the queue signal, and keeps a timer armed for the next at-cap or
+    /// signal deadline. The repeated-drops criterion needs no timer: drops only happen on a push, and the window
+    /// is evaluated lazily on every push, pop and poll.
     fn poll_send_queue_stuck(&mut self, cx: &mut Context<'_>) -> Option<HandlerEvent> {
         let now = Instant::now();
         self.send_queue.update_signal(now);
-        if let Some(deadline) = self.send_queue.stuck_deadline() {
-            if now >= deadline {
-                self.stuck_timer = None;
-                let report = self.send_queue.take_stuck(now)?;
-                log::warn!(
-                    "Closing the connection to peer {}: gossip send queue at its limit for {:?}, \
-                     {} messages dropped",
-                    self.peer_id,
-                    report.at_cap,
-                    report.total_dropped
-                );
-                return Some(HandlerEvent::SendQueueStuck);
-            }
+        if let Some(report) = self.send_queue.take_stuck(now) {
+            self.stuck_timer = None;
+            log::warn!(
+                "Closing every connection to peer {}: gossip send queue {}, {} messages dropped",
+                self.peer_id,
+                report.reason,
+                report.total_dropped
+            );
+            return Some(HandlerEvent::SendQueueStuck);
         }
         let next = [self.send_queue.stuck_deadline(), self.send_queue.signal_deadline()]
             .into_iter()
@@ -822,6 +821,43 @@ mod tests {
         assert_eq!(events.iter().filter(|ev| is_stuck(ev)).count(), 1);
         // Reported once per period.
         assert!(!poll_events(&mut h).iter().any(is_stuck));
+    }
+
+    #[test]
+    fn repeated_drops_in_consecutive_windows_are_reported_once_without_a_timer() {
+        // At-cap period of 10 min (never met); windows of 2 s, two in a row, any drop at all counts.
+        // Wide margins (2 s window, 2.5 s sleeps): a sleep overshooting by over 1.5 s on a loaded runner would be needed to span two windows.
+        let mut h = handler_with(SendQueueConfig {
+            max_messages: 2,
+            stuck_timeout: Duration::from_secs(600),
+            drop_window: Duration::from_secs(2),
+            drop_windows: 2,
+            drop_share_percent: 1,
+            ..SendQueueConfig::default()
+        });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut stuck_events = |h: &mut Handler| {
+            let mut n = 0;
+            while let Poll::Ready(ev) = ConnectionHandler::poll(h, &mut cx) {
+                if matches!(ev, ConnectionHandlerEvent::NotifyBehaviour(HandlerEvent::SendQueueStuck)) {
+                    n += 1;
+                }
+            }
+            n
+        };
+        for tag in 0..4u8 {
+            h.on_behaviour_event(HandlerIn::Message(data_rpc(tag)));
+        }
+        assert_eq!(stuck_events(&mut h), 0);
+        std::thread::sleep(Duration::from_millis(2500));
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(10)));
+        assert_eq!(stuck_events(&mut h), 0);
+        std::thread::sleep(Duration::from_millis(2500));
+        // The push finds the second window ended: the series is met.
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(11)));
+        assert_eq!(stuck_events(&mut h), 1);
+        assert_eq!(stuck_events(&mut h), 0);
     }
 
     #[test]
