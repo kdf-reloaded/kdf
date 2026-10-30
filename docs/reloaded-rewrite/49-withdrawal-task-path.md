@@ -333,6 +333,12 @@ as an unknown or unavailable task according to R49.14.
 
 ## 49.6 Completed transaction payload
 
+> **UTXO input bookkeeping (cross-reference).** For a UTXO coin, whether the
+> withdrawal path records the inputs its transaction spends, how the
+> candidate inputs are listed, and what a refused broadcast looks like are
+> bound by [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5B
+> (cleared by the Dirty Gate on 2026-10-30), not here.
+
 R49.25. A successful direct `withdraw` response and a successful
 `task::withdraw::status` terminal payload shall use the same transaction-details
 object. A completed withdrawal shall include at least:
@@ -415,3 +421,8 @@ confirm the extra field is simply absent and no error is raised.
   The carrier's own wire detail is recorded in
   [Chapter 20](20-siacoin-integration.md) §20.9.1, not here. No discretionary
   expression crosses into this chapter.
+- *Cross-reference added 2026-10-30.* The pointer note at the head of §49.6
+  to [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5B was added
+  by the Spec Reader in the pass that wrote §38.5B. It carries no reference
+  content of its own; the facts it points to are recorded, and their
+  clearance status tracked, in chapter 38 §38.9.
