@@ -71,6 +71,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Quieter logs while a shielded coin such as ARRR is enabled.** Keeping the shielded wallet up to
+  date logged six `info` lines on every new block. A sync that only adds the next block now logs
+  them at `debug`. They stay at `info` for the first sync after activation, for a sync that covers
+  more than one block or resets the wallet's scan state, and when another lightwalletd server than
+  the last one serves the sync. Failures are still logged as warnings.
+
 - **`my_orders` answers faster for an operator with many orders.** With 2,000 open orders a repeated
   call took about 56 ms (decimal prices) to 210 ms (prices such as one third) and now takes about
   12 ms to 18 ms on the same machine; the first call after a restart is as slow as before. The
