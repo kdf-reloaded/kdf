@@ -97,6 +97,25 @@ it and, where one exists, the CRD rule, for readers who want more.
   answered as before, but no message goes out, so the network carries only real changes. Set the
   `MM2.json` boolean `suppress_unchanged_order_updates` to `false` to broadcast every update again.
   Detail: PR #111; CRD ch.59 R59.4.6.
+- **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
+  addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
+  they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the
+  whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
+  it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
+  network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
+  once at info level, then at debug level. Detail: PR #170; CRD ch.28 R8c.
+- **Quieter peer-to-peer logs on seeds and relays under load.** Four warnings that report expected
+  conditions, not faults, are now lower or summarized:
+  - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
+    the first copy had already been forwarded.
+  - "Order … was recently cancelled" is now debug. It meant a late copy of another maker's
+    cancelled order was ignored.
+  - "HEARTBEAT: relays low" is now "Relay mesh below its low watermark". It is logged when the
+    relay count changes and every ten minutes, not every ten seconds.
+  - A request that times out is now a warning, not an error. Further timeouts toward the same peer
+    are counted in one line per minute.
+
+  Detail: PR #170.
 
 #### Order posting, fees and balances
 

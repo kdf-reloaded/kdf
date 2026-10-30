@@ -56,6 +56,7 @@ use crate::mcache::MessageCache;
 use crate::metrics::{Churn, Config as MetricsConfig, Inclusion, Metrics, Penalty};
 use crate::peer_score::{PeerScore, PeerScoreParams, PeerScoreThresholds, RejectReason};
 use crate::protocol::SIGNING_PREFIX;
+use crate::relay_mesh_report::WatermarkReport;
 use crate::send_queue::{SendQueueSnapshot, SendQueueStats};
 use crate::subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter};
 use crate::time_cache::{DuplicateCache, TimeCache};
@@ -389,6 +390,12 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// The peer ids of connected relay nodes
     connected_relays: HashSet<PeerId>,
 
+    /// Log level state of the "relay mesh below its low watermark" line.
+    relays_low_report: WatermarkReport,
+
+    /// Log level state of the "relay mesh above its high watermark" line.
+    relays_high_report: WatermarkReport,
+
     peer_connections: HashMap<PeerId, Vec<(ConnectionId, ConnectedPoint)>>,
 
     connected_addresses: Vec<Multiaddr>,
@@ -553,6 +560,8 @@ where
             ),
             explicit_relay_list: Vec::new(),
             connected_relays: HashSet::new(),
+            relays_low_report: WatermarkReport::default(),
+            relays_high_report: WatermarkReport::default(),
             peer_connections: HashMap::new(),
             connected_addresses: Vec::new(),
             send_queue_stats: HashMap::new(),
@@ -867,8 +876,8 @@ where
         let (raw_message, originating_peers) = match self.mcache.validate(message_id) {
             Some((raw_message, originating_peers)) => (raw_message.clone(), originating_peers),
             None => {
-                warn!(
-                    "Message not in cache. Ignoring forwarding. Message Id: {}",
+                debug!(
+                    "Second forward of message {} skipped: it is no longer in the message cache; its first forward happened on receipt",
                     message_id
                 );
                 if let Some(metrics) = self.metrics.as_mut() {
@@ -921,8 +930,8 @@ where
                         (raw_message.clone(), originating_peers)
                     }
                     None => {
-                        warn!(
-                            "Message not in cache. Ignoring forwarding. Message Id: {}",
+                        debug!(
+                            "Second forward of message {} skipped: it is no longer in the message cache; its first forward happened on receipt",
                             msg_id
                         );
                         if let Some(metrics) = self.metrics.as_mut() {
@@ -3573,11 +3582,16 @@ where
     }
 
     fn maintain_relays_mesh(&mut self) {
-        if self.relays_mesh.len() < self.config.mesh_n_low() {
-            log::info!(
-                "HEARTBEAT: relays low. Contains: {:?} needs: {:?}",
+        let now = Instant::now();
+        let low = self.relays_mesh.len() < self.config.mesh_n_low();
+        let level = self.relays_low_report.level(self.relays_mesh.len(), low, now);
+        if low {
+            log::log!(
+                level,
+                "Relay mesh below its low watermark: {} relays, wants at least {}; {} relays connected",
                 self.relays_mesh.len(),
                 self.config.mesh_n_low(),
+                self.connected_relays.len(),
             );
             // add peers 1 by 1 to avoid overloading peaks when node connects to several other nodes at once
             let required = 1;
@@ -3588,10 +3602,14 @@ where
             self.add_peers_to_relays_mesh(to_add);
         }
 
-        if self.relays_mesh.len() > self.config.mesh_n_high() {
-            log::info!(
-                "HEARTBEAT: relays high. Contains: {:?} needs: {:?}",
+        let high = self.relays_mesh.len() > self.config.mesh_n_high();
+        let level = self.relays_high_report.level(self.relays_mesh.len(), high, now);
+        if high {
+            log::log!(
+                level,
+                "Relay mesh above its high watermark: {} relays, more than {}; trimming it to {}",
                 self.relays_mesh.len(),
+                self.config.mesh_n_high(),
                 self.config.mesh_n(),
             );
             self.clean_up_relays_mesh();

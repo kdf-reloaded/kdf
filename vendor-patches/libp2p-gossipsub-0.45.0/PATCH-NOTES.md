@@ -36,8 +36,8 @@ the one crate is the proportionate fix.
 
 ## The patch
 
-Three call sites, all in the backoff path. Apart from the send queue change described
-below, everything else is byte-identical to the fork, including the relay-mesh extension
+Three call sites, all in the backoff path. Apart from the send queue change and the log levels
+described below, everything else is byte-identical to the fork, including the relay-mesh extension
 (`i_am_relay` / `IAmRelay`) that is the reason the fork exists.
 
 1. **`src/behaviour.rs`** — `remove_peer_from_mesh` clamps the peer-supplied value
@@ -160,6 +160,19 @@ cancellations and swap negotiation messages must not wait behind queued order up
 in `src/behaviour/tests.rs`, run with the filter `test_priority_ test_send_queue_ test_relay_mesh_join`;
 in-process tests in `mm2_p2p/tests/gossip_send_queue.rs`.
 
+## Log levels (not security-related)
+
+Log lines only; behavior and wire are unchanged.
+
+1. **`src/behaviour.rs`** -- `propagate_message_with_priority` and `report_message_validation_result` log
+   a message that is no longer in the message cache at DEBUG, not WARN. On a relay the gossip layer already
+   forwarded the message on receipt, so the missing application-level (second) forward loses nothing. The
+   metrics call is kept.
+2. **`src/relay_mesh_report.rs`, `src/behaviour.rs`** -- `maintain_relays_mesh` (every 10 s) logs the relay
+   mesh below its low watermark, and above its high watermark, at INFO the first time, on every change of the
+   mesh size, and as a reminder every 10 minutes while the size stays; DEBUG otherwise. The text names the
+   mesh size, the watermark and (low only) the number of connected relays.
+
 ## Manifest changes (not security-related)
 
 The fork declares deps through `[workspace.dependencies]`, which does not resolve
@@ -182,8 +195,9 @@ resolve fresh.
 ## Test status
 
 `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib`
-→ **158 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
-the pressure signal and the priority lane, and 6 more with the queue signal).
+→ **161 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
+the pressure signal and the priority lane, 6 more with the queue signal, and 3 more with the relay mesh
+log levels).
 
 Those 6 (`test_flood_publish`, `do_forward_messages_to_explicit_peers`,
 `test_do_not_use_floodsub_in_fanout`, `test_publish_to_floodsub_peers_without_flood_publish`,
