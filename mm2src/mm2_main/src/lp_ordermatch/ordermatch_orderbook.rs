@@ -110,20 +110,31 @@ pub(crate) async fn process_orders_keep_alive(
     .await;
 
     // `in_flight` ends the record of this request (CRD ch.32 R-Q5b) wherever the function ends: a
-    // failed request, an early return or a dropped future all drop it.
+    // failed request, an early return or a dropped future all drop it. It lasts through the second
+    // request of R-Q5c as well.
     let (req, in_flight) = match to_request {
         Some(to_request) => to_request,
         // The message was processed, simply forward it
         None => return true,
     };
 
-    let resp =
-        request_one_peer::<SyncPubkeyOrderbookStateRes>(ctx.clone(), P2PRequest::Ordermatch(req), propagated_from_peer)
-            .await;
-
-    let response = match resp {
-        Ok(Some(resp)) => resp,
+    let trie_roots = match req {
+        OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. } => trie_roots,
+        // `keep_alive_sync_request` builds no other request.
         _ => return false,
+    };
+    let response = match request_sync_state(
+        &ctx,
+        &ordermatch_ctx,
+        &from_pubkey,
+        trie_roots,
+        &propagated_from_peer,
+        deferral_ms,
+    )
+    .await
+    {
+        Some(response) => response,
+        None => return false,
     };
 
     // Phase 1: derive all index mutations under the Orderbook lock and enqueue their trie ops
@@ -156,6 +167,75 @@ pub(crate) async fn process_orders_keep_alive(
     }
 
     true
+}
+
+/// The keep-alive-driven request of CRD ch.32 R-Q4 to the forwarding `peer`, asked once more after a
+/// quick failure for the pairs still at the all-zero placeholder (R-Q5c). The caller keeps the in-flight
+/// record of R-Q5b for the whole call, so the requests parked behind it wait for the second answer too.
+async fn request_sync_state(
+    ctx: &MmArc,
+    ordermatch_ctx: &OrdermatchContext,
+    pubkey: &str,
+    trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+    peer: &str,
+    deferral_ms: u64,
+) -> Option<SyncPubkeyOrderbookStateRes> {
+    let sent_ms = now_ms();
+    if let Some(response) = ask_for_sync_state(ctx, pubkey, trie_roots.clone(), peer).await {
+        return Some(response);
+    }
+
+    // R-Q5c item 1: only while the second answer can still arrive within the bound of R-Q5b, which a
+    // request that failed by timing out never can.
+    let retry_ms = sync_request_retry_ms(ctx);
+    if retry_ms == 0 || now_ms().saturating_sub(sent_ms) + retry_ms >= deferral_ms {
+        return None;
+    }
+    Timer::sleep(retry_ms as f64 / 1000.).await;
+
+    // R-Q5c item 2: a pair that has left the placeholder meanwhile is not asked for again.
+    let still_unsynchronized = pairs_at_placeholder(ordermatch_ctx, pubkey, trie_roots);
+    if still_unsynchronized.is_empty() {
+        return None;
+    }
+    ask_for_sync_state(ctx, pubkey, still_unsynchronized, peer).await
+}
+
+/// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`. Any outcome but an answer
+/// (an error, "no data", a timeout, a transport failure) is `None`.
+async fn ask_for_sync_state(
+    ctx: &MmArc,
+    pubkey: &str,
+    trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+    peer: &str,
+) -> Option<SyncPubkeyOrderbookStateRes> {
+    let req = OrdermatchRequest::SyncPubkeyOrderbookState {
+        pubkey: pubkey.to_owned(),
+        trie_roots,
+    };
+    match request_one_peer::<SyncPubkeyOrderbookStateRes>(ctx.clone(), P2PRequest::Ordermatch(req), peer.to_owned())
+        .await
+    {
+        Ok(Some(response)) => Some(response),
+        _ => None,
+    }
+}
+
+/// The entries of `trie_roots` whose pair this node still holds at the all-zero placeholder for `pubkey`.
+fn pairs_at_placeholder(
+    ordermatch_ctx: &OrdermatchContext,
+    pubkey: &str,
+    trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+) -> HashMap<AlbOrderedOrderbookPair, H64> {
+    let trie_store = ordermatch_ctx.trie_store.lock();
+    let held = match trie_store.pubkeys_state.get(pubkey) {
+        Some(state) => &state.trie_roots,
+        None => return HashMap::new(),
+    };
+    trie_roots
+        .into_iter()
+        .filter(|(pair, _)| held.get(pair) == Some(&H64::default()))
+        .collect()
 }
 
 /// The root a keep-alive synchronization request names for a diverged pair (CRD ch.32 R-Q4, R-Q4a).

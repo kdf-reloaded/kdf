@@ -130,8 +130,8 @@ pub use ordermatch_orderbook::*;
 
 #[path = "lp_ordermatch/sync_answer_deferral.rs"]
 mod sync_answer_deferral;
-pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, SyncAnswerDeferral,
-                                      SyncAnswerReply, SyncInFlight};
+pub(crate) use sync_answer_deferral::{answer_sync_request, sync_answer_deferral_ms, sync_request_retry_ms,
+                                      SyncAnswerDeferral, SyncAnswerReply, SyncInFlight};
 
 #[path = "lp_ordermatch/ordermatch_trading.rs"]
 mod ordermatch_trading;
