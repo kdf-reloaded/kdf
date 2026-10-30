@@ -353,22 +353,25 @@ pub struct ZcoinConsensusParams {
     /// 19:00 UTC. Configuration therefore *overrides* rather than *enables*, so a
     /// moved activation time remains a data change.
     ///
-    /// **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade
-    /// gating. Because a built-in value applies when this field is absent, omitting
-    /// it is *not* sufficient to match GLEEC KDF — set `ironwood_gate_disabled` to
-    /// `true` for that. See `docs/GLEEC_COMPATIBILITY.md`.
+    /// **Compatibility:** GLEEC KDF has no equivalent and applies no upgrade gating, but
+    /// it cannot build for a post-Ironwood chain at all, so there is no GLEEC-compatible
+    /// value for this field, and omitting it is not an opt-out: a built-in value applies
+    /// when it is absent. See `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_activation_time: Option<u32>,
-    /// Suppresses the Ironwood swap freeze and build refusal for this coin
-    /// entirely, including the built-in activation time (R39.6.4d).
+    /// Would suppress the Ironwood swap freeze and build refusal for this coin, including
+    /// the built-in activation time (R39.6.4d), for a build that cannot construct
+    /// version-6 transactions.
     ///
-    /// The escape hatch for an operator who would rather meet the network's own
-    /// rejection than this build's refusal — and the switch that restores
-    /// GLEEC-equivalent behaviour, since simply omitting
-    /// `ironwood_activation_time` no longer does so.
+    /// This build supports version-6 construction (R39.6.4e), so neither the freeze nor
+    /// the refusal ever engages and the switch is accepted but changes nothing. It does
+    /// not disable version-6 construction, activation-height discovery, or the exclusion
+    /// of stale endpoints (R39.11.7a(h)), which apply irrespective of it. It keeps its
+    /// meaning only for a build that cannot construct version 6.
     ///
-    /// **Compatibility:** set to `true` to match GLEEC KDF exactly. Defaults to
-    /// `false`. See `docs/GLEEC_COMPATIBILITY.md`.
+    /// **Compatibility:** no GLEEC-compatible value exists any more: GLEEC KDF cannot
+    /// build for a post-Ironwood chain, so there is no GLEEC behaviour for the switch to
+    /// reproduce. Defaults to `false`. See `docs/GLEEC_COMPATIBILITY.md`.
     #[serde(default)]
     ironwood_gate_disabled: bool,
     /// Ironwood activation height, once the network has derived and published it.
@@ -1355,9 +1358,9 @@ mod ironwood_consensus_param_tests {
         );
     }
 
-    /// The opt-out that restores GLEEC-equivalent behaviour. It must beat both the
-    /// built-in value and an explicitly configured one, otherwise an operator who
-    /// asked for no gating would still be gated.
+    /// The opt-out still beats both the built-in value and an explicitly configured one as
+    /// the freeze and refusal inputs, although neither engages while version 6 is
+    /// supported.
     #[test]
     fn ironwood_gate_disabled_suppresses_both_the_builtin_and_a_configured_time() {
         let mut off = arrr_params_without_ironwood();

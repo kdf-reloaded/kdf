@@ -1,6 +1,6 @@
 # Plan: finish Solana support
 
-**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-25
+**Status:** parked (nothing started; awaits a dedicated session) — **Last reviewed:** 2026-10-29
 
 > **Context:** created 2026-10-11 on
 > `fix/activation-api-parity` when the coin-activation wire-parity work found

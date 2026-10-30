@@ -1,6 +1,6 @@
 # Plan: ARRR's per-swap HTLC key derived as the reference derives it
 
-**Status:** in progress — **Last reviewed:** 2026-10-28
+**Status:** done (PRs #140, #142, #146, #152; field recovery passed 2026-10-29) — **Last reviewed:** 2026-10-30
 
 > **Context.** Reloaded gives a shielded coin's swap leg a random HTLC key and saves its private
 > key with the swap. The reference instead derives that key from the coin's transparent key and
@@ -15,7 +15,7 @@
 1. **CRD.** Ch.39 R39.5.6–R39.5.13, T39.5.a–f and D39.5.a; the candidate order added to
    R39.5.4; pointers from ch.51.
 2. **Key-pair consistency fix** (R39.5.4). It is the safety net: the named "no private key held"
-   stop. A separate pull request.
+   stop. A separate pull request — done, PR #142.
 3. **Code — done.** The ZCoin HTLC key is derived per R39.5.8 (the maker uses the secret hash, the taker
    the uuid). It is used for payment, spend and refund, and re-derived on restart and in
    recovery, with the candidate order (1) derived, (2) a saved key that belongs to the saved
@@ -30,7 +30,11 @@
    - The `Negotiated` events' `taker_pubkey` / `maker_pubkey` are 33 zero bytes in both
      implementations. Reloaded parses that value and uses the HTLC public keys instead, so a
      vector needs only the `Started` and `Negotiated` HTLC public keys.
-5. **Field recovery** of the September swap with the operator, once step 4 passes.
+5. **Field recovery — done 2026-10-29.** The operator retried the stuck ARRR refunds, the
+   September swap among them, on dev `8b5acc41a`. One refund was broadcast
+   (`9c94bb484f67ae4e6a8a23bdd7e986c8fcb5e2af4f206ca1f94edf658dd6e6cf`), and the others answered
+   that they were already refunded, by a transaction that matched the derived key. On a build
+   without PR #152 the same swaps stopped with the named error of step 2, as expected.
 6. **Refund timing — done** (R39.5.13, maintainer Decision AP, 2026-10-28). The shielded refund waits
    until the chain's median time past has passed the lock time, and a refund rejected as
    non-final is retried until the refund deadline. A separate pull request; it does not wait

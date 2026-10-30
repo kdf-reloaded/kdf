@@ -5358,7 +5358,8 @@ does when the record or the tip cannot be read. The local record never answers
 
 Any recorded transaction that pays exactly the HTLC script counts, without a
 separate check that it spends this wallet's notes: the script is unique to the
-swap (a random per-swap key and a fresh secret hash, R39.5.4), so only this
+swap (a key unique to the swap, derived from its swap-unique input by
+R39.5.6--R39.5.8, and a fresh secret hash), so only this
 wallet's own payment can carry it. A mined record is trusted as the wallet
 database records it; a reorganization that the database's rewind handles clears
 its mined height.
@@ -5369,7 +5370,8 @@ a divergence from R39.11.18's parity contract.)* When the paying coin is a shiel
 coin, the payment step of a swap that this process started skips the already-sent
 question and goes straight to the step's deadline check and the send. That is a
 swap not restored from its saved log, whose log holds no payment event of this role.
-A shielded coin's HTLC key is random per swap (R39.5.4) and the secret hash is
+A shielded coin's HTLC key is unique per swap (derived from the swap-unique input,
+R39.5.6--R39.5.8) and the secret hash is
 fresh, so no payment to that script can exist unless this swap sent it, and a swap
 started in this process cannot have sent it before this step. A restored swap
 always asks the question. Every other coin keeps R39.11.18 unchanged.
@@ -5397,7 +5399,10 @@ are not affected.
 > (T39.11.r, T39.11.s).
 >
 > - **"A shielded coin" in R39.11.27.** It is decided by the property the rule rests on:
->   the coin's HTLC key is random per swap (only the shielded coin has it).
+>   the coin's HTLC key is unique per swap (only the shielded coin has it).
+>   *(Wording corrected 2026-10-29: when this note was written the key was random per
+>   swap; since R39.5.6 it is derived per swap. The property this rule and R39.11.26
+>   rest on, a key unique to the swap, holds either way.)*
 > - **"Started in this process".** Recorded when the swap is started new, never when it
 >   is restored from its saved log.
 > - **The address read of R39.11.28.** It is the transparent-address listing of the

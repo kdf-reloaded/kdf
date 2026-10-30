@@ -1,6 +1,6 @@
 # Plan: keep a maker's book through a keep-alive stall, and rebuild it faster (Decision AN)
 
-**Status:** planning — **Last reviewed:** 2026-10-28
+**Status:** in progress (CRD and both switches merged in PRs #132, #135; the lab run left) — **Last reviewed:** 2026-10-29
 
 > **Context.** In the lab on 2026-10-28, a reference seed and three reference
 > subscribers held a Reloaded maker's full book of 600 orders.

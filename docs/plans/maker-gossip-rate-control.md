@@ -1,6 +1,6 @@
 # Plan: maker-side gossip rate control
 
-**Status:** in progress — **Last reviewed:** 2026-10-28
+**Status:** parked (shipped opt-in in PRs #148, #159, #160, #166; default-on waits for the D9 items and field data) — **Last reviewed:** 2026-10-30
 
 > **Context.** A maker that changes its orders faster than its relay can take
 > them no longer gets its keep-alives through. After 90 s without a keep-alive,
@@ -296,7 +296,7 @@ If the maintainer wants it, in addition to or instead of A:
 - **Size:** small in the handler. A new field on the publish and propagate
   commands, plus the classification at their call sites.
 
-## Work packages, once decided
+## Work packages
 
 1. CRD: the ch.32 rules and the ch.28 §28.9B amendment.
 2. Code, through the Coder:

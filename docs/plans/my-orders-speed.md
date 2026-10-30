@@ -1,6 +1,6 @@
 # Plan: make `my_orders` fast at 2,000 orders
 
-**Status:** planning (approach decided 2026-10-28: speed up the call instead of adding a filter; evaluation and implementation pending) — **Last reviewed:** 2026-10-28
+**Status:** done (shipped in PR #154; profile-B target miss accepted 2026-10-29) — **Last reviewed:** 2026-10-29
 
 > **Context:** an operator runs a maker bot with about 2,000 live maker orders
 > (1,000 pairs, a bid and an ask each: 5 base coins x 200 rel coins). The bot

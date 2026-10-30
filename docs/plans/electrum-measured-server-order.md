@@ -1,6 +1,6 @@
 # Plan: measured Electrum server order
 
-**Status:** parked (design approved 2026-10-28; starts after the Electrum pool PR) — **Last reviewed:** 2026-10-28
+**Status:** in progress (shipped in PR #144; the RIN field run and the `mixed`-default decision left) — **Last reviewed:** 2026-10-29
 
 **CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.15 and
 the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
