@@ -5423,6 +5423,7 @@ fn ordermatch_ctx_without_worker() -> (Arc<OrdermatchContext>, mpsc::UnboundedRe
         trie_ops_tx,
         orderbook_subscriptions: Default::default(),
         sync_answer_deferral: Default::default(),
+        sync_log: Default::default(),
         pending_maker_reserved: Default::default(),
         maker_outbox: Default::default(),
         orderbook_tickers: Default::default(),
@@ -7772,6 +7773,7 @@ mod trie_store_memory_retention {
             trie_ops_tx,
             orderbook_subscriptions: Default::default(),
             sync_answer_deferral: Default::default(),
+            sync_log: Default::default(),
             maker_outbox: Default::default(),
             pending_maker_reserved: Default::default(),
             orderbook_tickers: Default::default(),
@@ -9810,10 +9812,13 @@ mod order_message_liveness {
 /// when the node's own synchronization lands.
 mod sync_answer_deferral_tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS, MAX_PARKED_PER_PEER,
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+                                                          DEFAULT_SYNC_REQUEST_RETRY_MS, MAX_PARKED_PER_PEER,
                                                           MAX_PARKED_TOTAL};
+    use crate::mm2::lp_ordermatch::sync_log::RequestClass;
     use futures::channel::oneshot;
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
+    use mm2_p2p::request_response::LocalFailure;
     use std::sync::mpsc as std_mpsc;
     use std::thread::JoinHandle;
     use std::time::Instant;
@@ -10042,9 +10047,33 @@ mod sync_answer_deferral_tests {
                 other => panic!("unexpected command {:?}", other),
             }
         }
+
+        /// The second request of R-Q5c, which takes the place of the first in `own`.
+        fn expect_second_request(&mut self, own: &mut OwnSync) {
+            match next_cmd(&mut self.relay_cmds) {
+                AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => {
+                    own.request = req;
+                    own.response_tx = Some(response_tx);
+                },
+                other => panic!("unexpected command {:?}", other),
+            }
+        }
+
+        /// Nothing more was asked (to be called once the keep-alive task has finished).
+        fn assert_no_further_request(&mut self) {
+            while let Ok(cmd) = self.relay_cmds.try_recv() {
+                assert!(
+                    !matches!(cmd, AdexBehaviourCmd::RequestPeers { .. }),
+                    "a further request was sent"
+                );
+            }
+        }
     }
 
     fn peer() -> PeerId { PeerId::random() }
+
+    /// A relay config without the second request of R-Q5c, for the tests of R-Q5b alone.
+    fn no_retry() -> Json { json!({ "sync_request_retry_ms": 0 }) }
 
     fn answered(answers: &std_mpsc::Receiver<(usize, AdexResponse)>, within_ms: u64) -> (usize, AdexResponse) {
         answers
@@ -10076,7 +10105,7 @@ mod sync_answer_deferral_tests {
 
     #[test]
     fn parked_request_gets_the_placeholder_error_when_the_own_request_fails() {
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
@@ -10245,7 +10274,7 @@ mod sync_answer_deferral_tests {
     #[test]
     fn the_per_peer_limit_is_the_same_for_a_peer_across_pairs_and_requests() {
         // A request for two tracked pairs counts once, whatever its size.
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         let p = peer();
@@ -10311,9 +10340,142 @@ mod sync_answer_deferral_tests {
         assert_eq!((MAX_PARKED_PER_PEER, MAX_PARKED_TOTAL), (8, 256));
     }
 
+    /// The pause of R-Q5c in the tests of the second request.
+    const RETRY_MS: u64 = 50;
+
+    fn quick_retry() -> Json { json!({ "sync_request_retry_ms": RETRY_MS }) }
+
+    /// The pairs and roots a request names.
+    fn requested_roots(request: &[u8]) -> HashMap<String, H64> {
+        match decode_message::<P2PRequest>(request).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. }) => trie_roots,
+            other => panic!("unexpected request {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_quick_failure_is_asked_once_more_and_the_parked_request_gets_the_full_set() {
+        let mut f = Fixture::new(quick_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+
+        own.fail();
+        f.expect_second_request(&mut own);
+        assert_eq!(
+            requested_roots(&own.request),
+            HashMap::from([(PAIR.to_owned(), H64::default())]),
+            "the second request names the pair still at the placeholder"
+        );
+        assert!(
+            answers.try_recv().is_err(),
+            "the parked request waits for the second answer"
+        );
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.answer(&f.maker);
+        let (id, res) = answered(&answers, 2000);
+        assert_eq!(id, 1);
+        assert_eq!(full_set_len(&res), ORDERS);
+        assert!(own.finish(), "an answered second request counts as success (R-F3b)");
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn the_second_request_is_the_last() {
+        let mut f = Fixture::new(quick_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+
+        own.fail();
+        f.expect_second_request(&mut own);
+        own.fail();
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn a_pair_that_left_the_placeholder_is_not_asked_for_again() {
+        const PAUSE_MS: u64 = 300;
+        let mut f = Fixture::new(json!({ "sync_request_retry_ms": PAUSE_MS }));
+        let mut own = f.start_own_sync();
+        own.fail();
+
+        // During the pause the maker's orders reach the relay by gossip.
+        let orders: Vec<OrderbookItem> = octx(&f.maker)
+            .orderbook
+            .lock()
+            .order_set
+            .values()
+            .filter(|o| o.pubkey == MAKER)
+            .cloned()
+            .collect();
+        for order in orders {
+            insert_or_update_order(&f.relay, order);
+        }
+        flush_trie(&f.relay);
+
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn no_second_request_when_its_answer_could_not_arrive_within_the_bound() {
+        // A pause as long as the bound.
+        let mut f = Fixture::new(json!({ "sync_request_retry_ms": DEFAULT_SYNC_ANSWER_DEFERRAL_MS }));
+        let mut own = f.start_own_sync();
+        own.fail();
+        assert!(!own.finish());
+        f.assert_no_further_request();
+
+        // A failure that comes late: 250 ms after the request, with a 100 ms pause and a 300 ms bound.
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": 300, "sync_request_retry_ms": 100 }));
+        let mut own = f.start_own_sync();
+        std::thread::sleep(Duration::from_millis(250));
+        own.fail();
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn zero_turns_the_second_request_off_and_so_does_a_zero_bound() {
+        for conf in [no_retry(), json!({ "sync_answer_deferral_ms": 0 })] {
+            let mut f = Fixture::new(conf);
+            let mut own = f.start_own_sync();
+            own.fail();
+            assert!(!own.finish());
+            f.assert_no_further_request();
+            assert_tables_empty(&f.relay);
+        }
+    }
+
+    #[test]
+    fn only_a_non_negative_integer_sets_the_pause() {
+        for (conf, expected) in [
+            (json!({}), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": 0 }), 0),
+            (json!({ "sync_request_retry_ms": 700 }), 700),
+            (json!({ "sync_request_retry_ms": "0" }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": -1 }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": 2.5 }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(sync_request_retry_ms(&ctx), expected);
+        }
+        assert_eq!(DEFAULT_SYNC_REQUEST_RETRY_MS, 1000);
+    }
+
     #[test]
     fn the_inbound_handler_returns_without_waiting() {
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
@@ -10432,6 +10594,293 @@ mod sync_answer_deferral_tests {
         assert_eq!(maker_book(&subscriber), f.uuids);
         assert_tables_empty(&f.relay);
         assert_tables_empty(&subscriber);
+    }
+
+    // ---- The logging of the synchronization (left to the implementation, CRD ch.32 R36). The tests read the
+    // counters and the recorded events of the node, not the log text.
+
+    fn assert_wire_form(res: &AdexResponse, needle: &str) {
+        match res {
+            AdexResponse::Err { error } => {
+                assert!(error.starts_with("ordermatch_orderbook:"), "{}", error);
+                assert!(error.contains(needle), "{}", error);
+            },
+            other => panic!("expected an error answer, got {:?}", other),
+        }
+    }
+
+    impl OwnSync {
+        /// The request ends with `res` as the transport's answer.
+        fn respond(&mut self, res: AdexResponse) {
+            self.response_tx
+                .take()
+                .unwrap()
+                .send(vec![(PeerId::random(), res)])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_placeholder_answered_at_once_without_an_own_request_is_logged_as_such() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        add_placeholder(&f.relay, MAKER, PAIR);
+
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        // Wire guard: the answer keeps the location prefix and the reason.
+        assert_wire_form(&answers.try_recv().unwrap().1, "InvalidStateRoot");
+
+        let log = &octx(&f.relay).sync_log;
+        assert_eq!(log.answers(), vec![(
+            AnswerClass::Placeholder,
+            AnswerPath::AtOnce(AtOnce::OwnRequestNotInFlight)
+        )]);
+        let counters = log.snapshot();
+        assert_eq!(counters.answers_placeholder, 1);
+        assert_eq!(counters.placeholder_own_not_in_flight, 1);
+        assert_eq!(counters.answers_parked, 0);
+    }
+
+    #[test]
+    fn a_placeholder_parked_until_the_bound_is_logged_with_the_path_parked_bound() {
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": 200 }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_wire_form(&answered(&answers, 3000).1, "InvalidStateRoot");
+
+        let log = &octx(&f.relay).sync_log;
+        assert_eq!(log.answers(), vec![(AnswerClass::Placeholder, AnswerPath::ParkedBound)]);
+        let counters = log.snapshot();
+        assert_eq!((counters.placeholder_parked_bound, counters.answers_parked), (1, 1));
+
+        own.fail();
+        assert!(!own.finish());
+    }
+
+    #[test]
+    fn a_parked_request_woken_by_a_failed_or_an_answered_own_request_is_logged_as_woken() {
+        let mut f = Fixture::new(no_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        // The own request fails: the parked request gets the placeholder error.
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        own.fail();
+        assert_wire_form(&answered(&answers, 2000).1, "InvalidStateRoot");
+        assert!(!own.finish());
+        assert_tables_empty(&f.relay);
+
+        // The next own request is answered: the parked request gets the full set.
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR], &answers_tx).unwrap();
+        own.answer(&f.maker);
+        assert_eq!(full_set_len(&answered(&answers, 2000).1), ORDERS);
+        assert!(own.finish());
+
+        let log = &octx(&f.relay).sync_log;
+        assert_eq!(log.answers(), vec![
+            (AnswerClass::Placeholder, AnswerPath::ParkedWoken),
+            (AnswerClass::OkFull, AnswerPath::ParkedWoken),
+        ]);
+        let counters = log.snapshot();
+        assert_eq!(counters.placeholder_parked_woken, 1);
+        assert_eq!(counters.answers_ok_full, 1);
+        assert_eq!(counters.answers_parked, 2);
+    }
+
+    #[test]
+    fn a_missing_pair_no_data_and_a_full_set_are_classified_and_the_wire_form_is_kept() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+
+        ask(&f.maker, peer(), 1, MAKER, &["C9:C8"], &answers_tx).unwrap();
+        assert_wire_form(&answers.try_recv().unwrap().1, "No pair trie root for C9:C8");
+        ask(&f.maker, peer(), 2, "03unknown", &[PAIR], &answers_tx).unwrap();
+        assert_eq!(answers.try_recv().unwrap().1, AdexResponse::None);
+        ask(&f.maker, peer(), 3, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_eq!(full_set_len(&answers.try_recv().unwrap().1), ORDERS);
+
+        let not_deferrable = AnswerPath::AtOnce(AtOnce::NotDeferrable);
+        assert_eq!(octx(&f.maker).sync_log.answers(), vec![
+            (AnswerClass::MissingPair, not_deferrable),
+            (AnswerClass::NoData, not_deferrable),
+            (AnswerClass::OkFull, not_deferrable),
+        ]);
+        let counters = octx(&f.maker).sync_log.snapshot();
+        assert_eq!(
+            (
+                counters.answers_missing_pair,
+                counters.answers_no_data,
+                counters.answers_ok_full
+            ),
+            (1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn a_delta_is_logged_as_ok_delta() {
+        let f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let old_root = pair_trie_root_by_pub(&f.maker, MAKER, PAIR);
+        for order in make_random_orders(MAKER.to_owned(), &[0; 32], "C1".into(), "C2".into(), 2) {
+            insert_or_update_order(&f.maker, order);
+        }
+        flush_trie(&f.maker);
+
+        let roots = HashMap::from([(PAIR.to_owned(), old_root)]);
+        let reply: SyncAnswerReply = Box::new(move |res| answers_tx.send((1, res)).map_err(|e| e.to_string()));
+        answer_sync_request(&f.maker, peer(), MAKER.to_owned(), roots, reply).unwrap();
+        assert!(matches!(answers.try_recv().unwrap().1, AdexResponse::Ok { .. }));
+
+        assert_eq!(octx(&f.maker).sync_log.answers(), vec![(
+            AnswerClass::OkDelta,
+            AnswerPath::AtOnce(AtOnce::NotDeferrable)
+        )]);
+        assert_eq!(octx(&f.maker).sync_log.snapshot().answers_ok_delta, 1);
+    }
+
+    #[test]
+    fn a_full_parked_table_and_a_zero_bound_are_logged_with_their_paths() {
+        let mut f = Fixture::new(json!({}));
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        let greedy = peer();
+        for id in 0..MAX_PARKED_PER_PEER {
+            ask(&f.relay, greedy, id, MAKER, &[PAIR], &answers_tx).unwrap();
+        }
+        ask(&f.relay, greedy, 100, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().expect("answered at once").1);
+        assert_eq!(octx(&f.relay).sync_log.answers(), vec![(
+            AnswerClass::Placeholder,
+            AnswerPath::AtOnce(AtOnce::CapsFull)
+        )]);
+        assert_eq!(octx(&f.relay).sync_log.snapshot().placeholder_caps, 1);
+        own.answer(&f.maker);
+        assert!(own.finish());
+
+        let f = Fixture::new(json!({ "sync_answer_deferral_ms": 0 }));
+        let (answers_tx, answers) = std_mpsc::channel();
+        add_placeholder(&f.relay, MAKER, PAIR);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().unwrap().1);
+        assert_eq!(octx(&f.relay).sync_log.answers(), vec![(
+            AnswerClass::Placeholder,
+            AnswerPath::AtOnce(AtOnce::DeferralOff)
+        )]);
+        assert_eq!(octx(&f.relay).sync_log.snapshot().placeholder_at_once, 1);
+    }
+
+    #[test]
+    fn a_placeholder_alongside_a_tracked_pair_is_not_deferrable_and_says_which_reason() {
+        let mut f = Fixture::new(no_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        add_placeholder(&f.relay, MAKER, OTHER_PAIR);
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR, OTHER_PAIR], &answers_tx).unwrap();
+        assert_placeholder_error(&answers.try_recv().unwrap().1);
+        // A pair with no entry at all decides the reason first, whatever the order of the pairs.
+        ask(&f.relay, peer(), 2, MAKER, &[PAIR, OTHER_PAIR, "C9:C8"], &answers_tx).unwrap();
+        assert!(matches!(answers.try_recv().unwrap().1, AdexResponse::Err { .. }));
+        // The class of the second answer depends on which of its failing pairs the trie read meets first, so
+        // only the path is fixed.
+        let answers = octx(&f.relay).sync_log.answers();
+        assert_eq!(
+            answers[0],
+            (
+                AnswerClass::Placeholder,
+                AnswerPath::AtOnce(AtOnce::OwnRequestNotInFlight)
+            )
+        );
+        assert_eq!(answers[1].1, AnswerPath::AtOnce(AtOnce::NotDeferrable));
+        assert!(matches!(
+            answers[1].0,
+            AnswerClass::Placeholder | AnswerClass::MissingPair
+        ));
+        own.fail();
+        assert!(!own.finish());
+    }
+
+    /// The first request ends as the transport reports, with no re-ask.
+    fn request_class_of(res: Option<AdexResponse>) -> Vec<(u8, RequestClass)> {
+        let mut f = Fixture::new(no_retry());
+        let mut own = f.start_own_sync();
+        match res {
+            Some(res) => own.respond(res),
+            None => own.fail(),
+        }
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        octx(&f.relay).sync_log.requests()
+    }
+
+    #[test]
+    fn every_outcome_of_the_first_request_has_its_class() {
+        let peer_error = AdexResponse::Err {
+            error: "the peer says no".to_owned(),
+        };
+        let local = |kind| AdexResponse::LocalErr {
+            kind,
+            error: "ResponseError".to_owned(),
+        };
+        let garbage = AdexResponse::Ok { response: vec![0xc1] };
+        for (res, class) in [
+            (Some(AdexResponse::None), RequestClass::NoData),
+            (Some(peer_error), RequestClass::PeerError),
+            (Some(local(LocalFailure::Timeout)), RequestClass::Timeout),
+            (Some(local(LocalFailure::Transport)), RequestClass::Transport),
+            (Some(garbage), RequestClass::Decode),
+            // The command is dropped without an answer.
+            (None, RequestClass::Transport),
+        ] {
+            assert_eq!(request_class_of(res), vec![(1, class)], "{:?}", class);
+        }
+    }
+
+    #[test]
+    fn an_answered_request_is_ok_and_the_re_ask_is_attempt_two() {
+        // Answered at once.
+        let mut f = Fixture::new(quick_retry());
+        let mut own = f.start_own_sync();
+        own.answer(&f.maker);
+        assert!(own.finish());
+        assert_eq!(octx(&f.relay).sync_log.requests(), vec![(1, RequestClass::Ok)]);
+
+        // A quick failure, then the answer to the second request.
+        let mut f = Fixture::new(quick_retry());
+        let mut own = f.start_own_sync();
+        own.respond(AdexResponse::LocalErr {
+            kind: LocalFailure::Timeout,
+            error: "Timeout".to_owned(),
+        });
+        f.expect_second_request(&mut own);
+        own.answer(&f.maker);
+        assert!(own.finish());
+        assert_eq!(octx(&f.relay).sync_log.requests(), vec![
+            (1, RequestClass::Timeout),
+            (2, RequestClass::Ok)
+        ]);
+        assert_eq!(octx(&f.relay).sync_log.snapshot().requests_ok, 1);
+
+        // Both fail, each in its own way.
+        let mut f = Fixture::new(quick_retry());
+        let mut own = f.start_own_sync();
+        own.respond(AdexResponse::Err {
+            error: "busy".to_owned(),
+        });
+        f.expect_second_request(&mut own);
+        own.respond(AdexResponse::LocalErr {
+            kind: LocalFailure::Transport,
+            error: "ConnectionClosed".to_owned(),
+        });
+        assert!(!own.finish());
+        assert_eq!(octx(&f.relay).sync_log.requests(), vec![
+            (1, RequestClass::PeerError),
+            (2, RequestClass::Transport)
+        ]);
+        let counters = octx(&f.relay).sync_log.snapshot();
+        assert_eq!((counters.requests_peer_error, counters.requests_transport), (1, 1));
+        assert_tables_empty(&f.relay);
     }
 }
 

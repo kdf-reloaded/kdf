@@ -63,6 +63,22 @@ pub(crate) fn sync_answer_deferral_ms(ctx: &MmArc) -> u64 {
         .unwrap_or(DEFAULT_SYNC_ANSWER_DEFERRAL_MS)
 }
 
+/// Default of the MM2.json integer `sync_request_retry_ms`.
+pub(crate) const DEFAULT_SYNC_REQUEST_RETRY_MS: u64 = 1000;
+
+// R-Q5c item 3: the default pause leaves room within the default bound for the second answer.
+const _: () = assert!(DEFAULT_SYNC_REQUEST_RETRY_MS < DEFAULT_SYNC_ANSWER_DEFERRAL_MS);
+
+/// The pause of CRD ch.32 R-Q5c before a failed keep-alive-driven request is asked once more: the top-level
+/// MM2.json integer `sync_request_retry_ms`, default `1000`; an absent or non-integer value means the default,
+/// `0` turns the second request off. The second request is sent only while it can still be answered within the
+/// bound of [`sync_answer_deferral_ms`], so a pause at or above that bound turns it off as well.
+pub(crate) fn sync_request_retry_ms(ctx: &MmArc) -> u64 {
+    ctx.conf["sync_request_retry_ms"]
+        .as_u64()
+        .unwrap_or(DEFAULT_SYNC_REQUEST_RETRY_MS)
+}
+
 /// Sends the answer of a synchronization request to the peer that asked. The inbound dispatcher builds
 /// it around the request's response channel; a parked request keeps it until it is answered.
 pub(crate) type SyncAnswerReply = Box<dyn FnOnce(AdexResponse) -> Result<(), String> + Send>;
@@ -144,36 +160,42 @@ impl SyncAnswerDeferral {
     }
 
     /// R-Q5b: park the request when it is deferrable and within the limits. `trie_store` is the store
-    /// the caller holds locked while asking. `None` means the request is to be answered at once.
+    /// the caller holds locked while asking. The error says why the request is to be answered at once.
     fn try_park(
         &self,
         peer: PeerId,
         pubkey: &str,
         trie_roots: &HashMap<AlbOrderedOrderbookPair, H64>,
         trie_store: &TrieStore,
-    ) -> Option<(Id, oneshot::Receiver<()>)> {
+    ) -> Result<(Id, oneshot::Receiver<()>), AtOnce> {
         // An unknown pubkey is the "no data" outcome, answered at once.
-        let pubkey_state = trie_store.pubkeys_state.get(pubkey)?;
+        let pubkey_state = trie_store.pubkeys_state.get(pubkey).ok_or(AtOnce::NotDeferrable)?;
         let mut tables = self.0.lock();
         let mut waits = HashSet::new();
+        let mut without_own_request = false;
         for pair in trie_roots.keys() {
             // A pair without an entry is the missing-pair failure, answered at once.
-            let held = pubkey_state.trie_roots.get(pair)?;
+            let held = pubkey_state.trie_roots.get(pair).ok_or(AtOnce::NotDeferrable)?;
             if *held != H64::default() {
                 continue;
             }
             // A placeholder without an own request in flight is answered at once.
-            let tokens = tables.in_flight_by_pair.get(&(pubkey.to_owned(), pair.clone()))?;
-            waits.extend(tokens.iter().copied());
+            match tables.in_flight_by_pair.get(&(pubkey.to_owned(), pair.clone())) {
+                Some(tokens) => waits.extend(tokens.iter().copied()),
+                None => without_own_request = true,
+            }
+        }
+        if without_own_request {
+            return Err(AtOnce::OwnRequestNotInFlight);
         }
         // Nothing to wait for: the answer is the same now as it would be later.
         if waits.is_empty() {
-            return None;
+            return Err(AtOnce::NotDeferrable);
         }
         if tables.parked.len() >= MAX_PARKED_TOTAL
             || tables.parked.values().filter(|p| p.peer == peer).count() >= MAX_PARKED_PER_PEER
         {
-            return None;
+            return Err(AtOnce::CapsFull);
         }
 
         let id = tables.next_id();
@@ -183,7 +205,7 @@ impl SyncAnswerDeferral {
             waits,
             wake: Some(wake_tx),
         });
-        Some((id, wake_rx))
+        Ok((id, wake_rx))
     }
 
     #[cfg(test)]
@@ -245,39 +267,97 @@ impl Drop for ParkedSlot {
     fn drop(&mut self) { self.table.0.lock().parked.remove(&self.id); }
 }
 
-/// The answer R-Q5 gives to the request at this moment, in the form the transport sends.
+/// The answer R-Q5 gives to the request at this moment, in the form the transport sends. It is the one place
+/// where the answer is decided, so it is also where the answer is logged: `path` says how the answer
+/// was reached and `waited_ms` how long a parked request waited.
 fn sync_answer_response(
     ctx: &MmArc,
+    peer: &PeerId,
     pubkey: String,
     trie_roots: HashMap<AlbOrderedOrderbookPair, H64>,
+    path: AnswerPath,
+    waited_ms: Option<u64>,
 ) -> AdexResponse {
-    match process_sync_pubkey_orderbook_state(ctx.clone(), pubkey, trie_roots) {
-        Ok(Some(answer)) => match encode_message(&answer) {
-            Ok(response) => AdexResponse::Ok { response },
-            Err(e) => AdexResponse::Err { error: e.to_string() },
+    let (pairs, log_pubkey) = if debug_enabled() {
+        (pairs_label(trie_roots.keys()), pubkey.clone())
+    } else {
+        (String::new(), String::new())
+    };
+    let mut entries = None;
+    let (class, response) = match process_sync_pubkey_orderbook_state_classified(ctx.clone(), pubkey, trie_roots) {
+        Ok(Some(answer)) => {
+            let class = answer_class(&answer);
+            entries = Some(answer_entries(&answer));
+            match encode_message(&answer) {
+                Ok(response) => (class, AdexResponse::Ok { response }),
+                Err(e) => (AnswerClass::TrieError, AdexResponse::Err { error: e.to_string() }),
+            }
         },
-        Ok(None) => AdexResponse::None,
-        Err(error) => AdexResponse::Err { error },
+        Ok(None) => (AnswerClass::NoData, AdexResponse::None),
+        Err(SyncAnswerError { failure, text }) => (failure.into(), AdexResponse::Err { error: text }),
+    };
+    match OrdermatchContext::from_ctx(ctx) {
+        Ok(ordermatch_ctx) => ordermatch_ctx.sync_log.answer(
+            &AnswerEvent {
+                peer,
+                pubkey: &log_pubkey,
+                pairs: &pairs,
+                class,
+                path,
+                waited_ms,
+                entries,
+            },
+            now_ms(),
+        ),
+        Err(e) => log::error!("Cannot log a synchronization answer: {}", e),
+    }
+    response
+}
+
+/// `ok_full` when any pair is answered with a full set, `ok_delta` when all are deltas.
+fn answer_class(answer: &SyncPubkeyOrderbookStateRes) -> AnswerClass {
+    if answer
+        .pair_orders_diff
+        .values()
+        .any(|diff| matches!(diff, DeltaOrFullTrie::FullTrie(_)))
+    {
+        AnswerClass::OkFull
+    } else {
+        AnswerClass::OkDelta
     }
 }
 
-/// Park the request when it is deferrable (R-Q5b); give `reply` back when it is to be answered at once.
+/// The orders (or order changes) the answer carries over all its pairs.
+fn answer_entries(answer: &SyncPubkeyOrderbookStateRes) -> usize {
+    answer
+        .pair_orders_diff
+        .values()
+        .map(|diff| match diff {
+            DeltaOrFullTrie::Delta(delta) => delta.len(),
+            DeltaOrFullTrie::FullTrie(orders) => orders.len(),
+        })
+        .sum()
+}
+
+/// Park the request when it is deferrable (R-Q5b); give `reply` back, with the reason, when it is to be
+/// answered at once.
 fn park_sync_request(
     ctx: &MmArc,
     peer: PeerId,
     pubkey: &str,
     trie_roots: &HashMap<AlbOrderedOrderbookPair, H64>,
     reply: SyncAnswerReply,
-) -> Result<(), SyncAnswerReply> {
+) -> Result<(), (SyncAnswerReply, AtOnce)> {
     let bound_ms = sync_answer_deferral_ms(ctx);
     if bound_ms == 0 {
-        return Err(reply);
+        return Err((reply, AtOnce::DeferralOff));
     }
     let ordermatch_ctx = match OrdermatchContext::from_ctx(ctx) {
         Ok(ordermatch_ctx) => ordermatch_ctx,
         Err(e) => {
             log::error!("Cannot consider deferring a synchronization request: {}", e);
-            return Err(reply);
+            // Logged above; the request is simply not deferred.
+            return Err((reply, AtOnce::NotDeferrable));
         },
     };
 
@@ -287,24 +367,26 @@ fn park_sync_request(
         table.try_park(peer, pubkey, trie_roots, &trie_store)
     };
     let (id, wake_rx) = match parked {
-        Some(parked) => parked,
-        None => return Err(reply),
+        Ok(parked) => parked,
+        Err(reason) => return Err((reply, reason)),
     };
 
     let slot = ParkedSlot { table, id };
     let ctx = ctx.clone();
     let pubkey = pubkey.to_owned();
     let trie_roots = trie_roots.clone();
+    let parked_at_ms = now_ms();
     spawn(async move {
         // Woken when every own request it waits for has completed, or at the bound, whichever is first.
         let timeout = Box::pin(Timer::sleep(bound_ms as f64 / 1000.));
-        match select(wake_rx, timeout).await {
-            Either::Left(_) => log::debug!("Parked synchronization request for {} is answered", pubkey),
-            Either::Right(_) => log::debug!("Parked synchronization request for {} reached its bound", pubkey),
-        }
+        let path = match select(wake_rx, timeout).await {
+            Either::Left(_) => AnswerPath::ParkedWoken,
+            Either::Right(_) => AnswerPath::ParkedBound,
+        };
         // The slot is freed before the answer is sent, so the table is empty by the time it arrives.
         drop(slot);
-        let res = sync_answer_response(&ctx, pubkey, trie_roots);
+        let waited_ms = now_ms().saturating_sub(parked_at_ms);
+        let res = sync_answer_response(&ctx, &peer, pubkey, trie_roots, path, Some(waited_ms));
         if let Err(e) = reply(res) {
             log::error!("Error on sending the answer of a parked synchronization request: {}", e);
         }
@@ -328,7 +410,14 @@ pub(crate) fn answer_sync_request(
 ) -> Result<(), String> {
     match park_sync_request(ctx, peer, &pubkey, &trie_roots, reply) {
         Ok(()) => Ok(()),
-        Err(reply) => reply(sync_answer_response(ctx, pubkey, trie_roots)),
+        Err((reply, reason)) => reply(sync_answer_response(
+            ctx,
+            &peer,
+            pubkey,
+            trie_roots,
+            AnswerPath::AtOnce(reason),
+            None,
+        )),
     }
 }
 

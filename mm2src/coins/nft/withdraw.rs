@@ -175,6 +175,8 @@ async fn build_signed_tx(ctx: &MmArc, req: EvmTxRequest) -> Result<TransactionDe
                 to: contract_address,
                 gas: None,
                 gas_price: Some(gp),
+                max_fee_per_gas: None,
+                max_priority_fee_per_gas: None,
             };
             let gas_limit = coin
                 .estimate_gas(estimate_req)
@@ -297,6 +299,8 @@ async fn withdraw_erc1155(ctx: MmArc, req: WithdrawErc1155) -> Result<Transactio
             to: contract,
             gas: None,
             gas_price: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
         };
         // LP-17: alloy raw eth_call.
         use alloy::providers::Provider as _;

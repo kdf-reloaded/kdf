@@ -65,6 +65,15 @@ impl SkippedAddressReports {
     }
 }
 
+/// `address` without its trailing `/p2p/<peer id>` component, if it has one.
+pub(crate) fn strip_p2p_suffix(address: &Multiaddr) -> Multiaddr {
+    let mut stripped = address.clone();
+    if matches!(stripped.iter().last(), Some(Protocol::P2p(_))) {
+        stripped.pop();
+    }
+    stripped
+}
+
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub struct PeerIdSerde(PeerId);
 
@@ -105,11 +114,13 @@ pub struct PeersExchange {
     maintain_peers_interval: Interval,
     network_info: NetworkInfo,
     skipped_addresses: SkippedAddressReports,
+    /// The peer ID of this node. No entry is ever stored for it (CRD ch.28 R8c item 5).
+    local_peer_id: PeerId,
 }
 
 #[allow(clippy::new_without_default)]
 impl PeersExchange {
-    pub fn new(network_info: NetworkInfo) -> Self {
+    pub fn new(network_info: NetworkInfo, local_peer_id: PeerId) -> Self {
         let codec = Codec::default();
         let protocol = iter::once((PeersExchangeProtocol::Version2, ProtocolSupport::Full));
         let config = RequestResponseConfig::default();
@@ -125,6 +136,7 @@ impl PeersExchange {
             ),
             network_info,
             skipped_addresses: SkippedAddressReports::default(),
+            local_peer_id,
         }
     }
 
@@ -135,7 +147,7 @@ impl PeersExchange {
             .known_peers
             .clone()
             .into_iter()
-            .filter(|peer| !self.request_response.addresses_of_peer(peer).is_empty())
+            .filter(|peer| *peer != self.local_peer_id && !self.request_response.addresses_of_peer(peer).is_empty())
             .collect::<Vec<_>>();
 
         let peer_ids = peer_ids.choose_multiple(&mut rng, num);
@@ -159,6 +171,25 @@ impl PeersExchange {
         }
     }
 
+    /// Removes `address` from the entry of `peer` after a dial of it reached a peer with a different peer ID (CRD
+    /// ch.28 R8c item 6), and forgets `peer` when no address is left. The address matches with or without its
+    /// trailing `/p2p/<peer id>` component. Nothing is stored for the peer that answered, and a reserved peer is
+    /// kept as configured.
+    pub fn remove_stale_address(&mut self, peer: &PeerId, address: &Multiaddr) {
+        if self.is_reserved_peer(peer) {
+            return;
+        }
+        let stale = strip_p2p_suffix(address);
+        for stored in self.request_response.addresses_of_peer(peer) {
+            if strip_p2p_suffix(&stored) == stale {
+                self.request_response.remove_address(peer, &stored);
+            }
+        }
+        if self.request_response.addresses_of_peer(peer).is_empty() {
+            self.known_peers.retain(|known_peer| known_peer != peer);
+        }
+    }
+
     /// Remembers the addresses `peer` announced about itself. Addresses that are not accepted are skipped
     /// (CRD ch.28 R8c); the accepted ones are kept.
     pub fn add_peer_addresses_to_known_peers(&mut self, peer: &PeerId, addresses: PeerAddresses) {
@@ -168,6 +199,9 @@ impl PeersExchange {
     /// Keeps the accepted addresses of `entry_peer` received from `sender` (CRD ch.28 R8c items 1 and 2). A
     /// peer entry without any accepted address is skipped, and the `sender` is never forgotten because of it.
     fn add_received_peer_addresses(&mut self, entry_peer: &PeerId, sender: &PeerId, addresses: PeerAddresses) {
+        if *entry_peer == self.local_peer_id {
+            return;
+        }
         let addresses = self.accepted_addresses(sender, addresses);
         if addresses.is_empty() {
             return;
@@ -213,6 +247,9 @@ impl PeersExchange {
     }
 
     pub fn add_peer_addresses_to_reserved_peers(&mut self, peer: &PeerId, addresses: PeerAddresses) {
+        if *peer == self.local_peer_id {
+            return;
+        }
         for address in addresses.iter() {
             if !self.validate_global_multiaddr(address) {
                 return;
@@ -260,7 +297,11 @@ impl PeersExchange {
     ) -> HashMap<PeerId, PeerAddresses> {
         let mut result = HashMap::with_capacity(num);
         let mut rng = rand::thread_rng();
-        let peer_ids = self.known_peers.iter().filter(|peer| filter(peer)).collect::<Vec<_>>();
+        let peer_ids = self
+            .known_peers
+            .iter()
+            .filter(|peer| **peer != self.local_peer_id && filter(peer))
+            .collect::<Vec<_>>();
         for peer_id in peer_ids.choose_multiple(&mut rng, num) {
             let addresses = self.request_response.addresses_of_peer(peer_id).into_iter().collect();
             result.insert(**peer_id, addresses);
@@ -273,7 +314,7 @@ impl PeersExchange {
     pub fn is_reserved_peer(&self, peer: &PeerId) -> bool { self.reserved_peers.contains(peer) }
 
     pub fn add_known_peer(&mut self, peer: PeerId) {
-        if !self.is_known_peer(&peer) {
+        if peer != self.local_peer_id && !self.is_known_peer(&peer) {
             self.known_peers.push(peer)
         }
     }
@@ -501,7 +542,7 @@ mod protocol_tests {
         let network_info = NetworkInfo::Distributed {
             network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
         };
-        let mut behaviour = PeersExchange::new(network_info);
+        let mut behaviour = PeersExchange::new(network_info, PeerId::random());
         let sender = PeerId::random();
         let response: HashMap<PeerIdSerde, PeerAddresses> = HashMap::new();
         assert!(behaviour.process_known_peers_response(&sender, response));
@@ -512,7 +553,7 @@ mod protocol_tests {
         let network_info = NetworkInfo::Distributed {
             network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
         };
-        let mut behaviour = PeersExchange::new(network_info);
+        let mut behaviour = PeersExchange::new(network_info, PeerId::random());
         let sender = PeerId::random();
         let mut response = HashMap::new();
         for _ in 0..21 {
@@ -538,10 +579,15 @@ mod tests {
         assert_eq!(peer_id.0, deserialized.0);
     }
 
-    fn distributed_behaviour() -> PeersExchange {
-        PeersExchange::new(NetworkInfo::Distributed {
-            network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
-        })
+    fn distributed_behaviour() -> PeersExchange { distributed_behaviour_of(PeerId::random()) }
+
+    fn distributed_behaviour_of(local_peer_id: PeerId) -> PeersExchange {
+        PeersExchange::new(
+            NetworkInfo::Distributed {
+                network_ports: NetworkPorts { tcp: 3000, wss: 3010 },
+            },
+            local_peer_id,
+        )
     }
 
     fn addresses_of(addresses: &[&str]) -> HashSet<Multiaddr> {
@@ -719,9 +765,96 @@ mod tests {
         assert_eq!(behaviour.skipped_addresses.reported.len(), 1);
     }
 
+    /// CRD ch.28 T6a: an answer and an announcement that carry the local peer ID store nothing for it, and it is
+    /// never picked as a dial candidate.
+    #[test]
+    fn test_own_identity_is_never_stored_or_returned() {
+        let local = PeerId::random();
+        let mut behaviour = distributed_behaviour_of(local);
+        let sender = PeerId::random();
+        let other = PeerId::random();
+        let address = "/ip4/216.58.210.142/tcp/3000";
+
+        // An answer with the local entry and another entry.
+        let response = HashMap::from_iter(vec![
+            (PeerIdSerde(local), addresses_of(&[address])),
+            (PeerIdSerde(other), addresses_of(&[address])),
+        ]);
+        assert!(behaviour.process_known_peers_response(&sender, response));
+        assert!(!behaviour.is_known_peer(&local));
+        assert!(behaviour.request_response.addresses_of_peer(&local).is_empty());
+        assert!(behaviour.is_known_peer(&other));
+
+        // An announcement, a known-peer registration and a reserved peer, all naming the local ID.
+        behaviour.add_peer_addresses_to_known_peers(&local, addresses_of(&[address]));
+        behaviour.add_known_peer(local);
+        behaviour.add_peer_addresses_to_reserved_peers(&local, addresses_of(&[address]));
+        assert!(!behaviour.is_known_peer(&local));
+        assert!(!behaviour.is_reserved_peer(&local));
+        assert!(behaviour.request_response.addresses_of_peer(&local).is_empty());
+
+        // Even a local entry that got in through the inner behaviour is neither returned nor handed out.
+        behaviour.known_peers.push(local);
+        behaviour.request_response.add_address(&local, address.parse().unwrap());
+        for _ in 0..20 {
+            assert!(!behaviour.get_random_peers(10, |_| true).contains_key(&local));
+            assert!(!behaviour.get_random_known_peers(10).contains_key(&local.into()));
+        }
+        assert!(behaviour.get_random_peers(10, |_| true).contains_key(&other));
+    }
+
+    /// CRD ch.28 T6a: a dial of A's address that reached another peer removes that address from A's entry, keeps
+    /// the other addresses, forgets A with the last one, and stores nothing for the peer that answered.
+    #[test]
+    fn test_stale_address_is_removed_and_peer_forgotten_with_the_last_one() {
+        let mut behaviour = distributed_behaviour();
+        let a = PeerId::random();
+        let b = PeerId::random();
+        let first: Multiaddr = "/ip4/216.58.210.142/tcp/3000".parse().unwrap();
+        let second: Multiaddr = "/ip4/216.58.210.143/tcp/3000".parse().unwrap();
+        behaviour.add_peer_addresses_to_known_peers(&a, HashSet::from_iter(vec![first.clone(), second.clone()]));
+        assert_eq!(behaviour.request_response.addresses_of_peer(&a).len(), 2);
+
+        // The dial endpoint carries the /p2p form of the stored bare address.
+        let dialed: Multiaddr = format!("{}/p2p/{}", first, a).parse().unwrap();
+        behaviour.remove_stale_address(&a, &dialed);
+        assert!(behaviour.is_known_peer(&a));
+        assert_eq!(behaviour.request_response.addresses_of_peer(&a), vec![second.clone()]);
+        assert!(!behaviour.is_known_peer(&b));
+        assert!(behaviour.request_response.addresses_of_peer(&b).is_empty());
+
+        // An address that is not stored changes nothing.
+        behaviour.remove_stale_address(&a, &first);
+        assert_eq!(behaviour.request_response.addresses_of_peer(&a), vec![second.clone()]);
+
+        // The last address removes the peer.
+        behaviour.remove_stale_address(&a, &second);
+        assert!(!behaviour.is_known_peer(&a));
+        assert!(behaviour.request_response.addresses_of_peer(&a).is_empty());
+    }
+
+    /// A stored address in its /p2p form is removed by the bare dial address as well, and a reserved peer is kept.
+    #[test]
+    fn test_stale_address_matches_p2p_form_and_keeps_reserved_peer() {
+        let mut behaviour = distributed_behaviour();
+        let a = PeerId::random();
+        let stored: Multiaddr = format!("/ip4/216.58.210.142/tcp/3000/p2p/{}", a).parse().unwrap();
+        behaviour.add_peer_addresses_to_known_peers(&a, HashSet::from_iter(vec![stored]));
+        behaviour.remove_stale_address(&a, &"/ip4/216.58.210.142/tcp/3000".parse().unwrap());
+        assert!(!behaviour.is_known_peer(&a));
+
+        let reserved = PeerId::random();
+        let reserved_address: Multiaddr = "/ip4/216.58.210.150/tcp/3000".parse().unwrap();
+        behaviour.add_peer_addresses_to_reserved_peers(&reserved, HashSet::from_iter(vec![reserved_address.clone()]));
+        behaviour.remove_stale_address(&reserved, &reserved_address);
+        assert_eq!(behaviour.request_response.addresses_of_peer(&reserved), vec![
+            reserved_address
+        ]);
+    }
+
     #[test]
     fn test_get_random_known_peers() {
-        let mut behaviour = PeersExchange::new(NetworkInfo::InMemory);
+        let mut behaviour = PeersExchange::new(NetworkInfo::InMemory, PeerId::random());
         let peer_id = PeerId::random();
         behaviour.add_known_peer(peer_id);
 

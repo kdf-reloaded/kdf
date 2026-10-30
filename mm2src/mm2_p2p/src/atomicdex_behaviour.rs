@@ -1,7 +1,7 @@
 use crate::{adex_ping::AdexPing,
-            peers_exchange::{PeerAddresses, PeersExchange},
-            request_response::{build_request_response_behaviour, PeerRequest, PeerResponse, RequestResponseBehaviour,
-                               RequestResponseBehaviourEvent, RequestResponseSender},
+            peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
+            request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
+                               RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
             NetworkInfo, NetworkPorts, RelayAddress, RelayAddressError};
 use derive_more::Display;
@@ -19,9 +19,9 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+             swarm::{DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
              PeerId};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, Level};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::{collections::hash_map::{DefaultHasher, HashMap},
@@ -213,9 +213,18 @@ pub enum AdexBehaviourCmd {
 /// but is used to prevent `PeerResponse` from being used outside the network implementation.
 #[derive(Debug, Eq, PartialEq)]
 pub enum AdexResponse {
-    Ok { response: Vec<u8> },
+    Ok {
+        response: Vec<u8>,
+    },
     None,
-    Err { error: String },
+    Err {
+        error: String,
+    },
+    /// A failure of this node's own request (see [`LocalFailure`]); it is never sent to a peer.
+    LocalErr {
+        kind: LocalFailure,
+        error: String,
+    },
 }
 
 impl From<PeerResponse> for AdexResponse {
@@ -224,6 +233,7 @@ impl From<PeerResponse> for AdexResponse {
             PeerResponse::Ok { res } => AdexResponse::Ok { response: res },
             PeerResponse::None => AdexResponse::None,
             PeerResponse::Err { err } => AdexResponse::Err { error: err },
+            PeerResponse::LocalErr { kind, err } => AdexResponse::LocalErr { kind, error: err },
         }
     }
 }
@@ -233,7 +243,8 @@ impl From<AdexResponse> for PeerResponse {
         match res {
             AdexResponse::Ok { response } => PeerResponse::Ok { res: response },
             AdexResponse::None => PeerResponse::None,
-            AdexResponse::Err { error } => PeerResponse::Err { err: error },
+            // Only an answer to a peer's request is converted this way, and a local failure is never one.
+            AdexResponse::Err { error } | AdexResponse::LocalErr { error, .. } => PeerResponse::Err { err: error },
         }
     }
 }
@@ -393,7 +404,7 @@ impl AtomicDexBehaviour {
                 },
             },
             PeerResponse::None => return PeerClockCheck::Inconclusive,
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 debug!("Peer clock check inconclusive: {}", err);
                 return PeerClockCheck::Inconclusive;
             },
@@ -735,13 +746,19 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
     // allow 2 * mesh_n_high connections to other nodes
     let max_n = behaviour.gossipsub.get_config().mesh_n_high() * 2;
 
+    let local_peer_id = *Swarm::local_peer_id(swarm);
+
     let mut rng = rand::thread_rng();
     if connected_relays.len() < mesh_n_low {
         let to_connect_num = mesh_n - connected_relays.len();
+        // The node never dials itself (CRD ch.28 R8c item 5): peers exchange does not hold its own entry, and the
+        // candidate filter excludes it as well.
         let to_connect = swarm
             .behaviour_mut()
             .peers_exchange
-            .get_random_peers(to_connect_num, |peer| !connected_relays.contains(peer));
+            .get_random_peers(to_connect_num, |peer| {
+                *peer != local_peer_id && !connected_relays.contains(peer)
+            });
 
         // choose some random bootstrap addresses to connect if peers exchange returned not enough peers
         if to_connect.len() < to_connect_num {
@@ -873,8 +890,114 @@ fn dial_peer_addr(swarm: &mut AtomicDexSwarm, peer: PeerId, addr: Multiaddr, rea
     }
 }
 
-fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>)
-where
+/// How often an address or a source is reported at the high log level (INFO or WARN) when its connections keep
+/// failing; the reports in between are logged at DEBUG.
+const CONNECTION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(3600);
+/// How many addresses or sources are remembered. The map is cleared when it is full, so its memory stays bounded.
+const MAX_CONNECTION_FAILURE_LOG_KEYS: usize = 256;
+
+/// The time of the last high-level report per key.
+struct ConnectionFailureLog<K> {
+    last_high: HashMap<K, Instant>,
+}
+
+impl<K> Default for ConnectionFailureLog<K> {
+    fn default() -> Self {
+        ConnectionFailureLog {
+            last_high: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> ConnectionFailureLog<K> {
+    /// The level an event naming `keys` is logged at at `now`: `high` when any key was not reported at the high
+    /// level within [`CONNECTION_FAILURE_LOG_INTERVAL`] (the keys that were not are marked as reported), DEBUG
+    /// otherwise.
+    fn level(&mut self, keys: impl IntoIterator<Item = K>, now: Instant, high: Level) -> Level {
+        let mut level = Level::Debug;
+        for key in keys {
+            let reported_recently = self
+                .last_high
+                .get(&key)
+                .is_some_and(|last| now.duration_since(*last) < CONNECTION_FAILURE_LOG_INTERVAL);
+            if reported_recently {
+                continue;
+            }
+            if self.last_high.len() >= MAX_CONNECTION_FAILURE_LOG_KEYS && !self.last_high.contains_key(&key) {
+                self.last_high.clear();
+            }
+            self.last_high.insert(key, now);
+            level = high;
+        }
+        level
+    }
+}
+
+/// What an outgoing connection failure is keyed by.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum DialFailureKey {
+    /// An address the error names, without its trailing `/p2p/<peer id>` component.
+    Address(Multiaddr),
+    /// The peer the dial was for, when the error names no address.
+    Peer(PeerId),
+    /// The error names neither an address nor a peer.
+    Unknown,
+}
+
+/// The keys of an outgoing connection failure: every address the error names, or the peer ID when it names none.
+fn dial_failure_keys(peer_id: Option<PeerId>, error: &DialError) -> Vec<DialFailureKey> {
+    let mut keys: Vec<DialFailureKey> = match error {
+        DialError::Transport(failures) => failures
+            .iter()
+            .map(|(address, _)| DialFailureKey::Address(strip_p2p_suffix(address)))
+            .collect(),
+        DialError::WrongPeerId { endpoint, .. } | DialError::LocalPeerId { endpoint } => {
+            vec![DialFailureKey::Address(strip_p2p_suffix(endpoint.get_remote_address()))]
+        },
+        _ => Vec::new(),
+    };
+    if keys.is_empty() {
+        keys.push(peer_id.map_or(DialFailureKey::Unknown, DialFailureKey::Peer));
+    }
+    keys
+}
+
+/// The source IP of an incoming connection, if its address carries one.
+fn source_ip(address: &Multiaddr) -> Option<IpAddr> {
+    address.iter().find_map(|protocol| match protocol {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
+    })
+}
+
+/// Rate limits of the connection failure log lines (CRD leaves the logging to the implementation).
+#[derive(Default)]
+struct ConnectionFailureLogs {
+    outgoing: ConnectionFailureLog<DialFailureKey>,
+    incoming: ConnectionFailureLog<Option<IpAddr>>,
+}
+
+impl ConnectionFailureLogs {
+    /// An outgoing connection failure is logged at WARN at most once per address per hour, at DEBUG otherwise.
+    fn outgoing_level(&mut self, peer_id: Option<PeerId>, error: &DialError, now: Instant) -> Level {
+        self.outgoing.level(dial_failure_keys(peer_id, error), now, Level::Warn)
+    }
+
+    /// An incoming transport negotiation failure is logged at INFO at most once per source IP per hour, at DEBUG
+    /// otherwise. Other incoming failures stay at WARN.
+    fn incoming_level(&mut self, send_back_addr: &Multiaddr, error: &ListenError, now: Instant) -> Level {
+        match error {
+            ListenError::Transport(_) => self.incoming.level([source_ip(send_back_addr)], now, Level::Info),
+            _ => Level::Warn,
+        }
+    }
+}
+
+fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
+    event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>,
+    failure_logs: &mut ConnectionFailureLogs,
+) where
     TBehaviourOutEvent: std::fmt::Debug,
     THandlerErr: std::fmt::Debug,
 {
@@ -928,12 +1051,24 @@ where
             send_back_addr,
             error,
             ..
-        } => warn!(
-            "P2P incoming connection failed on {} from {}: {}",
-            local_addr, send_back_addr, error
-        ),
+        } => {
+            let level = failure_logs.incoming_level(send_back_addr, error, Instant::now());
+            log::log!(
+                level,
+                "P2P incoming connection failed on {} from {}: {}",
+                local_addr,
+                send_back_addr,
+                error
+            );
+        },
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-            warn!("P2P outgoing connection failed for peer {:?}: {}", peer_id, error);
+            let level = failure_logs.outgoing_level(*peer_id, error, Instant::now());
+            log::log!(
+                level,
+                "P2P outgoing connection failed for peer {:?}: {}",
+                peer_id,
+                error
+            );
         },
         SwarmEvent::NewListenAddr { listener_id, address } => {
             info!("P2P listener {:?} is listening on {}", listener_id, address);
@@ -1105,7 +1240,7 @@ fn start_gossipsub(
 
         let floodsub = Floodsub::new(local_peer_id, true);
 
-        let peers_exchange = PeersExchange::new(network_info);
+        let peers_exchange = PeersExchange::new(network_info, local_peer_id);
 
         // build a request-response network behaviour
         let request_response = build_request_response_behaviour();
@@ -1157,6 +1292,7 @@ fn start_gossipsub(
     );
     let mut announce_interval = Interval::new_at(Instant::now() + ANNOUNCE_INITIAL_DELAY, ANNOUNCE_INTERVAL);
     let mut listening = false;
+    let mut failure_logs = ConnectionFailureLogs::default();
     let polling_fut = poll_fn(move |cx: &mut Context| {
         loop {
             match cmd_rx.poll_next_unpin(cx) {
@@ -1169,7 +1305,7 @@ fn start_gossipsub(
         loop {
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => {
-                    log_swarm_event(&event);
+                    log_swarm_event(&event, &mut failure_logs);
                     match event {
                         SwarmEvent::Behaviour(behaviour_event) => {
                             handle_behaviour_event(&mut swarm, &mut event_tx, behaviour_event)
@@ -1181,6 +1317,23 @@ fn start_gossipsub(
                                 &mut pending_clock_checks,
                                 peer_id,
                             );
+                        },
+                        // A dial of an address stored for `peer` reached another peer: the stored address is stale
+                        // (CRD ch.28 R8c item 6).
+                        SwarmEvent::OutgoingConnectionError {
+                            peer_id: Some(peer),
+                            error: DialError::WrongPeerId { endpoint, .. },
+                            ..
+                        } => {
+                            debug!(
+                                "Removing the stale address {} of peer {} from peers exchange",
+                                endpoint.get_remote_address(),
+                                peer
+                            );
+                            swarm
+                                .behaviour_mut()
+                                .peers_exchange
+                                .remove_stale_address(&peer, endpoint.get_remote_address());
                         },
                         _ => {},
                     }
@@ -1326,7 +1479,7 @@ async fn request_any_peer(
             PeerResponse::None => {
                 debug!("Received None from peer {:?}, request next peer", peer);
             },
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 error!("Error on request {:?} peer: {:?}. Request next peer", peer, err);
             },
         };
@@ -1381,7 +1534,9 @@ async fn request_one_peer(peer: PeerId, req: Vec<u8>, mut request_response_tx: R
 
     match internal_response_rx.await {
         Ok(response) => response,
-        Err(e) => PeerResponse::Err {
+        // The pending request was dropped without an answer: the local timeout expired.
+        Err(e) => PeerResponse::LocalErr {
+            kind: LocalFailure::Timeout,
             err: format!("Error on request the peer {:?}: \"{:?}\". Request next peer", peer, e),
         },
     }
@@ -1452,5 +1607,189 @@ mod application_tests {
 
         assert!(AtomicDexBehaviour::is_current_timestamp_request(&wrapped));
         assert!(AtomicDexBehaviour::is_current_timestamp_request(&bare));
+    }
+}
+
+#[cfg(test)]
+mod connection_failure_log_tests {
+    use super::{dial_failure_keys, ConnectionFailureLog, ConnectionFailureLogs, DialFailureKey,
+                CONNECTION_FAILURE_LOG_INTERVAL, MAX_CONNECTION_FAILURE_LOG_KEYS};
+    use libp2p::core::transport::TransportError;
+    use libp2p::core::{ConnectedPoint, Endpoint, Multiaddr};
+    use libp2p::swarm::{DialError, ListenError};
+    use libp2p::PeerId;
+    use log::Level;
+    use std::time::Duration;
+    use wasm_timer::Instant;
+
+    fn transport_error(addresses: &[&str]) -> DialError {
+        DialError::Transport(
+            addresses
+                .iter()
+                .map(|address| {
+                    (
+                        address.parse::<Multiaddr>().unwrap(),
+                        TransportError::Other(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn incoming_transport_error() -> ListenError {
+        ListenError::Transport(TransportError::Other(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "negotiation failed",
+        )))
+    }
+
+    /// An outgoing failure is logged at WARN the first time, at DEBUG within the hour, and at WARN again after it.
+    #[test]
+    fn outgoing_failure_is_warned_once_per_address_per_hour() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let start = Instant::now();
+
+        assert_eq!(logs.outgoing_level(None, &error, start), Level::Warn);
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + Duration::from_secs(30)),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL - Duration::from_secs(1)
+            ),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + CONNECTION_FAILURE_LOG_INTERVAL),
+            Level::Warn
+        );
+        // The hour counts from the last high-level report.
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(60)
+            ),
+            Level::Debug
+        );
+
+        // Another address has its own hour. An event that names a new address among known ones is high.
+        let other = transport_error(&["/ip4/203.0.113.8/tcp/42845"]);
+        assert_eq!(
+            logs.outgoing_level(None, &other, start + Duration::from_secs(40)),
+            Level::Warn
+        );
+        let both = transport_error(&["/ip4/203.0.113.7/tcp/42845", "/ip4/203.0.113.9/tcp/42845"]);
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &both,
+                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(70)
+            ),
+            Level::Warn
+        );
+    }
+
+    /// The bare and the /p2p form of an address are one key, and an error without an address is keyed by the peer.
+    #[test]
+    fn outgoing_failure_keys() {
+        let peer = PeerId::random();
+        let bare = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let with_peer = transport_error(&[format!("/ip4/203.0.113.7/tcp/42845/p2p/{}", peer).as_str()]);
+        assert_eq!(
+            dial_failure_keys(None, &bare),
+            dial_failure_keys(Some(peer), &with_peer)
+        );
+
+        assert_eq!(dial_failure_keys(Some(peer), &DialError::Aborted), vec![
+            DialFailureKey::Peer(peer)
+        ]);
+        assert_eq!(dial_failure_keys(None, &DialError::NoAddresses), vec![
+            DialFailureKey::Unknown
+        ]);
+
+        let endpoint = ConnectedPoint::Dialer {
+            address: format!("/ip4/203.0.113.7/tcp/42845/p2p/{}", peer).parse().unwrap(),
+            role_override: Endpoint::Dialer,
+        };
+        let wrong = DialError::WrongPeerId {
+            obtained: PeerId::random(),
+            endpoint,
+        };
+        assert_eq!(dial_failure_keys(Some(peer), &wrong), dial_failure_keys(None, &bare));
+    }
+
+    /// An incoming transport negotiation failure is logged at INFO once per source IP per hour; other incoming
+    /// failures stay at WARN.
+    #[test]
+    fn incoming_transport_failure_is_reported_once_per_source_ip_per_hour() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = incoming_transport_error();
+        let from = |address: &str| address.parse::<Multiaddr>().unwrap();
+        let start = Instant::now();
+
+        assert_eq!(
+            logs.incoming_level(&from("/ip4/198.51.100.5/tcp/50001"), &error, start),
+            Level::Info
+        );
+        // The same IP from another port is the same source.
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.5/tcp/50002"),
+                &error,
+                start + Duration::from_secs(5)
+            ),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.6/tcp/50001"),
+                &error,
+                start + Duration::from_secs(6)
+            ),
+            Level::Info
+        );
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.5/tcp/50003"),
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL
+            ),
+            Level::Info
+        );
+
+        // Other incoming failures are not limited.
+        for _ in 0..3 {
+            assert_eq!(
+                logs.incoming_level(&from("/ip4/198.51.100.5/tcp/50001"), &ListenError::Aborted, start),
+                Level::Warn
+            );
+        }
+    }
+
+    /// The remembered keys stay bounded: a full map is cleared.
+    #[test]
+    fn remembered_keys_stay_bounded() {
+        let mut log = ConnectionFailureLog::<u32>::default();
+        let start = Instant::now();
+        for key in 0..MAX_CONNECTION_FAILURE_LOG_KEYS as u32 {
+            assert_eq!(log.level([key], start, Level::Warn), Level::Warn);
+        }
+        assert_eq!(log.last_high.len(), MAX_CONNECTION_FAILURE_LOG_KEYS);
+        assert_eq!(log.level([0], start, Level::Warn), Level::Debug);
+
+        // One more distinct key clears the full map.
+        assert_eq!(log.level([u32::MAX], start, Level::Warn), Level::Warn);
+        assert_eq!(log.last_high.len(), 1);
+        assert_eq!(log.level([0], start, Level::Warn), Level::Warn);
+
+        for key in 1_000..1_000 + 10 * MAX_CONNECTION_FAILURE_LOG_KEYS as u32 {
+            log.level([key], start, Level::Warn);
+            assert!(log.last_high.len() <= MAX_CONNECTION_FAILURE_LOG_KEYS);
+        }
     }
 }

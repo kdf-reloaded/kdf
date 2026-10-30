@@ -967,6 +967,22 @@ else. Its complete contract:
 > only by statistics stores, the extension breaks no peer, but it should
 > be adopted as a documented Reloaded-original divergence, not silently.
 
+**R50B.** *The transaction-helper topic (Reloaded addition, 2026-10-30,
+Decision BB).* Each side publishes the spend and refund transactions it
+builds on the coin's transaction-helper topic (`txhlp/<ticker>`), so that
+other nodes can broadcast them too: after its own broadcast succeeded, and
+also when its own broadcast failed with the transaction at hand. The
+message is the transaction's bytes in the signed envelope that R43 uses,
+signed by the key that signs the swap's messages. A node that receives such
+a message for a coin it has enabled MUST decode and verify the envelope and
+broadcast the transaction inside it through that coin, never the message
+itself. A message that does not decode or verify is discarded with a
+warning. A broadcast that the network refuses is the usual outcome, since
+the parties have normally broadcast the transaction already (it is in the
+mempool or in a block), and is logged at debug level only. Which nodes act
+on the topic, and what a reference receiver does with the message, are
+open (D6).
+
 ## 51.8 Bound Reserved-Funds Semantics
 
 **R51.** *Reservation follows registry membership.* A swap's funds are
@@ -1669,6 +1685,11 @@ taker swap in its refund chain and the chain answers mocked:
 *(Added 2026-10-29 with R31a; items 7 and 8 added 2026-10-30 after
 review.)*
 
+**T30.** *The transaction-helper receiver unwraps the envelope (R50B).* A
+transaction's bytes signed as a transaction-helper message yield exactly
+those bytes, which are what is broadcast; a bare transaction and an envelope
+with a changed signed byte are both refused.
+
 ## 51.13 Deferred Work
 
 **D1.** *Migration of the legacy machines onto the chapter-14 runtime.*
@@ -1700,6 +1721,16 @@ R37 requires transmitting a refusal to a peer the maker could not hear
 from. Whether the peer hears the refusal is unverifiable, and no
 retransmission is specified. A bounded retransmission of the negative
 acknowledgement is deferred.
+
+**D6.** *Who acts on the transaction-helper topic.* A node subscribes to a
+coin's transaction-helper topic only for a UTXO coin in native mode
+([Chapter 55](55-coin-activation-wire-contract.md) R55.4.6), where its own
+daemon is an independent path to the network; a relay receives every topic
+and today acts on R50B for any enabled coin, so a relay with Electrum-mode
+coins broadcasts through the same kind of servers the parties use. Limiting
+the receiver to native-mode coins, and confirming what a reference node does
+with the message (whether it unwraps the envelope, and whether a relay acts
+on a topic it has not subscribed to), are deferred to a Spec Reader pass.
 
 ## 51.14 Baseline Verifications
 
@@ -1864,6 +1895,13 @@ reference rows alike.
   taker refund chain and recovery code and from R30, R31 and R32 of this
   chapter; no reference input was consulted, the rule makes no parity
   claim, and no Dirty Gate pass is needed.)
+  (Addition of 2026-10-30: R50B, T30 and D6 are a Reloaded addition
+  written in a clean session from this workspace's own transaction-helper
+  sender and receiver and from R43 of this chapter, prompted by a Reloaded
+  seed's own log from a field run on the public network, where every
+  received transaction-helper message failed to broadcast; no reference
+  input was consulted, the rule makes no parity claim, and no Dirty Gate
+  pass is needed.)
   Otherwise
   consulted, under the chapter-01 two-team
   clean-room workflow, for upstream parity of the legacy swap state

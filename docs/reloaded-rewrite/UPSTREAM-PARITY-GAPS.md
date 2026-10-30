@@ -502,6 +502,11 @@ R6a / R10a.
   the same outcome by the same route (ch. 09 R10a). Changing it is a
   divergence needing a compatibility switch, and it is deferred (ch. 09 D5).
   Nothing about it should be attempted before the item above is fixed.
+- [ ] *Watcher side (2026-10-30, Decision BA):* the UTXO-standard, BCH and QTUM
+  families opted in to watching without any watcher method, so a Reloaded node
+  started watchers for them that could only stop. They no longer opt in
+  (ch. 09 R17); restoring them needs their watcher methods (ch. 09 D3). Whether a
+  reference node watches swaps of these families is open (Spec Reader queue).
 
 ---
 
@@ -834,6 +839,12 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   the synchronization request by default; wire-compatible, yields usable
   deltas; a deliberate divergence with the opt-back switch
   `orderbook_sync_names_held_root`.
+- [x] *Done 2026-10-30 (ch. 32 R-Q5c):* after a quick failure of its own
+  keep-alive-driven synchronization request, Reloaded asks the same peer once
+  more after a pause, for the pairs still at the placeholder, while the answer
+  can still land within the R-Q5b bound; the reference never retries.
+  Wire-compatible; a deliberate divergence with the opt-back switch
+  `sync_request_retry_ms`.
 - [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
   in-flight synchronization de-duplication, orphan-node release, inbound
   task cap. Deferred, none bound.

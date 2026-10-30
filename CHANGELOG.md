@@ -103,8 +103,10 @@ it and, where one exists, the CRD rule, for readers who want more.
   whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
   it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
   network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
-  once at info level, then at debug level. Detail: PR #170; CRD ch.28 R8c.
-- **Quieter peer-to-peer logs on seeds and relays under load.** Four warnings that report expected
+  once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
+  other peers hand back to it, and it drops a stored address when a dial of it reaches a different
+  peer. Detail: PR #170, PR #176; CRD ch.28 R8c.
+- **Quieter peer-to-peer logs on seeds and relays under load.** Warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
     the first copy had already been forwarded.
@@ -113,9 +115,25 @@ it and, where one exists, the CRD rule, for readers who want more.
   - "HEARTBEAT: relays low" is now "Relay mesh below its low watermark". It is logged when the
     relay count changes and every ten minutes, not every ten seconds.
   - A request that times out is now a warning, not an error. Further timeouts toward the same peer
-    are counted in one line per minute.
+    are counted in one line per minute. The same holds for requests that fail because the
+    connection to the peer closed.
+  - A failed outgoing connection is a warning at most once per address per hour, and debug
+    otherwise. Relay upkeep keeps trying addresses that never answer, such as makers behind a
+    firewall.
+  - An incoming connection that fails to negotiate its transport, such as a scanner probing the
+    WebSocket port, is logged at info level once per source address per hour, then at debug level.
+  - "Request … is not processed" is now debug and no longer prints the answer. It meant an answer
+    arrived after the request had already been given up.
 
-  Detail: PR #170.
+  Detail: PR #170, PR #176.
+- **Seed and relay logs now show how order-book synchronization is going.** When a node asks
+  another for a maker's orders, or answers such a request, and it fails, the log at the default
+  level now shows a summary once a minute. The summary counts the answers this node gave with an
+  error, and why: no data for the maker, a pair it does not hold, a pair it is still synchronizing,
+  or an internal error. It also counts this node's own requests that failed, and why: no data, an
+  error from the peer, a timeout, a lost connection or an answer it could not read. At debug level
+  each request and answer gets one line, with the peer, the maker, the pairs and the time taken.
+  Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #179.
 
 #### Order posting, fees and balances
 
@@ -362,6 +380,17 @@ it and, where one exists, the CRD rule, for readers who want more.
   256 in all are held. Nothing on the wire changes, and nodes running other versions benefit too. To
   restore the old behavior, set `sync_answer_deferral_ms` to `0` in `MM2.json`. Detail: PR #135; CRD
   ch.32 R-Q5b.
+- **A relay whose own order-book sync fails at once now asks once more after a second, so the
+  nodes behind it no longer get an error for the next 30 seconds.** A relay that fetches a maker's
+  new pair from another relay often gets an error, because that relay is still fetching the pair
+  itself. Until the maker's next keep-alive, 30 seconds later, it then answered every node that
+  asked it for that pair with the same error, and each relay hop added another 30 seconds. On the
+  public network this showed up on GLEEC KDF nodes for about two minutes after a Reloaded maker
+  added pairs. The relay now waits 1 second and asks the same peer once more, only for the pairs it
+  still has nothing for, and the requests it is holding for other nodes wait for that answer. It
+  asks again only when the answer can still arrive within the 5-second hold, never after a timed-out
+  request, and never a third time. Nothing on the wire changes. To restore the old behavior, set
+  `sync_request_retry_ms` to `0` in `MM2.json`. Detail: PR #173; CRD ch.32 R-Q5c.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
@@ -476,6 +505,22 @@ it and, where one exists, the CRD rule, for readers who want more.
   as in a normal swap. Such a swap still lists the earlier error events, so a wallet may show it as
   failed although the trade completed. A refund already on the chain, after a restart, now ends the
   swap as refunded. Detail: PR #167; CRD ch.51 R31a.
+- **A node now re-sends other traders' swap transactions as a backup, instead of failing every
+  time.** Traders publish their claim and refund transactions to the network so that other nodes can
+  broadcast them too. A Reloaded node passed the whole signed message to its server instead of the
+  transaction inside it, so every such broadcast was refused ("TX decode failed") and logged as an
+  error; on a seed with coins enabled that was dozens of error lines a day. The node now takes the
+  transaction out of the signed message and broadcasts it. A refusal is the normal outcome, because
+  the traders have usually broadcast the transaction already, and it is logged only at debug level;
+  a message that is not a valid signed transaction is logged as a warning. Detail: PR #177; CRD
+  ch.51 R50B.
+- **A node no longer starts swap watchers it cannot run for Bitcoin-family coins.** A node offered to
+  watch other traders' swaps for every enabled coin of the Bitcoin family (UTXO, BCH, QTUM), but the
+  checks a watcher needs are not implemented for these coins yet. Every watcher it started gave up
+  after a minute, without doing anything, and logged seven warnings; it started again for the next
+  copy of the same swap. These coins no longer offer watching, so no watcher starts and nothing is
+  logged. Nothing else changes: these watchers never sent a transaction. Siacoin keeps its
+  watcher. Detail: PR #177; CRD ch.09 R17.
 - **Listing, cancelling or updating an order no longer waits for another path's disk or network
   work.** The balance-update handler, the periodic balance check, the removal of timed-out matches,
   an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while
@@ -802,6 +847,22 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 #### EVM coins
 
+- **A gas estimate now carries a fresh fee, and a fee below the chain's base fee gets its own
+  error.** A node may check the fee sent with a gas estimate against the current block base fee.
+  - **Before.** The fee sent could be a gas price reused from the short fee cache of order posting,
+    or one a rising base fee had already overtaken. The node then refused the estimate, and the call
+    failed with a raw transport error. That hit `setprice`, `buy`, `sell`, the trade preimage, a
+    withdraw, and the approval a token swap sends before its payment. A failed `setprice` also
+    cancelled the previous orders of that pair. No running swap was left stuck by it.
+  - **The fee sent now.** Every gas estimate carries the fee the transaction will be signed with,
+    read fresh for it: both EIP-1559 caps of the tier under `Low`, `Medium` and `High`, or the gas
+    price under `Legacy`. The approval a token swap sends is estimated and signed with the same fee.
+  - **When a node still refuses.** The fee is read once more and the estimate retried. A second
+    refusal, or a broadcast refused for the same reason, returns the new error `FeeCapBelowBaseFee`,
+    with the fee offered and the base fee. Either refusal also drops the cached gas price of that
+    chain. `send_raw_transaction` reports the same text.
+
+  Detail: PR #174; CRD ch.56 R5, R6, D5.
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could

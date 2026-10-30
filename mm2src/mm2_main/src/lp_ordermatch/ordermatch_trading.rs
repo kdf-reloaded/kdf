@@ -1060,6 +1060,9 @@ pub async fn lp_ordermatch_loop(ctx: MmArc) {
 
         reconcile_missing_own_maker_orders(&ctx, &ordermatch_ctx).await;
 
+        // A node that sees no synchronization event for a while still reports the window that ended.
+        ordermatch_ctx.sync_log.flush(now_ms());
+
         Timer::sleep(0.777).await;
     }
 }

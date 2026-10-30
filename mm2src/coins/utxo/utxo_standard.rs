@@ -465,10 +465,9 @@ impl SwapOps for UtxoStandardCoin {
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(self) }
 }
 
+// No watcher methods are implemented for this family yet, so it does not opt in to watching (CRD ch.09 R17).
 #[async_trait]
-impl WatcherOps for UtxoStandardCoin {
-    fn is_supported_by_watchers(&self) -> bool { true }
-}
+impl WatcherOps for UtxoStandardCoin {}
 
 impl MarketCoinOps for UtxoStandardCoin {
     fn ticker(&self) -> &str { &self.utxo_arc.conf.ticker }
