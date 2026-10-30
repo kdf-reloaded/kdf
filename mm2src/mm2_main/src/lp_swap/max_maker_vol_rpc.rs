@@ -1,5 +1,5 @@
 use coins::request_fee_scope::with_request_fee_scope;
-use coins::{lp_coinfind_or_err, CoinFindError};
+use coins::{lp_coinfind_or_err, CoinFindError, FeeCapBelowBaseFee};
 use common::mm_number::MmNumberMultiRepr;
 use common::HttpStatusCode;
 use derive_more::Display;
@@ -69,6 +69,9 @@ pub enum MaxMakerVolRpcError {
     NoSuchCoin { coin: String },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// An EVM node rejected an estimation or a transaction for a fee cap below the block base fee (CRD ch.56 R5).
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -80,9 +83,10 @@ impl HttpStatusCode for MaxMakerVolRpcError {
             MaxMakerVolRpcError::NotSufficientBalance { .. }
             | MaxMakerVolRpcError::NotSufficientBaseCoinBalance { .. }
             | MaxMakerVolRpcError::VolumeTooLow { .. } => StatusCode::BAD_REQUEST,
-            MaxMakerVolRpcError::Transport(_) | MaxMakerVolRpcError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
+            MaxMakerVolRpcError::Transport(_)
+            | MaxMakerVolRpcError::FeeCapBelowBaseFee(_)
+            | MaxMakerVolRpcError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -130,6 +134,7 @@ impl From<CheckBalanceError> for MaxMakerVolRpcError {
                 threshold: threshold.to_string(),
             },
             CheckBalanceError::Transport(e) => MaxMakerVolRpcError::Transport(e),
+            CheckBalanceError::FeeCapBelowBaseFee(rejection) => MaxMakerVolRpcError::FeeCapBelowBaseFee(rejection),
             CheckBalanceError::InternalError(e) => MaxMakerVolRpcError::InternalError(e),
         }
     }

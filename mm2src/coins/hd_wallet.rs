@@ -248,6 +248,9 @@ impl From<BalanceError> for HDWalletRpcError {
     fn from(e: BalanceError) -> Self {
         match e {
             BalanceError::Transport(transport) => HDWalletRpcError::Transport(transport),
+            // A balance read sends no fee cap; the arm exists so the conversion is total, and it keeps the node's
+            // text instead of dropping it.
+            e @ BalanceError::FeeCapBelowBaseFee(_) => HDWalletRpcError::Transport(e.to_string()),
             BalanceError::InvalidResponse(rpc) => HDWalletRpcError::RpcInvalidResponse(rpc),
             BalanceError::UnexpectedDerivationMethod(der_path) => HDWalletRpcError::from(der_path),
             BalanceError::WalletStorageError(internal) | BalanceError::Internal(internal) => {

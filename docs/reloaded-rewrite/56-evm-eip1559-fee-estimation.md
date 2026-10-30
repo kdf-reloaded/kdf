@@ -299,6 +299,29 @@ taken from the node has no headroom at all, so one full block defeats it
 > contradiction between two things read side by side — ch. 57 R57.7.3
 > and the swap-path estimation helpers.)*
 
+> **As-built note (2026-10-30, clean-side record).** PR #N implements R5,
+> R6 and D5 as decided.
+> - **Classification (R5).** The three phrasings are recognised by
+>   containment wherever the EVM coin layer reads a node's answer to an
+>   estimation or a broadcast. The typed error carries the cap and the base
+>   fee when the node quotes them, and the host-only node label of
+>   [Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.17.
+> - **On the wire.** The withdraw, trade-preimage and maximum-maker-volume
+>   RPCs report the typed error as the `error_type` `FeeCapBelowBaseFee`.
+>   Its `error_data` gives the amounts as decimal wei strings. The HTTP
+>   status is 500, as for a transport error.
+> - **`send_raw_transaction`.** Its error is a plain string, so it reports
+>   the same text.
+> - **Fee fields (R6).** Every estimation request carries the fee fields
+>   of the coin's swap gas-fee policy, fetched for it outside the request
+>   scope and the short cache. The withdraw path carries the legacy price
+>   (R57.7.2). The approve that precedes a V1 token payment is estimated
+>   and signed with one fetch.
+> - **Retry (D5).** One fresh retry applies to estimations only, and a
+>   rejection discards the chain's cached gas price.
+> - **Out of scope.** The NFT withdraw estimation is classified in the text
+>   of its error only; it is not a typed variant there.
+
 ## 56.5 Tests
 
 **T1.** *Freshest-base-fee regression (the fix).* Given a synthesized

@@ -310,6 +310,8 @@ impl From<UnexpectedDerivationMethod> for ActivationErr {
 fn balance_error(err: BalanceError) -> ActivationErr {
     match err {
         BalanceError::Transport(e) | BalanceError::InvalidResponse(e) => ActivationErr::Transport(e),
+        // A balance read sends no fee cap; the arm keeps the node's text so the conversion is total.
+        e @ BalanceError::FeeCapBelowBaseFee(_) => ActivationErr::Transport(e.to_string()),
         BalanceError::UnexpectedDerivationMethod(e) => ActivationErr::UnexpectedDerivationMethod(e.to_string()),
         BalanceError::Internal(e) | BalanceError::WalletStorageError(e) => ActivationErr::Internal(e),
     }

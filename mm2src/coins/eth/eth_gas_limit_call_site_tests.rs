@@ -127,6 +127,12 @@ fn capture_sent_gas() {
             TransactionErr::Plain("captured".to_owned()),
         )))
     });
+    EthCoin::sign_and_send_transaction_priced.mock_safe(|_, _value, _action, _data, gas, _fee| {
+        SENT_GAS.with(|sent| sent.borrow_mut().push(gas));
+        MockResult::Return(Box::new(futures01::future::err::<SignedEthTx, TransactionErr>(
+            TransactionErr::Plain("captured".to_owned()),
+        )))
+    });
 }
 
 fn sent_gas() -> Vec<u64> { SENT_GAS.with(|gas| gas.borrow().iter().map(|g| g.as_u64()).collect()) }
@@ -179,6 +185,17 @@ fn wei_amount(wei: u64) -> TradeFee {
 
 fn mock_gas_price_one() {
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::one()))));
+    mock_estimation_fee_one();
+}
+
+/// The fee fields of a gas-limit estimation are fetched for it and never through `get_gas_price` (CRD ch.56 R6),
+/// so a test that stubs the node's price stubs that fetch too.
+fn mock_estimation_fee_one() {
+    EthCoin::fresh_estimation_fee.mock_safe(|_, _| {
+        MockResult::Return(Box::new(futures01::future::ok(SwapFee::Legacy {
+            gas_price: U256::one(),
+        })))
+    });
 }
 
 // ─── T5: the nine V1 keys at their call sites ───────────────────────────────────────────────────────
@@ -356,6 +373,7 @@ fn t5_max_native_withdrawal_deducts_eth_send_coins() {
 #[test]
 fn t5_insufficient_gas_funds_threshold_is_eth_send_coins() {
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::from(40u64)))));
+    mock_estimation_fee_one();
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
             "error code -32000: gas required exceeds allowance (0)".to_string(),
@@ -735,9 +753,14 @@ fn stub_node_estimate(estimate: u64) {
 /// Like [`capture_sent_gas`], but every send succeeds, so a payment that follows an approve is reached.
 fn capture_sent_gas_ok(tx: SignedEthTx) {
     SENT_GAS.with(|gas| gas.borrow_mut().clear());
+    let priced_tx = tx.clone();
     EthCoin::sign_and_send_transaction.mock_safe(move |_, _value, _action, _data, gas| {
         SENT_GAS.with(|sent| sent.borrow_mut().push(gas));
         MockResult::Return(Box::new(futures01::future::ok(tx.clone())))
+    });
+    EthCoin::sign_and_send_transaction_priced.mock_safe(move |_, _value, _action, _data, gas, _fee| {
+        SENT_GAS.with(|sent| sent.borrow_mut().push(gas));
+        MockResult::Return(Box::new(futures01::future::ok(priced_tx.clone())))
     });
 }
 

@@ -332,6 +332,9 @@ impl FeeEstimateCache {
         }
     }
 
+    /// Drops the reading `(kind, key)`, so the next request that wants it reads afresh.
+    pub fn discard(&self, kind: FeeReadKind, key: &str) { self.readings().remove(&(kind, key.to_owned())); }
+
     /// Drops every entry keyed by the coin `ticker`.
     pub fn forget_coin(&self, ticker: &str) { self.readings().retain(|(_, cached), _| cached != ticker); }
 }
