@@ -474,7 +474,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   error; on a seed with coins enabled that was dozens of error lines a day. The node now takes the
   transaction out of the signed message and broadcasts it. A refusal is the normal outcome, because
   the traders have usually broadcast the transaction already, and it is logged only at debug level;
-  a message that is not a valid signed transaction is logged as a warning. Detail: PR #TBD; CRD
+  a message that is not a valid signed transaction is logged as a warning. Detail: PR #177; CRD
   ch.51 R50B.
 - **A node no longer starts swap watchers it cannot run for Bitcoin-family coins.** A node offered to
   watch other traders' swaps for every enabled coin of the Bitcoin family (UTXO, BCH, QTUM), but the
@@ -482,7 +482,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   after a minute, without doing anything, and logged seven warnings; it started again for the next
   copy of the same swap. These coins no longer offer watching, so no watcher starts and nothing is
   logged. Nothing else changes: these watchers never sent a transaction. Siacoin keeps its
-  watcher. Detail: PR #TBD; CRD ch.09 R17.
+  watcher. Detail: PR #177; CRD ch.09 R17.
 - **Listing, cancelling or updating an order no longer waits for another path's disk or network
   work.** The balance-update handler, the periodic balance check, the removal of timed-out matches,
   an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while
