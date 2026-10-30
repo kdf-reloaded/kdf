@@ -75,8 +75,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   notarized confirmation count, so the setting has nothing to select. It is still accepted, from
   the coins file, the activation request, `set_requires_notarization` or an order's
   `base_nota`/`rel_nota`, and now has no effect: a warning names the coin, the coin reports
-  `false`, and a swap counts ordinary confirmations. Before, such a swap failed after its payment
-  was on chain, and a taker paying in ARRR could be left to recover the maker's payment by hand.
+  `false`, and a swap counts ordinary confirmations. Before, such a swap failed once a payment was on
+  chain, and the funds came back only by refund after the swap's lock times had passed.
   Older coins files that set the flag for ARRR need no edit. GLEEC KDF waits for a notarized
   count instead; no switch restores that, because no such count exists here. Detail: CRD ch.39
   R39.11.4e, D39.11.f.

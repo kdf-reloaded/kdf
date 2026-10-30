@@ -5898,8 +5898,8 @@ item stays open in `docs/plans/arrr-ironwood-compatibility.md` §11.6.
 supersedes the known-issue form above.* The flag selects a notarized confirmation count,
 and a ZHTLC coin has none; the plain depth of `required_confirmations` is the only measure
 there is, so the flag is accepted and has no effect (R39.11.4e as amended). The known-issue
-form failed a swap after its payment was on chain, and in one role -- a taker paying with
-the coin -- it could leave the taker to recover the maker's payment by hand. Matching can
+form failed such a swap once a payment was on chain, and the funds came back only by
+refund after the swap's lock times had passed. Matching can
 only lower a node's flag, never raise it, so with the coin reporting `false` no counterparty
 setting reintroduces the wait. The swap lock time no longer takes the notarization
 multiplier from this coin; both peers still compute it from both sides' settings, so they
