@@ -2116,10 +2116,11 @@ async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
         .await
         .unwrap();
 
+    // The capture is process-wide, so a test running in parallel could add its own lines: at least
+    // the two expected here must have appeared.
     if capturing {
-        assert_eq!(
-            warnings() - before,
-            2,
+        assert!(
+            warnings() - before >= 2,
             "one warning for set_requires_notarization(true), one for the wait"
         );
     }
