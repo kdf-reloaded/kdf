@@ -2,8 +2,8 @@
 
 **Status:** parked (design approved 2026-10-28; starts after the Electrum pool PR) — **Last reviewed:** 2026-10-28
 
-**CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.14 and
-the open points D38.6.4l.1–D38.6.4l.9.
+**CRD:** ch.38 R38.6.4l (Reloaded-original), with T38.6.4l.1–T38.6.4l.15 and
+the decision items D38.6.4l.1–D38.6.4l.9, all resolved by 2026-10-29.
 
 > **Context.** The Electrum connection pool (CRD ch.38 §38.6.4) ranks a coin's
 > servers by an order drawn once at activation: R38.6.4b-R, with
@@ -178,3 +178,5 @@ A maintained connection is **poor** when one of these holds:
   a coin without one uses the 10-minute fallback for P1.
 - **When `mixed` becomes the default.** Decided 2026-10-28: after a field run
   on RIN with `mixed`, as a separate change (CRD D38.6.4l.1).
+- **The CRD's reading of the plan.** Decided 2026-10-29: the rules behind
+  D38.6.4l.2, .3 and .5 to .9 are kept as written.

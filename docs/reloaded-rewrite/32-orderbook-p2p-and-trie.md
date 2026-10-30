@@ -1828,9 +1828,10 @@ from the index ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7).
 4. **Order of release.** Pending messages are released oldest first,
    counted from when the order's slot was first filled, so that no order
    waits behind newer ones.
-5. **Switch.** The top-level `MM2.json` boolean `maker_update_coalescing`
-   (default `true`) selects this rule. Only a JSON `false` turns it off,
-   and every message is then published at once, as without the outbox.
+5. **Switch** *(amended 2026-10-29, D9)*. The top-level `MM2.json`
+   boolean `maker_update_coalescing` (default `false`) selects this rule
+   and R-MP2. Only a JSON `true` turns it on. Otherwise every message is
+   published at once, as without the outbox.
 
 **R-MP2 (release budget).** The outbox releases created and updated
 messages at no more than the pubkey's current *rate*.
@@ -2011,9 +2012,11 @@ waiting up to 30 seconds for the next tick.
 > on its own. No message format changes.
 >
 > Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this is arm 3.
-> The project team decided that Reloaded's variant is the default (decision
-> AO, 2026-10-28). **Compatibility:** to publish every order message at
-> once, set `maker_update_coalescing` to `false`. R-MP3 and R-MP4 are not
+> The project team first made Reloaded's variant the default (decision AO,
+> 2026-10-28). After a field run in a mesh with reference nodes, the
+> maintainer made the reference behavior the default again (D9,
+> 2026-10-29): every order message is published at once unless
+> `maker_update_coalescing` is set to `true`. R-MP3 and R-MP4 are not
 > switched: they only order and add keep-alives of the bound shape.
 >
 > **Provenance.** Reloaded-original. Inputs: our own code, the in-process
@@ -2087,8 +2090,10 @@ waiting up to 30 seconds for the next tick.
 - **T-MP10** *Metrics.* The R-MP5 values are present and reflect a
   queued backlog, drops, pending outbox messages, the rate and the
   pressure state.
-- **T-MP11** *Switch.* With `maker_update_coalescing` set to `false`,
-  every order message is published at once.
+- **T-MP11** *Switch (amended 2026-10-29).* With no
+  `maker_update_coalescing` setting, with `false` and with any value other
+  than a JSON `true`, every order message is published at once. With
+  `true`, the order messages go through the outbox.
 - **T-MP12** *Priority marking.*
   - A cancellation and each swap-negotiation message are published with
     priority, and so is one propagated by a relay.
@@ -2263,6 +2268,37 @@ D8. **Default ceiling and climb step of the maker publication rate
     times and trip again on every cycle. The first trip often comes from
     the burst that publishes a maker's orders at startup; that is
     accepted, with no behavior change.
+
+D9. **The outbox is opt-in (§32.9B R-MP1 item 5; resolved 2026-10-29,
+    maintainer decision; added 2026-10-29).** A field run of a maker
+    with several hundred orders, in a mesh where relays and other makers
+    run the reference, showed two flaws of R-MP2 as written:
+    - the close signal comes on the close of the last connection to any
+      relay, for any cause, including the node's own relay maintenance.
+      Under constant order traffic every such close counts, so ordinary
+      churn put the maker into degraded mode again and again;
+    - a keep-alive advertises the maker's local roots, which include the
+      changes the outbox still holds. A receiver asks the peer that
+      forwarded the keep-alive (R-Q4), and that peer does not have those
+      changes yet, because every relay forwards a keep-alive before it
+      handles it (R-F3a). Every hop then fails a synchronization request
+      for each pair on each keep-alive, and reference nodes logged
+      missing pair roots every 30 to 40 seconds.
+
+    The second flaw also holds outside degraded mode whenever the bot
+    wants more updates than the rate allows. Releasing at the floor
+    instead of holding would not close it, because the advertised roots
+    catch up only when the rate exceeds the update demand. The maintainer
+    therefore made the outbox opt-in: the default publishes every order
+    message at once, as the reference does, and `maker_update_coalescing`
+    set to `true` turns R-MP1 and R-MP2 on. Toward a slow relay the
+    default then behaves as a reference maker does; the per-peer send
+    queue bound of [Chapter 28](28-libp2p-modernization.md) §28.9B RQ1
+    protects Reloaded relays. Planned before the outbox becomes the
+    default again: a keep-alive that advertises only the roots of
+    released messages, a close signal that counts only error closes of
+    a relay with this node's data in flight, and a synchronization
+    request addressed to the keep-alive's author when connected to it.
 
 ## 32.11 External References
 

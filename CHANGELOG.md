@@ -104,13 +104,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
   moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
   every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
-- **A maker that changes its orders faster than its relays can take them no longer loses its whole
-  order book.** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
+- **A maker that changes its orders faster than its relays can take them can keep its order book
+  (opt-in).** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
-  updates, so the book vanished on every node. Now the maker keeps one pending message per order,
-  the latest values win, and the messages leave at a bounded rate (at most 20 per second per maker
-  key, a burst of 200). When a relay stops keeping up, either its send queue stays backed up for
-  2 seconds or the last connection to it closes while order messages are in flight, the rate drops
+  updates, so the book vanished on every node. This protection is **off by default** for now: set the
+  `MM2.json` boolean `maker_update_coalescing` to `true` to turn it on (only a JSON `true` does).
+  Without it, every order message is sent at once, as GLEEC KDF does. A field run showed that, in a
+  network where relays and makers also run GLEEC KDF, held-back updates make peers ask relays for
+  order state the relays do not have yet, and an ordinary relay disconnect lowers the rate. With it
+  turned on, the maker keeps one pending message per order, the latest values win, and the
+  messages leave at a bounded rate (at most 20 per second per maker key, a burst of 200).
+  When a relay stops keeping up, either its send queue stays backed up for 2 seconds or the last
+  connection to it closes while order messages are in flight, the rate drops
   sharply to 0.5 per second and order updates stop being sent. Peers then learn the changes through
   the keep-alive synchronization. Five minutes after the last such signal the rate climbs back by
   0.5 per second every 30 seconds, and stops one step below the rate at which the relay failed; after
@@ -123,9 +128,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `cancel_order` do not wait. After a relay connection is restored the maker sends an extra round of
   keep-alives. One short gap remains: the first signal comes only after the load has started, so a
   burst of changes can still cost one expiry of the maker's orders per new relay connection. Set the
-  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. Set the boolean
-  `maker_update_coalescing` to `false` to send every order message at once, as GLEEC KDF does; only a
-  JSON `false` turns it off. More in CRD ch.32 §32.9B and ch.28 §28.9B.
+  `MM2.json` number `maker_update_rate_max` to change the ceiling of 20 per second. More in CRD ch.32
+  §32.9B (D9) and ch.28 §28.9B.
 
 - **Electrum servers are kept in priority order and recover.** Servers are tried in an order drawn at
   random once when the coin is enabled, so users spread across the listed servers (set
@@ -331,6 +335,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   for peers. The metrics gain `orderbook.trie_store.early_purges` and `orderbook.history.evicted`.
   More in [Orderbook peer-to-peer and trie](docs/reloaded-rewrite/32-orderbook-p2p-and-trie.md)
   (R-K5, R-K6). Detail: PR #164.
+- **The native coin daemon's and the Sia wallet daemon's error texts no longer quote the daemon's raw
+  answer.** They carry the daemon's error code, its message and the answer's size only. More in CRD
+  ch.38 §38.6.9 and ch.20 §20.8.
 - **A maker whose swap negotiation fails is now banned by the taker for an hour, as specified.**
   Before, a taker banned a maker only when the maker's payment failed validation or the maker never
   spent the taker's payment. A maker that failed during negotiation could be picked again for the

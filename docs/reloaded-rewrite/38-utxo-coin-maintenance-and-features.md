@@ -1513,19 +1513,19 @@ few coins, RIN first. The maintainer chose the field run. The default stays
 `random` until a field run on RIN with `mixed` has passed; the switch to
 `mixed` is then a separate change.
 
-D38.6.4l.2 *The rank during the probe.* The probe offers servers to the set as
+D38.6.4l.2 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *The rank during the probe.* The probe offers servers to the set as
 they connect (R38.6.4k-R item 3), before the activation round's measurements
 are complete. This rule keeps the uniform draw until the probe ends, so the
 first maintained set follows that draw, and the measured rank reaches the set
 through later maintenance passes. The rule also counts the header request
 as part of each probe attempt, which can lengthen the probe, not the build,
-within *B*. Open: whether the probe should hold its connections until the
-round ends so that the first set follows the measured rank.
+within *B*. The alternative, a probe that holds its connections until the
+round ends so that the first set follows the measured rank, was not chosen.
 
-D38.6.4l.3 *The best tip of a re-measure round.* The plan says "any server
+D38.6.4l.3 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *The best tip of a re-measure round.* The plan says "any server
 reported in the current measurement round". This rule also counts the heights
 of the maintained connections, so a candidate behind a server already in use
-is never eligible. Open: confirm, or count the round's measurements only.
+is never eligible. Counting the round's measurements only was not chosen.
 
 D38.6.4l.4 *(Resolved 2026-10-28, maintainer decision.)* *Header
 notifications on every maintained connection.* A connection receives header
@@ -1537,33 +1537,31 @@ or `measured` without a header request sends one, so P1 covers every
 maintained connection (item 6, T38.6.4l.15). The cost is one small request per
 joining connection, over a connection that is in use anyway.
 
-D38.6.4l.5 *The reference figures of P2.* The plan names the server's
+D38.6.4l.5 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *The reference figures of P2.* The plan names the server's
 "activation latency" and the pool's "best activation latency". This rule
 reads them literally, uses the re-measure latency only for a server not
 measured at activation, and does not judge a server with neither. The
 smoothed latency starts at the first sample after joining, not at the
-measurement. Open: confirm, or use the latest round's figures.
+measurement. Using the latest round's figures was not chosen.
 
-D38.6.4l.6 *A trigger within 5 minutes of a round.* The plan does not say what
+D38.6.4l.6 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *A trigger within 5 minutes of a round.* The plan does not say what
 happens then. This rule waits for the limit and does not reuse the earlier
-round's measurements. Open: confirm.
+round's measurements.
 
-D38.6.4l.7 *Where the poor server goes.* The plan says the replacement takes
+D38.6.4l.7 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *Where the poor server goes.* The plan says the replacement takes
 "that one slot" and the rest keeps its place. This rule moves the poor server
 to the end of the rank, so that a later maintenance pass does not bring it
-back ahead of the other candidates. Open: confirm, or swap the two places.
+back ahead of the other candidates. Swapping the two places was not chosen.
 
-D38.6.4l.8 *Suspension by release.* Releasing a measured connection suspends
+D38.6.4l.8 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *Suspension by release.* Releasing a measured connection suspends
 its server (R38.6.4d item 1), and the plan makes a suspended server
 ineligible. Read together, no released server could ever be chosen. This
 rule applies the suspension test to the server's state when it was measured.
-Open: confirm.
 
-D38.6.4l.9 *A warning for an absent switch.* The plan's sentence "An absent
+D38.6.4l.9 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *A warning for an absent switch.* The plan's sentence "An absent
 switch, or an unrecognized value, means the default and logs one warning
 naming the value" can be read as a warning for an absent switch too. This
-rule keeps R38.6.4b-R item 1: no warning when the switch is absent. Open:
-confirm.
+rule keeps R38.6.4b-R item 1: no warning when the switch is absent.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -1989,8 +1987,20 @@ port, user name and password in the daemon's configuration file.
    or encoded (D38.6.9a).
 3. An error about reading the daemon's configuration file may name the file
    and a missing key, never the value of a key.
+4. *(Added 2026-10-29, maintainer decision, D38.6.9b.)* When the daemon
+   answers a request with a non-success HTTP status, the error text and any
+   log line about it shall not quote the response body or the request's
+   parameters. They carry the request's method name, the HTTP status, the
+   size of the body in bytes and, when the body is a JSON-RPC response with an
+   `error` object, that object's `code` and `message` (the daemon's own error
+   code and message), and nothing else of the body. A body that is not such
+   a response, for example an HTML page from a proxy, is represented by its
+   size only. The same holds for a success answer whose body cannot be
+   parsed: its text is never quoted. The shared JSON-RPC client's texts for
+   an answer of the wrong shape follow this rule too, so the Electrum texts
+   that use them quote no answer either.
 
-Neither rule has an opt-back switch, for the reason R35.1.14 gives: the
+None of these rules has an opt-back switch, for the reason R35.1.14 gives: the
 backend is the operator's own and no peer observes it, so by the second arm
 of the default-side rule (`docs/COMPAT_SWITCHES.md`) the Reloaded form is the
 default. The scope limit of R35.1.17 for the RPC wire dump applies. Both are
@@ -2020,14 +2030,32 @@ the debug form of the coin's RPC client, contain neither of them nor the
 encoded header value. A request to a closed port fails with an error that
 names `http://127.0.0.1:<port>` and nothing more of the endpoint.
 
-D38.6.9a *(Open -- conservative reading taken; 2026-10-28.)* *Is the RPC user
-name a credential?* R38.6.9b item 2 treats it as one, because it is half of
-the Basic-authentication pair. To be confirmed by the maintainer.
+T38.6.9.3 *Native daemon response bodies (added 2026-10-29).* Point a native
+client at a stub daemon and send a request whose parameters carry a known
+marker.
+- The stub answers HTTP 500 with a JSON-RPC error object of code -26 and a
+  short message, plus a further member that carries a second marker. The
+  error text contains the method name, the status, -26, the message and the
+  body's size, and neither marker.
+- The stub answers HTTP 401 with an HTML page that carries a marker. The
+  error text contains the method name, the status and the body's size, and no
+  marker.
+- The stub answers HTTP 200 with a body that is not JSON and carries a
+  marker. The error text contains no marker.
 
-D38.6.9b *(Open; 2026-10-28.)* *Response bodies in native-daemon errors.* A
-request the daemon answers with a non-success HTTP status yields an error that
-quotes the request and the response body. These rules do not bind it; the
-question is shared with chapter 36 D36.3.
+No captured log line contains a marker in any case.
+
+D38.6.9a *(Resolved 2026-10-29, maintainer decision: kept as written.)* *Is
+the RPC user name a credential?* R38.6.9b item 2 treats it as one, because it
+is half of the Basic-authentication pair. The maintainer kept that reading.
+
+D38.6.9b *(Resolved 2026-10-29, maintainer decision: changed.)* *Response
+bodies in native-daemon errors.* A request the daemon answered with a
+non-success HTTP status yielded an error that quoted the request and the
+response body. The question was shared with chapter 36 D36.3. The maintainer
+decided that such an error carries the daemon's error code and message and
+the body's size only, as R38.6.9b item 4 now states. Chapter 20 R-N3 states
+the same for the Sia wallet daemon.
 
 ## 38.8 Software global-HD UTXO accounts & address derivation (T-PORT)
 
@@ -2433,3 +2461,9 @@ R38.8.6 **Tests (two-direction, observable).**
   wire dump, which keeps its own secrets switch) and this repository's own
   code. It takes no forbidden-class input, so chapter 01 R38 is not engaged
   and no gate pass is required.
+- *Reloaded-original addition (2026-10-29), clean side.* R38.6.9b item 4,
+  T38.6.9.3 and the resolutions of D38.6.9a, D38.6.9b and D38.6.4l.2, .3 and
+  .5 to .9 were written by a session that never read the corpus. They rest on
+  the maintainer decision AU of 2026-10-29, the public JSON-RPC error format
+  and this repository's own code. They take no forbidden-class input, so
+  chapter 01 R38 is not engaged and no gate pass is required.

@@ -414,7 +414,9 @@ fn run(params: Params) -> Outcome {
     let relay = SlowRelay::start();
 
     // The maker: the production swarm, event loop, outbox pump and keep-alive function.
-    let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
+    let ctx = MmCtxBuilder::new()
+        .with_conf(json!({ "maker_update_coalescing": true }))
+        .into_mm_arc();
     ctx.init_metrics().unwrap();
     let crypto_ctx = CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "maker rate control lab passphrase").unwrap();
     let persistent_pubkey = crypto_ctx.mm2_internal_pubkey_hex();

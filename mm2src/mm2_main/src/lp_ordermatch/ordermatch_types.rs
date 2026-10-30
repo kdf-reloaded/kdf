@@ -193,10 +193,11 @@ pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
     ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
 }
 
-/// CRD ch.32 §32.9B R-MP1 item 5: the MM2.json boolean `maker_update_coalescing`, default `true`. Only an
-/// explicit JSON `false` makes every maker-order message leave at once, as without the outbox.
+/// CRD ch.32 §32.9B R-MP1 item 5 (D9): the MM2.json boolean `maker_update_coalescing`, default `false`. Only an
+/// explicit JSON `true` turns the maker outbox on. Otherwise (missing, `false`, any other value) every maker-order
+/// message leaves at once, as without the outbox.
 pub(crate) fn maker_update_coalescing(ctx: &MmArc) -> bool {
-    ctx.conf["maker_update_coalescing"].as_bool() != Some(false)
+    ctx.conf["maker_update_coalescing"].as_bool() == Some(true)
 }
 
 /// CRD ch.32 §32.9B R-MP2 item 1: the MM2.json number `maker_update_rate_max`, the ceiling of the rate at

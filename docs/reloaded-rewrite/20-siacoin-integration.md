@@ -445,12 +445,24 @@ value of any header the browser build's `client_conf.headers` supplies. The
 server URL appears in host-only form only. The scope limit of R35.1.17 for the
 RPC wire dump applies.
 
-Both rules bind the texts and renderings Reloaded emits, including those that
+**R-N3 (walletd response bodies; Reloaded; clean-room original; maintainer
+decision 2026-10-29; no switch).** When walletd answers a request with a
+non-success HTTP status, the error text and any log line about it shall not
+quote the response body as such. They carry the HTTP status, the size of the
+body in bytes and walletd's error message, and nothing else of the body.
+walletd answers an error with its message as plain text, so the message is
+the body's text with surrounding white space trimmed, but only when that text
+is a single line of at most 256 characters. Any other body, for example an
+HTML page from a proxy or a multi-line text, is represented by its size only.
+The same holds for a success answer whose body cannot be parsed: its text is
+never quoted. The message is subject to R-N1 like any other text.
+
+These rules bind the texts and renderings Reloaded emits, including those that
 come from the external Sia library's own error and configuration types once
-Reloaded renders them. Neither has an opt-back switch, for the reason
+Reloaded renders them. None has an opt-back switch, for the reason
 R35.1.14 gives: the walletd server is the operator's own and no peer observes
 it, so by the second arm of the default-side rule (`docs/COMPAT_SWITCHES.md`)
-the Reloaded form is the default. Both are recorded in
+the Reloaded form is the default. All three are recorded in
 `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 
 > **Status (2026-10-28).** Implemented at Reloaded's boundary (D10). In the
@@ -473,6 +485,20 @@ read with a transport error, the `Transport` error text of ch. 46 R46.5.4
 names the server in host-only form only. The same holds for the `RpcError`
 text and the error sync state of the history path when walletd fails during a
 pass (R-N1; ch. 53 R53.4.8).
+
+**T-N3 (added 2026-10-29).** With a walletd stub, and a request that carries a
+known marker:
+- the stub answers HTTP 400 with the single line `insufficient balance` and a
+  trailing newline: the error text contains the status, that line and the
+  body's size;
+- the stub answers HTTP 502 with a multi-line HTML page that carries a marker:
+  the error text contains the status and the body's size, and no marker;
+- the stub answers HTTP 400 with a single line longer than 256 characters
+  that carries a marker: the error text contains no marker;
+- the stub answers HTTP 200 with a body that is not JSON and carries a
+  marker: the error text contains no marker.
+
+No captured log line contains a marker in any case (R-N3).
 
 ## 20.9 Withdraw (Value Transfer) Behaviour
 
@@ -970,8 +996,9 @@ rather than defects. None is a correctness claim.
   done first was a maintainer choice. He chose Reloaded's boundary now and the
   change in the library later; once the library carries its own redaction,
   the boundary rewriting can be retired. The library's errors also quote the
-  response body of a non-success answer; whether that is allowed is chapter
-  36 D36.3.
+  response body of a non-success answer. Whether that is allowed was chapter
+  36 D36.3; the maintainer decided on 2026-10-29 that it is not, and R-N3
+  binds it, also at Reloaded's boundary.
 
 ## 20.11 Baseline Verifications
 
@@ -1114,3 +1141,8 @@ V3. The unit ratio, ed25519 scheme, address encoding, walletd
   the bound revision of the external Sia
   library, read as a permitted sibling source. They take no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Clean-context addition (2026-10-29, forbidden corpus not consulted):* R-N3
+  and T-N3 are Reloaded-original, written on the same terms. They rest on the
+  maintainer decision AU of 2026-10-29 (chapter 36 D36.3), on walletd's public
+  error format (an error answer carries its message as plain text) and on the
+  bound revision of the external Sia library.
