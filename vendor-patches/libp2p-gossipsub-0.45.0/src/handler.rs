@@ -20,7 +20,7 @@
 
 use crate::protocol::{GossipsubCodec, ProtocolConfig};
 use crate::rpc_proto::proto;
-use crate::send_queue::{DropLog, SendQueue, SendQueueConfig, SendQueueStats};
+use crate::send_queue::{DropLog, PriorityPush, SendQueue, SendQueueConfig, SendQueueStats, SpillLog};
 use crate::types::{PeerKind, RawMessage, Rpc};
 use crate::ValidationError;
 use asynchronous_codec::Framed;
@@ -61,8 +61,8 @@ pub enum HandlerEvent {
     /// An inbound or outbound substream has been established with the peer and this informs over
     /// which protocol. This message only occurs once per connection.
     PeerKind(PeerKind),
-    /// The send queue toward the peer has stayed at its cap for the whole stuck period, or its
-    /// priority lane overflowed. The behaviour closes the connection.
+    /// The send queue toward the peer has stayed at its cap for the whole stuck period. The
+    /// behaviour closes the connection.
     SendQueueStuck,
     /// The pressure level of the send queue toward the peer changed (CRD ch.28 §28.9B RQ1 item
     /// 8). Reported once per change.
@@ -222,7 +222,12 @@ impl Handler {
 
 impl EnabledHandler {
     fn push_to_send_queue(&mut self, rpc: proto::RPC) {
-        match self.send_queue.push(rpc, Instant::now()) {
+        let log = self.send_queue.push(rpc, Instant::now());
+        self.log_drop(log);
+    }
+
+    fn log_drop(&self, log: Option<DropLog>) {
+        match log {
             Some(DropLog::First {
                 queued_messages,
                 queued_bytes,
@@ -240,9 +245,28 @@ impl EnabledHandler {
         }
     }
 
+    /// Queues a priority RPC. When the priority lane is full the RPC joins the end of the data
+    /// queue instead (CRD ch.28 §28.9B RQ1 item 9); that is logged, and so are any data RPCs the
+    /// push dropped.
     fn push_to_priority_lane(&mut self, rpc: proto::RPC) {
-        // A failed push is reported by `poll_send_queue_stuck`, which closes the connection.
-        self.send_queue.push_priority(rpc);
+        let PriorityPush::Spilled { drop_log, spill_log } = self.send_queue.push_priority(rpc, Instant::now()) else {
+            return;
+        };
+        match spill_log {
+            Some(SpillLog::First) => log::info!(
+                "Gossip priority lane toward peer {} is full ({} messages): further priority messages \
+                 join the end of the send queue",
+                self.peer_id,
+                self.send_queue.priority_len()
+            ),
+            Some(SpillLog::Summary { moved }) => log::info!(
+                "Gossip priority lane toward peer {} is still full: {moved} priority messages joined the \
+                 send queue since the last report",
+                self.peer_id
+            ),
+            None => {},
+        }
+        self.log_drop(drop_log);
     }
 
     /// The pressure level change of the send queue, if any.
@@ -259,20 +283,9 @@ impl EnabledHandler {
             .map(|raised| HandlerEvent::SendQueueSignal { raised })
     }
 
-    /// Reports a connection whose priority lane overflowed or that stayed at the send queue cap
-    /// for the whole stuck period, re-evaluates the queue signal, and keeps a timer armed for the
-    /// next deadline of either.
+    /// Reports a connection that stayed at the send queue cap for the whole stuck period,
+    /// re-evaluates the queue signal, and keeps a timer armed for the next deadline of either.
     fn poll_send_queue_stuck(&mut self, cx: &mut Context<'_>) -> Option<HandlerEvent> {
-        if self.send_queue.take_priority_overflow() {
-            log::warn!(
-                "Closing the connection to peer {}: gossip priority lane at its limit of {} \
-                 messages, {} messages dropped",
-                self.peer_id,
-                self.send_queue.priority_len(),
-                self.send_queue.total_dropped()
-            );
-            return Some(HandlerEvent::SendQueueStuck);
-        }
         let now = Instant::now();
         self.send_queue.update_signal(now);
         if let Some(deadline) = self.send_queue.stuck_deadline() {
@@ -888,7 +901,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_messages_go_to_the_priority_lane_and_overflow_closes_the_connection() {
+    fn priority_messages_go_to_the_priority_lane_and_overflow_joins_the_data_queue() {
         let mut h = handler_with(SendQueueConfig {
             priority_max: 3,
             ..SendQueueConfig::default()
@@ -908,17 +921,24 @@ mod tests {
                 .count()
         };
         assert_eq!(is_stuck(&poll_all(&mut h)), 0);
-        // The fourth priority RPC does not fit: the connection is reported for closing, once.
+        // The fourth priority RPC does not fit the lane: it joins the data queue, after the data
+        // RPC queued before it, and the connection is not reported for closing.
+        h.on_behaviour_event(HandlerIn::Message(data_rpc(2)));
         h.on_behaviour_event(HandlerIn::PriorityMessage(data_rpc(13)));
-        assert_eq!(is_stuck(&poll_all(&mut h)), 1);
+        h.on_behaviour_event(HandlerIn::PriorityMessage(data_rpc(14)));
         assert_eq!(is_stuck(&poll_all(&mut h)), 0);
-        // The priority RPCs are written first, in order.
+        assert_eq!(is_stuck(&poll_all(&mut h)), 0);
+        {
+            let q = &enabled(&mut h).send_queue;
+            assert_eq!((q.priority_len(), q.data_count()), (3, 4));
+        }
+        // The lane is written first, in order, then the data queue in order.
         let q = &mut enabled(&mut h).send_queue;
         let mut tags = vec![];
         while let Some(rpc) = q.pop() {
             tags.push(rpc.publish[0].data.as_ref().unwrap()[0]);
         }
-        assert_eq!(tags, vec![10, 11, 12, 1]);
+        assert_eq!(tags, vec![10, 11, 12, 1, 2, 13, 14]);
     }
 
     #[test]
