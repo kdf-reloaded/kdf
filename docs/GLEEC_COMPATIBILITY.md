@@ -100,8 +100,12 @@ What an integrator observes:
 - `txfee: 0` (fee estimation) is refused for a ZHTLC coin: `lightwalletd` has no fee
   estimation. A coin with no `txfee` key, like the published ARRR entry, keeps the shared
   fixed default and activates as before.
-- `requires_notarization` cannot be satisfied for a ZHTLC coin: `lightwalletd` has no
-  notarized-depth field, and plain confirmation depth is not substituted for it.
+- `requires_notarization` has no effect on a ZHTLC coin. The flag selects a notarized
+  confirmation count, and `lightwalletd` has none, so it is accepted (coins entry,
+  activation request, `set_requires_notarization`, an order's `base_nota` / `rel_nota`), a
+  warning names the coin, the coin reports `false`, and a swap counts plain confirmations.
+  GLEEC KDF reads a notarized count from its transparent backend instead. No switch
+  restores that: there is no notarized count to wait for here.
 - Swap-path HTLC spend detection and "payment already sent" detection run over
   `lightwalletd`'s transparent address index (CRD ch.39 R39.11.4d). The serving node files
   every output under the pubkey-hash key type, so a `b...` (P2SH) query is empty forever;

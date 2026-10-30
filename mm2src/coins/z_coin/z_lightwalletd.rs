@@ -2005,7 +2005,9 @@ impl LightwalletdClient {
     }
 
     /// Waits until `tx_hash` (display order) has `confirmations` confirmations, derived locally from
-    /// the transaction's mined height and the tip (R39.11.4e).
+    /// the transaction's mined height and the tip (R39.11.4e). There is no notarized depth to wait
+    /// for: a ZHTLC coin has no notarized confirmation count, so `requires_notarization` has no
+    /// effect on it and is not taken here (R39.11.4e, D39.11.f).
     ///
     /// A transaction that cannot be fetched while the tip has passed its expiry height is **not**
     /// declared expired unless the service explicitly answered "no such transaction": a backend that
@@ -2015,19 +2017,9 @@ impl LightwalletdClient {
         tx_hash: H256Json,
         expiry_height: u32,
         confirmations: u32,
-        requires_notarization: bool,
         wait_until: u64,
         check_every: u64,
     ) -> Result<(), String> {
-        if requires_notarization {
-            // No notarized-depth field exists on this service; defaulting to plain depth would
-            // report a notarization guarantee that was never checked (R39.11.4e, D39.11.f).
-            return Err(
-                "notarized confirmation depth is not obtainable from lightwalletd, and plain confirmation \
-                        depth is not substituted for it"
-                    .to_owned(),
-            );
-        }
         loop {
             if common::now_ms() / 1000 > wait_until {
                 return Err(format!(

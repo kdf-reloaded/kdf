@@ -2058,3 +2058,30 @@ mod refund_gate {
         assert!(note.contains("median time past"), "{note}");
     }
 }
+
+/// R39.11.4e, D39.11.f: a ZHTLC coin has no notarized confirmation count, so `requires_notarization`
+/// has no effect on it. The coin reports false whatever its coins entry or activation request said,
+/// and `set_requires_notarization(true)` stores nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
+    let Some(fixture) = LightCoinFixture::new() else { return };
+    let coin = &fixture.coin;
+
+    // As if the coins entry or the activation request had asked for it.
+    coin.utxo_arc
+        .conf
+        .requires_notarization
+        .store(true, AtomicOrdering::Relaxed);
+    assert!(!coin.requires_notarization());
+
+    coin.utxo_arc
+        .conf
+        .requires_notarization
+        .store(false, AtomicOrdering::Relaxed);
+    coin.set_requires_notarization(true);
+    assert!(!coin.requires_notarization());
+    assert!(
+        !utxo_common::requires_notarization(&coin.utxo_arc),
+        "nothing was stored"
+    );
+}

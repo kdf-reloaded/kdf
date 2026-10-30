@@ -1202,13 +1202,15 @@ that reads differently from before) are worth capturing even when the shielded l
   can drive a shielded wallet database through those transitions yet (CRD ch.39 D39.8.0f).
   *Since resolved:* the harness of 2026‑10‑25 covers every T39.8.0h case for the Light‑mode
   send path, and D39.8.0f is closed.
-- **`requires_notarization` on ARRR is accepted but cannot be met** *(open; known issue by
-  maintainer Decision AT, 2026‑10‑29).* `lightwalletd` reports no notarized depth, and plain
+- **`requires_notarization` on ARRR is accepted but cannot be met** *(closed 2026‑10‑30; was a
+  known issue by maintainer Decision AT, 2026‑10‑29).* `lightwalletd` reports no notarized depth, and plain
   confirmation depth is never substituted for it. The flag is still accepted at activation and
   by `set_requires_notarization`, so a swap that requires notarization for ARRR fails at the
   confirmation wait, after its payment is on chain. Older published coins‑file revisions set
   the flag for ARRR; an operator must set `requires_notarization` to `false`. CRD ch.39
-  R39.11.4e, D39.11.f.
+  R39.11.4e, D39.11.f. *Closed 2026‑10‑30 (Decision AT amended): the flag is accepted and
+  has no effect on ARRR, with a warning; a wait counts plain confirmations, the coin reports
+  `false`, and no coins‑file edit is needed.*
 
 ---
 

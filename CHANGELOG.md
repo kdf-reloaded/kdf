@@ -71,6 +71,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **`requires_notarization` no longer breaks ARRR swaps.** A shielded coin such as ARRR has no
+  notarized confirmation count, so the setting has nothing to select. It is still accepted, from
+  the coins file, the activation request, `set_requires_notarization` or an order's
+  `base_nota`/`rel_nota`, and now has no effect: a warning names the coin, the coin reports
+  `false`, and a swap counts ordinary confirmations. Before, such a swap failed after its payment
+  was on chain, and a taker paying in ARRR could be left to recover the maker's payment by hand.
+  Older coins files that set the flag for ARRR need no edit. GLEEC KDF waits for a notarized
+  count instead; no switch restores that, because no such count exists here. Detail: CRD ch.39
+  R39.11.4e, D39.11.f.
+
 - **Quieter logs while a shielded coin such as ARRR is enabled.** Keeping the shielded wallet up to
   date logged six `info` lines on every new block. A sync that only adds the next block now logs
   them at `debug`. They stay at `info` for the first sync after activation, for a sync that covers
