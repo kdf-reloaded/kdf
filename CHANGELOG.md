@@ -105,7 +105,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
   once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
   other peers hand back to it, and it drops a stored address when a dial of it reaches a different
-  peer. Detail: PR #170; CRD ch.28 R8c.
+  peer. Detail: PR #170, PR #176; CRD ch.28 R8c.
 - **Quieter peer-to-peer logs on seeds and relays under load.** Warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
@@ -125,7 +125,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   - "Request … is not processed" is now debug and no longer prints the answer. It meant an answer
     arrived after the request had already been given up.
 
-  Detail: PR #170.
+  Detail: PR #170, PR #176.
 
 #### Order posting, fees and balances
 
