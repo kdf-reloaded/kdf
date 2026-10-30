@@ -502,6 +502,11 @@ R6a / R10a.
   the same outcome by the same route (ch. 09 R10a). Changing it is a
   divergence needing a compatibility switch, and it is deferred (ch. 09 D5).
   Nothing about it should be attempted before the item above is fixed.
+- [ ] *Watcher side (2026-10-30, Decision BA):* the UTXO-standard, BCH and QTUM
+  families opted in to watching without any watcher method, so a Reloaded node
+  started watchers for them that could only stop. They no longer opt in
+  (ch. 09 R17); restoring them needs their watcher methods (ch. 09 D3). Whether a
+  reference node watches swaps of these families is open (Spec Reader queue).
 
 ---
 

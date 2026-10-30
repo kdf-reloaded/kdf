@@ -231,6 +231,19 @@ fn floor_test_coin(ticker: &str, fee: TxFee, dust: u64, decimals: u8) -> UtxoSta
     utxo_coin_from_fields(fields)
 }
 
+/// CRD ch.09 R17: the UTXO-style families do not opt in to watching until their watcher methods exist, so a node
+/// neither subscribes to their watcher topics nor starts a watcher for their swaps.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_families_do_not_opt_in_to_watchers() {
+    use crate::WatcherOps;
+
+    let fields = || utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    assert!(!utxo_coin_from_fields(fields()).is_supported_by_watchers());
+    assert!(!QtumCoin::from(UtxoArc::new(fields())).is_supported_by_watchers());
+    assert!(!crate::utxo::bch::bch_coin_without_network_for_test().is_supported_by_watchers());
+}
+
 /// T60.1: exact minimum trading volume values, ticker-independent (R38.6.6e, R38.6.6f).
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
