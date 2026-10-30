@@ -116,6 +116,14 @@ it and, where one exists, the CRD rule, for readers who want more.
     are counted in one line per minute.
 
   Detail: PR #170.
+- **Seed and relay logs now show how order-book synchronization is going.** When a node asks
+  another for a maker's orders, or answers such a request, and it fails, the log at the default
+  level now shows a summary once a minute. The summary counts the answers this node gave with an
+  error, and why: no data for the maker, a pair it does not hold, a pair it is still synchronizing,
+  or an internal error. It also counts this node's own requests that failed, and why: no data, an
+  error from the peer, a timeout, a lost connection or an answer it could not read. At debug level
+  each request and answer gets one line, with the peer, the maker, the pairs and the time taken.
+  Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #179.
 
 #### Order posting, fees and balances
 
