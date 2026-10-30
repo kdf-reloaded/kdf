@@ -8572,7 +8572,7 @@ mod order_posting_latency {
     /// The P2PKH and P2PK script hashes of the test coin's address. The scripted server needs them, and they depend
     /// on the seed's key; the coin is built once here to learn its address and key, and again with the client that
     /// answers for them.
-    fn script_hashes_of_test_coin(segwit: bool) -> (String, String) {
+    pub(super) fn script_hashes_of_test_coin(segwit: bool) -> (String, String) {
         let probe = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, segwit);
         let address = match &probe.derivation_method {
             DerivationMethod::Iguana(address) => address.clone(),
@@ -8600,7 +8600,7 @@ mod order_posting_latency {
         (utxo_coin_from_fields(fields), server)
     }
 
-    fn my_address(coin: &UtxoStandardCoin) -> Address {
+    pub(super) fn my_address(coin: &UtxoStandardCoin) -> Address {
         match &coin.as_ref().derivation_method {
             DerivationMethod::Iguana(address) => address.clone(),
             _ => unreachable!("the test coin has an Iguana address"),
@@ -8608,7 +8608,7 @@ mod order_posting_latency {
     }
 
     /// The `(method, scripthash)` lookups of every request message, one entry per message.
-    fn lookups(server: &StubServer) -> Vec<Vec<(String, String)>> {
+    pub(super) fn lookups(server: &StubServer) -> Vec<Vec<(String, String)>> {
         server
             .request_messages()
             .iter()
@@ -8630,7 +8630,7 @@ mod order_posting_latency {
             .collect()
     }
 
-    fn count_requests(server: &StubServer, method: &str) -> usize {
+    pub(super) fn count_requests(server: &StubServer, method: &str) -> usize {
         lookups(server).iter().flatten().filter(|(m, _)| m == method).count()
     }
 
@@ -8847,5 +8847,375 @@ mod order_posting_latency {
             async { coin.spend_safe_amount().await.unwrap() },
         ));
         assert!(lookups(&server).is_empty());
+    }
+}
+
+// ---- A withdraw's spend is recorded when its broadcast is accepted (CRD ch.38 R38.5B.9, tests T38.5B.1-T38.5B.10) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod withdraw_recent_spent {
+    use super::order_posting_latency::{count_requests, my_address, script_hashes_of_test_coin};
+    use super::*;
+    use crate::rpc_command::init_withdraw::{init_withdraw, withdraw_status, WithdrawCompatRpcStatus,
+                                            WithdrawStatusRequest};
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::{CoinsContext, MmCoinEnum, TransactionDetails};
+    use futures::compat::Future01CompatExt;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    /// The one output the scripted backend lists, whatever happens to it.
+    const LISTED_VALUE: u64 = 900_000;
+    const BROADCAST: &str = "blockchain.transaction.broadcast";
+    const TTL_MS: u64 = PENDING_WITHDRAW_TTL_MS;
+
+    fn listed_outpoint() -> OutPoint {
+        OutPoint {
+            hash: H256::from([1; 32]),
+            index: 0,
+        }
+    }
+
+    /// A coin on a scripted Electrum server that keeps listing one unspent output of the coin's address
+    /// (`LISTED_VALUE`, as a backend that has not indexed any broadcast would) and accepts every broadcast.
+    fn coin_on_backend() -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result(BROADCAST, json!("ab".repeat(32)));
+        });
+        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    fn withdraw_request() -> WithdrawRequest {
+        WithdrawRequest {
+            amount: "0.001".parse().unwrap(),
+            from: None,
+            to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+            coin: TEST_COIN_NAME.into(),
+            max: false,
+            fee: None,
+        }
+    }
+
+    fn legacy_withdraw(coin: &UtxoStandardCoin) -> TransactionDetails {
+        block_on(coin.withdraw(withdraw_request()).compat()).unwrap()
+    }
+
+    /// Drives `task::withdraw::init` to its terminal status through the real task path.
+    fn task_withdraw(ctx: &MmArc) -> TransactionDetails {
+        let init = block_on(init_withdraw(ctx.clone(), withdraw_request())).unwrap();
+        let started = Instant::now();
+        loop {
+            let request = WithdrawStatusRequest {
+                task_id: init.task_id,
+                forget_if_finished: false,
+            };
+            let status = block_on(withdraw_status(ctx.clone(), request)).unwrap_or_else(|e| panic!("{}", e));
+            match status {
+                WithdrawCompatRpcStatus::Ok(details) => return details,
+                WithdrawCompatRpcStatus::Error(e) => panic!("the task withdraw failed: {:?}", e),
+                _ => (),
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the task withdraw did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn tx_of(details: &TransactionDetails) -> UtxoTx { deserialize(details.tx_hex.as_slice()).unwrap() }
+
+    fn inputs_of(tx: &UtxoTx) -> Vec<OutPoint> { tx.inputs.iter().map(|i| i.previous_output.clone()).collect() }
+
+    /// The unspent list a spend is built from, as the withdraw path reads it.
+    fn listing(coin: &UtxoStandardCoin) -> Vec<UnspentInfo> {
+        let (unspents, _guard) = block_on(coin.get_unspent_ordered_list(&my_address(coin))).unwrap();
+        unspents
+    }
+
+    /// The change output of a withdraw built by the tests, as the listing offers it once the spend is recorded.
+    fn change_of(coin: &UtxoStandardCoin, tx: &UtxoTx) -> UnspentInfo {
+        let script = Builder::build_p2pkh(&my_address(coin).hash).to_bytes();
+        let (index, output) = tx
+            .outputs
+            .iter()
+            .enumerate()
+            .find(|(_, output)| output.script_pubkey == script)
+            .expect("the withdraw has a change output");
+        UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx.hash(),
+                index: index as u32,
+            },
+            value: output.value,
+            height: None,
+        }
+    }
+
+    fn broadcast_hex(coin: &UtxoStandardCoin, details: &TransactionDetails) -> Result<String, String> {
+        block_on(coin.send_raw_tx(&hex::encode(&details.tx_hex.0)).compat())
+    }
+
+    fn record_is_empty(coin: &UtxoStandardCoin) -> bool {
+        let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        record.input_to_output_map.is_empty() && record.output_to_input_map.is_empty()
+    }
+
+    fn pending_count(coin: &UtxoStandardCoin) -> usize {
+        block_on(coin.as_ref().recently_spent_outpoints.lock())
+            .pending_withdraws
+            .len()
+    }
+
+    fn only_pending_created_ms(coin: &UtxoStandardCoin) -> u64 {
+        let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        assert_eq!(record.pending_withdraws.len(), 1);
+        record.pending_withdraws.values().next().unwrap().created_ms
+    }
+
+    /// T38.5B.1 (R38.5B.1): a swap-side send enters the record only once the backend has accepted the broadcast.
+    #[test]
+    fn swap_side_send_is_recorded_only_after_acceptance() {
+        let (coin, server) = coin_on_backend();
+        let to_other = TransactionOutput {
+            value: 100_000,
+            script_pubkey: Builder::build_p2pkh(&Address::from("RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa").hash).to_bytes(),
+        };
+        let before = listing(&coin);
+        assert_eq!(before.iter().map(|u| u.outpoint.clone()).collect::<Vec<_>>(), vec![
+            listed_outpoint()
+        ]);
+
+        // The backend refuses: the record and the next listing are unchanged.
+        server.set_error(BROADCAST, "txn-mempool-conflict");
+        block_on(send_outputs_from_my_address_impl(coin.clone(), vec![to_other.clone()])).unwrap_err();
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+
+        // The backend accepts, and keeps listing the spent input: the listing omits it and offers the change.
+        server.clear_error(BROADCAST);
+        let sent = block_on(send_outputs_from_my_address_impl(coin.clone(), vec![to_other])).unwrap();
+        let after = listing(&coin);
+        assert_eq!(after, vec![change_of(&coin, &sent)]);
+    }
+
+    /// T38.5B.2 (R38.5B.2, R38.5B.9 item 3): withdraws alone write nothing to the record.
+    #[test]
+    fn withdraws_alone_write_nothing_to_the_record() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let first = tx_of(&legacy_withdraw(&coin));
+        let second = tx_of(&legacy_withdraw(&coin));
+
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+    }
+
+    /// T38.5B.3 (R38.5B.9 items 2 and 6): an accepted broadcast of a withdraw's bytes records the spend.
+    #[test]
+    fn accepted_broadcast_of_a_withdraw_records_the_spend() {
+        let (coin, server) = coin_on_backend();
+        let first_details = legacy_withdraw(&coin);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        assert_eq!(count_requests(&server, BROADCAST), 1);
+        assert_eq!(pending_count(&coin), 0, "the pending entry was promoted");
+        // The backend still lists the input; the listing omits it and offers the change in its place.
+        let change = change_of(&coin, &first);
+        assert_eq!(listing(&coin), vec![change.clone()]);
+
+        // A second withdraw excludes the first one's input and spends its change.
+        let second = tx_of(&legacy_withdraw(&coin));
+        assert_eq!(inputs_of(&second), vec![change.outpoint]);
+    }
+
+    /// T38.5B.3, task path: the same assertions hold for `task::withdraw::*`.
+    #[test]
+    fn accepted_broadcast_of_a_task_withdraw_records_the_spend() {
+        let (coin, _server) = coin_on_backend();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::UtxoCoin(coin.clone()))).unwrap();
+
+        let first_details = task_withdraw(&ctx);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        assert!(record_is_empty(&coin), "building and signing writes nothing");
+        assert_eq!(pending_count(&coin), 1);
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        let change = change_of(&coin, &first);
+        assert_eq!(listing(&coin), vec![change.clone()]);
+
+        let second = tx_of(&task_withdraw(&ctx));
+        assert_eq!(inputs_of(&second), vec![change.outpoint]);
+    }
+
+    /// The byte-carrier form of the helper behaves like the hex form.
+    #[test]
+    fn send_raw_tx_bytes_promotes_like_send_raw_tx() {
+        let (coin, _server) = coin_on_backend();
+        let details = legacy_withdraw(&coin);
+        let first = tx_of(&details);
+
+        block_on(coin.send_raw_tx_bytes(&details.tx_hex.0).compat()).unwrap();
+        assert_eq!(pending_count(&coin), 0);
+        assert_eq!(listing(&coin), vec![change_of(&coin, &first)]);
+    }
+
+    /// T38.5B.6 (R38.5B.9 item 2, R38.5B.6): a refused broadcast records nothing, keeps the legacy refusal shape and
+    /// leaves the pending entry to age out.
+    #[test]
+    fn refused_broadcast_records_nothing() {
+        let (coin, server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+
+        server.set_error(BROADCAST, "txn-mempool-conflict");
+        let error = broadcast_hex(&coin, &details).unwrap_err();
+        assert!(error.contains("txn-mempool-conflict"), "{}", error);
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+        assert_eq!(pending_count(&coin), 1, "the entry is still pending");
+        let second = tx_of(&legacy_withdraw(&coin));
+        assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
+
+        // The entry ages out.
+        let created = only_pending_created_ms(&coin);
+        let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &[7, 7, 7]));
+        assert!(record.pending_withdraws.is_empty());
+    }
+
+    /// T38.5B.7 (R38.5B.9 item 3): a withdraw that is never broadcast hides nothing, at once or later.
+    #[test]
+    fn unbroadcast_withdraw_hides_nothing_and_ages_out() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+
+        assert_eq!(listing(&coin), before);
+        let created = only_pending_created_ms(&coin);
+
+        // Just short of the lifetime the entry is still there; after it, an entry made later drops it.
+        {
+            let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            record.note_pending_withdraw_at(created + TTL_MS - 1, &[1], vec![], H256::from([3; 32]), vec![]);
+            assert_eq!(record.pending_withdraws.len(), 2);
+            record.note_pending_withdraw_at(created + TTL_MS, &[2], vec![], H256::from([4; 32]), vec![]);
+            assert_eq!(
+                record.pending_withdraws.len(),
+                2,
+                "the withdraw's entry is gone, the two newer remain"
+            );
+            // An expired entry is not promoted by a broadcast that arrives late.
+            assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &details.tx_hex.0));
+        }
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before, "no phantom change output is offered");
+    }
+
+    /// T38.5B.8 (R38.5B.9 item 2): bytes the node did not build promote nothing and change nothing.
+    #[test]
+    fn bytes_the_node_did_not_build_promote_nothing() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+        let mut reserialized = tx_of(&details);
+        reserialized.lock_time += 1;
+
+        // A transaction no withdraw built, and one a caller re-serialized after the withdraw.
+        block_on(coin.send_raw_tx_bytes(&[1, 2, 3]).compat()).unwrap();
+        block_on(coin.send_raw_tx_bytes(&serialize(&reserialized)).compat()).unwrap();
+
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+        assert_eq!(pending_count(&coin), 1, "the withdraw's own entry is untouched");
+    }
+
+    /// T38.5B.9 (R38.5B.9 item 3): at most 64 pending entries are kept, the oldest dropped first, and an entry
+    /// older than ten minutes is dropped when the next one is made.
+    #[test]
+    fn pending_entries_are_bounded_and_expire() {
+        let script = Bytes::from(vec![5u8; 25]);
+        let mut record = RecentlySpentOutPoints::new(script);
+        let digest = |i: u8| sha256(&[i]);
+
+        for i in 0..70u8 {
+            record.note_pending_withdraw_at(1_000 + i as u64, &[i], vec![], H256::from([i; 32]), vec![]);
+        }
+        assert_eq!(record.pending_withdraws.len(), PENDING_WITHDRAW_CAP);
+        let kept: HashSet<_> = record.pending_withdraws.keys().cloned().collect();
+        let expected: HashSet<_> = (6..70u8).map(digest).collect();
+        assert_eq!(kept, expected, "the six oldest were dropped");
+
+        // Entries made within one millisecond are dropped in the order they were made.
+        let mut same_ms = RecentlySpentOutPoints::new(Bytes::from(vec![5u8; 25]));
+        for i in 0..65u8 {
+            same_ms.note_pending_withdraw_at(500, &[i], vec![], H256::from([i; 32]), vec![]);
+        }
+        assert!(!same_ms.pending_withdraws.contains_key(&digest(0)));
+        assert!(same_ms.pending_withdraws.contains_key(&digest(64)));
+
+        // Ten minutes: an entry exactly that old is dropped by the next entry; a younger one stays.
+        let mut aging = RecentlySpentOutPoints::new(Bytes::from(vec![5u8; 25]));
+        aging.note_pending_withdraw_at(0, &[1], vec![], H256::from([1; 32]), vec![]);
+        aging.note_pending_withdraw_at(1, &[2], vec![], H256::from([2; 32]), vec![]);
+        aging.note_pending_withdraw_at(TTL_MS, &[3], vec![], H256::from([3; 32]), vec![]);
+        let kept: HashSet<_> = aging.pending_withdraws.keys().cloned().collect();
+        assert_eq!(kept, [digest(2), digest(3)].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// T38.5B.10 (R38.5B.9 item 3, D38.5B.2): an entry promoted into the record does not expire.
+    #[test]
+    fn promoted_entry_does_not_expire() {
+        let own_script = Bytes::from(vec![5u8; 25]);
+        let mut record = RecentlySpentOutPoints::new(own_script.clone());
+        let spent = UnspentInfo {
+            outpoint: listed_outpoint(),
+            value: LISTED_VALUE,
+            height: Some(10),
+        };
+        let tx_hash = H256::from([9; 32]);
+        let outputs = vec![
+            TransactionOutput {
+                value: 100_000,
+                script_pubkey: Bytes::from(vec![6u8; 25]),
+            },
+            TransactionOutput {
+                value: 790_000,
+                script_pubkey: own_script,
+            },
+        ];
+        record.note_pending_withdraw_at(1_000, &[1, 2, 3], vec![spent.clone()], tx_hash, outputs);
+        assert!(record.promote_pending_withdraw_at(1_001, &[1, 2, 3]));
+
+        // Far beyond the pending lifetime, other entries come and go, and the record still holds the spend.
+        let much_later = 1_000 + 1_000 * TTL_MS;
+        record.note_pending_withdraw_at(much_later, &[4], vec![], H256::from([4; 32]), vec![]);
+        assert!(!record.promote_pending_withdraw_at(much_later, &[1, 2, 3]));
+        let change = UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx_hash,
+                index: 1,
+            },
+            value: 790_000,
+            height: None,
+        };
+        let replaced = record.replace_spent_outputs_with_cache([spent].into_iter().collect());
+        assert_eq!(replaced, [change].into_iter().collect::<HashSet<_>>());
     }
 }

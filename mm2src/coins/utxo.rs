@@ -373,6 +373,26 @@ impl From<CachedUnspentInfo> for UnspentInfo {
     }
 }
 
+/// How long a pending withdraw entry is kept before it is dropped (CRD ch.38 R38.5B.9 item 3).
+const PENDING_WITHDRAW_TTL_MS: u64 = 10 * 60 * 1000;
+/// The most pending withdraw entries kept at once; the oldest are dropped first (CRD ch.38 R38.5B.9 item 3).
+const PENDING_WITHDRAW_CAP: usize = 64;
+
+/// A withdraw this node built and signed but has not seen broadcast yet.
+/// It is not part of the recently-spent record: it hides no input and offers no output until
+/// [`RecentlySpentOutPoints::promote_pending_withdraw`] enters it into the record (CRD ch.38 R38.5B.9).
+struct PendingWithdraw {
+    /// The unspents the transaction consumes, with their values.
+    inputs: Vec<UnspentInfo>,
+    tx_hash: H256,
+    /// The outputs of the signed transaction. `add_spent` keeps only those paying to the record's script,
+    /// and needs the position of each to name its outpoint.
+    outputs: Vec<TransactionOutput>,
+    created_ms: u64,
+    /// Insertion order, so that "the oldest" is well defined for entries made in the same millisecond.
+    seq: u64,
+}
+
 /// The cache of recently send transactions used to track the spent UTXOs and replace them with new outputs
 /// The daemon needs some time to update the listunspent list for address which makes it return already spent UTXOs
 /// This cache helps to prevent UTXO reuse in such cases
@@ -383,6 +403,10 @@ pub struct RecentlySpentOutPoints {
     output_to_input_map: HashMap<CachedUnspentInfo, HashSet<CachedUnspentInfo>>,
     /// Cache includes only outputs having script_pubkey == for_script_pubkey
     for_script_pubkey: Bytes,
+    /// Withdraws built and signed by this node, keyed by the SHA-256 digest of the exact serialized transaction
+    /// bytes the withdraw returned. They are not consulted by [`Self::replace_spent_outputs_with_cache`].
+    pending_withdraws: HashMap<H256, PendingWithdraw>,
+    pending_withdraw_seq: u64,
 }
 
 impl RecentlySpentOutPoints {
@@ -391,6 +415,78 @@ impl RecentlySpentOutPoints {
             input_to_output_map: HashMap::new(),
             output_to_input_map: HashMap::new(),
             for_script_pubkey,
+            pending_withdraws: HashMap::new(),
+            pending_withdraw_seq: 0,
+        }
+    }
+
+    /// Drops the pending withdraw entries older than [`PENDING_WITHDRAW_TTL_MS`] at `now_ms`.
+    fn purge_pending_withdraws(&mut self, now_ms: u64) {
+        self.pending_withdraws
+            .retain(|_, pending| now_ms.saturating_sub(pending.created_ms) < PENDING_WITHDRAW_TTL_MS);
+    }
+
+    /// Keeps a pending entry for a withdraw transaction this node has just built and signed.
+    /// `tx_bytes` must be exactly the serialization the withdraw returns as the transaction hex.
+    /// The recently-spent record itself is not written (CRD ch.38 R38.5B.9 item 1).
+    pub fn note_pending_withdraw(
+        &mut self,
+        tx_bytes: &[u8],
+        inputs: Vec<UnspentInfo>,
+        tx_hash: H256,
+        outputs: Vec<TransactionOutput>,
+    ) {
+        self.note_pending_withdraw_at(now_ms(), tx_bytes, inputs, tx_hash, outputs)
+    }
+
+    /// [`Self::note_pending_withdraw`] with the clock given, so that tests need not sleep.
+    fn note_pending_withdraw_at(
+        &mut self,
+        now_ms: u64,
+        tx_bytes: &[u8],
+        inputs: Vec<UnspentInfo>,
+        tx_hash: H256,
+        outputs: Vec<TransactionOutput>,
+    ) {
+        self.purge_pending_withdraws(now_ms);
+        self.pending_withdraw_seq += 1;
+        let pending = PendingWithdraw {
+            inputs,
+            tx_hash,
+            outputs,
+            created_ms: now_ms,
+            seq: self.pending_withdraw_seq,
+        };
+        self.pending_withdraws.insert(sha256(tx_bytes), pending);
+        while self.pending_withdraws.len() > PENDING_WITHDRAW_CAP {
+            let oldest = self
+                .pending_withdraws
+                .iter()
+                .min_by_key(|(_, pending)| pending.seq)
+                .map(|(digest, _)| *digest);
+            match oldest {
+                Some(digest) => self.pending_withdraws.remove(&digest),
+                None => break,
+            };
+        }
+    }
+
+    /// Called after the backend accepted the broadcast of `tx_bytes`. If they are exactly the bytes of a pending
+    /// withdraw entry that has not expired, the entry is removed and its spend is entered into the record
+    /// ([`Self::add_spent`]); otherwise nothing changes. Returns whether an entry was promoted.
+    pub fn promote_pending_withdraw(&mut self, tx_bytes: &[u8]) -> bool {
+        self.promote_pending_withdraw_at(now_ms(), tx_bytes)
+    }
+
+    /// [`Self::promote_pending_withdraw`] with the clock given, so that tests need not sleep.
+    fn promote_pending_withdraw_at(&mut self, now_ms: u64, tx_bytes: &[u8]) -> bool {
+        self.purge_pending_withdraws(now_ms);
+        match self.pending_withdraws.remove(&sha256(tx_bytes)) {
+            Some(pending) => {
+                self.add_spent(pending.inputs, pending.tx_hash, pending.outputs);
+                true
+            },
+            None => false,
         }
     }
 
