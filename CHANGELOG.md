@@ -353,7 +353,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   still has nothing for, and the requests it is holding for other nodes wait for that answer. It
   asks again only when the answer can still arrive within the 5-second hold, never after a timed-out
   request, and never a third time. Nothing on the wire changes. To restore the old behavior, set
-  `sync_request_retry_ms` to `0` in `MM2.json`. Detail: PR #TBD; CRD ch.32 R-Q5c.
+  `sync_request_retry_ms` to `0` in `MM2.json`. Detail: PR #173; CRD ch.32 R-Q5c.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
