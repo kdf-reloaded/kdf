@@ -152,7 +152,9 @@ pub(crate) fn validate_payment(
     Box::new(fut.boxed().compat())
 }
 
-/// `wait_for_confirmations` for a ZHTLC coin.
+/// `wait_for_confirmations` for a ZHTLC coin. A ZHTLC coin has no notarized confirmation count, so
+/// `requires_nota` has no effect: the wait counts plain confirmations, and a wait that asked for
+/// notarization says so in one warning (CRD ch.39 R39.11.4e, D39.11.f).
 pub(crate) fn wait_for_confirmations(
     coin: &ZCoin,
     tx: &[u8],
@@ -162,11 +164,14 @@ pub(crate) fn wait_for_confirmations(
     check_every: u64,
 ) -> Box<dyn Future<Item = (), Error = String> + Send> {
     let tx = try_fus!(read_tx(tx));
+    if requires_nota {
+        log::warn!("{}", super::notarization_has_no_effect(&coin.as_ref().conf.ticker));
+    }
     coin.as_ref().rpc_client.wait_for_confirmations(
         txid_display(&tx),
         u32::from(tx.expiry_height()),
         confirmations as u32,
-        requires_nota,
+        false,
         wait_until,
         check_every,
     )

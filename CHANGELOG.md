@@ -214,6 +214,17 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 #### ARRR and other shielded coins
 
+- **`requires_notarization` no longer breaks ARRR swaps.** A shielded coin such as ARRR has no
+  notarized confirmation count, so the setting has nothing to select. It is still accepted, from
+  the coins file, the activation request, `set_requires_notarization` or an order's
+  `base_nota`/`rel_nota`, and now has no effect: a warning names the coin, the coin reports
+  `false`, and a swap counts ordinary confirmations. Before, such a swap failed once a payment was on
+  chain, and the funds came back only by refund after the swap's lock times had passed.
+  Older coins files that set the flag for ARRR need no edit. A peer whose coins file still sets
+  it makes the swap lock time four times as long on both sides, as before; the published coins
+  file sets `false` for ARRR. GLEEC KDF honors the flag through a notarized confirmation count;
+  no switch restores that, because no such count exists here. Detail: PR #169; CRD ch.39
+  R39.11.4e, D39.11.f, D39.11.i.
 - **ARRR native mode is refused in this release; use light mode.** Activating ARRR (or another
   shielded coin) with `mode.rpc` `Native` now fails at once with an error saying that native mode is
   not supported in this release and that light mode should be used. Native mode could not build a
@@ -986,11 +997,6 @@ lives.
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
   completed on the live chain, including the spend of the locked ARRR (October 2026). More in
   [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
-- **ARRR: a coins-file or RPC setting that requires notarization is accepted, but a swap that
-  requires notarization for ARRR fails at the confirmation wait, after its payment is on chain.** An
-  operator running ARRR must set `requires_notarization` to `false`; some older published coins files
-  set it. More in [`arrr-ironwood-compatibility`](docs/plans/arrr-ironwood-compatibility.md).
-  Detail: CRD ch.39 R39.11.4e, D39.11.f.
 - **Shielded coins such as ARRR cannot be activated in a browser (WASM) build.** Activation ends with
   an error saying shielded activation is not available in the WebAssembly build: the browser build
   has no shielded wallet database, and building a shielded transaction would also need the Sapling

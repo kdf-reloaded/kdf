@@ -171,8 +171,9 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   post-Ironwood transaction. An opt-back would restore a path with no working
   provider and would re-arm the defects the new design closes. Related, and
   also without a switch: `txfee: 0` (fee estimation) is refused for the coin
-  (lightwalletd has no fee estimation; an absent `txfee` keeps the fixed default); `requires_notarization` is refused for
-  the coin (there is no notarized-depth field); and the swap-path HTLC spend
+  (lightwalletd has no fee estimation; an absent `txfee` keeps the fixed default); `requires_notarization` has no effect on
+  the coin (there is no notarized confirmation count; it is accepted with a warning and
+  plain confirmations are counted); and the swap-path HTLC spend
   and already-sent detection run over the transparent address index with both
   the P2SH form and the `R...` re-encoding of the redeem-script hash probed (the
   serving node's index files every output under the pubkey-hash key type, proved

@@ -211,20 +211,15 @@ impl UtxoRpcClientEnum {
         check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
         // The lightwalletd backend derives confirmations locally from the mined height and the tip
-        // and treats an uncorroborated expiry differently (CRD ch.39 R39.11.4e, R39.11.12).
+        // and treats an uncorroborated expiry differently (CRD ch.39 R39.11.4e, R39.11.12). It
+        // serves only ZHTLC coins, which have no notarized confirmation count, so
+        // `requires_notarization` has no effect there (R39.11.4e).
         #[cfg(not(target_arch = "wasm32"))]
         if let UtxoRpcClientEnum::LightWalletD(client) = self {
             let client = client.clone();
             let fut = async move {
                 client
-                    .wait_for_confirmations(
-                        tx_hash,
-                        expiry_height,
-                        confirmations,
-                        requires_notarization,
-                        wait_until,
-                        check_every,
-                    )
+                    .wait_for_confirmations(tx_hash, expiry_height, confirmations, wait_until, check_every)
                     .await
             };
             return Box::new(fut.boxed().compat());
