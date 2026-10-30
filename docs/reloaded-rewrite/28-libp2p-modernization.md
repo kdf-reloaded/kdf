@@ -265,6 +265,15 @@ network's TCP port. Every other form is not accepted, the hostname form
    node logs one INFO line. The line names the address, the peer that
    sent it and the accepted form. Later sightings log at DEBUG. The set
    of addresses already reported is bounded.
+5. **Own identity** *(added 2026-10-30, maintainer decision BD).* The
+   node never stores a peer entry that names its own peer ID, and never
+   picks one as a dial candidate. Other peers hand out this node's own
+   entry, and dialing it only reaches the node itself.
+6. **Stale entry** *(added 2026-10-30, decision BD).* When a dial of an
+   address stored for peer A reaches a peer with a different peer ID,
+   the node removes that address from A's entry, and forgets A when no
+   address is left. It does not store the address under the peer that
+   answered.
 
 *Rationale.* A peer that does not run Reloaded may hand out the hostname
 under which it dialed a seed. Rejecting a whole answer for one such
@@ -925,6 +934,10 @@ when `num > 20`, the responder MUST omit the response.
 - A peers-topic announcement with one `/dns/...` address and one
   accepted address keeps the accepted one.
 - A skipped address is reported at INFO once, and at DEBUG after that.
+- *(Added 2026-10-30, decision BD.)* An answer or announcement that
+  carries this node's own peer ID stores nothing for it, and relay
+  maintenance never dials it. A dial of A's address that reaches peer B
+  removes the address from A's entry and stores nothing for B.
 
 **T7.** *Empty bootstrap list.* A client spawned with no bootstrap
 relays MUST start without a fatal P2P initialisation error, keep an
@@ -1215,3 +1228,10 @@ hardening carried by the pinned fork).
   *Inputs:* this repository's own peer-exchange and relay-address code
   only. The forbidden corpus was not consulted, and the addition needs
   no Dirty Gate pass.
+- *Scoped addition (2026-10-30) -- R8c items 5 and 6, and their T6a
+  bullet.* Reloaded-original, maintainer decision BD of 2026-10-30. It
+  was prompted by a seed's own log from a field run on a public network,
+  which showed the seed dialing itself and a stored address answering
+  under another peer ID. *Inputs:* that log and this repository's own
+  peer-exchange and relay-maintenance code only. The forbidden corpus
+  was not consulted, and the addition needs no Dirty Gate pass.
