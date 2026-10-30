@@ -176,14 +176,12 @@ reaches only the V1 approve, and that `gas_limit` is what to set.
    An estimate adds a round trip and a new way to revert on exactly the steps
    (spend, refund) where a revert is expensive.
 2. It needs no change to the swap code, so no compatibility switch and no risk
-   to the swaps in flight; the platform block reaches every token on the chain.
+   to the swaps in flight; a platform block reaches every token that has no block of its own.
 3. It fixes the report: with a Monad block the payment no longer runs out of
    gas, and the taker fee stops paying for twice the gas it uses.
 
-Proposed coins-file values. The token figures rest on the 1.3 to 1.6 ratio of the
-`transfer` and `approve` measurements, not on a Monad token payment, so they should
-be confirmed with an `eth_estimateGas` of a real token payment on Monad before they
-are shipped:
+Proposed coins-file values (2026-10-28), kept as the reasoning. They rest on the 1.3 to
+1.6 ratio of the `transfer` and `approve` measurements, not on a Monad token payment:
 
 | Entry | Member | Proposed |
 |---|---|---|
@@ -192,6 +190,28 @@ are shipped:
 | MON | `eth_send_erc20` | 130,000 (measured 100,299 fresh recipient, plus margin; default 210,000) |
 | MON | `erc20_receiver_spend`, `erc20_sender_refund` | 150,000 (unchanged default; Base worst 72,460 x 1.6 = 116,000) |
 | ETH-BASE | none | defaults already have about 1.5x headroom; no change |
+
+**Outcome (2026-10-29).** The coins-file maintainer committed a block measured on
+Monad itself, on the MON tokens only (USDC-MON, USDT-MON, WBTC-MON and the other listed
+MON tokens), and left the MON platform coin on the code defaults, which work for it:
+
+| Member | Committed on each MON token |
+|---|---|
+| `eth_send_erc20` | 150,000 |
+| `erc20_payment` | 250,000 |
+| `erc20_receiver_spend` | 200,000 |
+| `erc20_sender_refund` | 200,000 |
+
+These are above the proposal in the payment and spend rows because they were measured on
+real Monad token calls, which this plan could not do. They replace the table above as the
+values in use; the Base-based reasoning stays as the explanation of why a Monad token needs
+more than the Ethereum-tuned defaults. The `gas_limit` block of a token is honored by
+Reloaded for all four members (the token's own entry is read first, R57.5.3). It replaces
+the platform coin's block as a whole: a member the token's block omits takes the default of
+R57.5.2, not the platform coin's value. An operator copying this block to another chain's
+token must therefore carry every member that token needs. The maintainer also set
+`estimate_gas_mult` on MON; it reaches the legacy `approve` only and is inert for the swap
+transactions.
 
 If `estimate_gas_mult` is later wanted on payments, (b) stays available as an
 opt-in per coin, with the two limits above (the refund timing and the V1 approve

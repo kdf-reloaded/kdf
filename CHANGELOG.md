@@ -407,9 +407,31 @@ it and, where one exists, the CRD rule, for readers who want more.
   metrics now also show the number of stored change histories and changes, tracked pubkeys and
   queued trie updates, and, after each ten-minute clean-up, the node store's size and entry count.
   Detail: PR #131, PR #134, PR #137; CRD ch.32 R-K4.
+- **The order-book store no longer grows without bound when a maker updates orders very fast.** The
+  node now applies queued order updates in bulk (up to 1,024 batches or 2,048 events at a time),
+  drops the unused entries of its node store as soon as 100,000 updates have piled up (at most every
+  five seconds) instead of only every ten minutes, and keeps at most 2,048 stored changes per maker
+  and pair. In a test of 120,480 updates for 30 orders the memory left after the node caught up fell
+  from 134 MB to 26 MB (3 MB when the node was held back first). A peer that is behind, or asks
+  about a state older than the kept changes, receives the full set of orders instead of a delta;
+  nothing else changes for peers. The metrics gain `orderbook.trie_store.early_purges` and
+  `orderbook.history.evicted`. More in
+  [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md). Detail:
+  PR #164; CRD ch.32 R-K5, R-K6.
 
 #### Orders, swaps and activation (all coins)
 
+- **A taker that falls back to a refund now takes the maker's coins when the maker has already
+  claimed the taker's payment.** When a taker could not confirm its own payment, for example during
+  a node or server outage, or stopped waiting at the lock time just before the maker claimed it, the
+  swap went on to refund the payment. If the maker had claimed it, the refund was rejected and the
+  swap ended as failed: the taker got the maker's coins only by running `recover_funds_of_swap`
+  before the maker's own lock time ran out, and lost both sides otherwise. Now the taker checks the
+  chain before the refund, every few minutes while it waits to refund, and after a rejected refund;
+  when the maker has claimed the payment, the taker reads the secret and claims the maker's payment,
+  as in a normal swap. Such a swap still lists the earlier error events, so a wallet may show it as
+  failed although the trade completed. A refund already on the chain, after a restart, now ends the
+  swap as refunded. Detail: PR #167; CRD ch.51 R31a.
 - **Listing, cancelling or updating an order no longer waits for another path's disk or network
   work.** The balance-update handler, the periodic balance check, the removal of timed-out matches,
   an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while
@@ -716,11 +738,23 @@ it and, where one exists, the CRD rule, for readers who want more.
   transaction first seen unconfirmed stayed unconfirmed in the history. Detail: PR #84; CRD ch.38
   R38.5A.10.
 
-#### Errors from coin and wallet daemons
+#### Logs and error texts
 
 - **The native coin daemon's and the Sia wallet daemon's error texts no longer quote the daemon's raw
   answer.** They carry the daemon's error code, its message and the answer's size only. Detail:
   PR #163; CRD ch.38 §38.6.9, ch.20 §20.8.
+- **The log line about an abandoned HTTP request now says which host it was.** When a request
+  finished after its caller had stopped waiting, the node logged only "drive03 receiver is dropped".
+  This happens, for example, each time an EVM node misses the failover cutoff and the next node
+  answers. The line now names the scheme, host and port, never the path, query or credentials, and
+  says whether the request reached its time limit, got a late answer, or failed (only the kind of
+  the failure, without the error text). It stays one line per abandoned request at the normal log
+  level. Detail: PR #165; CRD ch.35 R35.1.17.
+- **HTTP error messages no longer show the full URL of the server.** An error from a request to an
+  NFT provider, the 1inch API, the market-maker price service, a gRPC-web server or, in the browser
+  build, a Tendermint node used to print the whole URL, path and query included, and so any API key
+  in them. Such an error now names only the scheme, host and port. The Telegram notifier's errors
+  are covered too, though none is shown today. Detail: PR #165; CRD ch.35 R35.1.17.
 
 #### EVM coins
 
@@ -847,8 +881,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   trading volume matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins (PR #66); an
   end-to-end preview on a real 8-decimal coin is left.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new, blocked: per-chain gas
-  limits in the coins file, not the multiplier, are the knob (PR #123); the two remaining options
-  wait on the reference maintainers.
+  limits in the coins file, not the multiplier, are the knob (PR #123), and the coins file now
+  carries a block measured on Monad for the MON tokens (PR #164); the two remaining options wait on
+  the reference maintainers.
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — new, planning: two dead-network
   EVM tests ported to a scripted local node (PR #30), and tests against a local `geth` node run in
   CI (PR #53).
@@ -873,6 +908,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
   makes fewer Electrum and node round trips (PRs #95, #114, #116, #128) and no longer does I/O under
   an order's lock (PR #149); a timing run is left.
+- [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — new,
+  planning: the order-book store applies queued updates in bulk, purges unused entries early and
+  keeps at most 2,048 changes per maker and pair (PR #164); one open point on the early purge waits
+  for the maintainer.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — new, in progress: a maker's
   order messages keep its book alive (PR #132) and a relay holds a sync answer while it catches up
   (PR #135); a lab run is left.
