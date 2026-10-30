@@ -63,6 +63,22 @@ pub(crate) fn sync_answer_deferral_ms(ctx: &MmArc) -> u64 {
         .unwrap_or(DEFAULT_SYNC_ANSWER_DEFERRAL_MS)
 }
 
+/// Default of the MM2.json integer `sync_request_retry_ms`.
+pub(crate) const DEFAULT_SYNC_REQUEST_RETRY_MS: u64 = 1000;
+
+// R-Q5c item 3: the default pause leaves room within the default bound for the second answer.
+const _: () = assert!(DEFAULT_SYNC_REQUEST_RETRY_MS < DEFAULT_SYNC_ANSWER_DEFERRAL_MS);
+
+/// The pause of CRD ch.32 R-Q5c before a failed keep-alive-driven request is asked once more: the top-level
+/// MM2.json integer `sync_request_retry_ms`, default `1000`; an absent or non-integer value means the default,
+/// `0` turns the second request off. The second request is sent only while it can still be answered within the
+/// bound of [`sync_answer_deferral_ms`], so a pause at or above that bound turns it off as well.
+pub(crate) fn sync_request_retry_ms(ctx: &MmArc) -> u64 {
+    ctx.conf["sync_request_retry_ms"]
+        .as_u64()
+        .unwrap_or(DEFAULT_SYNC_REQUEST_RETRY_MS)
+}
+
 /// Sends the answer of a synchronization request to the peer that asked. The inbound dispatcher builds
 /// it around the request's response channel; a parked request keeps it until it is answered.
 pub(crate) type SyncAnswerReply = Box<dyn FnOnce(AdexResponse) -> Result<(), String> + Send>;

@@ -9810,7 +9810,8 @@ mod order_message_liveness {
 /// when the node's own synchronization lands.
 mod sync_answer_deferral_tests {
     use super::*;
-    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS, MAX_PARKED_PER_PEER,
+    use crate::mm2::lp_ordermatch::sync_answer_deferral::{DEFAULT_SYNC_ANSWER_DEFERRAL_MS,
+                                                          DEFAULT_SYNC_REQUEST_RETRY_MS, MAX_PARKED_PER_PEER,
                                                           MAX_PARKED_TOTAL};
     use futures::channel::oneshot;
     use mm2_p2p::atomicdex_behaviour::AdexResponse;
@@ -10042,9 +10043,33 @@ mod sync_answer_deferral_tests {
                 other => panic!("unexpected command {:?}", other),
             }
         }
+
+        /// The second request of R-Q5c, which takes the place of the first in `own`.
+        fn expect_second_request(&mut self, own: &mut OwnSync) {
+            match next_cmd(&mut self.relay_cmds) {
+                AdexBehaviourCmd::RequestPeers { req, response_tx, .. } => {
+                    own.request = req;
+                    own.response_tx = Some(response_tx);
+                },
+                other => panic!("unexpected command {:?}", other),
+            }
+        }
+
+        /// Nothing more was asked (to be called once the keep-alive task has finished).
+        fn assert_no_further_request(&mut self) {
+            while let Ok(cmd) = self.relay_cmds.try_recv() {
+                assert!(
+                    !matches!(cmd, AdexBehaviourCmd::RequestPeers { .. }),
+                    "a further request was sent"
+                );
+            }
+        }
     }
 
     fn peer() -> PeerId { PeerId::random() }
+
+    /// A relay config without the second request of R-Q5c, for the tests of R-Q5b alone.
+    fn no_retry() -> Json { json!({ "sync_request_retry_ms": 0 }) }
 
     fn answered(answers: &std_mpsc::Receiver<(usize, AdexResponse)>, within_ms: u64) -> (usize, AdexResponse) {
         answers
@@ -10076,7 +10101,7 @@ mod sync_answer_deferral_tests {
 
     #[test]
     fn parked_request_gets_the_placeholder_error_when_the_own_request_fails() {
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
@@ -10245,7 +10270,7 @@ mod sync_answer_deferral_tests {
     #[test]
     fn the_per_peer_limit_is_the_same_for_a_peer_across_pairs_and_requests() {
         // A request for two tracked pairs counts once, whatever its size.
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
         let p = peer();
@@ -10311,9 +10336,142 @@ mod sync_answer_deferral_tests {
         assert_eq!((MAX_PARKED_PER_PEER, MAX_PARKED_TOTAL), (8, 256));
     }
 
+    /// The pause of R-Q5c in the tests of the second request.
+    const RETRY_MS: u64 = 50;
+
+    fn quick_retry() -> Json { json!({ "sync_request_retry_ms": RETRY_MS }) }
+
+    /// The pairs and roots a request names.
+    fn requested_roots(request: &[u8]) -> HashMap<String, H64> {
+        match decode_message::<P2PRequest>(request).unwrap() {
+            P2PRequest::Ordermatch(OrdermatchRequest::SyncPubkeyOrderbookState { trie_roots, .. }) => trie_roots,
+            other => panic!("unexpected request {:?}", other),
+        }
+    }
+
+    #[test]
+    fn a_quick_failure_is_asked_once_more_and_the_parked_request_gets_the_full_set() {
+        let mut f = Fixture::new(quick_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+
+        own.fail();
+        f.expect_second_request(&mut own);
+        assert_eq!(
+            requested_roots(&own.request),
+            HashMap::from([(PAIR.to_owned(), H64::default())]),
+            "the second request names the pair still at the placeholder"
+        );
+        assert!(
+            answers.try_recv().is_err(),
+            "the parked request waits for the second answer"
+        );
+        assert_eq!(octx(&f.relay).sync_answer_deferral.in_flight_len(), 1);
+
+        own.answer(&f.maker);
+        let (id, res) = answered(&answers, 2000);
+        assert_eq!(id, 1);
+        assert_eq!(full_set_len(&res), ORDERS);
+        assert!(own.finish(), "an answered second request counts as success (R-F3b)");
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn the_second_request_is_the_last() {
+        let mut f = Fixture::new(quick_retry());
+        let (answers_tx, answers) = std_mpsc::channel();
+        let mut own = f.start_own_sync();
+        ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
+
+        own.fail();
+        f.expect_second_request(&mut own);
+        own.fail();
+        assert_placeholder_error(&answered(&answers, 2000).1);
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn a_pair_that_left_the_placeholder_is_not_asked_for_again() {
+        const PAUSE_MS: u64 = 300;
+        let mut f = Fixture::new(json!({ "sync_request_retry_ms": PAUSE_MS }));
+        let mut own = f.start_own_sync();
+        own.fail();
+
+        // During the pause the maker's orders reach the relay by gossip.
+        let orders: Vec<OrderbookItem> = octx(&f.maker)
+            .orderbook
+            .lock()
+            .order_set
+            .values()
+            .filter(|o| o.pubkey == MAKER)
+            .cloned()
+            .collect();
+        for order in orders {
+            insert_or_update_order(&f.relay, order);
+        }
+        flush_trie(&f.relay);
+
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_eq!(maker_book(&f.relay), f.uuids);
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn no_second_request_when_its_answer_could_not_arrive_within_the_bound() {
+        // A pause as long as the bound.
+        let mut f = Fixture::new(json!({ "sync_request_retry_ms": DEFAULT_SYNC_ANSWER_DEFERRAL_MS }));
+        let mut own = f.start_own_sync();
+        own.fail();
+        assert!(!own.finish());
+        f.assert_no_further_request();
+
+        // A failure that comes late: 250 ms after the request, with a 100 ms pause and a 300 ms bound.
+        let mut f = Fixture::new(json!({ "sync_answer_deferral_ms": 300, "sync_request_retry_ms": 100 }));
+        let mut own = f.start_own_sync();
+        std::thread::sleep(Duration::from_millis(250));
+        own.fail();
+        assert!(!own.finish());
+        f.assert_no_further_request();
+        assert_tables_empty(&f.relay);
+    }
+
+    #[test]
+    fn zero_turns_the_second_request_off_and_so_does_a_zero_bound() {
+        for conf in [no_retry(), json!({ "sync_answer_deferral_ms": 0 })] {
+            let mut f = Fixture::new(conf);
+            let mut own = f.start_own_sync();
+            own.fail();
+            assert!(!own.finish());
+            f.assert_no_further_request();
+            assert_tables_empty(&f.relay);
+        }
+    }
+
+    #[test]
+    fn only_a_non_negative_integer_sets_the_pause() {
+        for (conf, expected) in [
+            (json!({}), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": 0 }), 0),
+            (json!({ "sync_request_retry_ms": 700 }), 700),
+            (json!({ "sync_request_retry_ms": "0" }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": -1 }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+            (json!({ "sync_request_retry_ms": 2.5 }), DEFAULT_SYNC_REQUEST_RETRY_MS),
+        ] {
+            let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+            assert_eq!(sync_request_retry_ms(&ctx), expected);
+        }
+        assert_eq!(DEFAULT_SYNC_REQUEST_RETRY_MS, 1000);
+    }
+
     #[test]
     fn the_inbound_handler_returns_without_waiting() {
-        let mut f = Fixture::new(json!({}));
+        let mut f = Fixture::new(no_retry());
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
