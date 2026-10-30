@@ -793,6 +793,22 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 #### EVM coins
 
+- **A gas estimate now carries a fresh fee, and a fee below the chain's base fee gets its own
+  error.** A node may check the fee sent with a gas estimate against the current block base fee.
+  - **Before.** The fee sent could be a gas price reused from the short fee cache of order posting,
+    or one a rising base fee had already overtaken. The node then refused the estimate, and the call
+    failed with a raw transport error. That hit `setprice`, `buy`, `sell`, the trade preimage, a
+    withdraw, and the approval a token swap sends before its payment. A failed `setprice` also
+    cancelled the previous orders of that pair. No running swap was left stuck by it.
+  - **The fee sent now.** Every gas estimate carries the fee the transaction will be signed with,
+    read fresh for it: both EIP-1559 caps of the tier under `Low`, `Medium` and `High`, or the gas
+    price under `Legacy`. The approval a token swap sends is estimated and signed with the same fee.
+  - **When a node still refuses.** The fee is read once more and the estimate retried. A second
+    refusal, or a broadcast refused for the same reason, returns the new error `FeeCapBelowBaseFee`,
+    with the fee offered and the base fee. Either refusal also drops the cached gas price of that
+    chain. `send_raw_transaction` reports the same text.
+
+  Detail: PR #174; CRD ch.56 R5, R6, D5.
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could

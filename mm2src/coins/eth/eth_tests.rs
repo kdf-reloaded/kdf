@@ -18,6 +18,16 @@ fn test_dex_fee_addr_raw_pubkey() -> &'static [u8] {
 
 /// The gas price for the tests
 const GAS_PRICE: u64 = 50_000_000_000;
+
+/// The fee fields of a gas-limit estimation are fetched for it and never through `get_gas_price` (CRD ch.56 R6),
+/// so a test that stubs the node's gas price stubs that fetch too.
+fn mock_estimation_fee(gas_price: u64) {
+    EthCoin::fresh_estimation_fee.mock_safe(move |_, _| {
+        MockResult::Return(Box::new(futures01::future::ok(SwapFee::Legacy {
+            gas_price: gas_price.into(),
+        })))
+    });
+}
 // `GAS_PRICE` increased by 3%
 const GAS_PRICE_APPROXIMATION_ON_START_SWAP: u64 = 51_500_000_000;
 // `GAS_PRICE` increased by 5%
@@ -1000,6 +1010,7 @@ fn get_erc20_sender_trade_preimage() {
         .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(unsafe { ALLOWANCE.into() }))));
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         unsafe { ESTIMATE_GAS_CALLED = true };
         MockResult::Return(Box::new(futures01::future::ok(APPROVE_GAS_LIMIT.into())))
@@ -1099,6 +1110,7 @@ fn test_get_fee_to_send_taker_fee() {
     const TRANSFER_GAS_LIMIT: u64 = 40_000;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas
         .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(TRANSFER_GAS_LIMIT.into()))));
 
@@ -1150,6 +1162,7 @@ fn test_get_fee_to_send_taker_fee_insufficient_balance() {
     const GAS_PRICE: u64 = 40;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     // Reproduce the revert some ERC20 tokens raise when the sender can't afford the transfer.
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
@@ -1189,6 +1202,7 @@ fn test_get_fee_to_send_taker_fee_insufficient_gas_balance() {
     const GAS_PRICE: u64 = 40;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
             "error code -32000: gas required exceeds allowance (0)".to_string(),
@@ -2145,8 +2159,12 @@ mod scripted_evm_node {
         };
         let request: Json = serde_json::from_slice(&raw[body_at..]).unwrap();
         let reply = |req: &Json| {
-            json!({"jsonrpc": "2.0", "id": req["id"],
-                   "result": handler(req["method"].as_str().unwrap(), &req["params"])})
+            let answer = handler(req["method"].as_str().unwrap(), &req["params"]);
+            // A handler answers with an error response by returning `{"__rpc_error": {"code": .., "message": ..}}`.
+            match answer.get("__rpc_error") {
+                Some(error) => json!({"jsonrpc": "2.0", "id": req["id"], "error": error}),
+                None => json!({"jsonrpc": "2.0", "id": req["id"], "result": answer}),
+            }
         };
         let body = match request.as_array() {
             Some(batch) => Json::Array(batch.iter().map(reply).collect()),
@@ -2234,7 +2252,7 @@ mod swap_send_path_wire_form {
 
     /// An ERC-20 token coin on a chain-137 platform with `policy` as its stored swap gas-fee policy. The
     /// platform carries `"max_eth_tx_type": 2`, as every shipped coin with a non-legacy policy does.
-    fn polygon_token(url: &str, policy: SwapGasFeePolicy, token_addr: Address) -> (MmArc, EthCoin) {
+    pub(super) fn polygon_token(url: &str, policy: SwapGasFeePolicy, token_addr: Address) -> (MmArc, EthCoin) {
         polygon_token_with_conf(
             url,
             policy,
@@ -2809,6 +2827,627 @@ mod scripted_node_ports {
             1,
             "the lagging node is asked once; its disagreement forces no second round"
         );
+    }
+
+    /// CRD ch.56 R5, R6, D5 (tests T4, T5, T6): the "fee cap below block base fee" rejection is a typed error,
+    /// and a gas-limit estimation carries the fee fields the transaction is signed with.
+    mod fee_cap_below_base_fee {
+        use super::super::swap_send_path_wire_form::polygon_token;
+        use super::*;
+        use crate::request_fee_scope::with_request_fee_scope;
+        use crate::FeeCapBelowBaseFee;
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+
+        // ── T4: the classification, no node ─────────────────────────────────────────────────────────────────
+
+        /// The observed text of CRD ch.56 §56.1A, as the daemon's own log renders the error.
+        const FIELD_LINE: &str = "Transport error: server returned an error response: error code -32000: failed \
+            with 16777216 gas: max fee per gas less than block base fee: address \
+            0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c, maxFeePerGas: 260384509, baseFee: 289502753 \
+            (node https://ethereum.public.blockpi.network)";
+
+        const PHRASES: [&str; 3] = [
+            "max fee per gas less than block base fee",
+            "fee cap less than block base fee",
+            "miner premium is negative",
+        ];
+
+        fn rejection(cap: u64, base: u64, node: Option<&str>) -> FeeCapBelowBaseFee {
+            FeeCapBelowBaseFee {
+                max_fee_per_gas: Some(U256::from(cap)),
+                base_fee: Some(U256::from(base)),
+                node: node.map(str::to_owned),
+            }
+        }
+
+        #[test]
+        fn the_observed_field_line_is_classified_with_both_amounts_and_the_node() {
+            assert_eq!(
+                classify_fee_cap_below_base_fee(FIELD_LINE),
+                Some(rejection(
+                    260_384_509,
+                    289_502_753,
+                    Some("https://ethereum.public.blockpi.network")
+                ))
+            );
+        }
+
+        #[test]
+        fn every_phrasing_is_classified_embedded_in_the_observed_shape_and_bare() {
+            for phrase in PHRASES {
+                let embedded = format!(
+                    "server returned an error response: error code -32000: failed with 16777216 gas: {phrase}: \
+                     address 0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c, maxFeePerGas: 260384509, \
+                     baseFee: 289502753"
+                );
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(&embedded),
+                    Some(rejection(260_384_509, 289_502_753, None)),
+                    "{phrase}"
+                );
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(phrase),
+                    Some(FeeCapBelowBaseFee {
+                        max_fee_per_gas: None,
+                        base_fee: None,
+                        node: None
+                    }),
+                    "bare: {phrase}"
+                );
+                // The node label alone, without the amounts.
+                let labelled = format!("{phrase} (node http://127.0.0.1:8545)");
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(&labelled).and_then(|r| r.node),
+                    Some("http://127.0.0.1:8545".to_owned()),
+                    "{phrase}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_similar_error_about_something_else_is_not_classified() {
+            for text in [
+                "server returned an error response: error code -32000: failed with 16777216 gas: insufficient \
+                 funds for gas * price + value: address 0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c have 0 want \
+                 5000000000000000",
+                "error code -32000: gas required exceeds allowance (0)",
+                "error code -32016: The execution failed due to an exception.",
+                "execution reverted",
+                // The spelling is the node's: a near miss is not a match.
+                "Max Fee Per Gas Less Than Block Base Fee",
+                "max fee per gas less than block",
+                "",
+            ] {
+                assert_eq!(classify_fee_cap_below_base_fee(text), None, "{text}");
+            }
+        }
+
+        #[test]
+        fn the_typed_error_reaches_every_error_type_of_the_coin_layer_unflattened() {
+            let typed = || Web3RpcError::FeeCapBelowBaseFee(classify_fee_cap_below_base_fee(FIELD_LINE).unwrap());
+            let expected = classify_fee_cap_below_base_fee(FIELD_LINE).unwrap();
+            assert!(matches!(WithdrawError::from(typed()), WithdrawError::FeeCapBelowBaseFee(r) if r == expected));
+            assert!(
+                matches!(TradePreimageError::from(typed()), TradePreimageError::FeeCapBelowBaseFee(r) if r == expected)
+            );
+            assert!(matches!(BalanceError::from(typed()), BalanceError::FeeCapBelowBaseFee(r) if r == expected));
+            // The rejection of a Transport text stays what it was.
+            assert!(matches!(
+                TradePreimageError::from(Web3RpcError::Transport("down".to_owned())),
+                TradePreimageError::Transport(_)
+            ));
+        }
+
+        #[test]
+        fn the_user_text_names_both_amounts_and_the_host_only_node_label() {
+            let text = classify_fee_cap_below_base_fee(FIELD_LINE).unwrap().to_string();
+            assert!(text.contains("0.260384509 gwei (260384509 wei)"), "{text}");
+            assert!(text.contains("0.289502753 gwei (289502753 wei)"), "{text}");
+            assert!(
+                text.contains("(node https://ethereum.public.blockpi.network)"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("0x8F7248e7"),
+                "the account address is not repeated: {text}"
+            );
+            // Whole gwei and amounts above a gwei.
+            let text = rejection(3_000_000_000, 12_500_000_001, None).to_string();
+            assert!(text.contains("3 gwei (3000000000 wei)"), "{text}");
+            assert!(text.contains("12.500000001 gwei (12500000001 wei)"), "{text}");
+            // Without the amounts the text still says what happened.
+            assert!(classify_fee_cap_below_base_fee(PHRASES[0])
+                .unwrap()
+                .to_string()
+                .contains("below the block base fee"));
+        }
+
+        #[test]
+        fn the_rpc_error_types_carry_it_as_their_own_variant_with_decimal_wei_in_the_json() {
+            let err = WithdrawError::FeeCapBelowBaseFee(classify_fee_cap_below_base_fee(FIELD_LINE).unwrap());
+            assert_eq!(
+                common::HttpStatusCode::status_code(&err),
+                http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "FeeCapBelowBaseFee");
+            assert_eq!(json["error_data"]["max_fee_per_gas"], "260384509");
+            assert_eq!(json["error_data"]["base_fee"], "289502753");
+            let back: WithdrawError = serde_json::from_value(json).unwrap();
+            assert!(matches!(back, WithdrawError::FeeCapBelowBaseFee(_)));
+        }
+
+        // ── the scripted fee market ─────────────────────────────────────────────────────────────────────────
+
+        /// How the base fee moves when an `eth_estimateGas` arrives, before the node validates it.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Rise {
+            /// It does not move.
+            Never,
+            /// It rises by one-eighth, once: the first estimation arrives one block later than the price query.
+            Once,
+            /// It rises by one-eighth at every estimation: no retry can catch up.
+            Always,
+        }
+
+        /// A chain whose base fee is `seen` when the daemon asks for a price, and whose node validates the fee
+        /// fields of every estimation request against the base fee of that moment.
+        struct FeeMarket {
+            seen: AtomicU64,
+            rise: Rise,
+            risen: AtomicBool,
+            /// The `eth_estimateGas` request objects, in arrival order.
+            estimates: Mutex<Vec<Json>>,
+            /// The raw transactions broadcast, and whether a broadcast is rejected as underpriced.
+            sent: Mutex<Vec<Vec<u8>>>,
+            reject_broadcast: bool,
+            gas_price_queries: AtomicUsize,
+            fee_history_queries: AtomicUsize,
+        }
+
+        const BASE_FEE: u64 = 100_000_000_000;
+        const ESTIMATED_GAS: u64 = 60_000;
+        const TIP: u64 = 1_000_000_000;
+
+        impl FeeMarket {
+            fn new(rise: Rise) -> Arc<FeeMarket> {
+                Arc::new(FeeMarket {
+                    seen: AtomicU64::new(BASE_FEE),
+                    rise,
+                    risen: AtomicBool::new(false),
+                    estimates: Mutex::default(),
+                    sent: Mutex::default(),
+                    reject_broadcast: false,
+                    gas_price_queries: AtomicUsize::new(0),
+                    fee_history_queries: AtomicUsize::new(0),
+                })
+            }
+
+            fn rejecting_broadcast() -> Arc<FeeMarket> {
+                Arc::new(FeeMarket {
+                    seen: AtomicU64::new(BASE_FEE),
+                    rise: Rise::Never,
+                    risen: AtomicBool::new(false),
+                    estimates: Mutex::default(),
+                    sent: Mutex::default(),
+                    reject_broadcast: true,
+                    gas_price_queries: AtomicUsize::new(0),
+                    fee_history_queries: AtomicUsize::new(0),
+                })
+            }
+
+            fn node(self: &Arc<Self>) -> super::super::scripted_evm_node::ScriptedNode {
+                let market = self.clone();
+                spawn(move |method, params| market.answer(method, params))
+            }
+
+            fn quantity(value: &Json) -> u64 {
+                match value {
+                    Json::String(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap(),
+                    other => other.as_u64().unwrap(),
+                }
+            }
+
+            fn answer(&self, method: &str, params: &Json) -> Json {
+                let hex = |v: u64| json!(format!("{v:#x}"));
+                match method {
+                    "parity_nextNonce" | "eth_getTransactionCount" => hex(self.sent.lock().unwrap().len() as u64),
+                    "eth_gasPrice" => {
+                        self.gas_price_queries.fetch_add(1, AtomicOrdering::SeqCst);
+                        hex(self.seen.load(AtomicOrdering::SeqCst))
+                    },
+                    "eth_feeHistory" => {
+                        self.fee_history_queries.fetch_add(1, AtomicOrdering::SeqCst);
+                        let seen = self.seen.load(AtomicOrdering::SeqCst);
+                        let count = Self::quantity(&params[0]) as usize;
+                        let percentiles = params[2].as_array().map(|p| p.len()).unwrap_or(0);
+                        // The oldest entry is a block old: the mined block of a one-block request is below the
+                        // base fee the pending block carries, as on a chain whose blocks are full.
+                        let mut base_fees = vec![hex(seen); count + 1];
+                        base_fees[0] = hex(seen / 10 * 9);
+                        json!({
+                            "oldestBlock": "0x1",
+                            "baseFeePerGas": base_fees,
+                            "gasUsedRatio": vec![0.5; count],
+                            "reward": vec![vec![hex(TIP); percentiles]; count],
+                        })
+                    },
+                    // The allowance of the swap contract: none.
+                    "eth_call" => json!(format!("0x{}", "00".repeat(32))),
+                    "eth_estimateGas" => {
+                        let request = params[0].clone();
+                        self.estimates.lock().unwrap().push(request.clone());
+                        let base = match self.rise {
+                            Rise::Never => self.seen.load(AtomicOrdering::SeqCst),
+                            Rise::Once if self.risen.swap(true, AtomicOrdering::SeqCst) => {
+                                self.seen.load(AtomicOrdering::SeqCst)
+                            },
+                            Rise::Once | Rise::Always => {
+                                let risen = self.seen.load(AtomicOrdering::SeqCst) / 8 * 9;
+                                self.seen.store(risen, AtomicOrdering::SeqCst);
+                                risen
+                            },
+                        };
+                        // A legacy price counts as both caps.
+                        let cap = request
+                            .get("maxFeePerGas")
+                            .or_else(|| request.get("gasPrice"))
+                            .map(Self::quantity);
+                        match cap {
+                            Some(cap) if cap < base => json!({"__rpc_error": {
+                                "code": -32000,
+                                "message": format!(
+                                    "failed with 16777216 gas: max fee per gas less than block base fee: address \
+                                     {}, maxFeePerGas: {cap}, baseFee: {base}",
+                                    request["from"].as_str().unwrap_or("0x")
+                                ),
+                            }}),
+                            _ => hex(ESTIMATED_GAS),
+                        }
+                    },
+                    "eth_sendRawTransaction" => {
+                        let raw = hex::decode(params[0].as_str().unwrap().trim_start_matches("0x")).unwrap();
+                        if self.reject_broadcast {
+                            let tx = signed_eth_tx_from_bytes(&raw).unwrap();
+                            let (max_fee, _, price) = Self::fees_of(&tx);
+                            let cap = max_fee.or(price).unwrap();
+                            return json!({"__rpc_error": {
+                                "code": -32000,
+                                "message": format!(
+                                    "max fee per gas less than block base fee: address {:#x}, maxFeePerGas: {cap}, \
+                                     baseFee: {}",
+                                    tx.sender(),
+                                    cap + 1
+                                ),
+                            }});
+                        }
+                        self.sent.lock().unwrap().push(raw);
+                        json!(format!("0x{}", "11".repeat(32)))
+                    },
+                    other => panic!("the scripted node does not serve `{}`", other),
+                }
+            }
+
+            /// `(max fee, max priority fee, gas price)` of a signed transaction, whichever form it has.
+            fn fees_of(tx: &SignedEthTx) -> (Option<U256>, Option<U256>, Option<U256>) {
+                match &tx.kind {
+                    TxKind::Legacy { gas_price } => (None, None, Some(*gas_price)),
+                    TxKind::Typed(t) => (t.max_fee_per_gas, t.max_priority_fee_per_gas, t.gas_price),
+                }
+            }
+
+            /// Wei out of a quantity member of a recorded estimation request.
+            fn field(request: &Json, member: &str) -> Option<U256> {
+                request.get(member).map(|v| U256::from(Self::quantity(v)))
+            }
+        }
+
+        fn token(node: &super::super::scripted_evm_node::ScriptedNode, policy: SwapGasFeePolicy) -> (MmArc, EthCoin) {
+            polygon_token(
+                &node.url,
+                policy,
+                Address::from_str("3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap(),
+            )
+        }
+
+        fn spender() -> Address { Address::from_str("9130b257d37a52e52f21054c4da3450c72f595ce").unwrap() }
+
+        /// The fee fields of the one signed transaction the node received: `(max fee, max priority fee, price)`.
+        fn signed_fees(market: &FeeMarket) -> (Option<U256>, Option<U256>, Option<U256>) {
+            let sent = market.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly one transaction is broadcast");
+            FeeMarket::fees_of(&signed_eth_tx_from_bytes(&sent[0]).unwrap())
+        }
+
+        fn approve(coin: &EthCoin) -> Result<SignedEthTx, TransactionErr> {
+            block_on(coin.approve_for_v1_payment(spender(), U256::max_value()).compat())
+        }
+
+        // ── T5: the estimation carries the fee fields the transaction is signed with ──────────────────────────
+
+        #[test]
+        fn t5_the_swap_approve_estimate_carries_the_pair_of_the_signed_approve_under_a_tier() {
+            for policy in [SwapGasFeePolicy::Low, SwapGasFeePolicy::Medium, SwapGasFeePolicy::High] {
+                let market = FeeMarket::new(Rise::Never);
+                let node = market.node();
+                let (_ctx, coin) = token(&node, policy);
+                approve(&coin).expect("the approve succeeds");
+
+                let estimates = market.estimates.lock().unwrap().clone();
+                assert_eq!(estimates.len(), 1, "{policy:?}");
+                let (max_fee, priority, price) = signed_fees(&market);
+                assert!(price.is_none(), "a tier signs a type-2 transaction");
+                assert!(max_fee.is_some() && priority.is_some());
+                assert_eq!(FeeMarket::field(&estimates[0], "maxFeePerGas"), max_fee, "{policy:?}");
+                assert_eq!(
+                    FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                    priority,
+                    "{policy:?}"
+                );
+                assert!(estimates[0].get("gasPrice").is_none(), "{policy:?}: no legacy price");
+                // One fee fetch priced both the estimation and the signature.
+                assert_eq!(market.fee_history_queries.load(AtomicOrdering::SeqCst), 1, "{policy:?}");
+            }
+        }
+
+        #[test]
+        fn t5_the_swap_approve_estimate_carries_the_gas_price_of_the_signed_approve_under_the_legacy_policy() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            approve(&coin).expect("the approve succeeds");
+
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            let (max_fee, priority, price) = signed_fees(&market);
+            assert!(
+                max_fee.is_none() && priority.is_none(),
+                "the legacy policy signs an untyped transaction"
+            );
+            assert!(price.is_some());
+            assert_eq!(FeeMarket::field(&estimates[0], "gasPrice"), price);
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+            assert_eq!(
+                market.gas_price_queries.load(AtomicOrdering::SeqCst),
+                1,
+                "one price fetch"
+            );
+        }
+
+        fn allowance_is_short(coin: &EthCoin) -> Result<TradeFee, MmError<TradePreimageError>> {
+            block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
+        }
+
+        #[test]
+        fn t5_the_trade_preimage_approve_estimate_carries_the_tier_pair_or_the_legacy_price() {
+            // A tier: both caps of the tier, which the signing path would take, and no legacy price.
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Medium);
+            allowance_is_short(&coin).expect("the preview succeeds");
+            let tier = block_on(coin.get_eip1559_gas_fee(false)).unwrap().medium;
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxFeePerGas"),
+                Some(tier.max_fee_per_gas)
+            );
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                Some(tier.max_priority_fee_per_gas)
+            );
+            assert!(estimates[0].get("gasPrice").is_none());
+
+            // The legacy policy: the price alone.
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            allowance_is_short(&coin).expect("the preview succeeds");
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert!(FeeMarket::field(&estimates[0], "gasPrice").is_some());
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+        }
+
+        fn taker_fee_preview(coin: &EthCoin) -> Result<TradeFee, MmError<TradePreimageError>> {
+            let dex_fee = u256_to_big_decimal(1_000_000u64.into(), 6).unwrap();
+            block_on(coin.get_fee_to_send_taker_fee(dex_fee, FeeApproxStage::WithoutApprox))
+        }
+
+        #[test]
+        fn t5_the_taker_fee_preview_estimate_carries_the_tier_pair_or_the_legacy_price() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::High);
+            taker_fee_preview(&coin).expect("the preview succeeds");
+            let tier = block_on(coin.get_eip1559_gas_fee(false)).unwrap().high;
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxFeePerGas"),
+                Some(tier.max_fee_per_gas)
+            );
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                Some(tier.max_priority_fee_per_gas)
+            );
+            assert!(estimates[0].get("gasPrice").is_none());
+
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            taker_fee_preview(&coin).expect("the preview succeeds");
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert!(FeeMarket::field(&estimates[0], "gasPrice").is_some());
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+        }
+
+        // ── T6: the field symptom, end to end ─────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn t6_a_legacy_priced_step_is_accepted_on_the_d5_retry_and_signs_with_the_accepted_price() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            approve(&coin).expect("the retry is accepted");
+
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 2, "one rejected request and one retry");
+            let (first, retry) = (
+                FeeMarket::field(&estimates[0], "gasPrice").unwrap(),
+                FeeMarket::field(&estimates[1], "gasPrice").unwrap(),
+            );
+            let risen = U256::from(BASE_FEE / 8 * 9);
+            assert!(
+                first < risen,
+                "the first price is below the base fee one block later: {first}"
+            );
+            assert!(retry >= risen, "the retry is priced again, afresh: {retry}");
+            // The approve is signed with the price that was accepted, not the rejected one.
+            assert_eq!(signed_fees(&market).2, Some(retry));
+        }
+
+        #[test]
+        fn t6_without_a_retry_the_legacy_priced_step_surfaces_the_typed_error_not_a_transport_error() {
+            let market = FeeMarket::new(Rise::Always);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            let err = approve(&coin).expect_err("the node rejects twice");
+            let TransactionErr::FeeCapBelowBaseFee { rejection, tx } = &err else {
+                panic!("expected the typed fee-cap error, got {err:?}");
+            };
+            assert!(tx.is_none(), "nothing was signed");
+            assert!(rejection.max_fee_per_gas.is_some() && rejection.base_fee.is_some());
+            assert!(rejection.max_fee_per_gas < rejection.base_fee);
+            assert!(
+                rejection.node.as_deref().is_some_and(|node| node.contains("127.0.0.1")),
+                "{rejection:?}"
+            );
+            assert_eq!(market.estimates.lock().unwrap().len(), 2, "exactly one retry");
+            assert!(market.sent.lock().unwrap().is_empty(), "nothing is broadcast");
+
+            // The same two rejections reach a trade preimage and the taker-fee preview typed. The preview
+            // returns it before it looks at any balance: the scripted node serves no balance read.
+            match allowance_is_short(&coin) {
+                Err(e) if matches!(e.get_inner(), TradePreimageError::FeeCapBelowBaseFee(_)) => {},
+                other => panic!("expected the typed error from the trade preimage, got {other:?}"),
+            }
+            match taker_fee_preview(&coin) {
+                Err(e) if matches!(e.get_inner(), TradePreimageError::FeeCapBelowBaseFee(_)) => {},
+                other => panic!("expected the typed error from the taker-fee preview, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn t6_the_eip1559_tier_is_accepted_first_time_because_its_headroom_covers_one_block() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Medium);
+            approve(&coin).expect("the approve succeeds");
+            assert_eq!(market.estimates.lock().unwrap().len(), 1, "no retry was needed");
+            let (max_fee, _, _) = signed_fees(&market);
+            assert!(max_fee.unwrap() >= U256::from(BASE_FEE / 8 * 9));
+        }
+
+        #[test]
+        fn t6_a_reading_cached_in_the_request_scope_is_not_used_for_the_estimate() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            let (cached, estimated_price) = block_on(with_request_fee_scope(&ctx, async {
+                // An order-posting request reads the gas price: the reading is kept in the request and the cache.
+                let cached = coin.get_gas_price().compat().await.unwrap();
+                // Several blocks later the chain is far above that reading.
+                market.seen.store(2 * BASE_FEE, AtomicOrdering::SeqCst);
+                // The approve estimate of the same request is priced afresh.
+                coin.approve_gas_estimate(coin.get_token_address().unwrap(), Bytes::default())
+                    .compat()
+                    .await
+                    .unwrap();
+                let estimates = market.estimates.lock().unwrap().clone();
+                assert_eq!(estimates.len(), 1, "accepted first time");
+                (cached, FeeMarket::field(&estimates[0], "gasPrice").unwrap())
+            }));
+            assert!(estimated_price >= U256::from(2 * BASE_FEE), "{estimated_price}");
+            assert!(cached < estimated_price, "the stale reading {cached} was not sent");
+        }
+
+        #[test]
+        fn t6_a_fee_cap_rejection_discards_the_cached_gas_price_of_the_chain() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            // Request 1 reads and caches the gas price, then its approve estimate is rejected once (D5(a)).
+            block_on(with_request_fee_scope(&ctx, async {
+                coin.get_gas_price().compat().await.unwrap();
+                coin.approve_gas_estimate(coin.get_token_address().unwrap(), Bytes::default())
+                    .compat()
+                    .await
+                    .unwrap();
+            }));
+            let queries = market.gas_price_queries.load(AtomicOrdering::SeqCst);
+            // Request 2 would reuse the cached reading (15 s default) if the rejection had not discarded it.
+            block_on(with_request_fee_scope(&ctx, async {
+                coin.get_gas_price().compat().await.unwrap();
+            }));
+            assert_eq!(
+                market.gas_price_queries.load(AtomicOrdering::SeqCst),
+                queries + 1,
+                "the next order-posting request read the gas price afresh"
+            );
+        }
+
+        // ── the broadcast sites ───────────────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn a_rejected_swap_broadcast_surfaces_the_typed_error_with_the_signed_transaction_and_is_not_retried() {
+            for policy in [SwapGasFeePolicy::Legacy, SwapGasFeePolicy::Medium] {
+                let market = FeeMarket::rejecting_broadcast();
+                let node = market.node();
+                let (_ctx, coin) = token(&node, policy);
+                let err = block_on(coin.send_to_address(spender(), U256::one()).compat())
+                    .expect_err("the node rejects the broadcast");
+                let TransactionErr::FeeCapBelowBaseFee { rejection, tx } = &err else {
+                    panic!("{policy:?}: expected the typed fee-cap error, got {err:?}");
+                };
+                assert!(tx.is_some(), "{policy:?}: the signed transaction is kept for recovery");
+                assert!(
+                    rejection.max_fee_per_gas.is_some() && rejection.base_fee.is_some(),
+                    "{policy:?}"
+                );
+                assert!(err.get_tx().is_some());
+                assert!(
+                    err.get_plain_text_format().contains("below the block base fee"),
+                    "{policy:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_raw_transaction_send_reports_the_rejection_with_both_amounts() {
+            use crate::eth::eth_market_ops::*;
+            let market = FeeMarket::rejecting_broadcast();
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            // Any signed transaction will do for the scripted node.
+            let unsigned = UnSignedEthTx {
+                nonce: 0.into(),
+                gas_price: 1_000_000_000u64.into(),
+                gas: 21_000.into(),
+                action: Action::Call(spender()),
+                value: 1.into(),
+                data: vec![],
+            };
+            let secret = Secret::from_str(TEST_KEY).unwrap();
+            let raw = rlp::encode(&unsigned.sign(&secret, Some(137))).to_vec();
+            let err = coin.send_raw_tx_bytes(&raw).wait().expect_err("the node rejects it");
+            assert!(err.contains("(1000000000 wei)"), "{err}");
+            assert!(err.contains("(1000000001 wei)"), "{err}");
+            assert!(err.contains("below the block base fee"), "{err}");
+        }
     }
 }
 
