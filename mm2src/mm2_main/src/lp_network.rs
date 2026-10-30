@@ -362,6 +362,15 @@ pub async fn p2p_event_process_loop(ctx: MmWeak, mut rx: AdexEventRx, i_am_relay
     }
 }
 
+/// The transaction a transaction-helper message carries (CRD ch.51 R50B). The sender signs the transaction's bytes
+/// (`lp_swap::broadcast_p2p_tx_msg`), so the message is a signed envelope; one that does not decode or verify is an
+/// error.
+fn tx_helper_transaction(data: &[u8]) -> Result<Vec<u8>, String> {
+    mm2_p2p::decode_signed::<Vec<u8>>(data)
+        .map(|(tx, _signature, _pubkey)| tx)
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) async fn process_p2p_message(
     ctx: MmArc,
     peer_id: PeerId,
@@ -402,9 +411,14 @@ pub(crate) async fn process_p2p_message(
             Some(lp_swap::TX_HELPER_PREFIX) => {
                 if let Some(pair) = split.next() {
                     if let Ok(Some(coin)) = lp_coinfind(&ctx, pair).await {
-                        match coin.send_raw_tx_bytes(&message.data).compat().await {
-                            Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
-                            Err(e) => log::error!("Broadcast transaction failed. {}", e),
+                        // CRD ch.51 R50B: the message is the signed envelope of the transaction, not the transaction.
+                        match tx_helper_transaction(&message.data) {
+                            Ok(tx) => match coin.send_raw_tx_bytes(&tx).compat().await {
+                                Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
+                                // The usual outcome: the parties have already broadcast it themselves.
+                                Err(e) => log::debug!("Broadcast transaction failed. {}", e),
+                            },
+                            Err(e) => log::warn!("Transaction-helper message for {} does not decode: {}", pair, e),
                         }
                     }
                 }
@@ -770,9 +784,28 @@ pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<De
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_connection_healthcheck, peer_healthcheck_topic};
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic, tx_helper_transaction};
     use common::block_on;
     use mm2_core::mm_ctx::MmCtxBuilder;
+
+    /// CRD ch.51 R50B: the receiver broadcasts the transaction inside the signed envelope, never the envelope.
+    #[test]
+    fn tx_helper_message_yields_the_signed_transaction() {
+        // The first bytes of a transaction, with values above 0x7f as in a real one.
+        let tx: Vec<u8> = vec![1, 0, 0, 0, 1, 0xa6, 0x7a, 0x32, 0x94, 0xd4, 0x80, 0xfb, 0, 0, 0, 0];
+        // What `lp_swap::broadcast_p2p_tx_msg` publishes.
+        let envelope = mm2_p2p::encode_and_sign(&tx, &[1; 32]).unwrap();
+        assert_ne!(envelope, tx);
+        assert_eq!(tx_helper_transaction(&envelope).unwrap(), tx);
+
+        // A bare transaction is not an envelope.
+        assert!(tx_helper_transaction(&tx).is_err());
+        // A changed byte of the signed payload fails the signature.
+        let mut tampered = envelope.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(tx_helper_transaction(&tampered).is_err());
+    }
 
     #[test]
     fn peer_healthcheck_topic_is_prefixed_by_peer() {
