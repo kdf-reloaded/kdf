@@ -142,7 +142,7 @@ impl Config {
     }
 
     /// Maximum number of RPCs queued in the priority lane of one connection. A priority RPC
-    /// past it closes the connection (default is 256).
+    /// past it joins the end of the data queue (default is 256; CRD ch.28 §28.9B RQ1 item 9).
     pub fn send_queue_priority_max(&self) -> usize {
         self.send_queue.priority_max
     }
@@ -707,7 +707,7 @@ impl ConfigBuilder {
     }
 
     /// The maximum number of RPCs queued in the priority lane of one connection (default is
-    /// 256). A priority RPC past it closes the connection.
+    /// 256). A priority RPC past it joins the end of the data queue (CRD ch.28 §28.9B RQ1 item 9).
     pub fn send_queue_priority_max(&mut self, max: usize) -> &mut Self {
         self.config.send_queue.priority_max = max;
         self

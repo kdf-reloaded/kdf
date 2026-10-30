@@ -31,6 +31,7 @@ use mm2_metrics::{ClockOps, MetricsOps};
 use mm2_p2p::atomicdex_behaviour::{AdexBehaviourCmd, AdexBehaviourEvent, AdexCmdTx, AdexEventRx, AdexResponse,
                                    AdexResponseChannel};
 use mm2_p2p::peers_exchange::PeerAddresses;
+use mm2_p2p::request_response::LocalFailure;
 use mm2_p2p::{decode_message, decode_signed, encode_and_sign, encode_message, pub_sub_topic, DecodingError,
               GossipsubMessage, Libp2pPublic, Libp2pSecpPublic, MessageId, NetworkPorts, PeerId, TOPIC_SEPARATOR};
 #[cfg(test)] use mocktopus::macros::*;
@@ -64,7 +65,12 @@ pub enum P2PRequestError {
     EncodeError(String),
     DecodeError(String),
     SendError(String),
+    /// The peer answered with an error.
     ResponseError(String),
+    /// This node's own request failed without an answer from the peer (the order-book synchronization logging
+    /// classifies by it); the text is the same as it was when this was a [`P2PRequestError::ResponseError`].
+    #[display(fmt = "{}", _1)]
+    LocalResponseError(LocalFailure, String),
     #[display(fmt = "Expected 1 response, found {}", _0)]
     ExpectedSingleResponseError(usize),
 }
@@ -362,6 +368,15 @@ pub async fn p2p_event_process_loop(ctx: MmWeak, mut rx: AdexEventRx, i_am_relay
     }
 }
 
+/// The transaction a transaction-helper message carries (CRD ch.51 R50B). The sender signs the transaction's bytes
+/// (`lp_swap::broadcast_p2p_tx_msg`), so the message is a signed envelope; one that does not decode or verify is an
+/// error.
+fn tx_helper_transaction(data: &[u8]) -> Result<Vec<u8>, String> {
+    mm2_p2p::decode_signed::<Vec<u8>>(data)
+        .map(|(tx, _signature, _pubkey)| tx)
+        .map_err(|e| e.to_string())
+}
+
 pub(crate) async fn process_p2p_message(
     ctx: MmArc,
     peer_id: PeerId,
@@ -402,9 +417,14 @@ pub(crate) async fn process_p2p_message(
             Some(lp_swap::TX_HELPER_PREFIX) => {
                 if let Some(pair) = split.next() {
                     if let Ok(Some(coin)) = lp_coinfind(&ctx, pair).await {
-                        match coin.send_raw_tx_bytes(&message.data).compat().await {
-                            Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
-                            Err(e) => log::error!("Broadcast transaction failed. {}", e),
+                        // CRD ch.51 R50B: the message is the signed envelope of the transaction, not the transaction.
+                        match tx_helper_transaction(&message.data) {
+                            Ok(tx) => match coin.send_raw_tx_bytes(&tx).compat().await {
+                                Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
+                                // The usual outcome: the parties have already broadcast it themselves.
+                                Err(e) => log::debug!("Broadcast transaction failed. {}", e),
+                            },
+                            Err(e) => log::warn!("Transaction-helper message for {} does not decode: {}", pair, e),
                         }
                     }
                 }
@@ -554,7 +574,7 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     match response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?
     {
         Some((from_peer, response)) => {
             let response = decode_message::<T>(&response)?;
@@ -567,7 +587,10 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
 pub enum PeerDecodedResponse<T> {
     Ok(T),
     None,
+    /// The peer answered with an error.
     Err(String),
+    /// This node's own request failed without an answer, or its answer could not be decoded.
+    LocalErr(LocalFailure, String),
 }
 
 #[allow(dead_code)]
@@ -590,7 +613,7 @@ pub async fn request_relays<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -615,7 +638,7 @@ pub async fn request_peers<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -637,6 +660,7 @@ pub async fn request_one_peer<T: de::DeserializeOwned>(
         PeerDecodedResponse::Ok(response) => Ok(Some(response)),
         PeerDecodedResponse::None => Ok(None),
         PeerDecodedResponse::Err(e) => MmError::err(P2PRequestError::ResponseError(e)),
+        PeerDecodedResponse::LocalErr(kind, e) => MmError::err(P2PRequestError::LocalResponseError(kind, e)),
     }
 }
 
@@ -649,10 +673,11 @@ fn parse_peers_responses<T: de::DeserializeOwned>(
             let res = match res {
                 AdexResponse::Ok { response } => match decode_message::<T>(&response) {
                     Ok(res) => PeerDecodedResponse::Ok(res),
-                    Err(e) => PeerDecodedResponse::Err(ERRL!("{}", e)),
+                    Err(e) => PeerDecodedResponse::LocalErr(LocalFailure::Decode, ERRL!("{}", e)),
                 },
                 AdexResponse::None => PeerDecodedResponse::None,
                 AdexResponse::Err { error } => PeerDecodedResponse::Err(error),
+                AdexResponse::LocalErr { kind, error } => PeerDecodedResponse::LocalErr(kind, error),
             };
             (peer_id, res)
         })
@@ -770,9 +795,28 @@ pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<De
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_connection_healthcheck, peer_healthcheck_topic};
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic, tx_helper_transaction};
     use common::block_on;
     use mm2_core::mm_ctx::MmCtxBuilder;
+
+    /// CRD ch.51 R50B: the receiver broadcasts the transaction inside the signed envelope, never the envelope.
+    #[test]
+    fn tx_helper_message_yields_the_signed_transaction() {
+        // The first bytes of a transaction, with values above 0x7f as in a real one.
+        let tx: Vec<u8> = vec![1, 0, 0, 0, 1, 0xa6, 0x7a, 0x32, 0x94, 0xd4, 0x80, 0xfb, 0, 0, 0, 0];
+        // What `lp_swap::broadcast_p2p_tx_msg` publishes.
+        let envelope = mm2_p2p::encode_and_sign(&tx, &[1; 32]).unwrap();
+        assert_ne!(envelope, tx);
+        assert_eq!(tx_helper_transaction(&envelope).unwrap(), tx);
+
+        // A bare transaction is not an envelope.
+        assert!(tx_helper_transaction(&tx).is_err());
+        // A changed byte of the signed payload fails the signature.
+        let mut tampered = envelope.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(tx_helper_transaction(&tampered).is_err());
+    }
 
     #[test]
     fn peer_healthcheck_topic_is_prefixed_by_peer() {

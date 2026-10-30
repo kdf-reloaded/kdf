@@ -2,7 +2,8 @@ use super::check_balance::CheckBalanceError;
 use super::{maker_swap_trade_preimage, taker_swap_trade_preimage, MakerTradePreimage, TakerTradePreimage};
 use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, TakerAction, TakerOrderBuildError};
 use coins::request_fee_scope::with_request_fee_scope;
-use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, TradeFee, TradePreimageError};
+use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, FeeCapBelowBaseFee, TradeFee,
+            TradePreimageError};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::HttpStatusCode;
 use derive_more::Display;
@@ -242,6 +243,9 @@ pub enum TradePreimageRpcError {
     PriceTooLow { price: BigDecimal, threshold: BigDecimal },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// An EVM node rejected an estimation or a transaction for a fee cap below the block base fee (CRD ch.56 R5).
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -258,9 +262,10 @@ impl HttpStatusCode for TradePreimageRpcError {
             | TradePreimageRpcError::TradingNotSupported { .. }
             | TradePreimageRpcError::InvalidParam { .. }
             | TradePreimageRpcError::PriceTooLow { .. } => StatusCode::BAD_REQUEST,
-            TradePreimageRpcError::Transport(_) | TradePreimageRpcError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
+            TradePreimageRpcError::Transport(_)
+            | TradePreimageRpcError::FeeCapBelowBaseFee(_)
+            | TradePreimageRpcError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -273,6 +278,7 @@ impl From<BalanceError> for TradePreimageRpcError {
             },
             e @ BalanceError::UnexpectedDerivationMethod(_) => TradePreimageRpcError::InternalError(e.to_string()),
             e @ BalanceError::WalletStorageError(_) => TradePreimageRpcError::InternalError(e.to_string()),
+            BalanceError::FeeCapBelowBaseFee(rejection) => TradePreimageRpcError::FeeCapBelowBaseFee(rejection),
             BalanceError::Internal(internal) => TradePreimageRpcError::InternalError(internal),
         }
     }
@@ -313,6 +319,7 @@ impl From<CheckBalanceError> for TradePreimageRpcError {
                 threshold,
             },
             CheckBalanceError::Transport(transport) => TradePreimageRpcError::Transport(transport),
+            CheckBalanceError::FeeCapBelowBaseFee(rejection) => TradePreimageRpcError::FeeCapBelowBaseFee(rejection),
             CheckBalanceError::InternalError(internal) => TradePreimageRpcError::InternalError(internal),
         }
     }

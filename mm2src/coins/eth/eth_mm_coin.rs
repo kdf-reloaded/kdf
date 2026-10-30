@@ -307,9 +307,13 @@ impl MmCoin for EthCoin {
             from: Some(self.my_address),
             to: *call_addr,
             gas: None,
-            // gas price must be supplied because some smart contracts base their
-            // logic on gas price, e.g. TUSD: https://github.com/KomodoPlatform/atomicDEX-API/issues/643
-            gas_price: Some(gas_price),
+            // The fee fields of the swap gas-fee policy are set by `estimate_gas_priced`, fetched for this
+            // request and not taken from `gas_price` above (CRD ch.56 R6). A price must be supplied because
+            // some smart contracts base their logic on gas price, e.g. TUSD:
+            // https://github.com/KomodoPlatform/atomicDEX-API/issues/643
+            gas_price: None,
+            max_fee_per_gas: None,
+            max_priority_fee_per_gas: None,
         };
 
         // `estimate_gas` reverts (e.g. Geth `-32016 "The execution failed due to an
@@ -318,8 +322,23 @@ impl MmCoin for EthCoin {
         // is provider-specific, so instead of matching it we check the actual
         // balances and report whichever one falls short; any other failure is
         // propagated unchanged.
-        let gas_limit = match self.estimate_gas(estimate_gas_req).compat().await {
-            Ok(gas_limit) => gas_limit,
+        // The fee that prices the estimation is fetched for it, and a failure to fetch it is not an estimation
+        // failure, so it does not reach the balance checks below.
+        let estimation_fee = self
+            .fresh_estimation_fee(EstimationFeeSource::SwapPolicy)
+            .compat()
+            .await
+            .mm_err(Into::into)?;
+        let gas_limit = match self
+            .estimate_gas_priced(estimate_gas_req, EstimationFeeSource::SwapPolicy, Some(estimation_fee))
+            .await
+        {
+            Ok((gas_limit, _fee)) => gas_limit,
+            // CRD ch.56 R5: a fee cap below the base fee is not a balance problem, so it is reported as what it
+            // is before the balances are consulted. It reaches here only after the one retry of D5(a).
+            Err(estimate_err) if matches!(estimate_err.get_inner(), Web3RpcError::FeeCapBelowBaseFee(_)) => {
+                return Err(estimate_err).mm_err(TradePreimageError::from);
+            },
             Err(estimate_err) => {
                 let balance = self
                     .my_balance()

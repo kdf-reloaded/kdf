@@ -315,20 +315,33 @@ R16. **Per-coin opt-in predicate.** The swap-operations
      The watcher substrate shall short-circuit on any coin
      pair where either side reports opt-out.
 
-R17. **UTXO-style families and Siacoin are the eligible set
-     today.** At the time of writing the eligible families are
-     UTXO-standard, BCH (Bitcoin Cash), QTUM, and Siacoin
-     ([Chapter 20](20-siacoin-integration.md) §20.10 D7 — a
-     non-UTXO family that opts in via the same per-coin
+R17. **Siacoin is the eligible set today.** *(Amended
+     2026-10-30, Decision BA.)* At the time of writing the only
+     eligible family is Siacoin ([Chapter 20](20-siacoin-integration.md)
+     §20.10 D7 — a non-UTXO family that opts in via the per-coin
      predicate of R16 despite its structurally different
-     native-spend-policy HTLC). Other coin families inherit the
-     opt-out default. Opting in via the predicate is independent
-     of how many of the coin-trait's other watcher methods a
-     family actually implements: the three named UTXO-style
-     families opt in with none of those methods overridden,
-     relying entirely on the trait's own graceful-error defaults,
-     while Siacoin's opt-in is paired with real implementations of
-     four of the five non-trivial methods (Chapter 20 §20.10 D7).
+     native-spend-policy HTLC), whose opt-in is paired with real
+     implementations of four of the five non-trivial methods
+     (Chapter 20 §20.10 D7). Every other coin family, the
+     UTXO-standard, BCH (Bitcoin Cash) and QTUM families
+     included, inherits the opt-out default. A family MUST NOT
+     opt in before it implements the watcher methods its watcher
+     states need, at least the taker-fee validation of the first
+     state (§9.6): an opted-in family without them subscribes the
+     node to its watcher topic (R3) and starts, for every payload
+     it receives, a state machine that can only fail that first
+     state after its retry budget (R13) and stop, broadcasting
+     nothing.
+
+     > **History.** Until 2026-10-30 the three UTXO-style families
+     > opted in with none of the watcher methods overridden,
+     > relying on the trait's graceful-error defaults. A Reloaded
+     > seed on the public network then started a watcher for every
+     > watcher payload of its enabled UTXO coins, each failing its
+     > taker-fee validation six times over a minute and stopping,
+     > and started it again for the next copy of the payload. The
+     > maintainer decided to withdraw the opt-in until the methods
+     > exist (Decision BA); restoring it is part of D3.
 
 R18. **`watcher_reward` field placeholder.** The codebase
      shall carry a `watcher_reward` boolean field on the
@@ -397,9 +410,12 @@ D2. **Cryptographically-bound watcher attribution.** R5
     free-riders. Not in scope today.
 
 D3. **Eligible-coin-family expansion.** *Partially
-    discharged.* R17 lists four eligible families today,
-    up from the three UTXO-style families this entry
-    originally described; Chapter 20 §20.10 D7 is the record
+    discharged.* R17 lists one eligible family today. The three
+    UTXO-style families this entry originally described opted
+    in until 2026-10-30 without any watcher method and were
+    withdrawn by Decision BA; restoring them needs their
+    watcher methods first (R17), together with the taker-side
+    hand-off of R6a. Chapter 20 §20.10 D7 is the record
     of Siacoin's addition, including which of the coin-trait's
     non-trivial watcher methods it implements and which one
     (`create_maker_payment_spend_preimage`) it judges
@@ -654,3 +670,11 @@ V3. The publish-subscribe overlay the substrate rides on is
     transcription; error and log string literals; per-method behavior
     tables keyed to internal names; internal module trees; and
     internal test-function names.
+- *Reloaded-original amendment (2026-10-30, Decision BA): R17 and
+  D3.* The UTXO-standard, BCH and QTUM families no longer opt in
+  to watching. *Inputs:* this repository's own coin-trait
+  overrides and watcher substrate, and a Reloaded seed's own log
+  from a field run on the public network. No reference input was
+  used, the amendment makes no parity claim, and it needs no
+  Dirty Gate pass. Whether a reference node watches swaps of
+  these families is open and queued for a Spec Reader pass.

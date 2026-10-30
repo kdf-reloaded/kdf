@@ -135,6 +135,8 @@ impl From<BalanceError> for EnableTokenError {
     fn from(e: BalanceError) -> Self {
         match e {
             BalanceError::Transport(e) | BalanceError::InvalidResponse(e) => EnableTokenError::Transport(e),
+            // A balance read sends no fee cap; the arm keeps the node's text so the conversion is total.
+            e @ BalanceError::FeeCapBelowBaseFee(_) => EnableTokenError::Transport(e.to_string()),
             BalanceError::UnexpectedDerivationMethod(e) => EnableTokenError::UnexpectedDerivationMethod(e.into()),
             BalanceError::Internal(e) | BalanceError::WalletStorageError(e) => EnableTokenError::Internal(e),
         }

@@ -1,7 +1,7 @@
 use crate::{adex_ping::AdexPing,
             peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
-            request_response::{build_request_response_behaviour, PeerRequest, PeerResponse, RequestResponseBehaviour,
-                               RequestResponseBehaviourEvent, RequestResponseSender},
+            request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
+                               RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
             NetworkInfo, NetworkPorts, RelayAddress, RelayAddressError};
 use derive_more::Display;
@@ -213,9 +213,18 @@ pub enum AdexBehaviourCmd {
 /// but is used to prevent `PeerResponse` from being used outside the network implementation.
 #[derive(Debug, Eq, PartialEq)]
 pub enum AdexResponse {
-    Ok { response: Vec<u8> },
+    Ok {
+        response: Vec<u8>,
+    },
     None,
-    Err { error: String },
+    Err {
+        error: String,
+    },
+    /// A failure of this node's own request (see [`LocalFailure`]); it is never sent to a peer.
+    LocalErr {
+        kind: LocalFailure,
+        error: String,
+    },
 }
 
 impl From<PeerResponse> for AdexResponse {
@@ -224,6 +233,7 @@ impl From<PeerResponse> for AdexResponse {
             PeerResponse::Ok { res } => AdexResponse::Ok { response: res },
             PeerResponse::None => AdexResponse::None,
             PeerResponse::Err { err } => AdexResponse::Err { error: err },
+            PeerResponse::LocalErr { kind, err } => AdexResponse::LocalErr { kind, error: err },
         }
     }
 }
@@ -233,7 +243,8 @@ impl From<AdexResponse> for PeerResponse {
         match res {
             AdexResponse::Ok { response } => PeerResponse::Ok { res: response },
             AdexResponse::None => PeerResponse::None,
-            AdexResponse::Err { error } => PeerResponse::Err { err: error },
+            // Only an answer to a peer's request is converted this way, and a local failure is never one.
+            AdexResponse::Err { error } | AdexResponse::LocalErr { error, .. } => PeerResponse::Err { err: error },
         }
     }
 }
@@ -393,7 +404,7 @@ impl AtomicDexBehaviour {
                 },
             },
             PeerResponse::None => return PeerClockCheck::Inconclusive,
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 debug!("Peer clock check inconclusive: {}", err);
                 return PeerClockCheck::Inconclusive;
             },
@@ -1468,7 +1479,7 @@ async fn request_any_peer(
             PeerResponse::None => {
                 debug!("Received None from peer {:?}, request next peer", peer);
             },
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 error!("Error on request {:?} peer: {:?}. Request next peer", peer, err);
             },
         };
@@ -1523,7 +1534,9 @@ async fn request_one_peer(peer: PeerId, req: Vec<u8>, mut request_response_tx: R
 
     match internal_response_rx.await {
         Ok(response) => response,
-        Err(e) => PeerResponse::Err {
+        // The pending request was dropped without an answer: the local timeout expired.
+        Err(e) => PeerResponse::LocalErr {
+            kind: LocalFailure::Timeout,
             err: format!("Error on request the peer {:?}: \"{:?}\". Request next peer", peer, e),
         },
     }

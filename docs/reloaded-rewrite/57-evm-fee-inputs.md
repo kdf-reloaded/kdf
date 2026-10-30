@@ -135,6 +135,17 @@ are distinct and only the estimator's was corrected. A Reloaded change to
 > fee **cap** that a node will reject if it falls below the block base
 > fee, whereas this source is only one input to a maximum that already
 > includes the node's own suggestion.
+>
+> *Amendment (2026-10-30, clean side, maintainer Decision AZ).* The
+> rationale above holds for the resolved price as a fee figure, not where
+> it is the fee field of a gas-limit estimation request. Under the legacy
+> policy the price is sent as `gasPrice` in every estimation request
+> (R57.7.3, [Chapter 56](56-evm-eip1559-fee-estimation.md) R6), and a
+> strict node validates it there as a cap. With the mined block chosen
+> here, the 13 percent covers one block of the one-eighth rise and no
+> more. Chapter 56 R6 therefore requires that price to be fetched for the
+> request, and chapter 56 R5 and D5 bind how a rejection is classified
+> and handled. The selection of R57.2.2 itself is unchanged.
 
 **R57.2.3** *No third source.* Resolution shall not consult an external
 gas-oracle HTTP service. No public release designation at or after
@@ -194,7 +205,11 @@ R38.6.6j items 1–4, under the same `fee_estimate_cache_secs` key:
   one value for the sender fee, the receiver fee and the maximum volume;
 - order-posting requests may reuse it for up to the configured number of
   seconds;
-- a swap's own transactions always resolve it fresh.
+- a swap's own transactions always resolve it fresh;
+- the fee fields of a gas-limit estimation request are never reused, not
+  even inside an order-posting request: [Chapter 56](56-evm-eip1559-fee-estimation.md)
+  R6 requires them to be fetched for that request (clean-side addition of
+  2026-10-30, maintainer Decision AZ).
 The resolution itself, with its two concurrent queries and its maximum, is
 unchanged. *Rationale:* a `setprice` resolves the gas price twice today,
 once for the sender fee and once for the receiver fee, and each resolution
@@ -853,6 +868,11 @@ legacy form, both EIP-1559 caps for the EIP-1559 form). Supplying them is
 required, not optional: some deployed token contracts branch on the gas
 price presented to them, and some strict EVM clients validate the
 maximum fee per gas against the current block base fee during estimation.
+(The node's rejection in that last case, and the typed error it must
+become, are bound in [Chapter 56](56-evm-eip1559-fee-estimation.md) R5;
+Chapter 56 R6 extends this rule's fee-field requirement to the swap and
+trade-preimage estimation paths. Both are a 2026-10-30 addendum, which
+passed the KDF Dirty Gate on 2026-10-30.)
 
 **R57.7.4** *Envelope type follows the resolved form.* The signed
 transaction's envelope type shall be derived from the resolved fee form —
@@ -1887,3 +1907,13 @@ pre-anchor baseline code.*
   by a session that never read the corpus, from the maintainer's Decision AD of
   2026-10-28 and a market maker's field report. It takes no forbidden-class
   input, so chapter 01 R38 is not engaged and no gate pass is required.
+- *Clean-side addition of 2026-10-30, maintainer Decision AZ.* A session that
+  never read the corpus wrote three items from this project's own code at
+  `d369906c2` and the field report recorded in chapter 56 §56.1A:
+  - the amendment under the cross-reference note of R57.2.2;
+  - the fourth item of R57.2.6;
+  - the cleared-status wording of the chapter-56 cross-reference in R57.7.3.
+
+  They take no forbidden-class input, so chapter 01 R38 is not engaged and no
+  gate pass is required. The one-line cross-reference in R57.7.3 rides on the
+  chapter-56 verdict of 2026-10-30.
