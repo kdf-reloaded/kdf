@@ -23,6 +23,63 @@ use std::time::Duration;
 use wasm_timer::{Instant, Interval};
 
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 - 100;
+/// The window in which timeouts toward one peer are counted instead of logged one by one.
+const TIMEOUT_REPORT_WINDOW: Duration = Duration::from_secs(60);
+
+/// One peer's window of outbound request timeouts: the first timeout was reported when the window opened, the
+/// later ones are only counted.
+struct TimeoutWindow {
+    started: Instant,
+    more: usize,
+}
+
+/// Rate limit of the outbound request timeout log lines: the first timeout toward a peer in a
+/// [`TIMEOUT_REPORT_WINDOW`] is logged at once, the later ones are counted and summarized when the window ends.
+#[derive(Default)]
+struct TimeoutReports {
+    windows: HashMap<PeerId, TimeoutWindow>,
+    ended: Vec<(PeerId, usize)>,
+}
+
+impl TimeoutReports {
+    /// Records a timeout toward `peer` at `now`. Returns `true` when it is the first one in a window, i.e. when
+    /// the caller should log it.
+    fn record(&mut self, peer: PeerId, now: Instant) -> bool {
+        match self.windows.get_mut(&peer) {
+            Some(window) if now.duration_since(window.started) < TIMEOUT_REPORT_WINDOW => {
+                window.more += 1;
+                false
+            },
+            Some(window) => {
+                if window.more > 0 {
+                    self.ended.push((peer, window.more));
+                }
+                *window = TimeoutWindow { started: now, more: 0 };
+                true
+            },
+            None => {
+                self.windows.insert(peer, TimeoutWindow { started: now, more: 0 });
+                true
+            },
+        }
+    }
+
+    /// Closes the windows that ended by `now` and returns the number of later timeouts of every peer whose
+    /// window had any. A window without later timeouts yields nothing.
+    fn flush(&mut self, now: Instant) -> Vec<(PeerId, usize)> {
+        let ended = &mut self.ended;
+        self.windows.retain(|peer, window| {
+            if now.duration_since(window.started) < TIMEOUT_REPORT_WINDOW {
+                return true;
+            }
+            if window.more > 0 {
+                ended.push((*peer, window.more));
+            }
+            false
+        });
+        std::mem::take(&mut self.ended)
+    }
+}
 
 pub type RequestResponseReceiver = mpsc::UnboundedReceiver<(PeerId, PeerRequest, oneshot::Sender<PeerResponse>)>;
 pub type RequestResponseSender = mpsc::UnboundedSender<(PeerId, PeerRequest, oneshot::Sender<PeerResponse>)>;
@@ -47,6 +104,7 @@ pub fn build_request_response_behaviour() -> RequestResponseBehaviour {
         events,
         timeout,
         timeout_interval,
+        timeout_reports: TimeoutReports::default(),
     }
 }
 
@@ -60,6 +118,7 @@ pub enum RequestResponseBehaviourEvent {
 }
 
 struct PendingRequest {
+    peer: PeerId,
     tx: oneshot::Sender<PeerResponse>,
     initiated_at: Instant,
 }
@@ -76,6 +135,8 @@ pub struct RequestResponseBehaviour {
     timeout: Duration,
     /// Interval for request timeout check
     timeout_interval: Interval,
+    /// Rate limit of the timeout log lines.
+    timeout_reports: TimeoutReports,
 }
 
 impl RequestResponseBehaviour {
@@ -93,6 +154,7 @@ impl RequestResponseBehaviour {
     ) -> RequestId {
         let request_id = self.inner.send_request(peer_id, request);
         let pending_request = PendingRequest {
+            peer: *peer_id,
             tx: response_tx,
             initiated_at: Instant::now(),
         };
@@ -155,6 +217,13 @@ impl RequestResponseBehaviour {
                         "Peer {:?} does not support request-response protocol for request {:?}",
                         peer, request_id
                     ),
+                    // A slow remote peer is not a local error: the first timeout toward a peer in a window is
+                    // logged at WARN, the later ones are counted and summarized when the window ends.
+                    OutboundFailure::Timeout => {
+                        if self.timeout_reports.record(peer, Instant::now()) {
+                            warn!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error);
+                        }
+                    },
                     _ => error!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error),
                 }
                 let err_response = PeerResponse::Err {
@@ -271,13 +340,18 @@ impl NetworkBehaviour for RequestResponseBehaviour {
         while let Poll::Ready(Some(())) = self.timeout_interval.poll_next_unpin(cx) {
             let now = Instant::now();
             let timeout = self.timeout;
+            let timeout_reports = &mut self.timeout_reports;
             self.pending_requests.retain(|request_id, pending_request| {
                 let retain = now.duration_since(pending_request.initiated_at) < timeout;
-                if !retain {
-                    warn!("Request {} timed out", request_id);
+                // The local timeout counts as a timeout toward the peer as well.
+                if !retain && timeout_reports.record(pending_request.peer, now) {
+                    warn!("Request {} to peer {} timed out", request_id, pending_request.peer);
                 }
                 retain
             });
+            for (peer, more) in self.timeout_reports.flush(now) {
+                warn!("{} more requests to peer {} timed out in the last 60 s", more, peer);
+            }
         }
 
         Poll::Pending
@@ -399,10 +473,62 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Protocol;
+    use super::{Protocol, TimeoutReports, TIMEOUT_REPORT_WINDOW};
+    use libp2p::PeerId;
+    use std::time::Duration;
+    use wasm_timer::Instant;
 
     #[test]
     fn protocol_name_is_version2() {
         assert_eq!(Protocol::Version2.as_ref(), "/request-response/2");
+    }
+
+    #[test]
+    fn first_timeout_is_reported_later_ones_are_counted() {
+        let mut reports = TimeoutReports::default();
+        let peer = PeerId::random();
+        let other = PeerId::random();
+        let start = Instant::now();
+
+        assert!(reports.record(peer, start));
+        // Five more in the same second toward the same peer are only counted.
+        for i in 1..=5 {
+            assert!(!reports.record(peer, start + Duration::from_millis(i * 100)));
+        }
+        // Another peer has a window of its own.
+        assert!(reports.record(other, start + Duration::from_secs(1)));
+
+        // Nothing is summarized while the windows are open.
+        assert!(reports.flush(start + Duration::from_secs(30)).is_empty());
+
+        // The window of `peer` ends first; `other` had no later timeout, so it yields no summary.
+        let summary = reports.flush(start + TIMEOUT_REPORT_WINDOW);
+        assert_eq!(summary, vec![(peer, 5)]);
+        assert!(reports.flush(start + Duration::from_secs(120)).is_empty());
+
+        // A timeout after the window opens a new one and is reported at once.
+        assert!(reports.record(peer, start + Duration::from_secs(130)));
+    }
+
+    #[test]
+    fn summary_appears_only_when_something_was_counted() {
+        let mut reports = TimeoutReports::default();
+        let peer = PeerId::random();
+        let start = Instant::now();
+        assert!(reports.record(peer, start));
+        assert!(reports.flush(start + TIMEOUT_REPORT_WINDOW).is_empty());
+    }
+
+    #[test]
+    fn timeout_after_the_window_ended_keeps_the_summary() {
+        let mut reports = TimeoutReports::default();
+        let peer = PeerId::random();
+        let start = Instant::now();
+        assert!(reports.record(peer, start));
+        assert!(!reports.record(peer, start + Duration::from_secs(10)));
+        assert!(!reports.record(peer, start + Duration::from_secs(20)));
+        // The interval did not flush yet; the next timeout opens a new window and keeps the summary of the old.
+        assert!(reports.record(peer, start + Duration::from_secs(61)));
+        assert_eq!(reports.flush(start + Duration::from_secs(62)), vec![(peer, 2)]);
     }
 }

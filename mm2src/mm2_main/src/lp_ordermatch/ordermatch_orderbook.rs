@@ -1880,7 +1880,12 @@ impl Orderbook {
     /// that must be applied by TrieStore. No trie/memory_db mutation happens here.
     pub(crate) fn index_insert_or_update(&mut self, order: OrderbookItem) -> Vec<TrieOp> {
         if self.recently_cancelled.get_unexpired(&order.uuid) == Some(&order.pubkey) {
-            log::warn!("Order {} was recently cancelled, ignoring insert", order.uuid);
+            log::debug!(
+                "Ignoring a late copy of order {} from {}: it was cancelled less than {} s ago",
+                order.uuid,
+                order.pubkey,
+                RECENTLY_CANCELLED_TIMEOUT.as_secs()
+            );
             return Vec::new();
         }
 
