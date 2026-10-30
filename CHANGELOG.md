@@ -429,7 +429,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   256 messages per connection; when more of them are waiting, the rest join the end of the normal
   queue. They used to disconnect the peer, so a maker cancelling hundreds of orders at once cut a
   seed off from all its slower relays in the same second. Nothing new is sent on the wire. Detail:
-  PR #122; CRD ch.28 §28.9B.
+  PR #122, PR #175; CRD ch.28 §28.9B.
 - **A seed or relay now gives back the memory a burst of order updates used.** Every order update a
   node applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and
   bookkeeping), and none of it was released until the same order pair changed again, so a node that
