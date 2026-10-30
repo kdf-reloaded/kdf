@@ -365,7 +365,7 @@ fn log_outbox_rate(line: RateLog) {
 
 /// Hands a maker-order message to the outbox of its pubkey (CRD ch.32 §32.9B R-MP1, R-MP2), and publishes at once
 /// what the outbox lets go: a cancellation, and the oldest pending messages while the budget allows.
-/// With `maker_update_coalescing` set to `false` the message is published at once, as without the outbox.
+/// Unless `maker_update_coalescing` is set to `true`, the message is published at once, as without the outbox.
 pub(crate) fn publish_maker_order_message(
     ctx: &MmArc,
     key_pair: Option<&KeyPair>,

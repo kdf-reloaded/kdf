@@ -7008,7 +7008,11 @@ mod trie_store_memory_retention {
         let (ctx, octx) = new_node();
         keep_pair_histories(&octx);
         let orders = seed(&ctx, &octx, 10);
-        burst(&ctx, &octx, &orders, 50);
+        // one update at a time: the worker merges the batches that wait for it (R-K5), which records
+        // fewer deltas than the updates, and the test counts the deltas
+        for i in 0..50 {
+            burst_from(&ctx, &octx, &orders[i % 10..i % 10 + 1], i as u64, 1);
+        }
 
         // A tick without purge reports the four per-tick gauges and leaves `memory_db` alone.
         run_trie_store_maintenance(&ctx, &octx, false);
@@ -7189,6 +7193,864 @@ mod trie_store_memory_retention {
         store.apply_ops(ops);
         assert!(store.pubkeys_state.is_empty());
         assert_eq!(live_nodes(&mut store), 0);
+    }
+
+    // ---- CRD ch.32 R-K5 (bulk drain, early purge) and R-K6 (cap on a pair's delta history): T-K5 to T-K7
+
+    fn counters(ctx: &MmArc) -> HashMap<String, i64> {
+        let json = ctx.metrics.collect_json().unwrap();
+        json["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|metric| metric["type"] == "counter")
+            .map(|metric| {
+                (
+                    metric["key"].as_str().unwrap().to_owned(),
+                    metric["value"].as_i64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn slice_root(store: &TrieStore, pubkey: &str, pair: &str) -> H64 { store.pubkeys_state[pubkey].trie_roots[pair] }
+
+    fn remove_op(pubkey: &str, pair: &str, uuid: Uuid) -> TrieOp {
+        TrieOp::Remove {
+            pubkey: pubkey.to_owned(),
+            alb_pair: pair.to_owned(),
+            uuid,
+        }
+    }
+
+    /// Insertions and removals on 40 orders of one slice, from a seed.
+    fn event_stream(seed: u64, events: usize) -> Vec<TrieOp> {
+        let mut st = seed;
+        (0..events)
+            .map(|_| {
+                let uuid = trie_op_uuid(trie_ops_lcg(&mut st) % 40 + 1);
+                if trie_ops_lcg(&mut st).is_multiple_of(4) {
+                    remove_op(MAKER, PAIR, uuid)
+                } else {
+                    insert_op(MAKER, MAKER, uuid, trie_ops_lcg(&mut st) % 100_000 + 1)
+                }
+            })
+            .collect()
+    }
+
+    /// The stream of `event_stream(seed, events)` cut into batches of 1 to `max_len` events.
+    fn event_batches(seed: u64, events: usize, max_len: u64) -> Vec<Vec<TrieOp>> {
+        let mut st = seed ^ 0x5555;
+        let mut stream = event_stream(seed, events).into_iter().peekable();
+        let mut batches = Vec::new();
+        while stream.peek().is_some() {
+            let len = trie_ops_lcg(&mut st) % max_len + 1;
+            batches.push(stream.by_ref().take(len as usize).collect());
+        }
+        batches
+    }
+
+    /// The orders a slice holds after the batches, as the read index would hold them.
+    fn orders_after(batches: &[Vec<TrieOp>]) -> HashMap<Uuid, OrderbookItem> {
+        let mut orders = HashMap::new();
+        for op in batches.iter().flatten() {
+            match op {
+                TrieOp::Insert { uuid, order, .. } => {
+                    orders.insert(*uuid, order.clone());
+                },
+                TrieOp::Remove { uuid, .. } => {
+                    orders.remove(uuid);
+                },
+                _ => unreachable!("the streams hold insertions and removals only"),
+            }
+        }
+        orders
+    }
+
+    /// What the store answers a requester that names `from` as its root of `pair`.
+    fn history_answer(
+        store: &TrieStore,
+        pair: &str,
+        from: H64,
+        latest: &HashMap<Uuid, OrderbookItem>,
+    ) -> DeltaOrFullTrie<Uuid, OrderbookItem> {
+        let state = &store.pubkeys_state[MAKER];
+        let history = state
+            .order_pairs_trie_state_history
+            .get(&pair.to_owned())
+            .expect("the pair has a history");
+        DeltaOrFullTrie::from_history(
+            history,
+            from,
+            state.trie_roots[pair],
+            &store.memory_db,
+            |uuid| latest.get(uuid).cloned(),
+            MissingValue::Fail,
+        )
+        .unwrap()
+    }
+
+    /// Apply an answer to the requester's store the way the receiver of a sync answer does. Returns
+    /// whether it was the full snapshot.
+    fn apply_answer(requester: &mut TrieStore, pair: &str, answer: DeltaOrFullTrie<Uuid, OrderbookItem>) -> bool {
+        match answer {
+            DeltaOrFullTrie::Delta(delta) => {
+                for (uuid, change) in delta {
+                    match change {
+                        Some(order) => requester.apply_insert(MAKER, pair, uuid, order),
+                        None => requester.apply_remove(MAKER, pair, uuid),
+                    }
+                }
+                false
+            },
+            DeltaOrFullTrie::FullTrie(values) => {
+                requester.apply_clear_pair(MAKER, pair);
+                for (uuid, order) in values {
+                    requester.apply_insert(MAKER, pair, uuid, order);
+                }
+                true
+            },
+        }
+    }
+
+    /// A store that applied the prelude and then the first `upto` batches one event at a time.
+    fn one_by_one(prelude: Vec<TrieOp>, batches: Vec<Vec<TrieOp>>, upto: usize) -> TrieStore {
+        let mut store = TrieStore::default();
+        store.apply_batches(vec![prelude]);
+        for batch in batches.into_iter().take(upto) {
+            for op in batch {
+                store.apply_ops(vec![op]);
+            }
+            store.applied_batches += 1;
+        }
+        store
+    }
+
+    /// T-K5: the worker applies a queue as a few large sequences, the outcome is that of one-by-one
+    /// application and a requester whose root fell inside a merged sequence gets the full snapshot.
+    #[test]
+    fn t_k5_bulk_drain_equals_one_by_one() {
+        for (what, seed, events, max_len) in [("small batches", 7, 3000, 3), ("large batches", 11, 6000, 400)] {
+            let prelude = || insert_all_ops(MAKER, MAKER, 10, 1000);
+            let batches = || event_batches(seed, events, max_len);
+            let batch_count = batches().len();
+            let latest = orders_after(&[prelude(), batches().into_iter().flatten().collect()]);
+
+            let reference = one_by_one(prelude(), batches(), batch_count);
+
+            // the root after every batch of the one-by-one run, the requesters' roots
+            let mut boundaries = Vec::new();
+            {
+                let mut store = TrieStore::default();
+                store.apply_batches(vec![prelude()]);
+                boundaries.push(slice_root(&store, MAKER, PAIR));
+                for batch in batches() {
+                    for op in batch {
+                        store.apply_ops(vec![op]);
+                    }
+                    boundaries.push(slice_root(&store, MAKER, PAIR));
+                }
+            }
+
+            // the worker, with the whole queue waiting when it wakes up
+            let mut start = TrieStore::default();
+            start.apply_batches(vec![prelude()]);
+            let merged = Arc::new(PaMutex::new(start));
+            let (tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
+            for batch in batches() {
+                tx.unbounded_send(batch).unwrap();
+            }
+            drop(tx);
+            let (ctx, ..) = make_ctx_for_tests();
+            block_on(run_trie_store_worker(rx, merged.clone(), ctx.metrics.weak()));
+            let merged = merged.lock();
+
+            assert_trie_stores_equal(&merged, &reference, what);
+            assert_eq!(
+                merged.applied_batches,
+                1 + batch_count as u64,
+                "{what}: applied batches"
+            );
+            assert_eq!(merged.applied_batches, reference.applied_batches, "{what}");
+            let final_root = slice_root(&merged, MAKER, PAIR);
+            assert_eq!(final_root, *boundaries.last().unwrap());
+
+            let deltas = |store: &TrieStore| store.snapshot(false).history_deltas;
+            assert!(
+                deltas(&merged) < deltas(&reference),
+                "{what}: merging recorded no fewer deltas ({} against {})",
+                deltas(&merged),
+                deltas(&reference)
+            );
+
+            // Every root a requester can hold at a batch boundary is answered with a delta that
+            // reaches the final root, or with the full snapshot.
+            let step = (boundaries.len() / 30).max(1);
+            let (mut deltas_given, mut fulls_given) = (0, 0);
+            for k in (0..boundaries.len()).step_by(step) {
+                let mut requester = one_by_one(prelude(), batches(), k);
+                assert_eq!(
+                    slice_root(&requester, MAKER, PAIR),
+                    boundaries[k],
+                    "{what}: requester {k}"
+                );
+                let answer = history_answer(&merged, PAIR, boundaries[k], &latest);
+                if apply_answer(&mut requester, PAIR, answer) {
+                    fulls_given += 1;
+                } else {
+                    deltas_given += 1;
+                }
+                assert_eq!(
+                    slice_root(&requester, MAKER, PAIR),
+                    final_root,
+                    "{what}: requester {k} did not reach the advertised root"
+                );
+            }
+            // negative control: roots inside the merged sequence are really gone from the history,
+            // and the snapshot they get is correct (checked above)
+            assert!(fulls_given > 0, "{what}: no root fell inside a merged sequence");
+            assert!(deltas_given + fulls_given > 2);
+        }
+    }
+
+    /// T-K5: bounds of one sequence, and the batch that does not fit starts the next one.
+    #[test]
+    fn t_k5_the_drain_takes_at_most_1024_batches_or_2048_events() {
+        let op = |n: u64| insert_op(MAKER, MAKER, trie_op_uuid(n), 1000 + n);
+        let take = |rx: &mut mpsc::UnboundedReceiver<Vec<TrieOp>>, carry: &mut Option<Vec<TrieOp>>| {
+            let first = carry.take().unwrap_or_else(|| rx.try_recv().unwrap());
+            take_waiting_batches(rx, first, carry)
+        };
+
+        // batches bound
+        let (tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
+        for n in 0..1030 {
+            tx.unbounded_send(vec![op(n)]).unwrap();
+        }
+        let mut carry = None;
+        let (batches, closed) = take(&mut rx, &mut carry);
+        assert_eq!((batches.len(), closed, carry.is_none()), (1024, false, true));
+        let (batches, closed) = take(&mut rx, &mut carry);
+        assert_eq!((batches.len(), closed, carry.is_none()), (6, false, true));
+        drop(tx);
+        assert_eq!(rx.try_recv().err(), Some(TryRecvError::Closed));
+
+        // events bound: 500 events a batch, 4 of them are 2,000 events, the 5th would pass 2,048
+        assert_eq!((DRAIN_MAX_EVENTS, DRAIN_MAX_BATCHES), (2048, 1024));
+        let (tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
+        for b in 0..40 {
+            tx.unbounded_send((0..500).map(|n| op(b * 500 + n)).collect()).unwrap();
+        }
+        let mut carry = None;
+        let (batches, _) = take(&mut rx, &mut carry);
+        assert_eq!(batches.len(), 4);
+        assert!(carry.is_some(), "the 5th batch waits for the next sequence");
+        let (batches, _) = take(&mut rx, &mut carry);
+        assert_eq!(batches.len(), 4, "the carried batch is the first of the next sequence");
+        assert!(carry.is_some());
+
+        // a batch beyond the bound is applied alone
+        let (tx2, mut rx2) = mpsc::unbounded::<Vec<TrieOp>>();
+        tx2.unbounded_send((0..5_000).map(op).collect()).unwrap();
+        tx2.unbounded_send(vec![op(1)]).unwrap();
+        let mut carry = None;
+        let (batches, _) = take(&mut rx2, &mut carry);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), 5_000);
+        let (batches, _) = take(&mut rx2, &mut carry);
+        assert_eq!(batches.len(), 1);
+
+        // the end of the queue is reported with the last sequence
+        let (tx3, mut rx3) = mpsc::unbounded::<Vec<TrieOp>>();
+        tx3.unbounded_send(vec![op(1)]).unwrap();
+        tx3.unbounded_send(vec![op(2)]).unwrap();
+        drop(tx3);
+        let mut carry = None;
+        let (batches, closed) = take(&mut rx3, &mut carry);
+        assert_eq!((batches.len(), closed), (2, true));
+        drop(tx);
+    }
+
+    /// T-K5 on a running node: the worker held back while the queue fills, then released; the book,
+    /// the trie roots and the identifiers are those of one-by-one application, and "enqueued equals
+    /// applied" means caught up.
+    #[test]
+    fn t_k5_a_released_worker_reaches_the_book_of_one_by_one_application() {
+        let (ctx, octx) = new_node();
+        let (ref_octx, mut ref_rx) = ordermatch_ctx_without_worker();
+
+        let orders = make_random_orders(MAKER.to_owned(), &[0; 32], "RIN".into(), "KMD".into(), 30);
+        let mut sequence = orders.clone();
+        for i in 0..3000u64 {
+            let mut order = orders[i as usize % orders.len()].clone();
+            order.price = BigRational::new((2000 + i).into(), 1_000_000.into());
+            sequence.push(order);
+        }
+
+        {
+            // the worker waits for the lock while the queue fills
+            let held = octx.trie_store.lock();
+            for item in &sequence {
+                insert_or_update_order(&ctx, item.clone());
+            }
+            assert!(octx.orderbook.lock().trie_ops_enqueued > held.applied_batches + 2000);
+        }
+        octx.wait_trie_ops_flushed();
+        for item in &sequence {
+            index_insert_and_queue(&ref_octx, item.clone());
+        }
+        drain_trie_queue(&ref_octx, &mut ref_rx);
+
+        let (book, ref_book) = (octx.orderbook.lock(), ref_octx.orderbook.lock());
+        assert_eq!(book.trie_ops_enqueued, octx.trie_store.lock().applied_batches);
+        assert_eq!(book.order_set, ref_book.order_set);
+        assert_eq!(book.trie_ops_enqueued, ref_book.trie_ops_enqueued);
+        assert_trie_stores_equal(&octx.trie_store.lock(), &ref_octx.trie_store.lock(), "released worker");
+        assert_eq!(
+            octx.trie_store.lock().applied_batches,
+            ref_octx.trie_store.lock().applied_batches
+        );
+    }
+
+    /// The nodes `memory_db` holds, those nobody refers to any more included (they wait for a purge).
+    fn stored_nodes(store: &TrieStore) -> usize { store.memory_db.clone().drain().len() }
+
+    /// T-K6: the early purge after 100,000 leaf updates, at most every 5 s, never removing a live node.
+    #[test]
+    fn t_k6_early_purge_after_100000_leaf_updates() {
+        const NOW: u64 = 1_000_000;
+        let mut store = TrieStore::default();
+        store.apply_batches(vec![insert_all_ops(MAKER, MAKER, 30, 1000)]);
+        let mut model: HashMap<Uuid, u64> = (0..30).map(|n| (trie_op_uuid(n), 1000 + n)).collect();
+        let mut updates = 0u64;
+        // One update of one leaf, as the worker applies a queued batch of one event.
+        fn update(store: &mut TrieStore, model: &mut HashMap<Uuid, u64>, updates: &mut u64, at_ms: u64) -> bool {
+            let (uuid, price) = (trie_op_uuid(*updates % 30), 2000 + *updates);
+            model.insert(uuid, price);
+            *updates += 1;
+            store.apply_batches(vec![vec![insert_op(MAKER, MAKER, uuid, price)]]);
+            store.purge_if_loaded(at_ms)
+        }
+
+        let live = |store: &TrieStore| store.memory_db.keys().len();
+        let mut purged = false;
+        while !purged {
+            purged = update(&mut store, &mut model, &mut updates, NOW);
+            if !purged {
+                assert_eq!(store.early_purges, 0);
+            }
+        }
+        // 30 leaves were applied by the setup, the purge came with the 100,000th leaf update
+        assert_eq!(updates, 100_000 - 30);
+        assert_eq!(store.leaf_updates_since_purge, 0);
+        assert_eq!(store.early_purges, 1);
+        assert_eq!(
+            stored_nodes(&store),
+            live(&store),
+            "only the live trie is held, not the replaced leaves"
+        );
+        let after_purge_bytes = parity_util_mem::malloc_size(&store.memory_db);
+        store.memory_db.shrink_to_fit();
+        assert!(
+            parity_util_mem::malloc_size(&store.memory_db) < after_purge_bytes,
+            "the early purge did not shrink the table"
+        );
+
+        // a second burst within 5 s: the threshold is reached again and no purge follows
+        let held_by_the_live_trie = live(&store);
+        for _ in 0..100_000 {
+            assert!(!update(&mut store, &mut model, &mut updates, NOW + 4_999));
+        }
+        assert_eq!(store.early_purges, 1);
+        assert!(store.leaf_updates_since_purge >= EARLY_PURGE_LEAF_UPDATES);
+        assert!(
+            stored_nodes(&store) > 10 * held_by_the_live_trie,
+            "the burst left its replaced leaves in the store"
+        );
+        // 5 s after the last purge it is due
+        assert!(!store.purge_if_loaded(NOW + 4_999));
+        assert!(store.purge_if_loaded(NOW + 5_000));
+        assert_eq!(store.early_purges, 2);
+        assert_eq!(stored_nodes(&store), live(&store));
+
+        // no node a live trie refers to was removed: the trie reads back in full and equals one
+        // built from the final orders only
+        let mut fresh = TrieStore::default();
+        let final_orders: Vec<TrieOp> = model
+            .iter()
+            .map(|(uuid, price)| insert_op(MAKER, MAKER, *uuid, *price))
+            .collect();
+        fresh.apply_batches(vec![final_orders]);
+        assert_eq!(slice_root(&store, MAKER, PAIR), slice_root(&fresh, MAKER, PAIR));
+        assert_eq!(read_back(&store, MAKER), 30);
+        assert_eq!(live(&store), live(&fresh));
+    }
+
+    /// The timer purge counts as a purge for the early one: its leaf updates are accounted for.
+    #[test]
+    fn t_k6_the_timer_purge_resets_the_early_purge_clock() {
+        let mut store = TrieStore::default();
+        store.apply_batches(vec![insert_all_ops(MAKER, MAKER, 30, 1000)]);
+        assert_eq!(store.leaf_updates_since_purge, 30);
+        store.purge_memory_db();
+        assert_eq!(store.leaf_updates_since_purge, 0);
+        store.leaf_updates_since_purge = EARLY_PURGE_LEAF_UPDATES;
+        assert!(
+            !store.purge_if_loaded(now_ms()),
+            "the timer purge just ran, the early one has to wait"
+        );
+        assert!(store.purge_if_loaded(now_ms() + EARLY_PURGE_MIN_INTERVAL_MS));
+        assert_eq!(store.early_purges, 1);
+    }
+
+    /// T-K6 and T-K7 through the worker: the counters.
+    #[test]
+    fn t_k6_t_k7_the_worker_reports_early_purges_and_evicted_deltas() {
+        let (ctx, ..) = make_ctx_for_tests();
+        let store = Arc::new(PaMutex::new(TrieStore::default()));
+        let (tx, rx) = mpsc::unbounded::<Vec<TrieOp>>();
+        let mut n = 0;
+        // 110,000 new orders in 100 batches of 1,100: two of them pass the event bound, so a batch is a sequence
+        for _ in 0..100 {
+            let batch = (0..1100)
+                .map(|_| {
+                    n += 1;
+                    insert_op(MAKER, MAKER, trie_op_uuid(n), 1000 + n)
+                })
+                .collect();
+            tx.unbounded_send(batch).unwrap();
+        }
+        drop(tx);
+        block_on(run_trie_store_worker(rx, store.clone(), ctx.metrics.weak()));
+
+        let store = store.lock();
+        assert_eq!(store.applied_batches, 100);
+        assert_eq!(
+            store.early_purges, 1,
+            "the purge came with the 91st batch, 100,100 updates"
+        );
+        assert_eq!(counters(&ctx)["orderbook.trie_store.early_purges"], 1);
+        assert!(
+            store.history_evicted > 0,
+            "110,000 new orders on one slice pass the cap"
+        );
+        assert_eq!(
+            counters(&ctx)["orderbook.history.evicted"],
+            store.history_evicted as i64
+        );
+        assert!(store.snapshot(false).history_deltas <= TRIE_DIFF_HISTORY_CAP);
+    }
+
+    /// T-K7: the cap on a pair's delta history.
+    #[test]
+    fn t_k7_history_cap() {
+        const OTHER_PAIR: &str = "DOC:KMD";
+        let other_insert = |uuid: Uuid, price: u64| TrieOp::Insert {
+            pubkey: MAKER.to_owned(),
+            alb_pair: OTHER_PAIR.to_owned(),
+            uuid,
+            order: trie_op_item(MAKER, "DOC", "KMD", uuid, price),
+        };
+        let one_hour = Duration::from_secs(3600);
+        let prelude = || insert_all_ops(MAKER, MAKER, 5, 1000);
+        let update = |i: u64| insert_op(MAKER, MAKER, trie_op_uuid(i % 5), 5000 + i);
+        let build = |updates: u64| {
+            let mut store = TrieStore::default();
+            // the pair histories live an hour, and so do the deltas of the pairs: only the cap acts
+            store
+                .pubkeys_state
+                .insert(MAKER.to_owned(), OrderbookPubkeyState::with_history_timeout(one_hour));
+            store.apply_batches(vec![prelude()]);
+            // one batch each: the second insert of the order would supersede the first in one batch
+            store.apply_batches(vec![vec![other_insert(trie_op_uuid(0), 1)]]);
+            store.apply_batches(vec![vec![other_insert(trie_op_uuid(0), 2)]]);
+            for history in store
+                .pubkeys_state
+                .get_mut(MAKER)
+                .unwrap()
+                .order_pairs_trie_state_history
+                .values_mut()
+            {
+                history.inner = TimeCache::new(one_hour);
+            }
+            store.history_evicted = 0;
+            let mut roots = Vec::new();
+            for i in 0..updates {
+                roots.push(slice_root(&store, MAKER, PAIR));
+                store.apply_batches(vec![vec![update(i)]]);
+            }
+            (store, roots)
+        };
+        let history_len = |store: &TrieStore, pair: &str| {
+            store.pubkeys_state[MAKER]
+                .order_pairs_trie_state_history
+                .get(&pair.to_owned())
+                .unwrap()
+                .len()
+        };
+
+        let (mut store, roots) = build(3000);
+        assert_eq!(history_len(&store, PAIR), TRIE_DIFF_HISTORY_CAP);
+        assert_eq!(TRIE_DIFF_HISTORY_CAP, 2048);
+        assert_eq!(store.history_evicted, 952);
+        {
+            let history = store.pubkeys_state[MAKER]
+                .order_pairs_trie_state_history
+                .get(&PAIR.to_owned())
+                .unwrap();
+            assert!(
+                roots[..952].iter().all(|root| !history.contains_key(root)),
+                "the oldest were dropped"
+            );
+            assert!(
+                roots[952..].iter().all(|root| history.contains_key(root)),
+                "the newest are kept"
+            );
+            // the memory held is that of 2,048 deltas: entries and room alike
+            assert_eq!(history.inner.queued_len(), 2048);
+            assert_not_sparse("history", history.inner.len(), history.inner.capacities());
+        }
+        let (exact, _) = build(2048);
+        assert_eq!(exact.history_evicted, 0);
+        assert_eq!(history_len(&exact, PAIR), 2048);
+
+        // answers: the oldest root is gone, the others are served as deltas
+        let final_root = slice_root(&store, MAKER, PAIR);
+        let latest = orders_after(&[insert_all_ops(MAKER, MAKER, 5, 1000), (0..3000).map(update).collect()]);
+        for (k, expect_full) in [(0, true), (951, true), (952, false), (1500, false), (2999, false)] {
+            let mut requester = TrieStore::default();
+            requester.apply_batches(vec![insert_all_ops(MAKER, MAKER, 5, 1000)]);
+            requester.apply_batches((0..k).map(|i| vec![update(i)]).collect());
+            assert_eq!(slice_root(&requester, MAKER, PAIR), roots[k as usize]);
+            let answer = history_answer(&store, PAIR, roots[k as usize], &latest);
+            assert_eq!(matches!(answer, DeltaOrFullTrie::FullTrie(_)), expect_full, "root {k}");
+            apply_answer(&mut requester, PAIR, answer);
+            assert_eq!(slice_root(&requester, MAKER, PAIR), final_root, "root {k}");
+        }
+
+        // another slice of the same pubkey is not touched by the cap of this one
+        assert_eq!(history_len(&store, OTHER_PAIR), 0);
+        for price in 3..=102 {
+            store.apply_batches(vec![vec![other_insert(trie_op_uuid(0), price)]]);
+        }
+        assert_eq!(history_len(&store, OTHER_PAIR), 100);
+        assert_eq!(store.history_evicted, 952);
+        assert_eq!(history_len(&store, PAIR), 2048);
+    }
+
+    // ---- measurement harness of docs/plans/orderbook-queue-and-history-caps.md (ignored by default)
+    //
+    // cargo test --release -p mm2_main --lib --features counting-alloc measure_burst_retention -- --ignored --nocapture --test-threads=1
+    //
+    // The feature `counting-alloc` installs the counting allocator (`counting_alloc` below) as the
+    // allocator of the whole test binary; without it the harness is not compiled and the tests run on
+    // the system allocator.
+    //
+    // With KDF_HARNESS_LEGACY_WORKER set, the worker applies one queued batch at a time with no early
+    // purge, the way it did before R-K5 (compile with the cap `TRIE_DIFF_HISTORY_CAP` raised to
+    // `usize::MAX` for the full "before" picture of R-K6).
+
+    /// The deltas live a minute instead of the production 300 s so that the run can wait them out.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+    const HARNESS_TTL: Duration = Duration::from_secs(60);
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+    fn install_legacy_worker(ctx: &MmArc) {
+        let trie_store = Arc::new(PaMutex::new(TrieStore::default()));
+        let (trie_ops_tx, mut rx) = mpsc::unbounded::<Vec<TrieOp>>();
+        let worker_store = trie_store.clone();
+        spawn(async move {
+            while let Some(ops) = rx.next().await {
+                worker_store.lock().apply_batch(ops);
+            }
+        });
+        let octx = OrdermatchContext {
+            maker_orders_ctx: Default::default(),
+            my_taker_orders: Default::default(),
+            orderbook: Default::default(),
+            trie_store,
+            trie_ops_tx,
+            orderbook_subscriptions: Default::default(),
+            sync_answer_deferral: Default::default(),
+            maker_outbox: Default::default(),
+            pending_maker_reserved: Default::default(),
+            orderbook_tickers: Default::default(),
+            original_tickers: Default::default(),
+        };
+        from_ctx(&ctx.ordermatch_ctx, move || Ok(octx)).unwrap();
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+    fn mb(bytes: isize) -> f64 { bytes as f64 / 1_048_576. }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+    fn measure(legacy: bool, stalled: bool) {
+        use super::counting_alloc;
+        const UPDATES: u64 = 120_480;
+        let (ctx, ..) = make_ctx_for_tests();
+        if legacy {
+            install_legacy_worker(&ctx);
+        }
+        let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
+        keep_pair_histories(&octx);
+        let orders = seed(&ctx, &octx, 30);
+        for history in octx
+            .trie_store
+            .lock()
+            .pubkeys_state
+            .get_mut(MAKER)
+            .unwrap()
+            .order_pairs_trie_state_history
+            .values_mut()
+        {
+            history.inner = TimeCache::new(HARNESS_TTL);
+        }
+
+        let mut applied_hint = octx.trie_store.lock().applied_batches;
+        let pending = |applied_hint: &mut u64| {
+            let enqueued = octx.orderbook.lock().trie_ops_enqueued;
+            if let Some(store) = octx.trie_store.try_lock() {
+                *applied_hint = store.applied_batches;
+            }
+            enqueued.saturating_sub(*applied_hint)
+        };
+
+        let base = counting_alloc::start_peak();
+        let started = std::time::Instant::now();
+        let mut queue_peak = 0;
+        let held = stalled.then(|| octx.trie_store.lock());
+        for i in 0..UPDATES {
+            let mut update = MakerOrderUpdated::new(orders[i as usize % orders.len()].uuid);
+            update.with_new_price(BigRational::new((2000 + i).into(), 1_000_000.into()));
+            assert!(process_maker_order_updated(ctx.clone(), MAKER.to_owned(), update));
+            if i % 200 == 0 {
+                queue_peak = queue_peak.max(pending(&mut applied_hint));
+            }
+        }
+        let produced_in = started.elapsed();
+        let queued_at_end = pending(&mut applied_hint);
+        queue_peak = queue_peak.max(queued_at_end);
+        let peak_producing = counting_alloc::peak() - base;
+        drop(held);
+        loop {
+            let enqueued = octx.orderbook.lock().trie_ops_enqueued;
+            if octx.trie_store.lock().applied_batches == enqueued {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let drained_in = started.elapsed();
+        let peak_total = counting_alloc::peak() - base;
+        let retained_after_drain = counting_alloc::current() - base;
+        let (early_purges, evicted, deltas) = {
+            let store = octx.trie_store.lock();
+            (
+                store.early_purges,
+                store.history_evicted,
+                store.snapshot(false).history_deltas,
+            )
+        };
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let retained_after_tick = counting_alloc::current() - base;
+        std::thread::sleep(HARNESS_TTL + Duration::from_secs(1));
+        run_trie_store_maintenance(&ctx, &octx, true);
+        let retained_after_ttl = counting_alloc::current() - base;
+        println!(
+            "HARNESS legacy_worker={legacy} worker_stalled_during_burst={stalled} updates={UPDATES} \
+             produced_in={produced_in:?} drained_in={drained_in:?} queue_peak_batches={queue_peak} \
+             queue_at_end_of_production={queued_at_end} peak_producing_MB={:.1} peak_total_MB={:.1} \
+             retained_after_drain_MB={:.1} retained_after_tick_and_purge_MB={:.1} \
+             retained_61s_later_after_tick_MB={:.1} early_purges={early_purges} history_evicted={evicted} \
+             history_deltas_after_drain={deltas}",
+            mb(peak_producing),
+            mb(peak_total),
+            mb(retained_after_drain),
+            mb(retained_after_tick),
+            mb(retained_after_ttl),
+        );
+    }
+
+    #[test]
+    #[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+    #[ignore = "measurement harness of docs/plans/orderbook-queue-and-history-caps.md, run alone"]
+    fn measure_burst_retention() {
+        let legacy = std::env::var("KDF_HARNESS_LEGACY_WORKER").is_ok();
+        for stalled in [false, true] {
+            measure(legacy, stalled);
+        }
+    }
+
+    // ---- how long the worker holds the trie store lock (ignored harness)
+    //
+    // cargo test --release -p mm2_main --lib measure_lock_hold -- --ignored --nocapture --test-threads=1
+    //
+    // The readers that take the orderbook lock and then wait for the trie store lock wait as long as the
+    // worker holds it, so the hold of one sequence (`apply_sequence`: apply, early purge if due, report)
+    // is what the other users of the orderbook can be made to wait for.
+
+    /// `events` insertions of new orders (distinct uuids from `first`), round-robin over `pubkeys` pubkeys and
+    /// `pairs` pairs.
+    fn new_orders(first: u64, events: u64, pubkeys: u64, pairs: u64) -> Vec<TrieOp> {
+        (first..first + events)
+            .map(|n| {
+                let pubkey = format!("02{:064x}", n % pubkeys);
+                let uuid = trie_op_uuid(n);
+                TrieOp::Insert {
+                    alb_pair: format!("P{}:KMD", (n / pubkeys) % pairs),
+                    order: trie_op_item(&pubkey, "P", "KMD", uuid, 1000 + n),
+                    pubkey,
+                    uuid,
+                }
+            })
+            .collect()
+    }
+
+    fn in_batches(ops: Vec<TrieOp>, batch_len: usize) -> Vec<Vec<TrieOp>> {
+        let mut batches = Vec::new();
+        let mut ops = ops.into_iter().peekable();
+        while ops.peek().is_some() {
+            batches.push(ops.by_ref().take(batch_len).collect());
+        }
+        batches
+    }
+
+    #[test]
+    #[ignore = "measurement harness, run alone"]
+    fn measure_lock_hold() {
+        const PREFILL: u64 = 30_000;
+        const PER_CONFIG: u64 = 65_536;
+        let (ctx, ..) = make_ctx_for_tests();
+        let metrics = ctx.metrics.weak();
+        let ms = |since: std::time::Instant| since.elapsed().as_secs_f64() * 1000.;
+
+        // (a) and (c): sequences of N events (batches of 16 events) on distinct new orders, over a store
+        // that already holds 30,000 orders
+        for (what, pubkeys, pairs) in [("1 pubkey x 1 pair", 1, 1), ("100 pubkeys x 25 pairs", 100, 25)] {
+            for sequence_events in [16_384u64, 4_096, 2_048, 1_024] {
+                let mut store = TrieStore::default();
+                store.apply_batches(in_batches(new_orders(0, PREFILL, pubkeys, pairs), 16));
+                store.leaf_updates_since_purge = 0;
+                let mut holds = Vec::new();
+                let mut reported = (0, 0);
+                for k in 0..PER_CONFIG / sequence_events {
+                    let first = PREFILL + k * sequence_events;
+                    let batches = in_batches(new_orders(first, sequence_events, pubkeys, pairs), 16);
+                    let started = std::time::Instant::now();
+                    apply_sequence(&mut store, batches, &metrics, &mut reported);
+                    holds.push(ms(started));
+                }
+                assert_eq!(store.early_purges, 0, "the purge would be part of the hold");
+                holds.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                println!(
+                    "LOCKHOLD apply_sequence {what}: events_per_sequence={sequence_events} sequences={} \
+                     median_ms={:.1} p90_ms={:.1} max_ms={:.1}",
+                    holds.len(),
+                    holds[holds.len() / 2],
+                    holds[holds.len() * 9 / 10],
+                    holds[holds.len() - 1]
+                );
+            }
+        }
+
+        // (b): the early purge of a store holding 100,000 replaced leaves
+        for live in [30u64, 30_000] {
+            let mut store = TrieStore::default();
+            store.apply_batches(in_batches(new_orders(0, live, 1, 1), 16));
+            store.leaf_updates_since_purge = 0;
+            for i in 0..EARLY_PURGE_LEAF_UPDATES {
+                let uuid = trie_op_uuid(i % live);
+                let op = TrieOp::Insert {
+                    pubkey: format!("02{:064x}", 0),
+                    alb_pair: "P0:KMD".to_owned(),
+                    uuid,
+                    order: trie_op_item(&format!("02{:064x}", 0), "P", "KMD", uuid, 10_000_000 + i),
+                };
+                store.apply_batches(vec![vec![op]]);
+            }
+            let stored_before = stored_nodes(&store);
+            let started = std::time::Instant::now();
+            assert!(store.purge_if_loaded(now_ms() + 10_000));
+            println!(
+                "LOCKHOLD early purge: live_orders={live} stored_nodes_before={stored_before} \
+                 stored_nodes_after={} purge_ms={:.1}",
+                stored_nodes(&store),
+                ms(started)
+            );
+        }
+    }
+}
+
+/// A counting `#[global_allocator]` for the ignored measurement harness of `trie_store_memory_retention`,
+/// compiled only with the cargo feature `counting-alloc` so that normal test runs keep the system
+/// allocator. It always counts the live bytes (one relaxed atomic add or subtract per call); the peak is followed
+/// only while the harness asks for it.
+#[cfg(all(not(target_arch = "wasm32"), feature = "counting-alloc"))]
+mod counting_alloc {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    static CURRENT: AtomicIsize = AtomicIsize::new(0);
+    static PEAK: AtomicIsize = AtomicIsize::new(0);
+    static FOLLOW_PEAK: AtomicBool = AtomicBool::new(false);
+
+    struct CountingAlloc;
+
+    fn add(n: usize) {
+        let now = CURRENT.fetch_add(n as isize, Ordering::Relaxed) + n as isize;
+        if FOLLOW_PEAK.load(Ordering::Relaxed) {
+            PEAK.fetch_max(now, Ordering::Relaxed);
+        }
+    }
+
+    fn sub(n: usize) { CURRENT.fetch_sub(n as isize, Ordering::Relaxed); }
+
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc(layout);
+            if !p.is_null() {
+                add(layout.size());
+            }
+            p
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            let p = System.alloc_zeroed(layout);
+            if !p.is_null() {
+                add(layout.size());
+            }
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout);
+            sub(layout.size());
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let p = System.realloc(ptr, layout, new_size);
+            if !p.is_null() {
+                sub(layout.size());
+                add(new_size);
+            }
+            p
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAlloc = CountingAlloc;
+
+    /// Live bytes now.
+    pub(super) fn current() -> isize { CURRENT.load(Ordering::Relaxed) }
+
+    /// Peak of the live bytes since [`start_peak`].
+    pub(super) fn peak() -> isize { PEAK.load(Ordering::Relaxed) }
+
+    /// Start following the peak from the live bytes now; returns them.
+    pub(super) fn start_peak() -> isize {
+        let now = current();
+        PEAK.store(now, Ordering::Relaxed);
+        FOLLOW_PEAK.store(true, Ordering::Relaxed);
+        now
     }
 }
 
@@ -9196,7 +10058,7 @@ mod sync_answer_deferral_tests {
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err(), "the request is parked, not answered");
         assert_eq!(octx(&f.relay).sync_answer_deferral.parked_len(), 1);
@@ -9220,7 +10082,7 @@ mod sync_answer_deferral_tests {
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err());
 
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         own.fail();
         let (_, res) = answered(&answers, 2000);
         assert!(started.elapsed() < Duration::from_millis(LONG_BOUND_MS / 2));
@@ -9237,7 +10099,7 @@ mod sync_answer_deferral_tests {
         // The own request never answers during the test.
         let mut own = f.start_own_sync();
 
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         assert!(answers.try_recv().is_err());
         let (_, res) = answered(&answers, 3000);
@@ -9455,7 +10317,7 @@ mod sync_answer_deferral_tests {
         let (answers_tx, answers) = std_mpsc::channel();
         let mut own = f.start_own_sync();
 
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         ask(&f.relay, peer(), 1, MAKER, &[PAIR], &answers_tx).unwrap();
         let handler_time = started.elapsed();
         assert!(
@@ -9523,7 +10385,7 @@ mod sync_answer_deferral_tests {
 
         // The first keep-alive after the stall reaches the relay and, forwarded at once, its subscriber.
         let (subscriber, mut subscriber_cmds) = node(json!({}));
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let mut relay_own = f.start_own_sync();
         let keep_alive = f.keep_alive();
         let subscriber_task = {
@@ -10275,13 +11137,13 @@ mod maker_publication_tests {
     #[test]
     fn settings_are_read_like_the_existing_switches() {
         let ctx_with = |conf: Json| MmCtxBuilder::new().with_conf(conf).into_mm_arc();
-        assert!(maker_update_coalescing(&ctx_with(json!({}))));
-        assert!(!maker_update_coalescing(&ctx_with(
-            json!({ "maker_update_coalescing": false })
+        assert!(!maker_update_coalescing(&ctx_with(json!({}))));
+        assert!(maker_update_coalescing(&ctx_with(
+            json!({ "maker_update_coalescing": true })
         )));
-        // Only a JSON `false` turns the outbox off.
-        for other in [json!(true), json!("false"), json!(0), json!(null)] {
-            assert!(maker_update_coalescing(&ctx_with(
+        // Only a JSON `true` turns the outbox on.
+        for other in [json!(false), json!("true"), json!(1), json!(null)] {
+            assert!(!maker_update_coalescing(&ctx_with(
                 json!({ "maker_update_coalescing": other })
             )));
         }
@@ -10307,7 +11169,7 @@ mod maker_publication_tests {
     /// pending message of the order. The local state and the update are not delayed.
     #[test]
     fn t_mp2_cancellation_is_released_at_once_with_priority() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let order = own_order("DOC", "MARTY");
         // The burst of the budget is one message: the creation uses it.
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
@@ -10339,7 +11201,7 @@ mod maker_publication_tests {
     /// priority, with the outbox full; a created, an updated and a keep-alive message are not priority.
     #[test]
     fn t_mp3_swap_messages_bypass_the_outbox_and_carry_priority() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let (a, b) = (own_order("DOC", "MARTY"), own_order("DOC", "MARTY"));
         maker_order_created_p2p_notify(ctx.clone(), &a, vec![], vec![]);
         maker_order_created_p2p_notify(ctx.clone(), &b, vec![], vec![]);
@@ -10414,7 +11276,7 @@ mod maker_publication_tests {
     /// T-MP9: below the ceiling every update is published as it is made; nothing is merged.
     #[test]
     fn t_mp9_healthy_relay_gets_every_update_at_once() {
-        let (ctx, mut rx) = node(json!({}));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true }));
         let order = own_order("DOC", "MARTY");
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
         for price in 2..32 {
@@ -10435,11 +11297,16 @@ mod maker_publication_tests {
         assert_eq!(pending(&ctx), 0);
     }
 
-    /// T-MP11: with `maker_update_coalescing` set to `false` every message is published at once; with the
-    /// default the same sequence is held back by the budget.
+    /// T-MP11: with no `maker_update_coalescing` setting, with `false` and with a value that is not a JSON boolean
+    /// every message is published at once; with `true` the same sequence goes through the outbox and is held back by
+    /// the budget.
     #[test]
     fn t_mp11_switch_publishes_every_message_at_once() {
-        let run = |conf: Json| {
+        let run = |setting: Option<Json>| {
+            let mut conf = json!({ "maker_update_rate_max": 0.1 });
+            if let Some(setting) = setting {
+                conf["maker_update_coalescing"] = setting;
+            }
             let (ctx, mut rx) = node(conf);
             let order = own_order("DOC", "MARTY");
             maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
@@ -10448,11 +11315,16 @@ mod maker_publication_tests {
             }
             (drain(&mut rx).len(), pending(&ctx))
         };
-        assert_eq!(
-            run(json!({ "maker_update_rate_max": 0.1, "maker_update_coalescing": false })),
-            (6, 0)
-        );
-        assert_eq!(run(json!({ "maker_update_rate_max": 0.1 })), (1, 1));
+        for setting in [
+            None,
+            Some(json!(false)),
+            Some(json!("true")),
+            Some(json!(1)),
+            Some(json!(null)),
+        ] {
+            assert_eq!(run(setting.clone()), (6, 0), "setting {setting:?}");
+        }
+        assert_eq!(run(Some(json!(true))), (1, 1));
     }
 
     /// T-MP12 (propagation): a relay propagates a cancellation with priority and a created message without.
@@ -10610,7 +11482,7 @@ mod maker_publication_tests {
     #[test]
     fn t_mp6_the_changes_of_a_pair_precede_its_keep_alive_within_the_wait() {
         // 2 messages per second, a burst of 20.
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 2.0 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 2.0 }));
         let warm_up = exhaust_the_burst(&maker, &mut rx, 20);
         let orders = [
             own_order("DOC", "MARTY"),
@@ -10672,7 +11544,7 @@ mod maker_publication_tests {
     /// bounded wait does not end, and the keep-alive does not overtake it.
     #[test]
     fn t_mp6_a_released_message_still_in_flight_holds_the_keep_alive_back() {
-        let (maker, _rx) = node(json!({}));
+        let (maker, _rx) = node(json!({ "maker_update_coalescing": true }));
         let octx = OrdermatchContext::from_ctx(&maker).unwrap();
         let topics = vec![own_order("DOC", "MARTY").orderbook_topic()];
         octx.maker_outbox
@@ -10702,7 +11574,7 @@ mod maker_publication_tests {
     #[test]
     fn t_mp6_with_more_pending_than_the_budget_releases_the_keep_alives_leave_after_ten_seconds() {
         // 0.5 messages per second, a burst of 5.
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let _ = exhaust_the_burst(&maker, &mut rx, 5);
         for _ in 0..20 {
             maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
@@ -10733,7 +11605,7 @@ mod maker_publication_tests {
     /// T-MP6 (third part): in degraded mode the keep-alives leave at the tick.
     #[test]
     fn t_mp6_in_degraded_mode_the_keep_alives_leave_at_the_tick() {
-        let (maker, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (maker, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let _ = exhaust_the_burst(&maker, &mut rx, 5);
         for _ in 0..4 {
             maker_order_created_p2p_notify(maker.clone(), &own_order("DOC", "MARTY"), vec![], vec![]);
@@ -10754,7 +11626,7 @@ mod maker_publication_tests {
     /// release within 30 seconds; the outbox then drops to the floor in degraded mode.
     #[test]
     fn t_mp5_a_relay_close_is_a_signal_only_with_recent_maker_traffic() {
-        let (ctx, mut rx) = node(json!({ "maker_update_rate_max": 0.5 }));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.5 }));
         let octx = OrdermatchContext::from_ctx(&ctx).unwrap();
         // No traffic: no signal.
         relay_connection_closed(&ctx);
@@ -10785,7 +11657,7 @@ mod maker_publication_tests {
     /// joined in the same moment; a later join starts another round.
     #[test]
     fn t_mp7_a_relay_joining_the_mesh_triggers_one_keep_alive_per_pair() {
-        let (ctx, mut rx) = node(json!({}));
+        let (ctx, mut rx) = node(json!({ "maker_update_coalescing": true }));
         for (base, rel) in [("DOC", "MARTY"), ("C1", "C2"), ("C1", "C2")] {
             maker_order_created_p2p_notify(ctx.clone(), &own_order(base, rel), vec![], vec![]);
         }
@@ -10836,7 +11708,7 @@ mod maker_publication_tests {
     /// mode and the signals, and carry no label (no peer identity, no content).
     #[test]
     fn t_mp10_outbox_gauges_follow_the_state() {
-        let (ctx, _rx) = node(json!({ "maker_update_rate_max": 0.1 }));
+        let (ctx, _rx) = node(json!({ "maker_update_coalescing": true, "maker_update_rate_max": 0.1 }));
         let order = own_order("DOC", "MARTY");
         maker_order_created_p2p_notify(ctx.clone(), &order, vec![], vec![]);
         for price in 2..5 {

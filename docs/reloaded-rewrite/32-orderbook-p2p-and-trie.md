@@ -1601,6 +1601,105 @@ No item changes a wire shape. The tests are those of the implementing change
 (in-process counts and capacities after a burst, the timer sweep, the clear and
 the shared-subtree case, the gauges).
 
+**R-K5 (the trie worker drains in bulk; Reloaded-original, 2026-10-29).** The
+mutation-event queue of R-T7 stays unbounded in the number of events it can
+hold, and no event is ever dropped, delayed on its producer's side (R-T3b item
+3) or reordered. What changes is how fast the worker empties it and how much
+the leftovers of an applied update cost:
+
+1. *Drain in bulk.* When the worker wakes it takes the batch that woke it and
+   every further batch already waiting in the queue, up to 1,024 batches or
+   2,048 events, whichever comes first, and applies them as one sequence under
+   one acquisition of the trie-store lock. A batch that would pass the event
+   bound starts the next sequence, and a batch larger than the bound is applied
+   alone. The event bound limits how long the trie-store lock is held, and with
+   it how long a reader that took the orderbook lock first (the synchronization
+   answer, the order-book request and the keep-alive consistency check of
+   R-T3b) can wait behind the worker: measured in a release build, a sequence
+   of 2,048 new orders applies in about 45 ms on one pair, and 16,384 events took
+   about 370 ms. By R-T3a the outcome is exactly that
+   of applying the batches one by one; only the delta history may hold fewer
+   entries, because a root that exists only between two merged batches is never
+   stored. The node's own keep-alive never advertises such a root (R-T3b item 2
+   advertises only a root of a caught-up store, which is at a boundary of the
+   merged sequence), but a root the maker advertised can fall inside a sequence
+   this node merged. A requester that holds such a root is answered with a full
+   snapshot instead of a delta; the answer is correct either way. The count of
+   applied batches (R-T3b items 2 and 4) advances by the number of batches
+   merged, so "enqueued equals applied" still means caught up.
+2. *Early purge under load.* The ten-minute purge of R-K4 stays as the floor.
+   In addition the worker purges the unreferenced nodes of the node store once
+   100,000 leaf updates (insertions and removals) have been applied since the
+   last purge, but not more often than every 5 seconds. The condition is checked
+   once per drained sequence, after the updates of that sequence are applied, and
+   the leaf updates are counted after the coalescing of R-T3a (a superseded
+   insertion does not count), so the purge happens at the first sequence boundary
+   at or past the threshold, not at exactly the 100,000th update. The 5 seconds
+   are counted from the last purge of either kind, and the ten-minute purge
+   resets both the update count and that clock. The threshold is
+   about 35 MB of unreferenced nodes (about 350 bytes per update, measured in
+   process); the 5-second spacing keeps the cost of a purge, which walks the
+   store, small against the work between two purges. An early purge only drops
+   unreferenced nodes and does not shrink the table (the shrink stays with the
+   ten-minute purge, to avoid reallocating under load).
+3. *Visibility.* `orderbook.trie_ops.pending` (R-K4 item 5) and a new counter
+   `orderbook.trie_store.early_purges` show how often the worker was behind.
+
+No item changes a wire shape. The one effect a peer can see is a full snapshot
+where a delta would have been sent, for a root that, under item 1, is no longer
+stored; every requester can apply it (R-Q5), and it happens only while the
+worker is behind. The cost is the full order set of one slice (one pubkey and
+pair) in place of the changed orders only, per such request, so a relay that
+merges while many peers ask pays more outbound bytes exactly when it is busy;
+the answer is no larger than the one a peer that has just joined receives for
+that slice. It is a divergence to record in the
+operator-facing compatibility documents.
+
+**R-K6 (a cap on each pair's delta history; Reloaded-original, 2026-10-29).** The
+delta history of a `(pubkey, pair)` slice (R-P5, R-T4) holds at most 2,048
+deltas. When a recorded delta would exceed the cap, the oldest delta is dropped,
+whether or not it has reached its time to live. The consequence is the one an
+expired delta already has: a requester whose root is older than the oldest delta
+kept is answered with the full snapshot of R-Q5, never with a wrong or partial
+delta. The cap is on entries, not bytes, and applies to each slice on its own.
+
+*Why 2,048.* A delta answer carries at most the distinct orders touched since
+the requester's root, so beyond about as many deltas as the slice holds orders
+a full snapshot is no larger than the delta and cheaper to build. A maker with
+2,000 orders that refreshes all of them every ten minutes records at most 1,000
+deltas in the 5-minute window, below the cap; the cap acts only on a slice that
+changes faster than that, which is the case of a burst. Held memory per slice is
+bounded by the cap times the size of one stored delta (about 680 bytes today),
+so about 1.4 MB, whatever the update rate; without the cap it grows with the
+rate times the 5-minute window (about 100 MB at 500 updates a second for one
+slice).
+
+The number of dropped deltas is reported as the counter
+`orderbook.history.evicted`. No item changes a wire shape.
+
+**T-K5** *Bulk drain equals one-by-one application (R-K5 item 1).* For a
+deterministic pseudo-random event stream, queue it as many small batches and as
+a few large ones; with the worker held back and then released, the trie roots,
+the read index and the per-pubkey order identifiers are identical to those of
+applying the batches one by one; the applied-batch count equals the enqueued
+count afterwards; and a delta answer for the root the store held before the
+stream and for the final root is correct (it applies to the requester's trie and
+reaches the advertised root), or is the full snapshot.
+
+**T-K6** *Early purge (R-K5 item 2).* Apply 100,000 leaf updates to one slice;
+the node store holds only the live trie plus the nodes younger than the last
+early purge (not the 100,000 replaced leaves), without waiting for the
+ten-minute purge; a second burst within 5 seconds does not purge again; a purge
+never removes a node a live trie still refers to (every key of the live tries
+is readable afterwards).
+
+**T-K7** *History cap (R-K6).* Record 3,000 deltas on one slice: 2,048 remain,
+the oldest were dropped, the counter reads 952, and the entries held (and the
+map capacity) are the same as after 2,048. A requester holding the root of the oldest dropped delta is
+answered with the full snapshot; one holding a root inside the kept window is
+answered with a delta whose application reaches the advertised root; another
+slice of the same pubkey is unaffected.
+
 ## 32.9A Bounded and Unbounded State
 
 *(Authored by the KDF Spec Reader 2026-10-28, second pass, from the rows
@@ -1729,9 +1828,10 @@ from the index ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7).
 4. **Order of release.** Pending messages are released oldest first,
    counted from when the order's slot was first filled, so that no order
    waits behind newer ones.
-5. **Switch.** The top-level `MM2.json` boolean `maker_update_coalescing`
-   (default `true`) selects this rule. Only a JSON `false` turns it off,
-   and every message is then published at once, as without the outbox.
+5. **Switch** *(amended 2026-10-29, D9)*. The top-level `MM2.json`
+   boolean `maker_update_coalescing` (default `false`) selects this rule
+   and R-MP2. Only a JSON `true` turns it on. Otherwise every message is
+   published at once, as without the outbox.
 
 **R-MP2 (release budget).** The outbox releases created and updated
 messages at no more than the pubkey's current *rate*.
@@ -1912,9 +2012,11 @@ waiting up to 30 seconds for the next tick.
 > on its own. No message format changes.
 >
 > Under `docs/COMPAT_SWITCHES.md`, "The default-side rule", this is arm 3.
-> The project team decided that Reloaded's variant is the default (decision
-> AO, 2026-10-28). **Compatibility:** to publish every order message at
-> once, set `maker_update_coalescing` to `false`. R-MP3 and R-MP4 are not
+> The project team first made Reloaded's variant the default (decision AO,
+> 2026-10-28). After a field run in a mesh with reference nodes, the
+> maintainer made the reference behavior the default again (D9,
+> 2026-10-29): every order message is published at once unless
+> `maker_update_coalescing` is set to `true`. R-MP3 and R-MP4 are not
 > switched: they only order and add keep-alives of the bound shape.
 >
 > **Provenance.** Reloaded-original. Inputs: our own code, the in-process
@@ -1988,8 +2090,10 @@ waiting up to 30 seconds for the next tick.
 - **T-MP10** *Metrics.* The R-MP5 values are present and reflect a
   queued backlog, drops, pending outbox messages, the rate and the
   pressure state.
-- **T-MP11** *Switch.* With `maker_update_coalescing` set to `false`,
-  every order message is published at once.
+- **T-MP11** *Switch (amended 2026-10-29).* With no
+  `maker_update_coalescing` setting, with `false` and with any value other
+  than a JSON `true`, every order message is published at once. With
+  `true`, the order messages go through the outbox.
 - **T-MP12** *Priority marking.*
   - A cancellation and each swap-negotiation message are published with
     priority, and so is one propagated by a relay.
@@ -2105,7 +2209,9 @@ D6. **Reference unboundedness, and Reloaded-original hardening
     queue).
     Candidates, all Reloaded-original and none bound here:
 
-    - a **bounded or coalescing mutation queue** — Reloaded already has
+    - a **bounded or coalescing mutation queue** (adopted in part: R-K5 drains
+      the queue in bulk and keeps it unbounded, because dropping an event would
+      make the trie and the read index diverge; the hard bound stays out) — Reloaded already has
       R-T3b item 1's queue ordering, which any bound must preserve; a
       coalescing design merges consecutive events for one
       `(pubkey, pair)` before they reach the worker and sheds load by
@@ -2162,6 +2268,37 @@ D8. **Default ceiling and climb step of the maker publication rate
     times and trip again on every cycle. The first trip often comes from
     the burst that publishes a maker's orders at startup; that is
     accepted, with no behavior change.
+
+D9. **The outbox is opt-in (§32.9B R-MP1 item 5; resolved 2026-10-29,
+    maintainer decision; added 2026-10-29).** A field run of a maker
+    with several hundred orders, in a mesh where relays and other makers
+    run the reference, showed two flaws of R-MP2 as written:
+    - the close signal comes on the close of the last connection to any
+      relay, for any cause, including the node's own relay maintenance.
+      Under constant order traffic every such close counts, so ordinary
+      churn put the maker into degraded mode again and again;
+    - a keep-alive advertises the maker's local roots, which include the
+      changes the outbox still holds. A receiver asks the peer that
+      forwarded the keep-alive (R-Q4), and that peer does not have those
+      changes yet, because every relay forwards a keep-alive before it
+      handles it (R-F3a). Every hop then fails a synchronization request
+      for each pair on each keep-alive, and reference nodes logged
+      missing pair roots every 30 to 40 seconds.
+
+    The second flaw also holds outside degraded mode whenever the bot
+    wants more updates than the rate allows. Releasing at the floor
+    instead of holding would not close it, because the advertised roots
+    catch up only when the rate exceeds the update demand. The maintainer
+    therefore made the outbox opt-in: the default publishes every order
+    message at once, as the reference does, and `maker_update_coalescing`
+    set to `true` turns R-MP1 and R-MP2 on. Toward a slow relay the
+    default then behaves as a reference maker does; the per-peer send
+    queue bound of [Chapter 28](28-libp2p-modernization.md) §28.9B RQ1
+    protects Reloaded relays. Planned before the outbox becomes the
+    default again: a keep-alive that advertises only the roots of
+    released messages, a close signal that counts only error closes of
+    a relay with this node's data in flight, and a synchronization
+    request addressed to the keep-alive's author when connected to it.
 
 ## 32.11 External References
 
@@ -2612,6 +2749,14 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   it relies on are the gated ones of D6 and of §32.9A R-B1 rows 3 and 6 (bounds,
   purge period, nodes of a cleared slice never released); nothing else from the
   reference was used.
+- *Reloaded-original addition (2026-10-29), no forbidden-class input:* R-K5
+  (bulk drain of the mutation queue, early purge under load) and R-K6 (cap on
+  each pair's delta history), with T-K5 to T-K7. *Inputs:* this repository's own
+  worker, node-store and history code, and the in-process measurement recorded
+  for R-K4 (about 680 bytes per stored delta, about 350 bytes of unreferenced
+  nodes per update, 100 MB of history for 150,000 updates of one slice). The
+  reference facts it relies on are the gated ones of D6 and of §32.9A R-B1 rows
+  3, 6 and 7; nothing else from the reference was used.
 - *Reloaded-original addition (2026-10-28, Decision AN): R-Q5b, its
   divergence note, the amendment of R-T3b item 3, the sentence appended to
   R-Q6, and T-Q5b.* A relay answers a request for a pair it is still

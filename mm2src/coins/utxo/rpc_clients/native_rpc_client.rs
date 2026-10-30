@@ -314,22 +314,86 @@ impl JsonRpcClient for NativeClientImpl {
                 // measure now only body length, because the `hyper` crate doesn't allow to get total HTTP packet length
                 event_handles.on_incoming_response(&res.2);
 
-                let body = try_s!(std::str::from_utf8(&res.2));
-
+                // The daemon's answer is never quoted in a text: only its status, size, and for a JSON-RPC error
+                // answer the daemon's own error code and message (CRD ch.38 R38.6.9b item 4).
                 if res.0 != StatusCode::OK {
-                    return ERR!(
-                        "Rpc request {:?} failed with HTTP status code {}, response body: {}",
-                        request,
-                        res.0,
-                        body
-                    );
+                    return Err(ERRL!("{}", failed_answer_text(&request, res.0, &res.2, &named_uri)));
                 }
 
-                let response = try_s!(json::from_str(body));
+                let body = unreadable_answer_text(&request, res.0, &res.2)?;
+                let response = json::from_str(body).map_err(|e| {
+                    ERRL!(
+                        "Rpc request {} got an answer of {} bytes that is not a JSON-RPC response: {:?} error at line {} column {}",
+                        request_name(&request),
+                        res.2.len(),
+                        e.classify(),
+                        e.line(),
+                        e.column()
+                    )
+                })?;
                 Ok((uri.into(), response))
             },
         ))
     }
+}
+
+/// What a text names of a request: the method of a single request, or the count and the distinct methods of a
+/// batch. Never its parameters (CRD ch.38 R38.6.9b item 4).
+#[cfg(not(target_arch = "wasm32"))]
+fn request_name(request: &JsonRpcRequestEnum) -> String {
+    match request {
+        JsonRpcRequestEnum::Single(single) => single.method.clone(),
+        JsonRpcRequestEnum::Batch(batch) => {
+            let methods: std::collections::BTreeSet<&str> = batch.methods().collect();
+            format!("batch of {} requests ({})", batch.len(), methods.into_iter().join(", "))
+        },
+    }
+}
+
+/// The error text for a daemon's answer with a non-success HTTP status: the request's name, the status and the
+/// size of the body, plus the `code` and `message` of the body's JSON-RPC `error` object when it has one. Nothing
+/// else of the body is quoted, and nothing of the request's parameters (CRD ch.38 R38.6.9b item 4). The message is
+/// scrubbed of the daemon's URL like every other text (R38.6.9b item 1).
+#[cfg(not(target_arch = "wasm32"))]
+fn failed_answer_text(request: &JsonRpcRequestEnum, status: StatusCode, body: &[u8], daemon_url: &str) -> String {
+    let mut text = format!(
+        "Rpc request {} failed with HTTP status code {}, response body of {} bytes",
+        request_name(request),
+        status,
+        body.len()
+    );
+    // `from_slice` takes bytes that are not UTF-8 too: such a body just has no readable error object.
+    if let Ok(Json::Object(answer)) = json::from_slice::<Json>(body) {
+        if let Some(Json::Object(error)) = answer.get("error") {
+            if let Some(code) = error.get("code").and_then(Json::as_i64) {
+                text.push_str(&format!(", daemon error code {}", code));
+            }
+            if let Some(message) = error.get("message").and_then(Json::as_str) {
+                text.push_str(&format!(
+                    ", daemon error message: {}",
+                    scrub_node_url(message, daemon_url)
+                ));
+            }
+        }
+    }
+    text
+}
+
+/// The body of a success answer as text, or the error text when it is not UTF-8. The bytes are not quoted.
+#[cfg(not(target_arch = "wasm32"))]
+fn unreadable_answer_text<'a>(
+    request: &JsonRpcRequestEnum,
+    status: StatusCode,
+    body: &'a [u8],
+) -> Result<&'a str, String> {
+    std::str::from_utf8(body).map_err(|_| {
+        ERRL!(
+            "Rpc request {} got an answer of {} bytes (HTTP status code {}) that is not UTF-8 text",
+            request_name(request),
+            body.len(),
+            status
+        )
+    })
 }
 
 impl JsonRpcBatchClient for NativeClientImpl {}
@@ -839,5 +903,191 @@ mod node_naming_tests {
             .to_string();
         assert!(error.contains("http://127.0.0.1:1"), "{error}");
         assert!(!error.contains("http://127.0.0.1:1/"), "{error}");
+    }
+}
+
+/// T38.6.9.3 (CRD ch.38 R38.6.9b item 4): an error text names the method, the status and the size of the daemon's
+/// answer, and the daemon's own error code and message; it never quotes the answer or the request's parameters.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod daemon_answer_tests {
+    use super::*;
+    use crate::answer_stub::{http_response, serve};
+    use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+
+    /// Carried by the request's parameters, never to appear in a text.
+    const REQUEST_MARKER: &str = "REQPARAMMARKER";
+    /// Carried by the daemon's answer, never to appear in a text.
+    const BODY_MARKER: &str = "DAEMONBODYMARKER";
+
+    fn client_for(port: u16) -> NativeClient {
+        NativeClient(Arc::new(NativeClientImpl {
+            coin_ticker: "RIN".to_owned(),
+            uri: format!("http://127.0.0.1:{port}/?key=URLMARKER"),
+            auth: "Basic cnBjdXNlcjpycGNzZWNyZXQ=".to_owned(),
+            ..Default::default()
+        }))
+    }
+
+    /// The error text of a request that carries [`REQUEST_MARKER`] to a daemon that answers with `reply`.
+    fn error_text(reply: Vec<u8>) -> String {
+        let port = serve(move |_| reply.clone());
+        let client = client_for(port);
+        common::block_on(client.get_address_info(REQUEST_MARKER).compat())
+            .unwrap_err()
+            .to_string()
+    }
+
+    fn assert_no_marker_logged() {
+        for line in captured_log_lines() {
+            assert!(
+                !line.contains(BODY_MARKER) && !line.contains(REQUEST_MARKER),
+                "a log line carries a marker: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn t38_6_9_3_a_json_rpc_error_answer_gives_status_code_message_and_size_only() {
+        install_log_capture();
+        let body = format!(
+            r#"{{"result":null,"error":{{"code":-26,"message":"rejected by the daemon","data":"{BODY_MARKER}"}},"id":"0","extra":"{BODY_MARKER}"}}"#
+        );
+        let error = error_text(http_response(
+            "500 Internal Server Error",
+            "application/json",
+            body.as_bytes(),
+        ));
+        assert!(error.contains("getaddressinfo"), "{error}");
+        assert!(error.contains("500"), "{error}");
+        assert!(error.contains("-26"), "{error}");
+        assert!(error.contains("rejected by the daemon"), "{error}");
+        assert!(error.contains(&format!("{} bytes", body.len())), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+        assert!(!error.contains(REQUEST_MARKER), "{error}");
+        assert!(!error.contains("URLMARKER"), "{error}");
+        assert_no_marker_logged();
+    }
+
+    #[test]
+    fn t38_6_9_3_an_html_answer_gives_status_and_size_only() {
+        install_log_capture();
+        let body = format!("<html><body>Unauthorized {BODY_MARKER}</body></html>");
+        let error = error_text(http_response("401 Unauthorized", "text/html", body.as_bytes()));
+        assert!(error.contains("getaddressinfo"), "{error}");
+        assert!(error.contains("401"), "{error}");
+        assert!(error.contains(&format!("{} bytes", body.len())), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+        assert!(!error.contains(REQUEST_MARKER), "{error}");
+        assert_no_marker_logged();
+    }
+
+    #[test]
+    fn t38_6_9_3_an_error_object_without_a_code_or_message_gives_neither() {
+        let body = format!(r#"{{"result":null,"error":{{"data":"{BODY_MARKER}"}},"id":"0"}}"#);
+        let error = error_text(http_response(
+            "500 Internal Server Error",
+            "application/json",
+            body.as_bytes(),
+        ));
+        assert!(
+            error.contains("500") && error.contains(&format!("{} bytes", body.len())),
+            "{error}"
+        );
+        assert!(!error.contains("daemon error"), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+    }
+
+    #[test]
+    fn t38_6_9_3_a_success_answer_that_is_not_json_is_not_quoted() {
+        install_log_capture();
+        let body = format!("this is not json {BODY_MARKER}");
+        let error = error_text(http_response("200 OK", "text/plain", body.as_bytes()));
+        assert!(error.contains("getaddressinfo"), "{error}");
+        assert!(error.contains(&format!("{} bytes", body.len())), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+        assert!(!error.contains(REQUEST_MARKER), "{error}");
+        assert_no_marker_logged();
+    }
+
+    #[test]
+    fn t38_6_9_3_a_success_answer_that_is_not_utf8_is_not_quoted() {
+        let mut body = BODY_MARKER.as_bytes().to_vec();
+        body.extend_from_slice(&[0xff, 0xfe]);
+        let error = error_text(http_response("200 OK", "application/octet-stream", &body));
+        assert!(error.contains(&format!("{} bytes", body.len())), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+        // The same holds for a failing status.
+        let error = error_text(http_response(
+            "500 Internal Server Error",
+            "application/octet-stream",
+            &body,
+        ));
+        assert!(
+            error.contains("500") && error.contains(&format!("{} bytes", body.len())),
+            "{error}"
+        );
+        assert!(!error.contains(BODY_MARKER), "{error}");
+    }
+
+    #[test]
+    fn t38_6_9_3_a_result_of_the_wrong_shape_is_not_quoted() {
+        install_log_capture();
+        let body = format!(r#"{{"result":"{BODY_MARKER}","error":null,"id":"0"}}"#);
+        let error = error_text(http_response("200 OK", "application/json", body.as_bytes()));
+        assert!(error.contains("getaddressinfo"), "{error}");
+        assert!(!error.contains(BODY_MARKER), "{error}");
+        assert_no_marker_logged();
+    }
+
+    #[test]
+    fn t38_6_9_3_a_batch_request_is_named_by_its_count_and_methods() {
+        let body = format!(
+            r#"{{"result":null,"error":{{"code":-32600,"message":"bad batch"}},"id":null,"x":"{BODY_MARKER}"}}"#
+        );
+        let reply = http_response("500 Internal Server Error", "application/json", body.as_bytes());
+        let port = serve(move |_| reply.clone());
+        let client = client_for(port);
+        let requests = vec![
+            rpc_req!(client, "getblockhash", REQUEST_MARKER),
+            rpc_req!(client, "getblockhash", REQUEST_MARKER),
+            rpc_req!(client, "getblock", REQUEST_MARKER),
+        ];
+        let error = common::block_on(client.batch_rpc::<_, Json>(requests).compat())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("batch of 3 requests (getblock, getblockhash)"),
+            "{error}"
+        );
+        assert!(
+            error.contains("500") && error.contains("bad batch") && error.contains("-32600"),
+            "{error}"
+        );
+        assert!(
+            !error.contains(BODY_MARKER) && !error.contains(REQUEST_MARKER),
+            "{error}"
+        );
+    }
+
+    /// The message of the daemon's error is subject to R38.6.9b item 1 like any text: the daemon's URL in it is
+    /// reduced to its host-only form.
+    #[test]
+    fn t38_6_9_3_the_daemon_url_in_its_message_is_host_only() {
+        let port = serve(|_| Vec::new());
+        let url = format!("http://127.0.0.1:{port}/?key=URLMARKER");
+        let body = format!(r#"{{"error":{{"code":-1,"message":"cannot reach {url}"}}}}"#);
+        let text = failed_answer_text(
+            &JsonRpcRequestEnum::Single(JsonRpcRequest {
+                jsonrpc: "1.0".into(),
+                id: "0".into(),
+                method: "getinfo".into(),
+                params: vec![],
+            }),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            body.as_bytes(),
+            &url,
+        );
+        assert!(text.contains(&format!("http://127.0.0.1:{port}")), "{text}");
+        assert!(!text.contains("URLMARKER"), "{text}");
     }
 }

@@ -74,4 +74,36 @@ mod telegram_tests {
             assert!(resp);
         }
     }
+
+    /// The bot token is a path segment of the request URL. A failed send names the endpoint host and carries no
+    /// part of the token (CRD ch.35 R35.1.17).
+    #[test]
+    fn a_failed_send_never_shows_the_bot_token() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json");
+        });
+        let chat_registry: ChatIdRegistry = vec![("Room".to_string(), "-1".to_string())].into_iter().collect();
+        let tg_client = TgClient::new(
+            "123456:AAHbotTOKEN".to_string(),
+            Some(format!("http://127.0.0.1:{port}/bot")),
+            chat_registry,
+        );
+        let err = block_on(tg_client.send_message("hi".to_string(), "Room", true)).unwrap_err();
+        let text = format!("{err} {err:?}");
+        assert!(
+            text.contains(&format!("http://127.0.0.1:{port}")),
+            "the endpoint host is missing from the rendered error"
+        );
+        assert!(
+            !text.contains("AAHbotTOKEN") && !text.contains("123456"),
+            "a part of the bot token leaked into the rendered error"
+        );
+    }
 }

@@ -764,15 +764,17 @@ D36.2 The task-managed single-token family (`task::enable_tendermint_token::*`)
 is not routed by the reference and is deferred.
 
 D36.3 *(Resolved 2026-10-28, maintainer decision, for Tendermint; the second
-question stays open.)* *Node response bodies in logs.* R36.5A.3 forbids
+question resolved 2026-10-29, maintainer decision.)* *Node response bodies in logs.* R36.5A.3 forbids
 response bodies in log lines at every level. A looser reading would allow them
 at trace level only. The stricter reading was taken because a trace level can
 be switched on in the field, and a body then reaches a shared log. The
-maintainer kept the rule: a log line names a body's size only. Still open:
-whether the same rule should bind the other
-node families, whose error texts carry the body of a non-success answer
-(chapter 38 §38.6.9 for the native UTXO daemon, chapter 20 §20.8 for the Sia
-wallet daemon).
+maintainer kept the rule: a log line names a body's size only. The second
+question was whether the same rule should bind the other node families,
+whose error texts carried the body of a non-success answer. The maintainer
+decided on 2026-10-29 that it does, for error texts as well as log lines: the
+native UTXO daemon's errors carry the daemon's error code and message and the
+body's size only (chapter 38 R38.6.9b item 4), and so do the Sia wallet
+daemon's (chapter 20 R-N3).
 
 ## 36.10 Baseline Verifications
 
@@ -845,4 +847,5 @@ V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
   own secrets switch), his decision of 2026-10-28 on D36.3 and this
   repository's own code. They take no
   forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
-  required.
+  required. The resolution of D36.3's second question (2026-10-29, decision
+  AU) was added on the same terms.

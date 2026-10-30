@@ -35,8 +35,132 @@ use crate::siacoin::{Address, Currency, Event, EventDataWrapper, Hash256, Hash25
 use crate::{DexFee, TransactionEnum};
 
 /// The text of an error that comes from the external Sia library or its HTTP client, with every URL in it reduced
-/// to its host-only form (CRD ch.20 R-N1): the library's request errors carry the full request URL.
-pub(crate) fn sia_text(error: &dyn std::fmt::Display) -> String { scrub_urls_in_text(&error.to_string()) }
+/// to its host-only form (CRD ch.20 R-N1) and without the walletd's response body (R-N3): the library's request
+/// errors carry the full request URL, and its status and deserialization errors carry the whole body.
+///
+/// The library's client error is found through the error's `source` chain (every library wrapper links its
+/// client error with `#[from]`), so the choice is made on the library's own variants. Only the wrapper's own words
+/// are kept as text: the wrapper's text embeds the client error's text verbatim, which is replaced by the text
+/// [`client_error_text`] gives. An error without a client error in its chain is rendered as it is.
+pub(crate) fn sia_text<E: std::error::Error + 'static>(error: &E) -> String {
+    let text = error.to_string();
+    let text = match client_error_in(error) {
+        Some(client) => text.replace(&client.to_string(), &client_error_text(client)),
+        None => text,
+    };
+    scrub_urls_in_text(&text)
+}
+
+/// The first library client error in `error`'s `source` chain, `error` itself included.
+fn client_error_in<'a>(error: &'a (dyn std::error::Error + 'static)) -> Option<&'a ClientError> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(client) = error.downcast_ref::<ClientError>() {
+            return Some(client);
+        }
+        current = error.source();
+    }
+    None
+}
+
+/// The longest walletd message a text carries (CRD ch.20 R-N3).
+const WALLETD_MESSAGE_MAX_CHARS: usize = 256;
+
+/// The walletd's error message in a non-success answer's body (CRD ch.20 R-N3): the body's text trimmed, but only
+/// when it is a single line of at most [`WALLETD_MESSAGE_MAX_CHARS`] characters. Any other body has no message.
+fn walletd_message(body: &str) -> Option<&str> {
+    let message = body.trim();
+    let single_line = !message.contains(['\n', '\r']);
+    (!message.is_empty() && single_line && message.chars().count() <= WALLETD_MESSAGE_MAX_CHARS).then_some(message)
+}
+
+/// How a text names the answer to a request that did not succeed (CRD ch.20 R-N3): the status, the body's size in
+/// bytes and the walletd's message, if the body is one. `body` is `None` when the answer had no body text, and
+/// `size` is then the size of whatever body there was.
+fn failed_answer_text(status: &dyn std::fmt::Display, size: usize, body: Option<&str>) -> String {
+    match body.and_then(walletd_message) {
+        Some(message) => format!("unexpected HTTP status:{status}, body of {size} bytes, message: {message}"),
+        None => format!("unexpected HTTP status:{status}, body of {size} bytes"),
+    }
+}
+
+/// How a text names a body that could not be read as JSON: the kind and position of the failure, never the body or
+/// the failing value (the library's error would quote it).
+fn unreadable_body_text(size: usize, error: &serde_json::Error) -> String {
+    format!(
+        "{size} bytes that are not the expected JSON: {:?} error at line {} column {}",
+        error.classify(),
+        error.line(),
+        error.column()
+    )
+}
+
+/// The text of the library's native client error, without the walletd's response body (CRD ch.20 R-N3). A variant
+/// that carries no body keeps the library's own text.
+#[cfg(not(target_arch = "wasm32"))]
+fn client_error_text(error: &ClientError) -> String {
+    match error {
+        ClientError::DispatcherUnexpectedStatus { status, body } => format!(
+            "NativeClient::dispatcher: {}",
+            failed_answer_text(status, body.len(), Some(body))
+        ),
+        ClientError::DispatcherDeserializeJsonBody { error, body } => format!(
+            "NativeClient::dispatcher: Failed to deserialize response body of {}",
+            unreadable_body_text(body.len(), error)
+        ),
+        ClientError::PingServer(inner) => format!(
+            "NativeClient::new: Failed to ping server with ConsensusTipRequest: {}",
+            client_error_text(inner)
+        ),
+        ClientError::DispatcherBuildRequest(inner) => format!(
+            "NativeClient::dispatcher: Failed to convert SiaApiRequest to reqwest::Request: {}",
+            client_error_text(inner)
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// The text of the library's browser client error, without the walletd's response body (CRD ch.20 R-N3). A variant
+/// that carries no body keeps the library's own text.
+#[cfg(target_arch = "wasm32")]
+fn client_error_text(error: &ClientError) -> String {
+    use sia_rust::transport::client::wasm_fetch::Body;
+
+    match error {
+        ClientError::DispatcherUnexpectedHttpStatus { status, body } => {
+            let (size, text) = match body {
+                Some(Body::Utf8(text)) => (text.len(), Some(text.as_str())),
+                Some(Body::Json(json)) => (json.to_string().len(), None),
+                Some(Body::Bytes(bytes)) => (bytes.len(), None),
+                None => (0, None),
+            };
+            format!("WasmClient::dispatcher: {}", failed_answer_text(status, size, text))
+        },
+        ClientError::DispatcherUnexpectedBodyBytes(bytes) => format!(
+            "WasmClient::dispatcher: expected utf-8 or JSON in response body, found octet-stream of {} bytes",
+            bytes.len()
+        ),
+        ClientError::DispatcherDeserializeBodyJson(error) | ClientError::DispatcherDeserializeBodyUtf8(error) => {
+            format!(
+                "WasmClient::dispatcher: failed to deserialize response body: {:?} error at line {} column {}",
+                error.classify(),
+                error.line(),
+                error.column()
+            )
+        },
+        ClientError::PingServer(inner) => format!(
+            "WasmClient::new: Failed to ping server with ConsensusTipRequest: {}",
+            client_error_text(inner)
+        ),
+        ClientError::DispatcherProcessSchema(inner) => {
+            format!(
+                "WasmClient::dispatcher: process_schema failed: {}",
+                client_error_text(inner)
+            )
+        },
+        other => other.to_string(),
+    }
+}
 
 // =====================================================================
 // 1. Conversion / parse errors
@@ -173,7 +297,7 @@ pub enum SendTakerFeeError {
     DexFeeVariant(String),
     #[error("[taker-fee] keypair fetch failed: {0}")]
     MyKeypair(#[from] SiaCoinMyKeypairError),
-    #[error("[taker-fee] funding failed: {0}")]
+    #[error("[taker-fee] funding failed: {}", sia_text(.0))]
     FundTx(#[from] V2TransactionBuilderError),
     #[error("[taker-fee] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -192,7 +316,7 @@ pub enum SendMakerPaymentError {
     SiacoinToHastings(#[from] SiacoinToHastingsError),
     #[error("[maker-payment] secret_hash parse failed: {0}")]
     ParseSecretHash(#[from] Hash256Error),
-    #[error("[maker-payment] funding failed: {0}")]
+    #[error("[maker-payment] funding failed: {}", sia_text(.0))]
     FundTx(#[from] V2TransactionBuilderError),
     #[error("[maker-payment] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -211,7 +335,7 @@ pub enum SendTakerPaymentError {
     SiacoinToHastings(#[from] SiacoinToHastingsError),
     #[error("[taker-payment] secret_hash wrong length: {0}")]
     SecretHashLength(#[from] Hash256Error),
-    #[error("[taker-payment] funding failed: {0}")]
+    #[error("[taker-payment] funding failed: {}", sia_text(.0))]
     FundTx(#[from] V2TransactionBuilderError),
     #[error("[taker-payment] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -237,7 +361,7 @@ pub enum SendRefundHltcError {
     ParseArgs(#[from] SiaRefundPaymentArgsError),
     #[error("[refund-hltc] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
-    #[error("[refund-hltc] HTLC SpendPolicy unsatisfied: {0}")]
+    #[error("[refund-hltc] HTLC SpendPolicy unsatisfied: {}", sia_text(.0))]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[refund-hltc] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -262,7 +386,7 @@ pub enum TakerSpendsMakerPaymentError {
     ParseSecretHash(#[from] Hash256Error),
     #[error("[taker-spends-maker] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
-    #[error("[taker-spends-maker] HTLC SpendPolicy unsatisfied: {0}")]
+    #[error("[taker-spends-maker] HTLC SpendPolicy unsatisfied: {}", sia_text(.0))]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[taker-spends-maker] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -289,7 +413,7 @@ pub enum MakerSpendsTakerPaymentError {
     ParseSecretHash(#[from] Hash256Error),
     #[error("[maker-spends-taker] utxo lookup failed: {}", sia_text(.0))]
     UtxoFromTxid(#[from] Box<UtxoFromTxidError>),
-    #[error("[maker-spends-taker] HTLC SpendPolicy unsatisfied: {0}")]
+    #[error("[maker-spends-taker] HTLC SpendPolicy unsatisfied: {}", sia_text(.0))]
     SatisfyHtlc(#[from] V2TransactionBuilderError),
     #[error("[maker-spends-taker] broadcast failed: {}", sia_text(.0))]
     BroadcastTx(#[from] BroadcastTransactionError),
@@ -515,4 +639,176 @@ pub enum SiaHistoryFetchError {
 pub enum SiaHDWalletCreationError {
     #[error("[hd-wallet] failed to derive the Sia ed25519 HD root key: {0}")]
     DeriveRoot(String),
+}
+
+/// T-N3 (CRD ch.20 R-N3): a text about a walletd answer carries the status, the size of the body and walletd's
+/// message, never the body.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod walletd_answer_tests {
+    use super::*;
+    use crate::answer_stub::{http_response, serve};
+    use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+    use crate::siacoin::ApiClientHelpers;
+    use crate::siacoin::{Currency, SiaApiClient, SiaClient, SiaClientConf, SiaKeypair, V2TransactionBuilder};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Carried by the walletd's answer, never to appear in a text.
+    const MARKER: &str = "WALLETDBODYMARKER";
+    /// Carried by the request (the configured URL and password), never to appear in a text.
+    const REQUEST_MARKER: &str = "WALLETDREQMARKER";
+    const TIP: &str = r#"{"height":10,"id":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    fn conf(port: u16) -> SiaClientConf {
+        serde_json::from_value(serde_json::json!({
+            "server_url": format!("http://127.0.0.1:{port}/?key={REQUEST_MARKER}"),
+            "password": REQUEST_MARKER,
+            "timeout": 5,
+        }))
+        .unwrap()
+    }
+
+    /// A client of a walletd that answers the connection probe (the first request) with a consensus tip and every
+    /// later request with `reply`.
+    fn client_after_ping(reply: Vec<u8>) -> SiaClient {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let port = serve(move |_| {
+            if requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                http_response("200 OK", "application/json", TIP.as_bytes())
+            } else {
+                reply.clone()
+            }
+        });
+        common::block_on(SiaClient::new(conf(port))).unwrap()
+    }
+
+    /// The text of a failed read of the consensus tip through a library helper, the way an endpoint call renders it.
+    fn read_error_text(reply: Vec<u8>) -> String {
+        let client = client_after_ping(reply);
+        let error = common::block_on(client.current_height()).unwrap_err();
+        sia_text(&error)
+    }
+
+    fn assert_no_marker(text: &str) {
+        assert!(!text.contains(MARKER), "{text}");
+        assert!(!text.contains(REQUEST_MARKER), "{text}");
+        for line in captured_log_lines() {
+            assert!(
+                !line.contains(MARKER) && !line.contains(REQUEST_MARKER),
+                "a log line carries a marker: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_n3_a_single_line_message_is_carried_with_status_and_size() {
+        install_log_capture();
+        let body = "insufficient balance\n";
+        let text = read_error_text(http_response("400 Bad Request", "text/plain", body.as_bytes()));
+        assert!(text.contains("400"), "{text}");
+        assert!(text.contains("message: insufficient balance"), "{text}");
+        assert!(text.contains(&format!("body of {} bytes", body.len())), "{text}");
+        assert!(
+            text.contains("current_height"),
+            "the wrapper's own words are kept: {text}"
+        );
+        assert_no_marker(&text);
+    }
+
+    #[test]
+    fn t_n3_a_multi_line_html_page_is_represented_by_its_size() {
+        install_log_capture();
+        let body = format!("<html>\n<body>\nBad gateway {MARKER}\n</body>\n</html>\n");
+        let text = read_error_text(http_response("502 Bad Gateway", "text/html", body.as_bytes()));
+        assert!(text.contains("502"), "{text}");
+        assert!(text.contains(&format!("body of {} bytes", body.len())), "{text}");
+        assert!(!text.contains("message:"), "{text}");
+        assert_no_marker(&text);
+    }
+
+    #[test]
+    fn t_n3_a_line_over_256_characters_is_represented_by_its_size() {
+        install_log_capture();
+        let long = format!("{MARKER}{}", "x".repeat(300));
+        let text = read_error_text(http_response("400 Bad Request", "text/plain", long.as_bytes()));
+        assert!(text.contains(&format!("body of {} bytes", long.len())), "{text}");
+        assert!(!text.contains("message:"), "{text}");
+        assert_no_marker(&text);
+        // The limit is on characters: a line of exactly 256 is a message.
+        let edge = "y".repeat(256);
+        let text = read_error_text(http_response("400 Bad Request", "text/plain", edge.as_bytes()));
+        assert!(text.contains(&format!("message: {edge}")), "{text}");
+    }
+
+    #[test]
+    fn t_n3_a_success_answer_that_is_not_json_is_not_quoted() {
+        install_log_capture();
+        let body = format!("not json {MARKER}");
+        let text = read_error_text(http_response("200 OK", "text/plain", body.as_bytes()));
+        assert!(text.contains(&format!("{} bytes", body.len())), "{text}");
+        assert_no_marker(&text);
+    }
+
+    #[test]
+    fn t_n3_the_message_is_scrubbed_of_urls() {
+        let body = "cannot reach http://user:pass@walletd.example:9980/secret/path?k=v";
+        let text = read_error_text(http_response(
+            "500 Internal Server Error",
+            "text/plain",
+            body.as_bytes(),
+        ));
+        assert!(text.contains("http://walletd.example:9980"), "{text}");
+        for secret in ["user:pass", "secret/path", "k=v"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+
+    /// The activation path: the connection probe itself is refused, which `SiaClient::new` wraps one level deeper.
+    #[test]
+    fn t_n3_a_refused_connection_probe_gives_status_message_and_size() {
+        install_log_capture();
+        let body = "walletd is locked\n";
+        let reply = http_response("403 Forbidden", "text/plain", body.as_bytes());
+        let port = serve(move |_| reply.clone());
+        let error = common::block_on(SiaClient::new(conf(port))).err().unwrap();
+        let text = SiaCoinBuilderError::Client(error).to_string();
+        assert!(
+            text.contains("403") && text.contains("message: walletd is locked"),
+            "{text}"
+        );
+        assert!(text.contains(&format!("body of {} bytes", body.len())), "{text}");
+        assert_no_marker(&text);
+    }
+
+    /// The funding helper wraps the client error twice more (`V2TransactionBuilderError`), and Reloaded renders it
+    /// through the same boundary.
+    #[test]
+    fn t_n3_a_failed_funding_read_goes_through_the_boundary() {
+        install_log_capture();
+        let client = client_after_ping(http_response(
+            "400 Bad Request",
+            "text/plain",
+            format!("<b>\n{MARKER}\n</b>\n").as_bytes(),
+        ));
+        let keypair = SiaKeypair::from_private_bytes(&[7u8; 32]).unwrap();
+        let error = common::block_on(
+            V2TransactionBuilder::new()
+                .miner_fee(Currency::DEFAULT_FEE)
+                .fund_tx_single_source(&client, &keypair.public()),
+        )
+        .err()
+        .unwrap();
+        let text = SendTakerFeeError::FundTx(error).to_string();
+        assert!(text.contains("[taker-fee] funding failed"), "{text}");
+        assert!(text.contains("400"), "{text}");
+        assert_no_marker(&text);
+    }
+
+    #[test]
+    fn t_n3_the_message_rule_is_on_the_trimmed_body() {
+        assert_eq!(walletd_message("  not found \r\n"), Some("not found"));
+        assert_eq!(walletd_message("a\nb"), None);
+        assert_eq!(walletd_message("a\rb"), None);
+        assert_eq!(walletd_message(" \n"), None);
+    }
 }
