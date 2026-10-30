@@ -123,7 +123,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   or an internal error. It also counts this node's own requests that failed, and why: no data, an
   error from the peer, a timeout, a lost connection or an answer it could not read. At debug level
   each request and answer gets one line, with the peer, the maker, the pairs and the time taken.
-  Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #TBD.
+  Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #179.
 
 #### Order posting, fees and balances
 
