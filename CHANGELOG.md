@@ -381,7 +381,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   negotiation messages still get their second copy, through the send queue's priority lane, and so
   do swap and watcher messages. The relay still marks every message as handled, so it announces and
   serves it to peers that ask exactly as before. Nothing on the wire changes. To restore the old
-  behavior, set `relay_second_copy_priority_only` to `false` in `MM2.json`. Detail: PR #TBD; CRD
+  behavior, set `relay_second_copy_priority_only` to `false` in `MM2.json`. Detail: PR #178; CRD
   ch.32 R-F3b, D11.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
