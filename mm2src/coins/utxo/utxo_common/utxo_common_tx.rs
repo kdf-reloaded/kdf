@@ -544,6 +544,42 @@ pub fn send_raw_tx_bytes(
     )
 }
 
+/// [`send_raw_tx`] for the coins whose user withdraw is built by `UtxoWithdraw` (the standard UTXO coin, BCH and
+/// Qtum): once the backend has accepted the broadcast, the spend is promoted into the recently-spent record if the
+/// bytes are those of a pending withdraw (see [`send_raw_tx_bytes_promoting_withdraw`]).
+pub fn send_raw_tx_promoting_withdraw(
+    coin: &UtxoArc,
+    tx: &str,
+) -> Box<dyn Future<Item = String, Error = String> + Send> {
+    let bytes = try_fus!(hex::decode(tx));
+    send_raw_tx_bytes_promoting_withdraw(coin, &bytes)
+}
+
+/// [`send_raw_tx_bytes`] that also promotes a withdraw's spend into the recently-spent record (CRD ch.38 R38.5B.9
+/// item 2). After the backend has accepted the broadcast, bytes that are exactly those of a pending withdraw entry
+/// that has not expired move that entry into the record. A refused broadcast promotes nothing, and bytes that match
+/// no pending entry change nothing.
+pub fn send_raw_tx_bytes_promoting_withdraw(
+    coin: &UtxoArc,
+    tx_bytes: &[u8],
+) -> Box<dyn Future<Item = String, Error = String> + Send> {
+    let coin = coin.clone();
+    let bytes = tx_bytes.to_vec();
+    let broadcast = coin.rpc_client.send_raw_transaction(tx_bytes.into()).compat();
+    Box::new(
+        async move {
+            let hash = broadcast.await.map_err(|e| ERRL!("{}", e))?;
+            coin.recently_spent_outpoints
+                .lock()
+                .await
+                .promote_pending_withdraw(&bytes);
+            Ok(format!("{:?}", hash))
+        }
+        .boxed()
+        .compat(),
+    )
+}
+
 pub fn tx_enum_from_bytes(coin: &UtxoCoinFields, bytes: &[u8]) -> Result<TransactionEnum, String> {
     let mut transaction: UtxoTx = try_s!(deserialize(bytes).map_err(|err| format!("{:?}", err)));
     transaction.tx_hash_algo = coin.tx_hash_algo;

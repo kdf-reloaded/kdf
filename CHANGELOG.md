@@ -821,6 +821,13 @@ it and, where one exists, the CRD rule, for readers who want more.
   The history compared the hash in two different forms that never matched, so a BCH or SLP
   transaction first seen unconfirmed stayed unconfirmed in the history. Detail: PR #84; CRD ch.38
   R38.5A.10.
+- **Two withdrawals in quick succession from one address no longer fail with a mempool conflict.**
+  When the first withdrawal was broadcast through this node (`send_raw_transaction`) and the
+  Electrum server still listed the spent coins, the second withdrawal could pick the same coins and
+  its broadcast was refused. A withdrawal's spend is now remembered once its broadcast is accepted,
+  so the next withdrawal skips those coins and may spend the change. A withdrawal that is never
+  broadcast, or whose broadcast is refused, hides nothing. Two withdrawals both built before the
+  first is broadcast still pick the same coins. Detail: CRD ch.38 R38.5B.9.
 
 #### Logs and error texts
 
