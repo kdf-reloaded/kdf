@@ -103,8 +103,10 @@ it and, where one exists, the CRD rule, for readers who want more.
   whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
   it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
   network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
-  once at info level, then at debug level. Detail: PR #170; CRD ch.28 R8c.
-- **Quieter peer-to-peer logs on seeds and relays under load.** Four warnings that report expected
+  once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
+  other peers hand back to it, and it drops a stored address when a dial of it reaches a different
+  peer. Detail: PR #170; CRD ch.28 R8c.
+- **Quieter peer-to-peer logs on seeds and relays under load.** Warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
     the first copy had already been forwarded.
@@ -113,7 +115,15 @@ it and, where one exists, the CRD rule, for readers who want more.
   - "HEARTBEAT: relays low" is now "Relay mesh below its low watermark". It is logged when the
     relay count changes and every ten minutes, not every ten seconds.
   - A request that times out is now a warning, not an error. Further timeouts toward the same peer
-    are counted in one line per minute.
+    are counted in one line per minute. The same holds for requests that fail because the
+    connection to the peer closed.
+  - A failed outgoing connection is a warning at most once per address per hour, and debug
+    otherwise. Relay upkeep keeps trying addresses that never answer, such as makers behind a
+    firewall.
+  - An incoming connection that fails to negotiate its transport, such as a scanner probing the
+    WebSocket port, is logged at info level once per source address per hour, then at debug level.
+  - "Request … is not processed" is now debug and no longer prints the answer. It meant an answer
+    arrived after the request had already been given up.
 
   Detail: PR #170.
 

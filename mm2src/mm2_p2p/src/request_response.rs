@@ -23,30 +23,31 @@ use std::time::Duration;
 use wasm_timer::{Instant, Interval};
 
 const MAX_BUFFER_SIZE: usize = 1024 * 1024 - 100;
-/// The window in which timeouts toward one peer are counted instead of logged one by one.
-const TIMEOUT_REPORT_WINDOW: Duration = Duration::from_secs(60);
+/// The window in which failures of one kind toward one peer are counted instead of logged one by one.
+const FAILURE_REPORT_WINDOW: Duration = Duration::from_secs(60);
 
-/// One peer's window of outbound request timeouts: the first timeout was reported when the window opened, the
-/// later ones are only counted.
-struct TimeoutWindow {
+/// One peer's window of outbound request failures of one kind: the first failure was reported when the window
+/// opened, the later ones are only counted.
+struct FailureWindow {
     started: Instant,
     more: usize,
 }
 
-/// Rate limit of the outbound request timeout log lines: the first timeout toward a peer in a
-/// [`TIMEOUT_REPORT_WINDOW`] is logged at once, the later ones are counted and summarized when the window ends.
+/// Rate limit of the log lines of one kind of outbound request failure: the first failure toward a peer in a
+/// [`FAILURE_REPORT_WINDOW`] is logged at once, the later ones are counted and summarized when the window ends.
+/// One instance is used per failure kind.
 #[derive(Default)]
-struct TimeoutReports {
-    windows: HashMap<PeerId, TimeoutWindow>,
+struct FailureReports {
+    windows: HashMap<PeerId, FailureWindow>,
     ended: Vec<(PeerId, usize)>,
 }
 
-impl TimeoutReports {
-    /// Records a timeout toward `peer` at `now`. Returns `true` when it is the first one in a window, i.e. when
+impl FailureReports {
+    /// Records a failure toward `peer` at `now`. Returns `true` when it is the first one in a window, i.e. when
     /// the caller should log it.
     fn record(&mut self, peer: PeerId, now: Instant) -> bool {
         match self.windows.get_mut(&peer) {
-            Some(window) if now.duration_since(window.started) < TIMEOUT_REPORT_WINDOW => {
+            Some(window) if now.duration_since(window.started) < FAILURE_REPORT_WINDOW => {
                 window.more += 1;
                 false
             },
@@ -54,22 +55,22 @@ impl TimeoutReports {
                 if window.more > 0 {
                     self.ended.push((peer, window.more));
                 }
-                *window = TimeoutWindow { started: now, more: 0 };
+                *window = FailureWindow { started: now, more: 0 };
                 true
             },
             None => {
-                self.windows.insert(peer, TimeoutWindow { started: now, more: 0 });
+                self.windows.insert(peer, FailureWindow { started: now, more: 0 });
                 true
             },
         }
     }
 
-    /// Closes the windows that ended by `now` and returns the number of later timeouts of every peer whose
-    /// window had any. A window without later timeouts yields nothing.
+    /// Closes the windows that ended by `now` and returns the number of later failures of every peer whose
+    /// window had any. A window without later failures yields nothing.
     fn flush(&mut self, now: Instant) -> Vec<(PeerId, usize)> {
         let ended = &mut self.ended;
         self.windows.retain(|peer, window| {
-            if now.duration_since(window.started) < TIMEOUT_REPORT_WINDOW {
+            if now.duration_since(window.started) < FAILURE_REPORT_WINDOW {
                 return true;
             }
             if window.more > 0 {
@@ -104,7 +105,8 @@ pub fn build_request_response_behaviour() -> RequestResponseBehaviour {
         events,
         timeout,
         timeout_interval,
-        timeout_reports: TimeoutReports::default(),
+        timeout_reports: FailureReports::default(),
+        closed_reports: FailureReports::default(),
     }
 }
 
@@ -136,7 +138,9 @@ pub struct RequestResponseBehaviour {
     /// Interval for request timeout check
     timeout_interval: Interval,
     /// Rate limit of the timeout log lines.
-    timeout_reports: TimeoutReports,
+    timeout_reports: FailureReports,
+    /// Rate limit of the log lines of requests that failed because the connection closed.
+    closed_reports: FailureReports,
 }
 
 impl RequestResponseBehaviour {
@@ -178,8 +182,10 @@ impl RequestResponseBehaviour {
     fn process_response(&mut self, request_id: RequestId, response: PeerResponse) {
         match self.pending_requests.remove(&request_id) {
             Some(pending) => {
-                if let Err(e) = pending.tx.send(response) {
-                    error!("{:?}. Request {:?} is not processed", e, request_id);
+                // The requester is gone (another peer answered first, or it timed out), so nothing is lost. The
+                // response itself is not logged.
+                if pending.tx.send(response).is_err() {
+                    debug!("Request {:?} is not processed: the requester is gone", request_id);
                 }
             },
             _ => debug!("Ignoring response for no-longer-pending request {:?}", request_id),
@@ -221,6 +227,13 @@ impl RequestResponseBehaviour {
                     // logged at WARN, the later ones are counted and summarized when the window ends.
                     OutboundFailure::Timeout => {
                         if self.timeout_reports.record(peer, Instant::now()) {
+                            warn!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error);
+                        }
+                    },
+                    // The connection closed under the request. A closing connection fails all its requests at once,
+                    // so they are aggregated per peer in the same way as the timeouts.
+                    OutboundFailure::ConnectionClosed => {
+                        if self.closed_reports.record(peer, Instant::now()) {
                             warn!("Error on send request {:?} to peer {:?}: {:?}", request_id, peer, error);
                         }
                     },
@@ -352,6 +365,12 @@ impl NetworkBehaviour for RequestResponseBehaviour {
             for (peer, more) in self.timeout_reports.flush(now) {
                 warn!("{} more requests to peer {} timed out in the last 60 s", more, peer);
             }
+            for (peer, more) in self.closed_reports.flush(now) {
+                warn!(
+                    "{} more requests to peer {} failed because the connection closed, in the last 60 s",
+                    more, peer
+                );
+            }
         }
 
         Poll::Pending
@@ -473,7 +492,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Protocol, TimeoutReports, TIMEOUT_REPORT_WINDOW};
+    use super::{FailureReports, Protocol, FAILURE_REPORT_WINDOW};
     use libp2p::PeerId;
     use std::time::Duration;
     use wasm_timer::Instant;
@@ -485,7 +504,7 @@ mod tests {
 
     #[test]
     fn first_timeout_is_reported_later_ones_are_counted() {
-        let mut reports = TimeoutReports::default();
+        let mut reports = FailureReports::default();
         let peer = PeerId::random();
         let other = PeerId::random();
         let start = Instant::now();
@@ -502,7 +521,7 @@ mod tests {
         assert!(reports.flush(start + Duration::from_secs(30)).is_empty());
 
         // The window of `peer` ends first; `other` had no later timeout, so it yields no summary.
-        let summary = reports.flush(start + TIMEOUT_REPORT_WINDOW);
+        let summary = reports.flush(start + FAILURE_REPORT_WINDOW);
         assert_eq!(summary, vec![(peer, 5)]);
         assert!(reports.flush(start + Duration::from_secs(120)).is_empty());
 
@@ -512,16 +531,31 @@ mod tests {
 
     #[test]
     fn summary_appears_only_when_something_was_counted() {
-        let mut reports = TimeoutReports::default();
+        let mut reports = FailureReports::default();
         let peer = PeerId::random();
         let start = Instant::now();
         assert!(reports.record(peer, start));
-        assert!(reports.flush(start + TIMEOUT_REPORT_WINDOW).is_empty());
+        assert!(reports.flush(start + FAILURE_REPORT_WINDOW).is_empty());
+    }
+
+    /// The connection-closed failures use an instance of their own, so the two kinds do not share a window.
+    #[test]
+    fn failure_kinds_have_windows_of_their_own() {
+        let mut timeouts = FailureReports::default();
+        let mut closed = FailureReports::default();
+        let peer = PeerId::random();
+        let start = Instant::now();
+        assert!(timeouts.record(peer, start));
+        assert!(closed.record(peer, start));
+        assert!(!closed.record(peer, start + Duration::from_secs(1)));
+        assert!(!closed.record(peer, start + Duration::from_secs(2)));
+        assert!(timeouts.flush(start + FAILURE_REPORT_WINDOW).is_empty());
+        assert_eq!(closed.flush(start + FAILURE_REPORT_WINDOW), vec![(peer, 2)]);
     }
 
     #[test]
     fn timeout_after_the_window_ended_keeps_the_summary() {
-        let mut reports = TimeoutReports::default();
+        let mut reports = FailureReports::default();
         let peer = PeerId::random();
         let start = Instant::now();
         assert!(reports.record(peer, start));
