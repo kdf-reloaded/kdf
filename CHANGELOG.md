@@ -373,6 +373,16 @@ it and, where one exists, the CRD rule, for readers who want more.
   asks again only when the answer can still arrive within the 5-second hold, never after a timed-out
   request, and never a third time. Nothing on the wire changes. To restore the old behavior, set
   `sync_request_retry_ms` to `0` in `MM2.json`. Detail: PR #173; CRD ch.32 R-Q5c.
+- **A relay now sends an ordinary order-book message once instead of twice.** A relay forwards each
+  message as soon as it arrives, and used to send it again after handling it. The receiving nodes,
+  GLEEC KDF and Reloaded alike, drop that second copy as a duplicate, so for new orders, order
+  updates and keep-alives it only doubled what a relay sends toward each peer. On the public network
+  a seed's far relays dropped up to a fifth of that stream in busy hours. Cancellations and swap
+  negotiation messages still get their second copy, through the send queue's priority lane, and so
+  do swap and watcher messages. The relay still marks every message as handled, so it announces and
+  serves it to peers that ask exactly as before. Nothing on the wire changes. To restore the old
+  behavior, set `relay_second_copy_priority_only` to `false` in `MM2.json`. Detail: PR #TBD; CRD
+  ch.32 R-F3b, D11.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,

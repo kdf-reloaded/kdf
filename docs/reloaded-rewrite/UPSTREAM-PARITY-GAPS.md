@@ -840,6 +840,12 @@ R59.6.2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta` (agree).
   can still land within the R-Q5b bound; the reference never retries.
   Wire-compatible; a deliberate divergence with the opt-back switch
   `sync_request_retry_ms`.
+- [x] *Done 2026-10-30 (ch. 32 R-F3b, D11):* a Reloaded relay sends the
+  application-level second copy only for priority messages and for
+  messages outside the orderbook topics; the reference sends every message
+  twice. Receivers drop the copy either way (R-F3c). Wire-compatible; a
+  deliberate divergence with the opt-back switch
+  `relay_second_copy_priority_only`.
 - [ ] Hardening candidates (ch. 32 D6): bounded or coalescing mutation queue,
   in-flight synchronization de-duplication, orphan-node release, inbound
   task cap. Deferred, none bound.
