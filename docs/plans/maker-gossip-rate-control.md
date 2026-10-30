@@ -1,6 +1,6 @@
 # Plan: maker-side gossip rate control
 
-**Status:** parked (shipped in PRs #148, #159, #160; two deferred items await field data) — **Last reviewed:** 2026-10-29
+**Status:** parked (shipped opt-in in PRs #148, #159, #160, #166; default-on waits for the D9 items and field data) — **Last reviewed:** 2026-10-30
 
 > **Context.** A maker that changes its orders faster than its relay can take
 > them no longer gets its keep-alives through. After 90 s without a keep-alive,

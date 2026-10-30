@@ -908,10 +908,10 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
   makes fewer Electrum and node round trips (PRs #95, #114, #116, #128) and no longer does I/O under
   an order's lock (PR #149); a timing run is left.
-- [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — new,
-  planning: the order-book store applies queued updates in bulk, purges unused entries early and
-  keeps at most 2,048 changes per maker and pair (PR #164); one open point on the early purge waits
-  for the maintainer.
+- [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — new, in
+  progress: the order-book store applies queued updates in bulk, purges unused entries early and
+  keeps at most 2,048 changes per maker and pair (PR #164); one open point on the early purge is
+  left.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — new, in progress: a maker's
   order messages keep its book alive (PR #132) and a relay holds a sync answer while it catches up
   (PR #135); a lab run is left.

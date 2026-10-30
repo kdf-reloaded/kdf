@@ -1,6 +1,6 @@
 # Plan: bound the trie mutation queue and each pair's delta history
 
-**Status:** planning — **Last reviewed:** 2026-10-29
+**Status:** in progress (AL-2 and AL-3 shipped in PR #164; the early-purge open point left) — **Last reviewed:** 2026-10-30
 
 > **Context.** The seed-node memory incident of 2026-10-28 showed that a seed
 > keeps about 1.2 KB per received order update. The low-risk part (timer expiry,
