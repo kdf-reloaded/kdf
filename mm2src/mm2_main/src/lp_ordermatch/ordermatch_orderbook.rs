@@ -1109,11 +1109,18 @@ pub(crate) struct TrieDiffHistory<Key, Value> {
     pub(crate) inner: TimeCache<H64, TrieDiff<Key, Value>>,
 }
 
+/// The most deltas the history of one `(pubkey, pair)` slice holds (CRD ch.32 R-K6). The oldest delta
+/// is dropped when a recorded one would exceed it, whether or not it has reached its time to live.
+pub(crate) const TRIE_DIFF_HISTORY_CAP: usize = 2048;
+
 impl<Key, Value> TrieDiffHistory<Key, Value> {
-    pub(crate) fn insert_new_diff(&mut self, insert_at: H64, diff: TrieDiff<Key, Value>) {
+    /// Record the change `insert_at -> diff.next_root`. Returns the number of older deltas dropped to
+    /// keep the history within [`TRIE_DIFF_HISTORY_CAP`] (CRD ch.32 R-K6); a requester whose root was
+    /// among them gets the full snapshot, like one whose root expired.
+    pub(crate) fn insert_new_diff(&mut self, insert_at: H64, diff: TrieDiff<Key, Value>) -> usize {
         if insert_at == diff.next_root {
             // do nothing to avoid cycles in diff history
-            return;
+            return 0;
         }
 
         match self.inner.remove(diff.next_root) {
@@ -1123,11 +1130,17 @@ impl<Key, Value> TrieDiffHistory<Key, Value> {
                 while let Some(next_diff) = self.inner.remove(diff.next_root) {
                     diff = next_diff;
                 }
+                0
             },
             None => {
                 self.inner.insert(insert_at, diff);
+                let mut evicted = 0;
+                while self.inner.len() > TRIE_DIFF_HISTORY_CAP && self.inner.pop_oldest().is_some() {
+                    evicted += 1;
+                }
+                evicted
             },
-        };
+        }
     }
 
     #[allow(dead_code)]
@@ -1297,21 +1310,71 @@ pub(crate) struct TrieStore {
     /// Number of queued batches the worker has applied (CRD ch.32 R-T3b); see
     /// [`Orderbook::trie_ops_enqueued`].
     pub(crate) applied_batches: u64,
+    /// Leaf insertions and removals applied since the node store was last purged (CRD ch.32 R-K5
+    /// item 2).
+    pub(crate) leaf_updates_since_purge: u64,
+    /// When the node store was last purged (early or on the timer), milliseconds since the epoch;
+    /// zero before the first purge.
+    last_purge_ms: u64,
+    /// Early purges done so far (`orderbook.trie_store.early_purges`, CRD ch.32 R-K5 item 3).
+    pub(crate) early_purges: u64,
+    /// Deltas dropped by the cap on a pair history so far (`orderbook.history.evicted`, CRD ch.32 R-K6).
+    pub(crate) history_evicted: u64,
 }
 
+/// Leaf updates (insertions and removals) after which the worker purges the node store before the
+/// timer does (CRD ch.32 R-K5 item 2): about 35 MB of unreferenced nodes.
+pub(crate) const EARLY_PURGE_LEAF_UPDATES: u64 = 100_000;
+/// The least time between two purges of the node store when the next one is due by the number of
+/// leaf updates (CRD ch.32 R-K5 item 2).
+pub(crate) const EARLY_PURGE_MIN_INTERVAL_MS: u64 = 5_000;
+/// The most queued batches the worker applies as one sequence (CRD ch.32 R-K5 item 1).
+pub(crate) const DRAIN_MAX_BATCHES: usize = 1024;
+/// The most events the worker applies as one sequence (CRD ch.32 R-K5 item 1). A single batch larger
+/// than this is applied alone. It bounds how long the worker holds the trie store lock, which the
+/// readers that hold the orderbook lock wait for: measured in release on a loaded machine, 2,048 events of
+/// new orders took a median of 26 to 45 ms, 4,096 events 52 to 90 ms and 16,384 events 232 to 374 ms.
+pub(crate) const DRAIN_MAX_EVENTS: usize = 2048;
+
 impl TrieStore {
-    /// Apply one queued batch and count it. This is what the trie worker runs per message; a
-    /// batch made only of the test-only `Flush` barrier is not counted because it is not queued
-    /// through [`Orderbook::queue_trie_ops`].
-    pub(crate) fn apply_batch(&mut self, ops: Vec<TrieOp>) {
+    /// Apply one queued batch and count it. A batch made only of the test-only `Flush` barrier is not
+    /// counted because it is not queued through [`Orderbook::queue_trie_ops`]. The worker applies
+    /// everything waiting as one sequence ([`TrieStore::apply_batches`]); this is the one-by-one
+    /// reference of it.
+    #[cfg(test)]
+    pub(crate) fn apply_batch(&mut self, ops: Vec<TrieOp>) { self.apply_batches(vec![ops]); }
+
+    /// Apply the queued `batches`, in queue order, as one sequence (CRD ch.32 R-K5 item 1): the
+    /// outcome is that of applying them one by one (R-T3a), only the delta history can hold fewer
+    /// entries. Counts every batch as applied.
+    pub(crate) fn apply_batches(&mut self, batches: Vec<Vec<TrieOp>>) {
+        // A batch made only of the test-only `Flush` barrier is not queued through
+        // `Orderbook::queue_trie_ops` and so is not counted.
         #[cfg(test)]
-        let counted = !ops.iter().any(|op| matches!(op, TrieOp::Flush(_)));
+        let counted = batches
+            .iter()
+            .filter(|ops| !ops.iter().any(|op| matches!(op, TrieOp::Flush(_))))
+            .count() as u64;
         #[cfg(not(test))]
-        let counted = true;
-        self.apply_ops(ops);
-        if counted {
-            self.applied_batches += 1;
+        let counted = batches.len() as u64;
+        self.apply_ops(batches.into_iter().flatten());
+        self.applied_batches += counted;
+    }
+
+    /// Purge the unreferenced nodes now if 100,000 leaf updates were applied since the last purge and
+    /// the last purge is at least 5 s old (CRD ch.32 R-K5 item 2). The table is not shrunk: that stays
+    /// with the timer purge. Returns whether it purged.
+    pub(crate) fn purge_if_loaded(&mut self, now_ms: u64) -> bool {
+        if self.leaf_updates_since_purge < EARLY_PURGE_LEAF_UPDATES
+            || now_ms.saturating_sub(self.last_purge_ms) < EARLY_PURGE_MIN_INTERVAL_MS
+        {
+            return false;
         }
+        self.memory_db.purge();
+        self.leaf_updates_since_purge = 0;
+        self.last_purge_ms = now_ms;
+        self.early_purges += 1;
+        true
     }
 
     /// Apply a sequence of trie operations produced by the Orderbook.
@@ -1453,13 +1516,14 @@ impl TrieStore {
                 return;
             };
         }
+        self.leaf_updates_since_purge += 1;
 
         if prev_root != H64::default() {
             let history = pair_history_mut(&mut pubkey_state.order_pairs_trie_state_history, alb_pair);
-            history.insert_new_diff(prev_root, TrieDiff {
+            self.history_evicted += history.insert_new_diff(prev_root, TrieDiff {
                 delta: vec![(uuid, Some(order))],
                 next_root: *pair_root,
-            });
+            }) as u64;
         }
     }
 
@@ -1480,6 +1544,7 @@ impl TrieStore {
                 return;
             },
         };
+        self.leaf_updates_since_purge += 1;
 
         if pubkey_state
             .order_pairs_trie_state_history
@@ -1487,10 +1552,10 @@ impl TrieStore {
             .is_some()
         {
             let history = pair_history_mut(&mut pubkey_state.order_pairs_trie_state_history, alb_pair);
-            history.insert_new_diff(old_state, TrieDiff {
+            self.history_evicted += history.insert_new_diff(old_state, TrieDiff {
                 delta: vec![(uuid, None)],
                 next_root: *pair_state,
-            });
+            }) as u64;
         }
     }
 
@@ -1526,6 +1591,9 @@ impl TrieStore {
     pub(crate) fn purge_memory_db(&mut self) {
         self.memory_db.purge();
         self.memory_db.shrink_to_fit();
+        // The early purge counts from this one (CRD ch.32 R-K5 item 2).
+        self.leaf_updates_since_purge = 0;
+        self.last_purge_ms = now_ms();
     }
 
     /// Aggregate counts for the gauges of the maintenance tick. The per-tick counts walk the pubkeys
@@ -1607,17 +1675,86 @@ impl TrieStore {
     }
 }
 
+/// Take, after `first` (the batch that woke the worker), every batch already waiting in `rx`, up to
+/// [`DRAIN_MAX_BATCHES`] batches or [`DRAIN_MAX_EVENTS`] events (CRD ch.32 R-K5 item 1). A waiting
+/// batch that would pass the event bound is left in `carry` for the next sequence; it is the first
+/// batch of that one, and so a batch larger than the bound is applied alone. Returns the batches in
+/// queue order and whether the queue is closed.
+pub(crate) fn take_waiting_batches(
+    rx: &mut UnboundedReceiver<Vec<TrieOp>>,
+    first: Vec<TrieOp>,
+    carry: &mut Option<Vec<TrieOp>>,
+) -> (Vec<Vec<TrieOp>>, bool) {
+    let mut events = first.len();
+    let mut batches = vec![first];
+    while batches.len() < DRAIN_MAX_BATCHES {
+        match rx.try_recv() {
+            Ok(batch) => {
+                if events + batch.len() > DRAIN_MAX_EVENTS {
+                    *carry = Some(batch);
+                    return (batches, false);
+                }
+                events += batch.len();
+                batches.push(batch);
+            },
+            Err(TryRecvError::Closed) => return (batches, true),
+            Err(TryRecvError::Empty) => break,
+        }
+    }
+    (batches, false)
+}
+
+/// Apply `batches` as one sequence under the caller's hold of the trie store lock, purge early if
+/// due, and report the counters the sequence moved. `reported` is what has been reported already.
+pub(crate) fn apply_sequence(
+    store: &mut TrieStore,
+    batches: Vec<Vec<TrieOp>>,
+    metrics: &MetricsWeak,
+    reported: &mut (u64, u64),
+) {
+    store.apply_batches(batches);
+    store.purge_if_loaded(now_ms());
+    let (early_purges, evicted) = (store.early_purges, store.history_evicted);
+    if early_purges > reported.0 {
+        mm_counter!(*metrics, "orderbook.trie_store.early_purges", early_purges - reported.0);
+    }
+    if evicted > reported.1 {
+        mm_counter!(*metrics, "orderbook.history.evicted", evicted - reported.1);
+    }
+    *reported = (early_purges, evicted);
+}
+
+/// The trie worker: applies what the queue holds, in bulk (CRD ch.32 R-K5). Ends when the queue is
+/// closed. The counters are reported through `metrics`, which does not keep the metrics alive.
+pub(crate) async fn run_trie_store_worker(
+    mut rx: UnboundedReceiver<Vec<TrieOp>>,
+    trie_store: Arc<PaMutex<TrieStore>>,
+    metrics: MetricsWeak,
+) {
+    let mut reported = (0, 0);
+    let mut carry = None;
+    loop {
+        let first = match carry.take() {
+            Some(batch) => batch,
+            None => match rx.next().await {
+                Some(batch) => batch,
+                None => return,
+            },
+        };
+        let (batches, closed) = take_waiting_batches(&mut rx, first, &mut carry);
+        apply_sequence(&mut trie_store.lock(), batches, &metrics, &mut reported);
+        if closed {
+            return;
+        }
+    }
+}
+
 pub(crate) fn spawn_trie_store_worker(
-    _ctx: &MmArc,
+    ctx: &MmArc,
     trie_store: Arc<PaMutex<TrieStore>>,
 ) -> UnboundedSender<Vec<TrieOp>> {
-    let (tx, mut rx) = unbounded::<Vec<TrieOp>>();
-    common::executor::spawn(async move {
-        while let Some(ops) = rx.next().await {
-            let mut store = trie_store.lock();
-            store.apply_batch(ops);
-        }
-    });
+    let (tx, rx) = unbounded::<Vec<TrieOp>>();
+    common::executor::spawn(run_trie_store_worker(rx, trie_store, ctx.metrics.weak()));
     tx
 }
 

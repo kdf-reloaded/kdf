@@ -315,6 +315,13 @@ bound by the CRD yet. The default ceiling and the climb step were measured and
 decided the same day (CRD ch.32 D8: 20 per second, +0.5 per second every
 30 seconds) and are not deferred.
 
+**Opt-in since 2026-10-29.** After a field run in a mesh with reference relays
+and makers, the outbox was made opt-in: `maker_update_coalescing` defaults to
+`false`, and only `true` turns R-MP1 and R-MP2 on (CRD ch.32 D9). The items
+listed there come before the outbox becomes the default again: a keep-alive
+that advertises only released state, a close signal that counts only error
+closes, and a synchronization request addressed to the keep-alive's author.
+
 - **A budget that reads the TCP send queue.** Toward a relay whose bandwidth is
   limited, the backlog first builds in the kernel's send queue, below the
   handler queue that the queue signal watches. A signal from the send-queue
