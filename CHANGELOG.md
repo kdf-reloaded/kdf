@@ -232,6 +232,11 @@ it and, where one exists, the CRD rule, for readers who want more.
   instead of 5, retrying every 15 seconds, as GLEEC KDF does.** The wait still ends at once when no
   waiting could free enough funds. More in
   [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md). Detail: PR #85.
+- **Quieter logs while a shielded coin such as ARRR is enabled.** Keeping the shielded wallet up to
+  date logged six `info` lines on every new block. A sync that only adds the next block now logs
+  them at `debug`. They stay at `info` for the first sync after activation, for a sync that covers
+  more than one block or resets the wallet's scan state, and when another lightwalletd server than
+  the last one serves the sync. Failures are still logged as warnings. Detail: PR #168.
 
 #### Node names in logs and errors
 
