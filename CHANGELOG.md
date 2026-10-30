@@ -325,6 +325,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The log line about an abandoned HTTP request now says which host it was.** When a request
+  finished after its caller had stopped waiting, the node logged only "drive03 receiver is dropped".
+  This happens, for example, each time an EVM node misses the failover cutoff and the next node
+  answers. The line now names the scheme, host and port, never the path, query or credentials, and
+  says whether the request reached its time limit, got a late answer, or failed (only the kind of
+  the failure, without the error text). It stays one line per abandoned request at the normal log
+  level.
+  Detail: PR #165; CRD ch.35 R35.1.17.
+- **HTTP error messages no longer show the full URL of the server.** An error from a request to an
+  NFT provider, the 1inch API, the market-maker price service, a gRPC-web server or, in the browser
+  build, a Tendermint node used to print the whole URL, path and query included, and so any API key
+  in them. Such an error now names only the scheme, host and port. The Telegram notifier's errors
+  are covered too, though none is shown today. Detail: PR #165; CRD ch.35 R35.1.17.
 - **The order-book store no longer grows without bound when a maker updates orders very fast.** The
   node now applies queued order updates in bulk (up to 1,024 batches or 2,048 events at a time), drops the unused entries of
   its node store as soon as 100,000 updates have piled up (at most every five seconds) instead of

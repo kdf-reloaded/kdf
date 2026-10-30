@@ -31,6 +31,10 @@
 //! - An input that is not an absolute URL with a host is never echoed: it renders as [`UNNAMED_NODE`].
 
 use http::Uri;
+/// [`host_only`] and [`scrub_node_url`] are defined in `mm2_net`, which the shared HTTP layer names hosts with, and
+/// shared from here, together with [`UNNAMED_NODE`], the text that stands in for a node URL that has no scheme or
+/// no host, so that the raw string is never echoed.
+pub use mm2_net::host_label::{host_only, scrub_node_url, UNNAMED_NODE};
 use serde::Deserialize;
 use std::fmt;
 use std::str::FromStr;
@@ -89,60 +93,6 @@ pub fn listed_nodes(ticker: &str, urls: Vec<String>) -> Vec<ListedNode> {
             },
         })
         .collect()
-}
-
-/// Stands in for a node URL that has no scheme or no host, so that the raw string is never echoed.
-pub const UNNAMED_NODE: &str = "<invalid node URL>";
-
-/// Renders `url` as `scheme://host` or `scheme://host:port` (IPv6 hosts keep their brackets).
-///
-/// Userinfo, path, query and fragment are dropped. A string that is not an absolute URL with a host renders as
-/// [`UNNAMED_NODE`].
-pub fn host_only(url: &str) -> String {
-    match Uri::from_str(url) {
-        Ok(uri) => host_only_uri(&uri),
-        Err(_) => UNNAMED_NODE.to_owned(),
-    }
-}
-
-fn host_only_uri(uri: &Uri) -> String {
-    match (uri.scheme_str(), uri.host()) {
-        (Some(scheme), Some(host)) if !host.is_empty() => match uri.port_u16() {
-            Some(port) => format!("{scheme}://{host}:{port}"),
-            None => format!("{scheme}://{host}"),
-        },
-        _ => UNNAMED_NODE.to_owned(),
-    }
-}
-
-/// Rewrites `text`, a message produced by a lower layer (HTTP client, TLS, DNS) for the node `url`, so that it
-/// no longer contains that node's URL.
-///
-/// The configured string and the form [`Uri`] displays are replaced by the host-only form; as a safety net for
-/// a lower layer that prints only a part of the URL, the userinfo and the path-and-query are removed wherever
-/// they appear.
-pub fn scrub_node_url(text: &str, url: &str) -> String {
-    if url.is_empty() {
-        return text.to_owned();
-    }
-    let label = host_only(url);
-    let mut out = text.replace(url, &label);
-    let Ok(uri) = Uri::from_str(url) else {
-        return out;
-    };
-    out = out.replace(&uri.to_string(), &label);
-    if let Some(authority) = uri.authority().map(|a| a.as_str()) {
-        if let Some((userinfo, host_port)) = authority.rsplit_once('@') {
-            out = out.replace(authority, host_port);
-            out = out.replace(&format!("{userinfo}@"), "");
-        }
-    }
-    if let Some(path_and_query) = uri.path_and_query().map(|p| p.as_str()) {
-        if path_and_query.len() > 1 {
-            out = out.replace(path_and_query, "");
-        }
-    }
-    out
 }
 
 /// A configured service URL (for example a gas-station endpoint). Its debug form is the host-only form, so a

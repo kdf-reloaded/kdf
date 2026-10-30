@@ -1,3 +1,4 @@
+use crate::host_label::{host_only, scrub_node_url};
 use crate::transport::{SlurpError, SlurpResult};
 use common::executor::spawn_local;
 use common::stringify_js_error;
@@ -133,6 +134,10 @@ impl FetchRequest {
     async fn fetch(request: Self) -> FetchResult<JsResponse> {
         let window = web_sys::window().expect("!window");
         let uri = request.uri;
+        // The host-only form is the only form of the URI that goes into an error (CRD ch.35 R35.1.17). A browser's
+        // own message may repeat the URL, so it is scrubbed of it.
+        let host = host_only(&uri);
+        let scrub = |text: String| scrub_node_url(&text, &uri);
 
         let req_init = RequestInit::new();
         req_init.set_method(request.method.as_str());
@@ -149,20 +154,20 @@ impl FetchRequest {
         }
 
         let js_request = Request::new_with_str_and_init(&uri, &req_init)
-            .map_to_mm(|e| SlurpError::Internal(stringify_js_error(&e)))?;
+            .map_to_mm(|e| SlurpError::Internal(scrub(stringify_js_error(&e))))?;
         for (hkey, hval) in request.headers {
             js_request
                 .headers()
                 .set(&hkey, &hval)
-                .map_to_mm(|e| SlurpError::Internal(stringify_js_error(&e)))?;
+                .map_to_mm(|e| SlurpError::Internal(scrub(stringify_js_error(&e))))?;
         }
 
         let request_promise = window.fetch_with_request(&js_request);
 
         let future = JsFuture::from(request_promise);
         let resp_value = future.await.map_to_mm(|e| SlurpError::Transport {
-            uri: uri.clone(),
-            error: stringify_js_error(&e),
+            uri: host.clone(),
+            error: scrub(stringify_js_error(&e)),
         })?;
         let js_response: JsResponse = match resp_value.dyn_into() {
             Ok(res) => res,
@@ -177,7 +182,7 @@ impl FetchRequest {
             Ok(code) => code,
             Err(e) => {
                 let error = format!("Unexpected HTTP status code, found {}: {}", status_code, e);
-                return MmError::err(SlurpError::ErrorDeserializing { uri, error });
+                return MmError::err(SlurpError::ErrorDeserializing { uri: host, error });
             },
         };
 
@@ -186,7 +191,7 @@ impl FetchRequest {
 
     /// The private non-Send method that is called in a spawned future.
     async fn fetch_str(request: Self) -> FetchResult<String> {
-        let uri = request.uri.clone();
+        let uri = host_only(&request.uri);
         let (status_code, js_response) = Self::fetch(request).await?;
 
         let resp_txt_fut = match js_response.text() {
@@ -216,7 +221,7 @@ impl FetchRequest {
 
     /// The private non-Send method that is called in a spawned future.
     async fn fetch_array(request: Self) -> FetchResult<Vec<u8>> {
-        let uri = request.uri.clone();
+        let uri = host_only(&request.uri);
         let (status_code, js_response) = Self::fetch(request).await?;
 
         let resp_array_fut = match js_response.array_buffer() {

@@ -8,6 +8,7 @@ use mm2_err_handle::{map_mm_error::MapMmError,
                      map_to_mm::MapToMmResult,
                      mm_error::{MmError, MmResult}};
 // crd:pin-end
+use mm2_net::host_label::host_only;
 use mm2_net::transport::slurp_url_with_headers;
 use serde::de::DeserializeOwned;
 use url::Url;
@@ -228,7 +229,7 @@ impl ApiClient {
         #[cfg(feature = "test-ext-api")]
         let _rate_guard = ApiClient::one_req_per_sec().await;
 
-        log::debug!("Dispatching 1inch request to {api_url}");
+        log::debug!("Dispatching 1inch request to {}", host_only(api_url.as_str()));
         let (status_code, _headers, raw_body) = slurp_url_with_headers(api_url.as_str(), ApiClient::get_headers())
             .await
             .mm_err(ApiClientError::TransportError)?;

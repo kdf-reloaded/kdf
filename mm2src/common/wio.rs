@@ -58,16 +58,23 @@ where
     rx
 }
 
-pub fn drive03<F, O>(f: F) -> futures::channel::oneshot::Receiver<O>
+/// Spawns the future `f` on the shared reactor and returns the receiver of its output.
+///
+/// When the receiver has been dropped by the time `f` finishes (the caller stopped waiting), the output has no one
+/// to go to. `describe_dropped` then builds the one log line that tells what happened from the finished output;
+/// it runs only in that case, and the line is the caller's to word, so that it can name what the future was about
+/// without this module knowing.
+pub fn drive03<F, O, D>(f: F, describe_dropped: D) -> futures::channel::oneshot::Receiver<O>
 where
     F: std::future::Future<Output = O> + Send + 'static,
     O: Send + 'static,
+    D: FnOnce(&O) -> String + Send + 'static,
 {
     let (sx, rx) = futures::channel::oneshot::channel();
     CORE.0.spawn(async move {
         let res = f.await;
-        if sx.send(res).is_err() {
-            log!("drive03 receiver is dropped");
+        if let Err(unclaimed) = sx.send(res) {
+            log!((describe_dropped(&unclaimed)));
         };
     });
     rx
