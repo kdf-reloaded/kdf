@@ -304,6 +304,17 @@ fn ironwood_build_refused_at(activation_time: Option<u32>, v6_supported: bool, n
     now_sec >= u64::from(activation_time)
 }
 
+/// The warning given wherever `requires_notarization` is asserted for a ZHTLC coin: at activation,
+/// by `set_requires_notarization`, and by a confirmation wait that asks for it. The flag selects a
+/// notarized confirmation count, and a ZHTLC coin has none, so it has no effect
+/// (CRD ch.39 R39.11.4e, D39.11.f).
+pub(crate) fn notarization_has_no_effect(ticker: &str) -> String {
+    format!(
+        "requires_notarization has no effect on {ticker}: no notarized confirmation count exists, \
+         so plain confirmations are counted"
+    )
+}
+
 /// Zcash consensus/network parameters for a shielded coin, sourced from the
 /// coin config's `protocol.protocol_data.consensus_params` (R39.1.3, R39.6.4).
 ///
@@ -2388,6 +2399,11 @@ impl<'a> UtxoCoinWithIguanaPrivKeyBuilder for ZCoinBuilder<'a> {
             .await
             .mm_err(Into::into)?;
         let utxo_arc = UtxoArc::new(utxo);
+        // The coins entry or the activation request asked for notarization, which has no effect on
+        // this coin; `requires_notarization` reports false regardless (R39.11.4e).
+        if utxo_common::requires_notarization(&utxo_arc) {
+            log::warn!("{}", notarization_has_no_effect(self.ticker));
+        }
 
         // ── Sapling state cache backend (R39.6.1) ─────────────────────────
         // Native: open the SQLite file; WASM: open IndexedDB.
@@ -2731,6 +2747,8 @@ impl MarketCoinOps for ZCoin {
             // (R39.11.16a).
             z_tx_read::wait_for_confirmations(self, tx, confirmations, requires_nota, wait_until, check_every)
         }
+        // Never reached with a live coin: a WASM build refuses every shielded activation (CRD ch.39
+        // R39.10.1), so `requires_nota` needs no handling here.
         #[cfg(target_arch = "wasm32")]
         {
             utxo_common::wait_for_confirmations(
@@ -3053,14 +3071,20 @@ impl MmCoin for ZCoin {
 
     fn required_confirmations(&self) -> u64 { utxo_common::required_confirmations(&self.utxo_arc) }
 
-    fn requires_notarization(&self) -> bool { utxo_common::requires_notarization(&self.utxo_arc) }
+    /// Always false: a ZHTLC coin has no notarized confirmation count, so the flag has nothing to
+    /// select, and orders and swaps never ask for it (CRD ch.39 R39.11.4e).
+    fn requires_notarization(&self) -> bool { false }
 
     fn set_required_confirmations(&self, confirmations: u64) {
         utxo_common::set_required_confirmations(&self.utxo_arc, confirmations)
     }
 
+    /// Stores nothing: the flag has no effect on a ZHTLC coin. Asking for it is answered with a
+    /// warning (R39.11.4e).
     fn set_requires_notarization(&self, requires_nota: bool) {
-        utxo_common::set_requires_notarization(&self.utxo_arc, requires_nota)
+        if requires_nota {
+            log::warn!("{}", notarization_has_no_effect(self.ticker()));
+        }
     }
 
     fn swap_contract_address(&self) -> Option<BytesJson> { utxo_common::swap_contract_address() }

@@ -2058,3 +2058,70 @@ mod refund_gate {
         assert!(note.contains("median time past"), "{note}");
     }
 }
+
+/// R39.11.4e, D39.11.f: a ZHTLC coin has no notarized confirmation count, so `requires_notarization`
+/// has no effect on it. The coin reports false whatever its coins entry or activation request said,
+/// `set_requires_notarization(true)` stores nothing, and a swap's confirmation wait that asks for
+/// notarization completes at plain depth. The wait and the request each say so in one warning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requires_notarization_has_no_effect_on_a_shielded_coin() {
+    use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+
+    let Some(fixture) = LightCoinFixture::new() else { return };
+    let coin = &fixture.coin;
+    let capturing = install_log_capture();
+    let warning = notarization_has_no_effect(coin.ticker());
+    assert!(
+        warning.contains(coin.ticker()) && warning.contains("no effect"),
+        "{warning}"
+    );
+    let warnings = || {
+        captured_log_lines()
+            .into_iter()
+            .filter(|line| line.contains(&warning))
+            .count()
+    };
+    let before = warnings();
+
+    // As if the coins entry or the activation request had asked for it.
+    coin.utxo_arc
+        .conf
+        .requires_notarization
+        .store(true, AtomicOrdering::Relaxed);
+    assert!(!coin.requires_notarization());
+
+    coin.utxo_arc
+        .conf
+        .requires_notarization
+        .store(false, AtomicOrdering::Relaxed);
+    coin.set_requires_notarization(true);
+    assert!(!coin.requires_notarization());
+    assert!(
+        !utxo_common::requires_notarization(&coin.utxo_arc),
+        "nothing was stored"
+    );
+
+    // A payment mined at the tip has one confirmation; the wait asks for notarization and one.
+    let payment = hex::decode(include_str!("test-fixtures/arrr-htlc-payment-75566e4d.hex").trim()).unwrap();
+    for script in fixture.transport.scripts.lock().values_mut() {
+        script.tips.clear();
+        script.tip_floor = Some(fixture.tip);
+        script.transaction = Some(Ok(RawTx {
+            data: payment.clone(),
+            height: Some(fixture.tip),
+        }));
+    }
+    coin.wait_for_confirmations(&payment, 1, true, u64::MAX, 1)
+        .compat()
+        .await
+        .unwrap();
+
+    // The capture is process-wide, so a test running in parallel could add its own lines: at least
+    // the two expected here must have appeared.
+    if capturing {
+        assert!(
+            warnings() - before >= 2,
+            "one warning for set_requires_notarization(true), one for the wait"
+        );
+    }
+}

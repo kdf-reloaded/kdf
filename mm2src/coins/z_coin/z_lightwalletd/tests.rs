@@ -843,7 +843,7 @@ async fn an_unfetchable_transaction_past_its_expiry_is_not_declared_expired() {
     );
     client.0.bind_wallet(Arc::new(Bound));
     let err = client
-        .wait_for_confirmations(txid, (ARRR_TIP - 10) as u32, 1, false, u64::MAX, 1)
+        .wait_for_confirmations(txid, (ARRR_TIP - 10) as u32, 1, u64::MAX, 1)
         .await
         .unwrap_err();
     assert!(err.contains("does not prove it expired"), "{err}");
@@ -862,7 +862,7 @@ async fn an_unfetchable_transaction_past_its_expiry_is_not_declared_expired() {
     );
     client.0.bind_wallet(Arc::new(Bound));
     let err = client
-        .wait_for_confirmations(txid, (ARRR_TIP - 10) as u32, 1, false, u64::MAX, 1)
+        .wait_for_confirmations(txid, (ARRR_TIP - 10) as u32, 1, u64::MAX, 1)
         .await
         .unwrap_err();
     assert!(err.contains("has expired"), "{err}");
@@ -886,7 +886,7 @@ async fn a_confirmed_transaction_satisfies_the_wait_without_any_server_side_deco
     let client = LightwalletdClient::new(transport, vec!["a".to_owned()], &arrr_params(), test_addressing());
     client.0.bind_wallet(Arc::new(Bound));
     client
-        .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 3, false, u64::MAX, 1)
+        .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 3, u64::MAX, 1)
         .await
         .unwrap();
 }
@@ -945,7 +945,7 @@ async fn wait_for_confirmations_waits_for_fresh_tip() {
     assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
 
     client
-        .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 2, false, u64::MAX, 1)
+        .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 2, u64::MAX, 1)
         .await
         .unwrap();
     // One read to establish the highest tip, then 105 (depth 1, keep waiting), then 106 (depth 2).
@@ -962,7 +962,7 @@ async fn expiry_not_declared_on_lowered_tip() {
 
     let wait_until = common::now_ms() / 1000 + 1;
     let err = client
-        .wait_for_confirmations(H256Json::from([9u8; 32]), 107, 1, false, wait_until, 1)
+        .wait_for_confirmations(H256Json::from([9u8; 32]), 107, 1, wait_until, 1)
         .await
         .unwrap_err();
     assert!(err.contains("Waited too long"), "{err}");
@@ -979,15 +979,18 @@ async fn reported_height_stays_monotonic() {
     assert_eq!(client.get_block_count().compat().await.unwrap(), HIGHEST_SEEN);
 }
 
+/// R39.11.4e, D39.11.f: a ZHTLC coin has no notarized confirmation count, so a wait that asks for
+/// notarization counts plain confirmations like any other wait.
 #[tokio::test]
-async fn notarized_depth_is_refused_and_not_substituted() {
-    let transport = Arc::new(FakeTransport::default());
-    let client = LightwalletdClient::new(transport, vec!["a".to_owned()], &arrr_params(), test_addressing());
-    let err = client
+async fn a_wait_that_asks_for_notarization_counts_plain_confirmations() {
+    let (_transport, client) = client_after_highest_seen(&[105], Ok(tx_at(105, 1)));
+    assert_eq!(client.0.chain_tip().await.unwrap(), HIGHEST_SEEN);
+    let client = crate::utxo::rpc_clients::UtxoRpcClientEnum::LightWalletD(client);
+    client
         .wait_for_confirmations(H256Json::from([9u8; 32]), 0, 1, true, u64::MAX, 1)
+        .compat()
         .await
-        .unwrap_err();
-    assert!(err.contains("notarized"), "{err}");
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------

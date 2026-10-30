@@ -3215,7 +3215,7 @@ R39.10.4 `activation_params` members (all at the top level of
 | `rpc_data.sync_params` | `{"height": u64}`, `{"date": u64}` or `"earliest"` | optional | sync start point (R39.6.2, R39.8.0g) |
 | `rpc_data.skip_sync_params` | boolean | optional; default false | resume from prior local sync state (R39.6.2) |
 | `required_confirmations` | integer (unsigned) | optional; coins-config default | swap confirmations |
-| `requires_notarization` | boolean | optional; coins-config default | dPoW notarization wait |
+| `requires_notarization` | boolean | optional; coins-config default | accepted; no effect on a ZHTLC coin, which has no notarized confirmation count (R39.11.4e) |
 | `zcash_params_path` | string | optional; platform default directory | Sapling parameter directory on native builds; ignored on WASM (parameter availability on WASM is governed by §39.6.1) |
 | `scan_blocks_per_iteration` | integer, unsigned 32-bit, **non-zero** | optional; default 1000 | blocks per scan batch; the value `0` is a request-parse failure (`InvalidRequest`), not a silent clamp |
 | `scan_interval_ms` | integer (unsigned 64-bit) | optional; default 0 | pause between scan batches |
@@ -3606,7 +3606,7 @@ definition -- and are fixed by that specification, not by this project.
 | Transparent address history -- spend detection, and detection that this wallet's own payment was already sent | `GetTaddressTxids`, bounded by height window, then a local decode of each streamed transaction to match the previous-output reference | R39.11.4b (windowing and stream failure) and R39.11.4d (which address encoding reaches the HTLC's index rows) both bind this row |
 | Transparent UTXO listing for one address | `GetAddressUtxos` | one address per call; the service definition carries no multi-address form, so a multi-address listing is a loop over single-address calls. R39.11.4d binds the P2SH case |
 | Transparent address balance | `GetTaddressBalance` | several addresses in one call, summed by the server; the reply carries a single value amount and no breakdown. The request encoding is load-bearing (R39.11.4a), and R39.11.4d binds the P2SH case |
-| Notarized-confirmation depth | none | not obtainable (R39.11.4e) |
+| Notarized-confirmation depth | none | not obtainable, so `requires_notarization` has no effect (R39.11.4e) |
 | Fee rate | coin configuration | the coin's fixed per-kilobyte fee (an undeclared fee keeps the shared fixed default, as the published ARRR entry relies on); this service exposes no fee-estimation method, so a Light-mode shielded coin that explicitly requests estimation (`txfee: 0`) shall be refused |
 | Shielded balance, spendable note selection, shielded transaction history | the local shielded wallet database (§39.8.0.2) | -- |
 
@@ -4017,8 +4017,9 @@ that cannot see it waits out the lock and refunds a swap it had already won.
 > hash matches the script. The opt-in test above, which also funds and redeems, has
 > still not been run on the test chain.
 
-R39.11.4e **Confirmation depth shall be derived locally; notarized depth is not
-obtainable and shall not be silently substituted.** The lookup method returns the
+R39.11.4e **Confirmation depth shall be derived locally; a ZHTLC coin has no
+notarized depth, and `requires_notarization` has no effect on it.** *(Amended
+2026-10-30, maintainer Decision AT.)* The lookup method returns the
 transaction bytes and its mined height (or an explicit not-mined indication), and
 the tip comes from the tip method, so confirmation depth is `tip + 1 - mined
 height`, and zero when the transaction is unmined or its height exceeds the tip
@@ -4030,12 +4031,18 @@ form available. Two consequences bind:
   transaction to report a mined height; this one does not, which removes an
   entire class of failure for a chain whose transaction version the servers do
   not yet understand (see R39.11.17).
-- **Notarization depth has no source.** This service exposes no notarized-depth
-  field, and a notarized depth defaulted to the plain confirmation depth would
-  report a notarization guarantee that was never checked. A ZHTLC coin shall
-  therefore not satisfy `requires_notarization` from plain confirmation depth:
-  asserting it for a ZHTLC coin shall be refused as unsupported for the coin
-  type, with the refusal naming the coin. See D39.11.f.
+- **Notarization depth has no source, so `requires_notarization` has no effect.**
+  This service exposes no notarized-depth field, and a ZHTLC coin has no
+  notarized confirmation count for the flag to select. Asserting
+  `requires_notarization` for a ZHTLC coin -- in the coins file, in the
+  activation request, by `set_requires_notarization`, or as an order's
+  `base_nota` / `rel_nota` -- shall be accepted and shall not change the wait:
+  the confirmation wait counts plain confirmation depth against the required
+  confirmations. The coin shall report `requires_notarization` as `false`, and a
+  `warn` line naming the coin shall state that the flag has no effect because no
+  notarized confirmation count exists: once at activation, once per
+  `set_requires_notarization` that asserts it, and once per wait that asks for it.
+  Nothing shall report a notarized depth. See D39.11.f.
 
 > **Status update (reloaded, Step C).** Implemented. The confirmation wait fetches
 > the bytes and mined height with `GetTransaction` and the tip with `GetLatestBlock`
@@ -4050,6 +4057,15 @@ form available. Two consequences bind:
 > activation and by `set_requires_notarization`; the refusal this rule asks for is not
 > made there. A swap that requires notarization for a ZHTLC coin fails at the
 > confirmation wait, after its payment is on chain. See D39.11.f.
+>
+> **Status update (2026-10-30, amended rule).** Implemented; the two notes above
+> describe the earlier form and are superseded. The lightwalletd confirmation wait no
+> longer takes the flag. The ZHTLC wait counts plain confirmations and, when a swap
+> asks for notarization, says so in one warning. `requires_notarization` reports
+> `false`, `set_requires_notarization(true)` warns and stores nothing, and activation
+> warns when the coins entry or the request asserts it. Tests:
+> `a_wait_that_asks_for_notarization_counts_plain_confirmations` and
+> `requires_notarization_has_no_effect_on_a_shielded_coin`.
 
 R39.11.4f **Block timestamps and median time past shall be read from the compact
 block's block-time field.** The compact-block message carries the block time, so
@@ -5877,6 +5893,29 @@ fails at the confirmation wait, after its payment is on chain, and ends by the s
 ordinary failure path. Older published coins-file revisions set the flag for ARRR
 (D39.11.i); an operator running ARRR must set `requires_notarization` to `false`. The
 item stays open in `docs/plans/arrr-ironwood-compatibility.md` §11.6.
+
+*Amended 2026-10-30 (maintainer Decision AT, amendment): ignored with a warning;
+supersedes the known-issue form above.* The flag selects a notarized confirmation count,
+and a ZHTLC coin has none; the plain depth of `required_confirmations` is the only measure
+there is, so the flag is accepted and has no effect (R39.11.4e as amended). The known-issue
+form failed such a swap once a payment was on chain, and the funds came back only by
+refund after the swap's lock times had passed. A counterparty's settings can never raise
+the flag a node waits with, so with the coin reporting `false` no counterparty setting
+reintroduces the wait. The swap lock time no longer takes the notarization multiplier from
+this node's setting for the coin. Both peers compute the lock time from the confirmation
+settings both sides sent when the order matched, so they agree: a peer that still sends
+`true` for the coin (a coins file from an older revision) makes it four times as long on
+both sides, as before. The published coins file sets `false` for ARRR (D39.11.i), so
+peers that use it get the ordinary lock time. A peer that computed a different lock time
+would be stopped by the taker's check of the maker's lock time at negotiation, before
+any payment. An operator no longer needs to edit the coins file. The item is closed in
+`docs/plans/arrr-ironwood-compatibility.md` §11.6.
+
+*Known residual (2026-10-30).* An order whose `base_nota` / `rel_nota` explicitly sets
+`true` for the coin still advertises it, and that still makes the swap lock time four
+times as long on both sides. It no longer changes any wait. Clearing an explicit order
+value would take a coin-type check in each place that builds an order's settings, so it
+is left as it is.
 
 D39.11.g **The serving node's transaction index is an unverifiable operational
 precondition for swap-path spend detection.** Without it the node cannot serve the
