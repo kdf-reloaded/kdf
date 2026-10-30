@@ -268,7 +268,7 @@ impl Drop for ParkedSlot {
 }
 
 /// The answer R-Q5 gives to the request at this moment, in the form the transport sends. It is the one place
-/// where the answer is decided, so it is also where the answer is logged (R-Q6a): `path` says how the answer
+/// where the answer is decided, so it is also where the answer is logged: `path` says how the answer
 /// was reached and `waited_ms` how long a parked request waited.
 fn sync_answer_response(
     ctx: &MmArc,

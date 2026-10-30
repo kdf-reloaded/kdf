@@ -1,4 +1,4 @@
-//! CRD ch.32 R-Q6a: the logging of the order-book synchronization.
+//! The logging of the order-book synchronization (logging is left to the implementation, CRD ch.32 R36).
 //!
 //! Two sites feed it:
 //!

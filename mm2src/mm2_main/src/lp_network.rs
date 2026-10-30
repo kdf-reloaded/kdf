@@ -67,8 +67,8 @@ pub enum P2PRequestError {
     SendError(String),
     /// The peer answered with an error.
     ResponseError(String),
-    /// This node's own request failed without an answer from the peer (CRD ch.32 R-Q6a classification); the
-    /// text is the same as it was when this was a [`P2PRequestError::ResponseError`].
+    /// This node's own request failed without an answer from the peer (the order-book synchronization logging
+    /// classifies by it); the text is the same as it was when this was a [`P2PRequestError::ResponseError`].
     #[display(fmt = "{}", _1)]
     LocalResponseError(LocalFailure, String),
     #[display(fmt = "Expected 1 response, found {}", _0)]

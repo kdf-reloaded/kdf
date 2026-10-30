@@ -10596,8 +10596,8 @@ mod sync_answer_deferral_tests {
         assert_tables_empty(&subscriber);
     }
 
-    // ---- CRD ch.32 R-Q6a: the logging of the synchronization. The tests read the counters and the recorded
-    // events of the node, not the log text.
+    // ---- The logging of the synchronization (left to the implementation, CRD ch.32 R36). The tests read the
+    // counters and the recorded events of the node, not the log text.
 
     fn assert_wire_form(res: &AdexResponse, needle: &str) {
         match res {

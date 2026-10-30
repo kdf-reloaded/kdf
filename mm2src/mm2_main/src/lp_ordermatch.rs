@@ -402,7 +402,8 @@ pub(crate) struct OrdermatchContext {
     pub orderbook_subscriptions: PaRwLock<HashMap<String, OrderbookRequestingState>>,
     /// Own synchronization requests in flight and the peers' requests parked behind them (CRD ch.32 R-Q5b).
     pub sync_answer_deferral: SyncAnswerDeferral,
-    /// The counters behind the summary line of the order-book synchronization logging (CRD ch.32 R-Q6a).
+    /// The counters behind the summary line of the order-book synchronization logging (logging is left to the
+    /// implementation, CRD ch.32 R36).
     pub sync_log: SyncLog,
     /// The map from coin original ticker to the orderbook ticker
     /// It is used to share the same orderbooks for concurrently activated coins with different protocols

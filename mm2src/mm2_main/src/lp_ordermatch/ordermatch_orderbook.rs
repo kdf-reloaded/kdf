@@ -203,8 +203,8 @@ async fn request_sync_state(
 
 /// One `SyncPubkeyOrderbookState` request for `trie_roots` of `pubkey` to `peer`; `attempt` is 1 for the
 /// request and 2 for the re-ask. Any outcome but an answer (an error, "no data", a timeout, a transport
-/// failure) is `None`. This is the only place where an own synchronization request is logged (CRD ch.32
-/// R-Q6a): the first request and the re-ask both pass here.
+/// failure) is `None`. This is the only place where an own synchronization request is logged:
+/// the first request and the re-ask both pass here.
 async fn ask_for_sync_state(
     ctx: &MmArc,
     ordermatch_ctx: &OrdermatchContext,
@@ -1011,7 +1011,7 @@ pub(crate) struct SyncPubkeyOrderbookStateRes {
     pub(crate) conf_infos: HashMap<Uuid, OrderConfirmationsSettings>,
 }
 
-/// Why a synchronization answer failed, by kind (CRD ch.32 R-Q6a). The kind is decided where the failure
+/// Why a synchronization answer failed, by kind. The kind is decided where the failure
 /// happens, never from the text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum SyncAnswerFailure {
@@ -1053,7 +1053,7 @@ pub(crate) fn process_sync_pubkey_orderbook_state(
     process_sync_pubkey_orderbook_state_classified(ctx, pubkey, trie_roots).map_err(|e| e.text)
 }
 
-/// [`process_sync_pubkey_orderbook_state`] with the kind of the failure, for the logging of R-Q6a.
+/// [`process_sync_pubkey_orderbook_state`] with the kind of the failure, for the synchronization logging.
 pub(crate) fn process_sync_pubkey_orderbook_state_classified(
     ctx: MmArc,
     pubkey: String,
