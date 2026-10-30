@@ -423,7 +423,10 @@ fn process_transport_single_result<T: DeserializeOwned + Send + 'static>(
             process_single_response(client_info, remote_addr, request, single)
         },
         Ok((remote_addr, JsonRpcResponseEnum::Batch(batch))) => {
-            let error = ERRL!("Expeced single response, found batch response: {:?}", batch);
+            let error = ERRL!(
+                "Expected single response, found batch response of {} elements",
+                batch.len()
+            );
             Err(JsonRpcError {
                 client_info,
                 request,
@@ -450,8 +453,9 @@ fn process_transport_batch_result<T: DeserializeOwned + Send + 'static>(
 
     let (remote_addr, batch) = match result {
         Ok((remote_addr, JsonRpcResponseEnum::Batch(batch))) => (remote_addr, batch),
-        Ok((remote_addr, JsonRpcResponseEnum::Single(single))) => {
-            let error = ERRL!("Expected batch response, found single response: {:?}", single);
+        Ok((remote_addr, JsonRpcResponseEnum::Single(_))) => {
+            // The answer is not quoted (CRD ch.38 R38.6.9b item 4): neither its result nor its error.
+            let error = ERRL!("Expected batch response, found single response");
             return Err(JsonRpcError {
                 client_info,
                 request,
@@ -528,7 +532,13 @@ fn process_single_response<T: DeserializeOwned + Send + 'static>(
         request,
         error: JsonRpcErrorType::Parse(
             remote_addr,
-            ERRL!("error {:?} parsing result from response {:?}", e, response),
+            // Neither the result nor the serde error is quoted: the latter can carry a fragment of the value
+            // (CRD ch.38 R38.6.9b item 4). The target type and the kind of the failure name what went wrong.
+            ERRL!(
+                "the result of the response could not be read as {}: {:?} error",
+                std::any::type_name::<T>(),
+                e.classify()
+            ),
         ),
     })
 }
