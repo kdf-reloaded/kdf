@@ -244,6 +244,36 @@ length-prefixed libp2p request-response frame whose payload is msgpack
 (`rmp-serde`) bytes for the channel's bound request/response type. The
 maximum accepted or emitted frame payload is `1024 * 1024 - 100` bytes.
 
+**R8c. Received peer addresses (Reloaded-original, maintainer decision
+2026-10-30).** A node accepts a peer address it received from another
+peer only in the form `/ip4/<address>/tcp/<port>`. That holds for an
+address in a peer-exchange answer and for one in a peers-topic
+announcement. The address MUST be globally routable (the
+`ip_helpers::is_global` predicate of R24), and the port MUST be the
+network's TCP port. Every other form is not accepted, the hostname form
+`/dns/...` included, and the node makes no name lookup for it.
+
+1. **Per address.** The node skips an address it does not accept and
+   keeps the other addresses of the same answer or announcement. It
+   skips a peer entry that has no accepted address left.
+2. **The sender is kept.** Skipped addresses MUST NOT make the node
+   forget the peer that sent them.
+3. **Whole answer.** An answer with more than 20 peer entries (R8) is
+   rejected as a whole. The node then forgets the peer that sent it and
+   asks another peer.
+4. **Logging.** The first time a distinct skipped address is seen, the
+   node logs one INFO line. The line names the address, the peer that
+   sent it and the accepted form. Later sightings log at DEBUG. The set
+   of addresses already reported is bounded.
+
+*Rationale.* A peer that does not run Reloaded may hand out the hostname
+under which it dialed a seed. Rejecting a whole answer for one such
+entry lost every valid address in it. Forgetting the sender removed a
+working peer from the exchange. A hostname from a peer is still not
+accepted, because it can resolve to an address that is not globally
+routable, which R24 keeps out. It would also let a remote peer choose
+the names this node looks up.
+
 **R9.** The ping wrapper MUST disconnect a peer after a bounded number
 of consecutive ping failures (the exact count is a substrate-internal
 tuning parameter, not bound here), as opposed to merely logging the
@@ -885,6 +915,17 @@ remains a one-symbol substrate edit.
 `KnownPeers { peers }` response containing no more than 20 peer entries;
 when `num > 20`, the responder MUST omit the response.
 
+**T6a.** *Received peer addresses (R8c).*
+- An answer that mixes accepted addresses with `/dns/...` and
+  non-global `/ip4/...` addresses keeps every accepted address. A peer
+  entry with no accepted address is skipped. The sender stays a known
+  peer.
+- An answer with more than 20 entries is rejected, and the sender is
+  forgotten.
+- A peers-topic announcement with one `/dns/...` address and one
+  accepted address keeps the accepted one.
+- A skipped address is reported at INFO once, and at DEBUG after that.
+
 **T7.** *Empty bootstrap list.* A client spawned with no bootstrap
 relays MUST start without a fatal P2P initialisation error, keep an
 empty relay mesh, and report zero connected relays until a reachable
@@ -1168,3 +1209,9 @@ hardening carried by the pinned fork).
   every backticked token and hexadecimal fragment from the added lines); the
   mechanical gate tool was not run (prose). *Measure:* 0.02 against the 0.10
   threshold. The clearance is complete and not pending.
+- *Scoped addition (2026-10-30) -- R8c and T6a.* Reloaded-original,
+  maintainer decision of 2026-10-30. It was prompted by peer-exchange
+  answers carrying hostname addresses in a field run on a public network.
+  *Inputs:* this repository's own peer-exchange and relay-address code
+  only. The forbidden corpus was not consulted, and the addition needs
+  no Dirty Gate pass.
