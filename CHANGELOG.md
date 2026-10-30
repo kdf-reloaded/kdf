@@ -103,8 +103,10 @@ it and, where one exists, the CRD rule, for readers who want more.
   whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
   it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
   network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
-  once at info level, then at debug level. Detail: PR #170; CRD ch.28 R8c.
-- **Quieter peer-to-peer logs on seeds and relays under load.** Four warnings that report expected
+  once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
+  other peers hand back to it, and it drops a stored address when a dial of it reaches a different
+  peer. Detail: PR #170, PR #176; CRD ch.28 R8c.
+- **Quieter peer-to-peer logs on seeds and relays under load.** Warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
     the first copy had already been forwarded.
@@ -113,9 +115,25 @@ it and, where one exists, the CRD rule, for readers who want more.
   - "HEARTBEAT: relays low" is now "Relay mesh below its low watermark". It is logged when the
     relay count changes and every ten minutes, not every ten seconds.
   - A request that times out is now a warning, not an error. Further timeouts toward the same peer
-    are counted in one line per minute.
+    are counted in one line per minute. The same holds for requests that fail because the
+    connection to the peer closed.
+  - A failed outgoing connection is a warning at most once per address per hour, and debug
+    otherwise. Relay upkeep keeps trying addresses that never answer, such as makers behind a
+    firewall.
+  - An incoming connection that fails to negotiate its transport, such as a scanner probing the
+    WebSocket port, is logged at info level once per source address per hour, then at debug level.
+  - "Request … is not processed" is now debug and no longer prints the answer. It meant an answer
+    arrived after the request had already been given up.
 
-  Detail: PR #170.
+  Detail: PR #170, PR #176.
+- **Seed and relay logs now show how order-book synchronization is going.** When a node asks
+  another for a maker's orders, or answers such a request, and it fails, the log at the default
+  level now shows a summary once a minute. The summary counts the answers this node gave with an
+  error, and why: no data for the maker, a pair it does not hold, a pair it is still synchronizing,
+  or an internal error. It also counts this node's own requests that failed, and why: no data, an
+  error from the peer, a timeout, a lost connection or an answer it could not read. At debug level
+  each request and answer gets one line, with the peer, the maker, the pairs and the time taken.
+  Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #179.
 
 #### Order posting, fees and balances
 
@@ -446,7 +464,11 @@ it and, where one exists, the CRD rule, for readers who want more.
   disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
   Messages are also sent in the order they were queued, where a backlog used to go out newest first.
   The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
-  minute. Nothing new is sent on the wire. Detail: PR #122; CRD ch.28 §28.9B.
+  minute. Cancellations and swap negotiation messages go out ahead of the others, through a lane of
+  256 messages per connection; when more of them are waiting, the rest join the end of the normal
+  queue. They used to disconnect the peer, so a maker cancelling hundreds of orders at once cut a
+  seed off from all its slower relays in the same second. Nothing new is sent on the wire. Detail:
+  PR #122, PR #175; CRD ch.28 §28.9B.
 - **A seed or relay now gives back the memory a burst of order updates used.** Every order update a
   node applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and
   bookkeeping), and none of it was released until the same order pair changed again, so a node that
@@ -488,6 +510,22 @@ it and, where one exists, the CRD rule, for readers who want more.
   as in a normal swap. Such a swap still lists the earlier error events, so a wallet may show it as
   failed although the trade completed. A refund already on the chain, after a restart, now ends the
   swap as refunded. Detail: PR #167; CRD ch.51 R31a.
+- **A node now re-sends other traders' swap transactions as a backup, instead of failing every
+  time.** Traders publish their claim and refund transactions to the network so that other nodes can
+  broadcast them too. A Reloaded node passed the whole signed message to its server instead of the
+  transaction inside it, so every such broadcast was refused ("TX decode failed") and logged as an
+  error; on a seed with coins enabled that was dozens of error lines a day. The node now takes the
+  transaction out of the signed message and broadcasts it. A refusal is the normal outcome, because
+  the traders have usually broadcast the transaction already, and it is logged only at debug level;
+  a message that is not a valid signed transaction is logged as a warning. Detail: PR #177; CRD
+  ch.51 R50B.
+- **A node no longer starts swap watchers it cannot run for Bitcoin-family coins.** A node offered to
+  watch other traders' swaps for every enabled coin of the Bitcoin family (UTXO, BCH, QTUM), but the
+  checks a watcher needs are not implemented for these coins yet. Every watcher it started gave up
+  after a minute, without doing anything, and logged seven warnings; it started again for the next
+  copy of the same swap. These coins no longer offer watching, so no watcher starts and nothing is
+  logged. Nothing else changes: these watchers never sent a transaction. Siacoin keeps its
+  watcher. Detail: PR #177; CRD ch.09 R17.
 - **Listing, cancelling or updating an order no longer waits for another path's disk or network
   work.** The balance-update handler, the periodic balance check, the removal of timed-out matches,
   an order's timeout expiry, the cancel paths and `update_maker_order` held the order's lock while

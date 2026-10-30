@@ -637,10 +637,9 @@ impl SwapOps for BchCoin {
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(self) }
 }
 
+// No watcher methods are implemented for this family yet, so it does not opt in to watching (CRD ch.09 R17).
 #[async_trait]
-impl WatcherOps for BchCoin {
-    fn is_supported_by_watchers(&self) -> bool { true }
-}
+impl WatcherOps for BchCoin {}
 
 fn total_unspent_value<'a>(unspents: impl IntoIterator<Item = &'a UnspentInfo>) -> u64 {
     unspents.into_iter().fold(0, |cur, unspent| cur + unspent.value)

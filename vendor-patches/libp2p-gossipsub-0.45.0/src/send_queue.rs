@@ -8,8 +8,8 @@
 //!
 //! Reloaded change: CRD ch.28 §28.9B RQ1 items 8 and 9. The queue also keeps a separate FIFO
 //! *priority lane* that is written before everything else, is never dropped and has its own count
-//! cap (a message past it reports the connection for closing), and it derives a *pressure* level
-//! from the data queue depth for the application.
+//! cap (a priority RPC past it joins the end of the data queue as a data RPC), and it derives a
+//! *pressure* level from the data queue depth for the application.
 //!
 //! The queue takes the current time as an argument so the stuck-peer logic is testable without
 //! sleeping.
@@ -61,7 +61,8 @@ pub struct SendQueueConfig {
     /// Data queue depth at or below which the pressure signal is cleared (with no period at the
     /// cap running).
     pub pressure_clear: usize,
-    /// Maximum number of queued priority RPCs. A priority RPC past it closes the connection.
+    /// Maximum number of queued priority RPCs. A priority RPC past it is queued at the end of the
+    /// data queue instead.
     pub priority_max: usize,
     /// How long the data queue must hold at least one RPC, without becoming empty, before the queue signal is
     /// raised.
@@ -120,6 +121,32 @@ pub enum DropLog {
     Summary { dropped: u64 },
 }
 
+/// What the caller should log after a priority RPC was moved to the data queue because the priority lane
+/// was full. Rate limited per connection like [`DropLog`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpillLog {
+    /// The first spill on this connection.
+    First,
+    /// A summary of the spills since the previous report: the number of priority RPCs moved to the
+    /// data queue.
+    Summary { moved: u64 },
+}
+
+/// The result of [`SendQueue::push_priority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriorityPush {
+    /// The RPC was queued in the priority lane.
+    Queued,
+    /// The lane was full: the RPC was queued at the end of the data queue through the same path as
+    /// [`SendQueue::push`].
+    Spilled {
+        /// What to log about data RPCs dropped by that push, if anything.
+        drop_log: Option<DropLog>,
+        /// What to log about the spill itself, if anything.
+        spill_log: Option<SpillLog>,
+    },
+}
+
 /// A connection that stayed at the cap for the whole period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StuckReport {
@@ -140,8 +167,6 @@ pub struct SendQueue {
     queue: VecDeque<Entry>,
     /// The priority lane: written before `queue`, never dropped (CRD ch.28 §28.9B RQ1 item 9).
     priority: VecDeque<proto::RPC>,
-    /// Set when a priority RPC could not be queued because the lane was full.
-    priority_overflow: bool,
     /// Current pressure level and the level last handed out by `take_pressure_change`.
     pressure: bool,
     pressure_reported: bool,
@@ -162,6 +187,9 @@ pub struct SendQueue {
     total_dropped: u64,
     dropped_since_log: u64,
     last_log: Option<Instant>,
+    /// Priority RPCs moved to the data queue since the last spill report, and the time of that report.
+    spilled_since_log: u64,
+    last_spill_log: Option<Instant>,
 }
 
 impl SendQueue {
@@ -170,7 +198,6 @@ impl SendQueue {
             config,
             queue: VecDeque::new(),
             priority: VecDeque::new(),
-            priority_overflow: false,
             pressure: false,
             pressure_reported: false,
             signal: false,
@@ -185,6 +212,8 @@ impl SendQueue {
             total_dropped: 0,
             dropped_since_log: 0,
             last_log: None,
+            spilled_since_log: 0,
+            last_spill_log: None,
         }
     }
 
@@ -233,20 +262,41 @@ impl SendQueue {
 
     /// Queues an RPC in the priority lane. The lane is first in, first out, is written before
     /// every other RPC, does not count toward the data cap and is never dropped. When the lane
-    /// already holds `priority_max` RPCs the RPC is not queued and `false` is returned; the
-    /// connection is then reported for closing through `take_priority_overflow`.
-    pub fn push_priority(&mut self, rpc: proto::RPC) -> bool {
-        if self.priority.len() >= self.config.priority_max {
-            self.priority_overflow = true;
-            return false;
+    /// already holds `priority_max` RPCs the RPC goes to the end of the data queue through the same
+    /// path as [`Self::push`]: it counts toward the cap, may evict the oldest data RPCs, and
+    /// updates the pressure level and the period at the cap. The result carries what to log.
+    pub fn push_priority(&mut self, rpc: proto::RPC, now: Instant) -> PriorityPush {
+        if self.priority.len() < self.config.priority_max {
+            self.priority.push_back(rpc);
+            return PriorityPush::Queued;
         }
-        self.priority.push_back(rpc);
-        true
+        let drop_log = self.push(rpc, now);
+        PriorityPush::Spilled {
+            drop_log,
+            spill_log: self.spill_log(now),
+        }
     }
 
-    /// Reports once that a priority RPC found the lane full.
-    pub fn take_priority_overflow(&mut self) -> bool {
-        std::mem::take(&mut self.priority_overflow)
+    /// Counts one spill and decides whether it is reported: the first one on the connection, then
+    /// at most one summary per `stuck_timeout`. A count that is not reported yet stays in
+    /// `spilled_since_log`; it is reported with the first spill at or after the period and is lost
+    /// if no further spill comes before the connection ends.
+    fn spill_log(&mut self, now: Instant) -> Option<SpillLog> {
+        self.spilled_since_log += 1;
+        match self.last_spill_log {
+            None => {
+                self.last_spill_log = Some(now);
+                self.spilled_since_log = 0;
+                Some(SpillLog::First)
+            },
+            Some(last) if now.saturating_duration_since(last) >= self.config.stuck_timeout => {
+                self.last_spill_log = Some(now);
+                Some(SpillLog::Summary {
+                    moved: std::mem::take(&mut self.spilled_since_log),
+                })
+            },
+            Some(_) => None,
+        }
     }
 
     /// The pressure level, if it changed since the last call (CRD ch.28 §28.9B RQ1 item 8): raised
@@ -816,9 +866,9 @@ mod tests {
         let now = Instant::now();
         q.push(data_rpc(1, 10), now);
         q.push(control_rpc("c"), now);
-        assert!(q.push_priority(data_rpc(10, 10)));
+        assert_eq!(q.push_priority(data_rpc(10, 10), now), PriorityPush::Queued);
         q.push(data_rpc(2, 10), now);
-        assert!(q.push_priority(data_rpc(11, 10)));
+        assert_eq!(q.push_priority(data_rpc(11, 10), now), PriorityPush::Queued);
         assert!(!q.is_empty());
         assert_eq!(q.priority_len(), 2);
         let mut order = vec![];
@@ -839,7 +889,7 @@ mod tests {
         for i in 0..2u8 {
             q.push(data_rpc(i, 10), now);
         }
-        assert!(q.push_priority(data_rpc(50, 10)));
+        assert_eq!(q.push_priority(data_rpc(50, 10), now), PriorityPush::Queued);
         assert_eq!(q.data_count(), 2);
         // Dropping the oldest data does not touch the priority lane.
         for i in 2..6u8 {
@@ -850,18 +900,139 @@ mod tests {
         assert_eq!(drain_tags(&mut q), vec![50, 4, 5]);
     }
 
-    #[test]
-    fn the_priority_lane_past_its_cap_reports_overflow_once() {
-        let mut q = pressure_queue(256, 64, 3);
-        for i in 0..3u8 {
-            assert!(q.push_priority(data_rpc(i, 10)));
+    fn spilled(push: PriorityPush) -> (Option<DropLog>, Option<SpillLog>) {
+        match push {
+            PriorityPush::Spilled { drop_log, spill_log } => (drop_log, spill_log),
+            PriorityPush::Queued => panic!("expected a spill"),
         }
-        assert!(!q.take_priority_overflow());
-        assert!(!q.push_priority(data_rpc(3, 10)));
-        assert!(q.take_priority_overflow());
-        assert!(!q.take_priority_overflow());
-        // Nothing was lost from the lane.
-        assert_eq!(drain_tags(&mut q), vec![0, 1, 2]);
+    }
+
+    fn full_lane_queue(lane: usize) -> SendQueue {
+        let mut q = pressure_queue(256, 64, lane);
+        let now = Instant::now();
+        for i in 0..lane as u8 {
+            assert_eq!(q.push_priority(data_rpc(i, 10), now), PriorityPush::Queued);
+        }
+        q
+    }
+
+    #[test]
+    fn a_priority_rpc_past_the_lane_cap_joins_the_end_of_the_data_queue() {
+        let mut q = full_lane_queue(3);
+        let now = Instant::now();
+        q.push(data_rpc(100, 10), now);
+        assert_eq!((q.priority_len(), q.data_count()), (3, 1));
+        let push = q.push_priority(data_rpc(200, 10), now);
+        assert!(matches!(push, PriorityPush::Spilled { .. }));
+        assert_eq!((q.priority_len(), q.data_count()), (3, 2));
+        // The lane first, then the data queue in order, the spilled RPC last.
+        assert_eq!(drain_tags(&mut q), vec![0, 1, 2, 100, 200]);
+    }
+
+    #[test]
+    fn the_256_lane_default_spills_the_257th() {
+        let mut q = SendQueue::new(SendQueueConfig::default());
+        let now = Instant::now();
+        for i in 0..256usize {
+            assert_eq!(q.push_priority(data_rpc((i % 200) as u8, 10), now), PriorityPush::Queued);
+        }
+        assert_eq!((q.priority_len(), q.data_count()), (256, 0));
+        assert!(matches!(q.push_priority(data_rpc(255, 10), now), PriorityPush::Spilled { .. }));
+        assert_eq!((q.priority_len(), q.data_count()), (256, 1));
+    }
+
+    #[test]
+    fn a_spill_at_the_data_cap_evicts_the_oldest_data_rpc() {
+        let mut q = SendQueue::new(SendQueueConfig {
+            max_messages: 2,
+            priority_max: 1,
+            ..SendQueueConfig::default()
+        });
+        let now = Instant::now();
+        assert_eq!(q.push_priority(data_rpc(10, 10), now), PriorityPush::Queued);
+        q.push(data_rpc(1, 10), now);
+        q.push(data_rpc(2, 10), now);
+        let (drop_log, _) = spilled(q.push_priority(data_rpc(11, 10), now));
+        // The first drop on the connection is logged as for any data RPC.
+        assert!(matches!(drop_log, Some(DropLog::First { queued_messages: 2, .. })));
+        assert_eq!((q.data_count(), q.total_dropped()), (2, 1));
+        assert_eq!(drain_tags(&mut q), vec![10, 2, 11]);
+    }
+
+    #[test]
+    fn a_spill_follows_the_data_path_for_pressure_and_the_period_at_the_cap() {
+        let mut q = SendQueue::new(SendQueueConfig {
+            max_messages: 2,
+            priority_max: 1,
+            pressure_raise: 100,
+            pressure_clear: 0,
+            ..SendQueueConfig::default()
+        });
+        let t0 = Instant::now();
+        q.push_priority(data_rpc(10, 10), t0);
+        q.push(data_rpc(1, 10), t0);
+        q.push(data_rpc(2, 10), t0);
+        assert_eq!(q.take_pressure_change(), None);
+        assert_eq!(q.stuck_deadline(), None);
+        // The spill evicts, so the period at the cap starts and the pressure level is raised.
+        q.push_priority(data_rpc(11, 10), t0);
+        assert_eq!(q.take_pressure_change(), Some(true));
+        assert_eq!(q.stuck_deadline(), Some(t0 + Duration::from_secs(60)));
+        // Spills count toward the data queue depth that raises the pressure level.
+        let mut q = pressure_queue(3, 1, 1);
+        q.push_priority(data_rpc(10, 10), t0);
+        q.push_priority(data_rpc(11, 10), t0);
+        q.push_priority(data_rpc(12, 10), t0);
+        assert_eq!(q.take_pressure_change(), None);
+        q.push_priority(data_rpc(13, 10), t0);
+        assert_eq!(q.take_pressure_change(), Some(true));
+    }
+
+    #[test]
+    fn spill_reports_are_rate_limited() {
+        let mut q = full_lane_queue(2);
+        let t0 = Instant::now();
+        assert_eq!(spilled(q.push_priority(data_rpc(50, 10), t0)).1, Some(SpillLog::First));
+        // Further spills inside the period report nothing.
+        for s in 1..60u64 {
+            assert_eq!(spilled(q.push_priority(data_rpc(51, 10), t0 + Duration::from_secs(s))).1, None);
+        }
+        // The first spill at the period reports the count since the last report.
+        assert_eq!(
+            spilled(q.push_priority(data_rpc(52, 10), t0 + Duration::from_secs(60))).1,
+            Some(SpillLog::Summary { moved: 60 })
+        );
+        assert_eq!(spilled(q.push_priority(data_rpc(53, 10), t0 + Duration::from_secs(61))).1, None);
+        assert_eq!(
+            spilled(q.push_priority(data_rpc(54, 10), t0 + Duration::from_secs(120))).1,
+            Some(SpillLog::Summary { moved: 2 })
+        );
+    }
+
+    #[test]
+    fn an_unreported_spill_count_waits_for_the_next_spill_after_the_period() {
+        let mut q = full_lane_queue(1);
+        let t0 = Instant::now();
+        spilled(q.push_priority(data_rpc(50, 10), t0));
+        spilled(q.push_priority(data_rpc(51, 10), t0 + Duration::from_secs(1)));
+        // No spill for a long time: nothing is reported by itself.
+        assert_eq!(q.spilled_since_log, 1);
+        assert_eq!(
+            spilled(q.push_priority(data_rpc(52, 10), t0 + Duration::from_secs(600))).1,
+            Some(SpillLog::Summary { moved: 2 })
+        );
+    }
+
+    #[test]
+    fn a_spill_alone_reports_no_stuck_connection() {
+        let mut q = full_lane_queue(2);
+        let t0 = Instant::now();
+        for s in 0..200u64 {
+            q.push_priority(data_rpc(60, 10), t0 + Duration::from_secs(s));
+        }
+        assert_eq!(q.stuck_deadline(), None);
+        assert_eq!(q.take_stuck(t0 + Duration::from_secs(1000)), None);
+        assert_eq!((q.priority_len(), q.data_count()), (2, 200));
     }
 
     #[test]

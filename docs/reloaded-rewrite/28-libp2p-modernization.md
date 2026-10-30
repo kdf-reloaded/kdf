@@ -265,6 +265,15 @@ network's TCP port. Every other form is not accepted, the hostname form
    node logs one INFO line. The line names the address, the peer that
    sent it and the accepted form. Later sightings log at DEBUG. The set
    of addresses already reported is bounded.
+5. **Own identity** *(added 2026-10-30, maintainer decision BD).* The
+   node never stores a peer entry that names its own peer ID, and never
+   picks one as a dial candidate. Other peers hand out this node's own
+   entry, and dialing it only reaches the node itself.
+6. **Stale entry** *(added 2026-10-30, decision BD).* When a dial of an
+   address stored for peer A reaches a peer with a different peer ID,
+   the node removes that address from A's entry, and forgets A when no
+   address is left. It does not store the address under the peer that
+   answered.
 
 *Rationale.* A peer that does not run Reloaded may hand out the hostname
 under which it dialed a seed. Rejecting a whole answer for one such
@@ -780,9 +789,27 @@ queue per connection of the RPCs waiting to be written to that peer.
      [Chapter 32](32-orderbook-p2p-and-trie.md) §32.9B R-MP1 item 2.
    - **Never dropped.** A priority RPC does not count toward the cap of
      item 2 and is never dropped under item 4.
-   - **Own cap.** When the priority lane already holds 256 RPCs and
-     another would be queued, the node closes that connection, as under
-     item 5, and logs it as in item 6. Such a peer is not reading at all.
+   - **Own cap** *(amended 2026-10-30, maintainer decision BC).* The
+     priority lane holds at most 256 RPCs. When it is full and another
+     priority RPC would be queued, that RPC is queued at the end of the
+     queue of items 1 to 4 instead, as a data RPC: it counts toward the
+     cap of item 2, and item 4 may drop it like any other data RPC. A
+     full priority lane does not close the connection; a peer that is
+     not reading at all is closed under item 5. The first time the lane
+     is found full on a connection, the node logs one line at INFO level
+     naming the peer ID and the lane size. Further overflows on that
+     connection log at most one INFO line per 60 seconds, with the number
+     of priority RPCs moved to the data queue since the last line. No
+     message content is logged.
+     *Reason:* a burst of more priority messages than the lane holds is
+     normal. A maker that cancels all of its orders publishes several
+     hundred cancellations at once, and a relay forwards the second copy
+     of each through this lane (Chapter 32 §32.8 R-F3b). In a field run
+     on a public network, closing on a full lane closed every slower
+     relay link of a seed in the same second. On a relay the first copy
+     of the same message is already in the data queue (§32.8 R-F3a), so
+     moving the second copy there puts no message at a risk it was not
+     already at.
    - **Order across lanes.** A priority message may reach the peer before
      a non-priority message published earlier. Messages within one lane
      keep their order.
@@ -870,7 +897,15 @@ the keep-alive synchronization.
   - With the data queue at its cap toward a paused peer, a priority
     message is not dropped, and after resume it arrives before the queued
     data messages.
-  - A 257th queued priority RPC closes the connection.
+  - *(Amended 2026-10-30, decision BC.)* With 256 priority RPCs queued
+    toward a paused peer, a 257th is queued at the end of the data queue
+    and counts toward its cap; the connection stays open. One INFO line
+    names the peer, and a second overflow within the period logs nothing
+    new until the period's summary line.
+  - A burst of 600 priority RPCs toward a peer that reads slowly closes
+    no connection. After it resumes, the first 256 arrive before the
+    data RPCs queued earlier, and every other one that item 4 did not
+    drop arrives in its order in the data queue.
 
 ## 28.10 Tests (test invariants)
 
@@ -925,6 +960,10 @@ when `num > 20`, the responder MUST omit the response.
 - A peers-topic announcement with one `/dns/...` address and one
   accepted address keeps the accepted one.
 - A skipped address is reported at INFO once, and at DEBUG after that.
+- *(Added 2026-10-30, decision BD.)* An answer or announcement that
+  carries this node's own peer ID stores nothing for it, and relay
+  maintenance never dials it. A dial of A's address that reaches peer B
+  removes the address from A's entry and stores nothing for B.
 
 **T7.** *Empty bootstrap list.* A client spawned with no bootstrap
 relays MUST start without a fatal P2P initialisation error, keep an
@@ -1215,3 +1254,17 @@ hardening carried by the pinned fork).
   *Inputs:* this repository's own peer-exchange and relay-address code
   only. The forbidden corpus was not consulted, and the addition needs
   no Dirty Gate pass.
+- *Scoped amendment (2026-10-30) -- §28.9B RQ1 item 9 "Own cap" and
+  T-RQ1.9.* Reloaded-original, maintainer decision BC of 2026-10-30. It
+  was prompted by a seed's own log from a field run on a public network,
+  in which a full priority lane closed three relay links in the same
+  second. *Inputs:* that log and this repository's vendored gossipsub
+  send queue only. The forbidden corpus was not consulted, and the
+  amendment needs no Dirty Gate pass.
+- *Scoped addition (2026-10-30) -- R8c items 5 and 6, and their T6a
+  bullet.* Reloaded-original, maintainer decision BD of 2026-10-30. It
+  was prompted by a seed's own log from a field run on a public network,
+  which showed the seed dialing itself and a stored address answering
+  under another peer ID. *Inputs:* that log and this repository's own
+  peer-exchange and relay-maintenance code only. The forbidden corpus
+  was not consulted, and the addition needs no Dirty Gate pass.

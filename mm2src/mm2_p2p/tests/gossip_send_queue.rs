@@ -913,16 +913,16 @@ async fn paused_peer_queue_grows_and_drains() {
 // RPCs never dropped) is covered by the unit tests of the vendored crate
 // ---------------------------------------------------------------------------------------------
 
-/// Captures the warnings of the gossipsub crate, so that tests can check what was logged.
+/// Captures the warnings and info lines of the gossipsub crate, so that tests can check what was logged.
 struct CaptureLogger;
 
 static LOG_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 impl log::Log for CaptureLogger {
-    fn enabled(&self, metadata: &log::Metadata) -> bool { metadata.level() <= log::Level::Warn }
+    fn enabled(&self, metadata: &log::Metadata) -> bool { metadata.level() <= log::Level::Info }
 
     fn log(&self, record: &log::Record) {
-        if record.target().starts_with("libp2p_gossipsub") && record.level() <= log::Level::Warn {
+        if record.target().starts_with("libp2p_gossipsub") && record.level() <= log::Level::Info {
             LOG_LINES.lock().unwrap().push(record.args().to_string());
         }
     }
@@ -935,7 +935,7 @@ fn start_log_capture() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = log::set_logger(&CaptureLogger);
-        log::set_max_level(log::LevelFilter::Warn);
+        log::set_max_level(log::LevelFilter::Info);
     });
     LOG_LINES.lock().unwrap().clear();
 }
@@ -1957,9 +1957,11 @@ async fn rq1_priority_message_arrives_first_after_resume() {
     s.stop();
 }
 
-/// T-RQ1.9: a 257th queued priority RPC closes the connection, and the close is logged.
+/// T-RQ1.9 (amended, decision BC): a burst of 600 priority RPCs toward a paused peer closes no connection. After
+/// the resume the first 256 arrive before the data RPCs queued earlier, and every other one arrives in its
+/// order in the data queue, after them. One INFO line names the peer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rq1_priority_lane_overflow_closes_the_connection() {
+async fn rq1_priority_lane_overflow_joins_the_data_queue() {
     let _guard = SERIAL.lock().await;
     start_log_capture();
     let topic = "gsq-rq1-priority-cap";
@@ -1967,34 +1969,59 @@ async fn rq1_priority_lane_overflow_closes_the_connection() {
         b.send_queue_stuck_timeout(Duration::from_secs(600));
     });
     let paused = spawn_fast_receiver(topic, s.port);
-    let healthy = spawn_fast_receiver(topic, s.port);
-    wait_ready_test(&s, topic, &[&paused, &healthy]).await;
+    wait_ready_test(&s, topic, &[&paused]).await;
     async_std::task::sleep(Duration::from_millis(800)).await;
     paused.drv.pause().await;
-    // Fill the transport window with data so that the priority lane cannot be written.
-    s.publish_paced(topic, 0..120, 8 * 1024, 4, &[&healthy]).await;
-    async_std::task::sleep(Duration::from_millis(300)).await;
 
-    // 256 priority messages are held; the connection stays.
-    s.publish_marked(topic, 1000..1256, 512, true).await;
+    // Data fills the transport window and leaves some RPCs in the data queue.
+    const DATA: u32 = 400;
+    s.publish_range(topic, 0..DATA, 8 * 1024).await;
+    async_std::task::sleep(Duration::from_millis(300)).await;
+    let queued_data = s.snapshot().await.queued as u32;
+    assert!(queued_data > 0 && queued_data < DATA, "queued data RPCs: {queued_data}");
+
+    // 600 priority RPCs: 256 fill the lane, 344 join the data queue.
+    const FIRST: u32 = 1000;
+    s.publish_marked(topic, FIRST..FIRST + 600, 512, true).await;
     async_std::task::sleep(Duration::from_millis(500)).await;
-    assert!(s.is_connected(paused.peer_id).await, "closed at 256 priority RPCs");
-    // The 257th closes it.
-    s.publish_marked(topic, 1256..1257, 512, true).await;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while s.is_connected(paused.peer_id).await {
-        assert!(
-            Instant::now() < deadline,
-            "the 257th priority RPC did not close the connection"
-        );
-        async_std::task::sleep(Duration::from_millis(50)).await;
+    let snapshot = s.snapshot().await;
+    assert_eq!(snapshot.queued as u32, queued_data + 344);
+    assert_eq!(snapshot.dropped, 0);
+    assert!(
+        s.is_connected(paused.peer_id).await,
+        "a full priority lane closed the connection"
+    );
+    let full = log_lines_with("priority lane");
+    assert_eq!(full.len(), 1, "priority lane lines: {full:?}");
+    assert!(full[0].contains(&paused.peer_id.to_string()) && full[0].contains("256"));
+    assert!(log_lines_with("Closing the connection").is_empty());
+
+    paused.drv.resume();
+    wait_for("the last spilled message arrived", Duration::from_secs(30), || {
+        received(&paused).last() == Some(&(FIRST + 599))
+    })
+    .await;
+    let got = received(&paused);
+    let pos = |i: u32| {
+        got.iter()
+            .position(|g| *g == i)
+            .unwrap_or_else(|| panic!("message {i} is missing"))
+    };
+    // The lane comes before the data RPCs that were queued when the burst began.
+    let first_queued_data = pos(DATA - queued_data);
+    for i in FIRST..FIRST + 256 {
+        assert!(pos(i) < first_queued_data, "lane message {i} came after queued data");
     }
-    assert!(s.is_connected(healthy.peer_id).await);
-    let closing = log_lines_with("priority lane");
-    assert_eq!(closing.len(), 1, "close lines: {closing:?}");
-    assert!(closing[0].contains(&paused.peer_id.to_string()));
+    // The spilled ones follow the data queue, in order.
+    let spilled: Vec<u32> = got.iter().copied().filter(|i| *i >= FIRST + 256).collect();
+    assert_eq!(spilled, (FIRST + 256..FIRST + 600).collect::<Vec<_>>());
+    let last_data = pos(DATA - 1);
+    assert!(
+        pos(FIRST + 256) > last_data,
+        "spilled messages came before the queued data"
+    );
+    assert!(s.is_connected(paused.peer_id).await);
     paused.drv.stop();
-    healthy.drv.stop();
     s.stop();
 }
 
