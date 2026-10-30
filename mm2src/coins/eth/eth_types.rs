@@ -1,6 +1,7 @@
 //! Ethereum coin types, constants, contract ABIs, and error conversions.
 
 use super::*;
+use crate::FeeCapBelowBaseFee;
 
 /// https://github.com/artemii235/etomic-swap/blob/master/contracts/EtomicSwap.sol
 /// Dev chain (195.201.0.6:8565) contract address: 0xa09ad3cd7e96586ebd05a2607ee56b56fb2db8fd
@@ -87,8 +88,50 @@ pub enum Web3RpcError {
     Transport(String),
     #[display(fmt = "Invalid response: {}", _0)]
     InvalidResponse(String),
+    /// CRD ch.56 R5: the node rejected the request for a fee cap below the block base fee.
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal: {}", _0)]
     Internal(String),
+}
+
+/// The node-observable phrasings of a fee cap below the block base fee (CRD ch.56 R5), matched by
+/// containment and exactly as the node spells them: the Geth family's two texts and the text Nethermind
+/// emitted before release 1.38.0.
+const FEE_CAP_BELOW_BASE_FEE_PHRASES: [&str; 3] = [
+    "max fee per gas less than block base fee",
+    "fee cap less than block base fee",
+    "miner premium is negative",
+];
+
+/// Reads the wei amount that follows `label` in `text`, when there is one.
+fn amount_after(text: &str, label: &str) -> Option<U256> {
+    let rest = text[text.find(label)? + label.len()..].trim_start();
+    let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+    U256::from_dec_str(digits).ok()
+}
+
+/// Classifies the text of a node error under CRD ch.56 R5.
+///
+/// `Some` when `text` contains one of [`FEE_CAP_BELOW_BASE_FEE_PHRASES`], else `None`: no other text is
+/// classified, whatever its error code. The payload carries the `maxFeePerGas: <wei>` and `baseFee: <wei>`
+/// the node appended, when it did, and the trailing `(node <label>)` the transport appended, when it did.
+pub(crate) fn classify_fee_cap_below_base_fee(text: &str) -> Option<FeeCapBelowBaseFee> {
+    if !FEE_CAP_BELOW_BASE_FEE_PHRASES
+        .iter()
+        .any(|phrase| text.contains(phrase))
+    {
+        return None;
+    }
+    let trimmed = text.trim_end();
+    let node = trimmed
+        .strip_suffix(')')
+        .and_then(|head| head.rfind("(node ").map(|at| head[at + "(node ".len()..].to_owned()));
+    Some(FeeCapBelowBaseFee {
+        max_fee_per_gas: amount_after(text, "maxFeePerGas:"),
+        base_fee: amount_after(text, "baseFee:"),
+        node,
+    })
 }
 
 impl From<GasStationReqErr> for Web3RpcError {
@@ -125,6 +168,7 @@ impl From<Web3RpcError> for WithdrawError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => WithdrawError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => WithdrawError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => WithdrawError::InternalError(internal),
         }
     }
@@ -134,6 +178,7 @@ impl From<Web3RpcError> for TradePreimageError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => TradePreimageError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => TradePreimageError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => TradePreimageError::InternalError(internal),
         }
     }
@@ -143,6 +188,7 @@ impl From<Web3RpcError> for BalanceError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => BalanceError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => BalanceError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => BalanceError::Internal(internal),
         }
     }

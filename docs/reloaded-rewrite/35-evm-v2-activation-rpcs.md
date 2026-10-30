@@ -1301,7 +1301,9 @@ R35.6.5 `error_type` discriminants and HTTP status shall include at least:
 R35.6.6 The selected policy governs how the EVM coin prices gas for subsequent
 swap transactions (legacy gas price vs. an EIP-1559 max-fee / max-priority-fee
 pair at the chosen tier). The mapping from tier to concrete fee values is dictated
-by EIP-1559 fee-history semantics, not by this chapter. Which serialized
+by EIP-1559 fee-history semantics ([Chapter 56](56-evm-eip1559-fee-estimation.md)
+R1–R3; its R6 requires the gas-limit estimation request of a swap step to carry
+the same tier pair the transaction is signed with), not by this chapter. Which serialized
 transaction form each policy value produces, and which forms the project must
 read as a consequence, are bound in §35.6A (R35.6A.17, R35.6A.2).
 

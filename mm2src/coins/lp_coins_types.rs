@@ -150,6 +150,13 @@ pub enum TransactionErr {
     TxRecoverable(TransactionEnum, String),
     /// Simply for plain error messages.
     Plain(String),
+    /// CRD ch.56 R5: an EVM node rejected the transaction, or its gas estimation, for a fee cap below the
+    /// block base fee. A rejected broadcast keeps its signed transaction, as [`TransactionErr::TxRecoverable`]
+    /// does: a node that did not answer may still have taken it.
+    FeeCapBelowBaseFee {
+        rejection: FeeCapBelowBaseFee,
+        tx: Option<TransactionEnum>,
+    },
 }
 impl TransactionErr {
     /// Returns transaction if the error includes it.
@@ -157,7 +164,8 @@ impl TransactionErr {
     pub fn get_tx(&self) -> Option<TransactionEnum> {
         match self {
             TransactionErr::TxRecoverable(tx, _) => Some(tx.clone()),
-            _ => None,
+            TransactionErr::FeeCapBelowBaseFee { tx, .. } => tx.clone(),
+            TransactionErr::Plain(_) => None,
         }
     }
 
@@ -167,6 +175,7 @@ impl TransactionErr {
         match self {
             TransactionErr::TxRecoverable(_, err) => err.to_string(),
             TransactionErr::Plain(err) => err.to_string(),
+            TransactionErr::FeeCapBelowBaseFee { rejection, .. } => rejection.to_string(),
         }
     }
 }

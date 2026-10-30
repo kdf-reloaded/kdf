@@ -93,7 +93,9 @@ impl MarketCoinOps for EthCoin {
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();
-            let pending = try_s!(assert_send_future(provider.send_raw_transaction(&bytes)).await);
+            let pending = assert_send_future(provider.send_raw_transaction(&bytes))
+                .await
+                .map_err(|e| selfi.broadcast_error_text(e.to_string()))?;
             let hash = *pending.tx_hash();
             Ok(format!("{:02x}", hash))
         };
@@ -108,7 +110,9 @@ impl MarketCoinOps for EthCoin {
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();
-            let pending = try_s!(assert_send_future(provider.send_raw_transaction(&bytes)).await);
+            let pending = assert_send_future(provider.send_raw_transaction(&bytes))
+                .await
+                .map_err(|e| selfi.broadcast_error_text(e.to_string()))?;
             let hash = *pending.tx_hash();
             Ok(format!("{:02x}", hash))
         };
