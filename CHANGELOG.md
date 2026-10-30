@@ -789,7 +789,7 @@ it and, where one exists, the CRD rule, for readers who want more.
     with the fee offered and the base fee. Either refusal also drops the cached gas price of that
     chain. `send_raw_transaction` reports the same text.
 
-  Detail: PR #N; CRD ch.56 R5, R6, D5.
+  Detail: PR #174; CRD ch.56 R5, R6, D5.
 - **An EVM node that answers with an error no longer ends the request; the next configured node is
   tried.** Before, the first node's answer was accepted even when it carried an error object, such as
   "block range too large" or a revert, so one picky node failed the call although the others could

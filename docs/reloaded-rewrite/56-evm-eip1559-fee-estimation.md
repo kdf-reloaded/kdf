@@ -299,7 +299,7 @@ taken from the node has no headroom at all, so one full block defeats it
 > contradiction between two things read side by side — ch. 57 R57.7.3
 > and the swap-path estimation helpers.)*
 
-> **As-built note (2026-10-30, clean-side record).** PR #N implements R5,
+> **As-built note (2026-10-30, clean-side record).** PR #174 implements R5,
 > R6 and D5 as decided.
 > - **Classification (R5).** The three phrasings are recognised by
 >   containment wherever the EVM coin layer reads a node's answer to an
