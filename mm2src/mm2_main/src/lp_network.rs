@@ -387,6 +387,7 @@ pub(crate) async fn process_p2p_message(
     let mut to_propagate = false;
     let mut priority = false;
     let mut orderbook_pairs = vec![];
+    let priority_only = relay_second_copy_priority_only(&ctx);
 
     for topic in std::iter::once(&message.topic) {
         let mut split = topic.as_str().split(TOPIC_SEPARATOR);
@@ -437,7 +438,8 @@ pub(crate) async fn process_p2p_message(
         }
     }
 
-    if !orderbook_pairs.is_empty() {
+    let orderbook_message = !orderbook_pairs.is_empty();
+    if orderbook_message {
         let process_fut = lp_ordermatch::process_msg_with_priority(
             ctx.clone(),
             orderbook_pairs,
@@ -456,8 +458,26 @@ pub(crate) async fn process_p2p_message(
     }
 
     if to_propagate && i_am_relay {
-        propagate_message_with_priority(&ctx, message_id, peer_id, priority);
+        if relay_sends_second_copy(priority, orderbook_message, priority_only) {
+            propagate_message_with_priority(&ctx, message_id, peer_id, priority);
+        } else {
+            validate_message(&ctx, message_id);
+        }
     }
+}
+
+/// CRD ch.32 R-F3b (D11): the MM2.json boolean `relay_second_copy_priority_only`, default `true`. Only an explicit
+/// JSON `false` restores the reference relay's application-level second copy of every message.
+fn relay_second_copy_priority_only(ctx: &MmArc) -> bool {
+    ctx.conf["relay_second_copy_priority_only"].as_bool() != Some(false)
+}
+
+/// Whether a relay sends the application-level second copy of a message (CRD ch.32 R-F3b, amended, D11).
+/// With `priority_only` (the default) a priority message keeps it, and so does a message outside the orderbook
+/// topics; for any other orderbook message the gossip-layer forward is the only copy. Without `priority_only` every
+/// message gets it, as on a reference relay. The relay validates the message in its message cache either way.
+fn relay_sends_second_copy(priority: bool, orderbook_message: bool, priority_only: bool) -> bool {
+    !priority_only || priority || !orderbook_message
 }
 
 fn process_p2p_request(
@@ -703,6 +723,16 @@ pub fn propagate_message_with_priority(ctx: &MmArc, message_id: MessageId, propa
     };
 }
 
+/// Marks a cached message as validated without forwarding it (CRD ch.32 R-F3b, D11).
+pub fn validate_message(ctx: &MmArc, message_id: MessageId) {
+    let ctx = ctx.clone();
+    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
+    let cmd = AdexBehaviourCmd::ValidateMessage { message_id };
+    if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
+        log::error!("validate_message cmd_tx.send error {:?}", e);
+    };
+}
+
 pub fn add_reserved_peer_addresses(ctx: &MmArc, peer: PeerId, addresses: PeerAddresses) {
     let ctx = ctx.clone();
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
@@ -795,9 +825,11 @@ pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<De
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_connection_healthcheck, peer_healthcheck_topic, tx_helper_transaction};
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic, relay_second_copy_priority_only,
+                relay_sends_second_copy, tx_helper_transaction};
     use common::block_on;
     use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
 
     /// CRD ch.51 R50B: the receiver broadcasts the transaction inside the signed envelope, never the envelope.
     #[test]
@@ -821,6 +853,59 @@ mod tests {
     #[test]
     fn peer_healthcheck_topic_is_prefixed_by_peer() {
         assert_eq!(peer_healthcheck_topic("12D3KooWtest"), "peer_healthcheck/12D3KooWtest");
+    }
+
+    /// T-F3d: a relay sends the second copy of a priority message and of a message outside the orderbook topics, and
+    /// not of any other orderbook message (CRD ch.32 R-F3b, D11).
+    #[test]
+    fn relay_sends_second_copy_for_priority_and_non_orderbook_messages() {
+        // (priority, orderbook message, priority only)
+        assert!(
+            !relay_sends_second_copy(false, true, true),
+            "ordinary orderbook message"
+        );
+        assert!(
+            relay_sends_second_copy(true, true, true),
+            "cancellation or swap negotiation"
+        );
+        assert!(
+            relay_sends_second_copy(false, false, true),
+            "swap, swap v2 or watcher message"
+        );
+        assert!(
+            relay_sends_second_copy(true, false, true),
+            "priority outside the orderbook topics"
+        );
+    }
+
+    /// With `relay_second_copy_priority_only` off, a relay sends the second copy of every message, as a reference
+    /// relay does (CRD ch.32 R-F3b, Compatibility note).
+    #[test]
+    fn relay_sends_second_copy_of_every_message_when_priority_only_is_off() {
+        for priority in [false, true] {
+            for orderbook_message in [false, true] {
+                assert!(
+                    relay_sends_second_copy(priority, orderbook_message, false),
+                    "priority {priority}, orderbook message {orderbook_message}"
+                );
+            }
+        }
+    }
+
+    /// The switch defaults to on; only a JSON `false` turns it off (CRD ch.32 R-F3b).
+    #[test]
+    fn relay_second_copy_priority_only_defaults_to_true() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        assert!(relay_second_copy_priority_only(&ctx), "absent");
+        for (conf, expected) in [
+            (json!({ "relay_second_copy_priority_only": true }), true),
+            (json!({ "relay_second_copy_priority_only": false }), false),
+            (json!({ "relay_second_copy_priority_only": "false" }), true),
+            (json!({ "relay_second_copy_priority_only": null }), true),
+        ] {
+            let ctx = MmCtxBuilder::default().with_conf(conf.clone()).into_mm_arc();
+            assert_eq!(relay_second_copy_priority_only(&ctx), expected, "{conf}");
+        }
     }
 
     #[test]

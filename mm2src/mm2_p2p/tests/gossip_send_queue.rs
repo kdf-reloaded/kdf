@@ -201,6 +201,11 @@ fn gossip_config(i_am_relay: bool) -> libp2p::gossipsub::Config {
 struct CountingGossipsub {
     inner: Gossipsub,
     notify_events: Arc<AtomicUsize>,
+    /// The peer of every `NotifyHandler` event that carries a published message.
+    message_events: Arc<Mutex<Vec<PeerId>>>,
+    /// The `Debug` form of every incoming handler event that carries an IHAVE (the event type is private to the
+    /// crate).
+    incoming_ihave: Arc<Mutex<Vec<String>>>,
 }
 
 impl NetworkBehaviour for CountingGossipsub {
@@ -258,6 +263,10 @@ impl NetworkBehaviour for CountingGossipsub {
         connection_id: ConnectionId,
         event: THandlerOutEvent<Self>,
     ) {
+        let shown = format!("{event:?}");
+        if shown.contains("IHave") {
+            self.incoming_ihave.lock().unwrap().push(shown);
+        }
         self.inner.on_connection_handler_event(peer_id, connection_id, event)
     }
 
@@ -267,8 +276,12 @@ impl NetworkBehaviour for CountingGossipsub {
         params: &mut impl PollParameters,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         let polled = self.inner.poll(cx, params);
-        if let Poll::Ready(ToSwarm::NotifyHandler { .. }) = &polled {
+        if let Poll::Ready(ToSwarm::NotifyHandler { peer_id, event, .. }) = &polled {
             self.notify_events.fetch_add(1, Ordering::Relaxed);
+            // `HandlerIn` is private to the crate; its `Debug` shows whether the RPC publishes anything.
+            if !format!("{event:?}").contains("publish: []") {
+                self.message_events.lock().unwrap().push(*peer_id);
+            }
         }
         polled
     }
@@ -1433,6 +1446,8 @@ async fn scenario_e_attribution() {
     let behaviour = CountingGossipsub {
         inner: Gossipsub::new(MessageAuthenticity::Author(peer_id), gossip_config(true)).expect("gossipsub"),
         notify_events: notify_events.clone(),
+        message_events: Arc::default(),
+        incoming_ihave: Arc::default(),
     };
     let mut swarm = SwarmBuilder::with_tokio_executor(memory_transport(&keypair), behaviour, peer_id).build();
     let port = next_port();
@@ -2149,4 +2164,287 @@ async fn mp5_queue_signal_follows_a_non_empty_queue() {
     assert_eq!(s.signal(paused.peer_id), vec![true, false]);
     paused.drv.stop();
     s.stop();
+}
+
+/// T-F3d (CRD ch.32 R-F3b, D11), at the behaviour level: a relay `R` that applies the rule of the daemon's network
+/// layer (second copy for a priority message and for a message outside the orderbook topics, otherwise only
+/// validation in the message cache) writes one copy of a non-priority orderbook message to a downstream peer `B`,
+/// and two copies of a cancellation and of a swap message. The counts are the `NotifyHandler` events that carry a
+/// message, taken from `R`; `B` itself cannot count copies, its gossipsub drops the second one. That the daemon's
+/// network layer picks the right branch for each kind is tested in `mm2_main` (`t_mp12_...`), which cannot run a
+/// swarm, and the vendored crate tests that validation forwards nothing and fills the gossip announcements.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f3d_relay_second_copy_follows_the_message_kind() {
+    const ORDERBOOK: u32 = 1;
+    const CANCELLATION: u32 = 2;
+    const SWAP: u32 = 3;
+    let _guard = SERIAL.lock().await;
+    let topic = "gsq-f3d";
+
+    let keypair = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(keypair.public());
+    let message_events: Arc<Mutex<Vec<PeerId>>> = Arc::default();
+    let validations: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let mut builder = gossip_builder(true);
+    builder
+        .heartbeat_initial_delay(Duration::from_millis(100))
+        .heartbeat_interval(Duration::from_millis(100));
+    let behaviour = CountingGossipsub {
+        inner: Gossipsub::new(
+            MessageAuthenticity::Author(peer_id),
+            builder.build().expect("valid config"),
+        )
+        .expect("gossipsub"),
+        notify_events: Arc::new(AtomicUsize::new(0)),
+        message_events: message_events.clone(),
+        incoming_ihave: Arc::default(),
+    };
+    let mut swarm = SwarmBuilder::with_tokio_executor(memory_transport(&keypair), behaviour, peer_id).build();
+    let port = next_port();
+    swarm.listen_on(format!("/memory/{port}").parse().unwrap()).unwrap();
+    let (ctl_tx, ctl_rx) = mpsc::unbounded();
+    let validated = validations.clone();
+    tokio::spawn(drive(swarm, ctl_rx, Arc::new(AtomicU64::new(0)), move |sw, event| {
+        if let GossipsubEvent::Message {
+            propagation_source,
+            message_id,
+            message,
+        } = event
+        {
+            let idx = msg_index(&message.data);
+            let (priority, orderbook) = match idx {
+                ORDERBOOK => (false, true),
+                CANCELLATION => (true, true),
+                SWAP => (false, false),
+                // A readiness probe: handled like a swap message.
+                _ => (false, false),
+            };
+            let gossipsub = &mut sw.behaviour_mut().inner;
+            if priority || !orderbook {
+                let found = gossipsub
+                    .propagate_message_with_priority(&message_id, &propagation_source, priority)
+                    .expect("propagate");
+                validated.lock().unwrap().push(found);
+            } else {
+                validated
+                    .lock()
+                    .unwrap()
+                    .push(gossipsub.validate_message_without_forwarding(&message_id));
+            }
+        }
+    }));
+    let relay: Driven<CountingGossipsub> = Driven { ctl: ctl_tx };
+
+    let a = spawn_fast_receiver(topic, port);
+    let b = spawn_fast_receiver(topic, port);
+    // A publishes probes until B has seen one.
+    for _ in 0..100 {
+        let t = IdentTopic::new(topic);
+        a.drv
+            .run(move |sw| {
+                let _ = sw.behaviour_mut().gossipsub.publish(t, payload(PROBE, 64));
+            })
+            .await;
+        async_std::task::sleep(Duration::from_millis(200)).await;
+        if b.recv.probes.load(Ordering::Relaxed) > 0 {
+            break;
+        }
+    }
+    assert!(b.recv.probes.load(Ordering::Relaxed) > 0, "B never saw a probe");
+    async_std::task::sleep(Duration::from_millis(500)).await;
+
+    let mut copies = Vec::new();
+    for kind in [ORDERBOOK, CANCELLATION, SWAP] {
+        message_events.lock().unwrap().clear();
+        let t = IdentTopic::new(topic);
+        a.drv
+            .run(move |sw| {
+                sw.behaviour_mut()
+                    .gossipsub
+                    .publish(t, payload(kind, 64))
+                    .expect("publish");
+            })
+            .await;
+        wait_for("B received the message", Duration::from_secs(10), || {
+            received(&b).contains(&kind)
+        })
+        .await;
+        // Long enough for a second copy, if there is one, to have been written.
+        async_std::task::sleep(Duration::from_millis(500)).await;
+        let to_b = message_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|p| **p == b.peer_id)
+            .count();
+        copies.push(to_b);
+    }
+    assert_eq!(
+        copies,
+        vec![1, 2, 2],
+        "copies written to B: non-priority orderbook, cancellation, swap"
+    );
+    let validated = validations.lock().unwrap();
+    assert!(validated.iter().all(|found| *found), "every message was in the cache");
+    drop(validated);
+    relay.stop();
+    a.drv.stop();
+    b.drv.stop();
+}
+
+/// A receiver that records the message indexes it gets and the IHAVEs it is sent.
+struct IhaveReceiver {
+    drv: Driven<CountingGossipsub>,
+    received: Arc<Mutex<Vec<u32>>>,
+    ihaves: Arc<Mutex<Vec<String>>>,
+}
+
+fn spawn_ihave_receiver(topic: &str, dial_port: u64) -> IhaveReceiver {
+    let keypair = identity::Keypair::generate_ed25519();
+    let peer_id = PeerId::from(keypair.public());
+    let mut builder = gossip_builder(false);
+    builder
+        .history_length(2)
+        .history_gossip(1)
+        .heartbeat_initial_delay(Duration::from_millis(100))
+        .heartbeat_interval(Duration::from_millis(100));
+    let mut inner = Gossipsub::new(
+        MessageAuthenticity::Author(peer_id),
+        builder.build().expect("valid config"),
+    )
+    .expect("gossipsub");
+    inner.subscribe(&IdentTopic::new(topic)).expect("subscribe");
+    let ihaves: Arc<Mutex<Vec<String>>> = Arc::default();
+    let behaviour = CountingGossipsub {
+        inner,
+        notify_events: Arc::new(AtomicUsize::new(0)),
+        message_events: Arc::default(),
+        incoming_ihave: ihaves.clone(),
+    };
+    let mut swarm = SwarmBuilder::without_executor(memory_transport(&keypair), behaviour, peer_id).build();
+    swarm
+        .dial(format!("/memory/{dial_port}").parse::<Multiaddr>().unwrap())
+        .expect("dial");
+    let received: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let seen = received.clone();
+    let (ctl_tx, ctl_rx) = mpsc::unbounded();
+    tokio::spawn(drive(swarm, ctl_rx, Arc::new(AtomicU64::new(0)), move |sw, event| {
+        if let GossipsubEvent::Message {
+            propagation_source,
+            message_id,
+            message,
+        } = event
+        {
+            seen.lock().unwrap().push(msg_index(&message.data));
+            let _ = sw.behaviour_mut().inner.report_message_validation_result(
+                &message_id,
+                &propagation_source,
+                MessageAcceptance::Ignore,
+            );
+        }
+    }));
+    IhaveReceiver {
+        drv: Driven { ctl: ctl_tx },
+        received,
+        ihaves,
+    }
+}
+
+/// T-F3d, the validation half, through the production command path (CRD ch.32 R-F3b, D11): a message that the
+/// application only marks validated with `AdexBehaviourCmd::ValidateMessage` (what the once-sent orderbook message
+/// gets) is in the production relay's gossip message ids afterwards, and not before. The relay is the production
+/// node, subscribed to the topic, with 16 receivers. A relay forwards a received message at once, so the test looks
+/// at the relay's IHAVEs instead of at the deliveries: the relay builds them from the validated messages of its
+/// message cache, and a receiver records every IHAVE it is sent (the receivers' incoming handler events, by their
+/// `Debug` form). The relay's gossipsub itself is not reachable from the test (`AtomicDexBehaviour` has no
+/// accessor for its message cache).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn f3d_validated_message_is_announced_by_the_relay() {
+    const ORDERBOOK: u32 = 7;
+    const RECEIVERS: usize = 16;
+    let _guard = SERIAL.lock().await;
+    let topic = "gsq-f3d-validate";
+
+    let port = next_port();
+    let (mut cmd_tx, mut event_rx, _peer_id, abort) =
+        spawn_gossipsub(None, spawn_fn, vec![], NodeType::RelayInMemory { port }, |_| {})
+            .await
+            .expect("spawn_gossipsub");
+    cmd_tx
+        .send(AdexBehaviourCmd::Subscribe {
+            topic: topic.to_owned(),
+        })
+        .await
+        .expect("cmd channel");
+    let receivers: Vec<IhaveReceiver> = (0..RECEIVERS).map(|_| spawn_ihave_receiver(topic, port)).collect();
+
+    // The relay publishes probes until every receiver has one.
+    for _ in 0..40 {
+        cmd_tx
+            .send(AdexBehaviourCmd::PublishMsg {
+                topics: vec![topic.to_owned()],
+                msg: payload(PROBE, 64),
+                priority: false,
+            })
+            .await
+            .expect("cmd channel");
+        async_std::task::sleep(Duration::from_secs(1)).await;
+        if receivers.iter().all(|r| r.received.lock().unwrap().contains(&PROBE)) {
+            break;
+        }
+    }
+    assert!(
+        receivers.iter().all(|r| r.received.lock().unwrap().contains(&PROBE)),
+        "a receiver never saw a probe"
+    );
+
+    let t = IdentTopic::new(topic);
+    receivers[0]
+        .drv
+        .run(move |sw| {
+            sw.behaviour_mut()
+                .inner
+                .publish(t, payload(ORDERBOOK, 64))
+                .expect("publish");
+        })
+        .await;
+    let message_id = loop {
+        match async_std::future::timeout(Duration::from_secs(10), event_rx.next()).await {
+            Ok(Some(mm2_p2p::atomicdex_behaviour::AdexBehaviourEvent::Message(_, id, message)))
+                if msg_index(&message.data) == ORDERBOOK =>
+            {
+                break id;
+            },
+            Ok(Some(_)) => {},
+            other => panic!("the relay never received the message: {other:?}"),
+        }
+    };
+    let ihaves_with_id = || {
+        let needle = format!("{message_id}");
+        receivers
+            .iter()
+            .map(|r| r.ihaves.lock().unwrap().iter().filter(|h| h.contains(&needle)).count())
+            .sum::<usize>()
+    };
+    // Not validated: the relay's gossip does not announce it, however many heartbeats pass.
+    async_std::task::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(ihaves_with_id(), 0, "announced before it was validated");
+
+    cmd_tx
+        .send(AdexBehaviourCmd::ValidateMessage {
+            message_id: message_id.clone(),
+        })
+        .await
+        .expect("cmd channel");
+    wait_for(
+        "the relay announces the validated message",
+        Duration::from_secs(15),
+        || ihaves_with_id() > 0,
+    )
+    .await;
+
+    abort.abort();
+    for r in &receivers {
+        r.drv.stop();
+    }
 }

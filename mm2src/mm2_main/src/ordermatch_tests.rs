@@ -11823,8 +11823,10 @@ mod maker_publication_tests {
         assert!(propagate && priority);
     }
 
-    /// T-MP12 (relay): the relay's propagate command carries priority for a cancellation and not for a created
-    /// message, as the network layer issues it after processing a received message.
+    /// T-MP12 (relay) and T-F3d (CRD ch.32 R-F3b, D11): after processing a received message the network layer of a
+    /// relay issues a propagate command with priority for a cancellation, a propagate command without priority for
+    /// a message outside the orderbook topics, and for any other orderbook message only a command that validates
+    /// the message in the cache (no second copy).
     #[test]
     fn t_mp12_the_propagate_command_of_a_relay_carries_the_priority() {
         use crate::mm2::lp_network::process_p2p_message;
@@ -11863,6 +11865,12 @@ mod maker_publication_tests {
             Ok(AdexBehaviourCmd::PropagateMessage { priority, .. }) => priority,
             other => panic!("a propagate command expected, got {:?}", other),
         };
+        let validated = |rx: &mut mpsc::Receiver<AdexBehaviourCmd>, id: u8| match rx.try_recv() {
+            Ok(AdexBehaviourCmd::ValidateMessage { message_id }) => {
+                assert_eq!(message_id, mm2_p2p::MessageId::from(vec![id]))
+            },
+            other => panic!("a validate command expected, got {:?}", other),
+        };
 
         let data = encode_and_sign(&OrdermatchMessage::MakerOrderCreated(created), &secret).unwrap();
         block_on(process_p2p_message(
@@ -11872,7 +11880,8 @@ mod maker_publication_tests {
             received(data),
             true,
         ));
-        assert!(!propagated(&mut rx), "a created message is propagated without priority");
+        validated(&mut rx, 1);
+        assert!(rx.try_recv().is_err(), "a created message has no second copy");
 
         let data = encode_and_sign(&OrdermatchMessage::MakerOrderCancelled(cancelled), &secret).unwrap();
         block_on(process_p2p_message(
@@ -11883,6 +11892,23 @@ mod maker_publication_tests {
             true,
         ));
         assert!(propagated(&mut rx), "a cancellation is propagated with priority");
+        assert!(rx.try_recv().is_err(), "a cancellation sends one command");
+
+        // A message outside the orderbook topics keeps the second copy, without priority.
+        block_on(process_p2p_message(
+            relay.clone(),
+            PeerId::random(),
+            mm2_p2p::MessageId::from(vec![3]),
+            mm2_p2p::GossipsubMessage {
+                source: None,
+                data: vec![1, 2, 3],
+                sequence_number: Some(1),
+                topic: TopicHash::from_raw("swap/not-a-uuid"),
+            },
+            true,
+        ));
+        assert!(!propagated(&mut rx), "a swap message is propagated without priority");
+        assert!(rx.try_recv().is_err(), "a swap message sends one command");
     }
 
     /// A receiver applies the given published messages in order and collects its synchronization requests.

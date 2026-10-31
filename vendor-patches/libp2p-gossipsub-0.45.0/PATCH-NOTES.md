@@ -37,7 +37,8 @@ the one crate is the proportionate fix.
 ## The patch
 
 Three call sites, all in the backoff path. Apart from the send queue change, the priority lane overflow
-change and the log levels described below, everything else is byte-identical to the fork, including the relay-mesh extension
+change, the log levels and the validate-without-forwarding method described below, everything else is
+byte-identical to the fork, including the relay-mesh extension
 (`i_am_relay` / `IAmRelay`) that is the reason the fork exists.
 
 1. **`src/behaviour.rs`** — `remove_peer_from_mesh` clamps the peer-supplied value
@@ -64,8 +65,8 @@ Regression tests live in `src/backoff.rs` under `mod tests`.
 ## Bounded per-connection send queue (not security-related)
 
 A second, unrelated change, so the "byte-identical" statement above now reads: the rest of the
-crate is byte-identical to the fork except for the backoff patch, this change and the priority lane
-overflow change below. It implements
+crate is byte-identical to the fork except for the backoff patch, this change, the priority lane
+overflow change and the validate-without-forwarding method below. It implements
 CRD ch.28 §28.9B RQ1 (Reloaded-original; the reference leaves this queue unbounded). The wire is
 unchanged.
 
@@ -206,6 +207,25 @@ Log lines only; behavior and wire are unchanged.
    mesh size, and as a reminder every 10 minutes while the size stays; DEBUG otherwise. The text names the
    mesh size, the watermark and (low only) the number of connected relays.
 
+## Validate without forwarding (not security-related)
+
+For CRD ch.32 §32.8 R-F3b (amended, D11): a relay sends the application-level second copy of an
+orderbook message only when the message is priority. The wire is unchanged.
+
+**Why.** `propagate_message` does two things: it marks the cached message validated, and it
+forwards it. Only validated messages are announced in IHAVE or served for IWANT. A relay that skips
+the second copy must still validate the message, or its gossip announcements and IWANT answers
+would change.
+
+**What changed.** `src/behaviour.rs` gains `validate_message_without_forwarding(&mut self,
+message_id) -> bool`. It marks the cached message validated (`mcache.validate`) and returns whether
+it was found; a miss is logged at debug and counted as a memcache miss, like
+`propagate_message_with_priority`. It forwards nothing and changes no other state.
+
+**Tests.** `test_validate_message_without_forwarding` in `src/behaviour/tests.rs`: no
+`NotifyHandler` event is queued, the message then appears in the gossip message ids of its topic, a
+miss returns false.
+
 ## Manifest changes (not security-related)
 
 The fork declares deps through `[workspace.dependencies]`, which does not resolve
@@ -228,9 +248,10 @@ resolve fresh.
 ## Test status
 
 `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib`
-→ **167 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
+→ **168 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
 the pressure signal and the priority lane, 6 more with the queue signal, 3 more with the relay mesh
-log levels, and 6 more with the priority lane overflow change: 7 added, 1 replaced).
+log levels, 6 more with the priority lane overflow change: 7 added, 1 replaced, and 1 more with
+validate-without-forwarding).
 
 Those 6 (`test_flood_publish`, `do_forward_messages_to_explicit_peers`,
 `test_do_not_use_floodsub_in_fanout`, `test_publish_to_floodsub_peers_without_flood_publish`,
