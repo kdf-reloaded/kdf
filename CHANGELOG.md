@@ -214,7 +214,15 @@ it and, where one exists, the CRD rule, for readers who want more.
   of always to the first, so an order-posting burst can use the request budget of every connected
   server. Broadcasts, subscriptions and pings are routed as before, and a query whose server fails
   moves on to the others. Set `electrum_spread_reads` to `false` to restore GLEEC KDF behavior, where
-  every query goes to the highest-ranked connected server first. Detail: PR #128; CRD ch.38 R38.6.4a.
+  every query goes to the highest-ranked connected server first. Spreading sends one read in N to
+  each of N connected servers, a slow or distant one included. On a list with one such server, a loop
+  of balance reads and order posts can be slower than before: in a lab loop of 200 RIN orders, one
+  server about nine times slower than the other two made the loop 48 % longer. To avoid it, remove
+  distant servers from the coin's list, or set `electrum_spread_reads` to `false` and
+  `electrum_server_order` to `listed`, which sends every read to the first listed server. Leave it on
+  where the servers limit each session, as DOGE's do: there every order post draws on the budget of
+  every connected server. More in [`order-posting-latency`](docs/plans/order-posting-latency.md).
+  Detail: PR #128; CRD ch.38 R38.6.4a.
 - **Fixed-fee UTXO coins now pay their `txfee` per kilobyte proportionally, as the reference does.**
   Every coin with a nonzero `txfee`, or none, used to pay the whole per-kilobyte fee for every
   started kilobyte, so a 226-byte KMD transaction cost 1,000 base units instead of 226. Withdrawals,
