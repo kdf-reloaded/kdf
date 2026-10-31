@@ -1157,12 +1157,20 @@ pub struct WssCerts {
 pub enum NodeType {
     Light {
         network_ports: NetworkPorts,
+        /// `p2p_resolve_peer_hostnames` (CRD ch.28 R8c item 10, decision BH).
+        resolve_peer_hostnames: bool,
+        /// `p2p_allow_private_addresses` (CRD ch.28 R8c item 8, decision BH).
+        allow_private_addresses: bool,
     },
     LightInMemory,
     Relay {
         ip: IpAddr,
         network_ports: NetworkPorts,
         wss_certs: Option<WssCerts>,
+        /// `p2p_resolve_peer_hostnames` (CRD ch.28 R8c item 10, decision BH).
+        resolve_peer_hostnames: bool,
+        /// `p2p_allow_private_addresses` (CRD ch.28 R8c item 8, decision BH).
+        allow_private_addresses: bool,
     },
     RelayInMemory {
         port: u64,
@@ -1172,7 +1180,7 @@ pub enum NodeType {
 impl NodeType {
     pub fn to_network_info(&self) -> NetworkInfo {
         match self {
-            NodeType::Light { network_ports } | NodeType::Relay { network_ports, .. } => NetworkInfo::Distributed {
+            NodeType::Light { network_ports, .. } | NodeType::Relay { network_ports, .. } => NetworkInfo::Distributed {
                 network_ports: *network_ports,
             },
             NodeType::LightInMemory | NodeType::RelayInMemory { .. } => NetworkInfo::InMemory,
@@ -1180,6 +1188,24 @@ impl NodeType {
     }
 
     pub fn is_relay(&self) -> bool { matches!(self, NodeType::Relay { .. } | NodeType::RelayInMemory { .. }) }
+
+    /// The flags `p2p_resolve_peer_hostnames` and `p2p_allow_private_addresses` (CRD ch.28 R8c items 10 and 8,
+    /// decision BH). An in-memory node has no hostnames to look up, so both are `false` for it.
+    fn peer_address_settings(&self) -> (bool, bool) {
+        match self {
+            NodeType::Light {
+                resolve_peer_hostnames,
+                allow_private_addresses,
+                ..
+            }
+            | NodeType::Relay {
+                resolve_peer_hostnames,
+                allow_private_addresses,
+                ..
+            } => (*resolve_peer_hostnames, *allow_private_addresses),
+            NodeType::LightInMemory | NodeType::RelayInMemory { .. } => (false, false),
+        }
+    }
 
     pub fn wss_certs(&self) -> Option<&WssCerts> {
         match self {
@@ -1288,7 +1314,9 @@ fn start_gossipsub(
 
         let floodsub = Floodsub::new(local_peer_id, true);
 
-        let peers_exchange = PeersExchange::new(network_info, local_peer_id);
+        let (resolve_peer_hostnames, allow_private_addresses) = node_type.peer_address_settings();
+        let peers_exchange = PeersExchange::new(network_info, local_peer_id)
+            .with_address_settings(resolve_peer_hostnames, allow_private_addresses);
 
         // build a request-response network behaviour
         let request_response = build_request_response_behaviour();
@@ -1315,6 +1343,7 @@ fn start_gossipsub(
             ip,
             network_ports,
             wss_certs,
+            ..
         } => {
             let dns_addr: Multiaddr = format!("/ip4/{}/tcp/{}", ip, network_ports.tcp).parse().unwrap();
             listen_on_addr(&mut swarm, dns_addr)?;

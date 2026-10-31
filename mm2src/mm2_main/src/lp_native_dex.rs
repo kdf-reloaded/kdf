@@ -689,6 +689,12 @@ impl SwarmPollRecorder {
 
 async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     let i_am_seed = ctx.conf["i_am_seed"].as_bool().unwrap_or(false);
+    if allow_private_addresses(&ctx) {
+        warn!(
+            "'p2p_allow_private_addresses' is set: peer addresses that are not globally routable are accepted. \
+             This setting is for private test networks only, not for production"
+        );
+    }
 
     if i_am_seed && ctx.secp256k1_key_pair.as_option().is_none() {
         return MmError::err(P2PInitError::Internal(
@@ -815,8 +821,18 @@ Example:    "wss_certs": { "server_priv_key": "/path/to/key.pem", "certificate":
         ip,
         network_ports,
         wss_certs,
+        resolve_peer_hostnames: resolve_peer_hostnames(ctx),
+        allow_private_addresses: allow_private_addresses(ctx),
     })
 }
+
+/// The configuration flag `p2p_resolve_peer_hostnames` (default `true`): whether the node looks up the hostnames that
+/// peers hand out and keeps the answers it gives to the accepted form (CRD ch.28 R8c items 7, 9 and 10, decision BH).
+fn resolve_peer_hostnames(ctx: &MmArc) -> bool { ctx.conf["p2p_resolve_peer_hostnames"].as_bool().unwrap_or(true) }
+
+/// The configuration flag `p2p_allow_private_addresses` (default `false`): whether the node accepts peer addresses
+/// that are not globally routable, for private test networks (CRD ch.28 R8c item 8, decision BH).
+fn allow_private_addresses(ctx: &MmArc) -> bool { ctx.conf["p2p_allow_private_addresses"].as_bool().unwrap_or(false) }
 
 fn relay_in_memory_node_type(ctx: &MmArc) -> P2PResult<NodeType> {
     let port = ctx
@@ -834,7 +850,11 @@ fn light_node_type(ctx: &MmArc) -> P2PResult<NodeType> {
 
     let netid = ctx.netid();
     let network_ports = lp_network_ports(netid).mm_err(Into::into)?;
-    Ok(NodeType::Light { network_ports })
+    Ok(NodeType::Light {
+        network_ports,
+        resolve_peer_hostnames: resolve_peer_hostnames(ctx),
+        allow_private_addresses: allow_private_addresses(ctx),
+    })
 }
 
 /// Returns non-empty vector of keys/certs or an error.
