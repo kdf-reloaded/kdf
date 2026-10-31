@@ -22,7 +22,7 @@
 
 use super::*;
 use crate::protocol::ProtocolConfig;
-use crate::send_queue::SendQueueConfig;
+use crate::send_queue::{SendQueueConfig, StuckReason, StuckReport};
 use crate::subscription_filter::WhitelistSubscriptionFilter;
 use crate::transform::{DataTransform, IdentityTransform};
 use crate::types::FastMessageId;
@@ -5480,6 +5480,174 @@ fn test_send_queue_pressure_and_snapshot() {
             dropped: 2
         }
     );
+}
+
+#[test]
+// A stuck send queue closes every connection to the peer, not only the reporting one (CRD ch.28 §28.9B RQ1
+// item 5, T-RQ1.6).
+fn test_send_queue_stuck_closes_every_connection_to_the_peer() {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let peer = PeerId::random();
+    flush_events(&mut gs);
+    gs.on_connection_handler_event(peer, ConnectionId::new_unchecked(3), stuck_event());
+    let closes: Vec<_> = gs
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            ToSwarm::CloseConnection { peer_id, connection } => Some((*peer_id, connection.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(closes.len(), 1);
+    assert_eq!(closes[0].0, peer);
+    assert!(matches!(closes[0].1, CloseConnection::All));
+}
+
+fn stuck_event() -> HandlerEvent {
+    HandlerEvent::SendQueueStuck(StuckReport {
+        reason: StuckReason::AtCap {
+            at_cap: Duration::from_secs(60),
+        },
+        total_dropped: 7,
+    })
+}
+
+/// A node with `n` connected relays, and the relays.
+fn node_with_relays(n: usize) -> (Behaviour<IdentityTransform, AllowAllSubscriptionFilter>, Vec<PeerId>) {
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .create_network();
+    let relays: Vec<PeerId> = (0..n).map(|_| PeerId::random()).collect();
+    gs.connected_relays.extend(relays.iter().copied());
+    flush_events(&mut gs);
+    (gs, relays)
+}
+
+/// Reports `SendQueueStuck` from connection `conn` of `peer`; returns the peers closed on every connection and the
+/// connections told to restart their stuck evaluation.
+fn report_stuck(
+    gs: &mut Behaviour<IdentityTransform, AllowAllSubscriptionFilter>,
+    peer: PeerId,
+    conn: usize,
+) -> (Vec<PeerId>, Vec<(PeerId, ConnectionId)>) {
+    flush_events(gs);
+    gs.on_connection_handler_event(peer, ConnectionId::new_unchecked(conn), stuck_event());
+    let mut closed = vec![];
+    let mut restarted = vec![];
+    for e in gs.events.iter() {
+        match e {
+            ToSwarm::CloseConnection { peer_id, connection } => {
+                assert!(matches!(connection, CloseConnection::All));
+                closed.push(*peer_id);
+            },
+            ToSwarm::NotifyHandler {
+                peer_id,
+                handler: NotifyHandler::One(id),
+                event: HandlerIn::RestartStuck,
+            } => restarted.push((*peer_id, *id)),
+            _ => {},
+        }
+    }
+    (closed, restarted)
+}
+
+#[test]
+// Guard for relays (CRD ch.28 §28.9B RQ1 item 5, T-RQ1.12): a second relay that is stuck within the guard interval of
+// the first close is held back and told to restart its evaluation; the first is closed.
+fn test_stuck_relay_within_the_guard_interval_of_another_close_is_held_back() {
+    let (mut gs, relays) = node_with_relays(4);
+    assert_eq!(report_stuck(&mut gs, relays[0], 1), (vec![relays[0]], vec![]));
+    let (closed, restarted) = report_stuck(&mut gs, relays[1], 2);
+    assert!(closed.is_empty(), "the second relay was closed");
+    assert_eq!(restarted, vec![(relays[1], ConnectionId::new_unchecked(2))]);
+    // A held-back relay does not count as a close: the guard interval is measured from the first close.
+    assert_eq!(gs.connected_relays_len(), 4);
+}
+
+#[test]
+// With only 2 relays connected, a stuck relay is held back: fewer than 2 would remain.
+fn test_stuck_relay_is_held_back_when_fewer_than_two_would_remain() {
+    let (mut gs, relays) = node_with_relays(2);
+    let (closed, restarted) = report_stuck(&mut gs, relays[0], 5);
+    assert!(closed.is_empty());
+    assert_eq!(restarted, vec![(relays[0], ConnectionId::new_unchecked(5))]);
+    // With 3 relays the first close leaves 2 and is allowed.
+    let (mut gs, relays) = node_with_relays(3);
+    assert_eq!(report_stuck(&mut gs, relays[0], 5), (vec![relays[0]], vec![]));
+}
+
+#[test]
+// A held-back relay that is stuck again after the guard interval, with enough relays, is closed (T-RQ1.12); a stuck
+// peer that is not a relay is closed at once, also right after a relay close.
+fn test_stuck_relay_is_closed_when_no_guard_holds_and_a_non_relay_at_once() {
+    let (mut gs, relays) = node_with_relays(4);
+    let t0 = Instant::now();
+    let after = |secs| t0 + Duration::from_secs(secs);
+    assert_eq!(gs.stuck_action(&relays[0], t0), StuckAction::Close);
+    assert!(matches!(
+        gs.stuck_action(&relays[1], after(1)),
+        StuckAction::HoldBack(StuckGuard::RecentRelayClose { .. })
+    ));
+    // A non-relay peer is closed at once and does not start the guard.
+    let other = PeerId::random();
+    assert_eq!(gs.stuck_action(&other, after(2)), StuckAction::Close);
+    assert!(matches!(
+        gs.stuck_action(&relays[1], after(29)),
+        StuckAction::HoldBack(StuckGuard::RecentRelayClose { .. })
+    ));
+    // At the interval and later nothing holds: 3 other relays remain.
+    assert_eq!(gs.stuck_action(&relays[1], after(30)), StuckAction::Close);
+    // The close at 30 s starts a new interval.
+    assert!(matches!(
+        gs.stuck_action(&relays[2], after(31)),
+        StuckAction::HoldBack(StuckGuard::RecentRelayClose { .. })
+    ));
+    // The remaining-relays condition applies once the interval has passed: with 4 relays in the set, closing
+    // leaves 3; with a smaller set it does not.
+    gs.connected_relays.remove(&relays[3]);
+    gs.connected_relays.remove(&relays[0]);
+    gs.connected_relays.remove(&relays[1]);
+    assert_eq!(
+        gs.stuck_action(&relays[2], after(70)),
+        StuckAction::HoldBack(StuckGuard::TooFewRelays { remaining: 0 })
+    );
+}
+
+#[test]
+// The settings of the guard can be changed by the builder, for tests.
+fn test_stuck_relay_guard_settings_follow_the_configuration() {
+    let defaults = ConfigBuilder::default().build().unwrap();
+    assert_eq!(defaults.stuck_relay_guard_interval(), Duration::from_secs(30));
+    assert_eq!(defaults.stuck_relay_min_remaining(), 2);
+    let config = ConfigBuilder::default()
+        .stuck_relay_guard_interval(Duration::from_secs(5))
+        .stuck_relay_min_remaining(0)
+        .build()
+        .unwrap();
+    let (mut gs, _, _) = inject_nodes1()
+        .peer_no(0)
+        .topics(vec![])
+        .to_subscribe(false)
+        .gs_config(config)
+        .create_network();
+    let relay = PeerId::random();
+    gs.connected_relays.insert(relay);
+    let t0 = Instant::now();
+    // No minimum: the only relay may be closed. The interval is 5 s.
+    assert_eq!(gs.stuck_action(&relay, t0), StuckAction::Close);
+    gs.connected_relays.insert(PeerId::random());
+    let other = *gs.connected_relays.iter().find(|p| **p != relay).unwrap();
+    assert!(matches!(
+        gs.stuck_action(&other, t0 + Duration::from_secs(4)),
+        StuckAction::HoldBack(StuckGuard::RecentRelayClose { .. })
+    ));
+    assert_eq!(gs.stuck_action(&other, t0 + Duration::from_secs(5)), StuckAction::Close);
 }
 
 #[test]

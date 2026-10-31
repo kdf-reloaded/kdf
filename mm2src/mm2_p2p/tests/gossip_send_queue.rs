@@ -968,6 +968,7 @@ fn log_lines_with(needle: &str) -> Vec<String> {
 /// A plain gossipsub node that listens on the in-memory transport; unlike the production node its
 /// send queue limits can be configured.
 struct TestSender {
+    peer_id: PeerId,
     port: u64,
     drv: Driven<Gossipsub>,
     /// The send queue pressure changes the behaviour reported: (peer, raised).
@@ -1014,6 +1015,7 @@ fn spawn_test_sender(limits: impl FnOnce(&mut ConfigBuilder)) -> TestSender {
         },
     ));
     TestSender {
+        peer_id,
         port,
         drv: Driven { ctl: ctl_tx },
         pressure_events,
@@ -1032,6 +1034,21 @@ impl TestSender {
                 }
             })
             .await;
+    }
+
+    /// The number of established connections of the node, over all peers.
+    async fn established_connections(&self) -> u32 {
+        let out = Arc::new(AtomicUsize::new(0));
+        let out_cb = out.clone();
+        self.drv
+            .run(move |swarm| {
+                out_cb.store(
+                    swarm.network_info().connection_counters().num_established() as usize,
+                    Ordering::Relaxed,
+                )
+            })
+            .await;
+        out.load(Ordering::Relaxed) as u32
     }
 
     async fn is_connected(&self, peer: PeerId) -> bool {
@@ -1253,8 +1270,9 @@ async fn rq1_byte_cap_drops_oldest() {
     assert_newest_kept_oldest_dropped(&run, 6, 300);
 }
 
-/// T-RQ1.6 and T-RQ1.7: a peer at the cap for the full (shortened) period is disconnected; a peer
-/// that drains before the period ends is not. The drop warning appears once per peer, and closing
+/// T-RQ1.6 and T-RQ1.7: a peer at the cap for the full (shortened) period is disconnected on every
+/// connection (see `rq1_stuck_peer_with_two_connections_loses_both`); a peer that drains before the
+/// period ends is not. The drop warning appears once per peer, and closing
 /// logs one line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
@@ -1297,7 +1315,7 @@ async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
     assert!(s.is_connected(drains.peer_id).await, "the draining peer was closed");
     assert!(s.is_connected(healthy.peer_id).await, "the healthy peer was closed");
 
-    let closing = log_lines_with("Closing the connection");
+    let closing = log_lines_with("Closing every connection");
     assert_eq!(closing.len(), 1, "close lines: {closing:?}");
     assert!(closing[0].contains(&stuck.peer_id.to_string()));
     for (name, r) in [("stuck", &stuck), ("draining", &drains)] {
@@ -1314,6 +1332,178 @@ async fn rq1_stuck_peer_is_closed_and_draining_peer_is_not() {
         r.drv.stop();
     }
     s.stop();
+}
+
+/// T-RQ1.6 (amended, RQ1 item 5): the stuck peer holds two connections to the node. Gossipsub writes its
+/// data to one of them, which becomes stuck, and both are closed, so the stream does not move to the other
+/// connection. A healthy peer keeps its connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_stuck_peer_with_two_connections_loses_both() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    let topic = "gsq-rq1-stuck-two";
+    const PERIOD: Duration = Duration::from_secs(6);
+    let s = spawn_test_sender(|b| {
+        b.send_queue_max_messages(32).send_queue_stuck_timeout(PERIOD);
+    });
+    let stuck = spawn_fast_receiver(topic, s.port);
+    let healthy = spawn_fast_receiver(topic, s.port);
+    wait_ready_test(&s, topic, &[&stuck, &healthy]).await;
+    assert_eq!(s.established_connections().await, 2);
+
+    // The stuck peer dials the node a second time.
+    let addr: Multiaddr = format!("/memory/{}", s.port).parse().unwrap();
+    stuck
+        .drv
+        .run(move |swarm| {
+            swarm.dial(addr).expect("second dial");
+        })
+        .await;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while s.established_connections().await != 3 {
+        assert!(Instant::now() < deadline, "the second connection was never established");
+        async_std::task::sleep(Duration::from_millis(20)).await;
+    }
+
+    stuck.drv.pause().await;
+    s.publish_paced(topic, 0..1200, 1024, 8, &[&healthy]).await;
+
+    // Once the period has passed, no connection to the stuck peer is left.
+    let deadline = Instant::now() + PERIOD + Duration::from_secs(10);
+    while s.is_connected(stuck.peer_id).await {
+        assert!(
+            Instant::now() < deadline,
+            "a connection to the stuck peer was never closed"
+        );
+        async_std::task::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        s.established_connections().await,
+        1,
+        "only the healthy peer's connection is left"
+    );
+    assert!(s.is_connected(healthy.peer_id).await, "the healthy peer was closed");
+    let closing = log_lines_with("Closing every connection");
+    assert_eq!(closing.len(), 1, "close lines: {closing:?}");
+    assert!(closing[0].contains(&stuck.peer_id.to_string()));
+    for r in [&stuck, &healthy] {
+        r.drv.stop();
+    }
+    s.stop();
+}
+
+/// T-RQ1.12 (RQ1 item 5, guard for relays): a node with exactly two connected relays, one of which stops reading,
+/// keeps both connections. The close is held back and the stuck evaluation restarts, so the held-back report comes
+/// again only once per new period, not in a loop; the queue toward the held-back relay stays within its cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rq1_stuck_relay_is_held_back_when_only_two_relays_are_connected() {
+    let _guard = SERIAL.lock().await;
+    start_log_capture();
+    const PERIOD: Duration = Duration::from_secs(3);
+    const CAP: usize = 32;
+    let r1 = spawn_test_sender(|_| {});
+    let r2 = spawn_test_sender(|_| {});
+    let mut builder = gossip_builder(false);
+    builder
+        .history_length(2)
+        .history_gossip(1)
+        .heartbeat_initial_delay(Duration::from_millis(100))
+        .heartbeat_interval(Duration::from_millis(100))
+        .send_queue_max_messages(CAP)
+        .send_queue_stuck_timeout(PERIOD);
+    let node = spawn_receiver_with(&[], r1.port, builder.build().expect("valid gossipsub config"));
+    let addr: Multiaddr = format!("/memory/{}", r2.port).parse().unwrap();
+    node.drv
+        .run(move |swarm| {
+            swarm.dial(addr).expect("dial the second relay");
+        })
+        .await;
+
+    // Both relays are connected and in the node's relay mesh.
+    let relays = Arc::new(AtomicUsize::new(0));
+    let mesh = Arc::new(AtomicUsize::new(0));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (relays_cb, mesh_cb) = (relays.clone(), mesh.clone());
+        node.drv
+            .run(move |swarm| {
+                let gs = &swarm.behaviour().gossipsub;
+                relays_cb.store(gs.connected_relays_len(), Ordering::Relaxed);
+                mesh_cb.store(gs.relay_mesh_len(), Ordering::Relaxed);
+            })
+            .await;
+        if relays.load(Ordering::Relaxed) == 2 && mesh.load(Ordering::Relaxed) == 2 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the node never saw two relays");
+        async_std::task::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The first relay stops reading; the node publishes a stream toward both.
+    r1.drv.pause().await;
+    let topic = IdentTopic::new("gsq-rq1-guard");
+    for batch in 0..100u32 {
+        let t = topic.clone();
+        node.drv
+            .run(move |swarm| {
+                for i in 0..4 {
+                    let _ = swarm
+                        .behaviour_mut()
+                        .gossipsub
+                        .publish(t.clone(), payload(batch * 4 + i, 1024));
+                }
+            })
+            .await;
+        async_std::task::sleep(Duration::from_millis(10)).await;
+    }
+
+    let held = || log_lines_with("Holding back the close of relay");
+    wait_for("the close is held back", PERIOD + Duration::from_secs(8), || {
+        !held().is_empty()
+    })
+    .await;
+    assert!(
+        held()[0].contains(&r1.peer_id.to_string()),
+        "held-back lines: {:?}",
+        held()
+    );
+    // One more period of the restarted evaluation; a loop of immediate re-reports would log hundreds of lines.
+    async_std::task::sleep(PERIOD * 2).await;
+    let lines = held();
+    assert!(
+        (2..=4).contains(&lines.len()),
+        "expected one line per new period, got {}: {lines:?}",
+        lines.len()
+    );
+    assert!(lines.iter().all(|l| l.contains(&r1.peer_id.to_string())));
+
+    let connected = Arc::new(AtomicUsize::new(0));
+    let (connected_cb, r1_id, r2_id) = (connected.clone(), r1.peer_id, r2.peer_id);
+    node.drv
+        .run(move |swarm| {
+            let both = swarm.is_connected(&r1_id) && swarm.is_connected(&r2_id);
+            connected_cb.store(both as usize, Ordering::Relaxed);
+        })
+        .await;
+    assert_eq!(connected.load(Ordering::Relaxed), 1, "a relay was closed");
+    assert!(log_lines_with("Closing every connection").is_empty());
+    // The queue toward the held-back relay stays within its cap while it drops the oldest.
+    let queued = Arc::new(AtomicUsize::new(usize::MAX));
+    let queued_cb = queued.clone();
+    node.drv
+        .run(move |swarm| {
+            queued_cb.store(
+                swarm.behaviour().gossipsub.send_queue_snapshot().max_per_connection,
+                Ordering::Relaxed,
+            )
+        })
+        .await;
+    assert!(queued.load(Ordering::Relaxed) <= CAP, "queue above its cap: {queued:?}");
+
+    r1.drv.resume();
+    node.drv.stop();
+    r1.stop();
+    r2.stop();
 }
 
 /// Scenario A: healthy baseline, receiver polled throughout.
@@ -1994,7 +2184,7 @@ async fn rq1_priority_lane_overflow_joins_the_data_queue() {
     let full = log_lines_with("priority lane");
     assert_eq!(full.len(), 1, "priority lane lines: {full:?}");
     assert!(full[0].contains(&paused.peer_id.to_string()) && full[0].contains("256"));
-    assert!(log_lines_with("Closing the connection").is_empty());
+    assert!(log_lines_with("Closing every connection").is_empty());
 
     paused.drv.resume();
     wait_for("the last spilled message arrived", Duration::from_secs(30), || {

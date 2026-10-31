@@ -36,9 +36,10 @@ the one crate is the proportionate fix.
 
 ## The patch
 
-Three call sites, all in the backoff path. Apart from the send queue change, the priority lane overflow
-change, the log levels and the validate-without-forwarding method described below, everything else is
-byte-identical to the fork, including the relay-mesh extension
+Three call sites, all in the backoff path. Apart from the send queue change (including its
+amendments: pressure signal, priority lane, queue signal, priority lane overflow, and the stuck peer
+change), the log levels and the validate-without-forwarding method described below, everything
+else is byte-identical to the fork, including the relay-mesh extension
 (`i_am_relay` / `IAmRelay`) that is the reason the fork exists.
 
 1. **`src/behaviour.rs`** — `remove_peer_from_mesh` clamps the peer-supplied value
@@ -93,7 +94,7 @@ one that answers pings and reads no gossip.
    (`futures_ticker::Ticker`, the same time source the behaviour uses, native and wasm) for the
    stuck deadline. A stuck connection is reported to the behaviour with the new
    `HandlerEvent::SendQueueStuck`.
-3. **`src/behaviour.rs`** -- on `SendQueueStuck` it emits `ToSwarm::CloseConnection` for that one
+3. **`src/behaviour.rs`** -- on `SendQueueStuck` it emits `ToSwarm::CloseConnection` for that one (later: every)
    connection. The handler cannot close the connection itself (`ConnectionHandler::Error` is
    `Void`) and `KeepAlive::No` would not close it while other protocols keep the connection alive.
    The `Handler::new` call sites pass the peer ID and the limits.
@@ -194,6 +195,64 @@ eviction, pressure and period, report rate limit, unreported count, no stuck rep
 and `rq1_priority_lane_overflow_joins_the_data_queue` in `mm2_p2p/tests/gossip_send_queue.rs` (600
 priority RPCs toward a paused peer).
 
+## Stuck peer: every connection, repeated drops (not security-related)
+
+An amendment to the send queue above: CRD ch.28 §28.9B RQ1 items 5, 6 and 7, including the guard for relays (maintainer decision AY,
+Reloaded-original). The wire is unchanged. The statement about what is byte-identical to the fork reads
+as in the first section of "The patch": the send queue change now includes this amendment.
+
+**Why.** Gossipsub writes a peer's data to one connection only. When that connection was closed as
+stuck, the same stream moved to the peer's other connection while the peer stayed in every mesh. A peer
+that catches up in bursts also never stays at the cap for the whole period, though it loses most of the
+stream.
+
+**What changed.**
+
+1. **`src/send_queue.rs`** -- a second stuck criterion, *repeated drops*: per connection, a window
+   (default 60 s) counts the data RPCs queued in it and the data RPCs dropped in it. A window counts when
+   something was queued and `dropped * 100 >= queued * share` (default 25 %). A connection is stuck after
+   3 (default) such windows in a row. Windows are evaluated lazily on a push, a pop and `take_stuck`, with the
+   current time as an argument; if more than one window has passed, at least one was empty and the series is
+   reset. `StuckReport` now carries a `StuckReason` (`AtCap { at_cap }` or `RepeatedDrops { share_percent }`).
+   Both criteria share one "already reported" state, which is no longer reset by a new period at the cap: a
+   connection is reported stuck at most once.
+2. **`src/handler.rs`** -- `HandlerEvent::SendQueueStuck` carries the `StuckReport` (reason and total
+   dropped). The handler no longer logs the close: the behaviour decides between closing and holding back,
+   and logs that. The timer still serves only the at-cap deadline and the queue signal deadline: a window
+   needs no timer, because drops only happen on a push. `HandlerIn::RestartStuck` calls
+   `SendQueue::restart_stuck` and drops the armed timer.
+3. **`src/behaviour.rs`** -- `HandlerEvent::SendQueueStuck` now emits `ToSwarm::CloseConnection` with
+   `CloseConnection::All` instead of `One`, and logs one warning naming the peer ID, the criterion (the time
+   at the cap, or the share dropped in the last window) and the total dropped; no message content. The
+   decision is `Behaviour::stuck_action(peer, now)` (see the guard below).
+4. **`src/config.rs`** -- `ConfigBuilder::send_queue_drop_window`, `send_queue_drop_windows` and
+   `send_queue_drop_share_percent` (and getters); defaults 60 s, 3 and 25. Also
+   `stuck_relay_guard_interval` (30 s) and `stuck_relay_min_remaining` (2). KDF's own configuration keeps
+   the defaults.
+
+**Guard for relays.** A shared cause (this node's own uplink) can make several relay connections stuck
+at once. When the stuck peer is in `connected_relays`, `stuck_action` holds the close back if another
+relay was closed as stuck within `stuck_relay_guard_interval`, or if `connected_relays.len() - 1` is below
+`stuck_relay_min_remaining`. A held-back relay stays connected: the behaviour logs one INFO line naming the
+peer and the condition and sends `HandlerIn::RestartStuck` to the reporting connection. The restart lets the
+connection be reported again, starts a new period at the cap at the time of the restart if the queue is still
+at the cap, and starts the repeated-drops series over. The next report therefore comes no earlier than a
+full new period or a full new series of windows, so there is no loop of immediate re-reports; meanwhile the
+queue keeps dropping its oldest data RPCs and stays within its cap. Only a relay that is actually closed
+starts the guard interval; a peer that is not a relay is always closed at once and does not start it.
+
+**Tests.** `src/send_queue.rs` (repeated drops: three windows at 25 % with the queue drained inside each
+window, 20 % in every window, 25 % twice and then none, an empty window between two dropping windows, a pop
+that finds a window ended, at-cap and repeated-drops reports never both, the reason text), `src/handler.rs`
+(a report once, no timer; a restart waits for a new period and does not loop), `src/behaviour/tests.rs`
+(`SendQueueStuck` gives `CloseConnection::All`; the guard: held back within the interval, held back with fewer
+than 2 remaining, closed when no guard holds, a non-relay closed at once, the settings), and
+`restart_stuck` units in `src/send_queue.rs` (no report before a full new period, one after it; a drained
+queue reports nothing; the series starts over), run with the filter
+`send_queue:: handler::tests test_send_queue_ test_stuck_relay`. In-process:
+`rq1_stuck_peer_with_two_connections_loses_both` and
+`rq1_stuck_relay_is_held_back_when_only_two_relays_are_connected` in `mm2_p2p/tests/gossip_send_queue.rs`.
+
 ## Log levels (not security-related)
 
 Log lines only; behavior and wire are unchanged.
@@ -248,10 +307,10 @@ resolve fresh.
 ## Test status
 
 `cargo test --manifest-path vendor-patches/libp2p-gossipsub-0.45.0/Cargo.toml --lib`
-→ **168 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
+→ **186 passed, 6 failed** (124 passed before the send queue change added 15 tests, and 13 more with
 the pressure signal and the priority lane, 6 more with the queue signal, 3 more with the relay mesh
-log levels, 6 more with the priority lane overflow change: 7 added, 1 replaced, and 1 more with
-validate-without-forwarding).
+log levels, 6 more with the priority lane overflow change: 7 added, 1 replaced, 1 more with
+validate-without-forwarding, and 18 more with the stuck peer change and its guard for relays).
 
 Those 6 (`test_flood_publish`, `do_forward_messages_to_explicit_peers`,
 `test_do_not_use_floodsub_in_fanout`, `test_publish_to_floodsub_peers_without_flood_publish`,

@@ -744,23 +744,59 @@ queue per connection of the RPCs waiting to be written to that peer.
    handler MUST drop the oldest queued data RPCs of that connection until
    the new RPC fits, then queue the new RPC. Dropping affects only that
    connection; the same message is still queued for every other peer.
-5. **Stuck peer.** When a connection's data queue has been at its cap
-   continuously for **60 seconds**, the node MUST close that connection.
-   A period at the cap starts with the first drop under item 4. It ends
-   when the data queue has drained to at most half of both limits (1,024
-   RPCs and 2 MiB). A peer that reads only a little at a time, freeing
-   one slot at a time, therefore stays at the cap. The peer may
-   reconnect; it then resynchronizes through the keep-alive exchange of
-   Chapter 32.
+5. **Stuck peer** *(amended 2026-10-30, maintainer decision AY, D8).* A
+   connection is *stuck* when either of these holds:
+   - **At the cap.** Its data queue has been at its cap continuously for
+     **60 seconds**. A period at the cap starts with the first drop under
+     item 4. It ends when the data queue has drained to at most half of
+     both limits (1,024 RPCs and 2 MiB). A peer that reads only a little
+     at a time, freeing one slot at a time, therefore stays at the cap.
+   - **Repeated drops.** In each of **3** consecutive 60-second windows,
+     at least **25 %** of the data RPCs queued for the connection in that
+     window were dropped under item 4. This catches a peer that catches
+     up in bursts: its queue sometimes drains to half, which ends a
+     period at the cap, while it keeps losing most of the stream. A
+     window in which nothing was queued breaks the series.
+
+   When a connection is stuck, the node MUST close **every** connection
+   to that peer, not only the stuck one. Gossipsub writes a peer's data
+   to one connection only. Closing just that connection would move the
+   same stream to another one while the peer stays in every mesh (RQ1a
+   items 1 and 6). After the close the peer leaves the meshes. It may
+   reconnect, and it then resynchronizes through the keep-alive exchange
+   of Chapter 32. RQ1a states what a reference peer does after the close:
+   when it redials, what it sends, and that it holds nothing against the
+   closer. The ping safeguard of R9 closes every connection to a peer in
+   the same way.
+
+   **Guard for relays** *(amended 2026-10-30, maintainer decision AY).*
+   A shared cause can make several relay connections stuck at once, for
+   example this node's own uplink being saturated. Closing them all would
+   leave the node without relays. When the stuck peer is one of this
+   node's connected relays, the node therefore holds back the close if
+   either holds:
+   - another relay was closed under this item within the last **30
+     seconds**, the period of the relay-connection maintenance;
+   - after the close, fewer than **2** relays would remain connected.
+
+   A held-back connection stays open, and item 4 keeps dropping its
+   oldest data RPCs, so its memory stays within the cap of item 2. The
+   node starts a new stuck evaluation for it: a new period at the cap
+   and a new series of windows. It closes the peer when that evaluation
+   finds it stuck again and no guard condition holds. The node logs one
+   INFO line per held-back close, naming the peer ID and the condition.
+   A peer that is not a relay is closed without this guard.
 6. **Logging.** The first drop toward a peer logs one warning naming the
    peer ID, the queued count and the queued bytes. Further drops toward
    that peer log at most one summary line per 60 seconds (the period of
    item 5), with the number
-   dropped since the last line. Closing a connection under item 5 logs
-   one warning with the peer ID, the time at the cap and the total
-   dropped. No message content is logged.
-7. **Settings.** The two limits and the 60-second period are fixed
-   values of the vendored gossipsub crate. Its configuration builder
+   dropped since the last line. Closing a peer under item 5 logs one
+   warning with the peer ID, the criterion that applied (the time at the
+   cap, or the share dropped in the last window), and the total dropped.
+   No message content is logged.
+7. **Settings.** The two limits, the 60-second period, the 3 windows
+   and 25 % share of item 5, and the 30-second interval and 2 remaining
+   relays of its guard are fixed values of the vendored gossipsub crate. Its configuration builder
    MAY override them, for tests. They are not an `MM2.json` setting.
 8. **Pressure signal** *(amendment, maintainer decision AO,
    2026-10-28).* The handler reports a pressure level to the application
@@ -866,6 +902,106 @@ the keep-alive synchronization.
 > queues. That design was not adopted: it drops the newest message and
 > expires queued messages after a fixed time.
 
+**RQ1a. A reference peer after every connection to it is closed.**
+*(Authored by the KDF Spec Reader 2026-10-30 from the rows
+`v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, identical at both,
+and from the public gossipsub library of the libp2p fork both rows pin.
+**Passed the KDF Dirty Gate on 2026-10-30**, measure 0.03; §28.14.
+Prompted by D8: closing every connection to a peer whose send queue is
+stuck under RQ1 item 5, not only the stuck one.)* When a Reloaded node R closes every connection to a reference node
+X that uses R as a relay, X behaves as follows. The facts are identical at
+both rows.
+
+1. **State is dropped at the last close, and only then.** When X's last
+   connection to R closes, X forgets R from all of its gossip state at
+   once: topic membership, every per-topic mesh and fanout, the
+   connected-relays set, the relay mesh and the reverse mesh (R10, R27).
+   While at least one connection to R remains, none of this changes: R
+   stays in every mesh, X's traffic to R continues over a remaining
+   connection, and only what was queued on the closed connection is
+   lost. Closing one of several connections therefore does not remove R
+   as X's relay; closing all of them does.
+2. **A request in flight fails late.** A request-response exchange X has
+   in flight to R when the connections close is not failed by the
+   close: X's request layer does not act on the connection-closed
+   failure the transport reports, and the request fails when the 3 s
+   sweep finds it older than its 10 s timeout, between 10 and 13 s
+   after it was sent (chapter 32 R-Q6, R-F3b). A synchronization request
+   caught by the close therefore costs X as much as a timeout would.
+3. **No ban, penalty or score.** X records nothing against R for
+   closing. Peer scoring is off (R14); the gossip blacklist the library
+   offers is never called by the application at either row; the pubkey
+   ban of RP3 is keyed by the pubkey that signs gossip messages, not by
+   peer, and nothing on the connection path feeds it. The only memory X
+   keeps is address-level: an address X dialed within the last
+   **5 minutes** is not dialed again during that time, whether at
+   start-up or from maintenance (item 4).
+4. **Reconnect only from maintenance, only when short of relays.** The
+   transport never redials on its own. X redials from its **30 s**
+   relay-connection maintenance tick (chapter 32 §32.9A R-B1 row 18),
+   and only when its count of connected relays is below the low
+   watermark of R13 (2 for a client, 4 for a relay). It then dials up to
+   `mesh_n` minus that count candidates: first peers chosen at random
+   from its known-peer list (addresses learned through peer exchange,
+   R8, and through the relays' periodic address announcements on the
+   peers topic, R6), then, if those are too few, addresses chosen at
+   random from its configured bootstrap list (R23); in both sets it
+   skips an address it is already connected to or dialed within the last
+   5 minutes. The earliest redial of R is therefore the first tick at
+   which X is both short of relays and past the 5-minute mark for R's
+   address; a connection that lasted less than 5 minutes delays the
+   redial to that mark; and an X that still has enough relays never
+   redials R on its own. R redials X only if X is a relay with an
+   announced address: clients are never dialed.
+5. **After reconnecting, only the gossip handshake and the clock
+   check.** On the first new connection to R, X sends -- once -- either
+   its relay notice (R12, if X is a relay) or one subscription for every
+   topic in its own mesh (every orderbook and swap topic it is
+   subscribed to, if X is a client); R does the same toward X; and each
+   side issues the clock check of RP2 on the new connection. On R's
+   relay notice X adds R to its connected relays and includes R in its
+   relay mesh **at once** only if that mesh is below the low watermark,
+   sending the inclusion notice of R10 that makes R forward to X again;
+   otherwise R waits for X's 10 s relay-mesh tick (R11), which adds one
+   relay per tick and only while the mesh is below the low watermark --
+   so an X whose relay mesh is already at the low watermark does not
+   re-include R until another relay drops, and receives nothing from R's
+   forwards meanwhile (R11a). If X is a relay, R adds X to its own relay
+   mesh on X's inclusion notice unless R's mesh is above the high
+   watermark. Nothing at the application layer reacts to the close or to
+   the reconnect: X sends no immediate keep-alive, no synchronization
+   request and no orderbook request, and keeps its subscription state;
+   the keep-alive cycle of chapter 59 R59.6.4 (30 s) and the pubkey
+   liveness window (90 s) run on their own clocks, so a gap longer than
+   the window evicts at X the pubkeys it heard only through R, and the
+   next keep-alive rebuilds them through the exchange of chapter 32
+   §32.7.3, addressed to the peer that forwarded it.
+6. **More than one connection to a peer.** Neither row limits
+   connections per peer. Two relays that dial each other hold two
+   connections and keep both: the dial-side check compares only the
+   remote addresses of existing connections, and an inbound connection's
+   remote address is the dialer's ephemeral one, so it never matches the
+   listen address being dialed. X sends its own publishes and its
+   forwards to relay-mesh members on one fixed connection -- the
+   earliest established that is still open -- and its forwards to the
+   clients it serves and its IWANT answers on whichever connection can
+   take the item. The ping safeguard of R9 closes **all** connections to
+   a peer at once.
+
+Reloaded's substrate, vendored from the same library, behaves as items
+1, 5 and 6 state and keeps the 30 s maintenance, the low-watermark
+condition and the watermark triples of item 4 (**parity** there).
+Reloaded differs on two points: it fails an in-flight request at once
+when the connection closes (item 2), and it has no 5-minute dial guard,
+so it redials at the next maintenance tick at which it is short of
+relays (item 3 and 4). For R, the consequence of item 1 is that closing
+only the stuck connection would leave R in X's mesh, with X's traffic
+moved to the other connection, while closing all of them makes X drop R
+and redial under item 4; the consequence of items 4 and 5 is that a
+reference client with one relay is back in at most 30 s once the
+5-minute dial guard has passed, and a reference client with spare relays
+does not come back until it is short of relays.
+
 **RQ1 test items.**
 
 - **T-RQ1.1** *Healthy peer unaffected.* A peer that keeps reading
@@ -885,9 +1021,10 @@ the keep-alive synchronization.
   cap, and is written in its turn. This item is verified at the handler
   queue level. A relay node ignores subscription changes, so an
   end-to-end subscription probe does not observe it.
-- **T-RQ1.6** *Stuck peer closed.* A peer at the cap for the full period
-  (shortened by test configuration) is disconnected. A peer that drains
-  before the period ends is not.
+- **T-RQ1.6** *Stuck peer closed (amended 2026-10-30, D8).* A peer at the
+  cap for the full period (shortened by test configuration) is
+  disconnected on every connection it holds to the node. A peer that
+  drains before the period ends is not.
 - **T-RQ1.7** *Rate-limited logging.* The drop warning appears once; later
   drops log at most one summary line per period.
 - **T-RQ1.8** *Pressure signal.* Filling a paused peer's queue to 256 data
@@ -906,6 +1043,36 @@ the keep-alive synchronization.
     no connection. After it resumes, the first 256 arrive before the
     data RPCs queued earlier, and every other one that item 4 did not
     drop arrives in its order in the data queue.
+
+- **T-RQ1.10** *Reference peer after a full close (RQ1a; black-box lab
+  item).* A reference client whose only relay is the node under test has
+  every connection closed by it: the client's relay mesh is empty at
+  once; it redials no earlier than its next maintenance tick and no
+  earlier than 5 minutes after its last dial of that address; on
+  reconnecting it sends its subscriptions, re-includes the relay in its
+  mesh at once, and sends no orderbook or synchronization request until
+  its next keep-alive arrives; a request in flight at the close fails
+  between 10 and 13 s after it was sent. A reference client with two
+  other relays in its mesh does not redial within 10 minutes.
+- **T-RQ1.11** *Repeated drops (item 5; added 2026-10-30, D8).* The
+  windows are shortened by test configuration.
+  - A connection is reported stuck, and every connection to the peer is
+    closed, when it drops at least 25 % of the data RPCs queued in each
+    of 3 consecutive windows, even though its queue drains to half within
+    each window, so that no period at the cap lasts the full period.
+  - A connection that drops 20 % in each window is not reported stuck.
+  - Neither is one that drops 25 % in two windows and none in the third.
+  - A window in which nothing was queued breaks the series.
+- **T-RQ1.12** *Guard for relays (item 5; added 2026-10-30, decision AY).*
+  The guard interval and the stuck periods are shortened by test
+  configuration.
+  - Two relays become stuck within the guard interval: the first is
+    closed, the second is held back and stays connected.
+  - With only 2 relays connected, a stuck relay is held back.
+  - A held-back relay that is still stuck after a new evaluation, with no
+    guard condition holding, is closed on every connection.
+  - A stuck peer that is not a relay is closed at once.
+  - While a relay is held back, its data queue stays within its cap.
 
 ## 28.10 Tests (test invariants)
 
@@ -1063,6 +1230,21 @@ the two copies per message of R11a are the other half of the same cost
 and a candidate of their own (forward once, on the consumer's report).
 Either is a divergence to record in the
 operator-facing compatibility documents; neither changes a wire shape.
+
+**D8.** *Close every connection of a stuck peer (Reloaded-original;
+added 2026-10-30; the reference facts it rests on are RQ1a).* RQ1 item 5 closes the connection whose data queue is
+stuck. Where a peer holds more than one connection to this node (RQ1a
+item 6), the candidate closes every connection to that peer, so that
+the peer drops this node as its relay and redials (RQ1a items 1 and 4)
+instead of keeping this node in its mesh over a connection the stuck
+one's traffic moves to. RQ1a states what the peer then does and that it
+holds nothing against this node for the close. This is a divergence to
+record in the operator-facing compatibility documents when adopted; it
+changes no wire shape. *Decided 2026-10-30 by the maintainer (decision
+AY), pre-beta: adopted, together with the repeated-drops criterion of
+RQ1 item 5. A swaplab run gates the merge.* *Amended 2026-10-30 (decision
+AY): a guard holds back the close of a relay when another relay was
+closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
 
 ## 28.11A Open Questions
 
@@ -1261,6 +1443,67 @@ hardening carried by the pinned fork).
   second. *Inputs:* that log and this repository's vendored gossipsub
   send queue only. The forbidden corpus was not consulted, and the
   amendment needs no Dirty Gate pass.
+- *Scoped addition (2026-10-30, Spec Reader) -- RQ1a, the pointer appended
+  to RQ1 item 5, T-RQ1.10 and D8. Dirty Gate: PASS on 2026-10-30, recorded
+  below.* Prompted by the Reloaded candidate of closing every
+  connection to a peer whose send queue is stuck. *Inputs:* the public
+  gossipsub library of the libp2p fork both reference rows and Reloaded
+  pin (a permitted sibling source, not forbidden-class material), read
+  for the bookkeeping at a connection close with and without remaining
+  connections, the handshake sent on a first connection, the relay-notice
+  and inclusion handling, the relay-mesh fill rate and watermarks, the
+  choice of connection for sends, and the address-based connected check;
+  this repository's own vendored copy of that library, composed behaviour
+  and request layer (the parity and difference statements); and the
+  forbidden corpus, consulted at the rows `v2.6.0-beta` and `v3.0.0-beta`
+  of chapter 02 §2.15A, identical in every respect taken, **only** to
+  establish: the 30 s relay-connection maintenance and its conditions
+  (below the low watermark; candidates from known peers, then bootstrap;
+  skip connected and recently dialed addresses; trim above twice the
+  high watermark), the 5-minute dial guard, that no per-peer connection
+  limit and no blacklist call exist, that the request layer does not act
+  on a connection-closed failure and relies on its 3 s sweep against the
+  10 s timeout, that the ping wrapper closes all connections of a peer,
+  that the clock check runs on every established connection, and that
+  nothing at the application layer reacts to a connection close or a
+  reconnect. What crosses is behaviour and numeric values a peer can
+  observe in timing (30 s, 5 min, 10 s, 3 s, 10 to 13 s, the watermark
+  triples of R13); no private identifier, function body, helper
+  decomposition, log or error literal was reproduced. T-RQ1.10 and D8 are
+  Reloaded-original. The earlier clearance positions recorded above are
+  untouched by this addition.
+- *Dirty Gate clearance for the 2026-10-30 Spec Reader addition (chapter 01
+  T1, R40):* PASS on 2026-10-30, measure 0.03, no leaks.
+  - *Extent:* the reference's composed peer-to-peer behavior at the
+    published release designations `v2.6.0-beta` and `v3.0.0-beta`:
+    - the bootstrap dialing and the 30 s relay-connection maintenance
+      (chapter 32 §32.9A R-B1 row 18 scope);
+    - the request-response layer and its pending-request timeout handling
+      (R8a/R8b scope);
+    - the ping wrapper's disconnect action (R9 scope);
+    - the per-connection clock check (RP2 scope);
+    - the application-layer dispatch's reaction to connection events
+      (§28.9B scope).
+
+    Seven corpus source files were compared at each row. The inter-row
+    diff was taken, and no fact relied on changed between the rows. Also
+    compared, as permitted inputs: this repository's vendored copy of the
+    public gossipsub library (1 file), and this repository's own composed
+    behavior, request layer and ping wrapper (3 files).
+  - *Method:* reading, plus a mechanical extraction of every backticked
+    token in the added lines, tested against both corpus rows. The
+    mechanical gate tool was not run (prose, no code blocks).
+  - *Measure:* 0.03 against the 0.10 threshold.
+- *Scoped addition (2026-10-30, maintainer decision AY).* It covers the
+  amended RQ1 items 5, 6 and 7, T-RQ1.6, T-RQ1.11, the relay guard of
+  item 5 with T-RQ1.12, and the decision lines of D8. Its first wording
+  also amended item 9 and T-RQ1.9; decision BC, above, replaced those.
+  It is Reloaded-original.
+  - *Inputs:* this repository's vendored send queue and connection
+    handler, and the field run of 2026-10-30 on a public network. RQ1a
+    supplies the reference facts.
+  - No further corpus input was used, and the addition needs no Dirty
+    Gate pass.
 - *Scoped addition (2026-10-30) -- R8c items 5 and 6, and their T6a
   bullet.* Reloaded-original, maintainer decision BD of 2026-10-30. It
   was prompted by a seed's own log from a field run on a public network,

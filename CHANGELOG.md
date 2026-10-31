@@ -460,15 +460,20 @@ it and, where one exists, the CRD rule, for readers who want more.
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
   so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
-  exchange repairs what a dropped message carried. A peer that stays at the limit for a full minute is
-  disconnected and resynchronizes when it reconnects. A peer that keeps up never reaches the limit.
+  exchange repairs what a dropped message carried. A peer is disconnected, on every connection it
+  holds to the node, when it stays at the limit for a full minute or loses at least a quarter of the
+  messages sent to it in each of three minutes in a row. It resynchronizes when it reconnects. Seeds
+  usually hold two connections to each other, and closing only one used to move the backlog onto the
+  other. A node closes at most one of its relays this way within 30 seconds, and never one that
+  would leave it with fewer than two; meanwhile that relay's queue keeps dropping its oldest
+  messages. A peer that keeps up never reaches the limit.
   Messages are also sent in the order they were queued, where a backlog used to go out newest first.
   The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
   minute. Cancellations and swap negotiation messages go out ahead of the others, through a lane of
   256 messages per connection; when more of them are waiting, the rest join the end of the normal
   queue. They used to disconnect the peer, so a maker cancelling hundreds of orders at once cut a
   seed off from all its slower relays in the same second. Nothing new is sent on the wire. Detail:
-  PR #122, PR #175; CRD ch.28 §28.9B.
+  PR #122, PR #172, PR #175; CRD ch.28 §28.9B, D8.
 - **A seed or relay now gives back the memory a burst of order updates used.** Every order update a
   node applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and
   bookkeeping), and none of it was released until the same order pair changed again, so a node that

@@ -185,6 +185,24 @@ pub enum Event {
     RelayConnectionClosed { peer_id: PeerId },
 }
 
+/// What to do with a connection whose send queue was reported as stuck (CRD ch.28 §28.9B RQ1 item 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StuckAction {
+    /// Close every connection to the peer.
+    Close,
+    /// Keep the connection (guard for relays) because of this condition.
+    HoldBack(StuckGuard),
+}
+
+/// The condition that holds back the close of a stuck relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StuckGuard {
+    /// Another relay was closed as stuck within the guard interval, this long ago.
+    RecentRelayClose { ago: Duration },
+    /// Fewer relays than the configured minimum would remain connected.
+    TooFewRelays { remaining: usize },
+}
+
 /// A data structure for storing configuration for publishing messages. See [`MessageAuthenticity`]
 /// for further details.
 #[allow(clippy::large_enum_variant)]
@@ -396,6 +414,9 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// Log level state of the "relay mesh above its high watermark" line.
     relays_high_report: WatermarkReport,
 
+    /// When a relay was last closed as stuck, for the guard for relays (CRD ch.28 §28.9B RQ1 item 5).
+    last_stuck_relay_close: Option<Instant>,
+
     peer_connections: HashMap<PeerId, Vec<(ConnectionId, ConnectedPoint)>>,
 
     connected_addresses: Vec<Multiaddr>,
@@ -562,6 +583,7 @@ where
             connected_relays: HashSet::new(),
             relays_low_report: WatermarkReport::default(),
             relays_high_report: WatermarkReport::default(),
+            last_stuck_relay_close: None,
             peer_connections: HashMap::new(),
             connected_addresses: Vec::new(),
             send_queue_stats: HashMap::new(),
@@ -3876,6 +3898,29 @@ where
         self.connected_relays.len()
     }
 
+    /// Decides what to do with a connection of `peer` whose send queue is stuck (CRD ch.28 §28.9B RQ1 item 5).
+    /// A peer that is not a connected relay is closed. A relay is held back if another relay was closed as stuck
+    /// within the guard interval before `now`, or if fewer than the minimum number of relays would remain
+    /// connected after closing it; otherwise it is closed and the time is recorded for the guard.
+    fn stuck_action(&mut self, peer: &PeerId, now: Instant) -> StuckAction {
+        if !self.connected_relays.contains(peer) {
+            return StuckAction::Close;
+        }
+        if let Some(ago) = self
+            .last_stuck_relay_close
+            .map(|at| now.saturating_duration_since(at))
+            .filter(|ago| *ago < self.config.stuck_relay_guard_interval())
+        {
+            return StuckAction::HoldBack(StuckGuard::RecentRelayClose { ago });
+        }
+        let remaining = self.connected_relays.len().saturating_sub(1);
+        if remaining < self.config.stuck_relay_min_remaining() {
+            return StuckAction::HoldBack(StuckGuard::TooFewRelays { remaining });
+        }
+        self.last_stuck_relay_close = Some(now);
+        StuckAction::Close
+    }
+
     /// The send queue counters of all connections, for metrics (CRD ch.28 §28.9B RQ1 item 8).
     pub fn send_queue_snapshot(&self) -> SendQueueSnapshot {
         let mut snapshot = SendQueueSnapshot {
@@ -4001,13 +4046,46 @@ where
         handler_event: THandlerOutEvent<Self>,
     ) {
         match handler_event {
-            HandlerEvent::SendQueueStuck => {
-                // The peer has not drained its send queue for the whole stuck period: close this
-                // connection. It may reconnect and resynchronize.
-                self.events.push_back(ToSwarm::CloseConnection {
-                    peer_id: propagation_source,
-                    connection: CloseConnection::One(connection_id),
-                });
+            HandlerEvent::SendQueueStuck(report) => {
+                // The peer's send queue is stuck (at its cap for the whole period, or repeated drops;
+                // CRD ch.28 §28.9B RQ1 item 5): close every connection to the peer, not only this one.
+                // Gossipsub writes a peer's data to one connection only, so closing just this one would
+                // move the same stream to another connection while the peer stays in every mesh. The
+                // ping safeguard does the same. The peer may reconnect and resynchronize. A relay is
+                // kept, and its connection starts a new stuck evaluation, if another relay was just
+                // closed or too few relays would remain (guard for relays).
+                match self.stuck_action(&propagation_source, Instant::now()) {
+                    StuckAction::Close => {
+                        log::warn!(
+                            "Closing every connection to peer {propagation_source}: gossip send queue {}, {} \
+                             messages dropped",
+                            report.reason,
+                            report.total_dropped
+                        );
+                        self.events.push_back(ToSwarm::CloseConnection {
+                            peer_id: propagation_source,
+                            connection: CloseConnection::All,
+                        });
+                    }
+                    StuckAction::HoldBack(guard) => {
+                        match guard {
+                            StuckGuard::RecentRelayClose { ago } => log::info!(
+                                "Holding back the close of relay {propagation_source}: its gossip send queue is \
+                                 stuck, but another relay was closed {ago:?} ago"
+                            ),
+                            StuckGuard::TooFewRelays { remaining } => log::info!(
+                                "Holding back the close of relay {propagation_source}: its gossip send queue is \
+                                 stuck, but only {remaining} other relays would remain connected (minimum {})",
+                                self.config.stuck_relay_min_remaining()
+                            ),
+                        }
+                        self.events.push_back(ToSwarm::NotifyHandler {
+                            peer_id: propagation_source,
+                            handler: NotifyHandler::One(connection_id),
+                            event: HandlerIn::RestartStuck,
+                        });
+                    }
+                }
             }
             HandlerEvent::SendQueuePressure { raised } => {
                 let changed = if raised {
