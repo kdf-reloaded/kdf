@@ -401,6 +401,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   serves it to peers that ask exactly as before. Nothing on the wire changes. To restore the old
   behavior, set `relay_second_copy_priority_only` to `false` in `MM2.json`. Detail: PR #178; CRD
   ch.32 R-F3b, D11.
+- **An idle second connection between two relays no longer logs a warning when it closes.** Two
+  relays that dial each other hold two connections, and a connection that carries nothing for two
+  minutes is closed as idle while the peer stays connected through the other. Since a relay sends
+  ordinary order-book messages once, this happens every few minutes when a peer keeps redialing.
+  That close now logs at INFO as an idle connection closing; the warning stays for a peer's last
+  connection and for every other cause. Detail: PR #183; CRD ch.32 R-F3b, D11.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
