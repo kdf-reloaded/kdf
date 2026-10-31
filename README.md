@@ -82,7 +82,7 @@ For WebAssembly builds, see [`docs/WASM_BUILD.md`](docs/WASM_BUILD.md). In this 
 Two files drive runtime configuration:
 
 - `MM2.json` — RPC credentials, mnemonic, `netid`, optional toggles. This project targets RPC/config compatibility with the Komodo DeFi Framework API; see the [Komodo DeFi Framework documentation](https://komodoplatform.com/en/docs/komodo-defi-framework/) for the full schema.
-- `coins` — list of activatable coin definitions. A community-maintained registry lives at [github.com/KomodoPlatform/coins](https://github.com/KomodoPlatform/coins).
+- `coins` — list of activatable coin definitions. A community-maintained registry lives at [github.com/KomodoPlatform/coins](https://github.com/KomodoPlatform/coins). Keep your copy current: swaps of Monad tokens, for example, need a coins file from October 28, 2026 or later, which carries their gas limits.
 
 Minimal example:
 

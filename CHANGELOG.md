@@ -1170,6 +1170,14 @@ lives.
   completes, and an order with a Tendermint coin saved by an earlier version is cancelled at startup.
   More in [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md). Detail:
   PR #93.
+- **Swaps of Monad tokens need a coins file from October 28, 2026 or later.** On Monad, a token's
+  swap payment needs more gas than the default limit of 150000 (about 158000 for USDC-MON). Coins
+  files from that date on give each Monad token, such as USDC-MON, its own `gas_limit` block, which
+  KDF Reloaded uses. With an older file the payment runs out of gas and fails on-chain: its gas fee
+  is spent, the tokens stay in the wallet and the swap stops. A counterparty whose payment is already
+  locked gets it back by refund once the swap's lock time passes. More in
+  [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105; CRD ch.57
+  R57.5.2, R57.5.3.
 
 ## [0.3.0-alpha.3] — development milestone, not released
 
