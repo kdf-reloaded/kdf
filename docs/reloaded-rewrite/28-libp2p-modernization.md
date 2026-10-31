@@ -315,9 +315,12 @@ for a received address.
         before and no longer returns.
       - When the record is full, the oldest entry is dropped.
       - The record is never handed out.
-   6. **Reporting.** A hostname that is dropped from a full queue,
-      whose lookup fails or times out, or that resolves to no accepted
-      address is reported under item 4, with that reason.
+   6. **Reporting.** A hostname whose lookup fails or times out, or
+      that resolves to no accepted address, is reported under item 4,
+      with that reason. A name dropped from a full queue is logged at
+      DEBUG only (sub-item 2), so a flood of names never reaches INFO.
+      Skipping a lookup while connected or within 30 minutes is not
+      logged.
 8. **Private addresses for tests** *(added 2026-10-31, decision BH).* The
    configuration flag `p2p_allow_private_addresses` (default `false`)
    makes the check of this requirement accept any IPv4 address with the
