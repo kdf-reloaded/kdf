@@ -944,11 +944,14 @@ outlives the longest parked request.
 > at once. Against a relay that has just forwarded a keep-alive and is still
 > synchronizing the pair, its subscribers fail, ask again only at the next
 > keep-alive (R-Q6), and so wait one advertisement interval (30 s) per relay
-> hop. Under this rule a Reloaded relay answers them within the bound, and on
-> a relay they forward on success (R-F3b), so the next hop is served in the
-> same round. The answer and its shape are unchanged; only its timing
-> differs, and only for a request that would otherwise fail. Reference and
-> Reloaded requesters alike accept a late answer within their timeout. Implemented 2026-10-28.
+> hop. Under this rule a Reloaded relay answers them within the bound, and the
+> next hop, which already has the keep-alive from the gossip-layer forward
+> (R-F3a), asks the same way and is served by the same rule, so it too is
+> served in the same round *(reworded 2026-10-30 for D11: a Reloaded relay
+> no longer sends the keep-alive a second time)*. The answer and its shape
+> are unchanged; only its timing differs, and only for a request that would
+> otherwise fail. Reference and Reloaded requesters alike accept a late
+> answer within their timeout. Implemented 2026-10-28.
 
 **R-Q5c (Reloaded: a quick failure of the own request is asked once more).**
 *Reloaded-original (2026-10-30, Decision AX); no forbidden-class input.*
@@ -979,8 +982,8 @@ after such a failure:
 4. The second request is the last: whatever its outcome, nothing more is sent
    for that keep-alive. The own request's record of R-Q5b covers both requests,
    so the requests parked behind it wait for the second answer, each still
-   within its own bound. An answered second request counts as success for the
-   forward of R-F3b.
+   within its own bound. An answered second request counts as success, as an
+   answered first request does (the boolean of R-F3).
 
 > **Compatibility:** for behaviour matching GLEEC KDF, set
 > `sync_request_retry_ms` to `0` (or `sync_answer_deferral_ms` to `0`, which
@@ -1253,11 +1256,21 @@ placeholder of R-Q4 item 3); nothing is retried (R-Q6), and the
 placeholder stays until either the next keep-alive from that pubkey
 repeats the cycle or the pubkey's state expires (§32.9 R-K3; 90 s by
 default — a pubkey whose keep-alives keep arriving does not expire,
-§32.9A R-B1 row 1). When the boolean is true, a relay forwards the
+§32.9A R-B1 row 1). When the boolean is true, a reference relay forwards the
 message **a second time** (the substrate de-duplicates none of its own
 outbound copies; downstream peers drop the second copy by their
-duplicate cache). A **non-relay forwards nothing it received, whatever
-the boolean**: the application issues the forward only on a relay, and
+duplicate cache, R-F3c). *(Amended 2026-10-30, maintainer decision AW,
+§32.10 D11.)* A Reloaded relay sends that second copy only for a
+priority message of §32.9B R-MP1 item 2, through the priority lane of
+ch. 28 RQ1 item 9, and for a message outside the orderbook topics, as
+before. For any other orderbook message the gossip-layer forward of
+R-F3a is the only copy. The relay still marks the message as validated
+in its message cache, so its gossip announcements and its answers to
+IWANT requests are unchanged. The top-level `MM2.json` boolean
+`relay_second_copy_priority_only` selects this behavior; it defaults to
+`true`, and only a JSON `false` restores the reference relay's second
+copy of every message. A **non-relay forwards nothing it received,
+whatever the boolean**: the application issues the forward only on a relay, and
 the substrate under manual validation does not forward for a non-relay
 either (ch. 28 R11a); on a non-relay the boolean's only effect is the
 state update it reports. *(Correction re-checked by the KDF Dirty Gate on 2026-10-28: this
@@ -1265,8 +1278,15 @@ replaces a first wording that had a non-relay forward once, on success,
 to its mesh peers.)* A keep-alive therefore reaches a peer only from a
 relay or from the maker that published it, and those are the only
 responders a synchronization request can be addressed to. Reloaded
-forwards and withholds on the same conditions, with the same relay-only
-gate in its dispatch: **parity**.
+withholds on the same conditions, with the same relay-only gate in its
+dispatch (**parity**). It sends the second copy of an orderbook message
+only when the message is priority (**divergence**, D11). A reference
+receiver neither depends on nor notices the second copy (R-F3c).
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `relay_second_copy_priority_only` to `false`: a relay then sends the
+> second copy of every message it forwards, as a reference relay does.
+> *(Added 2026-10-30, D11.)*
 
 > **Consequence for the mesh (informative; rewritten in the second
 > pass).** Because a relay's first forward precedes its own handling, a
@@ -1283,8 +1303,10 @@ gate in its dispatch: **parity**.
 > number of downstream peers asking each relay, and the asking peers
 > converge only on a later keep-alive. The two outbound copies per
 > message per downstream peer double the relay's outbound load (§32.9A
-> R-B1 row 17). An answer that fails for the whole request (R-Q5 item 2)
-> or a request too large to be answered within 10 s (K-pair requests
+> R-B1 row 17). On a Reloaded relay since D11 that holds only for
+> priority messages and for messages outside the orderbook topics. An
+> answer that fails for the whole request (R-Q5 item 2) or a request too
+> large to be answered within 10 s (K-pair requests
 > against K full tries, §32.9 R-K2a) leaves the asking peer at the
 > placeholder for a full advertisement interval; the keep-alive itself
 > has travelled on regardless.
@@ -1355,6 +1377,17 @@ membership and connected-relay set are unchanged. Deliver the same
 message once from peer A and once from peer B before the node's
 application-level forward: the forward reaches neither A nor B. Deliver
 the second copy after 60 s: the handler runs again.
+
+**T-F3d** *A relay's second copy (R-F3b as amended, D11).* A relay that
+receives from peer A a non-priority orderbook message (an order created
+or updated, or a keep-alive) sends downstream peer B exactly one copy.
+For each priority message of §32.9B R-MP1 item 2 -- an order
+cancellation, a taker request, a maker reservation, a taker connect and
+a maker connected message -- it sends B two, the second through the
+priority lane of ch. 28 RQ1 item 9. For a swap-topic message it sends B
+two. In every case the message is marked validated in the relay's
+message cache, so it appears in the relay's gossip announcements for its
+topic.
 
 **R-F4 (own-side mutation and queries).** The subsystem MUST
 support, as internal surface: inserting/updating an order;
@@ -1945,7 +1978,7 @@ own clock (§32.4 R-P3).
 | 14 | substrate IHAVE/IWANT bookkeeping (ch. 28 R13a) | announcements | per heartbeat | cleared every heartbeat | at most 10 IHAVE and 5000 requested ids per peer per heartbeat |
 | 15 | per-message retransmission counts (inside row 12) | IWANT received | IWANT for a cached message | dropped with the message | at most 3 per message per peer |
 | 16 | substrate peer-topic maps, mesh, fanout, backoffs | connected peers × topics | subscription announcements | disconnect, unsubscribe, backoff expiry | peers × topics |
-| 17 | **per-peer outbound queue of the substrate's connection handler** (ch. 28 R11a, D7) | every forward, publish, IWANT answer or control message to that peer | push on send; each forward is serialized once and cloned per recipient; a relay sends every message twice (R-F3a, R-F3b) | popped only when that peer's outbound stream is writable; freed by disconnection | **unbounded**; the only row whose growth rate a *remote* peer sets, by reading slowly |
+| 17 | **per-peer outbound queue of the substrate's connection handler** (ch. 28 R11a, D7) | every forward, publish, IWANT answer or control message to that peer | push on send; each forward is serialized once and cloned per recipient; a reference relay sends every message twice (R-F3a, R-F3b); a Reloaded relay sends a non-priority orderbook message once (D11) | popped only when that peer's outbound stream is writable; freed by disconnection | **unbounded**; the only row whose growth rate a *remote* peer sets, by reading slowly |
 | 18 | connected relays, relay mesh (ch. 28 R10, R11) | relays | connection with relay advertisement | the 30 s maintenance trims connected relays above twice the high watermark and keeps the mesh within the watermarks | at most 24 relays on a relay node; mesh at most 12 |
 | 19 | peer-exchange known peers (ch. 28 R8) | peers learned | exchange rounds | capped | 100 |
 
@@ -2543,7 +2576,15 @@ D11. **Second copy only for priority messages (Reloaded-original;
     record in the operator-facing compatibility documents when adopted
     and changes no wire shape. **Decided 2026-10-30 (Decision AW):
     adopted**, subject to the lab test the maintainer asked for; the rule
-    lands as an amendment of §32.8 R-F3b.
+    lands as an amendment of §32.8 R-F3b. *As adopted, messages
+    outside the orderbook topics (swap, swap v2 and watcher messages)
+    also keep their second copy, unchanged. That is this project's
+    scoping: the question the maintainer answered named "cancellations
+    and swap messages", and the copy is kept deliberately, because such
+    messages are few and the copy guards a message whose loss costs more
+    than the copy. Only a non-priority orderbook message is sent once
+    (R-F3b as amended; T-F3d). The opt-back switch is
+    `relay_second_copy_priority_only` (R-F3b).*
 
 ## 32.11 External References
 
@@ -3095,3 +3136,11 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   the maintainer's decisions; the consequence sentences of R-Q6a and R-F3c
   name R-Q5c and the decided divergence. No reference input was used for
   these edits.
+- *Scoped amendment (2026-10-30) -- §32.8 R-F3b (Reloaded's second
+  copy and its opt-back switch), its consequence note, §32.9A R-B1 row
+  17, the adoption note of §32.10 D11, T-F3d, and the wording of the
+  R-Q5b divergence note and of R-Q5c item 4 that named the second copy.*
+  Reloaded-original, maintainer decision AW of 2026-10-30. The reference facts it rests on are R-F3c, cleared above.
+  *Inputs:* this repository's own relay dispatch and vendored gossipsub
+  only. The forbidden corpus was not consulted for this amendment, and
+  it needs no Dirty Gate pass of its own.

@@ -5337,6 +5337,50 @@ fn test_priority_propagate_uses_the_priority_lane() {
     assert!(normal > 0);
 }
 
+#[test]
+// Validating a cached message without forwarding it queues nothing for any peer, yet the message is
+// then announced for gossip like a propagated one; an unknown message is a miss (CRD ch.32 R-F3b,
+// D11).
+fn test_validate_message_without_forwarding() {
+    let config = ConfigBuilder::default()
+        .validate_messages()
+        .build()
+        .unwrap();
+    let (mut gs, peers, topics) = inject_nodes1()
+        .peer_no(3)
+        .topics(vec![String::from("t")])
+        .to_subscribe(true)
+        .gs_config(config.clone())
+        .create_network();
+    flush_events(&mut gs);
+
+    let mut seq = 0;
+    let mut msg = random_message(&mut seq, &topics);
+    // A message from the wire is not validated.
+    msg.validated = false;
+    gs.handle_received_message(msg.clone(), &peers[0]);
+    let transformed = gs.data_transform.inbound_transform(msg).unwrap();
+    let id = config.message_id(&transformed);
+
+    // Not validated yet: not announced, and nothing was forwarded on receipt.
+    assert!(gs.mcache.get_gossip_message_ids(&topics[0]).is_empty());
+    flush_events(&mut gs);
+
+    assert!(gs.validate_message_without_forwarding(&id));
+    let notified = gs
+        .events
+        .iter()
+        .filter(|e| matches!(e, ToSwarm::NotifyHandler { .. }))
+        .count();
+    assert_eq!(notified, 0);
+    assert_eq!(gs.mcache.get_gossip_message_ids(&topics[0]), vec![id.clone()]);
+
+    // A message that is not in the cache is a miss and changes nothing.
+    let unknown = MessageId::from(vec![9u8; 8]);
+    assert!(!gs.validate_message_without_forwarding(&unknown));
+    assert_eq!(gs.mcache.get_gossip_message_ids(&topics[0]), vec![id]);
+}
+
 fn pressure_events<D: DataTransform, F: TopicSubscriptionFilter>(
     gs: &Behaviour<D, F>,
 ) -> Vec<(PeerId, bool)> {

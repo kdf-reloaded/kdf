@@ -391,6 +391,16 @@ it and, where one exists, the CRD rule, for readers who want more.
   asks again only when the answer can still arrive within the 5-second hold, never after a timed-out
   request, and never a third time. Nothing on the wire changes. To restore the old behavior, set
   `sync_request_retry_ms` to `0` in `MM2.json`. Detail: PR #173; CRD ch.32 R-Q5c.
+- **A relay now sends an ordinary order-book message once instead of twice.** A relay forwards each
+  message as soon as it arrives, and used to send it again after handling it. The receiving nodes,
+  GLEEC KDF and Reloaded alike, drop that second copy as a duplicate, so for new orders, order
+  updates and keep-alives it only doubled what a relay sends toward each peer. On the public network
+  a seed's far relays dropped up to a fifth of that stream in busy hours. Cancellations and swap
+  negotiation messages still get their second copy, through the send queue's priority lane, and so
+  do swap and watcher messages. The relay still marks every message as handled, so it announces and
+  serves it to peers that ask exactly as before. Nothing on the wire changes. To restore the old
+  behavior, set `relay_second_copy_priority_only` to `false` in `MM2.json`. Detail: PR #178; CRD
+  ch.32 R-F3b, D11.
 - **A node no longer drops a market maker's whole order book when only the maker's keep-alives are
   delayed.** A maker's order book is kept for as long as either its keep-alives or its order
   messages (an order created, updated or cancelled) keep arriving; before, only keep-alives counted,
@@ -450,20 +460,20 @@ it and, where one exists, the CRD rule, for readers who want more.
   gossip messages waiting to be sent to one peer is now capped at 2,048 messages or 4 MiB, whichever
   comes first. When a message does not fit, the oldest waiting messages toward that peer are dropped,
   so a peer that catches up keeps the newest; other peers are not affected, and the keep-alive
-  exchange repairs what a dropped message carried. A peer is disconnected, on every connection it holds
-  to the node, when it stays at the limit for a full minute or loses at least a quarter of the messages
-  sent to it in each of three minutes in a row. It resynchronizes when it reconnects. Seeds usually hold
-  two connections to each other, and closing only one used to move the backlog onto the other. A node
-  closes at most one of its relays this way within 30 seconds, and never one that would leave it with
-  fewer than two; meanwhile that relay's queue keeps dropping its oldest messages. A peer that keeps up
-  never reaches the limit.
+  exchange repairs what a dropped message carried. A peer is disconnected, on every connection it
+  holds to the node, when it stays at the limit for a full minute or loses at least a quarter of the
+  messages sent to it in each of three minutes in a row. It resynchronizes when it reconnects. Seeds
+  usually hold two connections to each other, and closing only one used to move the backlog onto the
+  other. A node closes at most one of its relays this way within 30 seconds, and never one that
+  would leave it with fewer than two; meanwhile that relay's queue keeps dropping its oldest
+  messages. A peer that keeps up never reaches the limit.
   Messages are also sent in the order they were queued, where a backlog used to go out newest first.
   The first drop toward a peer logs one warning with its peer ID, then at most one summary line per
   minute. Cancellations and swap negotiation messages go out ahead of the others, through a lane of
   256 messages per connection; when more of them are waiting, the rest join the end of the normal
   queue. They used to disconnect the peer, so a maker cancelling hundreds of orders at once cut a
   seed off from all its slower relays in the same second. Nothing new is sent on the wire. Detail:
-  PR #122, PR #175, PR #172; CRD ch.28 §28.9B, D8.
+  PR #122, PR #172, PR #175; CRD ch.28 §28.9B, D8.
 - **A seed or relay now gives back the memory a burst of order updates used.** Every order update a
   node applied left about 1.2 KB behind (the stored change history, replaced trie nodes, and
   bookkeeping), and none of it was released until the same order pair changed again, so a node that
