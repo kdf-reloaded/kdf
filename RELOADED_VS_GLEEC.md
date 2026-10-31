@@ -459,9 +459,9 @@ R46.2.4, ch.55 R55.4.6):
   project's divergence, and that alone is what the switch hands back to GLEEC
   KDF; the malformed `fork_id` above stays outside it under every setting.
 
-Eleven more behaviors, in the order book and its relaying, fee readings, Electrum and the shielded
-history, differ from GLEEC KDF by default, each with one top-level `MM2.json` switch. The value
-below gives the GLEEC-compatible behavior; the row of each switch in
+Twelve more behaviors, in the order book and its relaying, peer exchange, fee readings, Electrum
+and the shielded history, differ from GLEEC KDF by default, each with one top-level `MM2.json`
+switch. The value below gives the GLEEC-compatible behavior; the row of each switch in
 [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) gives the full detail:
 
 - `pre_trade_spend_check: false` — no pre-trade spend check.
@@ -480,13 +480,16 @@ below gives the GLEEC-compatible behavior; the row of each switch in
   maker's next keep-alive.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
+- `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is
+  skipped without a lookup, and this node's answers give a peer it dialed under the dialed address,
+  hostnames included.
 - `shielded_history_unmined_sends: false` — an own ARRR send is listed in the history only once
   mined.
 - `suppress_unchanged_order_updates: false` — every `update_maker_order` is broadcast, as the GPLv2
   baseline does; what GLEEC KDF does here is not established.
 
-A twelfth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`: every
-maker-order message is published at once, and `true` turns on the maker's rate control.
+A thirteenth switch, `maker_update_coalescing`, already defaults to the GLEEC-compatible `false`:
+every maker-order message is published at once, and `true` turns on the maker's rate control.
 
 ## Detail sections
 

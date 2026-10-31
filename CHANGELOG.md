@@ -125,6 +125,24 @@ it and, where one exists, the CRD rule, for readers who want more.
   error from the peer, a timeout, a lost connection or an answer it could not read. At debug level
   each request and answer gets one line, with the peer, the maker, the pairs and the time taken.
   Nothing is logged when all went well, and nothing changes on the wire. Detail: PR #179.
+- **Peer exchange now also uses seeds that other peers hand out by name.** Nodes ask each other for
+  peer addresses every five minutes. Some peers that do not run Reloaded give a seed by its
+  hostname, such as `/dns/seed02.kmdefi.net/tcp/42845`, instead of its IP address.
+  - **Lookups.** Reloaded now looks such a name up through the operating system's resolver, one
+    name at a time and away from the network task. It keeps the result only if it is a public
+    IPv4 address, and stores that address, never the name.
+  - **How often.** A name is looked up at most once per 30 minutes, and not at all while the node
+    is connected to that peer. When a seed moves to a new IP address, the next lookup replaces the
+    old one.
+  - **Reloaded's own answers.** They now carry only public IPv4 addresses. Nodes that drop a whole
+    list for one hostname therefore keep Reloaded's lists.
+  - **Switch.** `"p2p_resolve_peer_hostnames": false` in MM2.json turns the lookups and the
+    filtered answers off, as GLEEC KDF behaves.
+  - **Tests.** In a private test network, `"p2p_allow_private_addresses": true` in MM2.json accepts
+    private addresses as well; the node then warns at start-up that the setting is not for
+    production.
+
+  More in [`NETWORK_CONFIG`](docs/NETWORK_CONFIG.md). Detail: CRD ch.28 R8c items 7 to 10.
 
 #### Order posting, fees and balances
 
@@ -503,7 +521,8 @@ it and, where one exists, the CRD rule, for readers who want more.
   they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the
   whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
   it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
-  network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
+  network's port; a hostname is now looked up first (see "Peer exchange now also uses seeds that
+  other peers hand out by name" under Changed). A skipped address is logged
   once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
   other peers hand back to it, and it drops a stored address when a dial of it reaches a different
   peer. Detail: PR #170, PR #176; CRD ch.28 R8c.

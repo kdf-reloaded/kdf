@@ -119,6 +119,53 @@ the `"seednodes"` field in MM2.json, or run the node as a seed itself (`"i_am_se
 If `"seednodes"` is omitted and `"i_am_seed"` is not set, the node will start
 but will not be able to discover peers until it receives incoming connections.
 
+### Hostnames from Other Peers
+
+Nodes ask each other for peer addresses every five minutes, and some peers give a seed by its
+hostname instead of its IP address. KDF Reloaded looks such a name up through the operating
+system's resolver. It does at most one lookup at a time, looks the same name up at most once per
+30 minutes, and does no lookup while it is connected to that peer. It keeps the result only if it
+is a public IPv4 address on the network's port (see below for tests), and stores the address,
+never the name. Its own answers to other peers carry only such addresses. To turn this off, set:
+
+```json
+{
+  "p2p_resolve_peer_hostnames": false,
+  ...
+}
+```
+
+The node then skips every hostname a peer gives, without a lookup, and its own answers give each
+peer it dialed under the address it dialed, hostnames included.
+
+> **Compatibility:** for behavior matching GLEEC KDF (and the upstream pre-divergence Komodo DeFi
+> Framework), set this to `false`. *(GLEEC KDF never looks up a hostname it receives from a
+> peer.)*
+
+### Private Addresses (Tests Only)
+
+By default, a node keeps a peer address it learns from another peer only if it is a public IPv4
+address on the network's port. For a test network where every node has a private address, set:
+
+```json
+{
+  "p2p_allow_private_addresses": true,
+  ...
+}
+```
+
+The node then also keeps private, loopback and link-local IPv4 addresses, including those that a
+hostname resolves to, and logs a warning at start-up. Do not use this setting in production.
+
+> **Compatibility:** GLEEC KDF has no equivalent. Leave at the default to retain GLEEC-equivalent
+> behavior.
+
+Two resolvers are involved:
+- **Hostnames that other peers hand out** are looked up through the operating system's resolver,
+  so `/etc/hosts` entries and a local DNS server both work.
+- **Hostnames in `"seednodes"`** are resolved by the network transport through a fixed public
+  resolver. That resolver honors `/etc/hosts`, but not a local DNS server.
+
 ## Adding a New Network
 
 1. Create `mm2src/mm2_net_config/src/netid_XXXX.rs`

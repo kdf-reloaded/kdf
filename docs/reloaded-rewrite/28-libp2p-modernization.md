@@ -245,13 +245,16 @@ length-prefixed libp2p request-response frame whose payload is msgpack
 maximum accepted or emitted frame payload is `1024 * 1024 - 100` bytes.
 
 **R8c. Received peer addresses (Reloaded-original, maintainer decision
-2026-10-30).** A node accepts a peer address it received from another
-peer only in the form `/ip4/<address>/tcp/<port>`. That holds for an
-address in a peer-exchange answer and for one in a peers-topic
-announcement. The address MUST be globally routable (the
-`ip_helpers::is_global` predicate of R24), and the port MUST be the
-network's TCP port. Every other form is not accepted, the hostname form
-`/dns/...` included, and the node makes no name lookup for it.
+2026-10-30; amended 2026-10-31).** A node accepts a peer address it
+received from another peer only in the form `/ip4/<address>/tcp/<port>`.
+That holds for an address in a peer-exchange answer and for one in a
+peers-topic announcement. The address MUST be globally routable (the
+`ip_helpers::is_global` predicate of R24, unless item 8 is set), and the
+port MUST be the network's TCP port. Every other form is not accepted,
+with one exception: a native build looks up a hostname in a
+peer-exchange answer under item 7 and stores the addresses it resolves
+to, unless item 10 turns that off. The node makes no other name lookup
+for a received address.
 
 1. **Per address.** The node skips an address it does not accept and
    keeps the other addresses of the same answer or announcement. It
@@ -274,6 +277,71 @@ network's TCP port. Every other form is not accepted, the hostname form
    the node removes that address from A's entry, and forgets A when no
    address is left. It does not store the address under the peer that
    answered.
+7. **Hostnames in answers** *(added 2026-10-31, maintainer decision
+   BH; a Reloaded-only extension: the reference rows keep no received
+   hostname, see the note after the rationale).* On a native
+   build, an address `/dns/<name>/tcp/<port>` or
+   `/dns4/<name>/tcp/<port>` in a peer-exchange answer, with the
+   network's TCP port, is queued for a lookup under the entry's peer ID
+   instead of being skipped. The node still skips `/dns6` and
+   `/dnsaddr`, a hostname with another port, and every hostname in a
+   peers-topic announcement. A browser build skips every hostname.
+   1. **When it looks up.** The node processes the accepted addresses
+      of an answer before its hostnames. It makes no lookup while it is
+      connected to the entry's peer. Otherwise it looks up the same name
+      at most once per 30 minutes.
+   2. **How it looks up.** The lookup goes through the operating
+      system's resolver on a blocking worker thread, never on the
+      swarm's own task.
+      - At most one lookup runs at a time. The next one starts only when
+        the previous one has returned, even if its result was given up.
+      - A lookup that has not returned within 5 s stores nothing.
+      - The queue holds at most 64 names. A name that finds it full is
+        dropped and logged at DEBUG.
+      - While the queue is empty, no lookup, timer or worker is pending.
+   3. **Resolve, then check.** Each IPv4 result becomes
+      `/ip4/<address>/tcp/<port>` and goes through the same check as a
+      received address. The node stores an accepted one under the
+      entry's peer ID, exactly like an accepted received address, and
+      ignores IPv6 results. Items 5 and 6 apply to resolved addresses
+      unchanged.
+   4. **Names are never stored.** The node keeps no received hostname
+      in a peer entry, so it never hands one out as a stored address.
+   5. **Per-name record.** For at most 64 names, the node keeps the
+      entry's peer ID, the time of the last lookup and the addresses
+      that lookup stored.
+      - A later lookup of the same name adds the new addresses. It
+        removes from that peer's entry the addresses the name stored
+        before and no longer returns.
+      - When the record is full, the oldest entry is dropped.
+      - The record is never handed out.
+   6. **Reporting.** A hostname that is dropped from a full queue,
+      whose lookup fails or times out, or that resolves to no accepted
+      address is reported under item 4, with that reason.
+8. **Private addresses for tests** *(added 2026-10-31, decision BH).* The
+   configuration flag `p2p_allow_private_addresses` (default `false`)
+   makes the check of this requirement accept any IPv4 address with the
+   network's TCP port, routable or not. That applies to received and to
+   resolved addresses. When the flag is `true`, the node logs a WARN line
+   at start-up saying that the setting is not for production. The flag
+   does not change the listener announcement of R24.
+9. **Answers this node gives** *(added 2026-10-31, decision BH).* An
+   answer this node gives carries, for each entry, only addresses in the
+   accepted form of this requirement. The address of a connection this
+   node dialed by hostname is left out, and so is an entry left with no
+   address. *(The reference rows hand out a connection's dialed address
+   as written before resolution, and so did Reloaded before this item:
+   the note after the rationale, item 2. A reference receiver drops a
+   whole answer that holds a hostname and forgets the sender: the same
+   note, item 3. This item is a Reloaded-only divergence that changes
+   no wire shape.)*
+10. **Opt-back switch** *(added 2026-10-31, decision BH).* Items 7
+    and 9 diverge from the reference rows, so they come with a way back
+    (`docs/COMPAT_SWITCHES.md`). The top-level configuration flag
+    `p2p_resolve_peer_hostnames` defaults to `true`. With `false`, the
+    node skips every received hostname without a lookup, and its answers
+    hand out a dialed connection's address as the reference rows do.
+    Items 1 to 6 and 8 hold either way.
 
 *Rationale.* A peer that does not run Reloaded may hand out the hostname
 under which it dialed a seed. Rejecting a whole answer for one such
@@ -282,6 +350,197 @@ working peer from the exchange. A hostname from a peer is still not
 accepted, because it can resolve to an address that is not globally
 routable, which R24 keeps out. It would also let a remote peer choose
 the names this node looks up.
+
+*Amended rationale (2026-10-31, decision BH).* The maintainer chose to
+look these hostnames up after all, so that a node also reaches seeds
+that other peers hand out only by name. Item 9 keeps this node's own
+answers acceptable to every receiver. Item 7 keeps the two risks above out:
+- **Routability.** The resolved address goes through the same check as
+  a received address, so a name cannot steer the node to an address
+  that is not globally routable.
+- **Re-pointing.** Only the checked address is stored and dialed,
+  never the name, so a later change of the name's records cannot
+  re-point the node either.
+- **Stalls and rate.** The lookup runs off the swarm's task, one at a
+  time, from a bounded queue, so a remote peer can neither stall the
+  node nor make it look names up at a high rate.
+- **Source.** Only names in an answer to this node's own request are
+  looked up.
+
+What remains is that whoever runs a name's DNS servers can learn that
+some node looked it up. Dialing a peer-supplied IPv4 address already
+tells that peer more.
+
+> **Reference behavior for received hostnames (informative; added
+> 2026-10-31).** *(Authored by the KDF Spec Reader on 2026-10-31 from
+> the rows `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A and
+> from the public libraries both rows pin. Cleared by a KDF Dirty Gate
+> pass on 2026-10-31, §28.14.)* This note records what a reference
+> node does. It changes nothing in R8c. Both rows behave the same in
+> everything below, with one exception. A received announcement is
+> ignored on each row's own default netid: 8762 at `v2.6.0-beta`,
+> 6133 at `v3.0.0-beta`. `v3.0.0-beta` does not start on netid 8762
+> at all (chapter 06 §6.6A.6 L1, L2).
+>
+> 1. **Own announcement.** Only a relay (seed) node builds one. A
+>    client never does. The announcement carries at most **one**
+>    address: one of the node's own listen addresses whose IPv4
+>    component is globally routable. No hostname goes into it, no
+>    external or observed address, and no port filter is applied. A
+>    relay listens on one IP: the IP its operator configured, or else
+>    the external IPv4 reported by public what-is-my-IP web services,
+>    if the node can bind on it. If it cannot, the relay listens on all
+>    interfaces, and its listen addresses are then its interface
+>    addresses. The announcement is built 60 s after start and every
+>    600 s after that, as a msgpack set of multiaddrs on the peers
+>    topic (R6). So a seed operated by hostname puts in its public
+>    IPv4 with the TCP port if it listens on that IPv4. It puts in
+>    nothing if it sits behind NAT, and it never puts in its hostname.
+>    With a secure-websocket listener configured, the one address may
+>    be that listener's instead, which no receiver accepts (item 3).
+>    **As read, the announcement reaches no peer at either row.** The
+>    floodsub library sends a message, and the node's own
+>    subscription, only to the peers the application has put on its
+>    propagation list, and neither row puts any peer there. A reference
+>    node therefore sends no peers-topic traffic.
+> 2. **Answers it gives.** A reference node answers with up to the
+>    requested number of entries (at most 20, R8). It picks them at
+>    random among the peers it knows that have at least one address,
+>    and gives every address it holds for each one. It holds addresses
+>    from three sources:
+>    - addresses it accepted from answers (item 3);
+>    - addresses it accepted from announcements (item 3; on the rows'
+>      default netids there are none);
+>    - for a peer it is connected to over a connection **it dialed**,
+>      the address it dialed, as written before name resolution. A
+>      dial made to a known peer's ID carries that peer ID as a
+>      trailing `/p2p/...` component.
+>
+>    Every connected relay joins the known peers at each 30 s
+>    maintenance tick. So a seed the node dialed by hostname is handed
+>    out as `/dns/<name>/tcp/<port>` for as long as that connection
+>    lasts. The address of a peer that dialed this node is not
+>    recorded and is not handed out. Nothing is filtered on the way
+>    out: there is no form, routability or port check, and neither the
+>    node's own entry nor the requester's is excluded.
+> 3. **Addresses it receives.** An address is accepted only when its
+>    first component is `/ip4` with a globally routable address and its
+>    second is `/tcp` with the network's TCP port. Components after the
+>    second are not examined. Addresses in the `/dns`, `/dns4`,
+>    `/dns6`, `/dnsaddr` and `/ip6` forms are rejected, and so are
+>    non-global `/ip4` addresses and other ports.
+>    - *Answers are all-or-nothing.* The whole answer is dropped if it
+>      is empty, has more than 20 entries, has an entry with no
+>      address, or has a single rejected address. The sender is then
+>      forgotten, together with the addresses held for it, and another
+>      known peer is asked.
+>    - *Announcements are all-or-nothing as well,* but the sender is
+>      not forgotten. An announcement is processed only on a netid
+>      other than the row's default netid.
+>    - *No received hostname is resolved.* A received hostname is never
+>      kept, so a reference node never resolves one, at receipt or at
+>      dial. No resolved received address exists to be filtered.
+> 4. **Dialing hostnames.** The only hostname addresses a reference
+>    node dials are its configured seed entries (item 5). The DNS
+>    transport resolves the name when the dial is made. It asks a fixed
+>    public resolver (Google Public DNS), not the servers the operating
+>    system is configured with, and uses the resolver library's default
+>    options: a 32-entry cache that honors record lifetimes, and, for
+>    `/dns`, IPv4 first and IPv6 only when there is no IPv4 record.
+>    Every resolved address is tried in turn until one connects. No
+>    routability or private-range check is made on a resolved address.
+>    The limits are these:
+>    - each seed address, as written, is dialed at most once per
+>      5 minutes;
+>    - at start-up at most `mesh_n` seeds are dialed, chosen at random,
+>      all at once;
+>    - after start-up, seeds are dialed only from the 30 s maintenance,
+>      and only when known peers do not fill the shortfall (RQ1a
+>      item 4);
+>    - on each dial, the transport library caps the number of lookups
+>      and connection attempts.
+>
+>    No limit on names exists per answer, per peer or per unit of time,
+>    because no received name is kept.
+> 5. **Configured seeds.** Neither row compiles in a seed list. The
+>    list comes only from the operator's `seednodes` (chapter 06 §6.5,
+>    the divergence note). Each entry is a bare IPv4 literal or a
+>    lower-case DNS name. It is mapped to `/ip4/<ip>/tcp/<tcp port>` or
+>    to `/dns/<name>/tcp/<tcp port>`; a browser build uses the
+>    secure-websocket port with `/wss` instead. A full multiaddr is not
+>    accepted, so R21's operator multiaddr forms are a Reloaded
+>    extension. The seed list distributed for clients in the public
+>    coins-configuration repository held only hostnames for netid 8762
+>    at the `v2.6.0-beta` date. Today it holds only hostnames for netid
+>    6133. A configured hostname is dialed through the transport's
+>    resolution of item 4.
+> 6. **Other behavior that limits discovery.**
+>    - *Hostnames break reference-to-reference exchange.* Where the
+>      configured seeds are hostnames, as in the distributed list, an
+>      answer from a node connected to such a seed carries a hostname
+>      whenever that seed is among the chosen entries (item 2). A
+>      reference receiver then drops the whole answer and forgets the
+>      sender (item 3). Reference-to-reference exchange therefore keeps
+>      only the answers whose chosen entries include no seed dialed by
+>      hostname.
+>    - *Failed requests.* A timeout, or an asked peer that does not
+>      support the protocol, also makes the node forget that peer and
+>      ask another. Connected relays rejoin the known peers at the next
+>      30 s tick, so a forgotten relay is back within 30 s while its
+>      connection lasts.
+>    - *Cap and deduplication.* The known peers are capped at 100. At
+>      every 300 s request tick (the first at 20 s, R23), the excess is
+>      removed at random, together with the addresses held for it.
+>      Between ticks, accepted answers may exceed the cap. An address
+>      already held for a peer is not added twice. An entry's address
+>      count has no limit other than the frame size of R8b.
+>    - *Which peer is asked, and how it is dialed.* The periodic request
+>      goes to a random known peer, connected or not. To reach one that
+>      is not connected, the request layer dials it by peer ID at its
+>      held addresses, so a held address that now serves another peer
+>      fails there. Relay maintenance instead dials held addresses
+>      without an expected peer ID. A connection that reaches another
+>      peer is kept as a connection to that peer, and the address stays
+>      under the original entry (compare R8c item 6). Maintenance dials
+>      every held address of a chosen peer except one it is already
+>      connected to.
+>    - *Own identity.* No entry is refused for naming the node's own
+>      peer ID (compare R8c item 5). The transport library skips a dial
+>      to an address equal to one of the node's own listen addresses,
+>      and refuses a connection that reaches the node's own identity.
+>
+> *Code-quality findings (informative).* Each was apparent from
+> reading the reference and this repository side by side.
+> (a) *Inert announcement.* As read on 2026-10-31, this repository
+> uses the same floodsub library the same way and puts no peer on its
+> propagation list either, so its own announcement reaches no peer.
+> R8c's announcement clause and the announcement bullet of T6a
+> therefore cover a path that no peer of either implementation feeds.
+> Proposal: keep the path for parity and confirm the absence of
+> peers-topic traffic in the lab. Filling the list would be a
+> Reloaded-only wire extension, and reference nodes on their default
+> netids would ignore it.
+> (b) *Routability predicate.* The reference treats all of
+> 0.0.0.0/8 as not global and treats 192.0.0.9 and 192.0.0.10 as
+> global, as the IANA special-purpose registry marks them. This
+> repository's predicate of R24 treats only 0.0.0.0 in that block as
+> not global, and treats all of 192.0.0.0/24 as not global. Proposal:
+> align both ranges with the reference.
+> (c) *Trailing components.* R8c's wording admits only the exact form
+> `/ip4/<address>/tcp/<port>`. The reference, and this repository's
+> check as read on 2026-10-31, examine only the first two components.
+> Reference answers do carry the trailing `/p2p/...` form of item 2.
+> Proposal: word R8c by its first two components, which matches the
+> reference, or decide deliberately to reject a trailing component.
+> (d) *Periodic request target.* R23 item 3 sends the periodic request
+> to a random connected relay. Both rows and this repository pick a
+> random known peer instead (item 6). Proposal: amend the wording of
+> R23 item 3.
+>
+> *Open question.* The statement that a reference node sends no
+> peers-topic traffic rests on reading at both rows, not on
+> observation. A lab capture of a reference relay's traffic would
+> confirm it.
 
 **R9.** The ping wrapper MUST disconnect a peer after a bounded number
 of consecutive ping failures (the exact count is a substrate-internal
@@ -943,16 +1202,18 @@ both rows.
    watermark of R13 (2 for a client, 4 for a relay). It then dials up to
    `mesh_n` minus that count candidates: first peers chosen at random
    from its known-peer list (addresses learned through peer exchange,
-   R8, and through the relays' periodic address announcements on the
-   peers topic, R6), then, if those are too few, addresses chosen at
+   R8; the peers-topic announcement of R6 adds none, see the note after
+   R8c), then, if those are too few, addresses chosen at
    random from its configured bootstrap list (R23); in both sets it
    skips an address it is already connected to or dialed within the last
    5 minutes. The earliest redial of R is therefore the first tick at
    which X is both short of relays and past the 5-minute mark for R's
    address; a connection that lasted less than 5 minutes delays the
    redial to that mark; and an X that still has enough relays never
-   redials R on its own. R redials X only if X is a relay with an
-   announced address: clients are never dialed.
+   redials R on its own. R redials X only if X is a relay whose listen
+   address R holds (R8, R23): clients are never dialed. *(Two phrases
+   of this item corrected 2026-10-31 and cleared by a KDF Dirty Gate
+   pass the same day, §28.14.)*
 5. **After reconnecting, only the gossip handshake and the clock
    check.** On the first new connection to R, X sends -- once -- either
    its relay notice (R12, if X is a relay) or one subscription for every
@@ -1131,6 +1392,32 @@ when `num > 20`, the responder MUST omit the response.
   carries this node's own peer ID stores nothing for it, and relay
   maintenance never dials it. A dial of A's address that reaches peer B
   removes the address from A's entry and stores nothing for B.
+- *(Added 2026-10-31, items 7 to 10.)* With an injected resolver:
+  - A `/dns` or `/dns4` name with the network's port that resolves to a
+    global IPv4 address is stored as `/ip4/<address>/tcp/<port>` under
+    the entry's peer ID. The name itself is not stored.
+  - A name that resolves to a private, loopback or link-local address
+    stores nothing and is reported with that reason. With
+    `p2p_allow_private_addresses` set to `true` it is stored, and so is
+    a received private `/ip4` address.
+  - `/dns6`, `/dnsaddr`, a hostname with another port and a hostname in
+    a peers-topic announcement are skipped without a lookup.
+  - No lookup is made while the entry's peer is connected. A second
+    sighting of the same name within 30 minutes makes no second lookup.
+  - A later lookup that returns a different address adds it and removes
+    the address the same name stored before.
+  - The queue holds 64 names, and a 65th is dropped.
+  - Lookups run one at a time. A lookup that times out stores nothing,
+    and the next one starts only after it has returned.
+  - With an empty queue, no lookup, timer or worker is pending.
+  - An entry that names this node's own peer ID causes no lookup.
+  - A browser build skips every hostname.
+  - An answer this node gives carries no hostname, including for a peer
+    connected through a dialed hostname, and no address outside the
+    accepted form. An entry left with no address is left out.
+  - With `p2p_resolve_peer_hostnames` set to `false`, no hostname is
+    looked up, and an answer this node gives carries a dialed
+    connection's address, as it did before item 9.
 
 **T7.** *Empty bootstrap list.* A client spawned with no bootstrap
 relays MUST start without a fatal P2P initialisation error, keep an
@@ -1245,6 +1532,24 @@ AY), pre-beta: adopted, together with the repeated-drops criterion of
 RQ1 item 5. A swaplab run gates the merge.* *Amended 2026-10-30 (decision
 AY): a guard holds back the close of a relay when another relay was
 closed within 30 s or fewer than 2 would remain (RQ1 item 5, T-RQ1.12).*
+
+**D9.** *Peer-address follow-ups (deferred to after the beta; added
+2026-10-31, maintainer decision BH).*
+- **Asynchronous lookups.** An asynchronous, spaced lookup loop in place
+  of the blocking worker of R8c item 7.
+- **Transport resolver.** The transport dials configured hostnames
+  through a fixed public resolver. A security evaluation should compare
+  that with the system's resolver, possibly adding a compatibility
+  switch that defaults to the fixed resolver. This is an evaluation, not
+  a decision.
+- **Skip logging.** R8c item 4 logs each skipped address at DEBUG and adds
+  one INFO summary per hour, with counts per form.
+- **Findings of the note after R8c's rationale:**
+  - (b) align the routability ranges of R24 with the reference;
+  - (c) word R8c by an address's first two components;
+  - (d) correct the request target in R23 item 3.
+- **Idle-close logging.** An idle close of a relay connection outside
+  this node's relay mesh is logged at INFO.
 
 ## 28.11A Open Questions
 
@@ -1511,3 +1816,60 @@ hardening carried by the pinned fork).
   under another peer ID. *Inputs:* that log and this repository's own
   peer-exchange and relay-maintenance code only. The forbidden corpus
   was not consulted, and the addition needs no Dirty Gate pass.
+- *Scoped addition (2026-10-31, KDF Spec Reader) -- the note
+  "Reference behavior for received hostnames" after the R8c rationale,
+  and the matching correction of two phrases in RQ1a item 4.* It was
+  prompted by the maintainer's pending decision on whether to accept
+  hostname addresses received from peers. It is informative; R8c's
+  normative text is unchanged.
+  - *Inputs:* the forbidden corpus at the rows `v2.6.0-beta` and
+    `v3.0.0-beta` of chapter 02 §2.15A. Seven source files were read
+    at each row: the composed peer-to-peer behavior, the peer-exchange
+    behavior, the seed-address parsing, the daemon's network start-up,
+    its own-address detection and routability helper, the context's
+    network flags, and the statistics peer registration. The inter-row
+    diff was taken. The only difference in any respect taken is the
+    default-netid value and the refused-netid list (chapter 06
+    §6.6A.6). Also read, as permitted public sources and not
+    forbidden-class material:
+    - the libp2p fork both rows pin, for its floodsub, request-response,
+      swarm, DNS and TCP crates;
+    - the public DNS resolver library both rows pin, for its default
+      options;
+    - the public coins-configuration repository's seed-node list, at
+      its last change before the `v2.6.0-beta` date and at its state
+      on 2026-10-26.
+
+    This repository's own peer-exchange behavior, composed behavior
+    and routability helper (three files) were also read, for the
+    findings.
+  - *Method:* reading of the compared regions plus the inter-row
+    diff. The mechanical gate tool was not run (prose). No private
+    identifier, function body, helper decomposition, log or error
+    literal was reproduced. The only literals the note carries are
+    public multiaddr protocol names, numeric values a peer can observe
+    in timing or in sizes, and public library defaults.
+  - *Clearance:* a KDF Dirty Gate pass on 2026-10-31 cleared the
+    note, the RQ1a item 4 correction (a re-clearance of the item
+    cleared on 2026-10-30) and this bullet. *Extent:* the reference's
+    address handling in the peer-to-peer subsystem at both rows: peer
+    exchange, the composed behavior, the peers-topic announcement,
+    seed configuration and dialing, own-address detection and the
+    routability predicate, node-role flags, and relay-maintenance
+    redial. *Method:* reading, mechanical extraction of every
+    backticked and identifier-shaped token in the added lines tested
+    against both rows, and a word 4-gram overlap; the mechanical gate
+    tool was not run (prose). *Measure:* 0.02 against the 0.10
+    threshold. The clearance is complete and not pending.
+- *Scoped amendment (2026-10-31) -- R8c amended opening paragraph,
+  items 7 to 10 and amended rationale, T6a's bullet for items 7 to 9,
+  and D9.* Reloaded-original, maintainer decision BH of 2026-10-31.
+  - *Inputs:*
+    - the gated note above, for every reference fact;
+    - this repository's peer-exchange behavior, request layer, composed
+      behavior and swarm runtime;
+    - the public libp2p fork's request-response crate;
+    - a 25-minute run of a Reloaded node on the public netid-8762
+      network on 2026-10-31.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
