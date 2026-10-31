@@ -190,6 +190,21 @@ costs an open inbound stream, not send-queue space.
 
 ## (b) Short requester retry (not recommended now)
 
+> **Shipped as a variant (2026-10-30, Decision AX, PR #173).** On the public
+> network (a) alone left one case open: when a relay's own request fails at
+> once, typically because the peer it asked is a relay still synchronizing the
+> same pair, the relay answers every held request with the placeholder error
+> until the maker's next keep-alive. Ch.32 R-Q5c now has our node ask the same
+> peer once more. It differs from the option below:
+> - the pause is 1 s (`sync_request_retry_ms`; `0` turns it off), not 2–5 s
+>   with jitter;
+> - it also follows "no data" and a transport failure, but never a timeout;
+> - it asks only while the second answer can still arrive within the R-Q5b
+>   bound, and only for the pairs still at the placeholder;
+> - the requests held under (a) wait for the second answer.
+>
+> The text below is the original assessment, kept as the record.
+
 **What it would do.** After a failed keep-alive sync, our node would ask the
 same peer once more after 2–5 s with jitter, but only for the race classes:
 - a placeholder root;

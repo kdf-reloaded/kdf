@@ -97,15 +97,6 @@ it and, where one exists, the CRD rule, for readers who want more.
   answered as before, but no message goes out, so the network carries only real changes. Set the
   `MM2.json` boolean `suppress_unchanged_order_updates` to `false` to broadcast every update again.
   Detail: PR #111; CRD ch.59 R59.4.6.
-- **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
-  addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
-  they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the
-  whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
-  it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
-  network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
-  once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
-  other peers hand back to it, and it drops a stored address when a dial of it reaches a different
-  peer. Detail: PR #170, PR #176; CRD ch.28 R8c.
 - **Quieter peer-to-peer logs on seeds and relays under load.** Warnings that report expected
   conditions, not faults, are now lower or summarized:
   - "Message not in cache" is now debug. It meant a relay's second copy of a message came too late;
@@ -507,6 +498,15 @@ it and, where one exists, the CRD rule, for readers who want more.
   `orderbook.history.evicted`. More in
   [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md). Detail:
   PR #164; CRD ch.32 R-K5, R-K6.
+- **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
+  addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
+  they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the
+  whole list for one such entry and stop asking the peer that sent it. It now skips only the entries
+  it does not accept and keeps the peer. It still accepts only a public IPv4 address with the
+  network's port, and it never looks up a hostname it got from a peer. A skipped address is logged
+  once at info level, then at debug level. A node also no longer keeps or dials its own entry, which
+  other peers hand back to it, and it drops a stored address when a dial of it reaches a different
+  peer. Detail: PR #170, PR #176; CRD ch.28 R8c.
 
 #### Orders, swaps and activation (all coins)
 
@@ -848,7 +848,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   its broadcast was refused. A withdrawal's spend is now remembered once its broadcast is accepted,
   so the next withdrawal skips those coins and may spend the change. A withdrawal that is never
   broadcast, or whose broadcast is refused, hides nothing. Two withdrawals both built before the
-  first is broadcast still pick the same coins. Detail: CRD ch.38 R38.5B.9.
+  first is broadcast still pick the same coins. Detail: PR #181; CRD ch.38 R38.5B.9.
 
 #### Logs and error texts
 
@@ -1041,8 +1041,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   keeps at most 2,048 changes per maker and pair (PR #164); one open point on the early purge is
   left.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — new, in progress: a maker's
-  order messages keep its book alive (PR #132) and a relay holds a sync answer while it catches up
-  (PR #135); a lab run is left.
+  order messages keep its book alive (PR #132), a relay holds a sync answer while it catches up
+  (PR #135), and a variant of the short retry the plan did not recommend shipped as a second sync
+  request after a quick failure (PR #173); a lab run is left.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — parked: given a status
   header; the analysis is unchanged.
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — new, parked: the
@@ -1093,6 +1094,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   T9–T10 shipped; T8 is deferred and T11–T13 are queued.
 - [`walletconnect-fork-upgrade`](docs/plans/walletconnect-fork-upgrade.md) — new and superseded: a
   `[patch]` onto upstream `tokio-tungstenite-wasm` 0.4.0 replaced the fork bump (PR #40).
+- [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md) — new,
+  planning for after the beta: a withdrawal's recorded spend would expire after a multiple of the
+  chain's real block time, and the record would be kept per address for HD wallets (PR #180).
 
 ### Known limitations
 
@@ -1104,6 +1108,22 @@ lives.
   accepts one and rejects the other, and the instance that loses gets no explanation and may try
   again. KDF guards against this inside a single instance only; shielded coins such as ARRR are the
   known case. More in [`shielded-in-flight-note-locking`](docs/plans/shielded-in-flight-note-locking.md).
+- **A withdrawal that drops out of the mempool keeps its coins set aside until the coin is enabled
+  again or the node restarts.** Once a withdrawal's broadcast is accepted, the node no longer offers
+  the coins it spent, so the next withdrawal does not pick them again, and it offers the change
+  instead. If the transaction later leaves the mempool unconfirmed, for example because its fee was
+  too low or it was replaced, those coins stay set aside and its change stays offered, so a
+  withdrawal that picks that change can fail. Disabling and enabling the coin again, or restarting
+  the node, clears this. In an HD wallet, change that a withdrawal sends to another address of the
+  coin is offered only once the Electrum server lists it. More in
+  [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
+  Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
+- **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
+  when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
+  your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
+  BCH and QTUM) also no longer offer to watch other traders' swaps, because the checks a watcher
+  runs are not implemented for them; only Siacoin (SC) offers watching. Detail: PR #177; CRD ch.09
+  R17.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
@@ -1117,9 +1137,8 @@ lives.
 - **Siacoin (SC) swaps are not available.** Sending, receiving, the balance and the history work.
   Atomic swaps of SC are postponed until after the beta; the design is still a draft. More in the
   [Siacoin swap draft](docs/reloaded-rewrite/54-sia-swap-v2-path.md).
-- **Radiant (RXD) is only partly usable, and the swap watcher does not work yet.** RXD activates and
-  signs, but swaps with it are not established. The swap watcher, which finishes a swap for you when
-  you are offline, does not work yet (issue #56). More in
+- **Radiant (RXD) is only partly usable.** RXD activates and signs, but swaps with it are not
+  established. More in
   [`rxd-signature-version-support`](docs/plans/rxd-signature-version-support.md).
 - **TRON (TRX, TRC20) and Solana (SOL, SPL) cannot be activated in this beta.** Their support is not
   finished. TRON activation answers "TRON support is not available in this build";
