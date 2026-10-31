@@ -1288,6 +1288,29 @@ receiver neither depends on nor notices the second copy (R-F3c).
 > second copy of every message it forwards, as a reference relay does.
 > *(Added 2026-10-30, D11.)*
 
+> **Consequence for a relay's connections (informative; added 2026-10-31,
+> maintainer decision BF).** Two nodes that dial each other hold two
+> connections. The substrate offers each message for a peer to that
+> peer's connections in a fixed order of its own, not the order they were
+> established, and a later connection receives a message only when an
+> earlier one's command queue is full. Only the first connection
+> established to a peer that shares a topic mesh with the node is held
+> open regardless of traffic; any other connection that carries nothing
+> for the substrate's idle timeout (120 s) is closed. Under load, the
+> overflow of a relay that sends every message twice usually keeps such a
+> connection busy; with the second copy sent only for priority messages
+> the overflow is rare, and the close becomes common. On a quiet mesh,
+> where no topic mesh holds a connection open, a connection that neither
+> end sends on is closed the same way. While another connection remains,
+> the peer stays connected through it, and its mesh, relay-mesh and
+> connected-relay membership is unchanged (ch. 28 R27). A peer that
+> redials on its own schedule, or this node's relay maintenance while it
+> holds fewer relays than its low watermark, recreates the second
+> connection, so in a mixed mesh the close recurs every few minutes.
+> Reloaded logs such a close at INFO, as an idle connection closing, and
+> keeps the warning for the last connection to a peer and for every other
+> cause. Nothing on the wire changes.
+
 > **Consequence for the mesh (informative; rewritten in the second
 > pass).** Because a relay's first forward precedes its own handling, a
 > downstream peer that receives a keep-alive from relay S and finds a
@@ -2585,6 +2608,10 @@ D11. **Second copy only for priority messages (Reloaded-original;
     than the copy. Only a non-priority orderbook message is sent once
     (R-F3b as amended; T-F3d). The opt-back switch is
     `relay_second_copy_priority_only` (R-F3b).*
+    *Decision BF (2026-10-31): the idle close of a relay pair's second
+    connection, which the single copy makes common under load, is logged
+    at INFO (the note "Consequence for a relay's connections" under
+    R-F3b).*
 
 ## 32.11 External References
 
@@ -3144,3 +3171,10 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   *Inputs:* this repository's own relay dispatch and vendored gossipsub
   only. The forbidden corpus was not consulted for this amendment, and
   it needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-10-31) -- the note "Consequence for a relay's
+  connections" under §32.8 R-F3b and the Decision BF sentence of §32.10
+  D11.* Reloaded-original, maintainer decision BF of 2026-10-31.
+  *Inputs:* this repository's vendored gossipsub, the libp2p swarm it
+  runs on, the connection handling of `mm2_p2p`, and our own nodes' logs
+  from a lab run. The forbidden corpus was not consulted for this
+  amendment, and it needs no Dirty Gate pass of its own.

@@ -19,7 +19,7 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
+             swarm::{ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
              PeerId};
 use log::{debug, error, info, warn, Level};
 use rand::seq::SliceRandom;
@@ -972,6 +972,40 @@ fn dial_failure_keys(peer_id: Option<PeerId>, error: &DialError) -> Vec<DialFail
     keys
 }
 
+/// How a closed connection is logged.
+enum ConnectionClosedLog<'a, E> {
+    /// Closed without a cause: INFO, "closed cleanly".
+    Clean,
+    /// A surplus connection that idled out while the peer stays connected: INFO, "idle connection ... closed".
+    IdleDuplicate,
+    /// Closed with a cause that is a failure, or the last connection to the peer idled out: WARN. Carries the cause.
+    Error(&'a ConnectionError<E>),
+}
+
+/// Classifies a `SwarmEvent::ConnectionClosed` by the type of its cause and the connections left to the peer
+/// (CRD ch.32 R-F3b and D11, maintainer decision BF).
+///
+/// The swarm offers each gossipsub message for a peer to that peer's connections in a fixed order of its own, not the
+/// order they were established. A later connection receives a message only when an earlier one's command queue is
+/// full.
+///
+/// Only the first connection established to a mesh peer is held open regardless of traffic. Any other connection that
+/// carries nothing for gossipsub's idle timeout closes with [`ConnectionError::KeepAliveTimeout`], while the peer
+/// stays connected through the remaining one. Under load that happens mainly when the overflow that kept a
+/// connection busy goes away, which R-F3b as amended (D11) makes common. On a quiet mesh it happens whenever
+/// neither end sends on that connection.
+///
+/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`]. A
+/// keep-alive timeout of the last connection (`remaining == 0`), and every other cause, are
+/// [`ConnectionClosedLog::Error`], which carries the cause for the log line.
+fn connection_closed_log<E>(cause: Option<&ConnectionError<E>>, remaining: u32) -> ConnectionClosedLog<'_, E> {
+    match cause {
+        None => ConnectionClosedLog::Clean,
+        Some(ConnectionError::KeepAliveTimeout) if remaining > 0 => ConnectionClosedLog::IdleDuplicate,
+        Some(cause) => ConnectionClosedLog::Error(cause),
+    }
+}
+
 /// The source IP of an incoming connection, if its address carries one.
 fn source_ip(address: &Multiaddr) -> Option<IpAddr> {
     address.iter().find_map(|protocol| match protocol {
@@ -1038,12 +1072,16 @@ fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
             num_established,
             cause,
             ..
-        } => match cause {
-            Some(cause) => warn!(
+        } => match connection_closed_log(cause.as_ref(), *num_established) {
+            ConnectionClosedLog::IdleDuplicate => info!(
+                "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); remaining connections to peer: {}",
+                peer_id, endpoint, num_established
+            ),
+            ConnectionClosedLog::Error(cause) => warn!(
                 "P2P connection to peer {} via {:?} closed with error: {:?}; remaining connections to peer: {}",
                 peer_id, endpoint, cause, num_established
             ),
-            None => info!(
+            ConnectionClosedLog::Clean => info!(
                 "P2P connection to peer {} via {:?} closed cleanly; remaining connections to peer: {}",
                 peer_id, endpoint, num_established
             ),
@@ -1622,11 +1660,12 @@ mod application_tests {
 
 #[cfg(test)]
 mod connection_failure_log_tests {
-    use super::{dial_failure_keys, ConnectionFailureLog, ConnectionFailureLogs, DialFailureKey,
-                CONNECTION_FAILURE_LOG_INTERVAL, MAX_CONNECTION_FAILURE_LOG_KEYS};
+    use super::{connection_closed_log, dial_failure_keys, ConnectionClosedLog, ConnectionFailureLog,
+                ConnectionFailureLogs, DialFailureKey, CONNECTION_FAILURE_LOG_INTERVAL,
+                MAX_CONNECTION_FAILURE_LOG_KEYS};
     use libp2p::core::transport::TransportError;
     use libp2p::core::{ConnectedPoint, Endpoint, Multiaddr};
-    use libp2p::swarm::{DialError, ListenError};
+    use libp2p::swarm::{ConnectionError, DialError, ListenError};
     use libp2p::PeerId;
     use log::Level;
     use std::time::Duration;
@@ -1779,6 +1818,40 @@ mod connection_failure_log_tests {
                 Level::Warn
             );
         }
+    }
+
+    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection,
+    /// and every other cause, stay WARN and carry the cause printed as before; no cause is a clean close.
+    #[test]
+    fn connection_closed_is_classified_by_cause_type_and_remaining_connections() {
+        let timeout = ConnectionError::<()>::KeepAliveTimeout;
+        let io = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+        let handler = ConnectionError::Handler(());
+
+        assert!(matches!(
+            connection_closed_log(Some(&timeout), 1),
+            ConnectionClosedLog::IdleDuplicate
+        ));
+        match connection_closed_log(Some(&timeout), 0) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
+            _ => panic!("the last connection idling out must be a WARN"),
+        }
+        match connection_closed_log(Some(&io), 1) {
+            ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
+            _ => panic!("an IO error must be a WARN"),
+        }
+        match connection_closed_log(Some(&handler), 1) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
+            _ => panic!("a handler error must be a WARN"),
+        }
+        assert!(matches!(
+            connection_closed_log::<()>(None, 1),
+            ConnectionClosedLog::Clean
+        ));
+        assert!(matches!(
+            connection_closed_log::<()>(None, 0),
+            ConnectionClosedLog::Clean
+        ));
     }
 
     /// The remembered keys stay bounded: a full map is cleared.
