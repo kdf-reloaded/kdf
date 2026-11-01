@@ -6,8 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] — 2026-11-01
+
 Within each heading, entries are grouped by area. Each entry ends with the pull request that made
 it and, where one exists, the CRD rule, for readers who want more.
+
+### Highlights
+
+The most important changes of this release in short. Each item points to the detailed entry below.
+
+#### What is new
+
+- **Seeds and relays cope with slow peers, send each message once and use seeds handed out by
+  name.** PRs #122, #172, #178, #185.
+- **Seeds, relays and busy makers hold much less memory under heavy order traffic.** PRs #131,
+  #134, #137, #164, #190.
+- **Order posting is faster, with fewer Electrum and node requests.** PRs #114, #128, #154.
+- **Electrum servers are kept in priority order, recover and can be ranked by performance.**
+  PRs #104, #128, #144.
+- **ARRR swaps work on the Ironwood format, with refunds and recovery that hold up.** PRs #109,
+  #117, #130, #142, #146, #152.
+- **EVM swaps use the coins file's gas limits and typed transactions, and leave a dead node within
+  10 seconds.** PRs #24, #25, #90, #105, #107, #174.
+- **Trading floors and minimum volumes match the reference.** PRs #66, #72, #73.
+- **Radiant (RXD) signs with its own signature hash, and Siacoin withdrawals take a custom fee.**
+  PRs #65, #77.
+- **Logs hide node addresses and credentials, TLS moved to rustls 0.23, and releases ship the
+  license files.** PRs #36, #39, #40, #42, #161, #165.
+- **Compatibility switches restore GLEEC KDF behavior where KDF Reloaded differs.** More in
+  [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md).
+
+#### Major fixes
+
+- **A taker that falls back to a refund now takes the maker's coins** when the maker has already
+  claimed the taker's payment. PR #167.
+- **A swap that resumes after a restart no longer gives up on a payment it already sent.** PR #119.
+- **After a restart, the transaction history of UTXO coins no longer lists every earlier transaction
+  twice.** A history already doubled heals itself. PR #81.
+- **Swaps on merged-mined (AuxPoW) coins can be completed and refunded again**, and PIVX, LBRY (LBC),
+  RIC and MEWC swaps can complete. PRs #55, #62, #67, #82.
+- **ARRR wallets no longer wedge after a reorg of their scan tip** or pile up checkpoint backups when
+  their sync keeps failing. PRs #31, #150.
+- **A node no longer drops a market maker's whole order book when only its keep-alives are
+  delayed.** PR #132.
+- **Lighter networking and bookkeeping.** Gossip message ids use the compact form other KDF nodes use,
+  and a node no longer keeps memory for every swap it has ever run. PRs #99, #100.
+
+#### Warnings and gaps
+
+All of these are described under Known limitations below.
+
+- **Do not run two KDF instances on the same seed at the same time.**
+- **The swap watcher does not work yet**, so keep your node running until your swaps have finished.
+- **ARRR swaps work only between two KDF Reloaded nodes**, and shielded coins cannot be activated in
+  a browser (WASM) build.
+- **Siacoin (SC) swaps are not available, and Radiant (RXD) is only partly usable.**
+- **TRON and Solana cannot be activated in this beta**, and Tendermint (Cosmos) coins are wallet-only.
+- **Swaps of Monad tokens need a coins file from October 28, 2026 or later.**
+- **Withdrawals:** an explicit fixed fee can cost more than on Komodo or GLEEC KDF, and a withdrawal
+  that drops out of the mempool keeps its coins set aside until the coin is enabled again or the
+  node restarts.
+- **A maker that changes its orders many times a second can drop out of the order book of a relay
+  with a slow link.** The opt-in setting `maker_update_coalescing` keeps the orders visible.
+- **Other nodes can keep showing a cancelled order for a while** if its cancellation is lost on the
+  way; such an order cannot be traded.
 
 ### Added
 
@@ -67,7 +129,9 @@ it and, where one exists, the CRD rule, for readers who want more.
 - **A maker that changes its orders faster than its relays can take them can keep its order book
   (opt-in).** Every node drops a maker 90 seconds after its last keep-alive. A relay that reads
   slowly, for example on a busy host, used to leave the keep-alive stuck behind a pile of order
-  updates, so the book vanished on every node. This protection is **off by default** for now: set
+  updates, so the book vanished on every node. Since PR #132 a Reloaded node keeps the book while
+  the maker's order messages arrive; nodes running GLEEC KDF or Komodo do not. This protection is
+  **off by default** for now: set
   the `MM2.json` boolean `maker_update_coalescing` to `true` to turn it on (only a JSON `true`
   does). Without it, every order message is sent at once, as GLEEC KDF does. A field run showed
   that, in a network where relays and makers also run GLEEC KDF, held-back updates make peers ask
@@ -142,7 +206,8 @@ it and, where one exists, the CRD rule, for readers who want more.
     private addresses as well; the node then warns at start-up that the setting is not for
     production.
 
-  More in [`NETWORK_CONFIG`](docs/NETWORK_CONFIG.md). Detail: CRD ch.28 R8c items 7 to 10.
+  More in [`NETWORK_CONFIG`](docs/NETWORK_CONFIG.md). Detail: PR #184, PR #185; CRD ch.28 R8c items 7
+  to 10.
 
 #### Order posting, fees and balances
 
@@ -531,13 +596,14 @@ it and, where one exists, the CRD rule, for readers who want more.
   one area is mostly not reused by the others, so a maker that updated hundreds of orders every few
   seconds held steadily more memory although the data it holds stayed the same. In tests a maker
   with 480 orders on 16 pairs, updating about 80 times a second, grew by about 1 MB a minute with
-  the allocator's own default and stopped growing with two arenas, with no change in update rate or
-  processor use. The limit applies only to the daemon on Linux with glibc, not to the embedded
+  the allocator's own default, and by about 0.2–0.3 MB a minute with two arenas over 40 minutes;
+  whether that levels off is not measured yet, and there was no change in update rate or processor
+  use. The limit applies only to the daemon on Linux with glibc, not to the embedded
   library or other systems, and the start-up log has one line that says where the limit came from.
   Set the environment variable `MALLOC_ARENA_MAX` to choose your own (the daemon then leaves the
   allocator alone), or the `MM2.json` whole number `malloc_arena_max`; `0` keeps the allocator's own
   default, and an invalid value is reported and replaced by `2`. Its effect on swaps and coin
-  activation is not measured yet. Detail: issue #191;
+  activation is not measured yet. Detail: PR #189, PR #190; issue #191;
   [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.
 - **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
   addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
@@ -971,7 +1037,8 @@ it and, where one exists, the CRD rule, for readers who want more.
   or before `v2.0.0-beta` that cannot read a typed transaction — but the shipped coins file puts
   ETH, MATIC, AVAX, ETH-ARB20, ETH-BASE and MOVR on `"Medium"`, so swaps of those coins and of
   their tokens now emit type 2 unless the policy is overridden at activation or with
-  `set_swap_gas_fee_policy`. Not yet verified against a live network send. Detail: PR #25.
+  `set_swap_gas_fee_policy`. Six live ETH-ARB20 swaps on the `Medium` policy finished in the
+  pre-beta tests (2026-10-31). Detail: PR #25.
 - **EIP-1559 swap transactions are no longer priced from a stale base fee.** The fee estimate took
   the base fee of the oldest block in the fee-history window instead of the newest, so under a
   rising base fee `max_fee_per_gas` could land below the actual block base fee and the send was
@@ -1053,14 +1120,15 @@ file carries the detail. "New" means the plan was created in this cycle.
   trading volume matches the reference for EVM, QRC20, TRON, UTXO and Lightning coins (PR #66); an
   end-to-end preview on a real 8-decimal coin is left.
 - [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — new, blocked: per-chain gas
-  limits in the coins file, not the multiplier, are the knob (PR #123), and the coins file now
-  carries a block measured on Monad for the MON tokens (PR #164); the two remaining options wait on
-  the reference maintainers.
+  limits in the coins file, not the multiplier, are the knob (PR #123), and the coins repository
+  has carried a block measured on Monad for the MON tokens since 2026-10-28; the two remaining
+  options wait on the reference maintainers.
 - [`evm-test-infrastructure`](docs/plans/evm-test-infrastructure.md) — new, planning: two dead-network
   EVM tests ported to a scripted local node (PR #30), and tests against a local `geth` node run in
   CI (PR #53).
 - [`faster-transaction-visibility`](docs/plans/faster-transaction-visibility.md) — new and done: push
-  notifications and pending receipts shipped, with tests.
+  notifications and pending receipts shipped with tests; they are listed under 0.3.0-alpha.1, and the
+  work predates pull requests.
 - [`gossip-send-queue-bound`](docs/plans/gossip-send-queue-bound.md) — new and done: each peer's
   gossip send queue is capped (PRs #121, #122), and the cap is listed in the compatibility document.
 - [`librustzcash-upgrade`](docs/plans/librustzcash-upgrade.md) — done: the upgrade with a
@@ -1079,7 +1147,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   12 times faster with 2,000 orders (PR #154).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — new, in progress: posting orders
   makes fewer Electrum and node round trips (PRs #95, #114, #116, #128) and no longer does I/O under
-  an order's lock (PR #149); a timing run is left.
+  an order's lock (PR #149); the timing run of 2026-10-31 found posting faster than before, and the
+  cost of spreading reads over a slow server is documented (PR #187).
 - [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md) — new, in
   progress: the order-book store applies queued updates in bulk, purges unused entries early and
   keeps at most 2,048 changes per maker and pair (PR #164); one open point on the early purge is
@@ -1087,7 +1156,8 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`orderbook-wipe-recovery`](docs/plans/orderbook-wipe-recovery.md) — new, in progress: a maker's
   order messages keep its book alive (PR #132), a relay holds a sync answer while it catches up
   (PR #135), and a variant of the short retry the plan did not recommend shipped as a second sync
-  request after a quick failure (PR #173); a lab run is left.
+  request after a quick failure (PR #173); the lab run found no burst of failed synchronizations, and
+  one variant moves to after the beta.
 - [`qtum-qrc20-stabilization`](docs/plans/qtum-qrc20-stabilization.md) — parked: given a status
   header; the analysis is unchanged.
 - [`rpc-api-reference-wire-parity`](docs/plans/rpc-api-reference-wire-parity.md) — new, parked: the
@@ -1114,9 +1184,9 @@ file carries the detail. "New" means the plan was created in this cycle.
   a stub to elaborate before any work is scheduled (PR #90).
 - [`tendermint-activation-features`](docs/plans/tendermint-activation-features.md) — new, parked:
   Tendermint coins are wallet-only for this beta (PR #93).
-- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — new, in progress (beta blocker):
-  every coin family's trading floors are specified (PR #69) and implemented (PRs #66, #72, #73); a
-  lab run is left.
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — new, in progress: every coin
+  family's trading floors are specified (PR #69) and implemented (PRs #66, #72, #73), and the lab run
+  of 2026-10-31 passed, including a swap at the minimum volume for KMD, LTC, DOGE and DINGO.
 - [`tron-gasfree`](docs/plans/tron-gasfree.md) — new, parked: waits on pinning the GasFree proxy's
   creation bytecode; TRON is off for this beta (PR #93).
 - [`tron-support`](docs/plans/tron-support.md) — new, parked: how TRON comes back in the next beta
@@ -1822,11 +1892,13 @@ Highlights:
 - EVM ABI encoding/decoding migrated from `ethabi` to `alloy` (`alloy-dyn-abi` / `alloy-json-abi` / `alloy-primitives`), guarded by a byte-identity golden regression suite.
 - Tag-driven, GPG-signed release pipeline: signed `SHA256SUMS` manifest and drafted GitHub Releases — pre-releases from `staging` (`-alpha/-beta/-rc` tags), finals from `main`. Linux binaries build inside a Debian 11 container (glibc 2.31) for broad backwards-compatibility; unsigned all-platform snapshots via manual `dev-build.yml` and automatic `staging-build.yml`.
 
-Tag `v0.2.0-beta.1` (2026-08-05) was cut from `staging`, which has since diverged from the
-development line; it has no section in this file, and neither `0.3.0-alpha` milestone descends
-from it.
+Tag `v0.2.0-beta.1` (2026-08-05) was cut on `staging` from the development line as of commit
+6dc1b63b1, part-way through 0.3.0-alpha.1. Everything it shipped is listed in the 0.3.0-alpha.1
+section above, which continues past that point. The tag itself is not on the development line, so
+it has no section of its own.
 
-[Unreleased]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...HEAD
+[Unreleased]: https://github.com/kdf-reloaded/kdf/compare/v0.3.0-beta.1...HEAD
+[0.3.0-beta.1]: https://github.com/kdf-reloaded/kdf/compare/ddb87a4849f91400b1b4aa120090f1acb12aa7bf...v0.3.0-beta.1
 [0.3.0-alpha.3]: https://github.com/kdf-reloaded/kdf/compare/49a46bc54fc16761796ed0bad53a472b8183ed9b...ddb87a4849f91400b1b4aa120090f1acb12aa7bf
 [0.3.0-alpha.2]: https://github.com/kdf-reloaded/kdf/compare/7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f...49a46bc54fc16761796ed0bad53a472b8183ed9b
 [0.3.0-alpha.1]: https://github.com/kdf-reloaded/kdf/compare/v0.1.0-beta.2...7a18f94b2f5de1ff7ba2ae69c4b445132d305a3f

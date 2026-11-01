@@ -102,8 +102,8 @@ Minimal example:
 > [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md) for details.
 
 > **Memory allocator arenas (Linux).** On Linux with glibc the daemon limits the
-> memory allocator to two arenas at start-up, which keeps the memory of a maker
-> that updates many orders from growing. Set the optional `malloc_arena_max`
+> memory allocator to two arenas at start-up, which greatly reduces the memory
+> growth of a maker that updates many orders. Set the optional `malloc_arena_max`
 > setting in `MM2.json` to a whole number to choose another limit; `0` leaves
 > the allocator's own default. The environment variable `MALLOC_ARENA_MAX`, when
 > set, takes precedence and the daemon then leaves the allocator alone.
