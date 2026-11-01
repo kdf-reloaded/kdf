@@ -1001,6 +1001,8 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Tests
 
+- **The tests run before this beta and their results are listed in
+  [`docs/release-tests/0.3.0-beta.1.md`](docs/release-tests/0.3.0-beta.1.md).**
 - **The ARRR HTLC key derivation is checked against keys another KDF implementation derived.** A
   maker and a taker swap made by the reference on throwaway wallets give the expected HTLC public
   keys bit for bit, and two extra cases cover the low-S rule of the signature the derivation hashes.
