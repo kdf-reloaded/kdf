@@ -203,7 +203,7 @@ fn test_enable_lightning() {
 #[cfg(not(target_arch = "wasm32"))]
 fn test_connect_to_lightning_node() {
     let (mm_node_1, mm_node_2, node_1_id, _) = start_lightning_nodes();
-    let node_1_address = format!("{}@{}:9735", node_1_id, mm_node_1.ip.to_string());
+    let node_1_address = format!("{}@{}:9735", node_1_id, mm_node_1.ip);
 
     let connect = block_on(mm_node_2.rpc(&json! ({
         "userpass": mm_node_2.userpass,
@@ -229,7 +229,7 @@ fn test_connect_to_lightning_node() {
 #[cfg(not(target_arch = "wasm32"))]
 fn test_open_channel() {
     let (mm_node_1, mut mm_node_2, node_1_id, node_2_id) = start_lightning_nodes();
-    let node_1_address = format!("{}@{}:9735", node_1_id, mm_node_1.ip.to_string());
+    let node_1_address = format!("{}@{}:9735", node_1_id, mm_node_1.ip);
 
     let open_channel = block_on(mm_node_2.rpc(&json! ({
         "userpass": mm_node_2.userpass,

@@ -280,6 +280,16 @@ The state `8 -> 9` migration shall append:
 | `maker_pubkey` | `VARCHAR(255)` |
 | `taker_pubkey` | `VARCHAR(255)` |
 
+> **Cross-reference (added 2026-10-27; passed the KDF Dirty Gate on 2026-10-28 with
+> chapter 51 R50A).** How these two columns are filled at live time is bound by
+> [Chapter 51](51-legacy-v1-swap-state-machine.md) R50A item 5: each
+> party's published terminal report supplies only its **own** persistent
+> public key — a maker record fills `maker_pubkey`, a taker record
+> `taker_pubkey` — so a swap's two columns are complete only once both
+> parties' reports have arrived, and a privacy-coin party's column stays
+> empty. The state-15 backfill of R44.6.3 applies the same own-role
+> derivation to historical records.
+
 ### 44.6.6 State 12 GUI and Version Columns
 
 The state `11 -> 12` migration shall append:
@@ -582,3 +592,24 @@ lineage and a conversion rule for existing `MM2.db` files.
 - Completion-fiat snapshots are stored in `stats_swaps`; `my_swaps` does not
   contain RELOADED-only `maker_coin_usd_price` or `taker_coin_usd_price`
   columns.
+
+## 44.11 Provenance Footer
+
+- *Inputs:* the project's own revision history and current tree (the
+  shipped `MM2.db` migration ledger, version-1 bootstrap schema, and
+  version-by-version migrations through state 15 -- by table/column/
+  migration-number shape only, no code transcribed); the GLEEC-compatible
+  shared schema baseline (state 15) and the dictated-interop rule that
+  RELOADED-local persistence changes must not claim future shared
+  `MM2.db` migration numbers (both explicitly named as this chapter's
+  binding-scope source of truth); [Chapter 25](25-sql-query-builder.md)
+  (the SQLite gateway substrate this chapter's native path uses);
+  [Chapter 26](26-cross-platform-and-wasm.md) (the native/WebAssembly
+  persistence split this chapter is scoped native-only against).
+- *Permitted-input classes used:* baseline/as-built source (the shipped
+  migration ledger and schema); dictated interop (the GLEEC-compatible
+  shared schema/migration-number contract, R29/R31); cross-chapter
+  contracts (Chapters 25, 26).
+- *Sibling-allowlist consultations:* [Chapter 25](25-sql-query-builder.md),
+  [Chapter 26](26-cross-platform-and-wasm.md).
+- *Forbidden corpus:* not consulted.

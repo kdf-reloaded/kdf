@@ -275,6 +275,20 @@ pub trait Qrc20ElectrumOps {
         topic: &str,
     ) -> RpcRes<Vec<TxHistoryItem>>;
 
+    /// Ask the server to notify us when a matching contract event is logged.
+    /// Takes the same parameters as `blockchain.contract.event.get_history`.
+    ///
+    /// A QRC20 balance lives in contract storage, not in the address's UTXO
+    /// set, so a token transfer need not disturb the QTUM address's script hash
+    /// and cannot be observed through a script-hash subscription.
+    /// https://github.com/qtumproject/qtum-electrumx-server/blob/master/docs/qrc20-integration.md
+    fn blockchain_contract_event_subscribe(
+        &self,
+        address: &H160Json,
+        contract_addr: &H160Json,
+        topic: &str,
+    ) -> RpcRes<Json>;
+
     /// This can be used to get eventlogs in the transaction, the returned data is the same as Qtum Core RPC gettransactionreceipt.
     /// from the eventlogs, we can get QRC20 Token transafer informations(from, to, amount).
     /// https://github.com/qtumproject/qtum-electrumx-server/blob/master/docs/qrc20-integration.md#blochchaintransactionget_receipttxid
@@ -360,6 +374,21 @@ impl Qrc20ElectrumOps for ElectrumClient {
         )
     }
 
+    fn blockchain_contract_event_subscribe(
+        &self,
+        address: &H160Json,
+        contract_addr: &H160Json,
+        topic: &str,
+    ) -> RpcRes<Json> {
+        rpc_func!(
+            self,
+            "blockchain.contract.event.subscribe",
+            address,
+            contract_addr,
+            topic
+        )
+    }
+
     fn blockchain_transaction_get_receipt(&self, hash: &H256Json) -> RpcRes<Vec<TxReceipt>> {
         rpc_func!(self, "blochchain.transaction.get_receipt", hash)
     }
@@ -383,6 +412,23 @@ impl Qrc20RpcOps for UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Electrum(electrum) => electrum.blockchain_transaction_get_receipt(tx_hash),
             UtxoRpcClientEnum::Native(native) => native.get_transaction_receipt(tx_hash),
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(_) => {
+                Box::new(futures01::future::err(common::jsonrpc_client::JsonRpcError {
+                    client_info: "lightwalletd".to_owned(),
+                    request: common::jsonrpc_client::JsonRpcRequestEnum::Single(
+                        common::jsonrpc_client::JsonRpcRequest {
+                            jsonrpc: "2.0".to_owned(),
+                            id: "0".to_owned(),
+                            method: "gettransactionreceipt".to_owned(),
+                            params: Vec::new(),
+                        },
+                    ),
+                    error: common::jsonrpc_client::JsonRpcErrorType::InvalidRequest(
+                        "QRC20 is not supported over lightwalletd".to_owned(),
+                    ),
+                }))
+            },
         }
     }
 
@@ -402,6 +448,12 @@ impl Qrc20RpcOps for UtxoRpcClientEnum {
                 UtxoRpcClientEnum::Native(native) => native.call_contract(&contract_addr, params.into()),
                 UtxoRpcClientEnum::Electrum(electrum) => {
                     electrum.blockchain_contract_call(&contract_addr, params.into())
+                },
+                #[cfg(not(target_arch = "wasm32"))]
+                UtxoRpcClientEnum::LightWalletD(_) => {
+                    return MmError::err(UtxoRpcError::Internal(
+                        "QRC20 is not supported over lightwalletd".to_owned(),
+                    ))
                 },
             };
             let result = fut.compat().await?;

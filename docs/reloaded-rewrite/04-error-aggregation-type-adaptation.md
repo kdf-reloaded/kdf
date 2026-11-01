@@ -113,9 +113,20 @@ R6. **Auto-trait propagation compensations.** The
     additional positive implementations on standard-
     library wrappers that are required because auto-traits
     do not propagate through unsized wrappers. The bound
-    set at the time of writing is the standard library's
-    boxed-trait-object wrapper and its interior-mutability
-    cell wrapper.
+    set at the time of writing is three: the standard
+    library's boxed-trait-object wrapper (`Box<T>`), its
+    interior-mutability cell wrapper (`UnsafeCell<T>`), and
+    its non-null raw-pointer wrapper (`NonNull<T>`). The
+    third compensation exists because at least one standard-
+    library error type can, on some standard-library
+    implementations, internally reach a boxed trait object
+    through the raw-pointer wrapper rather than through the
+    boxed-trait-object wrapper directly; the boxed-trait-
+    object compensation alone does not cover that reachable
+    case, so the auto-trait needs the raw-pointer
+    compensation as well for the negative-implementation
+    constraint of R4/R5 to hold uniformly across every
+    standard-library error shape the substrate wraps.
 
 ## 4.4 The Single `From` Impl and the Explicit Lift
 

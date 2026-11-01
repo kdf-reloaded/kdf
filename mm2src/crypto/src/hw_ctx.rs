@@ -12,7 +12,7 @@ use primitives::hash::{H160, H264};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
-use trezor::client::TrezorClient;
+use trezor::client::{TrezorClient, TrezorDeviceInfo};
 use trezor::utxo::TrezorUtxoCoin;
 use trezor::{ProcessTrezorResponse, TrezorRequestProcessor};
 
@@ -49,6 +49,8 @@ pub struct HardwareWalletCtx {
     /// because every variant of `HwClient` uses an internal mutex to operate with the device.
     /// But it has to be locked while the client is initialized.
     pub(crate) hw_wallet: AsyncMutex<Option<HwClient>>,
+    /// The description the device reported when the context was initialised, if it is known.
+    pub(crate) device_info: Option<TrezorDeviceInfo>,
 }
 
 impl HardwareWalletCtx {
@@ -59,17 +61,23 @@ impl HardwareWalletCtx {
         Processor: TrezorConnectProcessor + Sync,
     {
         let trezor = HwClient::trezor(processor).await?;
-        let hw_internal_pubkey = {
+        let (hw_internal_pubkey, device_info) = {
             let mut session = trezor.session().await.mm_err(Into::into)?;
-            HardwareWalletCtx::trezor_mm_internal_pubkey(&mut session, processor).await?
+            let device_info = session.device_info().clone();
+            let pubkey = HardwareWalletCtx::trezor_mm_internal_pubkey(&mut session, processor).await?;
+            (pubkey, device_info)
         };
         let hw_client = HwClient::Trezor(trezor);
         Ok(HardwareWalletArc::new(HardwareWalletCtx {
             hw_internal_pubkey,
             hw_wallet_type: hw_client.hw_wallet_type(),
             hw_wallet: AsyncMutex::new(Some(hw_client)),
+            device_info: Some(device_info),
         }))
     }
+
+    /// The description the device reported when the context was initialised.
+    pub fn device_info(&self) -> Option<&TrezorDeviceInfo> { self.device_info.as_ref() }
 
     pub fn hw_wallet_type(&self) -> HwWalletType { self.hw_wallet_type }
 
@@ -177,6 +185,7 @@ mod tests {
             hw_internal_pubkey: H264::from_str(pubkey_hex).unwrap(),
             hw_wallet_type: HwWalletType::Trezor,
             hw_wallet: AsyncMutex::new(None),
+            device_info: None,
         }
     }
 

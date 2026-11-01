@@ -8,7 +8,7 @@ use coins::lightning::ln_errors::EnableLightningError;
 use coins::lightning::{start_lightning, LightningCoin, LightningParams};
 use coins::utxo::utxo_standard::UtxoStandardCoin;
 use coins::utxo::UtxoCommonOps;
-use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, RegisterCoinError};
+use coins::{coin_conf, BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, MmCoinEnum, RegisterCoinError};
 use common::{HttpStatusCode, StatusCode};
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
@@ -18,6 +18,9 @@ use rpc_task::RpcTaskHandle;
 use ser_error_derive::SerializeErrorType;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::{self as json, Value as Json};
+
+/// The node colour used when the request has none (CRD ch.41 R41.2.4).
+const DEFAULT_NODE_COLOR: &str = "2b6680";
 
 const DEFAULT_LISTENING_PORT: u16 = 9735;
 
@@ -84,6 +87,26 @@ pub enum LightningValidationErr {
     InvalidAddress(String),
 }
 
+/// What the platform coin's configuration lacks (CRD R41.2.6 row 9).
+struct PlatformConfigurationError {
+    platform_coin_ticker: String,
+    err: String,
+}
+
+/// The platform's coin configuration must carry `avg_blocktime` (CRD R41.2.6 row 9).
+fn check_platform_avg_blocktime(ctx: &MmArc, platform_ticker: &str) -> Result<(), MmError<PlatformConfigurationError>> {
+    if coin_conf(ctx, platform_ticker)
+        .get("avg_blocktime")
+        .is_none_or(Json::is_null)
+    {
+        return MmError::err(PlatformConfigurationError {
+            platform_coin_ticker: platform_ticker.to_owned(),
+            err: "avg_blocktime is missing in the coin configuration".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct LightningInitResult {
     platform_coin: String,
@@ -94,6 +117,7 @@ pub struct LightningInitResult {
 #[derive(Debug)]
 pub enum LightningInitError {
     InvalidConfiguration(String),
+    InvalidPlatformConfiguration { platform_coin_ticker: String, err: String },
     EnableLightningError(EnableLightningError),
     LightningValidationErr(LightningValidationErr),
     MyBalanceError(BalanceError),
@@ -101,19 +125,29 @@ pub enum LightningInitError {
 }
 
 /// Task-compatible error that stringifies transient errors for Clone/Serialize/Display.
+///
+/// It is converted to the [`L2ActivationError`] of the task status (CRD ch.41 R41.2.7), which is what clients see.
 #[derive(Clone, Debug, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
 pub enum LightningTaskError {
     #[display(fmt = "Invalid configuration: {}", _0)]
     InvalidConfiguration(String),
+    #[display(fmt = "Invalid platform configuration for {}: {}", platform_coin_ticker, err)]
+    InvalidPlatformConfiguration { platform_coin_ticker: String, err: String },
     #[display(fmt = "Lightning init failed: {}", _0)]
     EnableFailed(String),
     #[display(fmt = "Validation error: {}", _0)]
     Validation(String),
+    /// The platform coin's backend could not be reached (CRD R41.2.7).
+    #[display(fmt = "Transport error: {}", _0)]
+    Transport(String),
     #[display(fmt = "Balance retrieval failed: {}", _0)]
     BalanceError(String),
     #[display(fmt = "Address error: {}", _0)]
     AddressError(String),
+    /// The coin was registered by a concurrent activation first (CRD R41.2.7).
+    #[display(fmt = "Layer 2 {} is already activated", _0)]
+    L2IsAlreadyActivated(String),
     #[display(fmt = "Registration error: {}", _0)]
     RegistrationError(String),
     #[display(fmt = "Internal: {}", _0)]
@@ -121,31 +155,69 @@ pub enum LightningTaskError {
 }
 
 impl From<RegisterCoinError> for LightningTaskError {
-    fn from(e: RegisterCoinError) -> Self { LightningTaskError::RegistrationError(e.to_string()) }
+    fn from(e: RegisterCoinError) -> Self {
+        match e {
+            RegisterCoinError::CoinIsInitializedAlready { coin } => LightningTaskError::L2IsAlreadyActivated(coin),
+            other => LightningTaskError::RegistrationError(other.to_string()),
+        }
+    }
 }
 
 impl From<LightningInitError> for LightningTaskError {
     fn from(e: LightningInitError) -> Self {
         match e {
             LightningInitError::InvalidConfiguration(s) => LightningTaskError::InvalidConfiguration(s),
-            LightningInitError::EnableLightningError(e) => LightningTaskError::EnableFailed(e.to_string()),
+            LightningInitError::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            } => LightningTaskError::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            },
+            LightningInitError::EnableLightningError(e) => lightning_start_error(e),
             LightningInitError::LightningValidationErr(e) => LightningTaskError::Validation(e.to_string()),
-            LightningInitError::MyBalanceError(e) => LightningTaskError::BalanceError(e.to_string()),
+            LightningInitError::MyBalanceError(e) => lightning_balance_error(e),
             LightningInitError::MyAddressError(e) => LightningTaskError::AddressError(e),
         }
+    }
+}
+
+/// A failure to start the node: an unreachable platform backend is a transport error, anything else is internal
+/// (CRD R41.2.7).
+fn lightning_start_error(err: EnableLightningError) -> LightningTaskError {
+    match err {
+        EnableLightningError::RpcError(rpc_err) => LightningTaskError::Transport(rpc_err),
+        other => LightningTaskError::EnableFailed(other.to_string()),
+    }
+}
+
+/// Only a transport failure while reading the final balance is a transport error (CRD R41.2.7).
+fn lightning_balance_error(err: BalanceError) -> LightningTaskError {
+    match err {
+        BalanceError::Transport(e) => LightningTaskError::Transport(e),
+        other => LightningTaskError::BalanceError(other.to_string()),
     }
 }
 
 impl From<LightningTaskError> for L2ActivationError {
     fn from(e: LightningTaskError) -> Self {
         match e {
-            LightningTaskError::InvalidConfiguration(s) => L2ActivationError::ConfigParseError(s),
-            LightningTaskError::EnableFailed(s) => L2ActivationError::Internal(s),
-            LightningTaskError::Validation(s) => L2ActivationError::Internal(s),
-            LightningTaskError::BalanceError(s) => L2ActivationError::Transport(s),
-            LightningTaskError::AddressError(s) => L2ActivationError::Internal(s),
-            LightningTaskError::RegistrationError(s) => L2ActivationError::Internal(s),
-            LightningTaskError::Internal(s) => L2ActivationError::Internal(s),
+            LightningTaskError::InvalidConfiguration(s) => L2ActivationError::L2ConfigParseError(s),
+            LightningTaskError::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            } => L2ActivationError::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            },
+            LightningTaskError::Transport(s) => L2ActivationError::Transport(s),
+            LightningTaskError::L2IsAlreadyActivated(ticker) => L2ActivationError::L2IsAlreadyActivated(ticker),
+            LightningTaskError::EnableFailed(s)
+            | LightningTaskError::Validation(s)
+            | LightningTaskError::BalanceError(s)
+            | LightningTaskError::AddressError(s)
+            | LightningTaskError::RegistrationError(s)
+            | LightningTaskError::Internal(s) => L2ActivationError::Internal(s),
         }
     }
 }
@@ -189,6 +261,13 @@ impl From<LightningInitError> for EnableL2Error {
     fn from(err: LightningInitError) -> Self {
         match err {
             LightningInitError::InvalidConfiguration(err) => EnableL2Error::L2ConfigParseError(err),
+            LightningInitError::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            } => EnableL2Error::InvalidPlatformConfiguration {
+                platform_coin_ticker,
+                err,
+            },
             LightningInitError::EnableLightningError(enable_err) => match enable_err {
                 EnableLightningError::RpcError(rpc_err) => EnableL2Error::Transport(rpc_err),
                 enable_error => EnableL2Error::Internal(enable_error.to_string()),
@@ -227,6 +306,7 @@ impl L2ActivationOps for LightningCoin {
     }
 
     fn validate_platform_configuration(
+        ctx: &MmArc,
         platform_coin: &Self::PlatformCoin,
     ) -> Result<(), MmError<Self::ActivationError>> {
         // Channel funding transactions need to spend segwit outputs
@@ -237,12 +317,21 @@ impl L2ActivationOps for LightningCoin {
                 LightningValidationErr::UnsupportedMode("Lightning network".into(), "segwit".into()).into(),
             );
         }
-        Ok(())
+        check_platform_avg_blocktime(ctx, platform_coin.ticker()).mm_err(|e| {
+            LightningInitError::InvalidPlatformConfiguration {
+                platform_coin_ticker: e.platform_coin_ticker,
+                err: e.err,
+            }
+        })
     }
 
     fn validate_activation_params(
         activation_params: Self::ActivationParams,
     ) -> Result<Self::ValidatedParams, MmError<Self::ActivationError>> {
+        // Docs vs reference (CRD ch.41 R41.2.4): the public `LightningActivationParams` table states a colour
+        // default of `2b6680`; the reference defaults to `000000`. Reloaded implements the documented `2b6680`
+        // by maintainer decision (2026-10-11): the docs are explicit and the value is cosmetic, it is only the
+        // node's colour in the network graph.
         if activation_params.name.len() > 32 {
             return MmError::err(
                 LightningValidationErr::InvalidRequest("Node name length can't be more than 32 characters".into())
@@ -254,7 +343,7 @@ impl L2ActivationOps for LightningCoin {
 
         let mut node_color = [0u8; 3];
         hex::decode_to_slice(
-            activation_params.color.unwrap_or_else(|| "000000".into()),
+            activation_params.color.unwrap_or_else(|| DEFAULT_NODE_COLOR.into()),
             &mut node_color as &mut [u8],
         )
         .map_to_mm(|_| LightningValidationErr::InvalidRequest("Invalid Hex Color".into()))
@@ -309,7 +398,7 @@ async fn lightning_init_core(
 ) -> Result<(LightningCoin, LightningInitResult), MmError<LightningTaskError>> {
     let lightning_coin = start_lightning(ctx, platform_coin.clone(), protocol_conf, coin_conf, validated_params)
         .await
-        .map_err(|e| MmError::new(LightningTaskError::EnableFailed(e.to_string())))?;
+        .map_err(|e| MmError::new(lightning_start_error(e.into_inner())))?;
     let address = lightning_coin
         .my_address()
         .map_to_mm(LightningTaskError::AddressError)?;
@@ -317,7 +406,7 @@ async fn lightning_init_core(
         .my_balance()
         .compat()
         .await
-        .map_err(|e| MmError::new(LightningTaskError::BalanceError(e.to_string())))?;
+        .map_err(|e| MmError::new(lightning_balance_error(e.into_inner())))?;
     let init_result = LightningInitResult {
         platform_coin: platform_coin.ticker().into(),
         address,
@@ -349,6 +438,7 @@ impl InitL2ActivationOps for LightningCoin {
     }
 
     fn validate_platform_configuration(
+        ctx: &MmArc,
         platform_coin: &Self::PlatformCoin,
     ) -> Result<(), MmError<Self::ActivationError>> {
         if !platform_coin.addr_format().is_segwit() {
@@ -356,12 +446,19 @@ impl InitL2ActivationOps for LightningCoin {
                 "Lightning network requires segwit address format".into(),
             ));
         }
-        Ok(())
+        check_platform_avg_blocktime(ctx, platform_coin.ticker()).mm_err(|e| {
+            LightningTaskError::InvalidPlatformConfiguration {
+                platform_coin_ticker: e.platform_coin_ticker,
+                err: e.err,
+            }
+        })
     }
 
     fn validate_activation_params(
         activation_params: Self::ActivationParams,
     ) -> Result<Self::ValidatedParams, MmError<Self::ActivationError>> {
+        // Colour default `2b6680` as the public docs table states, not the reference's `000000`: see the one-shot
+        // twin above (CRD ch.41 R41.2.4).
         if activation_params.name.len() > 32 {
             return MmError::err(LightningTaskError::Validation(
                 "Node name length can't be more than 32 characters".into(),
@@ -372,7 +469,7 @@ impl InitL2ActivationOps for LightningCoin {
 
         let mut node_color = [0u8; 3];
         hex::decode_to_slice(
-            activation_params.color.unwrap_or_else(|| "000000".into()),
+            activation_params.color.unwrap_or_else(|| DEFAULT_NODE_COLOR.into()),
             &mut node_color as &mut [u8],
         )
         .map_to_mm(|_| LightningTaskError::Validation("Invalid Hex Color".into()))?;
@@ -399,3 +496,5 @@ impl InitL2ActivationOps for LightningCoin {
         lightning_init_core(ctx, platform_coin, validated_params, protocol_conf, coin_conf).await
     }
 }
+
+#[cfg(test)] mod wire_tests;

@@ -169,6 +169,9 @@ impl RpcTask for WithdrawTask {
             MmCoinEnum::SlpToken(ref slp) => init_legacy_withdraw(slp, self.request, task_handle).await,
             #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::ZCoin(ref z_coin) => z_coin.init_withdraw(self.ctx, self.request, task_handle).await,
+            // The WASM shielded coin cannot build transactions; its `withdraw` reports that as a typed error.
+            #[cfg(target_arch = "wasm32")]
+            MmCoinEnum::ZCoin(ref z_coin) => init_legacy_withdraw(z_coin, self.request, task_handle).await,
             #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::SolanaCoin(ref solana) => init_legacy_withdraw(solana, self.request, task_handle).await,
             #[cfg(not(target_arch = "wasm32"))]

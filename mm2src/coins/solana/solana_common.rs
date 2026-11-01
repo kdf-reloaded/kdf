@@ -47,6 +47,9 @@ impl From<BalanceError> for SufficientBalanceError {
     fn from(e: BalanceError) -> Self {
         match e {
             BalanceError::Transport(e) => SufficientBalanceError::Transport(e),
+            // A balance read sends no fee cap; the arm exists so the conversion is total, and it keeps the node's
+            // text instead of dropping it.
+            e @ BalanceError::FeeCapBelowBaseFee(_) => SufficientBalanceError::Transport(e.to_string()),
             BalanceError::InvalidResponse(e) => SufficientBalanceError::InvalidResponse(e),
             BalanceError::UnexpectedDerivationMethod(e) => SufficientBalanceError::UnexpectedDerivationMethod(e),
             BalanceError::Internal(e) => SufficientBalanceError::Internal(e),

@@ -1,6 +1,7 @@
 [package]
 name = "coins_activation"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -14,6 +15,7 @@ mm2_metrics = { path = "../mm2_metrics" }
 mm2_core = { path = "../mm2_core" }
 crypto = { path = "../crypto" }
 derive_more = "0.99"
+ethereum-types.workspace = true
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await"] }
 hex = "0.4.2"
 rpc = { package = "kdf_rpc_types", path = "../kdf_rpc_types" }
@@ -23,3 +25,6 @@ ser_error_derive = { path = "../derives/ser_error_derive" }
 serde = "1.0"
 serde_derive = "1.0"
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
+
+[dev-dependencies]
+db_common = { path = "../db_common" }

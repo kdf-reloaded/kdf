@@ -56,6 +56,7 @@ pub use hw_client::{HwClient, HwError, HwProcessingError, HwResult, HwWalletType
 pub use hw_common::primitives::{Bip32Error, ChildNumber, DerivationPath, EcdsaCurve, ExtendedPublicKey,
                                 Secp256k1ExtendedPublicKey, XPub};
 pub use hw_ctx::{HardwareWalletArc, HardwareWalletCtx};
+pub use trezor::HwRpcError;
 
 // Re-exports from key_pair_ctx (backward compat — used by downstream crates)
 pub use key_pair_ctx::{IguanaArc, IguanaCtx};

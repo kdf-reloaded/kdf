@@ -4,8 +4,8 @@ use crate::hash::{H160, H264, H520};
 use crate::{AddressHashEnum, CompactSignature, Error, Message, Signature, SECP_VERIFY};
 use crypto::dhash160;
 use rustc_hex::ToHex;
-use secp256k1::recovery::{RecoverableSignature, RecoveryId};
-use secp256k1::{Message as SecpMessage, PublicKey, Signature as SecpSignature};
+use secp256k1::ecdsa::{RecoverableSignature, RecoveryId, Signature as SecpSignature};
+use secp256k1::{Message as SecpMessage, PublicKey};
 use std::{fmt, ops};
 
 #[derive(Copy, Clone, Eq)]
@@ -44,8 +44,8 @@ impl Public {
         };
         let mut sig = SecpSignature::from_der_lax(signature)?;
         sig.normalize_s();
-        let msg = SecpMessage::from_slice(&**message)?;
-        Ok(SECP_VERIFY.verify(&msg, &sig, &pk).is_ok())
+        let msg = SecpMessage::from_digest_slice(&**message)?;
+        Ok(SECP_VERIFY.verify_ecdsa(&msg, &sig, &pk).is_ok())
     }
 
     pub fn recover_compact(message: &Message, signature: &CompactSignature) -> Result<Self, Error> {
@@ -56,8 +56,8 @@ impl Public {
         let compressed = (signature[0] - 27) & 4 != 0;
         let recovery_id = RecoveryId::from_i32(rec as i32)?;
         let recoverable = RecoverableSignature::from_compact(&signature[1..65], recovery_id)?;
-        let msg = SecpMessage::from_slice(&**message)?;
-        let pk = SECP_VERIFY.recover(&msg, &recoverable)?;
+        let msg = SecpMessage::from_digest_slice(&**message)?;
+        let pk = SECP_VERIFY.recover_ecdsa(&msg, &recoverable)?;
         if compressed {
             Ok(Public::Compressed(pk.serialize().into()))
         } else {
@@ -79,7 +79,7 @@ impl ops::Deref for Public {
 }
 
 impl AsRef<[u8]> for Public {
-    fn as_ref(&self) -> &[u8] { &**self }
+    fn as_ref(&self) -> &[u8] { self }
 }
 
 impl PartialEq for Public {

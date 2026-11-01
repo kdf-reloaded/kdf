@@ -23,8 +23,10 @@ also carried the chapter-02 R5 patched dependencies for a chapter-
 dependency overrides in a syntax the Cargo tool subsequently
 renamed.
 
-The chapter-bound substrate moves the project to the chapter-bound
-stable Rust toolchain. The four chapter-bound crates that still
+The chapter-bound substrate moves the project to a chapter-bound
+pinned stable Rust toolchain release (a specific version number,
+not the floating `stable` channel alias, so the pin cannot drift
+to a newer release without a deliberate bump). The four chapter-bound crates that still
 depend on a chapter-bound nightly-only language feature
 (chapter-bound auto-traits with negative implementations, chapter-
 bound custom-test-frameworks) compile on the stable toolchain
@@ -41,8 +43,9 @@ compilation configuration is preserved unchanged.
 A separate concern — code formatting — still relies on chapter-
 bound nightly-only formatting-tool options. The substrate handles
 this at the continuous-integration layer by installing a chapter-
-bound nightly toolchain *only* for the format-check job; the
-build-and-test toolchain remains stable.
+bound date-pinned nightly toolchain *only* for the format-check
+job; the build-and-test toolchain remains the chapter-bound
+pinned stable release of R1.
 
 Bound rules R1–R4 cover the toolchain pin and the bootstrap
 allowlist; R5–R6 cover the edition migration; R7–R9 cover the
@@ -71,17 +74,38 @@ surface.
 ## 3.3 Bound Toolchain Pin
 
 **R1.** The chapter-bound toolchain manifest at the substrate
-landing point MUST read exactly:
+landing point MUST pin the chapter-bound `[toolchain].channel`
+key to a specific stable-release version number and MUST pin
+the chapter-bound `[toolchain].components` key to the chapter-
+bound two-component list `["rustfmt", "clippy"]`, unchanged
+from the chapter-02 R3 baseline.
 
-| Bound key                  | Bound value                          |
-| -------------------------- | ------------------------------------ |
-| `[toolchain].channel`      | `stable`                             |
-| `[toolchain].components`   | The chapter-bound two-component list `["rustfmt", "clippy"]`, unchanged from the chapter-02 R3 baseline. |
+The chapter-bound floating `stable` channel alias MUST NOT be
+used as the pinned value: that alias resolves to whatever
+release the installing tool considers current at install time,
+which is not a pin at all and lets two otherwise-identical
+builds silently compile against two different compiler
+releases. Every routine build (developer, continuous-
+integration, release) runs against the chapter-bound pinned
+stable-release version, not against whichever release an
+unpinned floating alias would have resolved to at build time.
+The chapter-bound nightly channel of the chapter-02 R3 anchor is
+not consumed except via R12's format-check carve-out.
 
-Every routine build (developer, continuous-integration, release)
-runs against the latest stable Rust at the time the build is
-performed. The chapter-bound nightly channel of the chapter-02 R3
-anchor is not consumed except via R12's format-check carve-out.
+The chapter-bound pinned stable-release version number MUST be
+advanced only deliberately, when a substrate-level reason
+requires the newer release, and MUST NOT be left to drift
+silently. A later stable-release compiler can change a
+standard-library type's internal representation in a way that
+alters which types satisfy an auto-trait constraint the
+substrate depends on elsewhere in the codebase (the chapter-04-
+bound `NotMmError` auto-trait's propagation-compensation set of
+[Chapter 4](04-error-aggregation-type-adaptation.md) R6 is the
+bound example at the time of writing); an unplanned toolchain-
+version change is therefore capable of silently breaking the
+build even when no first-party source changed, which is exactly
+why the pin must be an explicit version number rather than a
+floating alias.
 
 ## 3.4 Bound Bootstrap-Allowlist Substrate
 
@@ -237,13 +261,25 @@ options with an error rather than ignoring them.
 
 The substrate MUST install a chapter-bound nightly toolchain *only*
 for the format-check step of the continuous-integration workflow
-and run the chapter-bound nightly formatting-tool invocation
-(`cargo +nightly fmt --all -- --check`) from there. The chapter-
-bound build-and-test continuous-integration jobs MUST continue to
-use the stable toolchain of R1. The chapter-bound nightly
-toolchain installation is the *only* nightly toolchain
-installation routine continuous-integration performs and it MUST
-NOT produce any compiled artefact.
+and run the chapter-bound nightly formatting-tool invocation from
+there. The chapter-bound installed nightly toolchain MUST be
+pinned to a specific date rather than the chapter-bound floating
+`nightly` channel alias, for the same reason R1 pins the build-
+and-test toolchain to a specific stable-release version rather
+than the floating `stable` alias: the formatting tool's rendered
+output can drift between nightly releases, so an unpinned
+floating nightly would make the format-check step fail
+spontaneously when an unrelated upstream formatting-tool change
+lands, independent of any change to the workspace's own source.
+The chapter-bound pinned nightly date MUST be advanced only
+deliberately (bumping the pinned date and re-running the chapter-
+bound nightly formatting-tool invocation across the workspace in
+the same change) and MUST NOT be left to drift silently. The
+chapter-bound build-and-test continuous-integration jobs MUST
+continue to use the pinned stable toolchain of R1. The chapter-
+bound nightly toolchain installation is the *only* nightly
+toolchain installation routine continuous-integration performs
+and it MUST NOT produce any compiled artefact.
 
 ## 3.11 Tests
 
@@ -260,14 +296,27 @@ allowlist. A new consumer outside the allowlist is a chapter-bound
 regression and MUST fail the test.
 
 **T3.** *Format-check.* The chapter-bound R12 format-check
-continuous-integration job MUST install a chapter-bound nightly
-toolchain, run the chapter-bound nightly formatting-tool with the
-chapter-bound check flag, and pass.
+continuous-integration job MUST install a chapter-bound pinned-
+date nightly toolchain (not the chapter-bound floating `nightly`
+channel alias), run the chapter-bound nightly formatting-tool
+with the chapter-bound check flag, and pass.
 
 **T4.** *Patched-dependency removal verification.* A chapter-bound
 regression test MUST `grep` the chapter-bound root manifest for
 the chapter-bound patched-dependency block of R7 and assert it is
 absent.
+
+**T5.** *Toolchain-pin drift verification.* A chapter-bound
+regression test MUST inspect the chapter-bound toolchain manifest
+of R1 and assert that the `[toolchain].channel` value is a
+specific stable-release version number and not the chapter-bound
+floating `stable` channel alias.
+
+**T6.** *Format-check nightly-pin drift verification.* A chapter-
+bound regression test MUST inspect the chapter-bound continuous-
+integration configuration of R12 and assert that the installed
+format-check nightly toolchain is pinned to a specific date and
+is not the chapter-bound floating `nightly` channel alias.
 
 ## 3.12 Deferred Work
 
@@ -345,7 +394,9 @@ expression-attributes feature, the chapter-bound test feature.
   consumes, the chapter-02 R5 patched-dependency block R7
   removes, and the chapter-02 R8 build-target surface T1 covers);
   chapter 04 (the error-aggregation framework consuming R3's
-  second allowlist entry); chapter 14 (the storable-state-machine
+  second allowlist entry, and the R6 auto-trait propagation-
+  compensation example the deliberate-bump discipline of R1
+  cites); chapter 14 (the storable-state-machine
   substrate consuming R3's first and third allowlist entries);
   chapter 23 (the external-trading-application-programming-
   interface client crate D2 defers); the chapter-bound public

@@ -334,7 +334,7 @@ streamers:
 | `stream::shutdown_signal::enable` | `ShutdownSignal`                |
 
 The `network` streamer's request, payload, cadence, platform gate, and
-peer-discovery integration are bound in §10.16 (R29–R32). The
+P2P-substrate integration are bound in §10.16 (R29–R32). The
 tx-history streamer's request, payload, trigger, and coin-family support
 are bound in §10.18 (R39–R45). The shutdown-signal streamer's request,
 payload, trigger, platform gate, and shutdown interaction are bound in
@@ -476,7 +476,7 @@ return the shared R22 success envelope with `streamer_id: "NETWORK"`.
 Request-decoding tests MUST cover defaulted `client_id`, defaulted
 network config, explicit `stream_interval_seconds` and `always_send`,
 and rejection of unknown `config` fields. A streamer test MUST inject or
-mock the peer-discovery snapshot source and assert that the first normal
+mock the P2P-substrate snapshot source and assert that the first normal
 event uses origin `NETWORK` and carries exactly the five R30 payload
 fields. A cadence test MUST assert emit-on-change by default and
 emit-every-cycle when `always_send` is true.
@@ -589,6 +589,12 @@ origin tag (`Network`, wire string `NETWORK`) is already reserved in
 R6. It resolves D2: a consumer for the tag now exists (a graphical
 peer-connectivity view), so the previously-deferred activation handler
 is bound here. The exact wire method name is `stream::network::enable`.
+The gossipsub / peer-connectivity state this streamer snapshots is
+owned by the consolidated P2P substrate of
+[Chapter 28](28-libp2p-modernization.md), not by the separate,
+consumer-less baseline peer-discovery crate that Chapter 28 §28.3 R4
+retains on disk; this section's "P2P substrate" wording below refers
+to the former.
 
 **R29.** A sixth entry MUST be added to the streamer-activation table
 (R20) and routed through the `stream::` dispatcher branch (R19):
@@ -638,16 +644,16 @@ gossipsub / peer-connectivity snapshot. The field names are wire-stable
 | `relay_mesh`               | array of peer-id strings                               | Peers in the relay mesh.                                                             |
 
 These five values are dictated by the gossipsub introspection surface
-of the peer-discovery substrate; this section binds their presence,
+of the Chapter 28 P2P substrate; this section binds their presence,
 names, and JSON shape, not the internal traversal that produces them.
 
 **R31.** The network streamer MUST be self-driven (input type
 `NoDataIn`, R8/R10) and timer-paced:
 
 1. On activation it MUST report ready (R9) after attaching to the
-   peer-discovery substrate, then begin its emission loop.
-2. Each cycle it MUST assemble the R30 snapshot from the peer-discovery
-   substrate, then wait `stream_interval_seconds` before the next cycle.
+   Chapter 28 P2P substrate, then begin its emission loop.
+2. Each cycle it MUST assemble the R30 snapshot from the Chapter 28
+   P2P substrate, then wait `stream_interval_seconds` before the next cycle.
 3. Emit semantics MUST be emit-on-change by default: a cycle whose
    snapshot equals the previously broadcast snapshot MUST NOT emit. The
    first cycle always emits (there is no prior snapshot). When
@@ -657,10 +663,10 @@ names, and JSON shape, not the internal traversal that produces them.
 
 **R32.** Platform gate: the network streamer activation MUST be bound on
 ALL targets (native and WebAssembly). It carries no native-only `cfg`
-gate, because the peer-discovery substrate it introspects is present on
-every target. The implementation MUST be integrated with the
-peer-discovery / p2p networking substrate that owns the gossipsub state;
-no internal placement or file layout is specified by this chapter.
+gate, because the Chapter 28 P2P substrate it introspects is present on
+every target. The implementation MUST be integrated with the Chapter 28
+P2P substrate that owns the gossipsub state; no internal placement or
+file layout is specified by this chapter.
 
 ## 10.17 Bound Fee-Estimator Streamer Activation
 
@@ -924,7 +930,9 @@ activated the streamer again before that signal is handled.
   (peer/topic/mesh enumeration) that dictates the `NETWORK` payload
   field set (R30); public documentation for the asynchronous-runtime and
   lock crates listed in 10.15; upstream clean-channel wire and platform
-  facts for `stream::shutdown_signal::enable`.
+  facts for `stream::shutdown_signal::enable`; chapter 28 (the
+  consolidated P2P substrate that owns the gossipsub / peer-connectivity
+  state the network streamer of §10.16 introspects).
 - *Permitted-input classes used:* baseline source; bound substrate
   identifiers introduced with in-chapter justification; public
   protocol documentation; public crate documentation; dictated-interop
@@ -935,7 +943,9 @@ activated the streamer again before that signal is handled.
   `NETWORK` / `FEE_ESTIMATION:<ticker>` / `TX_HISTORY:<ticker>` event
   / `SHUTDOWN_SIGNAL` event field sets — all GUI/third-party-visible
   contract surface).
-- *Sibling-allowlist consultations:* none.
+- *Sibling-allowlist consultations:* chapter 28 (P2P substrate the
+  network streamer introspects), chapter 31 (central application
+  context the broker handle is bound on).
 - *Forbidden corpus:* consulted only by the spec-reader role for C8
   clean-channel behaviour extraction; no protected expression is bound
   by this chapter.

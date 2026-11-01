@@ -130,6 +130,7 @@ async fn withdraw_spl_token_impl(coin: SplToken, req: WithdrawRequest) -> Withdr
         0.into()
     };
     Ok(TransactionDetails {
+        tx_json: None,
         tx_hex: serialized_tx.into(),
         tx_hash: tx.signatures[0].to_string(),
         from: vec![coin.platform_coin.my_address.clone()],
@@ -382,6 +383,7 @@ impl SwapOps for SplToken {
     async fn search_for_swap_tx_spend_my(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         _tx: &[u8],
@@ -394,6 +396,7 @@ impl SwapOps for SplToken {
     async fn search_for_swap_tx_spend_other(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         _tx: &[u8],

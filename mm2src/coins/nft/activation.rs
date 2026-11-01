@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use url::Url;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::nft::providers::{update_chain, HttpCrawlProvider};
+use crate::nft::providers::{FetchError as ProviderFetchError, HttpCrawlProvider, NftCrawlProvider};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::nft::store::{ensure_initialised, NftListStore};
 #[cfg(not(target_arch = "wasm32"))]
@@ -175,31 +175,74 @@ async fn activate_chain(
         },
     };
 
+    let owned = fetch_and_store_owned_nfts(nft_ctx, chain, coin.my_address, provider).await?;
+    let mut nfts = HashMap::with_capacity(owned.len());
+    for nft in owned {
+        nfts.insert(nft.token_id.to_string(), nft);
+    }
+    Ok(nfts)
+}
+
+/// Fetches the owned inventory of `owner` on `chain` from the caller-supplied indexer, paged to completion,
+/// and persists it so the operational read methods observe the same snapshot (CRD ch.19 R9a).
+///
+/// Used by `enable_nft` and by the inline `nft_req` activation of a platform (CRD ch.35 R35.1.4b), which both
+/// perform exactly this narrowest fetch.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn fetch_and_store_owned_nfts(
+    nft_ctx: &NftCtx,
+    chain: Chain,
+    owner: ethereum_types::Address,
+    provider: &NftProvider,
+) -> MmResult<Vec<NftInfo>, EnableNftError> {
+    let NftProvider::Moralis(info) = provider;
+    let crawl = HttpCrawlProvider::new(info.url.clone(), info.komodo_proxy);
+
+    // Activation is deliberately the narrowest fetch that satisfies the
+    // response contract (CRD ch.19 R9a): owned inventory only, paged to
+    // completion. Walking transfer history here multiplies provider requests
+    // by history size and turns any one of them into an activation-blocking
+    // failure, while contributing nothing the response needs. The transfer
+    // walk, per-token detail lookups, metadata back-fill, and bookmark
+    // advance all belong to `update_nft`.
+    let owned = crawl
+        .fetch_owned_inventory(chain, owner)
+        .await
+        .mm_err(|err| match &err {
+            ProviderFetchError::HttpStatus { status: 400, .. } => {
+                EnableNftError::ProviderRejectedRequest(err.to_string())
+            },
+            _ => EnableNftError::CrawlFailed(err.to_string()),
+        })?;
+
+    // The indexer answered in full: only now touch the storage, so an unreachable indexer leaves it alone.
     let store = nft_ctx.store();
     ensure_initialised(store, store, &chain)
         .await
         .mm_err(|err| EnableNftError::Storage(format!("{err:?}")))?;
 
-    let NftProvider::Moralis(info) = provider;
-    let crawl = HttpCrawlProvider::new(info.url.clone(), info.komodo_proxy);
-    update_chain(store, &crawl, chain, coin.my_address)
-        .await
-        .mm_err(|err| EnableNftError::CrawlFailed(format!("{err:?}")))?;
-
-    let list = NftListStore::list_owned(store, vec![chain], true, 0, None, None)
+    // Persist before returning so the operational read methods observe the
+    // same snapshot the caller is handed.
+    //
+    // The bookmark is written as 0 rather than advanced: R9a forbids
+    // activation moving it, and the store's bulk register has no
+    // leave-unchanged mode. 0 is the safe direction — it can only make a
+    // later `update_nft` re-walk history it already has, which dedupes on
+    // append, whereas any higher value could skip transfers permanently.
+    NftListStore::register_owned(store, chain, owned.clone(), 0)
         .await
         .mm_err(|err| EnableNftError::Storage(format!("{err:?}")))?;
-    let mut nfts = HashMap::with_capacity(list.nfts.len());
-    for nft in list.nfts {
-        nfts.insert(nft.token_id.to_string(), NftInfo {
+
+    Ok(owned
+        .into_iter()
+        .map(|nft| NftInfo {
             token_address: nft.common.token_address,
             token_id: nft.token_id,
             chain: nft.chain,
             contract_type: nft.contract_type,
             amount: nft.common.amount,
-        });
-    }
-    Ok(nfts)
+        })
+        .collect())
 }
 
 /// Browser activation: the initial crawl is deferred (D1), so the context
@@ -212,6 +255,17 @@ async fn activate_chain(
     _provider: &NftProvider,
 ) -> MmResult<HashMap<String, NftInfo>, EnableNftError> {
     Ok(HashMap::new())
+}
+
+/// Browser form of [`fetch_and_store_owned_nfts`]: the initial crawl is deferred (D1).
+#[cfg(target_arch = "wasm32")]
+pub async fn fetch_and_store_owned_nfts(
+    _nft_ctx: &NftCtx,
+    _chain: Chain,
+    _owner: ethereum_types::Address,
+    _provider: &NftProvider,
+) -> MmResult<Vec<NftInfo>, EnableNftError> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]

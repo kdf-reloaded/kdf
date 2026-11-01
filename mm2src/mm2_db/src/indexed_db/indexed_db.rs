@@ -647,18 +647,18 @@ mod tests {
         const DB_NAME: &str = "TEST_ADD_GET_ITEM";
         const DB_VERSION: u32 = 1;
 
-        let rick_tx_1 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_1 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f".to_owned(),
             block_height: 10000,
         };
-        let rick_tx_2 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_2 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424".to_owned(),
             block_height: 10000,
         };
-        let morty_tx_1 = TxTable {
-            ticker: "MORTY".to_owned(),
+        let marty_tx_1 = TxTable {
+            ticker: "MARTY".to_owned(),
             tx_hash: "1fc789133239260ed16361190a026a88cab2243935f02f1ccd794f1d06a22246".to_owned(),
             block_height: 20000,
         };
@@ -677,43 +677,43 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        let rick_tx_1_id = table
-            .add_item(&rick_tx_1)
+        let doc_tx_1_id = table
+            .add_item(&doc_tx_1)
             .await
-            .expect("!Couldn't add a 'RICK' transaction");
-        let rick_tx_2_id = table
-            .add_item(&rick_tx_2)
+            .expect("!Couldn't add a 'DOC' transaction");
+        let doc_tx_2_id = table
+            .add_item(&doc_tx_2)
             .await
-            .expect("!Couldn't add a 'RICK' transaction with the different 'tx_hash'");
-        let morty_tx_1_id = table
-            .add_item(&morty_tx_1)
+            .expect("!Couldn't add a 'DOC' transaction with the different 'tx_hash'");
+        let marty_tx_1_id = table
+            .add_item(&marty_tx_1)
             .await
-            .expect("!Couldn't add a 'MORTY' transaction");
-        assert!(rick_tx_1_id != rick_tx_2_id && rick_tx_2_id != morty_tx_1_id);
+            .expect("!Couldn't add a 'MARTY' transaction");
+        assert!(doc_tx_1_id != doc_tx_2_id && doc_tx_2_id != marty_tx_1_id);
 
-        let actual_rick_txs = table
-            .get_items("ticker", "RICK")
+        let actual_doc_txs = table
+            .get_items("ticker", "DOC")
             .await
-            .expect("!Couldn't get items by the index 'ticker=RICK'");
-        let expected_rick_txs = vec![(rick_tx_1_id, rick_tx_1), (rick_tx_2_id, rick_tx_2.clone())];
-        assert_eq!(actual_rick_txs, expected_rick_txs);
+            .expect("!Couldn't get items by the index 'ticker=DOC'");
+        let expected_doc_txs = vec![(doc_tx_1_id, doc_tx_1), (doc_tx_2_id, doc_tx_2.clone())];
+        assert_eq!(actual_doc_txs, expected_doc_txs);
 
-        let actual_rick_tx_ids = table
-            .get_item_ids("ticker", "RICK")
+        let actual_doc_tx_ids = table
+            .get_item_ids("ticker", "DOC")
             .await
-            .expect("Couldn't get item ids by the index 'ticker=RICK'");
-        let expected_rick_tx_ids = vec![rick_tx_1_id, rick_tx_2_id];
-        assert_eq!(actual_rick_tx_ids, expected_rick_tx_ids);
+            .expect("Couldn't get item ids by the index 'ticker=DOC'");
+        let expected_doc_tx_ids = vec![doc_tx_1_id, doc_tx_2_id];
+        assert_eq!(actual_doc_tx_ids, expected_doc_tx_ids);
 
-        let actual_rick_2_tx = table
+        let actual_doc_2_tx = table
             .get_items(
                 "tx_hash",
                 "ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424",
             )
             .await
             .expect("!Couldn't get items by the index 'tx_hash'");
-        let expected_rick_txs = vec![(rick_tx_2_id, rick_tx_2)];
-        assert_eq!(actual_rick_2_tx, expected_rick_txs);
+        let expected_doc_txs = vec![(doc_tx_2_id, doc_tx_2)];
+        assert_eq!(actual_doc_2_tx, expected_doc_txs);
     }
 
     #[wasm_bindgen_test]
@@ -721,18 +721,18 @@ mod tests {
         const DB_NAME: &str = "TEST_REPLACE_ITEM";
         const DB_VERSION: u32 = 1;
 
-        let rick_tx_1 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_1 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f".to_owned(),
             block_height: 10000,
         };
-        let rick_tx_2 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_2 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424".to_owned(),
             block_height: 10000,
         };
-        let rick_tx_1_updated = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_1_updated = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f".to_owned(),
             block_height: 20000,
         };
@@ -751,8 +751,8 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        let rick_tx_1_id = table.add_item(&rick_tx_1).await.expect("Couldn't add an item");
-        let rick_tx_2_id = table.add_item(&rick_tx_2).await.expect("Couldn't add an item");
+        let doc_tx_1_id = table.add_item(&doc_tx_1).await.expect("Couldn't add an item");
+        let doc_tx_2_id = table.add_item(&doc_tx_2).await.expect("Couldn't add an item");
 
         // Wait for the transaction to complete to save the changes to the database.
         transaction
@@ -767,10 +767,10 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        // Try to add the updated RICK tx item with the same [`TxTable::tx_hash`].
+        // Try to add the updated DOC tx item with the same [`TxTable::tx_hash`].
         // [`TxTable::tx_hash`] is a unique index, so this operation must fail.
         let err = table
-            .add_item(&rick_tx_1_updated)
+            .add_item(&doc_tx_1_updated)
             .await
             .expect_err("'DbTable::add_item' should have failed");
         match err.into_inner() {
@@ -788,19 +788,19 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        let rick_tx_1_updated_id = table
-            .replace_item(rick_tx_1_id, &rick_tx_1_updated)
+        let doc_tx_1_updated_id = table
+            .replace_item(doc_tx_1_id, &doc_tx_1_updated)
             .await
             .expect("!Couldn't replace an item");
-        assert_eq!(rick_tx_1_updated_id, rick_tx_1_id);
+        assert_eq!(doc_tx_1_updated_id, doc_tx_1_id);
 
-        let actual_rick_txs = table
-            .get_items("ticker", "RICK")
+        let actual_doc_txs = table
+            .get_items("ticker", "DOC")
             .await
-            .expect("Couldn't get items by the index 'ticker=RICK'");
-        assert_eq!(actual_rick_txs, vec![
-            (rick_tx_1_id, rick_tx_1_updated),
-            (rick_tx_2_id, rick_tx_2)
+            .expect("Couldn't get items by the index 'ticker=DOC'");
+        assert_eq!(actual_doc_txs, vec![
+            (doc_tx_1_id, doc_tx_1_updated),
+            (doc_tx_2_id, doc_tx_2)
         ]);
     }
 
@@ -809,13 +809,13 @@ mod tests {
         const DB_NAME: &str = "TEST_DELETE_ITEM";
         const DB_VERSION: u32 = 1;
 
-        let rick_tx_1 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_1 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f".to_owned(),
             block_height: 10000,
         };
-        let rick_tx_2 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_2 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424".to_owned(),
             block_height: 10000,
         };
@@ -834,16 +834,16 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        let rick_tx_1_id = table.add_item(&rick_tx_1).await.expect("Couldn't add an item");
-        let rick_tx_2_id = table.add_item(&rick_tx_2).await.expect("Couldn't add an item");
+        let doc_tx_1_id = table.add_item(&doc_tx_1).await.expect("Couldn't add an item");
+        let doc_tx_2_id = table.add_item(&doc_tx_2).await.expect("Couldn't add an item");
 
-        table.delete_item(rick_tx_1_id).await.expect("Couldn't delete an item");
+        table.delete_item(doc_tx_1_id).await.expect("Couldn't delete an item");
 
-        let actual_rick_txs = table
-            .get_items("ticker", "RICK")
+        let actual_doc_txs = table
+            .get_items("ticker", "DOC")
             .await
-            .expect("Couldn't get items by the index 'ticker=RICK'");
-        assert_eq!(actual_rick_txs, vec![(rick_tx_2_id, rick_tx_2)]);
+            .expect("Couldn't get items by the index 'ticker=DOC'");
+        assert_eq!(actual_doc_txs, vec![(doc_tx_2_id, doc_tx_2)]);
     }
 
     #[wasm_bindgen_test]
@@ -851,13 +851,13 @@ mod tests {
         const DB_NAME: &str = "TEST_CLEAR";
         const DB_VERSION: u32 = 1;
 
-        let rick_tx_1 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_1 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f".to_owned(),
             block_height: 10000,
         };
-        let rick_tx_2 = TxTable {
-            ticker: "RICK".to_owned(),
+        let doc_tx_2 = TxTable {
+            ticker: "DOC".to_owned(),
             tx_hash: "ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424".to_owned(),
             block_height: 10000,
         };
@@ -876,16 +876,16 @@ mod tests {
             .await
             .expect("!DbTransaction::open_table");
 
-        let _rick_tx_1_id = table.add_item(&rick_tx_1).await.expect("Couldn't add an item");
-        let _rick_tx_2_id = table.add_item(&rick_tx_2).await.expect("Couldn't add an item");
+        let _doc_tx_1_id = table.add_item(&doc_tx_1).await.expect("Couldn't add an item");
+        let _doc_tx_2_id = table.add_item(&doc_tx_2).await.expect("Couldn't add an item");
 
         table.clear().await.expect("Couldn't clear the database");
 
-        let actual_rick_txs = table
-            .get_items("ticker", "RICK")
+        let actual_doc_txs = table
+            .get_items("ticker", "DOC")
             .await
-            .expect("Couldn't get items by the index 'ticker=RICK'");
-        assert!(actual_rick_txs.is_empty());
+            .expect("Couldn't get items by the index 'ticker=DOC'");
+        assert!(actual_doc_txs.is_empty());
     }
 
     #[wasm_bindgen_test]

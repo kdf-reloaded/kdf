@@ -1,5 +1,7 @@
 # 49. Withdrawal task path
 
+**Status:** driving-spec.
+
 ## 49.1 Scope
 
 This chapter covers the withdrawal JSON-RPC surface for the direct `withdraw`
@@ -28,6 +30,15 @@ Coin families may bind additional public fields already accepted by the shared
 withdrawal request, such as memo, broadcast, protocol-channel, or expiry
 controls. The task endpoint shall not add a second withdrawal-specific request
 shape.
+
+> **The `fee` descriptor's EVM forms (cross-reference).** The descriptor is a
+> single enumeration shared by every coin family, tagged by a `type` member.
+> Its EVM forms, the rule for an absent descriptor, the gas-limit estimation
+> that follows, and the envelope type the resolved form implies are bound by
+> [Chapter 57](57-evm-fee-inputs.md) §57.7, which also records that reloaded
+> accepts only the legacy EVM form today and that the enumeration is missing
+> the Cosmos-family form entirely. This chapter binds the request's shape and
+> the task lifecycle around it, not the per-family fee semantics.
 
 R49.2. When `from` is present, it shall be an HD-address selector in exactly one
 of these public JSON wire forms:
@@ -322,6 +333,12 @@ as an unknown or unavailable task according to R49.14.
 
 ## 49.6 Completed transaction payload
 
+> **UTXO input bookkeeping (cross-reference).** For a UTXO coin, whether the
+> withdrawal path records the inputs its transaction spends, how the
+> candidate inputs are listed, and what a refused broadcast looks like are
+> bound by [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5B
+> (cleared by the Dirty Gate on 2026-10-30), not here.
+
 R49.25. A successful direct `withdraw` response and a successful
 `task::withdraw::status` terminal payload shall use the same transaction-details
 object. A completed withdrawal shall include at least:
@@ -346,7 +363,66 @@ shall treat `tx_hex` and `tx_hash` as mandatory for a completed withdrawal
 transaction and shall use the remaining metadata for history, balance, and
 confirmation display.
 
+R49.26. The field set of R49.25 is a **minimum**, not a closed set. A coin
+family may bind *additional* top-level fields on the same transaction-details
+object, and a consumer shall ignore a field it does not recognise rather than
+treat it as a protocol error. Such an addition is conformant only while it is
+strictly additive: it shall not remove a R49.25 field, shall not change an
+existing field's name, JSON type, or meaning, and shall not make `tx_hex` or
+`tx_hash` optional for the coin that adds it.
+
+The one coin family that presently uses R49.26 is Siacoin, whose native
+transaction serialisation is JSON text rather than a binary encoding. It
+carries the signed transaction twice: in the mandatory `tx_hex` of R49.25, as
+hex of that JSON text, and additionally in a top-level `tx_json` object holding
+the same JSON unencoded. That carrier pair, its precedence when the transaction
+is fed back to the legacy broadcast method, and the Sia-specific
+`transaction_type` and `internal_id` values are bound by
+[Chapter 20](20-siacoin-integration.md) §20.9.1-§20.9.2 (R-W6 through R-W11),
+not by this chapter. `tx_json` is absent for every other coin family, and its
+absence is not an error.
+
 T49.25. For the same supported coin family and signing policy where both direct
 `withdraw` and task withdrawal are supported, compare a successful direct
 `withdraw` result with the `details` payload of a successful task withdrawal.
 Both shall expose the same transaction-details field contract.
+
+T49.26. For a coin family that binds an additional field under R49.26, complete
+a withdrawal through both the direct `withdraw` method and the task path and
+confirm that the R49.25 minimum field set is present and unchanged in both, that
+`tx_hex` and `tx_hash` are non-empty, and that the additional field appears in
+both payloads. Repeat for a coin family that binds no additional field and
+confirm the extra field is simply absent and no error is raised.
+
+## 49.7 Provenance Footer
+
+- *Inputs:* the project's own revision history and current tree (the
+  already-shipped direct `withdraw` method and `task::withdraw::*` family
+  this chapter documents as-built -- by public wire contract only, no code
+  transcribed); the shared mmrpc-2.0 task pattern (`init`/`status`/
+  `user_action`/`cancel`, the standard task-status envelope) already
+  established by sibling `task::` families; [Chapter 35](35-evm-v2-activation-rpcs.md)
+  R35.1.4/R35.3.2 (the Trezor hardware policy this chapter's sender
+  selection and `user_action` surface accommodate); [Chapter 50](50-evm-trezor-signing.md)
+  R50.1-R50.4 (the EVM Trezor withdrawal path built directly on this
+  chapter's wire); [Chapter 20](20-siacoin-integration.md) §20.9.1-§20.9.2
+  (the Siacoin transaction-carrier and record-identity fields this chapter's
+  R49.26 admits as the one present use of an additional coin-family field).
+- *Permitted-input classes used:* baseline/as-built source (the shipped
+  withdraw wire and shared task-status envelope pattern); cross-chapter
+  contracts (Chapters 20, 35, 50); Interop / wire-and-API-bound reuse (R29/R31)
+  for the dictated request/response field names and task-status vocabulary.
+- *Sibling-allowlist consultations:* [Chapter 20](20-siacoin-integration.md),
+  [Chapter 35](35-evm-v2-activation-rpcs.md),
+  [Chapter 50](50-evm-trezor-signing.md).
+- *Forbidden corpus:* consulted **only** for the fact that one coin family's
+  deployed reference response carries an additional top-level transaction
+  carrier alongside the R49.25 minimum field set -- the fact R49.26 generalises.
+  The carrier's own wire detail is recorded in
+  [Chapter 20](20-siacoin-integration.md) §20.9.1, not here. No discretionary
+  expression crosses into this chapter.
+- *Cross-reference added 2026-10-30.* The pointer note at the head of §49.6
+  to [Chapter 38](38-utxo-coin-maintenance-and-features.md) §38.5B was added
+  by the Spec Reader in the pass that wrote §38.5B. It carries no reference
+  content of its own; the facts it points to are recorded, and their
+  clearance status tracked, in chapter 38 §38.9.

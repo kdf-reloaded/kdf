@@ -1,3 +1,4 @@
+use crate::platform_coin_with_tokens::RegisterTokenInfo;
 use crate::prelude::*;
 use crate::token::{EnableTokenError, TokenActivationOps, TokenProtocolParams};
 use async_trait::async_trait;
@@ -117,5 +118,17 @@ impl TokenActivationOps for SlpToken {
             required_confirmations: token.required_confirmations(),
         };
         Ok((token, init_result))
+    }
+
+    /// Records the token on the BCH platform coin once the token is registered, so the platform's SLP-aware
+    /// operations (balances, history, swaps) know the token exactly as they would after
+    /// `enable_bch_with_tokens` (CRD ch.55 R55.10.5). Doing it after the registration leaves the platform's
+    /// token set unchanged when the activation fails or loses the registration race (R55.10.6).
+    ///
+    /// Docs vs reference: the public docs do not say that `enable_slp` records the token on the platform;
+    /// the reference does, and Reloaded did not (a token activated here was unknown to the platform).
+    /// Reloaded implements the reference behavior (R55.10.5).
+    fn on_token_registered(platform_coin: &Self::PlatformCoin, token: &Self) {
+        platform_coin.register_token_info(token);
     }
 }

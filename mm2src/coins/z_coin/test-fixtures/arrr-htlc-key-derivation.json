@@ -1,0 +1,32 @@
+{
+  "_comment": "test-only keys of swept throwaway wallets — never fund",
+  "_source": "One swap between two throwaway non-HD wallets run on the reference release binary (3.0.0-beta); ARRR is the maker coin, RIN the taker coin. The base key of each node is its RIN WIF (the seed's secp256k1 key).",
+  "uuid": "4620277b-2db6-4193-99e2-f6c3751816dd",
+  "secret_hash": "70f9c95e9cfdf49e9f9b9afcda92cd2d40cbd49f",
+  "maker": {
+    "base_wif": "UrxnsqVTQbyxUoDUXS2VBwZPFXtkB3CRBLjNTEWVKq2JvW3Fpxx9",
+    "my_persistent_pub": "0325753c5ff659817ee99008dd3ae71ce0dc14d4acaf4cc08a6c974cc1eb4c473d",
+    "arrr_htlc_pub": "02a4edd0a99e681f1e9cc39c4e5688186bc20920793493240d4d66a0b523247453",
+    "rin_htlc_pub": "0325753c5ff659817ee99008dd3ae71ce0dc14d4acaf4cc08a6c974cc1eb4c473d"
+  },
+  "taker": {
+    "base_wif": "UuvLJ2TqUXXz6qMgLAaNbCJdgnobPTLCKpho8TipUz8EvwWaznS4",
+    "my_persistent_pub": "022e6ef88fda3a4d86b0d2bfb839dc2d46d74f04b49e3930ed4089e37f2bd8af50",
+    "arrr_htlc_pub": "02ceea5156f120a2a688a49e1f9ddd38008a98fa67074db762267eaef87eb4c3b2",
+    "rin_htlc_pub": "022e6ef88fda3a4d86b0d2bfb839dc2d46d74f04b49e3930ed4089e37f2bd8af50"
+  },
+  "low_s_cases": {
+    "_comment": "Computed from CRD ch.39 R39.5.8 with the taker's base key, NOT observed from the reference. The expected values were computed by an independent pure-Python implementation of the CRD rule, written separately from this Rust code and not part of the repository. The inputs are chosen so that the raw ECDSA s is above n/2, i.e. low-S normalization changes the signature; each case also gives the key a derivation that skipped low-S would produce.",
+    "base": "taker",
+    "taker_uuid": {
+      "input": "68ea8497-9b1f-4ac6-bd3a-df5df4365986",
+      "expected_htlc_pub": "030dcf2ba85951b69784b3ca055732513974f1a2673cb1498141d3f14e5222ba2a",
+      "if_low_s_skipped": "0311bec2e0bac1b0314ce552de42b0576f51917e8be51f5dcc62c44dc398912b51"
+    },
+    "maker_secret_hash": {
+      "input": "600a0ac2926c0ac2a239f49ca1a146f3e332e384",
+      "expected_htlc_pub": "02eab68c4b5c922bcabf0434f406c5ebc29f0bdb8e499d7892ae704775a94bda1d",
+      "if_low_s_skipped": "029618e643926dd37a20beff1f2128b5e7268f9c72b0cd283c8d01ee6c0cc50013"
+    }
+  }
+}

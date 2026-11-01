@@ -7,7 +7,8 @@ use mm2_err_handle::prelude::*;
 use primitives::hash::H264;
 use std::time::Duration;
 use trezor::client::TrezorClient;
-use trezor::{TrezorError, TrezorProcessingError, TrezorRequestProcessor, TrezorUserInteraction};
+use trezor::{HwRpcError, OperationFailure, TrezorError, TrezorProcessingError, TrezorRequestProcessor,
+             TrezorUserInteraction};
 
 pub type HwResult<T> = Result<T, MmError<HwError>>;
 
@@ -39,6 +40,9 @@ pub enum HwError {
     #[display(fmt = "Invalid xpub received from a device: '{}'", _0)]
     InvalidXpub(Bip32Error),
     Failure(String),
+    /// A failure the device itself reported with a known failure code.
+    #[display(fmt = "Operation failed on the device: {}", _0)]
+    DeviceFailure(HwRpcError),
     UnderlyingError(String),
     ProtocolError(String),
     UnexpectedUserInteractionRequest(TrezorUserInteraction),
@@ -54,10 +58,34 @@ impl From<TrezorError> for HwError {
             TrezorError::DeviceDisconnected => HwError::DeviceDisconnected,
             TrezorError::UnderlyingError(_) => HwError::UnderlyingError(error),
             TrezorError::ProtocolError(_) | TrezorError::UnexpectedMessageType(_) => HwError::Internal(error),
-            // TODO handle the failure correctly later
-            TrezorError::Failure(_) => HwError::Failure(error),
+            TrezorError::Failure(OperationFailure::InvalidPin) => HwError::DeviceFailure(HwRpcError::InvalidPin),
+            TrezorError::Failure(OperationFailure::Device(kind)) => HwError::DeviceFailure(kind),
+            TrezorError::Failure(OperationFailure::Other(_)) => HwError::Failure(error),
             TrezorError::UnexpectedInteractionRequest(req) => HwError::UnexpectedUserInteractionRequest(req),
             TrezorError::Internal(_) => HwError::Internal(error),
+        }
+    }
+}
+
+impl HwError {
+    /// Classifies the error into the public hardware RPC error names (CRD ch. 55 R55.2.17).
+    ///
+    /// Returns `None` for a failure that has no name in the vocabulary (for example a transport
+    /// failure) and for a connection timeout, which the activation error sets report separately.
+    pub fn hw_rpc_error(&self) -> Option<HwRpcError> {
+        match self {
+            HwError::NoTrezorDeviceAvailable | HwError::DeviceDisconnected => Some(HwRpcError::NoTrezorDeviceAvailable),
+            HwError::CannotChooseDevice { .. } => Some(HwRpcError::FoundMultipleDevices),
+            HwError::FoundUnexpectedDevice { .. } => Some(HwRpcError::FoundUnexpectedDevice),
+            HwError::DeviceFailure(kind) => Some(*kind),
+            HwError::ConnectionTimedOut { .. }
+            | HwError::TransportNotSupported { .. }
+            | HwError::InvalidXpub(_)
+            | HwError::Failure(_)
+            | HwError::UnderlyingError(_)
+            | HwError::ProtocolError(_)
+            | HwError::UnexpectedUserInteractionRequest(_)
+            | HwError::Internal(_) => None,
         }
     }
 }

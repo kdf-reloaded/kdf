@@ -30,9 +30,8 @@ Patched published crates
 The following directories contain published crates.io sources with narrow KDF
 Reloaded patches:
 
-* `vendor-patches/zcash_client_backend-0.23.0/`
-* `vendor-patches/zcash_primitives-0.28.0/`
-* `vendor-patches/zcash_transparent-0.8.0/`
+* `vendor-patches/zcash_primitives-0.30.1/`
+* `vendor-patches/zcash_transparent-0.10.0/`
 
 Each package is offered upstream under `MIT OR Apache-2.0`. KDF Reloaded relies
 on the MIT option when combining these components with the GPL-2.0-only work.
@@ -72,3 +71,40 @@ upstream and is recorded in the provenance ledger (classification
 		CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 		TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 		SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+* `mm2src/mm2_net/src/grpc_web.rs` adapts the gRPC-Web client example of
+	`tonic` (https://github.com/hyperium/tonic, commit
+	`ddab65ede90f503360b7adb0d7afe6d5b7bb8b02`,
+	`examples/src/grpc-web/client.rs`), under the MIT license. The upstream
+	notice is reproduced below as required by the MIT license:
+
+		Copyright (c) 2020 Lucio Franco
+
+		Permission is hereby granted, free of charge, to any person obtaining a
+		copy of this software and associated documentation files (the
+		"Software"), to deal in the Software without restriction, including
+		without limitation the rights to use, copy, modify, merge, publish,
+		distribute, sublicense, and/or sell copies of the Software, and to
+		permit persons to whom the Software is furnished to do so, subject to
+		the following conditions:
+
+		The above copyright notice and this permission notice shall be included
+		in all copies or substantial portions of the Software.
+
+		THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+		OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+		MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+		IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+		CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+		TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+		SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Vendored sources
+----------------
+
+* `mm2src/testcontainers-vendored/` is a vendored copy of
+	`artemii235/testcontainers-rs` (commit `65e7380`), a fork of
+	`testcontainers-rs` 0.7.0, which is offered upstream under
+	`MIT OR Apache-2.0`. KDF Reloaded relies on the MIT option; the upstream
+	MIT notice is kept in `mm2src/testcontainers-vendored/LICENSE-MIT`. The
+	crate is used only by tests.

@@ -122,6 +122,14 @@ history may read the same values by swap `uuid`.
 > snapshots are fetched, stored in the GLEEC-compatible aggregate stats columns,
 > and exposed through per-wallet swap-history RPCs by `uuid`.
 
+> **Cross-reference.** [Chapter 44](44-database-persistence-and-migrations.md)
+> §44.6 and R44.8.6 own the binding on-disk schema this requirement writes
+> through: the state `7 -> 8` `stats_swaps` migration adds the
+> `maker_coin_usd_price` / `taker_coin_usd_price` columns this snapshot
+> populates, and R44.8.6 binds that RELOADED does not add a parallel
+> completion-fiat column set to `my_swaps` -- per-wallet history reads the
+> `stats_swaps` price columns by `uuid` instead.
+
 ## 42.7 Acceptance criteria (chapter)
 
 - `start_simple_market_maker_bot` starts the loop with a pair registry; the loop
@@ -133,3 +141,21 @@ history may read the same values by swap `uuid`.
   unknown future provider values.
 - Price fetch supports endpoint fallback via comma-separated `price_url`.
 - A completed swap records its moment-of-completion fiat price (R42.6.1).
+
+## 42.7 Provenance Footer
+
+- *Inputs:* the project's own revision history and current tree (the
+  shipped makerbot RPC pair, per-pair configuration registry, price-fetch
+  loop, and price-provider set -- by public behaviour and config-key
+  shape only, no code transcribed); the externally dictated
+  price-aggregator JSON response shape and the current set of upstream
+  price providers (CoinGecko, CoinMarketCap, etc.) and their public APIs
+  (this chapter's own binding-scope source of truth); [Chapter 44](44-database-persistence-and-migrations.md)
+  (the persistence contract §42.6's fiat-price-at-completion snapshot is
+  built on).
+- *Permitted-input classes used:* baseline/as-built source (the shipped
+  makerbot and price-fetch loop); external public specification (the
+  price-aggregator response shape and upstream provider APIs);
+  cross-chapter contracts (Chapter 44).
+- *Sibling-allowlist consultations:* [Chapter 44](44-database-persistence-and-migrations.md).
+- *Forbidden corpus:* not consulted.

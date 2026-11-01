@@ -29,6 +29,7 @@
 //! - Hardware-wallet (Ledger) integration. Removing the
 //!   `solana-remote-wallet` dependency is the entire point of P14.
 
+use crate::node_url::{host_only, scrub_node_url, scrub_urls_in_text};
 use common::executor::Timer;
 use derive_more::Display;
 use futures::future::{select, Either};
@@ -100,11 +101,21 @@ pub struct SolanaRpcClient {
     inner: Arc<ClientInner>,
 }
 
-#[derive(Debug)]
 struct ClientInner {
     url: String,
     commitment: CommitmentConfig,
     next_id: AtomicU64,
+}
+
+/// The debug form names the node by its host-only form (CRD ch.40 R40.5A.1, ch.35 R35.1.17).
+impl std::fmt::Debug for ClientInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientInner")
+            .field("node", &host_only(&self.url))
+            .field("commitment", &self.commitment)
+            .field("next_id", &self.next_id)
+            .finish()
+    }
 }
 
 impl SolanaRpcClient {
@@ -145,7 +156,13 @@ impl SolanaRpcClient {
         let timeout = Timer::sleep(REQUEST_TIMEOUT_SECS);
         let (status, _headers, bytes) = match select(req_fut, timeout).await {
             Either::Left((Ok(triple), _)) => triple,
-            Either::Left((Err(e), _)) => return Err(RpcError::transport(method, e.get_inner().to_string())),
+            // The lower layer's text names the node by its full URL; a text names it host-only (R40.5A.1).
+            Either::Left((Err(e), _)) => {
+                return Err(RpcError::transport(
+                    method,
+                    scrub_urls_in_text(&scrub_node_url(&e.get_inner().to_string(), &self.inner.url)),
+                ))
+            },
             Either::Right(_) => {
                 return Err(RpcError::transport(
                     method,
@@ -542,5 +559,21 @@ mod tests {
         let mint = Pubkey::from_str("So11111111111111111111111111111111111111112").unwrap();
         let v = TokenAccountsFilter::Mint(mint).into_json();
         assert_eq!(v["mint"], "So11111111111111111111111111111111111111112");
+    }
+
+    /// T40.10 (R40.5A.1): a request to a closed port and the debug forms name the node host-only.
+    #[test]
+    fn t40_10_a_node_is_named_host_only_in_errors_and_debug_forms() {
+        let url = "http://user:secret@127.0.0.1:1/v1/APIKEY?token=X";
+        let client = SolanaRpcClient::new(url);
+        let pool = crate::solana::rpc_pool::SolanaRpcPool::from_urls([url]).unwrap();
+        let error = common::block_on(client.get_health()).unwrap_err().to_string();
+        let pool_error = common::block_on(pool.get_health()).unwrap_err().to_string();
+        for text in [error, pool_error, format!("{client:?}"), format!("{pool:?}")] {
+            assert!(text.contains("http://127.0.0.1:1"), "{text}");
+            for secret in ["user", "secret", "/v1/", "APIKEY", "token=X"] {
+                assert!(!text.contains(secret), "a credential part reaches a text");
+            }
+        }
     }
 }

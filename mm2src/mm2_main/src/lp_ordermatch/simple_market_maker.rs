@@ -124,12 +124,17 @@ pub struct StartSimpleMakerBotRequest {
 #[cfg(test)]
 impl StartSimpleMakerBotRequest {
     pub fn new() -> StartSimpleMakerBotRequest {
-        return StartSimpleMakerBotRequest {
+        StartSimpleMakerBotRequest {
             cfg: Default::default(),
             price_url: None,
             bot_refresh_rate: None,
-        };
+        }
     }
+}
+
+#[cfg(test)]
+impl Default for StartSimpleMakerBotRequest {
+    fn default() -> Self { Self::new() }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

@@ -34,20 +34,26 @@ The subsystem is divided cleanly between:
    they own. The trait is intentionally minimal and chain-family
    agnostic.
 
-**Port status.** The protocol and persistence layers are present
-in reloaded as a **library crate** and are functionally complete.
-The integration trait of §22.3 is **NOT yet present in reloaded**
-and MUST be created as part of the port. Three integration
-obligations remain: (a) the §22.3 integration trait must be added
-to the WalletConnect library crate, (b) at least one coin support
-module per chain family must implement that trait, and (c) the
-public RPC dispatcher does not yet register the WalletConnect
-methods. Per the project's PORT decision these are not optional
-"deferred" items — they are **binding driving-spec requirements**
-that an implementer MUST satisfy. The trait surface (§22.3), the
+**Port status.** *Implemented.* The protocol and persistence
+layers, the §22.3 integration trait (`WcCoinSigner`), the
+session-establishment handshake of §22.4.1 (propose-publish,
+session-key derivation, and settled-session construction/
+persistence), at least one coin support module per chain family
+(EVM, Cosmos, UTXO), and the five public RPC handlers of §22.9A.2
+are all present in reloaded. The trait surface (§22.3), the
 required coin-integration set, the public RPC surface, and the
-clean-channel wire payloads are specified normatively in §22.8.1
-and §22.9A; the persistence shape (§22.5) is already binding.
+clean-channel wire payloads specified normatively in §22.8.1 and
+§22.9A are the contract this port was implemented against; the
+persistence shape (§22.5) was already binding. See the §22.9A and
+§22.9 status notes for the per-item detail.
+
+**What is not yet reachable.** The ported trait implementors have no
+caller outside the integration layer, so the subsystem can **pair
+but not sign**: no activation policy, withdrawal route, or swap path
+reaches them, and EVM activation refuses the WalletConnect signing
+policy. §22.9B is the driving spec for that remaining call-site
+port and records, operation by operation, how far the reference
+release carries it.
 
 ## 22.1 Subsystem Shape
 
@@ -955,18 +961,21 @@ R11. **Session `encoding_algo` selection.** The WalletConnect
     does not amend the WC2 Type 0 codec or the Cosmos field-level
     binary encoding rules.
 
-The following items are **required ports** (binding driving-spec,
+The following items were **required ports** (binding driving-spec,
 specified normatively in §22.9A) plus genuinely-optional
 follow-on work; the required-port items are flagged as such:
 
-D1. **[REQUIRED PORT — §22.9A.1]** At least one coin support
-    module per the EVM, Cosmos, and UTXO families shall implement
-    the integration trait. This is a binding requirement, not
-    optional.
+D1. **[REQUIRED PORT — §22.9A.1, implemented]** At least one coin
+    support module per the EVM, Cosmos, and UTXO families
+    implements the `WcCoinSigner` integration trait
+    (`mm2src/coins/eth/wc_integration.rs`,
+    `mm2src/coins/utxo/wc_integration.rs`,
+    `mm2src/coins/tendermint/wc_integration.rs`).
 
-D2. **[REQUIRED PORT — §22.9A.2]** The five public RPC handlers
-    of §22.9A.2 (see R6) shall be registered in the public
-    dispatcher. This is a binding requirement, not optional.
+D2. **[REQUIRED PORT — §22.9A.2, implemented]** The five public RPC
+    handlers of §22.9A.2 (see R6) are registered in the public
+    dispatcher (`wc_new_connection`, `wc_get_sessions`,
+    `wc_get_session`, `wc_delete_session`, `wc_ping_session`).
 
 D3. The session-key type shall acquire `Zeroize` /
     `ZeroizeOnDrop` (see R5).
@@ -1006,27 +1015,49 @@ D9. When the encrypted format of D8 ships and a stronger-security
     added now (nothing better is yet offered); it is recorded here
     as future work only.
 
+D10. **[REQUIRED PORT — §22.9B, not implemented]** Signing is not
+    reachable by a user. The §22.3 trait implementors have exactly
+    one consumer, the integration layer itself; no activation
+    policy, withdrawal route, or swap path calls them, and EVM
+    activation refuses the WalletConnect signing policy. The port
+    needed is the call-site plumbing of §22.9B — RP8 activation
+    acceptance, the delegated-signing wiring behind withdrawal and
+    the legacy swap HTLC paths for the families RP9 marks
+    reachable, RP10's watcher gate, and RP11.1's early rejection
+    for the paths that cannot be served. The subsystem and the
+    trait implementors themselves need no redesign. RP9, cited
+    here for the families to wire first, is an **informative**
+    record of the reference release (§22.9B.4) and not a binding
+    scope: what this item requires is the §22.9B rules named
+    above, and a port that makes more operations reachable than
+    RP9 records is conformant — D11 asks for exactly that.
+
+D11. The UTXO withdrawal refusal recorded in RP9 is a reference gap,
+    not a contract: reloaded should make withdrawal reachable for a
+    key-less UTXO coin through the same delegated signing operation
+    the swap path uses (§22.9B.4, finding 1), coordinated with
+    [Chapter 49](49-withdrawal-task-path.md). Both references this
+    item follows land in **informative** material: the refusal is
+    a negative cell in RP9's reference-release table, and
+    §22.9B.4's findings are informative code-quality observations.
+    Neither binds an implementation — which is the point, since
+    this item exists to say that the refusal must not be ported.
+    The requirement is the one stated in this item.
+
 ## 22.9A Required Port — Coin Integration and Public RPC Surface (driving-spec)
 
-**STATUS.** The capabilities in this section are **required but
-NOT yet implemented in reloaded**. The WalletConnect library crate
-is present for the **transport cryptography, JSON-RPC payload
-types, and persistence** layers; however the **session-
-establishment handshake is only stubbed** — the inbound
-`wc_sessionPropose` response and `wc_sessionSettle` handlers log
-and acknowledge but do not derive the session key, build, or store
-a `Session`, and no `wc_sessionPropose` is published over the
-relay. Completing that handshake (propose-publish on the pairing
+**STATUS.** *Implemented.* The capabilities in this section were
+**required** at chapter authoring time and have since been
+ported. The WalletConnect library crate provides the transport
+cryptography, JSON-RPC payload types, and persistence layers; the
+session-establishment handshake — propose-publish on the pairing
 topic, deriving the session key from the responder public key per
-§22.6, and building/persisting the settled session) is part of
-this required port, since AC1 depends on it. The **§22.3
-integration trait is NOT present and MUST be created** as part of
-this port. Per the PORT decision these are binding requirements,
-not optional deferred work. An implementer MUST land the session-
-establishment handshake, the §22.3 integration trait, the
-per-family coin integration (§22.9A.1), and the public RPC
-dispatcher surface (§22.9A.2), all emitting the clean-channel wire
-payloads pinned in §22.8.1.
+§22.6, and building/persisting the settled session (AC1) — is
+implemented rather than stubbed; the §22.3 integration trait
+(`WcCoinSigner`) is present; the per-family coin integration
+(§22.9A.1) has at least one implementor per chain family; and the
+public RPC dispatcher surface (§22.9A.2) is registered — all
+emitting the clean-channel wire payloads pinned in §22.8.1.
 
 ### 22.9A.1 Coin-integration requirement
 
@@ -1146,6 +1177,258 @@ client-error / 400 token.
   that this branch does not change the §22.8.1.2 Cosmos
   field-level contract.
 
+## 22.9B Reachability of Signing from User-Facing Entry Points (driving-spec)
+
+**STATUS.** *Required port — not implemented.* The subsystem, the
+§22.3 integration trait, and one trait implementor per chain family
+are present (§22.9A, D1), but in this repository nothing beyond the
+integration layer calls them: no activation policy, no withdrawal
+route, and no swap path reaches a `WcCoinSigner` implementation, and
+EVM activation refuses the WalletConnect signing policy outright.
+The subsystem can therefore **pair but not sign**. This section
+states the user-facing contract a port must satisfy, and records
+informatively how far the reference release carries it.
+
+> **Clearance (chapter 01 T1, R40).** This section was authored by
+> the KDF Spec Reader under the chapter-01 two-team workflow and
+> **passed the KDF Dirty Gate** on 2026-10-17 before being relied
+> on (PASS, finding list empty). Its clearance is therefore
+> *complete* and not pending: nothing in this section is a
+> candidate awaiting a gate, and the STATUS line above reports port
+> status, which is a different claim. The extent, method and
+> measure of that pass are recorded once, in the *Dirty Gate
+> clearance* item of §22.12, and are not restated here.
+
+> **Binding versus informative in this section.** The section
+> carries both kinds of material and this note changes neither.
+> Marked **informative**, and binding nothing: RP9's per-operation
+> reachability table, which records what the reference release
+> reaches today; the whole of §22.9B.4, both its release
+> designations and its code-quality findings; and each note headed
+> *(informative)*. Everything else is stated as requirement. Where
+> a requirement or a deferral points at informative material, it
+> now says so at the point of reference, so that a reader following
+> the pointer is not left to infer the status of what they land on.
+
+The chain-namespace and request-method sets of §22.8 need no change
+for this port: the reference release exposes the same three CAIP-2
+namespaces and the same ten method strings already specified there.
+The gap is entirely in the call sites, not in the taxonomy, the
+wire payloads, or the trait shape.
+
+### 22.9B.1 Activation-policy acceptance
+
+**RP8.** A coin shall be activatable against an already-settled
+WalletConnect session by naming that session in the activation
+request's key-source policy field.
+[Chapter 55](55-coin-activation-wire-contract.md) R55.5.11 defers
+this form to the present chapter. Two JSON shapes are in use for
+the same concept, and both are part of the accepted wire surface:
+
+| Family | Request field | Accepted JSON for a WalletConnect key source | Already specified in |
+|--------|---------------|-----------------------------------------------|----------------------|
+| EVM / EVM-family | `priv_key_policy` | adjacently tagged: `{"type": "WalletConnect", "params": {"session_topic": "<session topic>"}}` | [Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.4 |
+| Tendermint / Cosmos | `activation_params` | adjacently tagged: `{"type": "WalletConnect", "params": {"session_topic": "<session topic>"}}` | [Chapter 36](36-tendermint-v2-activation-rpcs.md) §36 activation-params form 2 |
+| UTXO | `priv_key_policy` | **externally** tagged: `{"WalletConnect": {"session_topic": "<session topic>"}}` | this chapter (deferred to it by [Chapter 55](55-coin-activation-wire-contract.md) R55.5.11) |
+
+The EVM and Tendermint forms are already bound by chapters 35 and
+36 and are reproduced here only so the three families can be read
+side by side; those chapters govern their own request shapes. The
+UTXO form is bound here.
+
+**RP8.1.** The topic named is the **settled session** topic of
+§22.3, not a pairing topic. Activation shall fail with a structured
+error, not a panic, when no live session carries that topic or when
+the session's agreed namespaces do not grant the coin's CAIP-2
+chain.
+
+**RP8.2.** The EVM-family route shall accept the policy **only**
+when an explicit chain id is resolvable for the coin, and shall
+refuse it on the **pre-v2 legacy** EVM enable route (the old
+`enable`-style activation that carries no explicit chain id),
+with a structured unsupported-policy error. Both v2 EVM activation
+forms — the one-shot call and the task-based call — accept it, as
+chapter 35 R35.1.4 already records.
+
+**RP8.2a.** The UTXO form is accepted on the **task-based** UTXO
+activation route, and the coin configuration must carry both the
+CAIP-2 chain id in its protocol data and a derivation path, since
+the derivation path is what selects which of the wallet's reported
+addresses becomes the activated one (RP8.3). A message-signing
+prefix must also be configured, because it is required for the
+public-key-recovery fallback of RP8.3.
+
+**RP8.3.** Activation under this policy learns the address and
+public key **from the wallet**, never from a local secret:
+
+- UTXO: request the wallet's account addresses, select the entry
+  whose reported derivation path equals the coin's configured full
+  derivation path; if the wallet reports no derivation paths at
+  all, fall back to its first entry and log that the selection was
+  positional; if it reports paths but none match, fail. When the
+  selected entry carries no public key, recover one by asking the
+  wallet to sign a fixed short message and recovering the key from
+  the compact signature against the coin's configured
+  message-signing prefix. A hex **or** base64 signature encoding
+  shall both be accepted.
+- EVM: recover the account's uncompressed public key and address
+  from a wallet message signature, then derive the compressed form.
+- Cosmos: obtain the account public key from the wallet's account
+  enumeration method.
+
+> **Upstream divergence (informative).** The two tagged-enum JSON
+> shapes in RP8 are not externally dictated; they are an accident
+> of the reference carrying a family-generic key-source type
+> alongside separate EVM- and Tendermint-specific ones, only the
+> latter two of which acquired a `type` discriminator. Accepting
+> both shapes on every route is a permitted superset and is
+> recommended (chapter 55 R55.5.11 already takes that approach for
+> the UTXO unit variants), provided the reference form for each
+> family continues to be accepted.
+
+### 22.9B.2 Operations a paired wallet can actually sign
+
+**RP9 (informative record of the reference release, §22.9B.4).**
+Signing reachability in the reference is **per operation, not per
+subsystem**:
+
+| Operation | EVM | Cosmos | UTXO |
+|-----------|-----|--------|------|
+| Activate; learn address and public key from the wallet | yes | yes | yes |
+| Withdrawal (both the legacy and task withdrawal routes) | yes | yes | **no — refused as an unsupported key policy** |
+| Ordinary transaction build then wallet signature then broadcast | yes | yes | yes |
+| Legacy (v1) atomic-swap HTLC payment / spend / refund | transaction-send path is wired; not announced as supported | generic send path is wired; not announced as supported | **yes — the one family the reference announces as swap-capable** |
+| Swap-protocol-v2 HTLC paths | no | no | no |
+| Watcher-assisted swap (detached transactions a watcher broadcasts later) | no | no | no |
+| Stand-alone message-signing RPC | no | no | no |
+| Private-key export / display | refused | refused | refused |
+
+**RP9.1.** Wallet message signing is reachable only as an
+activation-time public-key recovery step (RP8.3). It is not wired
+to the user-facing message-signing RPC for any family.
+
+**RP10 — Watcher participation off for a key-less policy
+(binding).** A coin whose signing policy holds no local secret
+shall report itself **unsupported by the watcher subsystem** of
+[Chapter 09](09-watcher-reward-infrastructure.md). The watcher
+hand-off requires a detached signature produced with the same key
+the swap itself uses, and an external wallet yields neither that
+key nor a detached raw signature it did not broadcast. This gate is
+what keeps a key-less coin out of the watcher preimage paths
+instead of letting it reach a key accessor that cannot serve it.
+
+**RP11 — How the swap protocol's key requirements are met without
+a local key (UTXO).** The two obstacles
+[Chapter 47](47-metamask-integration.md) R47.5.13 names do not both
+bind the UTXO family:
+
+1. *No per-swap HTLC key is needed.* For the UTXO family the HTLC
+   key was never derived per swap: the HTLC public key is the
+   activated address's compressed public key and the swap-unique
+   data is ignored. Under a key-less policy the HTLC public key is
+   therefore simply the public key the wallet reported at
+   activation (RP8.3) — no derivation is attempted and none is
+   required.
+2. *The framework keeps broadcast control.* Every signature over an
+   HTLC output is obtained by handing the wallet a PSBT carrying
+   the single input to be signed, annotated with the previous
+   (non-witness) transaction, the redeem script, and a sighash
+   selector of ALL, with broadcasting explicitly **not** requested.
+   The framework extracts the partial signature from the returned
+   PSBT, assembles the final unlocking script itself — signature,
+   then the branch-selecting script data, then the redeem script —
+   and retains control of when the transaction is broadcast.
+   Ordinary pay-to-public-key-hash and
+   pay-to-witness-public-key-hash inputs use the same no-broadcast
+   PSBT request, with the framework finalizing any input the wallet
+   leaves unfinalized.
+3. *The detached-signature requirement is declined, not satisfied.*
+   Nothing produces a re-broadcastable detached signature for a
+   third party; RP10 removes the need by excluding the coin from
+   watcher participation.
+
+**RP11.1.** The swap-protocol-v2 HTLC paths and the watcher-message
+paths still read the per-swap key-pair accessor directly. For a
+key-less policy that accessor has no implementation. A key-less coin
+shall therefore be prevented from entering those paths at the
+**earliest** lifecycle point with a structured unsupported-operation
+error, consistent with Chapter 47 R47.5.13a — never by reaching an
+unimplemented accessor.
+
+**RP12 — No WalletConnect signing RPC.** Signing shall not be
+exposed as its own RPC method. The five methods of §22.9A.2 are the
+complete WalletConnect-specific RPC surface; every signature is a
+side effect of an ordinary coin operation performed on a coin
+activated under the policy of RP8. A caller therefore reaches
+signing by: pair, settle, activate with the WalletConnect key
+source, then invoke the ordinary withdrawal or trading operation.
+
+### 22.9B.3 Build-gating caveat
+
+**RP13.** External-wallet signing for the UTXO family must be
+reachable in the **shipped artifact**, not only in some build
+configuration. In the reference release the UTXO external-wallet
+signing and activation code sits behind a Cargo feature that is
+**off** in the daemon crate's default feature set and switched on
+only by the binary/library crate that wraps it, because the
+additional dependency it pulls in conflicts with an existing
+dependency version when test binaries link. A conforming
+implementation shall either keep the capability unconditional or
+ensure every shipped target enables it; a build that compiles the
+daemon crate directly with default features silently loses UTXO
+external-wallet signing and activation and reports it as a
+build-configuration failure at use time rather than at build time.
+
+### 22.9B.4 Reference release designations (informative)
+
+| Public release designation | WalletConnect change |
+|----------------------------|----------------------|
+| `v2.5.0-beta` (2025-07-04) | First appearance. WalletConnect v2 pairing, sessions, persistence, and signing integration for the EVM and Cosmos families; the EVM activation key-source field acquires its tagged-object form as an announced breaking change. |
+| `v2.6.0-beta` (2025-11-28) | UTXO (`bip122`) **activation** only, explicitly announced as activation-only with signing to follow. Pairing responses begin returning the pairing topic. |
+| `v3.0.0-beta` (2026-03-06) | UTXO transaction signing and **legacy (v1) atomic-swap** support. This is the last material change; the newest reference lineage available carries nothing later. |
+
+No release designation announces WalletConnect swap support for the
+EVM or Cosmos families, nor watcher, swap-protocol-v2, or UTXO
+withdrawal support under this policy. The reference's own
+end-to-end WalletConnect swap test is a manually driven,
+non-automated test against a public test network that requires a
+human to approve the signing prompts in a real wallet; there is no
+automated coverage of the swap path.
+
+> **Code-quality finding (informative).** Three gaps are visible in
+> the reference's own treatment of this policy. Each is stated as a
+> behavioral fact with a proposed remedy; none should be ported as
+> a contract.
+>
+> 1. *UTXO withdrawal is refused while UTXO swapping is permitted.*
+>    Both withdrawal routes reject the key-less policy as
+>    unsupported, yet the same coin may enter a legacy swap, where
+>    the framework signs ordinary inputs through exactly the
+>    delegated PSBT path a withdrawal would need. The capability
+>    exists and is simply not wired to withdrawal. Remedy: route
+>    both withdrawal paths through the same delegated signing
+>    operation the swap path uses, so a user who can swap a coin can
+>    also move it — this is the one RP9 **no** that reloaded should
+>    turn into a **yes**.
+> 2. *Unimplemented key accessors are reachable without a guard.*
+>    The swap-protocol-v2 HTLC paths and the watcher-message paths
+>    call the per-swap key-pair accessor directly, and that accessor
+>    has no implementation for a key-less policy. Nothing in order
+>    placement or swap start prevents a key-less coin from reaching
+>    them; the watcher case is closed only incidentally, by the
+>    watcher-support gate of RP10, and the swap-protocol-v2 case only
+>    by that protocol being an opt-in node setting that is off by
+>    default. Remedy: RP11.1's early structured rejection.
+> 3. *A correctness hazard is acknowledged but unaddressed.* The
+>    EVM delegated-signing path records that it does not take the
+>    account nonce serialization it would need once swaps run over
+>    this policy. Any future EVM swap support under this policy must
+>    close that first, or two concurrent delegated sends can race on
+>    the same account nonce. Remedy: acquire the same nonce
+>    serialization the local-key path uses before handing a
+>    transaction to the wallet, independently of whether swaps are
+>    enabled.
+
 ## 22.10 External References
 
 - The WalletConnect v2 protocol specification (transport,
@@ -1209,8 +1492,10 @@ V3. The third-party Cargo dependencies that provide the relay
   selection/default behaviour, and, for §22.8.1, the
   externally-dictated request/response wire field spellings, the
   CAIP-2 reference formats, the `session-info` / namespace-record
-  field spellings, and the dictated wallet-metadata signals (see
-  *Forbidden corpus* below).
+  field spellings, and the dictated wallet-metadata signals; and,
+  for §22.9B, the signing-reachability acceptance sets, the
+  activation key-source JSON shapes, and the public release
+  designations (see *Forbidden corpus* below).
 - *Permitted-input classes used:* baseline source; external public
   specifications (WalletConnect v2; CAIP-2; CAIP-10; Ethereum
   JSON-RPC; EIP-191/EIP-1559; Cosmos SDK signing schemes / ADR-036;
@@ -1222,11 +1507,13 @@ V3. The third-party Cargo dependencies that provide the relay
   `encoding_algo` selector, and for the §22.8.1 request/response
   wire payloads, CAIP-2 reference formats, `session-info` /
   namespace-record field spellings, and dictated wallet-metadata
-  signals, with the relicensed historical record cited as the R31
-  source (see *Forbidden corpus* below).
+  signals, and for the §22.9B signing-reachability acceptance sets,
+  activation key-source JSON shapes, and public release
+  designations, with the relicensed historical record cited as the
+  R31 source (see *Forbidden corpus* below).
 - *Sibling-allowlist consultations:* none.
 - *Forbidden corpus:* not consulted for clean-room derivation of
-  protected expression. There are three narrow exceptions, each
+  protected expression. There are four narrow exceptions, each
   consulted under R31 **solely** for clean functional or
   externally-required interop facts:
   1. the §22.5.3 `open` on-disk session-record format, whose only
@@ -1243,7 +1530,88 @@ V3. The third-party Cargo dependencies that provide the relay
      Cosmos / BIP-174 / Keplr standards, with the corpus consulted
      only to confirm which standard-dictated method set and field
      spellings reloaded must emit.
+  4. §22.9B, consulted under R31 for the reachability facts a
+     clean-side implementer cannot derive from public
+     specifications: which activation JSON shapes the reference
+     accepts for a WalletConnect key source and on which activation
+     route (RP8, RP8.2), what the wallet is asked for at activation
+     (RP8.3), which user-facing operations are reachable per chain
+     family (RP9), the watcher exclusion for key-less policies
+     (RP10), the delegated-PSBT signing model and the absence of
+     per-swap HTLC key derivation for the UTXO family (RP11), the
+     absence of any signing RPC (RP12), the shipped-artifact build
+     gating (RP13), and the public release designations of §22.9B.4.
+     Behaviour and acceptance sets only; the §22.9B.4 findings are
+     restated as behavioral facts.
   No discretionary expression — no bodies, private identifiers,
   comments, or diagnostics — was taken from the corpus; the
   surrounding prose is authored fresh per the R31 sanitization
   discipline.
+- *Dirty Gate clearance (chapter 01 T1):* the fourth exception
+  above — §22.9B in full (RP8 through RP13 and §22.9B.4), the
+  paragraph it added to §22.0, deferrals D10 and D11, and the
+  fourth scoped item of this footer — was authored by the KDF Spec
+  Reader and **passed the KDF Dirty Gate** on 2026-10-17: PASS,
+  discretionary-expression measure 0.02, finding list empty, and
+  accordingly no remedy class for any line or for the candidate as
+  a whole. The clearance is therefore **complete and not pending**,
+  so R40 no longer withholds this material; §22.9B carries a short
+  pointer to this item so that a reader at the material itself does
+  not have to come here to learn as much. The pass compared the
+  whole chapter, new material and previously cleared text alike;
+  the material listed above is what it gated for the first time.
+  The three elements of the R39 scope attestation, carried forward
+  here in corpus-free terms as chapter 01 T1 requires:
+  - *Extent.* The subject matter this chapter's own scope names:
+    the WalletConnect v2 dApp / relay-client subsystem and its
+    per-chain signing integration for the three chain families; the
+    coin-activation key-source acceptance surface for those same
+    three families; the withdrawal, ordinary-transaction,
+    legacy-swap and swap-protocol-v2 signing paths, together with
+    the watcher-support gate; the per-swap swap-key accessor
+    surface; the build-configuration / feature surface that governs
+    whether the UTXO external-wallet capability is present in a
+    shipped artifact; and the published release-notes record.
+    Reference versions: the publicly published release designations
+    `v2.5.0-beta`, `v2.6.0-beta` and `v3.0.0-beta`, the last being
+    the newest publicly designated release of that lineage
+    available to the gate. That is as precise as this record goes —
+    a more exact reference cannot be given within the limits
+    binding a scope attestation (§1.7) — and the gap is left
+    visible rather than papered over. Quantity examined:
+    approximately **twenty files** read in full or in the relevant
+    part for the close reading, and **864 files plus the published
+    release-notes document** enrolled in the mechanical sweep.
+  - *Method.* A stated combination of three. (1) **Reading** —
+    line-by-line classification of every added line of the
+    candidate against the corresponding compared material, with the
+    per-token forced-versus-free test applied to each token that
+    matched. (2) **Mechanical comparison** — a word-normalised
+    n-gram overlap sweep at **N = 5, 6, 7 and 8** between the
+    candidate text and the compared set described above, run both
+    over the new sections alone and over the whole chapter line by
+    line. (3) **Targeted absence check** — a check of the candidate
+    for the private, non-wire identifiers of the compared
+    subsystem: **25 candidate names checked, all absent** from the
+    chapter.
+  - *Measure.* **0.02** on the discretionary-expression basis — the
+    same figure the leak report carries, not a second one. The
+    judgement standard it is read against: the measured set admits
+    discretionary expression only and excludes dictated-interop and
+    pinned-interface content, so genuine discretionary expression
+    fails in any amount while dictated and public matches score
+    nothing however dense, and token-match density is therefore not
+    read as evidence. The residual figure is attributable solely to
+    publicly published release designations and to generic
+    subject-matter wording that cannot be varied: at **N = 8 the
+    whole chapter has no overlap at all** with the whole compared
+    set, and the entire mechanical residue at **N = 6 and N = 7**
+    consists of publicly published release designations and their
+    release dates, which §1.7 expressly admits as public-release
+    facts.
+
+  This item records the fourth exception only. The first three
+  exceptions were committed in June 2026, before §1.4A was adopted
+  (2026-10-11), so T1 does not reach them and R43 makes them no
+  less sound; recording the route for such pre-adoption material is
+  chapter 01 D3.

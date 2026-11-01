@@ -1,7 +1,8 @@
 use super::{CoinBalance, HistorySyncState, MarketCoinOps, MmCoin, RawTransactionFut, RawTransactionRequest, SwapOps,
             TradeFee, TransactionEnum, TransactionFut};
-use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, NegotiateSwapContractAddrErr, SignatureResult,
-            TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
+use crate::SpendSafeAmountError;
+use crate::{BalanceFut, DexFee, FeeApproxStage, FoundSwapTxSpend, HtlcPaymentCheck, NegotiateSwapContractAddrErr,
+            SignatureResult, TradePreimageFut, TradePreimageResult, TradePreimageValue, UnexpectedDerivationMethod,
             ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult, WatcherOps, WithdrawFut,
             WithdrawRequest};
 use async_trait::async_trait;
@@ -79,7 +80,9 @@ impl MarketCoinOps for TestCoin {
         unimplemented!()
     }
 
-    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> { unimplemented!() }
+    fn tx_enum_from_bytes(&self, bytes: &[u8]) -> Result<TransactionEnum, String> {
+        Err("TestCoin cannot read transactions".to_owned())
+    }
 
     fn current_block(&self) -> Box<dyn Future<Item = u64, Error = String> + Send> { unimplemented!() }
 
@@ -201,6 +204,7 @@ impl SwapOps for TestCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -213,6 +217,7 @@ impl SwapOps for TestCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -222,7 +227,54 @@ impl SwapOps for TestCoin {
         unimplemented!()
     }
 
+    async fn check_payment_pays_htlc(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+        _payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        Ok(HtlcPaymentCheck::Pays)
+    }
+
+    fn htlc_detection_progress(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+    ) -> Option<String> {
+        None
+    }
+
+    fn htlc_key_is_random_per_swap(&self) -> bool { false }
+
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> { Ok(()) }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> { unimplemented!() }
+
+    fn can_refund_htlc(
+        &self,
+        locktime: u64,
+    ) -> Box<dyn Future<Item = crate::CanRefundHtlc, Error = String> + Send + '_> {
+        let now = common::now_ms() / 1000;
+        let result = if now > locktime {
+            crate::CanRefundHtlc::CanRefundNow
+        } else {
+            crate::CanRefundHtlc::HaveToWait(locktime - now + 1)
+        };
+        Box::new(futures01::future::ok(result))
+    }
+
+    fn retriable_refund_rejection(&self, rejection: &str) -> Option<String> { None }
+
+    fn refund_gate_closed_note(
+        &self,
+        locktime: u64,
+    ) -> Box<dyn Future<Item = Option<String>, Error = String> + Send + '_> {
+        Box::new(futures01::future::ok(None))
+    }
 
     fn negotiate_swap_contract_addr(
         &self,
@@ -232,6 +284,10 @@ impl SwapOps for TestCoin {
     }
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { unimplemented!() }
+
+    fn derives_swap_htlc_key(&self) -> bool { false }
+
+    fn derive_swap_htlc_key_pair(&self, _swap_unique_input: &[u8]) -> Result<KeyPair, String> { unimplemented!() }
 }
 
 #[async_trait]
@@ -267,6 +323,8 @@ impl MmCoin for TestCoin {
     ) -> TradePreimageResult<TradeFee> {
         unimplemented!()
     }
+
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> { Ok(None) }
 
     fn get_receiver_trade_fee(&self, stage: FeeApproxStage) -> TradePreimageFut<TradeFee> { unimplemented!() }
 

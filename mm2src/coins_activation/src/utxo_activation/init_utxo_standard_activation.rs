@@ -2,7 +2,8 @@ use crate::context::CoinsActivationContext;
 use crate::prelude::TryFromCoinProtocol;
 use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoinTaskHandle,
                              InitStandaloneCoinTaskManagerShared};
-use crate::utxo_activation::common_impl::{get_activation_result, priv_key_build_policy};
+use crate::utxo_activation::common_impl::{get_activation_result, priv_key_build_policy,
+                                          validate_electrum_connection_settings};
 use crate::utxo_activation::init_utxo_standard_activation_error::InitUtxoStandardError;
 use crate::utxo_activation::init_utxo_standard_statuses::{UtxoStandardAwaitingStatus, UtxoStandardInProgressStatus,
                                                           UtxoStandardUserAction};
@@ -56,6 +57,7 @@ impl InitStandaloneCoinActivationOps for UtxoStandardCoin {
         _protocol_info: Self::StandaloneProtocol,
         _task_handle: &UtxoStandardRpcTaskHandle,
     ) -> MmResult<Self, InitUtxoStandardError> {
+        validate_electrum_connection_settings(activation_request)?;
         let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(Into::into)?;
         let priv_key_policy = priv_key_build_policy(&ctx, &crypto_ctx, activation_request.priv_key_policy)?;
 

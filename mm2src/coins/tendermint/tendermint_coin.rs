@@ -10,11 +10,15 @@
 //!   `pub use tendermint_token::*;`
 
 use super::tendermint_types::*;
+use crate::node_url::{host_only, scrub_node_url, scrub_urls_in_text};
 use crate::PrivKeyPolicy;
 use crypto::privkey::key_pair_from_secret;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use serde_json::Value as Json;
+
+/// The largest number of decimal places a Tendermint coin may declare (CRD R36.3.1).
+const MAX_TENDERMINT_DECIMALS: u8 = 18;
 
 /// Initialise a list of HTTP RPC clients from configuration nodes.
 ///
@@ -29,7 +33,14 @@ pub(crate) fn init_rpc_clients(nodes: &[RpcNode]) -> MmResult<Vec<super::rpc::Ht
     for node in nodes {
         match super::rpc::HttpClient::new(node.url.as_str()) {
             Ok(client) => clients.push(client),
-            Err(e) => errors.push(format!("Url {} is invalid: {}", node.url, e)),
+            // The configured string is never echoed (CRD ch.36 R36.5A.1): the node is named host-only, an
+            // entry without a usable scheme and host by a fixed placeholder, and the lower layer's text is
+            // scrubbed of the URL.
+            Err(e) => errors.push(format!(
+                "Url {} is invalid: {}",
+                host_only(&node.url),
+                scrub_urls_in_text(&scrub_node_url(&e.to_string(), &node.url))
+            )),
         }
     }
 
@@ -79,6 +90,14 @@ pub async fn tendermint_coin_from_conf_and_request(
             )))
         })?;
 
+    // The bound is checked here and not while parsing the coin protocol, so that an out-of-range value fails
+    // the activation as a platform-coin creation error (CRD R36.3.2).
+    if protocol_info.decimals > MAX_TENDERMINT_DECIMALS {
+        return MmError::err(init_err(TendermintInitErrorKind::DecimalsAboveMaximum(
+            protocol_info.decimals,
+        )));
+    }
+
     let account_id = account_id_from_privkey(priv_key, &protocol_info.account_prefix).mm_err(&init_err)?;
 
     let key_pair =
@@ -101,4 +120,36 @@ pub async fn tendermint_coin_from_conf_and_request(
     );
 
     Ok(TendermintCoin::from(coin_impl))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod node_naming_tests {
+    use super::*;
+
+    const URL: &str = "http://user:secret@127.0.0.1:1/rpc/APIKEY?token=X";
+    const SECRETS: [&str; 5] = ["user", "secret", "/rpc/", "APIKEY", "token=X"];
+
+    /// T36.14 (R36.5A.1): an unusable node URL is not echoed, and a usable one that fails is named host-only.
+    #[test]
+    fn a_node_url_that_cannot_be_used_is_not_echoed() {
+        let nodes = [
+            RpcNode::for_test("secret-key-as-a-url"),
+            RpcNode::for_test("ftp://user:secret@host.example/rpc/APIKEY?token=X"),
+        ];
+        let err = init_rpc_clients(&nodes).unwrap_err().to_string();
+        assert!(err.contains("<invalid node URL>"), "{err}");
+        for secret in SECRETS.iter().chain(&["secret-key-as-a-url"]) {
+            assert!(!err.contains(secret), "a credential part is echoed");
+        }
+    }
+
+    /// T36.14 (R36.5A.2): the debug form of a node entry is host-only.
+    #[test]
+    fn the_debug_form_of_a_node_entry_is_host_only() {
+        let rendered = format!("{:?}", RpcNode::for_test(URL));
+        assert!(rendered.contains("http://127.0.0.1:1"), "{rendered}");
+        for secret in SECRETS {
+            assert!(!rendered.contains(secret), "a credential part is rendered");
+        }
+    }
 }

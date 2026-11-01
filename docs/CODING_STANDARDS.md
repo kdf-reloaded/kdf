@@ -8,7 +8,15 @@ substantially rewritten code.
 ## 0. Hard rules
 
 - `cargo fmt` must pass.
-- `cargo clippy --all-targets --all-features -- -D warnings` must pass.
+- Clippy must pass clean (no warnings). The enforced invocation is per
+  first-party package, with default features —
+  `cargo clippy -p <package> --all-targets --no-deps -- -D warnings` — and
+  deliberately not a bare `--workspace --all-features` sweep: `--workspace`
+  trips the vendored `rust-lightning-patched/lightning` crate's own
+  deny-level lints, and `--all-features` would enforce warnings over
+  never-in-production features and test-only scaffolding the `kdf` binary
+  never builds. See `AGENTS.md` §6 for the full rationale; CI enforces this
+  in the `clippy` job in `.github/workflows/test.yml`.
 - No `unwrap()` / `expect()` / `panic!()` outside tests, build scripts,
   and unavoidable `const` initialization.
 - Prefer explicit error propagation via `MmError` and typed error enums.

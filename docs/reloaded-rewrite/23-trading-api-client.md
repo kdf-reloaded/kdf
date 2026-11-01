@@ -25,14 +25,15 @@ public JSON-RPC handler, does not depend on any coin support
 module, and is not consumed by the daemon's runtime path at the
 time of writing.
 
-**Port status.** The 1inch binding crate is present in reloaded as
-a **library**. The integration boundary — the public classic-swap
-JSON-RPC surface, plus the EVM allowance/approval and
-transaction-submission wiring — is **required but NOT yet
-implemented in reloaded**. Per the project's PORT decision this is
-a **binding driving-spec requirement**, not optional deferred
-work; the required public method surface and its request/response
-shapes are specified normatively in §23.8A.
+**Port status.** *Implemented.* The 1inch binding crate is present
+in reloaded as a **library**, and the integration boundary — the
+public classic-swap JSON-RPC surface (the five
+`experimental::1inch_v6_0::classic_swap_*` handlers) plus the EVM
+allowance/approval wiring (`get_token_allowance` / `approve_token`)
+and transaction-submission handoff — has been ported against the
+contract specified normatively in §23.8A. Signing and broadcast of
+the `classic_swap_create` transaction remain the responsibility of
+EVM coin support / the caller, per R11 (§23.9) and RP5 (§23.8A.2).
 
 The bound surface for the 1inch provider covers:
 
@@ -449,12 +450,10 @@ interface are excluded.
 
 ## 23.8A Required Port — Classic-Swap RPC Surface and EVM Wiring (driving-spec)
 
-**STATUS.** The capabilities in this section are **required but
-NOT yet implemented in reloaded; the 1inch binding crate is
-present** as a library. Per the PORT decision these are binding
-requirements, not optional deferred work. An implementer MUST land
-the public classic-swap RPC surface (§23.8A.1) and the EVM
-allowance/approval wiring (§23.8A.2).
+**STATUS.** *Implemented.* Both the public classic-swap RPC
+surface (§23.8A.1) and the EVM allowance/approval wiring
+(§23.8A.2) have been landed against the 1inch binding crate
+library.
 
 ### 23.8A.1 Public RPC method surface
 
@@ -821,14 +820,13 @@ D1. **Provider-agnostic abstraction.** A trait covering the
     question. The current per-provider-submodule layout
     leaves room for one but does not bind one.
 
-D2. **[REQUIRED PORT — §23.8A.1]** JSON-RPC handler
+D2. **[REQUIRED PORT — §23.8A.1, implemented]** JSON-RPC handler
     registration. The public RPC surface for the 1inch
     provider is the set of five handlers under
     `experimental::1inch_v6_0::` covering router-address
     resolution, classic-swap quote, classic-swap create,
     liquidity-sources discovery, and tokens discovery. These
-    handlers are not yet registered in reloaded; landing them
-    is a binding requirement, not optional.
+    handlers are registered in reloaded's dispatcher.
 
 D3. **1inch Fusion mode.** Only the classic-swap surface is
     bound in the chapter-bound substrate. The intent-based, resolver-
@@ -839,15 +837,13 @@ D4. **Portfolio endpoint integration.** The portfolio cross-
     prices request and response types are defined but no
     consumer in the project calls them.
 
-D5. **[REQUIRED PORT — §23.8A.2]** Allowance-approval flow.
-    The `AllowanceNotEnough` condition carries enough
+D5. **[REQUIRED PORT — §23.8A.2, implemented]** Allowance-approval
+    flow. The `AllowanceNotEnough` condition carries enough
     information (R6) for a consumer to issue an ERC-20
     `approve` call before retrying. The `get_token_allowance`
-    and `approve_token` methods that this flow relies on are
-    **not present in reloaded yet** and are themselves part of
-    the port; their wire contract is specified in §23.8A.4.
-    Wiring this flow is a binding requirement of the port, not
-    optional.
+    and `approve_token` methods this flow relies on are present
+    in reloaded and registered in the dispatcher; their wire
+    contract is specified in §23.8A.4.
 
 D6. **Production rate-limit policy.** Only the test-only
     build path of R3 serialises requests. A production rate-
@@ -855,13 +851,15 @@ D6. **Production rate-limit policy.** Only the test-only
     deferred decision; the crate does not currently impose
     one.
 
-D7. **[REQUIRED PORT — §23.8A.2 RP5]** Transaction signing
-    and broadcast. The transaction-fields record returned by
-    the classic-swap create endpoint is delivered to the
-    caller. The crate does not sign or broadcast; that wiring
-    belongs in the integrating RPC handler and the EVM coin
-    support module, and is part of the required port (the
-    library itself stays handler-free and coin-free).
+D7. **[REQUIRED PORT — §23.8A.2 RP5, implemented as designed]**
+    Transaction signing and broadcast. The transaction-fields
+    record returned by the classic-swap create endpoint is
+    delivered to the caller by the `classic_swap_create` handler.
+    Per RP5 the crate itself does not sign or broadcast, and by
+    design neither does that handler; the library stays
+    handler-free and coin-free (R11), and signing/broadcast of the
+    returned `tx` fields is left to the caller through EVM coin
+    support's existing signing surface.
 
 ## 23.12 External References
 

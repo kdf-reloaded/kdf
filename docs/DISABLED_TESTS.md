@@ -28,7 +28,28 @@ env-gated tests:
   `geth --dev` chain with a clean-room `EtomicSwap` HTLC + ERC20 deployed
   locally (see `for_tests/*.sol`). They exercise the real payment -> refund
   flow and assert the on-chain state transition. They skip themselves when the
-  `geth` binary is not on `PATH`, so the default offline suite stays green.
+  `geth` binary is not on `PATH`, so the default offline suite stays green; the
+  `evm-geth-tests` CI job installs a pinned `geth` and sets `KDF_REQUIRE_GETH=1`,
+  which turns that skip into a failure.
+- `validate_dex_fee_invalid_sender_eth`, `validate_dex_fee_invalid_sender_erc`,
+  `validate_dex_fee_eth_confirmed_before_min_block`,
+  `validate_dex_fee_erc_confirmed_before_min_block`, `test_nonce_lock`,
+  `test_nonce_several_urls` (`coins/eth/eth_tests.rs`, now in
+  `eth_tests::scripted_node_ports`) — were not `#[ignore]`d but permanently failing: they
+  were pinned to a decommissioned chain, a hosted project key and two RPC hosts that no
+  longer answer, and no CI filter selected them, so the rot went unnoticed. They now run
+  the same real functions (`validate_fee`, `sign_and_send_transaction_impl`,
+  `get_addr_nonce`) against the scripted local node, with no network and no key. The
+  fee tests sign an equivalent fee transaction instead of fetching two historical
+  mainnet ones, and now also pin the `min_block` boundary and the accepting case;
+  `test_nonce_lock` asserts the nodes saw nonces 0..5 once each; `test_nonce_several_urls`
+  checks nonce agreement across a lagging, a leading and an unreachable node instead of
+  broadcasting on a testnet. Still selected by no CI filter (see
+  `docs/plans/evm-test-infrastructure.md`).
+- `test_get_raw_transaction` (`mm2_main`) — its inline hosted-project key and Ropsten
+  node are removed. The ETH raw-hex and "hash does not exist" checks were dropped (no
+  node to serve them); the hash-format checks now run against DOC. Lost coverage: ETH
+  `get_raw_transaction` retrieval.
 
 ## Group 1 — Genuine code failures worth fixing (inherited from the 2022 fork)
 
@@ -38,12 +59,8 @@ and re-enabled (see above).
 
 ## Group 2 — Dead external endpoints
 
-- `test_nonce_several_urls` (`coins/eth/eth_tests.rs`) — Ropsten is
-  decommissioned (Infura + linkpool URLs dead) and ethgasstation.info is gone;
-  the test also broadcasts a real tx. Re-enabling requires porting to a live
-  testnet (e.g. Sepolia) with a funded key and working gas estimation, run in a
-  network-gated job. Lost coverage: nonce reconciliation across multiple ETH RPC
-  URLs.
+_None outstanding._ The last entry, `test_nonce_several_urls`, was ported to a scripted
+node (see above).
 
 ## Group 3 — Live-infra integration tests (code is fine; ignored so offline `cargo test` stays green)
 
@@ -76,8 +93,21 @@ Re-enable path: fresh electrum URLs + a network-gated CI job. Flaky by nature.
 - `test_one_unavailable_electrum_proto_version` (`coins/utxo/utxo_tests.rs`) —
   only exercised deprecated electrum protocol v1.2 negotiation. **Delete
   candidate** (no coverage value).
-- `test_spam_rick` (`coins/utxo/utxo_tests.rs`) — manual repro, not an assertion.
+- `test_spam_doc` (`coins/utxo/utxo_tests.rs`) — manual repro, not an assertion.
   **Delete candidate.**
+
+## Group 6 — Family switched off for the beta (re-enable when the family returns)
+
+- `test_solana_and_spl_balance_enable_spl_v2`, `test_sign_verify_message_solana`,
+  `test_sign_verify_message_spl` (`mm2_main/src/docker_tests/solana_tests.rs`) —
+  they activate Solana through `enable_solana_with_tokens` / `enable_spl`, which
+  refuse while `SOLANA_ACTIVATION_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`
+  (Solana is postponed for the current beta). Effort to re-enable: flip the
+  constant to `true` and remove the three `#[ignore]` attributes; they need the
+  Solana docker node (`solana_supplied_node`). Lost coverage while off:
+  Solana/SPL activation, balances and message signing against a live node.
+  The refusal itself is covered by offline tests in `rpc/dispatcher/dispatcher.rs`
+  and `lp_commands_legacy.rs`.
 
 > Note: `coins/eth/abi_golden_tests.rs` mentions `#[ignore]` only in a doc
 > comment (pending an ethabi 17 upgrade); those golden tests are **active**, not

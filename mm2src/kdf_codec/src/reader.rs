@@ -35,6 +35,11 @@ where
     }
 }
 
+/// Most slots `read_list`/`read_list_max` reserve before any item has been decoded. Larger lists
+/// (a block's transactions can run to the tens of thousands) pay a handful of doubling
+/// reallocations, negligible next to decoding them.
+const MAX_PREALLOCATED_ITEMS: usize = 4096;
+
 /// Codec-level decode error.
 #[derive(Debug, Display, PartialEq)]
 pub enum Error {
@@ -63,14 +68,37 @@ pub trait Deserializable {
 /// `Transaction` and `BlockHeader` deserializers reach for Qtum-specific
 /// fields when the input came from a Qtum chain. New variants are added
 /// as Phase B reaches additional coins.
-#[derive(Debug)]
+///
+/// `Riecoin` and `KawpowAuxpowMixed` are the two header layouts a coin selects through the
+/// Reloaded-only `protocol.header_layout` key (CRD ch.37 R37.5.9); they are never
+/// inferred from a version value. `Lbc` and `Pivx` are the readers of the `"LBC"` and `"PIVX"`
+/// values of `chain_variant` (R37.5.2, R37.5.5); no `header_layout` value names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoinVariant {
     Standard,
     Qtum,
+    /// 112-byte Riecoin header: 64-bit time, 256-bit nonce.
+    Riecoin,
+    /// Per-header choice by the AuxPoW flag: set -> std-80, clear -> 120-byte KawPoW.
+    KawpowAuxpowMixed,
+    /// 112-byte LBRY header: claim-trie root after the Merkle root, in every header.
+    Lbc,
+    /// PIVX: std-80, plus a 32-byte field after the nonce for header versions 4-6 and 8 and above.
+    Pivx,
 }
 
 impl CoinVariant {
     pub fn is_qtum(&self) -> bool { matches!(self, CoinVariant::Qtum) }
+
+    /// The layout a `header_layout` coin-configuration value names, or `None` for an
+    /// unrecognized value. The one place the key's value spellings are defined.
+    pub fn from_header_layout(value: &str) -> Option<Self> {
+        match value {
+            "riecoin" => Some(CoinVariant::Riecoin),
+            "kawpow_auxpow_mixed" => Some(CoinVariant::KawpowAuxpowMixed),
+            _ => None,
+        }
+    }
 }
 
 /// Stateful reader over an arbitrary `io::Read`. Keeps a one-byte
@@ -171,7 +199,18 @@ where
         T: Deserializable,
     {
         let len: usize = self.read::<CompactInteger>()?.into();
-        let mut out = Vec::with_capacity(len);
+        self.read_items(len)
+    }
+
+    /// Reads `len` items. The length comes from the wire, so it is never trusted for
+    /// preallocation: at most `MAX_PREALLOCATED_ITEMS` slots are reserved up front and the vector
+    /// grows (amortized doubling) only as items are actually decoded. A hostile length therefore
+    /// ends at the first missing byte with `UnexpectedEnd` instead of asking the allocator for it.
+    fn read_items<T>(&mut self, len: usize) -> Result<Vec<T>, Error>
+    where
+        T: Deserializable,
+    {
+        let mut out = Vec::with_capacity(len.min(MAX_PREALLOCATED_ITEMS));
         for _ in 0..len {
             out.push(self.read()?);
         }
@@ -188,11 +227,7 @@ where
         if len > max {
             return Err(Error::MalformedData);
         }
-        let mut out = Vec::with_capacity(len);
-        for _ in 0..len {
-            out.push(self.read()?);
-        }
-        Ok(out)
+        self.read_items(len)
     }
 
     /// Has every byte been consumed? Side-effects the reader by peeking
@@ -258,5 +293,34 @@ where
         let n = io::Read::read(&mut self.from, buf)?;
         (self.observe)(&buf[..n]);
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostile_list_length_ends_with_unexpected_end() {
+        let mut bytes = vec![0xff];
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let mut reader = Reader::from_read(bytes.as_slice());
+        assert_eq!(reader.read_list::<u8>(), Err(Error::UnexpectedEnd));
+
+        let mut reader = Reader::from_read(bytes.as_slice());
+        assert_eq!(reader.read_list_max::<u8>(usize::MAX), Err(Error::UnexpectedEnd));
+    }
+
+    #[test]
+    fn list_longer_than_the_preallocation_cap_still_decodes() {
+        let n = MAX_PREALLOCATED_ITEMS * 3 + 7;
+        let mut bytes = vec![0xfe];
+        bytes.extend_from_slice(&(n as u32).to_le_bytes());
+        bytes.extend((0..n).map(|i| i as u8));
+        let mut reader = Reader::from_read(bytes.as_slice());
+        let list: Vec<u8> = reader.read_list().unwrap();
+        assert_eq!(list.len(), n);
+        assert_eq!(list[n - 1], (n - 1) as u8);
     }
 }

@@ -211,23 +211,23 @@ async fn test_activate_deactivate_coins_impl() {
 
     // Deactivating unknown coins should never fail.
     storage
-        .deactivate_coins(AccountId::Iguana, vec!["RICK".to_string(), "MORTY".to_string()])
+        .deactivate_coins(AccountId::Iguana, vec!["DOC".to_string(), "MARTY".to_string()])
         .await
         .unwrap();
 
-    // Try to reactivate `RICK` coin, it should be ignored.
+    // Try to reactivate `DOC` coin, it should be ignored.
     storage
-        .activate_coins(AccountId::Iguana, vec!["RICK".to_string()])
+        .activate_coins(AccountId::Iguana, vec!["DOC".to_string()])
         .await
         .unwrap();
-    // Try to reactivate `MORTY` and activate `BTC` coins, `MORTY` should be ignored.
+    // Try to reactivate `MARTY` and activate `BTC` coins, `MARTY` should be ignored.
     storage
-        .activate_coins(AccountId::Iguana, vec!["MORTY".to_string(), "BTC".to_string()])
+        .activate_coins(AccountId::Iguana, vec!["MARTY".to_string(), "BTC".to_string()])
         .await
         .unwrap();
     storage
         .activate_coins(HD_0_ACCOUNT, vec![
-            "MORTY".to_string(),
+            "MARTY".to_string(),
             "QTUM".to_string(),
             "KMD".to_string(),
         ])
@@ -235,13 +235,13 @@ async fn test_activate_deactivate_coins_impl() {
         .unwrap();
 
     let actual = storage.load_account_coins(AccountId::Iguana).await.unwrap();
-    let expected = vec!["RICK".to_string(), "MORTY".to_string(), "BTC".to_string()]
+    let expected = vec!["DOC".to_string(), "MARTY".to_string(), "BTC".to_string()]
         .into_iter()
         .collect();
     assert_eq!(actual, expected);
 
     let actual = storage.load_account_coins(HD_0_ACCOUNT).await.unwrap();
-    let expected = vec!["MORTY".to_string(), "QTUM".to_string(), "KMD".to_string()]
+    let expected = vec!["MARTY".to_string(), "QTUM".to_string(), "KMD".to_string()]
         .into_iter()
         .collect();
     assert_eq!(actual, expected);
@@ -252,12 +252,12 @@ async fn test_activate_deactivate_coins_impl() {
         .await
         .unwrap();
     let actual = storage.load_account_coins(HD_0_ACCOUNT).await.unwrap();
-    let expected = vec!["MORTY".to_string(), "KMD".to_string()].into_iter().collect();
+    let expected = vec!["MARTY".to_string(), "KMD".to_string()].into_iter().collect();
     assert_eq!(actual, expected);
 
     // Deactivate all `HD{0}` account's coins.
     storage
-        .deactivate_coins(HD_0_ACCOUNT, vec!["MORTY".to_string(), "KMD".to_string()])
+        .deactivate_coins(HD_0_ACCOUNT, vec!["MARTY".to_string(), "KMD".to_string()])
         .await
         .unwrap();
     let actual = storage.load_account_coins(HD_0_ACCOUNT).await.unwrap();
@@ -265,7 +265,7 @@ async fn test_activate_deactivate_coins_impl() {
 
     // Try to activate a coin for an unknown `HD{2}` account.
     let error = storage
-        .activate_coins(HD_2_ACCOUNT, vec!["RICK".to_string()])
+        .activate_coins(HD_2_ACCOUNT, vec!["DOC".to_string()])
         .await
         .expect_err("'AccountStorage::activate_coins' should have failed due to an unknown account_id");
     match error.into_inner() {
@@ -275,7 +275,7 @@ async fn test_activate_deactivate_coins_impl() {
 
     // Try to deactivate a coin for an unknown `HD{3}` account.
     let error = storage
-        .deactivate_coins(HD_3_ACCOUNT, vec!["MORTY".to_string()])
+        .deactivate_coins(HD_3_ACCOUNT, vec!["MARTY".to_string()])
         .await
         .expect_err("'AccountStorage::deactivate_coins' should have failed due to an unknown account_id");
     match error.into_inner() {
@@ -304,12 +304,12 @@ async fn test_load_enabled_account_with_coins_impl() {
     storage.enable_account(EnabledAccountId::Iguana).await.unwrap();
 
     storage
-        .activate_coins(AccountId::Iguana, vec!["RICK".to_string(), "MORTY".to_string()])
+        .activate_coins(AccountId::Iguana, vec!["DOC".to_string(), "MARTY".to_string()])
         .await
         .unwrap();
     storage
         .activate_coins(HD_0_ACCOUNT, vec![
-            "MORTY".to_string(),
+            "MARTY".to_string(),
             "QTUM".to_string(),
             "KMD".to_string(),
         ])
@@ -319,7 +319,7 @@ async fn test_load_enabled_account_with_coins_impl() {
     let actual = storage.load_enabled_account_with_coins().await.unwrap();
     let expected = AccountWithCoins {
         account_info: accounts_map.get(&AccountId::Iguana).unwrap().clone(),
-        coins: vec!["RICK".to_string(), "MORTY".to_string()].into_iter().collect(),
+        coins: vec!["DOC".to_string(), "MARTY".to_string()].into_iter().collect(),
     };
     assert_eq!(actual, expected);
 
@@ -331,7 +331,7 @@ async fn test_load_enabled_account_with_coins_impl() {
     let actual = storage.load_enabled_account_with_coins().await.unwrap();
     let expected = AccountWithCoins {
         account_info: accounts_map.get(&HD_0_ACCOUNT).unwrap().clone(),
-        coins: vec!["MORTY".to_string(), "QTUM".to_string(), "KMD".to_string()]
+        coins: vec!["MARTY".to_string(), "QTUM".to_string(), "KMD".to_string()]
             .into_iter()
             .collect(),
     };
@@ -340,7 +340,7 @@ async fn test_load_enabled_account_with_coins_impl() {
     // Deactivate all `HD{0}` account's coins.
     storage
         .deactivate_coins(HD_0_ACCOUNT, vec![
-            "MORTY".to_string(),
+            "MARTY".to_string(),
             "QTUM".to_string(),
             "KMD".to_string(),
         ])
@@ -473,12 +473,12 @@ async fn test_delete_account_clears_coins_impl() {
 
     // Activate coins, delete the account and re-activate it again to make sure that all associated coins were deleted.
     storage
-        .activate_coins(AccountId::Iguana, vec!["RICK".to_string(), "MORTY".to_string()])
+        .activate_coins(AccountId::Iguana, vec!["DOC".to_string(), "MARTY".to_string()])
         .await
         .unwrap();
     // Activate also coins for another account.
     storage
-        .activate_coins(HD_0_ACCOUNT, vec!["RICK".to_string(), "KMD".to_string()])
+        .activate_coins(HD_0_ACCOUNT, vec!["DOC".to_string(), "KMD".to_string()])
         .await
         .unwrap();
 
@@ -508,7 +508,7 @@ async fn test_delete_account_clears_coins_impl() {
     let actual = storage.load_enabled_account_with_coins().await.unwrap();
     let expected = AccountWithCoins {
         account_info: accounts_map.get(&HD_0_ACCOUNT).unwrap().clone(),
-        coins: vec!["RICK".to_string(), "KMD".to_string()].into_iter().collect(),
+        coins: vec!["DOC".to_string(), "KMD".to_string()].into_iter().collect(),
     };
     assert_eq!(actual, expected);
 }

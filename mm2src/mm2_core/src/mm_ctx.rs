@@ -234,8 +234,12 @@ impl MmCtx {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn rpc_ip_port(&self) -> Result<SocketAddr, String> {
         let port = self.conf["rpcport"].as_u64().unwrap_or(7783);
-        if port < 1000 {
-            return ERR!("rpcport < 1000");
+        // `0` is a deliberate escape hatch (CRD ch.45 R45.5.1): it asks the OS to
+        // bind any free port rather than a fixed one, so it must not be folded
+        // into the "too low" refusal below. Every other sub-1024 value stays
+        // refused (privileged-port range).
+        if port != 0 && port < 1024 {
+            return ERR!("rpcport < 1024");
         }
         if port > u16::MAX as u64 {
             return ERR!("rpcport > u16");
@@ -725,5 +729,57 @@ impl MmCtxBuilder {
         }
 
         MmArc::new(ctx)
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod rpc_ip_port_tests {
+    use super::MmCtxBuilder;
+
+    fn ctx_with_rpcport(rpcport: Option<u64>) -> super::MmArc {
+        let conf = match rpcport {
+            Some(p) => serde_json::json!({ "rpcport": p }),
+            None => serde_json::json!({}),
+        };
+        MmCtxBuilder::new().with_conf(conf).into_mm_arc()
+    }
+
+    #[test]
+    fn rpc_ip_port_defaults_to_7783_when_absent() {
+        let ctx = ctx_with_rpcport(None);
+        assert_eq!(ctx.rpc_ip_port().unwrap().port(), 7783);
+    }
+
+    #[test]
+    fn rpc_ip_port_zero_is_accepted_as_bind_any_free_port() {
+        // CRD ch.45 R45.5.1: `rpcport: 0` means "bind any free port", not a
+        // refused launch. Regression guard for the KDF-008 fix (rpc_ip_port used
+        // to reject every port below 1000, including 0, with no special case).
+        let ctx = ctx_with_rpcport(Some(0));
+        assert_eq!(ctx.rpc_ip_port().unwrap().port(), 0);
+    }
+
+    #[test]
+    fn rpc_ip_port_rejects_privileged_nonzero_ports() {
+        let ctx = ctx_with_rpcport(Some(1023));
+        assert!(ctx.rpc_ip_port().is_err());
+    }
+
+    #[test]
+    fn rpc_ip_port_accepts_the_1024_boundary() {
+        let ctx = ctx_with_rpcport(Some(1024));
+        assert_eq!(ctx.rpc_ip_port().unwrap().port(), 1024);
+    }
+
+    #[test]
+    fn rpc_ip_port_accepts_u16_max() {
+        let ctx = ctx_with_rpcport(Some(u16::MAX as u64));
+        assert_eq!(ctx.rpc_ip_port().unwrap().port(), u16::MAX);
+    }
+
+    #[test]
+    fn rpc_ip_port_rejects_above_u16_max() {
+        let ctx = ctx_with_rpcport(Some(u16::MAX as u64 + 1));
+        assert!(ctx.rpc_ip_port().is_err());
     }
 }

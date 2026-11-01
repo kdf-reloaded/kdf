@@ -982,8 +982,8 @@ pub fn now_float() -> f64 {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn temp_dir() -> PathBuf { env::temp_dir() }
 
-/// If the `MM_LOG` variable is present then tries to open that file.  
-/// Prints a warning to `stdout` if there's a problem opening the file.  
+/// If the `MM_LOG` variable is present then tries to open that file.
+/// Prints a warning to `stdout` if there's a problem opening the file.
 /// Returns `None` if `MM_LOG` variable is not present or if the specified path can't be opened.
 #[cfg(not(target_arch = "wasm32"))]
 fn open_log_file() -> Option<std::fs::File> {
@@ -994,14 +994,32 @@ fn open_log_file() -> Option<std::fs::File> {
 
     // For security reasons we want the log path to always end with ".log".
     if !mm_log.ends_with(".log") {
-        println!("open_log_file] MM_LOG doesn't end with '.log'");
+        let _ = witeln!(std::io::stdout(), "open_log_file] MM_LOG doesn't end with '.log'");
         return None;
+    }
+
+    // The launcher owns MM_LOG's value (both wallet apps point it at a path
+    // under their own temp/data directory) and its parent directory may not
+    // exist yet, or may have been removed since a previous run -- `create(true)`
+    // below creates the *file* but never its missing parent directories, so
+    // this would otherwise fail on every single call to `writeln` for the rest
+    // of the process, every time, until something outside KDF recreates that
+    // directory. `Path::parent()` returns `Some("")` for a bare filename with
+    // no directory component (e.g. `MM_LOG=kdf.log`); skip creation in that
+    // case rather than asking the filesystem to create an empty path.
+    if let Some(parent) = std::path::Path::new(&mm_log).parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                let _ = witeln!(std::io::stdout(), "open_log_file] Can't create " (parent.display()) ": " (err));
+                return None;
+            }
+        }
     }
 
     match std::fs::OpenOptions::new().append(true).create(true).open(&mm_log) {
         Ok(f) => Some(f),
         Err(err) => {
-            println!("open_log_file] Can't open {}: {}", mm_log, err);
+            let _ = witeln!(std::io::stdout(), "open_log_file] Can't open " (mm_log) ": " (err));
             None
         },
     }
@@ -1020,6 +1038,20 @@ pub fn writeln(line: &str) {
     //     thread 'CORE' panicked at 'cannot access stdout during shutdown'
     //
     // (which might be related to https://github.com/rust-lang/rust/issues/29488).
+    //
+    // It does NOT protect against a broken stdout pipe. `println!` panics on a
+    // write failure, and when this function is reached from the panic hook
+    // (`set_panic_hook` below, logging the very panic that got us here), that
+    // second panic occurs while the first is still unwinding — Rust treats a
+    // panic during unwind as unconditionally fatal and aborts the process
+    // right through this `catch_unwind`, no matter what it wraps. This is
+    // exactly what happens when KDF runs as a child process with a piped
+    // stdout (both wallet apps run it this way) and the reading end closes or
+    // stalls: an ordinary log line, or the panic hook's own report of an
+    // unrelated panic, kills the whole trading engine over a transient,
+    // purely cosmetic I/O condition. `witeln!` returns a `Result` instead of
+    // panicking, so a broken pipe here now drops the line instead of the
+    // process.
     let _ = catch_unwind(|| {
         if let Ok(mut log_file) = LOG_FILE.lock() {
             if let Some(ref mut log_file) = *log_file {
@@ -1027,7 +1059,7 @@ pub fn writeln(line: &str) {
                 return;
             }
         }
-        println!("{}", line);
+        let _ = witeln!(std::io::stdout(), (line));
     });
 }
 
@@ -1349,4 +1381,63 @@ macro_rules! def_with_opt_param {
             }
         }
     };
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod open_log_file_tests {
+    use super::open_log_file;
+    use std::{env, fs};
+
+    // All three scenarios live in one #[test] fn rather than three: MM_LOG is
+    // process-global state, `cargo test` runs test fns on separate threads
+    // within the same process by default, and nothing else in this crate
+    // currently touches MM_LOG to race against -- but a second test fn added
+    // later easily could, silently. Keeping them together removes that risk
+    // structurally instead of relying on everyone remembering it.
+    #[test]
+    fn open_log_file_creates_missing_parent_directories() {
+        let base = env::temp_dir().join(format!("kdf_open_log_file_test_{}", std::process::id()));
+        // Start from nothing, in case a previous run of this exact test
+        // process id collided and left something behind.
+        let _ = fs::remove_dir_all(&base);
+
+        // 1) A log path several directories deep, none of which exist yet --
+        // this is the reported case: the launcher's own temp/data directory
+        // was deleted out from under a path it had already chosen.
+        let nested_log = base.join("a").join("b").join("kdf.log");
+        env::set_var("MM_LOG", nested_log.to_str().unwrap());
+        assert!(
+            open_log_file().is_some(),
+            "missing nested parent directories should be created, then the file should open"
+        );
+        assert!(nested_log.is_file());
+
+        // 2) A bare filename with no directory component at all must not ask
+        // the filesystem to create an empty path (`Path::parent()` returns
+        // `Some("")` here, not `None`) -- this is the pre-existing, already
+        // working case that must keep working.
+        let cwd_relative = format!("kdf_open_log_file_bare_test_{}.log", std::process::id());
+        env::set_var("MM_LOG", &cwd_relative);
+        assert!(
+            open_log_file().is_some(),
+            "a bare filename with no directory component must still open in the current directory"
+        );
+        let _ = fs::remove_file(&cwd_relative);
+
+        // 3) A parent path that already exists as a plain file, not a
+        // directory, cannot be created as a directory -- confirms the
+        // now-added creation step fails closed (returns `None`) rather than
+        // panicking or looping, matching the existing open-failure branch.
+        let blocked_parent = base.join("blocked");
+        fs::write(&blocked_parent, b"not a directory").unwrap();
+        let blocked_log = blocked_parent.join("kdf.log");
+        env::set_var("MM_LOG", blocked_log.to_str().unwrap());
+        assert!(
+            open_log_file().is_none(),
+            "a parent path that is a plain file must fail cleanly, not panic"
+        );
+
+        env::remove_var("MM_LOG");
+        let _ = fs::remove_dir_all(&base);
+    }
 }

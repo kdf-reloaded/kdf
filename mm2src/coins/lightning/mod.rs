@@ -83,7 +83,12 @@ pub(crate) use mm2_net::ip_addr::myipaddr;
 pub(crate) use parking_lot::Mutex as PaMutex;
 pub(crate) use rpc::v1::types::{Bytes as BytesJson, H256 as H256Json};
 pub(crate) use script::{Builder, TransactionInputSigner};
-pub(crate) use secp256k1::PublicKey;
+// LDK's own APIs (pay_pubkey, PeerManager, ...) expect bitcoin's re-exported
+// secp256k1 types, not the standalone `secp256k1` crate directly -- those
+// diverged once secp256k1-migration.md bumped the standalone crate to 0.29
+// while `bitcoin 0.27.1` (LDK's own pin) stayed on 0.20. This re-export is
+// what most of the lightning/ module actually means by "PublicKey".
+pub(crate) use bitcoin::secp256k1::PublicKey;
 pub(crate) use serde::{Deserialize, Serialize};
 pub(crate) use serde_json::Value as Json;
 pub(crate) use std::collections::hash_map::Entry;

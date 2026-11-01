@@ -6,7 +6,17 @@ Automated implementation of the residual-similarity gate that
 [`docs/reloaded-rewrite/01-clean-room-rules.md`](../docs/reloaded-rewrite/01-clean-room-rules.md)
 defers (rule **R35**, deferral **D1**, and chapter 30). The gate scores a
 reloaded file's **discretionary expression** against a *relicensed historical
-record* reference and never reads the forbidden corpus (R8).
+record* reference. That reference **is** the corpus forbidden under R8 — CRD
+chapter 01 R31 defines the two terms as the same material — so the gate is a
+corpus-side tool, not a clean-side one. It reads the reference only inside a
+gated reference repository held outside this checkout; no reference content is
+vendored here, and only similarity scores cross back into the clean side. In
+practice it is run by the maintainer. Note that no role CRD chapter 01 R37
+separates carries a bound mandate covering the measurement of a file of source
+— the gate role it defines is bound to a candidate chapter — and this file is
+not part of the operational elaboration R44 subordinates, so nothing stated here
+widens any mandate chapter 01 binds. It must never be run by a clean-side
+context.
 
 ### What it measures
 

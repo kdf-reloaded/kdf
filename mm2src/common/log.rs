@@ -94,7 +94,7 @@ impl Gravity {
     #[cfg(not(target_arch = "wasm32"))]
     fn flush(&self) {
         let mut tail = self.tail.spinlock(77).unwrap();
-        while let Ok(chunk) = self.landing.pop() {
+        while let Some(chunk) = self.landing.pop() {
             let logged_with_log_output = LOG_CALLBACK.lock().is_some();
             if !logged_with_log_output {
                 writeln(&chunk)

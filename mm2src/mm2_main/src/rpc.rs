@@ -18,17 +18,21 @@
 //
 
 use crate::mm2::rpc::rate_limiter::RateLimitError;
+#[cfg(feature = "unsafe-rpc-wire-dump")]
+use coins::node_url::redact_urls_in_text;
 #[cfg(feature = "unsafe-rpc-wire-dump")] use common::log::trace;
 #[cfg(not(target_arch = "wasm32"))] use common::log::warn;
 use common::log::{error, info};
 use common::{err_to_rpc_json_string, err_tp_rpc_json, HttpStatusCode};
 use derive_more::Display;
-use futures::future::{join_all, FutureExt};
+use futures::future::join_all;
 use http::header::{HeaderValue, ACCESS_CONTROL_ALLOW_ORIGIN};
 use http::request::Parts;
 use http::{Method, Request, Response, StatusCode};
 #[cfg(not(target_arch = "wasm32"))]
-use hyper::{self, Body, Server};
+use http_body_util::{combinators::UnsyncBoxBody, BodyExt, Full};
+#[cfg(not(target_arch = "wasm32"))]
+use hyper::body::{Bytes, Incoming};
 use lazy_static::lazy_static;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -139,6 +143,9 @@ fn redact_rpc_wire_dump_json(value: &mut Json) {
                 redact_rpc_wire_dump_json(item);
             }
         },
+        // A URL inside a string keeps its scheme, host and port; its userinfo, path, query and fragment are
+        // marked (CRD ch.35, the rule after R35.1.17, D35.10). Nothing else of the value changes.
+        Json::String(text) if text.contains("://") => *text = redact_urls_in_text(text),
         _ => {},
     }
 }
@@ -327,8 +334,15 @@ async fn process_single_request(ctx: MmArc, req: Json, client: SocketAddr) -> Re
     }
 }
 
+/// Response body of the RPC server: buffered for the JSON-RPC answers, streaming for the SSE endpoint.
 #[cfg(not(target_arch = "wasm32"))]
-async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Response<Body> {
+type RpcBody = UnsyncBoxBody<Bytes, std::convert::Infallible>;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn full_body(data: impl Into<Bytes>) -> RpcBody { Full::new(data.into()).boxed_unsync() }
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn rpc_service(req: Request<Incoming>, ctx_h: u32, client: SocketAddr) -> Response<RpcBody> {
     /// Unwraps a result or propagates its error 500 response with the specified headers (if they are present).
     macro_rules! try_sf {
         ($value: expr $(, $header_key:expr => $header_val:expr)*) => {
@@ -338,7 +352,7 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
                     error!("RPC error response: {}", err);
                     let ebody = err_to_rpc_json_string(&fomat!((err)));
                     // generate a `Response` with the headers specified in `$header_key` and `$header_val`
-                    let response = Response::builder().status(500) $(.header($header_key, $header_val))* .body(Body::from(ebody)).unwrap();
+                    let response = Response::builder().status(500) $(.header($header_key, $header_val))* .body(full_body(ebody)).unwrap();
                     return response;
                 },
             }
@@ -375,14 +389,14 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
 
     // Convert the native Hyper stream into a portable stream of `Bytes`.
     let (req, req_body) = req.into_parts();
-    let req_bytes = try_sf!(hyper::body::to_bytes(req_body).await, ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
+    let req_bytes = try_sf!(req_body.collect().await.map(|collected| collected.to_bytes()), ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
     let req_str = String::from_utf8_lossy(req_bytes.as_ref());
     let is_invalid_input = req_str.chars().any(|c| c == '<' || c == '>' || c == '&');
     if is_invalid_input {
         return Response::builder()
             .status(500)
             .header("Content-Type", "application/json")
-            .body(Body::from(err_to_rpc_json_string("Invalid input")))
+            .body(full_body(err_to_rpc_json_string("Invalid input")))
             .unwrap();
     }
     let req_json: Json = try_sf!(json::from_slice(&req_bytes), ACCESS_CONTROL_ALLOW_ORIGIN => rpc_cors);
@@ -416,11 +430,11 @@ async fn rpc_service(req: Request<Body>, ctx_h: u32, client: SocketAddr) -> Resp
             return Response::builder()
                 .status(500)
                 .header("Content-Type", "application/json")
-                .body(Body::from(err_to_rpc_json_string("Non UTF-8 output")))
+                .body(full_body(err_to_rpc_json_string("Non UTF-8 output")))
                 .unwrap();
         },
     };
-    Response::from_parts(parts, Body::from(body_escaped))
+    Response::from_parts(parts, full_body(body_escaped))
 }
 
 #[cfg(all(test, feature = "unsafe-rpc-wire-dump"))]
@@ -466,37 +480,100 @@ mod wire_dump_tests {
         assert_eq!(parsed["userpass"], "abc");
         assert_eq!(parsed["params"]["token"], "123");
     }
+
+    /// T35.35 / D35.10: in the redacted mode, a URL keeps its scheme, host and port and shows a marker for each
+    /// part it had; nothing else of the dump changes. With the secrets switch on, the dump is the input.
+    #[test]
+    fn t35_35_redacted_dump_keeps_the_host_of_a_url_and_marks_the_rest() {
+        const REMOVED_PARTS: [&str; 6] = ["alice", "pw1", "KEYA", "KEYB", "tok1", "tok2"];
+        let rin = br#"{"userpass":"abc","method":"electrum","coin":"RIN","mm2":1,"servers":[
+            {"url":"electrum.example.org:50002","protocol":"SSL"},
+            {"url":"wss://alice:pw1@electrum.example.org:443/ws/KEYA?token=tok1","protocol":"WSS"},
+            {"url":"wss://electrum2.example.org:443/","protocol":"WSS"}]}"#;
+        let evm = br#"{"method":"enable_eth_with_tokens","mmrpc":"2.0","params":{"ticker":"ETH","tx_history":true,
+            "nodes":[{"url":"https://alice:pw1@rpc.example.org:8545/v3/KEYA?x=tok1"},
+                     {"url":"https://rpc2.example.org/v3/KEYB"},
+                     {"url":"https://rpc3.example.org:8545/"}]},
+            "error":"error sending request for url (https://rpc.example.org:8545/v3/KEYB?token=tok2): dns error"}"#;
+
+        let rin_dump = format_rpc_wire_dump_payload(rin, false);
+        let redacted_rin: Json = json::from_str(&rin_dump).unwrap();
+        assert_eq!(redacted_rin["coin"], "RIN");
+        assert_eq!(redacted_rin["method"], "electrum");
+        assert_eq!(redacted_rin["mm2"], 1);
+        assert_eq!(redacted_rin["userpass"], RPC_WIRE_DUMP_REDACTED_VALUE);
+        assert_eq!(redacted_rin["servers"][0]["url"], "electrum.example.org:50002");
+        assert_eq!(redacted_rin["servers"][0]["protocol"], "SSL");
+        assert_eq!(
+            redacted_rin["servers"][1]["url"],
+            "wss://<redacted>@electrum.example.org:443/<redacted>?<redacted>"
+        );
+        assert_eq!(redacted_rin["servers"][2]["url"], "wss://electrum2.example.org:443/");
+
+        let evm_dump = format_rpc_wire_dump_payload(evm, false);
+        let redacted_evm: Json = json::from_str(&evm_dump).unwrap();
+        assert_eq!(redacted_evm["method"], "enable_eth_with_tokens");
+        assert_eq!(redacted_evm["params"]["ticker"], "ETH");
+        assert_eq!(redacted_evm["params"]["tx_history"], true);
+        let nodes = &redacted_evm["params"]["nodes"];
+        assert_eq!(
+            nodes[0]["url"],
+            "https://<redacted>@rpc.example.org:8545/<redacted>?<redacted>"
+        );
+        assert_eq!(nodes[1]["url"], "https://rpc2.example.org/<redacted>");
+        assert_eq!(nodes[2]["url"], "https://rpc3.example.org:8545/");
+        assert_eq!(
+            redacted_evm["error"],
+            "error sending request for url (https://rpc.example.org:8545/<redacted>?<redacted>): dns error"
+        );
+
+        for dumped in [&rin_dump, &evm_dump] {
+            assert!(
+                REMOVED_PARTS.iter().all(|part| !dumped.contains(part)),
+                "a removed URL part is still in the redacted dump"
+            );
+        }
+
+        for payload in [&rin[..], &evm[..]] {
+            let input: Json = json::from_slice(payload).unwrap();
+            let full: Json = json::from_str(&format_rpc_wire_dump_payload(payload, true)).unwrap();
+            assert_eq!(full, input);
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub extern "C" fn spawn_rpc(ctx_h: u32) {
+pub fn spawn_rpc(ctx_h: u32) -> Result<(), String> {
     use common::wio::CORE;
-    use hyper::server::conn::AddrStream;
-    use hyper::service::{make_service_fn, service_fn};
+    use futures::future::{select, Either};
+    use hyper::service::service_fn;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto;
+    use hyper_util::server::graceful::GracefulShutdown;
     use std::convert::Infallible;
 
-    // NB: We need to manually handle the incoming connections in order to get the remote IP address,
-    // cf. https://github.com/hyperium/hyper/issues/1410#issuecomment-419510220.
-    // Although if the ability to access the remote IP address is solved by the Hyper in the future
-    // then we might want to refactor into starting it ideomatically in order to benefit from a more graceful shutdown,
-    // cf. https://github.com/hyperium/hyper/pull/1640.
+    // NB: hyper 1 has no `Server`, so the accept loop is ours. That is also what gives us the remote IP
+    // address of each connection, which the RPC handlers need.
 
-    let ctx = MmArc::from_ffi_handle(ctx_h).expect("No context");
+    let ctx = MmArc::from_ffi_handle(ctx_h)?;
 
-    let rpc_ip_port = ctx.rpc_ip_port().unwrap();
+    let rpc_ip_port = ctx.rpc_ip_port()?;
     // By entering the context, we tie `tokio::spawn` to this executor.
     let _runtime_guard = CORE.0.enter();
 
-    let server = Server::try_bind(&rpc_ip_port).unwrap_or_else(|_| panic!("Can't bind on {}", rpc_ip_port));
-    let make_svc = make_service_fn(move |socket: &AddrStream| {
-        let remote_addr = socket.remote_addr();
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req: Request<Body>| async move {
-                let res = rpc_service(req, ctx_h, remote_addr).await;
-                Ok::<_, Infallible>(res)
-            }))
-        }
-    });
+    // A bind failure (port already in use, permission denied, ...) is a launch-time
+    // configuration error, not a process invariant violation: CRD ch.45 R45.7.1
+    // requires a clean, structured error and an orderly non-zero exit here, never a
+    // panic. This function previously panicked on this path, which aborts rather
+    // than unwinds now that the function is a plain Rust fn (its former `extern "C"`
+    // qualifier made a panic here undefined behaviour / an abrupt SIGABRT, since it
+    // has always had exactly one caller in this crate, not a real FFI boundary).
+    let listener = common::wio::bind_listener(rpc_ip_port).map_err(|e| format!("Can't bind on {rpc_ip_port}: {e}"))?;
+    // The actual bound address: identical to `rpc_ip_port` unless port 0 was
+    // requested (R45.5.1: "bind any free port"), in which case the OS chose one.
+    let bound_addr = listener
+        .local_addr()
+        .map_err(|e| format!("Can't get the bound address: {e}"))?;
 
     let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
     let mut shutdown_tx = Some(shutdown_tx);
@@ -512,31 +589,61 @@ pub extern "C" fn spawn_rpc(ctx_h: u32) {
         }
     }));
 
-    let server = server
-        .http1_half_close(false)
-        .serve(make_svc)
-        .with_graceful_shutdown(shutdown_rx.then(|_| futures::future::ready(())));
+    let server = async move {
+        // Serves HTTP/1 and HTTP/2 on the same port, as the `hyper` 0.14 server did.
+        let mut builder = auto::Builder::new(TokioExecutor::new());
+        // https://github.com/hyperium/hyper/issues/1764
+        builder.http1().half_close(false);
+        let graceful = GracefulShutdown::new();
+        let mut shutdown = Box::pin(shutdown_rx);
+        loop {
+            let (stream, remote_addr) = match select(Box::pin(listener.accept()), shutdown).await {
+                Either::Left((Ok(accepted), pending_shutdown)) => {
+                    shutdown = pending_shutdown;
+                    accepted
+                },
+                Either::Left((Err(err), pending_shutdown)) => {
+                    // Back off so that a persistent failure (e.g. out of descriptors) does not spin.
+                    error!("{}", err);
+                    shutdown = pending_shutdown;
+                    common::executor::Timer::sleep(1.).await;
+                    continue;
+                },
+                Either::Right(_) => break,
+            };
+            let service = service_fn(move |req: Request<Incoming>| async move {
+                Ok::<_, Infallible>(rpc_service(req, ctx_h, remote_addr).await)
+            });
+            let conn = graceful.watch(
+                builder
+                    .clone()
+                    .serve_connection(TokioIo::new(stream), service)
+                    .into_owned(),
+            );
+            CORE.0.spawn(async move {
+                if let Err(err) = conn.await {
+                    error!("{}", err);
+                }
+            });
+        }
+        drop(listener);
+        // Like `with_graceful_shutdown`, wait for the connections in flight (SSE streams included).
+        graceful.shutdown().await;
+    };
 
-    let server = server.then(|r| {
-        if let Err(err) = r {
-            error!("{}", err);
-        };
-        futures::future::ready(())
-    });
-
-    let rpc_ip_port = ctx.rpc_ip_port().unwrap();
     CORE.0.spawn({
         log_tag!(
             ctx,
             "😉";
             fmt = ">>>>>>>>>> DEX stats {}:{} DEX stats API enabled at unixtime.{}  <<<<<<<<<",
-            rpc_ip_port.ip(),
-            rpc_ip_port.port(),
+            bound_addr.ip(),
+            bound_addr.port(),
             gstuff::now_ms() / 1000
         );
         let _ = ctx.rpc_started.pin(true);
         server
     });
+    Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -588,4 +695,258 @@ pub fn spawn_rpc(ctx_h: u32) {
         fmt = ">>>>>>>>>> DEX stats API enabled at unixtime.{}  <<<<<<<<<",
         common::now_ms() / 1000
     );
+}
+
+/// Loopback tests of the native RPC server on `hyper` 1: the accept loop, the buffered JSON-RPC
+/// answers and the streaming SSE endpoint, driven over a real TCP socket.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod server_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use common::executor::Timer;
+    use common::wio::CORE;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use mm2_event_stream::{mpsc, oneshot, Broadcaster, Event, EventStreamer, NoDataIn, StreamerId};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    /// Emits a probe event every 50 ms until it is shut down.
+    struct ProbeStreamer;
+
+    #[async_trait]
+    impl EventStreamer for ProbeStreamer {
+        type DataInType = NoDataIn;
+
+        fn streamer_id(&self) -> StreamerId { StreamerId::Heartbeat }
+
+        async fn handle(
+            self,
+            broadcaster: Broadcaster,
+            ready_tx: oneshot::Sender<Result<(), String>>,
+            shutdown_rx: oneshot::Receiver<()>,
+            _data_rx: mpsc::UnboundedReceiver<NoDataIn>,
+        ) {
+            let _ = ready_tx.send(Ok(()));
+            let mut shutdown = core::pin::pin!(shutdown_rx);
+            loop {
+                let sleep = core::pin::pin!(Timer::sleep(0.05));
+                match futures::future::select(sleep, &mut shutdown).await {
+                    futures::future::Either::Left(_) => {
+                        broadcaster.broadcast(Event::new(StreamerId::Heartbeat, json!({ "probe": 1 })))
+                    },
+                    futures::future::Either::Right(_) => break,
+                }
+            }
+        }
+    }
+
+    fn start_server() -> (MmArc, SocketAddr) { start_server_with_coins(json!([])) }
+
+    /// Like [`start_server`], with `coins` as the coins configuration and `pw` as the RPC password.
+    fn start_server_with_coins(coins: Json) -> (MmArc, SocketAddr) {
+        // Reserve a free port, then hand it to the server (`rpcport: 0` would hide the chosen port).
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({
+                "rpcip": "127.0.0.1",
+                "rpcport": port.max(1024),
+                "rpccors": "http://example.test",
+                "rpc_password": "pw",
+                "coins": coins,
+            }))
+            .into_mm_arc();
+        spawn_rpc(ctx.ffi_handle().unwrap()).unwrap();
+        (ctx, SocketAddr::from(([127, 0, 0, 1], port.max(1024))))
+    }
+
+    /// POSTs `request` and returns the status line and the JSON body exactly as a client receives them.
+    fn post(addr: SocketAddr, request: &Json) -> (String, Json) {
+        let body = request.to_string();
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let status = response.lines().next().unwrap_or_default().to_owned();
+        let (_, payload) = response.split_once("\r\n\r\n").expect("a complete response");
+        let payload = serde_json::from_str(payload).unwrap_or_else(|e| panic!("{e}: {response}"));
+        (status, payload)
+    }
+
+    fn connect(addr: SocketAddr) -> TcpStream {
+        let stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream
+    }
+
+    /// Reads from `stream` until `needle` shows up in what has been received so far (at least one read).
+    fn read_until(stream: &mut TcpStream, received: &mut String, needle: &str) {
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = stream.read(&mut buf).expect("read timed out or failed");
+            assert!(n > 0, "connection closed before {needle:?}; got {received:?}");
+            received.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if received.contains(needle) {
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn rpc_rejects_markup_in_the_body_with_a_json_error() {
+        let (_ctx, addr) = start_server();
+        let body = "<script>";
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+        assert!(response.contains("Invalid input"), "{response}");
+    }
+
+    #[test]
+    fn rpc_answers_malformed_json_with_500_and_the_configured_cors_origin() {
+        let (_ctx, addr) = start_server();
+        let body = "{not json";
+        let mut stream = connect(addr);
+        write!(
+            stream,
+            "POST / HTTP/1.1\r\nHost: x\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 500"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("access-control-allow-origin: http://example.test"),
+            "{response}"
+        );
+    }
+
+    /// Tendermint swaps are postponed for this beta (`coins::TENDERMINT_SWAPS_AVAILABLE`): over the wire, a real
+    /// Tendermint platform coin and a real Tendermint token are refused by the routes that start a new trade
+    /// (`setprice`, `buy`, `sell` and the v2 `start_swap`), on either side of the pair, with the usual
+    /// wallet-only answer.
+    #[test]
+    fn tendermint_coins_are_refused_by_the_new_trade_routes() {
+        use coins::tendermint::{tendermint_coin_from_conf_and_request, TendermintToken};
+        use coins::{CoinsContext, MmCoinEnum, TestCoin};
+
+        let coins = json!([
+            { "coin": "IRIS", "avg_blocktime": 5, "mm2": 1, "protocol": { "type": "TENDERMINT", "protocol_data": {
+                "denom": "uiris", "decimals": 6, "account_prefix": "iaa", "chain_id": "irishub-1" } } },
+            { "coin": "IRIS-NYAN", "mm2": 1, "protocol": { "type": "TENDERMINTTOKEN", "protocol_data": {
+                "platform": "IRIS", "decimals": 6, "denom": "unyan" } } },
+            { "coin": "TRADE", "mm2": 1 },
+        ]);
+        let (ctx, addr) = start_server_with_coins(coins.clone());
+        crypto::CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "tendermint trade refusal test passphrase")
+            .expect("initialize the crypto context");
+        let priv_key = *ctx.secp256k1_key_pair().private().secret;
+        let node = serde_json::from_value(json!({ "url": "http://127.0.0.1:1" })).unwrap();
+        let platform = common::block_on(tendermint_coin_from_conf_and_request(
+            &ctx,
+            "IRIS".to_owned(),
+            &coins[0],
+            vec![node],
+            &priv_key,
+            false,
+        ))
+        .unwrap_or_else(|e| panic!("cannot build the platform: {e}"));
+        let token = TendermintToken::from_protocol("IRIS-NYAN".to_owned(), platform.clone(), 6, "unyan").unwrap();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        for coin in [
+            MmCoinEnum::from(platform),
+            MmCoinEnum::from(token),
+            MmCoinEnum::Test(TestCoin::new("TRADE")),
+        ] {
+            common::block_on(coins_ctx.add_coin(coin)).unwrap();
+        }
+
+        for tendermint in ["IRIS", "IRIS-NYAN"] {
+            for (base, rel, side) in [(tendermint, "TRADE", "Base"), ("TRADE", tendermint, "Rel")] {
+                let wallet_only_error = format!("{side} coin {tendermint} is wallet only");
+
+                // The legacy routes answer `{"error": ...}` with HTTP 500.
+                for method in ["setprice", "buy", "sell"] {
+                    let request = json!({
+                        "userpass": "pw", "method": method, "base": base, "rel": rel, "price": 1, "volume": 1
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(status.contains("500"), "{method} {base}/{rel}: {status}");
+                    let error = body["error"].as_str().unwrap_or_else(|| panic!("{method}: {body}"));
+                    assert!(error.ends_with(&wallet_only_error), "{method} {base}/{rel}: {body}");
+                }
+
+                // `start_swap` is the v2 front of the same three.
+                for method in ["set_price", "buy", "sell"] {
+                    let request = json!({
+                        "mmrpc": "2.0", "userpass": "pw", "method": "start_swap", "id": 3,
+                        "params": {
+                            "base": base, "rel": rel, "base_coin_amount": "1", "rel_coin_amount": "1",
+                            "method": { method: {} },
+                        },
+                    });
+                    let (status, body) = post(addr, &request);
+                    assert!(
+                        status.contains("500"),
+                        "start_swap {method} {base}/{rel}: {status} {body}"
+                    );
+                    assert_eq!(body["error_type"], "Internal", "{body}");
+                    assert!(
+                        body["error_data"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .ends_with(&wallet_only_error),
+                        "start_swap {method} {base}/{rel}: {body}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The SSE answer must stay open and deliver events as they happen, not only once the body ends.
+    #[test]
+    fn sse_endpoint_streams_events_over_an_open_connection() {
+        let (ctx, addr) = start_server();
+        let mut stream = connect(addr);
+        write!(stream, "GET /event-stream?id=7 HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut received = String::new();
+        read_until(&mut stream, &mut received, "\r\n\r\n");
+        let head = received.to_ascii_lowercase();
+        assert!(head.starts_with("http/1.1 200"), "{received}");
+        assert!(head.contains("content-type: text/event-stream"), "{received}");
+        assert!(head.contains("cache-control: no-cache"), "{received}");
+
+        // The client is registered once the handler ran; subscribe it to the probe streamer.
+        CORE.0
+            .block_on(ctx.event_stream_manager.add(7, ProbeStreamer))
+            .expect("the probe streamer starts");
+
+        // Two distinct frames, received while the connection is still open.
+        while received.matches("data: {").count() < 2 {
+            read_until(&mut stream, &mut received, "");
+        }
+        assert!(received.contains(r#""origin":"HEARTBEAT""#), "{received}");
+        assert!(received.contains(r#""payload":{"probe":1}"#), "{received}");
+        assert!(received.contains(r#""error":false"#), "{received}");
+    }
 }

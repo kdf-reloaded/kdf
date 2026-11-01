@@ -1,0 +1,48 @@
+# VENDOR PATCH of libp2p-websocket 0.42.0, taken from KomodoPlatform/rust-libp2p
+# tag k-0.52.12 (commit 8bcc1fda) with only its TLS layer ported to rustls 0.23
+# (futures-rustls 0.26, ring provider). See PATCH-NOTES.md.
+#
+# The fork declares libp2p-core, libp2p-identity and rw-stream-sink via
+# `[workspace.dependencies]`; vendored here as explicit git deps on the SAME fork
+# tag so Cargo unifies them with the copies the root libp2p pin resolves.
+[package]
+name = "libp2p-websocket"
+edition = "2021"
+rust-version = "1.65.0"
+description = "WebSocket transport for libp2p"
+version = "0.42.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+license = "MIT"
+repository = "https://github.com/libp2p/rust-libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+futures-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+either = "1.5.3"
+futures = "0.3.28"
+libp2p-core = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+libp2p-identity = "0.2.1"
+log = "0.4.19"
+parking_lot = "0.12.0"
+quicksink = "0.1"
+rw-stream-sink = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+soketto = "0.7.0"
+url = "2.1"
+webpki-roots = "1.0"
+
+[dev-dependencies]
+# `PeerId::random` (used by the tests) sits behind identity's `rand` feature, which the fork's
+# workspace enabled for these tests through feature unification.
+libp2p-identity = { version = "0.2.1", features = ["rand"] }
+libp2p-tcp = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12", features = ["async-io"] }
+libp2p-dns = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12", features = ["async-std"] }
+async-std = { version = "1.6.5", features = ["attributes"] }
+rcgen = "0.9.3"
+
+# Passing arguments to the docsrs builder in order to properly document cfg's.
+# More information: https://docs.rs/about/builds#cross-compiling
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+rustc-args = ["--cfg", "docsrs"]

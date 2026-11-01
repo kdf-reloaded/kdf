@@ -121,6 +121,42 @@ impl<E> !NotMmError for MmError<E> {}
 impl<T: ?Sized> NotMmError for Box<T> {}
 impl<T: ?Sized> NotMmError for UnsafeCell<T> {}
 
+// `Box<dyn Error + Send + Sync>` above only covers the case where the
+// unsized trait object sits behind an actual `Box`. It doesn't cover one
+// reached through `NonNull<dyn ...>` (or `*const dyn ...`, which `NonNull`
+// itself wraps) -- auto traits still don't propagate through those either,
+// for the same "unsized types opt out of structural auto-trait inference"
+// reason as Box/UnsafeCell above.
+//
+// (Note: you cannot fix this by implementing `NotMmError` directly for the
+// trait object type itself, e.g. `impl NotMmError for dyn Error + Send +
+// Sync {}` -- rustc rejects that outright, E0321: "traits with a default
+// impl... cannot be implemented for trait object ...". `NonNull<T>` is the
+// right target -- a concrete, `Sized` generic struct that merely *wraps* a
+// possibly-unsized `T`, exactly like `Box<T>` above, and legal for the same
+// reason.)
+//
+// This was never reachable before because every such pointer we
+// structurally recursed into happened to be wrapped in a `Box` at some
+// level, until std's own `io::Error` stopped being one: its internal
+// bit-packed representation (`core::io::error::repr_bitpacked::Repr`) holds
+// its custom-error case as a raw `NonNull<dyn Error + Send + Sync>` (and
+// that struct itself behind a further `NonNull<Custom>`) for the
+// pointer-tagging trick that representation depends on, not a `Box`, on
+// rustc 1.98+. rustc <1.98, including this workspace's pinned 1.97.1,
+// boxed it at every level `Box<T>` above already covered -- this impl is a
+// no-op there, not a conflicting one, for the same reason the Box/UnsafeCell
+// impls above never conflict with the auto-derivation for types that
+// already qualified structurally: an explicit impl for a concrete type
+// always takes priority over the structural auto-trait fallback, whether
+// or not the fallback would separately have agreed.
+//
+// Confirmed via a real CI break: mm2src/mm2_io/src/fs.rs and anything
+// built on `io::Error` (e.g. FsJsonError below it) failed to satisfy
+// `NotMmError` under rustc 1.98.0 specifically, tracing through exactly
+// this pointer type.
+impl<T: ?Sized> NotMmError for std::ptr::NonNull<T> {}
+
 /// Combined bound used by [`MmError`]'s [`Serialize`] impl: the inner
 /// error must be displayable, serializable in our adjacent-tagged JSON
 /// shape, and not itself an `MmError`.

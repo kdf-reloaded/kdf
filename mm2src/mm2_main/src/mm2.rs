@@ -67,6 +67,9 @@ pub mod database;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "lp_wallet.rs"]
 pub mod lp_wallet;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "malloc_arena.rs"]
+mod malloc_arena;
 #[path = "rpc.rs"] pub mod rpc;
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -95,6 +98,10 @@ impl MmVersionResult {
     }
 
     pub fn to_json(&self) -> Json { json::to_value(self).expect("expected valid JSON object") }
+}
+
+impl Default for MmVersionResult {
+    fn default() -> Self { Self::new() }
 }
 
 pub struct LpMainParams {
@@ -250,6 +257,38 @@ fn maybe_warn_unsafe_rpc_wire_dump_enabled() {
     }
 }
 
+/// Refuses a node setting that the node cannot run with, naming the key (the node does not start).
+///
+/// `fee_estimate_cache_secs` is an integer from 0 to 30 (CRD ch.38 R38.6.6j item 2).
+fn validate_node_settings(conf: &Json) -> Result<(), String> {
+    coins::request_fee_scope::explicit_fee_estimate_cache_secs(conf).map(|_| ())
+}
+
+#[cfg(test)]
+mod node_settings_tests {
+    use super::*;
+    use common::block_on;
+    use serde_json::json;
+
+    #[test]
+    fn fee_estimate_cache_secs_is_optional_and_accepts_zero_to_thirty() {
+        validate_node_settings(&json!({})).unwrap();
+        for secs in [0, 15, 30] {
+            validate_node_settings(&json!({ "fee_estimate_cache_secs": secs })).unwrap();
+        }
+    }
+
+    /// The start itself fails, before any context is built, with an error that names the key.
+    #[test]
+    fn a_bad_fee_estimate_cache_secs_fails_the_node_start() {
+        for bad in [json!(31), json!(-1), json!("15"), json!(15.5)] {
+            let params = LpMainParams::with_conf(json!({ "fee_estimate_cache_secs": bad }));
+            let err = block_on(lp_main(params, &|_| ())).unwrap_err();
+            assert!(err.contains("fee_estimate_cache_secs"), "{bad}: {err}");
+        }
+    }
+}
+
 /// * `ctx_cb` - callback used to share the `MmCtx` ID with the call site.
 pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), String> {
     let log_filter = params.filter.unwrap_or_default();
@@ -280,6 +319,8 @@ pub async fn lp_main(params: LpMainParams, ctx_cb: &dyn Fn(u32)) -> Result<(), S
         }
     }
 
+    try_s!(validate_node_settings(&conf));
+
     #[cfg(feature = "custom-swap-locktime")]
     initialize_payment_locktime(&conf);
 
@@ -303,6 +344,7 @@ fn help() {
             "The first command-line argument is special and designates the mode.\n"
             "\n"
             "  help                       ..  Display this message.\n"
+            "  version, --version         ..  Display the version and exit.\n"
             "  btc2kmd {WIF or BTC}       ..  Convert a BTC WIF into a KMD WIF.\n"
             "  events                     ..  Listen to a feed coming from a separate MM daemon and print it to stdout.\n"
             "  vanity {substring}         ..  Tries to find an address with the given substring.\n"
@@ -422,8 +464,13 @@ pub fn mm2_main() {
         help();
         return;
     }
+    // The version banner has already been logged above; exit successfully
+    // instead of parsing the flag as a JSON configuration.
+    if first_arg == Some("--version") || first_arg == Some("version") {
+        return;
+    }
 
-    if let Err(err) = run_lp_main(first_arg, &|_| ()) {
+    if let Err(err) = run_lp_main_impl(first_arg, &|_| (), true) {
         log!((err));
         exit(1);
     }
@@ -491,9 +538,20 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
 ///   allowing the `run_lp_main` caller to communicate with MM.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_lp_main(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32)) -> Result<(), String> {
+    run_lp_main_impl(first_arg, ctx_cb, false)
+}
+
+/// `native_daemon` is set only by `mm2_main`. The embedded library runs inside the process of a host application,
+/// whose allocator settings are not ours to change (CRD ch.45 R45.6A.1).
+#[cfg(not(target_arch = "wasm32"))]
+fn run_lp_main_impl(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32), native_daemon: bool) -> Result<(), String> {
     let conf = get_mm2config(first_arg)?;
 
     let log_filter = LogLevel::from_env();
+    if native_daemon {
+        // Must happen before any worker thread starts (R45.6A.2).
+        malloc_arena::apply_at_startup(&conf, log_filter.unwrap_or_default());
+    }
 
     let params = LpMainParams::with_conf(conf).log_filter(log_filter);
     try_s!(block_on(lp_main(params, ctx_cb)));

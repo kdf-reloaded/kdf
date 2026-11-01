@@ -17,7 +17,7 @@ mod task;
 
 pub use handle::RpcTaskHandle;
 pub use manager::{RpcTaskManager, RpcTaskManagerShared};
-pub use task::{RpcTask, RpcTaskTypes};
+pub use task::{CancelCleanup, CancelCleanupFuture, RpcTask, RpcTaskTypes};
 
 pub type FinishedTaskResult<Item, Error> = MmRpcResult<Item, Error>;
 pub type RpcTaskResult<T> = Result<T, MmError<RpcTaskError>>;
@@ -34,7 +34,7 @@ type TaskAbortHandle = oneshot::Sender<()>;
 type TaskAbortHandler = oneshot::Receiver<()>;
 type UserActionSender<UserAction> = oneshot::Sender<UserAction>;
 
-#[derive(Clone, Display)]
+#[derive(Clone, Debug, Display)]
 pub enum RpcTaskError {
     #[display(fmt = "RPC task timeout '{:?}'", _0)]
     Timeout(Duration),
@@ -51,10 +51,16 @@ pub enum RpcTaskError {
         expected: TaskStatusError,
     },
     Canceled,
+    /// The user action delivered to the task is not the kind the task waits for.
+    /// `expected` names the `action_type` the task waits for.
+    #[display(fmt = "Unexpected user action: expected '{}'", expected)]
+    UnexpectedUserAction {
+        expected: &'static str,
+    },
     Internal(String),
 }
 
-#[derive(Clone, Display, Serialize)]
+#[derive(Clone, Debug, Display, Serialize)]
 pub enum TaskStatusError {
     Idle,
     InProgress,
@@ -72,6 +78,10 @@ impl From<TimeoutError> for RpcTaskError {
 /// clients expect: a finished task reports `{"status": "Ok", "details": <item>}` on success and
 /// `{"status": "Error", "details": <error>}` on failure. Collapsing both into a single terminal
 /// variant breaks clients that treat `Ok` as the completion signal.
+///
+/// The error object sits directly in `details`. Several task pages of the public docs describe a `details.result`
+/// wrapper, but every published example and the reference release have none, so Reloaded has none either
+/// (CRD ch.55 R55.1.6, ch.35 R35.3.5).
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", content = "details")]
 pub enum RpcTaskStatus<Item, Error, InProgressStatus, AwaitingStatus>

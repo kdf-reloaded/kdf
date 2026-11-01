@@ -1,7 +1,9 @@
 use super::check_balance::CheckBalanceError;
 use super::{maker_swap_trade_preimage, taker_swap_trade_preimage, MakerTradePreimage, TakerTradePreimage};
-use crate::mm2::lp_ordermatch::{MakerOrderBuildError, TakerAction, TakerOrderBuildError};
-use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, TradeFee, TradePreimageError};
+use crate::mm2::lp_ordermatch::{MakerOrderBuildError, SpendSafetyError, TakerAction, TakerOrderBuildError};
+use coins::request_fee_scope::with_request_fee_scope;
+use coins::{is_wallet_only_ticker, lp_coinfind_or_err, BalanceError, CoinFindError, FeeCapBelowBaseFee, TradeFee,
+            TradePreimageError};
 use common::mm_number::{BigDecimal, MmNumber};
 use common::HttpStatusCode;
 use derive_more::Display;
@@ -17,6 +19,14 @@ construct_detailed!(DetailedRequiredBalance, required_balance);
 pub type TradePreimageRpcResult<T> = Result<T, MmError<TradePreimageRpcError>>;
 
 pub async fn trade_preimage_rpc(
+    ctx: MmArc,
+    req: TradePreimageRequest,
+) -> TradePreimageRpcResult<TradePreimageResponse> {
+    let scope_ctx = ctx.clone();
+    with_request_fee_scope(&scope_ctx, trade_preimage_rpc_impl(ctx, req)).await
+}
+
+async fn trade_preimage_rpc_impl(
     ctx: MmArc,
     req: TradePreimageRequest,
 ) -> TradePreimageRpcResult<TradePreimageResponse> {
@@ -225,12 +235,17 @@ pub enum TradePreimageRpcError {
     CoinIsWalletOnly { coin: String },
     #[display(fmt = "Rel coin can not be same as base")]
     BaseEqualRel,
+    #[display(fmt = "Trading is not supported for coin {}", coin)]
+    TradingNotSupported { coin: String },
     #[display(fmt = "Incorrect use of the '{}' parameter: {}", param, reason)]
     InvalidParam { param: String, reason: String },
     #[display(fmt = "Price {} is too low, required at least {}", price, threshold)]
     PriceTooLow { price: BigDecimal, threshold: BigDecimal },
     #[display(fmt = "Transport error: {}", _0)]
     Transport(String),
+    /// An EVM node rejected an estimation or a transaction for a fee cap below the block base fee (CRD ch.56 R5).
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal error: {}", _0)]
     InternalError(String),
 }
@@ -244,11 +259,13 @@ impl HttpStatusCode for TradePreimageRpcError {
             | TradePreimageRpcError::NoSuchCoin { .. }
             | TradePreimageRpcError::CoinIsWalletOnly { .. }
             | TradePreimageRpcError::BaseEqualRel
+            | TradePreimageRpcError::TradingNotSupported { .. }
             | TradePreimageRpcError::InvalidParam { .. }
             | TradePreimageRpcError::PriceTooLow { .. } => StatusCode::BAD_REQUEST,
-            TradePreimageRpcError::Transport(_) | TradePreimageRpcError::InternalError(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            },
+            // Like `Transport`: a node's verdict on a fee the daemon chose, not a fault of the request.
+            TradePreimageRpcError::Transport(_)
+            | TradePreimageRpcError::FeeCapBelowBaseFee(_)
+            | TradePreimageRpcError::InternalError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -261,6 +278,7 @@ impl From<BalanceError> for TradePreimageRpcError {
             },
             e @ BalanceError::UnexpectedDerivationMethod(_) => TradePreimageRpcError::InternalError(e.to_string()),
             e @ BalanceError::WalletStorageError(_) => TradePreimageRpcError::InternalError(e.to_string()),
+            BalanceError::FeeCapBelowBaseFee(rejection) => TradePreimageRpcError::FeeCapBelowBaseFee(rejection),
             BalanceError::Internal(internal) => TradePreimageRpcError::InternalError(internal),
         }
     }
@@ -301,7 +319,25 @@ impl From<CheckBalanceError> for TradePreimageRpcError {
                 threshold,
             },
             CheckBalanceError::Transport(transport) => TradePreimageRpcError::Transport(transport),
+            CheckBalanceError::FeeCapBelowBaseFee(rejection) => TradePreimageRpcError::FeeCapBelowBaseFee(rejection),
             CheckBalanceError::InternalError(internal) => TradePreimageRpcError::InternalError(internal),
+        }
+    }
+}
+
+impl From<SpendSafetyError> for TradePreimageRpcError {
+    fn from(e: SpendSafetyError) -> Self {
+        match e {
+            SpendSafetyError::VolumeTooLow {
+                coin,
+                volume,
+                threshold,
+            } => TradePreimageRpcError::VolumeTooLow {
+                coin,
+                volume,
+                threshold,
+            },
+            e @ SpendSafetyError::EstimateUnavailable { .. } => TradePreimageRpcError::Transport(e.to_string()),
         }
     }
 }
@@ -330,6 +366,7 @@ impl TradePreimageRpcError {
     ) -> TradePreimageRpcError {
         match maker_order_err {
             MakerOrderBuildError::BaseEqualRel => TradePreimageRpcError::BaseEqualRel,
+            MakerOrderBuildError::TradingNotSupported { coin } => TradePreimageRpcError::TradingNotSupported { coin },
             MakerOrderBuildError::MaxBaseVolTooLow { actual, threshold } => TradePreimageRpcError::VolumeTooLow {
                 coin: base.to_owned(),
                 volume: actual.to_decimal(),
@@ -360,6 +397,7 @@ impl TradePreimageRpcError {
     ) -> TradePreimageRpcError {
         match taker_order_err {
             TakerOrderBuildError::BaseEqualRel => TradePreimageRpcError::BaseEqualRel,
+            TakerOrderBuildError::TradingNotSupported { coin } => TradePreimageRpcError::TradingNotSupported { coin },
             TakerOrderBuildError::BaseAmountTooLow { actual, threshold } => TradePreimageRpcError::VolumeTooLow {
                 coin: base.to_owned(),
                 volume: actual.to_decimal(),
@@ -446,5 +484,31 @@ impl From<TotalTradeFee> for TotalTradeFeeResponse {
             amount: orig.amount.into(),
             required_balance: orig.required_balance.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trading_not_supported_maps_to_a_typed_bad_request() {
+        let rpc = TradePreimageRpcError::from_maker_order_build_error(
+            MakerOrderBuildError::TradingNotSupported {
+                coin: "tBTC-lightning".into(),
+            },
+            "A",
+            "B",
+        );
+        assert!(matches!(&rpc, TradePreimageRpcError::TradingNotSupported { coin } if coin == "tBTC-lightning"));
+        assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
+
+        let rpc = TradePreimageRpcError::from_taker_order_build_error(
+            TakerOrderBuildError::TradingNotSupported { coin: "SOL".into() },
+            "A",
+            "B",
+        );
+        assert!(matches!(&rpc, TradePreimageRpcError::TradingNotSupported { coin } if coin == "SOL"));
+        assert_eq!(rpc.status_code(), StatusCode::BAD_REQUEST);
     }
 }

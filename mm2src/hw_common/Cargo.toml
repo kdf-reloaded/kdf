@@ -1,18 +1,19 @@
 [package]
 name = "hw_common"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 async-trait = "0.1"
-bip32 = { version = "0.2.2", default-features = false, features = ["alloc", "secp256k1-ffi"] }
+bip32 = { version = "0.6.0-pre.1", default-features = false, features = ["alloc", "secp256k1-ffi"] }
 common = { path = "../common" }
 mm2_err_handle = { path = "../mm2_err_handle" }
 derive_more = "0.99"
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await"] }
-secp256k1 = { version = "0.20", features = ["rand"] }
+secp256k1 = { version = "0.29", features = ["rand"] }
 serde = "1.0"
 serde_derive = "1.0"
 

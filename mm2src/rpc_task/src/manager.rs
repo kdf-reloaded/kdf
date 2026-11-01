@@ -43,6 +43,7 @@ impl<Task: RpcTask> RpcTaskManager<Task> {
             task_manager: RpcTaskManagerShared::downgrade(this),
             task_id,
         };
+        let cancel_cleanup = task.cancel_cleanup();
 
         let fut = async move {
             debug!("Spawn RPC task '{}'", task_id);
@@ -55,15 +56,20 @@ impl<Task: RpcTask> RpcTaskManager<Task> {
             };
             // We can't finish or abort the task in the match statement above since `task_handle` is borrowed here:
             // `task.run(&task_handle)`.
-            match task_result {
+            let cancelled = match task_result {
                 Some(task_result) => {
                     debug!("RPC task '{}' has been finished", task_id);
-                    task_handle.finish(task_result);
+                    // The result is dropped if the task was cancelled while it was finishing.
+                    !task_handle.finish(task_result)
                 },
                 None => {
                     debug!("RPC task '{}' has been aborted", task_id);
                     task_handle.abort();
+                    true
                 },
+            };
+            if let (true, Some(cleanup)) = (cancelled, cancel_cleanup) {
+                cleanup().await;
             }
         };
         spawn(fut);
@@ -170,10 +176,18 @@ impl<Task: RpcTask> RpcTaskManager<Task> {
         task_id: TaskId,
         task_result: FinishedTaskResult<Task::Item, Task::Error>,
     ) -> RpcTaskResult<()> {
-        if self.tasks.insert(task_id, TaskStatusExt::Ready(task_result)).is_none() {
-            warn!("Finished task '{}' was not ongoing", task_id);
+        match self.tasks.entry(task_id) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(TaskStatusExt::Ready(task_result));
+                Ok(())
+            },
+            // The task was cancelled while it was finishing. A cancelled task is not observable,
+            // so its result must not reappear.
+            Entry::Vacant(_) => {
+                warn!("Finished task '{}' was not ongoing", task_id);
+                MmError::err(RpcTaskError::NoSuchTask(task_id))
+            },
         }
-        Ok(())
     }
 
     fn update_in_progress_status(&mut self, task_id: TaskId, status: Task::InProgressStatus) -> RpcTaskResult<()> {
@@ -338,5 +352,40 @@ mod tests {
             ..
         }));
         assert!(manager.contains(task_id));
+    }
+
+    #[test]
+    fn cancelled_task_result_is_not_recorded() {
+        let mut manager = RpcTaskManager::<DummyTask>::default();
+        let (task_id, _abort_handler) = manager
+            .register_task("initial")
+            .unwrap_or_else(|e| panic!("register_task failed: {}", e));
+        manager
+            .cancel_task(task_id)
+            .unwrap_or_else(|e| panic!("cancel_task failed: {}", e));
+
+        let err = manager
+            .update_task_status(task_id, TaskStatus::Ready(MmRpcResult::ok("done".to_owned())))
+            .unwrap_err()
+            .into_inner();
+
+        assert!(matches!(err, RpcTaskError::NoSuchTask(id) if id == task_id));
+        assert!(!manager.contains(task_id));
+        assert!(manager.task_status(task_id, false).is_none());
+    }
+
+    #[test]
+    fn repeated_cancel_answers_no_such_task() {
+        let mut manager = RpcTaskManager::<DummyTask>::default();
+        let (task_id, _abort_handler) = manager
+            .register_task("initial")
+            .unwrap_or_else(|e| panic!("register_task failed: {}", e));
+        manager
+            .cancel_task(task_id)
+            .unwrap_or_else(|e| panic!("cancel_task failed: {}", e));
+
+        let err = manager.cancel_task(task_id).unwrap_err().into_inner();
+
+        assert!(matches!(err, RpcTaskError::NoSuchTask(id) if id == task_id));
     }
 }

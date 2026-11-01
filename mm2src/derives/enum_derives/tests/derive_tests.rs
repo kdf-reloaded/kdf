@@ -13,6 +13,10 @@ enum Wrapper {
     Text(String),
     #[from_inner]
     Num(i64),
+    // Non-annotated variant: proves `EnumFromInner` generates `From` impls only
+    // for `#[from_inner]` variants and leaves this one alone. Intentionally
+    // never constructed, hence the allow.
+    #[allow(dead_code)]
     Plain(Vec<u8>),
 }
 
@@ -40,6 +44,10 @@ impl fmt::Display for CustomError {
 enum AppError {
     #[from_stringify("CustomError")]
     Stringified(String),
+    // Non-annotated variant: proves `EnumFromStringify` leaves variants without
+    // `#[from_stringify]` untouched. Intentionally never constructed, hence the
+    // allow.
+    #[allow(dead_code)]
     Other(String),
 }
 

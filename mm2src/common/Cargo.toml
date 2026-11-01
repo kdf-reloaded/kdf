@@ -1,6 +1,7 @@
 [package]
 name = "common"
 version = "0.1.0"
+license = "GPL-2.0-only"
 links = "marketmaker-mainnet-lib"
 edition = "2021"
 
@@ -22,21 +23,18 @@ bigdecimal = { version = "0.3", features = ["serde"] }
 kdf_crypto = { path = "../kdf_crypto" }
 bytes = "1.1"
 cfg-if = "1.0"
-crossbeam = "0.7"
+crossbeam = "0.8"
 derive_more = "0.99"
 findshlibs = "0.5"
 fnv = "1.0.6"
 fomat-macros = "0.2"
 futures01 = { version = "0.1", package = "futures" }
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await", "thread-pool"] }
-futures-cpupool = "0.1"
 hex = "0.4.2"
-http = "0.2"
-http-body = "0.1"
+http = "1"
 itertools = "0.10"
 keys = { package = "kdf_keys", path = "../kdf_keys" }
 lazy_static = "1.4"
-lightning = { path = "../../rust-lightning-patched/lightning" }
 log = { version = "0.4.8", features = ["std"] }
 mm2_number = { path = "../mm2_number" }
 num-bigint = { version = "0.4", features = ["serde", "std"] }
@@ -60,7 +58,16 @@ ser_error_derive = { path = "../derives/ser_error_derive" }
 shared_ref_counter = { path = "shared_ref_counter" }
 uuid = { version = "0.7", features = ["serde", "v4"] }
 wasm-timer = "0.2.4"
-winapi = "0.3"
+# winapi features must be declared HERE, not inherited. Every one of these
+# call sites used to compile only because some other crate in the graph
+# happened to enable the feature and Cargo unified it. That broke on
+# 2026-09-23: bumping `dirs` 1 -> 6 moved dirs-sys from winapi to
+# windows-sys, the `shlobj` feature stopped being enabled by anyone, and the
+# Windows build failed with "unresolved import winapi::um::shlobj". Nothing
+# in CI catches this on push -- no Windows job runs outside workflow_dispatch.
+# minwinbase: EXCEPTION_ACCESS_VIOLATION / EXCEPTION_ILLEGAL_INSTRUCTION
+# (crash_reports.rs).
+winapi = { version = "0.3", features = ["minwinbase"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 chrono = { version = "0.4", features = ["wasmbind"] }
@@ -82,11 +89,21 @@ anyhow = "1.0"
 chrono = "0.4"
 crossterm = "0.20"
 gstuff = { version = "0.7", features = ["crossterm"] }
-hyper = { version = "0.14.11", features = ["client", "http2", "server", "tcp"] }
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "http1", "http2", "tokio"] }
 # using webpki-tokio to avoid rejecting valid certificates
 # got "invalid certificate: UnknownIssuer" for https://ropsten.infura.io on iOS using default-features
-hyper-rustls = { version = "0.23", default-features = false, features = ["http1", "http2", "webpki-tokio"] }
+# `ring` only: the provider is passed explicitly in `wio::https_connector`, so the process-global
+# default provider is never consulted. `tls12` must be listed, default-features = false drops it.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "webpki-tokio", "ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
 libc = { version = "0.2" }
+# log.rs's `impl LightningLogger for LogState` is itself
+# `#[cfg(not(target_arch = "wasm32"))]`; see
+# docs/plans/secp256k1-migration.md ("Scope reduction: decouple Lightning
+# first") for why this stays out of the WASM dependency graph.
+lightning = { path = "../../rust-lightning-patched/lightning" }
 log4rs = { version = "1.0", default-features = false, features = ["console_appender", "pattern_encoder"] }
 tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net"] }
 

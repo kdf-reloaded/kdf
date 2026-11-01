@@ -1,5 +1,5 @@
 use super::{DispatcherError, DispatcherResult, PUBLIC_METHODS};
-use crate::mm2::lp_native_dex::init_hw::{init_trezor, init_trezor_status, init_trezor_user_action};
+use crate::mm2::lp_native_dex::init_hw::{init_trezor, init_trezor_cancel, init_trezor_status, init_trezor_user_action};
 use crate::mm2::lp_ordermatch::{best_orders_rpc_v2, orderbook_rpc_v2, start_simple_market_maker_bot, start_swap_rpc,
                                 stop_simple_market_maker_bot};
 #[cfg(target_arch = "wasm32")]
@@ -23,7 +23,6 @@ use coins::eth::fee_estimation::rpc::get_eth_estimated_fee_per_gas;
 use coins::eth::EthCoin;
 use coins::hd_wallet::get_new_address;
 use coins::my_tx_history_v2::my_tx_history_v2_rpc;
-use coins::nft::activation::enable_nft;
 // `coins::nft::rpc` and the `withdraw_nft` handler are native-only:
 // `coins/nft/mod.rs` gates `pub mod rpc;` and `pub mod withdraw;` behind
 // `#[cfg(not(target_arch = "wasm32"))]`. The matching dispatcher arms
@@ -31,6 +30,8 @@ use coins::nft::activation::enable_nft;
 #[cfg(not(target_arch = "wasm32"))]
 use coins::nft::rpc::{clear_nft_db, get_nft_list, get_nft_metadata, get_nft_transfers, refresh_nft_metadata,
                       update_nft, withdraw_nft};
+// The shielded coin is activated on every target (CRD ch. 39 R39.10.1); only its history method is
+// native-only.
 use coins::rpc_command::account_balance::account_balance;
 use coins::rpc_command::consolidate_utxos::consolidate_utxos_rpc;
 use coins::rpc_command::fetch_utxos::fetch_utxos_rpc;
@@ -52,11 +53,14 @@ use coins::utxo::bch::BchCoin;
 use coins::utxo::qtum::QtumCoin;
 use coins::utxo::slp::SlpToken;
 use coins::utxo::utxo_standard::UtxoStandardCoin;
+use coins::z_coin::ZCoin;
 use coins::{add_delegation, claim_staking_rewards, delegations_info, get_raw_transaction, get_staking_infos,
             ongoing_undelegations_info, remove_delegation, sign_message, sign_raw_transaction, validators_info,
             verify_message, withdraw};
-use coins_activation::{cancel_init_platform_coin_with_tokens, init_platform_coin_with_tokens,
-                       init_platform_coin_with_tokens_status, init_platform_coin_with_tokens_user_action};
+use coins_activation::{cancel_init_platform_coin_with_tokens, cancel_init_token, enable_evm_token,
+                       init_platform_coin_with_tokens, init_platform_coin_with_tokens_status,
+                       init_platform_coin_with_tokens_user_action, init_token, init_token_status,
+                       init_token_user_action};
 use coins_activation::{cancel_init_standalone_coin, cancel_l2_activation, enable_l2, enable_platform_coin_with_tokens,
                        enable_token, init_l2, init_l2_status, init_l2_user_action, init_standalone_coin,
                        init_standalone_coin_status, init_standalone_coin_user_action};
@@ -78,8 +82,7 @@ cfg_native! {
     use coins::lightning::{add_trusted_node, close_channel, connect_to_lightning_node, generate_invoice, get_channel_details,
         get_claimable_balances, get_payment_details, list_closed_channels_by_filter, list_open_channels_by_filter, list_payments_by_filter, list_trusted_nodes, open_channel,
         remove_trusted_node, send_payment, update_channel, LightningCoin};
-    use coins::{SolanaCoin, SplToken};
-    use coins::z_coin::ZCoin;
+    use coins_activation::{enable_solana_with_tokens, enable_spl};
     use coins::my_tx_history_v2::z_coin_tx_history_rpc;
     use crate::mm2::lp_wallet::{change_mnemonic_password_rpc, create_wallet_rpc, delete_wallet_rpc, get_mnemonic_rpc, get_wallet_names_rpc};
     use crate::mm2::rpc::trezor::trezor_connection_status_rpc;
@@ -161,14 +164,22 @@ async fn auth(request: &MmRpcRequest, ctx: &MmArc, client: &SocketAddr) -> Dispa
         return Ok(());
     }
 
-    let rpc_password = ctx.conf["rpc_password"].as_str().unwrap_or_else(|| {
+    // `rpc_password` absent from config must never be treated as an empty-string
+    // password to match against: defaulting it to "" let a caller who explicitly
+    // supplied an empty (present, non-null) `userpass` authenticate for every
+    // protected method on a node that never had a password configured at all.
+    // No comparison is attempted in that case — every request is rejected the
+    // same way a wrong password is, through the same rate-limited path, so an
+    // unconfigured node gives an attacker no signal distinguishing "no password
+    // set" from "wrong password" (CRD ch.43 §43.3 code-quality finding).
+    let rpc_password = ctx.conf["rpc_password"].as_str();
+    if rpc_password.is_none() {
         warn!("'rpc_password' is not set in the config");
-        ""
-    });
-    match request.userpass {
-        Some(ref userpass) if userpass == rpc_password => Ok(()),
-        Some(_) => Err(process_rate_limit(ctx, client).await),
-        None => MmError::err(DispatcherError::UserpassIsNotSet),
+    }
+    match (request.userpass.as_deref(), rpc_password) {
+        (Some(userpass), Some(rpc_password)) if userpass == rpc_password => Ok(()),
+        (Some(_), _) => Err(process_rate_limit(ctx, client).await),
+        (None, _) => MmError::err(DispatcherError::UserpassIsNotSet),
     }
 }
 
@@ -219,9 +230,10 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "best_orders" => handle_mmrpc(ctx, request, best_orders_rpc_v2).await,
         "consolidate_utxos" => handle_mmrpc(ctx, request, consolidate_utxos_rpc).await,
         "enable_bch_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<BchCoin>).await,
-        "enable_erc20" => handle_mmrpc(ctx, request, enable_token::<EthCoin>).await,
+        // `enable_erc20` and its alias `enable_nft` share one single-token handler (CRD ch. 35 R35.2.4).
+        "enable_erc20" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_eth_with_tokens" => handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<EthCoin>).await,
-        "enable_nft" => handle_mmrpc(ctx, request, enable_nft).await,
+        "enable_nft" => handle_mmrpc(ctx, request, enable_evm_token).await,
         "enable_sia" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_slp" => handle_mmrpc(ctx, request, enable_token::<SlpToken>).await,
         "enable_tendermint_token" => handle_mmrpc(ctx, request, enable_token::<TendermintToken>).await,
@@ -258,6 +270,9 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
         "init_trezor" => handle_mmrpc(ctx, request, init_trezor).await,
         "init_trezor_status" => handle_mmrpc(ctx, request, init_trezor_status).await,
         "init_trezor_user_action" => handle_mmrpc(ctx, request, init_trezor_user_action).await,
+        "init_z_coin" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
+        "init_z_coin_status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
+        "init_z_coin_user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
         "init_utxo" => handle_mmrpc(ctx, request, init_standalone_coin::<UtxoStandardCoin>).await,
         "init_utxo_status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<UtxoStandardCoin>).await,
         "init_utxo_user_action" => {
@@ -319,19 +334,14 @@ async fn dispatcher_v2(request: MmRpcRequest, ctx: MmArc) -> DispatcherResult<Re
             "init_lightning_status" => handle_mmrpc(ctx, request, init_l2_status::<LightningCoin>).await,
             "init_lightning_user_action" => handle_mmrpc(ctx, request, init_l2_user_action::<LightningCoin>).await,
             "cancel_init_lightning" => handle_mmrpc(ctx, request, cancel_l2_activation::<LightningCoin>).await,
-            "init_z_coin" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
-            "init_z_coin_status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
-            "init_z_coin_user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
             "z_coin_tx_history" => handle_mmrpc(ctx, request, z_coin_tx_history_rpc).await,
             "list_closed_channels_by_filter" => handle_mmrpc(ctx, request, list_closed_channels_by_filter).await,
             "list_open_channels_by_filter" => handle_mmrpc(ctx, request, list_open_channels_by_filter).await,
             "list_payments_by_filter" => handle_mmrpc(ctx, request, list_payments_by_filter).await,
             "open_channel" => handle_mmrpc(ctx, request, open_channel).await,
             "send_payment" => handle_mmrpc(ctx, request, send_payment).await,
-            "enable_solana_with_tokens" => {
-                handle_mmrpc(ctx, request, enable_platform_coin_with_tokens::<SolanaCoin>).await
-            },
-            "enable_spl" => handle_mmrpc(ctx, request, enable_token::<SplToken>).await,
+            "enable_solana_with_tokens" => handle_mmrpc(ctx, request, enable_solana_with_tokens).await,
+            "enable_spl" => handle_mmrpc(ctx, request, enable_spl).await,
             "trezor_connection_status" => handle_mmrpc(ctx, request, trezor_connection_status_rpc).await,
             _ => {
                 warn!("No such v2 RPC method: '{}'", native_only_methods);
@@ -449,6 +459,15 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         "enable_qtum::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<QtumCoin>).await,
         "enable_qtum::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<QtumCoin>).await,
         "enable_qtum::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<QtumCoin>).await,
+        "enable_z_coin::init" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
+        "enable_z_coin::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
+        "enable_z_coin::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
+        "enable_z_coin::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<ZCoin>).await,
+        // BCH standalone-coin task family (CRD ch. 55 §55.8): activates the BCH coin only.
+        "enable_bch::init" => handle_mmrpc(ctx, request, init_standalone_coin::<BchCoin>).await,
+        "enable_bch::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<BchCoin>).await,
+        "enable_bch::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<BchCoin>).await,
+        "enable_bch::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<BchCoin>).await,
         "enable_sia::init" => handle_mmrpc(ctx, request, init_standalone_coin::<SiaCoin>).await,
         "enable_sia::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<SiaCoin>).await,
         "enable_sia::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<SiaCoin>).await,
@@ -463,6 +482,11 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
             handle_mmrpc(ctx, request, init_platform_coin_with_tokens_user_action::<EthCoin>).await
         },
         "enable_eth::cancel" => handle_mmrpc(ctx, request, cancel_init_platform_coin_with_tokens::<EthCoin>).await,
+        // ERC-20 token task family (CRD ch. 35 §35.3A / ch. 48 §48.11), on all targets like `enable_erc20`.
+        "enable_erc20::init" => handle_mmrpc(ctx, request, init_token::<EthCoin>).await,
+        "enable_erc20::status" => handle_mmrpc(ctx, request, init_token_status::<EthCoin>).await,
+        "enable_erc20::user_action" => handle_mmrpc(ctx, request, init_token_user_action::<EthCoin>).await,
+        "enable_erc20::cancel" => handle_mmrpc(ctx, request, cancel_init_token::<EthCoin>).await,
         // Tendermint platform activation task family (CRD ch. 36 §36.6 / ch. 48).
         // Mirrors `enable_tendermint_with_assets`' params and result;
         // cross-platform for the same reason as `enable_eth::*`.
@@ -484,6 +508,7 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         "init_trezor::init" => handle_mmrpc(ctx, request, init_trezor).await,
         "init_trezor::status" => handle_mmrpc(ctx, request, init_trezor_status).await,
         "init_trezor::user_action" => handle_mmrpc(ctx, request, init_trezor_user_action).await,
+        "init_trezor::cancel" => handle_mmrpc(ctx, request, init_trezor_cancel).await,
         "account_balance::init" => handle_mmrpc(ctx, request, init_account_balance).await,
         "account_balance::status" => handle_mmrpc(ctx, request, init_account_balance_status).await,
         "create_new_account::init" => handle_mmrpc(ctx, request, init_create_new_account).await,
@@ -506,10 +531,6 @@ async fn task_dispatcher(request: MmRpcRequest, ctx: MmArc, task_method: &str) -
         "connect_metamask::cancel" => handle_mmrpc(ctx, request, connect_metamask_cancel).await,
         #[cfg(not(target_arch = "wasm32"))]
         native_only_task => match native_only_task {
-            "enable_z_coin::init" => handle_mmrpc(ctx, request, init_standalone_coin::<ZCoin>).await,
-            "enable_z_coin::status" => handle_mmrpc(ctx, request, init_standalone_coin_status::<ZCoin>).await,
-            "enable_z_coin::user_action" => handle_mmrpc(ctx, request, init_standalone_coin_user_action::<ZCoin>).await,
-            "enable_z_coin::cancel" => handle_mmrpc(ctx, request, cancel_init_standalone_coin::<ZCoin>).await,
             "enable_lightning::init" => handle_mmrpc(ctx, request, init_l2::<LightningCoin>).await,
             "enable_lightning::status" => handle_mmrpc(ctx, request, init_l2_status::<LightningCoin>).await,
             "enable_lightning::user_action" => handle_mmrpc(ctx, request, init_l2_user_action::<LightningCoin>).await,
@@ -583,6 +604,242 @@ mod tests {
 
         let err = block_on(dispatcher_v2(request, ctx)).unwrap_err();
         assert!(matches!(err.into_inner(), DispatcherError::NoSuchMethod));
+    }
+
+    /// Any address works: `auth` only reads `client` to key its rate-limit
+    /// registry on the failure paths these tests exercise.
+    fn test_client_addr() -> SocketAddr { "127.0.0.1:0".parse().unwrap() }
+
+    fn protected_request(userpass: Option<&str>) -> MmRpcRequest {
+        MmRpcRequest {
+            mmrpc: MmRpcVersion::V2,
+            userpass: userpass.map(str::to_owned),
+            // Any method absent from `PUBLIC_METHODS` exercises the real auth
+            // check; `my_balance` is not public.
+            method: "my_balance".to_owned(),
+            params: json!({}),
+            id: Some(1),
+        }
+    }
+
+    /// CRD ch.43 §43.3: a node with no `rpc_password` configured must reject
+    /// every protected-method request, not authenticate a caller who supplies
+    /// an explicit empty-string `userpass`. Before the fix this passed
+    /// (`"" == ""`), granting unauthenticated access to every protected
+    /// method on any node that never had a password configured.
+    #[test]
+    fn auth_rejects_empty_userpass_when_rpc_password_is_unconfigured() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        assert!(
+            ctx.conf["rpc_password"].is_null(),
+            "test assumes no rpc_password in config"
+        );
+
+        let request = protected_request(Some(""));
+        let result = block_on(auth(&request, &ctx, &test_client_addr()));
+        assert!(
+            result.is_err(),
+            "an empty userpass must not authenticate against an unconfigured rpc_password"
+        );
+    }
+
+    /// Same gap, non-empty caller-supplied value: still must not authenticate
+    /// against an unconfigured password.
+    #[test]
+    fn auth_rejects_any_userpass_when_rpc_password_is_unconfigured() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        assert!(
+            ctx.conf["rpc_password"].is_null(),
+            "test assumes no rpc_password in config"
+        );
+
+        let request = protected_request(Some("whatever-a-caller-happens-to-send"));
+        let result = block_on(auth(&request, &ctx, &test_client_addr()));
+        assert!(
+            result.is_err(),
+            "no userpass value should authenticate against an unconfigured rpc_password"
+        );
+    }
+
+    /// Sanity: a configured password still authenticates a matching caller.
+    #[test]
+    fn auth_accepts_correct_userpass_when_rpc_password_is_configured() {
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "rpc_password": "correct horse battery staple" }))
+            .into_mm_arc();
+
+        let request = protected_request(Some("correct horse battery staple"));
+        let result = block_on(auth(&request, &ctx, &test_client_addr()));
+        assert!(
+            result.is_ok(),
+            "the configured password must still authenticate its own caller"
+        );
+    }
+
+    /// Sanity: a configured password still rejects a wrong caller.
+    #[test]
+    fn auth_rejects_wrong_userpass_when_rpc_password_is_configured() {
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "rpc_password": "correct horse battery staple" }))
+            .into_mm_arc();
+
+        let request = protected_request(Some("wrong password"));
+        let result = block_on(auth(&request, &ctx, &test_client_addr()));
+        assert!(
+            result.is_err(),
+            "a configured password must still reject a caller who gets it wrong"
+        );
+    }
+
+    /// The dispatcher error of an EVM activation request as the dispatcher serializes it, with its HTTP status.
+    fn evm_request_failure(method: &str, params: serde_json::Value) -> (serde_json::Value, http::StatusCode) {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let request = MmRpcRequest {
+            mmrpc: MmRpcVersion::V2,
+            userpass: None,
+            method: method.to_owned(),
+            params,
+            id: Some(1),
+        };
+        match block_on(dispatcher_v2(request, ctx)) {
+            Ok(_) => panic!("`{}` must be rejected before the activation starts", method),
+            Err(e) => (
+                serde_json::to_value(e.get_inner()).unwrap(),
+                e.get_inner().status_code(),
+            ),
+        }
+    }
+
+    fn assert_invalid_request(failure: (serde_json::Value, http::StatusCode)) {
+        assert_eq!(failure.0["error_type"], "InvalidRequest", "{:?}", failure.0);
+        assert!(failure.0["error_data"].is_string(), "{:?}", failure.0);
+        assert_eq!(failure.1, http::StatusCode::BAD_REQUEST);
+    }
+
+    /// CRD ch. 35 T35.5, T35.9: a request that cannot be decoded is rejected by the dispatcher with
+    /// `InvalidRequest` (string, 400) before the activation starts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn evm_activation_request_parse_failures_are_invalid_request() {
+        let valid = json!({
+            "ticker": "ETH",
+            "nodes": [{ "url": "http://127.0.0.1:1" }],
+            "erc20_tokens_requests": [],
+        });
+        let with = |key: &str, value: serde_json::Value| {
+            let mut params = valid.clone();
+            params[key] = value;
+            params
+        };
+        for method in ["enable_eth_with_tokens", "task::enable_eth::init"] {
+            // The MetaMask values do not exist on native builds.
+            assert_invalid_request(evm_request_failure(method, with("rpc_mode", json!("Metamask"))));
+            assert_invalid_request(evm_request_failure(
+                method,
+                with("priv_key_policy", json!({ "type": "Metamask" })),
+            ));
+            // A string-form policy.
+            assert_invalid_request(evm_request_failure(method, with("priv_key_policy", json!("Trezor"))));
+            // Absent token requests.
+            let mut absent = valid.clone();
+            absent.as_object_mut().unwrap().remove("erc20_tokens_requests");
+            assert_invalid_request(evm_request_failure(method, absent));
+        }
+        for method in ["enable_erc20", "enable_nft", "task::enable_erc20::init"] {
+            // `activation_params` is required.
+            assert_invalid_request(evm_request_failure(method, json!({ "ticker": "USDT-ERC20" })));
+        }
+    }
+
+    /// CRD ch. 35 §35.3A: the token task family is routed under its own namespace and an unknown sub-method of it
+    /// resolves to the standard no-such-method error.
+    #[test]
+    fn the_erc20_task_family_is_routed_and_unknown_sub_methods_are_not() {
+        let failure = evm_request_failure("task::enable_erc20::bogus", json!({}));
+        assert_eq!(failure.0["error_type"], "NoSuchMethod");
+        assert!(failure.0.get("error_data").is_none());
+        assert_eq!(failure.1, http::StatusCode::BAD_REQUEST);
+
+        // A routed method reaches its handler, which rejects the undecodable params.
+        for sub_method in ["init", "status", "user_action", "cancel"] {
+            let failure = evm_request_failure(&format!("task::enable_erc20::{sub_method}"), json!({ "no": "task" }));
+            assert_eq!(
+                failure.0["error_type"], "InvalidRequest",
+                "{sub_method}: {:?}",
+                failure.0
+            );
+        }
+    }
+
+    /// The status and the JSON body of a well-formed v2 request the dispatcher answers.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn answer_of(ctx: &MmArc, method: &str, params: serde_json::Value) -> (http::StatusCode, serde_json::Value) {
+        let request = MmRpcRequest {
+            mmrpc: MmRpcVersion::V2,
+            userpass: None,
+            method: method.to_owned(),
+            params,
+            id: Some(7),
+        };
+        match block_on(dispatcher_v2(request, ctx.clone())) {
+            Ok(response) => (response.status(), serde_json::from_slice(response.body()).unwrap()),
+            Err(_) => panic!("`{}` must reach its handler", method),
+        }
+    }
+
+    /// Solana is postponed for this beta: `enable_solana_with_tokens` and `enable_spl` refuse a well-formed
+    /// request with the "not available in this build" text and register nothing (the switch is
+    /// `coins::SOLANA_ACTIVATION_AVAILABLE`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_activation_routes_refuse_while_solana_is_switched_off() {
+        use coins::{lp_coinfind, SOLANA_NOT_AVAILABLE};
+
+        let ctx = MmCtxBuilder::default()
+            .with_conf(json!({ "coins": [
+                { "coin": "SOL", "mm2": 1, "protocol": { "type": "SOLANA" } },
+                { "coin": "USDC-SOL", "mm2": 1, "protocol": { "type": "SPLTOKEN", "protocol_data": {
+                    "platform": "SOL",
+                    "token_contract_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                    "decimals": 6 } } },
+            ] }))
+            .into_mm_arc();
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_solana_with_tokens",
+            json!({
+                "ticker": "SOL",
+                "confirmation_commitment": "finalized",
+                "client_url": "http://127.0.0.1:1",
+                "tx_history": false,
+                "spl_tokens_requests": [{ "ticker": "USDC-SOL" }],
+            }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["mmrpc"], "2.0");
+        assert_eq!(body["id"], 7);
+        assert_eq!(body["error_type"], "PlatformCoinCreationError", "{body}");
+        assert_eq!(body["error_data"]["ticker"], "SOL");
+        assert_eq!(body["error_data"]["error"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        let (status, body) = answer_of(
+            &ctx,
+            "enable_spl",
+            json!({ "ticker": "USDC-SOL", "activation_params": {} }),
+        );
+        assert_eq!(status, http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error_type"], "Internal", "{body}");
+        assert_eq!(body["error_data"], SOLANA_NOT_AVAILABLE);
+        assert!(body["error"].as_str().unwrap().contains(SOLANA_NOT_AVAILABLE), "{body}");
+
+        for ticker in ["SOL", "USDC-SOL"] {
+            assert!(
+                block_on(lp_coinfind(&ctx, ticker)).unwrap().is_none(),
+                "{ticker} registered"
+            );
+        }
     }
 
     #[cfg(all(unix, not(target_arch = "wasm32")))]

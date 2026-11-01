@@ -1,6 +1,7 @@
 // utxo_common_tx — transaction building, signing, fee estimation, UTXO management
 
 use super::*;
+use crate::request_fee_scope::{self, FeeReadKind};
 use utxo_signer::with_key_pair::sign_tx;
 
 pub const DEFAULT_FEE_VOUT: usize = 0;
@@ -18,15 +19,32 @@ pub async fn get_tx_fee(coin: &UtxoCoinFields) -> UtxoRpcResult<ActualTxFee> {
     let conf = &coin.conf;
     match &coin.tx_fee {
         TxFee::Dynamic(method) => {
-            let fee = coin
-                .rpc_client
-                .estimate_fee_sat(coin.decimals, method, &conf.estimate_fee_mode, conf.estimate_fee_blocks)
-                .compat()
-                .await?;
+            // R38.6.6j item 1: one estimate per coin and order-posting request. Outside such a request
+            // (every swap path) this is a plain fresh read.
+            let fee = request_fee_scope::memoize(
+                FeeReadKind::UtxoFeeEstimate,
+                &conf.ticker,
+                coin.rpc_client
+                    .estimate_fee_sat(coin.decimals, method, &conf.estimate_fee_mode, conf.estimate_fee_blocks)
+                    .compat(),
+            )
+            .await?;
             Ok(ActualTxFee::Dynamic(fee))
         },
         TxFee::FixedPerKb(satoshis) => Ok(ActualTxFee::FixedPerKb(*satoshis)),
+        TxFee::FixedPerStartedKb(satoshis) => Ok(ActualTxFee::FixedPerStartedKb(*satoshis)),
     }
+}
+
+/// The node's minimum relay fee of a coin that forces it. Like the dynamic-fee estimate of [`get_tx_fee`], it is
+/// read once per order-posting request and always afresh outside one (CRD ch.38 R38.6.6j items 1 and 3).
+pub async fn get_min_relay_fee(coin: &UtxoCoinFields) -> Result<BigDecimal, common::jsonrpc_client::JsonRpcError> {
+    request_fee_scope::memoize(
+        FeeReadKind::UtxoRelayFee,
+        &coin.conf.ticker,
+        coin.rpc_client.get_relay_fee().compat(),
+    )
+    .await
 }
 
 pub fn send_outputs_from_my_address<T>(coin: T, outputs: Vec<TransactionOutput>) -> TransactionFut
@@ -37,22 +55,9 @@ where
     Box::new(fut.boxed().compat().map(|tx| tx.into()))
 }
 
-/// Sends outputs while allowing one protocol-defined output to bypass the
-/// generic spendable-output dust check.
-///
-/// This is intentionally crate-private and is used only by the legacy KMD
-/// direct-burn taker-fee path. Change handling still uses the coin's dust.
-pub(crate) fn send_outputs_from_my_address_with_underdust_output<T>(
-    coin: T,
-    outputs: Vec<TransactionOutput>,
-    output_index: usize,
-) -> TransactionFut
-where
-    T: UtxoCommonOps + GetUtxoListOps,
-{
-    let fut = send_outputs_from_my_address_impl_with_underdust_output(coin, outputs, Some(output_index));
-    Box::new(fut.boxed().compat().map(|tx| tx.into()))
-}
+/// BIP141 virtual size: `ceil(weight / 4)` where `weight = base_size * 3 + total_size`, in exact integer
+/// arithmetic (CRD ch.38 R38.6.6b uses the virtual size, which the node rounds up).
+fn segwit_virtual_size(base_size: usize, total_size: usize) -> usize { (base_size * 3 + total_size).div_ceil(4) }
 
 pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> usize {
     let transaction_bytes = serialize(tx);
@@ -66,7 +71,7 @@ pub fn tx_size_in_v_bytes(from_addr_format: &UtxoAddressFormat, tx: &UtxoTx) -> 
             let base_size = transaction_bytes.len();
             // 4 additional bytes (2 for the marker and 2 for the flag) and 1 additional byte for every input in the witness for the SIGHASH flag
             let total_size = transaction_bytes.len() + 4 + tx.inputs().len() * (additional_len + 1);
-            ((0.75 * base_size as f64) + (0.25 * total_size as f64)) as usize
+            segwit_virtual_size(base_size, total_size)
         },
         _ => transaction_bytes.len() + tx.inputs().len() * additional_len,
     }
@@ -101,7 +106,6 @@ pub struct UtxoTxBuilder<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> {
     tx_fee: u64,
     min_relay_fee: Option<u64>,
     dust: Option<u64>,
-    allowed_underdust_output: Option<usize>,
 }
 
 impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
@@ -120,7 +124,6 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             tx_fee: 0,
             min_relay_fee: None,
             dust: None,
-            allowed_underdust_output: None,
         }
     }
 
@@ -131,16 +134,6 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
 
     pub fn with_dust(mut self, dust_amount: u64) -> Self {
         self.dust = Some(dust_amount);
-        self
-    }
-
-    /// Permits one protocol-defined output to be positive but below the
-    /// generic spendable-output dust threshold.
-    ///
-    /// This does not change the dust threshold used for any other output or
-    /// for change construction.
-    pub(crate) fn allow_underdust_output(mut self, output_index: usize) -> Self {
-        self.allowed_underdust_output = Some(output_index);
         self
     }
 
@@ -192,37 +185,25 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         from_addr_format: &UtxoAddressFormat,
         actual_tx_fee: &ActualTxFee,
     ) -> bool {
-        self.tx_fee = match &actual_tx_fee {
-            ActualTxFee::Dynamic(f) => {
-                let transaction = UtxoTx::from(self.tx.clone());
-                let v_size = tx_size_in_v_bytes(from_addr_format, &transaction);
-                (f * v_size as u64) / KILO_BYTE
-            },
-            ActualTxFee::FixedPerKb(f) => {
-                let transaction = UtxoTx::from(self.tx.clone());
-                let v_size = tx_size_in_v_bytes(from_addr_format, &transaction) as u64;
-                let v_size_kb = if v_size % KILO_BYTE == 0 {
-                    v_size / KILO_BYTE
-                } else {
-                    v_size / KILO_BYTE + 1
-                };
-                f * v_size_kb
-            },
-        };
+        // CRD ch.38 R38.6.6b: the fee of the transaction as built so far, i.e. without the change output.
+        let transaction = UtxoTx::from(self.tx.clone());
+        let v_size = tx_size_in_v_bytes(from_addr_format, &transaction) as u64;
+        self.tx_fee = actual_tx_fee.fee_for_size(v_size);
 
         match self.fee_policy {
             FeePolicy::SendExact => {
                 let mut outputs_plus_fee = self.sum_outputs_value + self.tx_fee;
                 if self.sum_inputs >= outputs_plus_fee {
                     self.change = self.sum_inputs - outputs_plus_fee;
+                    let mut final_size = v_size;
                     if self.change > self.dust() {
+                        final_size += P2PKH_OUTPUT_LEN;
                         // there will be change output
-                        if let ActualTxFee::Dynamic(ref f) = actual_tx_fee {
-                            self.tx_fee += (f * P2PKH_OUTPUT_LEN) / KILO_BYTE;
-                            outputs_plus_fee += (f * P2PKH_OUTPUT_LEN) / KILO_BYTE;
-                        }
+                        let change_increase = Self::change_output_fee_increase(actual_tx_fee, v_size);
+                        self.tx_fee += change_increase;
+                        outputs_plus_fee += change_increase;
                     }
-                    if let Some(min_relay) = self.min_relay_fee {
+                    if let Some(min_relay) = Self::relay_fee_for_size(self.min_relay_fee, final_size) {
                         if self.tx_fee < min_relay {
                             outputs_plus_fee -= self.tx_fee;
                             outputs_plus_fee += min_relay;
@@ -237,12 +218,12 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
             FeePolicy::DeductFromOutput(_) => {
                 if self.sum_inputs >= self.sum_outputs_value {
                     self.change = self.sum_inputs - self.sum_outputs_value;
+                    let mut final_size = v_size;
                     if self.change > self.dust() {
-                        if let ActualTxFee::Dynamic(ref f) = actual_tx_fee {
-                            self.tx_fee += (f * P2PKH_OUTPUT_LEN) / KILO_BYTE;
-                        }
+                        final_size += P2PKH_OUTPUT_LEN;
+                        self.tx_fee += Self::change_output_fee_increase(actual_tx_fee, v_size);
                     }
-                    if let Some(min_relay) = self.min_relay_fee {
+                    if let Some(min_relay) = Self::relay_fee_for_size(self.min_relay_fee, final_size) {
                         if self.tx_fee < min_relay {
                             self.tx_fee = min_relay;
                         }
@@ -251,6 +232,23 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
                 } else {
                     false
                 }
+            },
+        }
+    }
+
+    /// CRD ch.38 R38.6.6b: the forced minimum relay fee of a transaction of `size` bytes,
+    /// `floor(relay_rate * size / 1000)`, from the node's per-kilobyte relay rate.
+    fn relay_fee_for_size(relay_rate: Option<u64>, size: u64) -> Option<u64> {
+        relay_rate.map(|rate| ActualTxFee::Dynamic(rate).fee_for_size(size))
+    }
+
+    /// The fee increase for the change output that is not in the transaction yet. The dynamic rate keeps
+    /// its proportional allowance; the fixed policies use the R38.6.6b increase of the transaction size.
+    fn change_output_fee_increase(actual_tx_fee: &ActualTxFee, v_size: u64) -> u64 {
+        match actual_tx_fee {
+            ActualTxFee::Dynamic(f) => (f * P2PKH_OUTPUT_LEN) / KILO_BYTE,
+            ActualTxFee::FixedPerKb(_) | ActualTxFee::FixedPerStartedKb(_) => {
+                actual_tx_fee.change_output_increase(v_size)
             },
         }
     }
@@ -282,17 +280,15 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         true_or!(!self.tx.outputs.is_empty(), GenerateTxError::EmptyOutputs);
 
         let mut received_by_me = 0;
-        for (output_index, output) in self.tx.outputs.iter().enumerate() {
+        for output in self.tx.outputs.iter() {
             let script: Script = output.script_pubkey.clone().into();
-            let is_allowed_underdust_output = self.allowed_underdust_output == Some(output_index);
+            // CRD ch.08 R15A: the only per-output dust exemption is a script
+            // beginning with OP_RETURN; there is no per-descriptor exemption.
             if script.opcodes().next() != Some(Ok(Opcode::OP_RETURN)) {
-                true_or!(
-                    output.value >= dust || (is_allowed_underdust_output && output.value > 0),
-                    GenerateTxError::OutputValueLessThanDust {
-                        value: output.value,
-                        dust
-                    }
-                );
+                true_or!(output.value >= dust, GenerateTxError::OutputValueLessThanDust {
+                    value: output.value,
+                    dust
+                });
             }
             self.sum_outputs_value += output.value;
             if output.script_pubkey == change_script_pubkey {
@@ -312,7 +308,7 @@ impl<'a, T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps> UtxoTxBuilder<'a, T> {
         );
 
         self.min_relay_fee = if coin.as_ref().conf.force_min_relay_fee {
-            let fee_dec = coin.as_ref().rpc_client.get_relay_fee().compat().await?;
+            let fee_dec = get_min_relay_fee(coin.as_ref()).await?;
             let min_relay_fee = sat_from_big_decimal(&fee_dec, coin.as_ref().decimals).mm_err(Into::into)?;
             Some(min_relay_fee)
         } else {
@@ -548,6 +544,42 @@ pub fn send_raw_tx_bytes(
     )
 }
 
+/// [`send_raw_tx`] for the coins whose user withdraw is built by `UtxoWithdraw` (the standard UTXO coin, BCH and
+/// Qtum): once the backend has accepted the broadcast, the spend is promoted into the recently-spent record if the
+/// bytes are those of a pending withdraw (see [`send_raw_tx_bytes_promoting_withdraw`]).
+pub fn send_raw_tx_promoting_withdraw(
+    coin: &UtxoArc,
+    tx: &str,
+) -> Box<dyn Future<Item = String, Error = String> + Send> {
+    let bytes = try_fus!(hex::decode(tx));
+    send_raw_tx_bytes_promoting_withdraw(coin, &bytes)
+}
+
+/// [`send_raw_tx_bytes`] that also promotes a withdraw's spend into the recently-spent record (CRD ch.38 R38.5B.9
+/// item 2). After the backend has accepted the broadcast, bytes that are exactly those of a pending withdraw entry
+/// that has not expired move that entry into the record. A refused broadcast promotes nothing, and bytes that match
+/// no pending entry change nothing.
+pub fn send_raw_tx_bytes_promoting_withdraw(
+    coin: &UtxoArc,
+    tx_bytes: &[u8],
+) -> Box<dyn Future<Item = String, Error = String> + Send> {
+    let coin = coin.clone();
+    let bytes = tx_bytes.to_vec();
+    let broadcast = coin.rpc_client.send_raw_transaction(tx_bytes.into()).compat();
+    Box::new(
+        async move {
+            let hash = broadcast.await.map_err(|e| ERRL!("{}", e))?;
+            coin.recently_spent_outpoints
+                .lock()
+                .await
+                .promote_pending_withdraw(&bytes);
+            Ok(format!("{:?}", hash))
+        }
+        .boxed()
+        .compat(),
+    )
+}
+
 pub fn tx_enum_from_bytes(coin: &UtxoCoinFields, bytes: &[u8]) -> Result<TransactionEnum, String> {
     let mut transaction: UtxoTx = try_s!(deserialize(bytes).map_err(|err| format!("{:?}", err)));
     transaction.tx_hash_algo = coin.tx_hash_algo;
@@ -559,10 +591,7 @@ pub fn get_trade_fee<T: UtxoCommonOps>(coin: T) -> Box<dyn Future<Item = TradeFe
     let decimals = coin.as_ref().decimals;
     let fut = async move {
         let fee = try_s!(coin.get_tx_fee().await);
-        let amount = match fee {
-            ActualTxFee::Dynamic(f) => f,
-            ActualTxFee::FixedPerKb(f) => f,
-        };
+        let amount = fee.rate_per_kb();
         Ok(TradeFee {
             coin: ticker,
             amount: big_decimal_from_sat(amount as i64, decimals).into(),
@@ -650,7 +679,7 @@ where
 
             Ok(big_decimal_from_sat(total_fee as i64, decimals))
         },
-        ActualTxFee::FixedPerKb(fee) => {
+        ActualTxFee::FixedPerKb(_) | ActualTxFee::FixedPerStartedKb(_) => {
             let outputs_count = outputs.len();
             let (unspents, _recently_sent_txs) = coin.get_unspent_ordered_list(&my_address).await.mm_err(Into::into)?;
 
@@ -668,19 +697,18 @@ where
                 .await
                 .mm_err(|e| TradePreimageError::from_generate_tx_error(e, ticker, decimals, is_amount_upper_bound))?;
 
-            let total_fee = if tx.outputs.len() == outputs_count {
-                // take into account the change output if tx_size_kb(tx with change) > tx_size_kb(tx without change)
-                let tx = UtxoTx::from(tx);
-                let tx_bytes = serialize(&tx);
-                if tx_bytes.len() as u64 % KILO_BYTE + P2PKH_OUTPUT_LEN > KILO_BYTE {
-                    data.fee_amount + fee
-                } else {
-                    data.fee_amount
-                }
-            } else {
-                // the change output is included already
-                data.fee_amount
-            };
+            // CRD ch.38 R38.6.6b: the preview always allows for exactly one P2PKH change output (a real swap
+            // transaction carries one), under the coin's own fee rule. If the builder materialised the change
+            // output, drop it first so the allowance is not counted twice. The builder's own fee (which may
+            // carry a forced minimum relay fee) is a lower bound.
+            let tx = UtxoTx::from(tx);
+            let mut v_size = tx_size_in_v_bytes(&my_address.addr_format, &tx) as u64;
+            if tx.outputs.len() != outputs_count {
+                v_size = v_size.saturating_sub(P2PKH_OUTPUT_LEN);
+            }
+            let total_fee = tx_fee
+                .fee_for_size(v_size.saturating_add(P2PKH_OUTPUT_LEN))
+                .max(data.fee_amount);
 
             Ok(big_decimal_from_sat(total_fee as i64, decimals))
         },
@@ -1012,17 +1040,20 @@ pub async fn get_all_unspent_ordered_list<'a, T: UtxoCommonOps>(
     address: &Address,
 ) -> UtxoRpcResult<(Vec<UnspentInfo>, RecentlySpentOutPointsGuard<'a>)> {
     let decimals = coin.as_ref().decimals;
-    let mut unspents = coin
-        .as_ref()
-        .rpc_client
-        .list_unspent(address, decimals)
-        .compat()
-        .await?;
-
     // For Electrum legacy addresses also query `<pubkey> OP_CHECKSIG` (P2PK)
     // script-hash unspents so they are available for selection and spending.
-    let mut p2pk_unspents = crate::utxo::electrum_p2pk_unspents_for_address(coin.as_ref(), address).await?;
-    unspents.append(&mut p2pk_unspents);
+    // The P2PK lookup travels in the same Electrum request message as the
+    // P2PKH one (R38.6.3a).
+    let unspents = match crate::utxo::electrum_p2pk_lookup(coin.as_ref(), address) {
+        Some((electrum, p2pk_script)) => electrum.list_unspent_with_p2pk(address, &p2pk_script).compat().await?,
+        None => {
+            coin.as_ref()
+                .rpc_client
+                .list_unspent(address, decimals)
+                .compat()
+                .await?
+        },
+    };
 
     let recently_spent = coin.as_ref().recently_spent_outpoints.lock().await;
     let unordered_unspents = recently_spent.replace_spent_outputs_with_cache(unspents.into_iter().collect());
@@ -1327,6 +1358,7 @@ async fn sign_raw_utxo_tx<T: AsRef<UtxoCoinFields> + UtxoTxGenerationOps>(
 
     let tx_signed_bytes = serialize_with_flags(&tx_signed, SERIALIZE_TRANSACTION_WITNESS);
     Ok(RawTransactionRes {
+        tx_json: None,
         tx_hex: tx_signed_bytes.into(),
     })
 }
@@ -1449,6 +1481,18 @@ fn test_increase_by_percent() {
     assert_eq!(increase_by_percent(23, 100.), 46);
     assert_eq!(increase_by_percent(100, 2.4), 102);
     assert_eq!(increase_by_percent(100, 2.5), 103);
+}
+
+#[test]
+fn test_segwit_virtual_size_rounds_up() {
+    // weight = 100 * 3 + 111 = 411 (not a multiple of 4): ceil(411 / 4) = 103, the float estimate gave 102
+    assert_eq!(segwit_virtual_size(100, 111), 103);
+    // weight = 100 * 3 + 112 = 412: exact
+    assert_eq!(segwit_virtual_size(100, 112), 103);
+    // weight = 101 * 3 + 101 = 404: exact
+    assert_eq!(segwit_virtual_size(101, 101), 101);
+    // weight = 99 * 3 + 100 = 397: ceil(397 / 4) = 100
+    assert_eq!(segwit_virtual_size(99, 100), 100);
 }
 
 #[test]

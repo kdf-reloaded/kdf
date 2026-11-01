@@ -150,7 +150,7 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR
         );
 
-        let internal = serde_json::to_value(&TrezorConnectionStatusError::Internal("boom".to_string())).unwrap();
+        let internal = serde_json::to_value(TrezorConnectionStatusError::Internal("boom".to_string())).unwrap();
         assert_eq!(internal, json!({ "error_type": "Internal", "error_data": "boom" }));
         assert_eq!(
             TrezorConnectionStatusError::Internal(String::new()).status_code(),

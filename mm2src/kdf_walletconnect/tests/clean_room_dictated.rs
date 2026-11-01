@@ -11,7 +11,7 @@
 //! Oracles:
 //!   * x25519 ECDH:        RFC 7748 §6.1 known-answer vector.
 //!   * HKDF-SHA256:        RFC 5869 construction (salt = none, info = empty),
-//!                         recomputed independently here.
+//!     recomputed independently here.
 //!   * topic derivation:   SHA-256 over the symmetric key (recomputed here).
 
 use hkdf::Hkdf;

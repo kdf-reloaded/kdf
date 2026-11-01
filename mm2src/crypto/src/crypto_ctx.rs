@@ -238,6 +238,7 @@ impl CryptoCtx {
             hw_internal_pubkey,
             hw_wallet_type: HwWalletType::Trezor,
             hw_wallet: AsyncMutex::new(hw_wallet),
+            device_info: None,
         });
         *self.hw_ctx.write() = HardwareWalletCtxState::Ready(hw_ctx.clone());
         hw_ctx

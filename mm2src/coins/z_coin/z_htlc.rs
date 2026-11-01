@@ -9,26 +9,25 @@ use super::ZCoin;
 use crate::utxo::rpc_clients::{UtxoRpcClientEnum, UtxoRpcError};
 use crate::utxo::utxo_common::payment_script;
 use crate::utxo::{sat_from_big_decimal, UtxoAddressFormat};
-use crate::z_coin::{SendOutputsErr, ZOutput, DEX_FEE_OVK};
+use crate::z_coin::{z_tx_read, BuilderHeightError, SendOutputsErr, ZOutput, DEX_FEE_OVK};
 use crate::{NumConversError, PrivKeyNotAllowed, TransactionEnum};
 use bigdecimal::BigDecimal;
-use chain::Transaction as UtxoTx;
+use common::log;
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
 use kdf_crypto::dhash160;
 use keys::{Address, Public};
 use mm2_err_handle::prelude::*;
 use script::{Builder as ScriptBuilder, Opcode, Script};
-use serialization::deserialize;
+use secp256k1::SecretKey;
 use std::convert::Infallible;
-use zcash_primitives::transaction::builder::{BuildConfig, Builder as ZTxBuilder};
+use zcash_primitives::transaction::builder::{BuildConfig, Builder as ZTxBuilder, BundlePadding};
 use zcash_primitives::transaction::fees::fixed::FeeRule as FixedFeeRule;
 use zcash_primitives::transaction::Transaction as ZTransaction;
 use zcash_protocol::consensus;
 use zcash_protocol::memo::MemoBytes;
 use zcash_protocol::value::Zatoshis as Amount;
 use zcash_script::script::Code as ZCashScriptCode;
-use zcash_secp256k1::SecretKey;
 use zcash_transparent::address::Script as ZCashScript;
 use zcash_transparent::builder::TransparentSigningSet;
 use zcash_transparent::bundle::{OutPoint as ZCashOutpoint, TxOut};
@@ -103,6 +102,8 @@ pub enum ZP2SHSpendError {
     ZTxBuilderError(ZTxBuilderError),
     PrivKeyNotAllowed(PrivKeyNotAllowed),
     Rpc(UtxoRpcError),
+    #[display(fmt = "{}", _0)]
+    BuilderHeight(BuilderHeightError),
     #[display(fmt = "Invalid ZCash HTLC payment transaction: {}", _0)]
     InvalidPaymentTx(String),
     #[display(fmt = "{:?} {}", _0, _1)]
@@ -115,6 +116,10 @@ impl From<ZTxBuilderError> for ZP2SHSpendError {
 
 impl From<PrivKeyNotAllowed> for ZP2SHSpendError {
     fn from(err: PrivKeyNotAllowed) -> Self { ZP2SHSpendError::PrivKeyNotAllowed(err) }
+}
+
+impl From<BuilderHeightError> for ZP2SHSpendError {
+    fn from(err: BuilderHeightError) -> ZP2SHSpendError { ZP2SHSpendError::BuilderHeight(err) }
 }
 
 impl From<UtxoRpcError> for ZP2SHSpendError {
@@ -131,6 +136,9 @@ impl ZP2SHSpendError {
     }
 }
 
+/// The identifier of `tx` in the usual display byte order.
+fn txid_hex(tx: &ZTransaction) -> String { format!("{:?}", z_tx_read::txid_display(tx)) }
+
 /// Spends P2SH output 0 to the coin's my_z_addr
 pub async fn z_p2sh_spend(
     coin: &ZCoin,
@@ -140,20 +148,30 @@ pub async fn z_p2sh_spend(
     redeem_script: Script,
     script_data: Script,
     htlc_privkey: &[u8],
-) -> Result<UtxoTx, MmError<ZP2SHSpendError>> {
-    let current_block = coin
-        .utxo_arc
-        .rpc_client
-        .get_block_count()
-        .compat()
+) -> Result<ZTransaction, MmError<ZP2SHSpendError>> {
+    // The same single height authority the ordinary shielded send path uses, so a spend or refund
+    // can never be born expired because its height came from a different source (R39.11.11).
+    let target_height = coin
+        .builder_target_height()
         .await
-        .mm_err(Into::into)? as u32;
+        .mm_err(ZP2SHSpendError::BuilderHeight)?;
+    let ticker = &coin.as_ref().conf.ticker;
+    let payment_txid = txid_hex(&p2sh_tx);
+    log::info!(
+        "{}: HTLC spend of payment {}: the builder's target height is {}",
+        ticker,
+        payment_txid,
+        target_height
+    );
     let mut tx_builder = ZTxBuilder::new(
         coin.z_fields.consensus_params.clone(),
-        current_block.into(),
+        target_height.into(),
         BuildConfig::Standard {
             sapling_anchor: Some(sapling::Anchor::empty_tree()),
             orchard_anchor: None,
+            ironwood_anchor: None,
+            orchard_padding: BundlePadding::DEFAULT,
+            ironwood_padding: BundlePadding::DEFAULT,
         },
     );
     tx_builder.set_lock_time(tx_locktime);
@@ -181,12 +199,18 @@ pub async fn z_p2sh_spend(
         .transparent_bundle()
         .and_then(|bundle| bundle.vout.first())
         .map(TxOut::value)
-        .and_then(|value| value - fee)
+        // CRD ch.60 R60.6.4: a spend whose fee is not smaller than the HTLC value is refused.
+        .and_then(|value| if value > fee { value - fee } else { None })
         .or_mm_err(|| ZP2SHSpendError::InvalidPaymentTx("output 0 cannot cover the swap spend fee".to_owned()))?;
     tx_builder
         .add_sapling_output(None, coin.z_fields.my_z_addr.clone(), payment_value, MemoBytes::empty())
         .map_to_mm(ZP2SHSpendError::from)?;
 
+    log::info!(
+        "{}: HTLC spend of payment {}: building the transaction",
+        ticker,
+        payment_txid
+    );
     let zcash_tx = tx_builder
         .build(
             &signing_set,
@@ -204,13 +228,34 @@ pub async fn z_p2sh_spend(
     zcash_tx
         .write(&mut tx_buffer)
         .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
-    let refund_tx: UtxoTx = deserialize(tx_buffer.as_slice())
-        .map_err(|e| MmError::new(ZP2SHSpendError::InvalidPaymentTx(e.to_string())))?;
-
+    // The transaction the builder produced is returned as it is: re-reading its bytes through the
+    // shared UTXO parser would give the Zcash-transaction arm a UTXO-transaction one and the version
+    // coverage of that parser (R39.11.14, R39.11.16a(b)).
+    let spend_txid = txid_hex(&zcash_tx);
+    log::info!(
+        "{}: HTLC spend of payment {}: broadcasting transaction {}",
+        ticker,
+        payment_txid,
+        spend_txid
+    );
     match coin.rpc_client().send_raw_transaction(tx_buffer.into()).compat().await {
-        Ok(_) => (),
-        Err(e) => return Err(ZP2SHSpendError::TxRecoverable(refund_tx.into(), e.to_string()).into()),
+        Ok(_) => log::info!(
+            "{}: HTLC spend of payment {}: transaction {} was broadcast",
+            ticker,
+            payment_txid,
+            spend_txid
+        ),
+        Err(e) => {
+            log::info!(
+                "{}: HTLC spend of payment {}: broadcasting transaction {} failed: {}",
+                ticker,
+                payment_txid,
+                spend_txid,
+                e
+            );
+            return Err(ZP2SHSpendError::TxRecoverable(zcash_tx.into(), e.to_string()).into());
+        },
     };
 
-    Ok(refund_tx)
+    Ok(zcash_tx)
 }

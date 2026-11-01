@@ -340,31 +340,31 @@ mod tests {
     }
 
     async fn test_unique_wallets_impl() {
-        let rick_user0_device0_account0 = HDAccountStorageItem {
+        let doc_user0_device0_account0 = HDAccountStorageItem {
             account_id: 0,
             account_xpub: "xpub6DEHSksajpRPM59RPw7Eg6PKdU7E2ehxJWtYdrfQ6JFmMGBsrR6jA78ANCLgzKYm4s5UqQ4ydLEYPbh3TRVvn5oAZVtWfi4qJLMntpZ8uGJ".to_owned(),
             external_addresses_number: 1,
             internal_addresses_number: 2,
         };
-        let rick_user0_device0_account1 = HDAccountStorageItem {
+        let doc_user0_device0_account1 = HDAccountStorageItem {
             account_id: 1,
             account_xpub: "xpub6DEHSksajpRPQq2FdGT6JoieiQZUpTZ3WZn8fcuLJhFVmtCpXbuXxp5aPzaokwcLV2V9LE55Dwt8JYkpuMv7jXKwmyD28WbHYjBH2zhbW2p".to_owned(),
             external_addresses_number: 1,
             internal_addresses_number: 2,
         };
-        let rick_user0_device1_account0 = HDAccountStorageItem {
+        let doc_user0_device1_account0 = HDAccountStorageItem {
             account_id: 0,
             account_xpub: "xpub6EuV33a2DXxAhoJTRTnr8qnysu81AA4YHpLY6o8NiGkEJ8KADJ35T64eJsStWsmRf1xXkEANVjXFXnaUKbRtFwuSPCLfDdZwYNZToh4LBCd".to_owned(),
             external_addresses_number: 3,
             internal_addresses_number: 4,
         };
-        let rick_user1_device0_account0 = HDAccountStorageItem {
+        let doc_user1_device0_account0 = HDAccountStorageItem {
             account_id: 0,
             account_xpub: "xpub6CUGRUonZSQ4TWtTMmzXdrXDtypWKiKrhko4egpiMZbpiaQL2jkwSB1icqYh2cfDfVxdx4df189oLKnC5fSwqPfgyP3hooxujYzAu3fDVmz".to_owned(),
             external_addresses_number: 5,
             internal_addresses_number: 6,
         };
-        let morty_user0_device0_account0 = HDAccountStorageItem {
+        let marty_user0_device0_account0 = HDAccountStorageItem {
             account_id: 0,
             account_xpub: "xpub6AHA9hZDN11k2ijHMeS5QqHx2KP9aMBRhTDqANMnwVtdyw2TDYRmF8PjpvwUFcL1Et8Hj59S3gTSMcUQ5gAqTz3Wd8EsMTmF3DChhqPQBnU".to_owned(),
             external_addresses_number: 7,
@@ -377,43 +377,43 @@ mod tests {
         let device0_rmd160 = H160::from("0000000000000000000000000000000000000020");
         let device1_rmd160 = H160::from("0000000000000000000000000000000000000030");
 
-        let rick_user0_device0_db =
-            HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user0_rmd160, device0_rmd160)
+        let doc_user0_device0_db =
+            HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user0_rmd160, device0_rmd160)
                 .await
                 .expect("!HDWalletCoinStorage::new");
-        let rick_user0_device1_db =
-            HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user0_rmd160, device1_rmd160)
+        let doc_user0_device1_db =
+            HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user0_rmd160, device1_rmd160)
                 .await
                 .expect("!HDWalletCoinStorage::new");
-        let rick_user1_device0_db =
-            HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user1_rmd160, device0_rmd160)
+        let doc_user1_device0_db =
+            HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user1_rmd160, device0_rmd160)
                 .await
                 .expect("!HDWalletCoinStorage::new");
-        let morty_user0_device0_db =
-            HDWalletCoinStorage::init_with_rmd160(&ctx, "MORTY".to_owned(), user0_rmd160, device0_rmd160)
+        let marty_user0_device0_db =
+            HDWalletCoinStorage::init_with_rmd160(&ctx, "MARTY".to_owned(), user0_rmd160, device0_rmd160)
                 .await
                 .expect("!HDWalletCoinStorage::new");
 
-        rick_user0_device0_db
-            .upload_new_account(rick_user0_device0_account0.clone())
+        doc_user0_device0_db
+            .upload_new_account(doc_user0_device0_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK user=0 device=0 account=0");
-        rick_user0_device0_db
-            .upload_new_account(rick_user0_device0_account1.clone())
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC user=0 device=0 account=0");
+        doc_user0_device0_db
+            .upload_new_account(doc_user0_device0_account1.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK user=0 device=0 account=1");
-        rick_user0_device1_db
-            .upload_new_account(rick_user0_device1_account0.clone())
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC user=0 device=0 account=1");
+        doc_user0_device1_db
+            .upload_new_account(doc_user0_device1_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK user=0 device=1 account=0");
-        rick_user1_device0_db
-            .upload_new_account(rick_user1_device0_account0.clone())
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC user=0 device=1 account=0");
+        doc_user1_device0_db
+            .upload_new_account(doc_user1_device0_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK user=1 device=0 account=0");
-        morty_user0_device0_db
-            .upload_new_account(morty_user0_device0_account0.clone())
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC user=1 device=0 account=0");
+        marty_user0_device0_db
+            .upload_new_account(marty_user0_device0_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: MORTY user=0 device=0 account=0");
+            .expect("!HDWalletCoinStorage::upload_new_account: MARTY user=0 device=0 account=0");
 
         // All accounts must be in the only one database.
         // Rows in the database must differ by only `coin`, `mm2_rmd160`, `hd_wallet_rmd160` and `account_id` values.
@@ -423,37 +423,37 @@ mod tests {
             .sorted_by(|x, y| x.external_addresses_number.cmp(&y.external_addresses_number))
             .collect();
         assert_eq!(all_accounts, vec![
-            rick_user0_device0_account0.clone(),
-            rick_user0_device0_account1.clone(),
-            rick_user0_device1_account0.clone(),
-            rick_user1_device0_account0.clone(),
-            morty_user0_device0_account0.clone()
+            doc_user0_device0_account0.clone(),
+            doc_user0_device0_account1.clone(),
+            doc_user0_device1_account0.clone(),
+            doc_user1_device0_account0.clone(),
+            marty_user0_device0_account0.clone()
         ]);
 
-        let mut actual = rick_user0_device0_db
+        let mut actual = doc_user0_device0_db
             .load_all_accounts()
             .await
-            .expect("HDWalletCoinStorage::load_all_accounts: RICK user=0 device=0");
+            .expect("HDWalletCoinStorage::load_all_accounts: DOC user=0 device=0");
         actual.sort_by(|x, y| x.account_id.cmp(&y.account_id));
-        assert_eq!(actual, vec![rick_user0_device0_account0, rick_user0_device0_account1]);
+        assert_eq!(actual, vec![doc_user0_device0_account0, doc_user0_device0_account1]);
 
-        let actual = rick_user0_device1_db
+        let actual = doc_user0_device1_db
             .load_all_accounts()
             .await
-            .expect("HDWalletCoinStorage::load_all_accounts: RICK user=0 device=1");
-        assert_eq!(actual, vec![rick_user0_device1_account0]);
+            .expect("HDWalletCoinStorage::load_all_accounts: DOC user=0 device=1");
+        assert_eq!(actual, vec![doc_user0_device1_account0]);
 
-        let actual = rick_user1_device0_db
+        let actual = doc_user1_device0_db
             .load_all_accounts()
             .await
-            .expect("HDWalletCoinStorage::load_all_accounts: RICK user=1 device=0");
-        assert_eq!(actual, vec![rick_user1_device0_account0]);
+            .expect("HDWalletCoinStorage::load_all_accounts: DOC user=1 device=0");
+        assert_eq!(actual, vec![doc_user1_device0_account0]);
 
-        let actual = morty_user0_device0_db
+        let actual = marty_user0_device0_db
             .load_all_accounts()
             .await
-            .expect("HDWalletCoinStorage::load_all_accounts: MORTY user=0 device=0");
-        assert_eq!(actual, vec![morty_user0_device0_account0]);
+            .expect("HDWalletCoinStorage::load_all_accounts: MARTY user=0 device=0");
+        assert_eq!(actual, vec![marty_user0_device0_account0]);
     }
 
     async fn test_delete_accounts_impl() {
@@ -488,37 +488,37 @@ mod tests {
         let device1_rmd160 = H160::from("0000000000000000000000000000000000000020");
         let device2_rmd160 = H160::from("0000000000000000000000000000000000000030");
 
-        let wallet0_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user_rmd160, device0_rmd160)
+        let wallet0_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device0_rmd160)
             .await
             .expect("!HDWalletCoinStorage::new");
-        let wallet1_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user_rmd160, device1_rmd160)
+        let wallet1_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device1_rmd160)
             .await
             .expect("!HDWalletCoinStorage::new");
-        let wallet2_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user_rmd160, device2_rmd160)
+        let wallet2_db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device2_rmd160)
             .await
             .expect("!HDWalletCoinStorage::new");
 
         wallet0_db
             .upload_new_account(wallet0_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=0 account=0");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=0 account=0");
         wallet0_db
             .upload_new_account(wallet0_account1.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=0 account=1");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=0 account=1");
         wallet1_db
             .upload_new_account(wallet1_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=1 account=0");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=1 account=0");
         wallet2_db
             .upload_new_account(wallet2_account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=2 account=0");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=2 account=0");
 
         wallet0_db
             .clear_accounts()
             .await
-            .expect("HDWalletCoinStorage::clear_accounts: RICK wallet=0");
+            .expect("HDWalletCoinStorage::clear_accounts: DOC wallet=0");
 
         // All accounts must be in the only one database.
         // Rows in the database must differ by only `coin`, `mm2_rmd160`, `hd_wallet_rmd160` and `account_id` values.
@@ -548,16 +548,16 @@ mod tests {
         let user_rmd160 = H160::from("0000000000000000000000000000000000000000");
         let device_rmd160 = H160::from("0000000000000000000000000000000000000010");
 
-        let db = HDWalletCoinStorage::init_with_rmd160(&ctx, "RICK".to_owned(), user_rmd160, device_rmd160)
+        let db = HDWalletCoinStorage::init_with_rmd160(&ctx, "DOC".to_owned(), user_rmd160, device_rmd160)
             .await
             .expect("!HDWalletCoinStorage::new");
 
         db.upload_new_account(account0.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=0 account=0");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=0 account=0");
         db.upload_new_account(account1.clone())
             .await
-            .expect("!HDWalletCoinStorage::upload_new_account: RICK wallet=0 account=1");
+            .expect("!HDWalletCoinStorage::upload_new_account: DOC wallet=0 account=1");
 
         db.update_internal_addresses_number(0, 5)
             .await

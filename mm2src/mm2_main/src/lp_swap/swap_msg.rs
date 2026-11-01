@@ -185,8 +185,8 @@ pub fn broadcast_swap_v2_message<T: prost::Message>(
 
     let secp_secret = SecretKey::from_slice(&p2p_private).expect("valid secret key");
     let secp_message =
-        secp256k1::Message::from_slice(sha256(&encoded_msg).as_slice()).expect("sha256 is 32 bytes hash");
-    let signature = SECP_SIGN.sign(&secp_message, &secp_secret);
+        secp256k1::Message::from_digest_slice(sha256(&encoded_msg).as_slice()).expect("sha256 is 32 bytes hash");
+    let signature = SECP_SIGN.sign_ecdsa(&secp_message, &secp_secret);
 
     let signed_message = SignedMessage {
         from: PublicKey::from_secret_key(&*SECP_SIGN, &secp_secret).serialize().into(),
@@ -240,11 +240,11 @@ pub fn process_swap_v2_msg(ctx: MmArc, topic: &str, msg: &[u8]) -> Result<(), St
 
         let signature =
             Signature::from_compact(&signed_message.signature).map_err(|e| format!("Invalid signature: {}", e))?;
-        let secp_message = secp256k1::Message::from_slice(sha256(&signed_message.payload).as_slice())
+        let secp_message = secp256k1::Message::from_digest_slice(sha256(&signed_message.payload).as_slice())
             .expect("sha256 is 32 bytes hash");
 
         SECP_VERIFY
-            .verify(&secp_message, &signature, &pubkey)
+            .verify_ecdsa(&secp_message, &signature, &pubkey)
             .map_err(|e| format!("Signature verification failed: {}", e))?;
 
         let swap_message = SwapMessage::decode(signed_message.payload.as_slice())

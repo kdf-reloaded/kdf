@@ -1,4 +1,6 @@
 use super::*;
+use crate::activation_locks::{ActivationGuard, ActivationLocks};
+use crate::request_fee_scope::{explicit_fee_estimate_cache_secs, FeeEstimateCache};
 
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
@@ -7,7 +9,6 @@ pub enum MmCoinEnum {
     QtumCoin(QtumCoin),
     Qrc20Coin(Qrc20Coin),
     EthCoin(EthCoin),
-    #[cfg(not(target_arch = "wasm32"))]
     ZCoin(ZCoin),
     Bch(BchCoin),
     SlpToken(SlpToken),
@@ -55,7 +56,6 @@ impl From<SlpToken> for MmCoinEnum {
 impl From<LightningCoin> for MmCoinEnum {
     fn from(c: LightningCoin) -> MmCoinEnum { MmCoinEnum::LightningCoin(c) }
 }
-#[cfg(not(target_arch = "wasm32"))]
 impl From<ZCoin> for MmCoinEnum {
     fn from(c: ZCoin) -> MmCoinEnum { MmCoinEnum::ZCoin(c) }
 }
@@ -80,7 +80,6 @@ impl Deref for MmCoinEnum {
             MmCoinEnum::SlpToken(ref c) => c,
             #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::LightningCoin(ref c) => c,
-            #[cfg(not(target_arch = "wasm32"))]
             MmCoinEnum::ZCoin(ref c) => c,
             MmCoinEnum::Test(ref c) => c,
             #[cfg(not(target_arch = "wasm32"))]
@@ -111,11 +110,15 @@ pub struct CoinsContext {
     /// A map from a currency ticker symbol to the corresponding coin.
     /// Similar to `LP_coins`.
     pub(crate) coins: AsyncMutex<HashMap<String, MmCoinEnum>>,
+    /// The per-ticker activation locks that serialize activations of the same ticker (CRD ch.55 R55.1.12).
+    activation_locks: ActivationLocks,
     pub(crate) balance_update_handlers: AsyncMutex<Vec<Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>>>,
     pub(crate) withdraw_task_manager: WithdrawTaskManagerShared,
     pub(crate) create_account_manager: CreateAccountTaskManagerShared,
     pub(crate) scan_addresses_manager: ScanAddressesTaskManagerShared,
     pub(crate) account_balance_task_manager: AccountBalanceTaskManagerShared,
+    /// The fee estimates that order-posting requests obtained (CRD ch.38 R38.6.6j item 2).
+    pub(crate) fee_estimate_cache: Arc<FeeEstimateCache>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) tx_history_db: SharedDb<TxHistoryDb>,
     #[cfg(target_arch = "wasm32")]
@@ -135,13 +138,17 @@ impl CoinsContext {
     /// Obtains a reference to this crate context, creating it if necessary.
     pub fn from_ctx(ctx: &MmArc) -> Result<Arc<CoinsContext>, String> {
         Ok(try_s!(from_ctx(&ctx.coins_ctx, move || {
+            // A node whose top-level setting is invalid does not start; this only keeps the guard.
+            explicit_fee_estimate_cache_secs(&ctx.conf)?;
             Ok(CoinsContext {
                 coins: AsyncMutex::new(HashMap::new()),
+                activation_locks: ActivationLocks::default(),
                 balance_update_handlers: AsyncMutex::new(vec![]),
                 withdraw_task_manager: WithdrawTaskManager::new_shared(),
                 create_account_manager: CreateAccountTaskManager::new_shared(),
                 scan_addresses_manager: ScanAddressesTaskManager::new_shared(),
                 account_balance_task_manager: AccountBalanceTaskManager::new_shared(),
+                fee_estimate_cache: Arc::new(FeeEstimateCache::for_node(ctx)),
                 #[cfg(target_arch = "wasm32")]
                 tx_history_db: ConstructibleDb::new_shared(ctx),
                 #[cfg(target_arch = "wasm32")]
@@ -152,6 +159,17 @@ impl CoinsContext {
         })))
     }
 
+    /// Waits until no other activation of any of `tickers` is running and returns the guard that holds their
+    /// activation locks (CRD ch.55 R55.1.12).
+    ///
+    /// Every activation path takes this before it builds anything and keeps the guard until it has registered
+    /// the coin and finished the steps that belong to the activation. After the wait it must check again
+    /// whether the ticker is registered, because the activation it waited for may have registered it. A path
+    /// that registers several tickers names all of them. The lock is not reentrant: a path holds one guard.
+    pub async fn lock_activation(&self, tickers: &[&str]) -> Result<ActivationGuard, String> {
+        self.activation_locks.lock(tickers).await
+    }
+
     pub async fn add_coin(&self, coin: MmCoinEnum) -> Result<(), MmError<CoinIsAlreadyActivatedErr>> {
         let mut coins = self.coins.lock().await;
         if coins.contains_key(coin.ticker()) {
@@ -160,6 +178,7 @@ impl CoinsContext {
             });
         }
 
+        self.fee_estimate_cache.forget_coin(coin.ticker());
         coins.insert(coin.ticker().into(), coin);
         Ok(())
     }
@@ -176,10 +195,12 @@ impl CoinsContext {
             });
         }
 
+        self.fee_estimate_cache.forget_coin(platform.ticker());
         coins.insert(platform.ticker().into(), platform);
 
         // Tokens can't be activated without platform coin so we can safely insert them without checking prior existence
         for token in tokens {
+            self.fee_estimate_cache.forget_coin(token.ticker());
             coins.insert(token.ticker().into(), token);
         }
         Ok(())
@@ -191,7 +212,13 @@ impl CoinsContext {
     }
 }
 /// This enum is used in coin activation requests.
-#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
+///
+/// It is accepted both as a bare string (`"Trezor"`) and as the object form `{"type": "Trezor"}` that the
+/// public API reference documents (CRD ch. 55 R55.5.11). It serialises as the bare string.
+///
+/// The public docs show only the object form; the reference release accepts only the bare string and rejects the
+/// documented object. Reloaded accepts both, so a client written against either source works (R55.5.11).
+#[derive(Copy, Clone, Debug, Serialize)]
 pub enum PrivKeyActivationPolicy {
     /// Use whatever key policy the CryptoCtx was initialized with (Iguana or GlobalHD).
     ContextPrivKey,
@@ -199,6 +226,38 @@ pub enum PrivKeyActivationPolicy {
     IguanaPrivKey,
     Trezor,
 }
+#[derive(Deserialize)]
+enum PrivKeyActivationPolicyName {
+    ContextPrivKey,
+    IguanaPrivKey,
+    Trezor,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PrivKeyActivationPolicyRepr {
+    Name(PrivKeyActivationPolicyName),
+    Tagged {
+        #[serde(rename = "type")]
+        policy: PrivKeyActivationPolicyName,
+    },
+}
+
+impl<'de> Deserialize<'de> for PrivKeyActivationPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (PrivKeyActivationPolicyRepr::Name(name) | PrivKeyActivationPolicyRepr::Tagged { policy: name }) =
+            PrivKeyActivationPolicyRepr::deserialize(deserializer)?;
+        Ok(match name {
+            PrivKeyActivationPolicyName::ContextPrivKey => PrivKeyActivationPolicy::ContextPrivKey,
+            PrivKeyActivationPolicyName::IguanaPrivKey => PrivKeyActivationPolicy::IguanaPrivKey,
+            PrivKeyActivationPolicyName::Trezor => PrivKeyActivationPolicy::Trezor,
+        })
+    }
+}
+
 impl PrivKeyActivationPolicy {
     /// The function can be used as a default deserialization constructor:
     /// `#[serde(default = "PrivKeyActivationPolicy::context_priv_key")]`
@@ -297,24 +356,9 @@ impl<Address, HDWallet> DerivationMethod<Address, HDWallet> {
     pub fn unwrap_iguana(&self) -> &Address { self.iguana_or_err().unwrap() }
 }
 #[allow(clippy::upper_case_acronyms)]
-/// Deserialize a Tendermint `decimals` value, rejecting any value above 18 as
-/// invalid protocol data (R36.3.1). The Cosmos base-denom-to-whole-coin scale is
-/// bounded at 18 places; a higher value would make every balance/amount
-/// conversion undefined, so it fails `protocol_data` parsing rather than
-/// silently activating a mis-scaled coin.
-fn deserialize_tendermint_decimals<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let decimals = u8::deserialize(deserializer)?;
-    if decimals > 18 {
-        return Err(serde::de::Error::custom(format!(
-            "Tendermint `decimals` must be 18 or lower, got {decimals}"
-        )));
-    }
-    Ok(decimals)
-}
-
+// Adjacent tagging omits `protocol_data` for a protocol without parameters (`{"type": "UTXO"}`). That is the form the
+// public docs show; the reference emits `"protocol_data": null` instead. Reloaded follows the docs, which are
+// explicit here (CRD ch.36 R36.0.3). This is the form every `error_data.protocol` member takes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", content = "protocol_data")]
 pub enum CoinProtocol {
@@ -367,7 +411,6 @@ pub enum CoinProtocol {
     /// (R39.6.4). Because `consensus_params` is required, a bare
     /// `{"type":"ZHTLC"}` with no `protocol_data` is non-conformant and fails
     /// deserialization by design.
-    #[cfg(not(target_arch = "wasm32"))]
     ZHTLC(ZcoinProtocolInfo),
     SIA,
     TENDERMINT {
@@ -377,9 +420,10 @@ pub enum CoinProtocol {
         /// bank/HTLC/IBC messages against (R36.3.1). Required.
         denom: String,
         /// The number of decimal places between the base denom and one whole
-        /// coin, used to scale base-unit balances/amounts (R36.3.1). Required and
-        /// bounded at 18; a value above 18 fails protocol-data parsing.
-        #[serde(deserialize_with = "deserialize_tendermint_decimals")]
+        /// coin, used to scale base-unit balances/amounts (R36.3.1). Required. The
+        /// bound of 18 is enforced when the platform coin is built, not here, so
+        /// a larger value fails activation as `PlatformCoinCreationError`
+        /// (CRD R36.3.2).
         decimals: u8,
         /// The bech32 human-readable prefix (HRP) of the chain's account
         /// addresses (e.g. `cosmos`, `iaa`, `osmo`). Required.
@@ -677,14 +721,25 @@ mod coin_protocol_tests {
     }
 
     #[test]
-    fn tendermint_protocol_data_rejects_decimals_above_18() {
-        // decimals must be 18 or lower; a higher value fails protocol-data parsing
-        // as a bounded-input check (R36.3.1).
+    fn tendermint_protocol_data_leaves_the_decimals_bound_to_construction() {
+        // The bound of 18 is checked at platform-coin construction (R36.3.2), so
+        // protocol parsing accepts any value that fits the integer type.
         assert!(CoinProtocol::from_conf_json(json!({
             "type": "TENDERMINT",
             "protocol_data": {
                 "denom": "uatom",
                 "decimals": 19,
+                "account_prefix": "cosmos",
+                "chain_id": "cosmoshub-4"
+            }
+        }))
+        .is_ok());
+        // A value that does not fit the integer type is still a parse failure.
+        assert!(CoinProtocol::from_conf_json(json!({
+            "type": "TENDERMINT",
+            "protocol_data": {
+                "denom": "uatom",
+                "decimals": 256,
                 "account_prefix": "cosmos",
                 "chain_id": "cosmoshub-4"
             }

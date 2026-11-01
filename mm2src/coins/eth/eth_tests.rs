@@ -18,6 +18,16 @@ fn test_dex_fee_addr_raw_pubkey() -> &'static [u8] {
 
 /// The gas price for the tests
 const GAS_PRICE: u64 = 50_000_000_000;
+
+/// The fee fields of a gas-limit estimation are fetched for it and never through `get_gas_price` (CRD ch.56 R6),
+/// so a test that stubs the node's gas price stubs that fetch too.
+fn mock_estimation_fee(gas_price: u64) {
+    EthCoin::fresh_estimation_fee.mock_safe(move |_, _| {
+        MockResult::Return(Box::new(futures01::future::ok(SwapFee::Legacy {
+            gas_price: gas_price.into(),
+        })))
+    });
+}
 // `GAS_PRICE` increased by 3%
 const GAS_PRICE_APPROXIMATION_ON_START_SWAP: u64 = 51_500_000_000;
 // `GAS_PRICE` increased by 5%
@@ -30,7 +40,7 @@ fn check_sum(addr: &str, expected: &str) {
     assert_eq!(expected, actual);
 }
 
-fn eth_coin_for_test(
+pub(super) fn eth_coin_for_test(
     coin_type: EthCoinType,
     urls: Vec<String>,
     fallback_swap_contract: Option<Address>,
@@ -52,11 +62,38 @@ fn eth_coin_for_test_with_netid(
     fallback_swap_contract: Option<Address>,
     netid: u16,
 ) -> (MmArc, EthCoin) {
+    eth_coin_for_test_with_netid_and_decimals(coin_type, urls, fallback_swap_contract, netid, 18)
+}
+
+fn eth_coin_for_test_with_netid_and_decimals(
+    coin_type: EthCoinType,
+    urls: Vec<String>,
+    fallback_swap_contract: Option<Address>,
+    netid: u16,
+    decimals: u8,
+) -> (MmArc, EthCoin) {
+    let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", urls), vec![]).unwrap();
+    let web3_instances = vec![Web3Instance {
+        web3: web3.clone(),
+        is_parity: true,
+    }];
+    eth_coin_for_test_with_providers(coin_type, web3, web3_instances, fallback_swap_contract, netid, decimals)
+}
+
+/// The coin of the tests above over ready-made providers: `web3` is the failover provider every request goes
+/// through, `web3_instances` are the single-node providers of nonce gathering and the signed broadcast.
+pub(super) fn eth_coin_for_test_with_providers(
+    coin_type: EthCoinType,
+    web3: crate::eth::alloy_compat::KdfProvider,
+    web3_instances: Vec<Web3Instance>,
+    fallback_swap_contract: Option<Address>,
+    netid: u16,
+    decimals: u8,
+) -> (MmArc, EthCoin) {
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(urls, vec![]).unwrap();
     let conf = json!({
         "netid": netid,
         "coins":[
@@ -74,7 +111,7 @@ fn eth_coin_for_test_with_netid(
     let my_addr = key_pair.address();
     let eth_coin = EthCoin(Arc::new(EthCoinImpl {
         coin_type,
-        decimals: 18,
+        decimals,
         gas_station_url: None,
         gas_station_decimals: ETH_GAS_STATION_DECIMALS,
         history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
@@ -85,10 +122,7 @@ fn eth_coin_for_test_with_netid(
         swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
         fallback_swap_contract,
         ticker,
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
+        web3_instances,
         web3,
         ctx: ctx.weak(),
         required_confirmations: 1.into(),
@@ -96,11 +130,14 @@ fn eth_coin_for_test_with_netid(
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin)
 }
@@ -154,7 +191,11 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         .unwrap()
         .address();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let ticker = match coin_type {
         EthCoinType::Eth => "ETH".to_string(),
         EthCoinType::Erc20 { .. } => "JST".to_string(),
@@ -184,6 +225,7 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::HDWallet(EthHDWallet {
@@ -193,7 +235,9 @@ fn eth_hd_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin, Address) {
             gap_limit: 20,
         }),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin, selected_addr)
 }
@@ -326,77 +370,6 @@ fn test_wei_from_big_decimal() {
 }
 
 #[test]
-#[ignore = "network + funded testnet account: Ropsten is decommissioned (both the Infura and linkpool URLs are dead) and ethgasstation.info is gone; this test also broadcasts a real tx. Re-enabling requires porting to a live testnet (e.g. Sepolia) with a funded key and working gas estimation, run in a network-gated job."]
-fn test_nonce_several_urls() {
-    let key_pair = KeyPair::from_secret_slice(
-        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
-    )
-    .unwrap();
-    let web3_infura = crate::eth::alloy_compat::build_provider(
-        vec!["https://ropsten.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b".into()],
-        vec![],
-    )
-    .unwrap();
-    let web3_linkpool =
-        crate::eth::alloy_compat::build_provider(vec!["https://ropsten-rpc.linkpool.io".into()], vec![]).unwrap();
-    let web3_failing =
-        crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8989".into()], vec![]).unwrap();
-
-    let ctx = MmCtxBuilder::new().into_mm_arc();
-    let my_addr = key_pair.address();
-    let coin = EthCoin(Arc::new(EthCoinImpl {
-        ticker: "ETH".into(),
-        coin_type: EthCoinType::Eth,
-        my_address: my_addr,
-        sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        signer: EthSigner::Local(key_pair),
-        swap_contract_address: Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap()),
-        fallback_swap_contract: None,
-        web3_instances: vec![
-            Web3Instance {
-                web3: web3_infura.clone(),
-                is_parity: false,
-            },
-            Web3Instance {
-                web3: web3_linkpool,
-                is_parity: false,
-            },
-            Web3Instance {
-                web3: web3_failing,
-                is_parity: false,
-            },
-        ],
-        web3: web3_infura,
-        decimals: 18,
-        gas_station_url: Some("https://ethgasstation.info/json/ethgasAPI.json".into()),
-        gas_station_decimals: ETH_GAS_STATION_DECIMALS,
-        gas_station_policy: GasStationPricePolicy::MeanAverageFast,
-        history_sync_state: Mutex::new(HistorySyncState::NotStarted),
-        ctx: ctx.weak(),
-        required_confirmations: 1.into(),
-        tron_api: None,
-        nft_swap_v2_contract: None,
-        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
-        erc20_tokens_infos: Default::default(),
-        chain_id: None,
-        logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
-        derivation_method: DerivationMethod::Iguana(my_addr),
-        swap_v2_contracts: None,
-        gas_limit_v2: EthGasLimitV2::default(),
-    }));
-
-    log!("My address "[coin.my_address]);
-    log!("before payment");
-    let payment = coin.send_to_address(coin.my_address, 200000000.into()).wait().unwrap();
-
-    log!([payment]);
-    let new_nonce = get_addr_nonce(coin.my_address, coin.web3_instances.clone())
-        .wait()
-        .unwrap();
-    log!([new_nonce]);
-}
-
-#[test]
 fn test_wait_for_payment_spend_timeout() {
     EthCoinImpl::spend_events.mock_safe(|_, _, _, _| MockResult::Return(Box::new(futures01::future::ok(vec![]))));
     EthCoin::current_block.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(900))));
@@ -405,7 +378,11 @@ fn test_wait_for_payment_spend_timeout() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8555".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8555".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
 
     let my_addr = key_pair.address();
@@ -433,11 +410,14 @@ fn test_wait_for_payment_spend_timeout() {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     };
 
     let coin = EthCoin(Arc::new(coin));
@@ -461,86 +441,6 @@ fn test_wait_for_payment_spend_timeout() {
         .wait_for_tx_spend(&tx_bytes, wait_until, from_block, &coin.swap_contract_address())
         .wait()
         .is_err());
-}
-
-#[test]
-fn test_search_for_swap_tx_spend_was_spent() {
-    let key_pair = KeyPair::from_secret_slice(
-        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
-    )
-    .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(
-        vec!["https://ropsten.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b".into()],
-        vec![],
-    )
-    .unwrap();
-    let ctx = MmCtxBuilder::new().into_mm_arc();
-
-    let swap_contract_address = Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap());
-    let my_addr = key_pair.address();
-    let coin = EthCoin(Arc::new(EthCoinImpl {
-        coin_type: EthCoinType::Eth,
-        decimals: 18,
-        gas_station_url: None,
-        gas_station_decimals: ETH_GAS_STATION_DECIMALS,
-        gas_station_policy: GasStationPricePolicy::MeanAverageFast,
-        history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
-        my_address: my_addr,
-        sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        signer: EthSigner::Local(key_pair),
-        swap_contract_address,
-        fallback_swap_contract: None,
-        ticker: "ETH".into(),
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
-        web3,
-        ctx: ctx.weak(),
-        required_confirmations: 1.into(),
-        tron_api: None,
-        nft_swap_v2_contract: None,
-        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
-        erc20_tokens_infos: Default::default(),
-        chain_id: None,
-        logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
-        derivation_method: DerivationMethod::Iguana(my_addr),
-        swap_v2_contracts: None,
-        gas_limit_v2: EthGasLimitV2::default(),
-    }));
-
-    // raw transaction bytes of https://ropsten.etherscan.io/tx/0xb1c987e2ac79581bb8718267b5cb49a18274890494299239d1d0dfdb58d6d76a
-    let payment_tx = [
-        248, 240, 52, 132, 119, 53, 148, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201, 191, 252,
-        73, 201, 33, 182, 133, 236, 184, 75, 148, 135, 71, 13, 228, 223, 130, 0, 0, 184, 132, 21, 44, 243, 175, 188,
-        96, 248, 252, 165, 132, 81, 30, 243, 34, 85, 165, 46, 224, 176, 90, 137, 30, 19, 123, 224, 67, 83, 53, 74, 57,
-        148, 140, 95, 45, 70, 147, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 117, 244, 28, 175, 51, 95, 91, 184, 141, 201,
-        45, 116, 26, 102, 210, 119, 151, 124, 143, 52, 215, 128, 89, 116, 30, 25, 35, 128, 122, 186, 177, 228, 149,
-        250, 55, 53, 62, 196, 51, 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 56, 62, 80, 28, 160, 65, 22, 195, 212, 184, 202, 226, 151, 224, 111,
-        174, 31, 160, 219, 39, 69, 137, 37, 8, 127, 177, 4, 104, 248, 27, 41, 245, 176, 131, 188, 215, 136, 160, 91,
-        134, 199, 67, 1, 58, 57, 103, 23, 215, 176, 64, 124, 1, 44, 88, 161, 200, 160, 64, 110, 13, 145, 127, 180, 27,
-        171, 131, 253, 90, 48, 147,
-    ];
-    // raw transaction bytes of https://ropsten.etherscan.io/tx/0xcb7c14d3ff309996d582400369393b6fa42314c52245115d4a3f77f072c36da9
-    let spend_tx = [
-        249, 1, 9, 37, 132, 119, 53, 148, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201, 191, 252,
-        73, 201, 33, 182, 133, 236, 184, 75, 148, 128, 184, 164, 2, 237, 41, 43, 188, 96, 248, 252, 165, 132, 81, 30,
-        243, 34, 85, 165, 46, 224, 176, 90, 137, 30, 19, 123, 224, 67, 83, 53, 74, 57, 148, 140, 95, 45, 70, 147, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 71, 13, 228, 223, 130, 0, 0, 168, 151, 11,
-        232, 224, 253, 63, 180, 26, 114, 23, 184, 27, 10, 161, 80, 178, 251, 73, 204, 80, 174, 97, 118, 149, 204, 186,
-        187, 243, 185, 19, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 157, 73, 251, 238, 138, 245, 142, 240, 85, 44, 209, 63, 194, 242,
-        109, 242, 246, 6, 76, 176, 27, 160, 29, 157, 226, 23, 81, 174, 34, 82, 93, 182, 41, 248, 119, 42, 221, 214, 38,
-        243, 128, 2, 235, 208, 193, 192, 74, 208, 242, 26, 221, 83, 54, 74, 160, 111, 29, 92, 8, 75, 61, 97, 103, 199,
-        100, 189, 72, 74, 221, 144, 66, 170, 68, 121, 29, 105, 19, 194, 35, 245, 196, 131, 236, 29, 105, 101, 30,
-    ];
-    let spend_tx = FoundSwapTxSpend::Spent(signed_eth_tx_from_bytes(&spend_tx).unwrap().into());
-
-    let found_tx = block_on(coin.search_for_swap_tx_spend(&payment_tx, swap_contract_address, 6051857))
-        .unwrap()
-        .unwrap();
-    assert_eq!(spend_tx, found_tx);
 }
 
 #[test]
@@ -576,57 +476,53 @@ fn test_gas_station() {
     assert_eq!(expected_eth_polygon, res_polygon);
 }
 
-#[test]
-fn test_search_for_swap_tx_spend_was_refunded() {
-    let key_pair = KeyPair::from_secret_slice(
-        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
-    )
-    .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(
-        vec!["https://ropsten.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b".into()],
-        vec![],
-    )
-    .unwrap();
-    let ctx = MmCtxBuilder::new().into_mm_arc();
+/// `search_for_swap_tx_spend` decides, after a restart, whether the counterparty took the payment or
+/// the payer must refund it, so both outcomes are pinned on an EVM coin.
+///
+/// The two tests that used to live here (`test_search_for_swap_tx_spend_was_spent` and
+/// `..._was_refunded`) queried a public Ropsten endpoint for frozen historical transactions. That
+/// chain no longer exists and the endpoint is gone, so they could never pass again, and a keyless
+/// public endpoint does not serve historical `eth_getLogs` ranges either. They now run the same
+/// real function, over the same recorded raw transactions, against a scripted local node. Do not
+/// point them back at a live network.
+///
+/// The function reads exactly three node methods, all scripted below: `eth_blockNumber`,
+/// `eth_getLogs` (once per window, first for `ReceiverSpent`, then for `SenderRefunded`) and
+/// `eth_getTransactionByHash`.
+mod search_for_swap_tx_spend_scripted {
+    use super::scripted_evm_node::spawn;
+    use super::*;
+    use serde_json::{json, Value as Json};
 
-    let swap_contract_address = Address::from_slice(&hex::decode("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap());
-    let my_addr = key_pair.address();
-    let coin = EthCoin(Arc::new(EthCoinImpl {
-        coin_type: EthCoinType::Erc20 {
-            platform: "ETH".to_string(),
-            token_addr: Address::from_slice(&hex::decode("c0eb7aed740e1796992a08962c15661bdeb58003").unwrap()),
-        },
-        decimals: 18,
-        gas_station_url: None,
-        gas_station_decimals: ETH_GAS_STATION_DECIMALS,
-        gas_station_policy: GasStationPricePolicy::MeanAverageFast,
-        history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
-        my_address: my_addr,
-        sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
-        signer: EthSigner::Local(key_pair),
-        swap_contract_address,
-        fallback_swap_contract: None,
-        ticker: "ETH".into(),
-        web3_instances: vec![Web3Instance {
-            web3: web3.clone(),
-            is_parity: true,
-        }],
-        web3,
-        ctx: ctx.weak(),
-        required_confirmations: 1.into(),
-        tron_api: None,
-        nft_swap_v2_contract: None,
-        swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
-        erc20_tokens_infos: Default::default(),
-        chain_id: None,
-        logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
-        derivation_method: DerivationMethod::Iguana(my_addr),
-        swap_v2_contracts: None,
-        gas_limit_v2: EthGasLimitV2::default(),
-    }));
+    const SWAP_CONTRACT_ADDR: &str = "7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94";
+    const CURRENT_BLOCK: u64 = 6_000_000;
 
-    // raw transaction bytes of https://ropsten.etherscan.io/tx/0xe18bbca69dea9a4624e1f5b0b2021d5fe4c8daa03f36084a8ba011b08e5cd938
-    let payment_tx = [
+    // Recorded Ropsten transactions (the chain is gone; only the bytes are kept).
+    const SPENT_PAYMENT_TX: &[u8] = &[
+        248, 240, 52, 132, 119, 53, 148, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201, 191, 252,
+        73, 201, 33, 182, 133, 236, 184, 75, 148, 135, 71, 13, 228, 223, 130, 0, 0, 184, 132, 21, 44, 243, 175, 188,
+        96, 248, 252, 165, 132, 81, 30, 243, 34, 85, 165, 46, 224, 176, 90, 137, 30, 19, 123, 224, 67, 83, 53, 74, 57,
+        148, 140, 95, 45, 70, 147, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 117, 244, 28, 175, 51, 95, 91, 184, 141, 201,
+        45, 116, 26, 102, 210, 119, 151, 124, 143, 52, 215, 128, 89, 116, 30, 25, 35, 128, 122, 186, 177, 228, 149,
+        250, 55, 53, 62, 196, 51, 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 93, 56, 62, 80, 28, 160, 65, 22, 195, 212, 184, 202, 226, 151, 224, 111,
+        174, 31, 160, 219, 39, 69, 137, 37, 8, 127, 177, 4, 104, 248, 27, 41, 245, 176, 131, 188, 215, 136, 160, 91,
+        134, 199, 67, 1, 58, 57, 103, 23, 215, 176, 64, 124, 1, 44, 88, 161, 200, 160, 64, 110, 13, 145, 127, 180, 27,
+        171, 131, 253, 90, 48, 147,
+    ];
+    const SPEND_TX: &[u8] = &[
+        249, 1, 9, 37, 132, 119, 53, 148, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201, 191, 252,
+        73, 201, 33, 182, 133, 236, 184, 75, 148, 128, 184, 164, 2, 237, 41, 43, 188, 96, 248, 252, 165, 132, 81, 30,
+        243, 34, 85, 165, 46, 224, 176, 90, 137, 30, 19, 123, 224, 67, 83, 53, 74, 57, 148, 140, 95, 45, 70, 147, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 71, 13, 228, 223, 130, 0, 0, 168, 151, 11,
+        232, 224, 253, 63, 180, 26, 114, 23, 184, 27, 10, 161, 80, 178, 251, 73, 204, 80, 174, 97, 118, 149, 204, 186,
+        187, 243, 185, 19, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 157, 73, 251, 238, 138, 245, 142, 240, 85, 44, 209, 63, 194, 242,
+        109, 242, 246, 6, 76, 176, 27, 160, 29, 157, 226, 23, 81, 174, 34, 82, 93, 182, 41, 248, 119, 42, 221, 214, 38,
+        243, 128, 2, 235, 208, 193, 192, 74, 208, 242, 26, 221, 83, 54, 74, 160, 111, 29, 92, 8, 75, 61, 97, 103, 199,
+        100, 189, 72, 74, 221, 144, 66, 170, 68, 121, 29, 105, 19, 194, 35, 245, 196, 131, 236, 29, 105, 101, 30,
+    ];
+    const REFUNDED_PAYMENT_TX: &[u8] = &[
         249, 1, 43, 130, 10, 96, 132, 149, 2, 249, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201,
         191, 252, 73, 201, 33, 182, 133, 236, 184, 75, 148, 128, 184, 196, 155, 65, 91, 42, 192, 158, 192, 175, 210,
         198, 159, 244, 116, 46, 255, 28, 236, 147, 240, 68, 91, 16, 19, 6, 59, 187, 149, 138, 179, 151, 121, 47, 14,
@@ -639,8 +535,7 @@ fn test_search_for_swap_tx_spend_was_refunded() {
         58, 94, 57, 121, 252, 166, 34, 25, 206, 193, 113, 198, 160, 68, 125, 142, 153, 210, 177, 60, 173, 67, 127, 138,
         52, 112, 9, 49, 108, 109, 44, 177, 142, 9, 124, 10, 200, 37, 100, 52, 137, 196, 74, 67, 192,
     ];
-    // raw transaction bytes of https://ropsten.etherscan.io/tx/0x9a50ac4d1737f4f04b94177996da7fa942b09469de52cfdadce891cd85afc37c
-    let refund_tx = [
+    const REFUND_TX: &[u8] = &[
         249, 1, 11, 130, 10, 97, 132, 149, 2, 249, 0, 131, 2, 73, 240, 148, 123, 193, 187, 221, 106, 10, 114, 47, 201,
         191, 252, 73, 201, 33, 182, 133, 236, 184, 75, 148, 128, 184, 164, 70, 252, 2, 148, 192, 158, 192, 175, 210,
         198, 159, 244, 116, 46, 255, 28, 236, 147, 240, 68, 91, 16, 19, 6, 59, 187, 149, 138, 179, 151, 121, 47, 14,
@@ -652,12 +547,165 @@ fn test_search_for_swap_tx_spend_was_refunded() {
         19, 27, 208, 119, 219, 60, 231, 2, 118, 91, 169, 99, 78, 209, 135, 160, 51, 115, 90, 189, 124, 172, 205, 134,
         203, 159, 238, 40, 39, 99, 88, 48, 160, 189, 37, 60, 20, 117, 65, 238, 36, 98, 226, 48, 22, 235, 86, 183,
     ];
-    let refund_tx = FoundSwapTxSpend::Refunded(signed_eth_tx_from_bytes(&refund_tx).unwrap().into());
 
-    let found_tx = block_on(coin.search_for_swap_tx_spend(&payment_tx, swap_contract_address, 5886908))
-        .unwrap()
+    fn coin(url: &str, coin_type: EthCoinType) -> (MmArc, EthCoin) {
+        let key_pair = KeyPair::from_secret_slice(
+            &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
+        )
         .unwrap();
-    assert_eq!(refund_tx, found_tx);
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
+        let ctx = MmCtxBuilder::new().into_mm_arc();
+        let swap_contract_address = Address::from_str(SWAP_CONTRACT_ADDR).unwrap();
+        let my_addr = key_pair.address();
+        let coin = EthCoin(Arc::new(EthCoinImpl {
+            coin_type,
+            decimals: 18,
+            gas_station_url: None,
+            gas_station_decimals: ETH_GAS_STATION_DECIMALS,
+            gas_station_policy: GasStationPricePolicy::MeanAverageFast,
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            my_address: my_addr,
+            sign_message_prefix: Some(String::from("Ethereum Signed Message:\n")),
+            signer: EthSigner::Local(key_pair),
+            swap_contract_address,
+            fallback_swap_contract: None,
+            ticker: "ETH".into(),
+            web3_instances: vec![Web3Instance {
+                web3: web3.clone(),
+                is_parity: true,
+            }],
+            web3,
+            ctx: ctx.weak(),
+            required_confirmations: 1.into(),
+            tron_api: None,
+            nft_swap_v2_contract: None,
+            swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
+            erc20_tokens_infos: Default::default(),
+            custom_token: false,
+            chain_id: None,
+            logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+            derivation_method: DerivationMethod::Iguana(my_addr),
+            swap_v2_contracts: None,
+            gas_limit: EthGasLimit::default(),
+            gas_limit_v2: EthGasLimitV2::default(),
+            estimate_gas_mult: None,
+        }));
+        (ctx, coin)
+    }
+
+    /// The `eth_getTransactionByHash` result a node reports for a legacy transaction.
+    fn rpc_tx(tx: &SignedEthTx) -> Json {
+        let to = match &tx.action {
+            Action::Call(addr) => json!(format!("{:#x}", addr)),
+            Action::Create => Json::Null,
+        };
+        let gas_price = tx.gas_price().expect("a legacy transaction");
+        json!({
+            "type": "0x0",
+            "hash": format!("{:#x}", tx.tx_hash()),
+            "nonce": format!("{:#x}", tx.nonce),
+            "blockHash": format!("0x{}", "22".repeat(32)),
+            "blockNumber": "0x5b8d80",
+            "transactionIndex": "0x0",
+            "from": format!("{:#x}", tx.sender()),
+            "to": to,
+            "value": format!("{:#x}", tx.value),
+            "gas": format!("{:#x}", tx.gas),
+            "gasPrice": format!("{:#x}", gas_price),
+            "input": format!("0x{}", hex::encode(&tx.data)),
+            "v": format!("{:#x}", tx.v),
+            "r": format!("{:#x}", tx.r),
+            "s": format!("{:#x}", tx.s),
+        })
+    }
+
+    /// Runs the search with the node reporting `event` ("ReceiverSpent" or "SenderRefunded") for the
+    /// payment's id in `found_tx`, and nothing for the other event.
+    fn search(
+        coin_type: EthCoinType,
+        payment: &[u8],
+        found_event: &'static str,
+        found_tx: &[u8],
+    ) -> Result<Option<FoundSwapTxSpend>, String> {
+        let payment_tx = signed_eth_tx_from_bytes(payment).unwrap();
+        let func = match coin_type {
+            EthCoinType::Erc20 { .. } => "erc20Payment",
+            _ => "ethPayment",
+        };
+        let decoded = SWAP_CONTRACT
+            .function(func)
+            .unwrap()
+            .decode_input(&payment_tx.data[4..])
+            .unwrap();
+        let Token::FixedBytes(id) = decoded[0].clone() else {
+            panic!("the payment id is bytes32")
+        };
+        let found = signed_eth_tx_from_bytes(found_tx).unwrap();
+        let found_hash = found.tx_hash();
+        let found_json = rpc_tx(&found);
+        let event_topic = |name: &str| format!("{:#x}", SWAP_CONTRACT.event(name).unwrap().signature());
+        let wanted_topic = event_topic(found_event);
+
+        let node = spawn(move |method, params| match method {
+            "eth_blockNumber" => json!(format!("{:#x}", CURRENT_BLOCK)),
+            "eth_getLogs" => {
+                // Only the event the test scripts has a log; the other query finds nothing.
+                let asked = params[0]["topics"][0].to_string();
+                if asked.contains(&wanted_topic) {
+                    json!([{
+                        "address": format!("0x{}", SWAP_CONTRACT_ADDR.to_lowercase()),
+                        "topics": [wanted_topic],
+                        "data": format!("0x{}", hex::encode(&id)),
+                        "blockHash": format!("0x{}", "22".repeat(32)),
+                        "blockNumber": "0x5b8d80",
+                        "transactionHash": format!("{:#x}", found_hash),
+                        "transactionIndex": "0x0",
+                        "logIndex": "0x0",
+                        "removed": false,
+                    }])
+                } else {
+                    json!([])
+                }
+            },
+            "eth_getTransactionByHash" => {
+                assert_eq!(params[0].as_str().unwrap(), format!("{:#x}", found_hash));
+                found_json.clone()
+            },
+            other => panic!("the scripted node does not serve `{}`", other),
+        });
+        let (_ctx, coin) = coin(&node.url, coin_type);
+        block_on(coin.search_for_swap_tx_spend(
+            payment,
+            Address::from_str(SWAP_CONTRACT_ADDR).unwrap(),
+            CURRENT_BLOCK - 100,
+        ))
+    }
+
+    #[test]
+    fn search_finds_the_spend_of_an_eth_payment() {
+        let expected = FoundSwapTxSpend::Spent(signed_eth_tx_from_bytes(SPEND_TX).unwrap().into());
+        let found = search(EthCoinType::Eth, SPENT_PAYMENT_TX, "ReceiverSpent", SPEND_TX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected, found);
+    }
+
+    #[test]
+    fn search_finds_the_refund_of_an_erc20_payment() {
+        let coin_type = EthCoinType::Erc20 {
+            platform: "ETH".to_string(),
+            token_addr: Address::from_slice(&hex::decode("c0eb7aed740e1796992a08962c15661bdeb58003").unwrap()),
+        };
+        let expected = FoundSwapTxSpend::Refunded(signed_eth_tx_from_bytes(REFUND_TX).unwrap().into());
+        let found = search(coin_type, REFUNDED_PAYMENT_TX, "SenderRefunded", REFUND_TX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(expected, found);
+    }
 }
 
 #[test]
@@ -872,58 +920,48 @@ fn direct_withdraw_evm_single_key_explicit_from_is_structured_sender_error() {
 }
 
 #[test]
-#[cfg(not(target_arch = "wasm32"))]
-fn test_nonce_lock() {
-    use futures::future::join_all;
-    use mm2_test_helpers::for_tests::wait_for_log;
+fn test_increase_by_percent_no_gwei_floor() {
+    // Sub-gigawei base: purely proportional, no +1 gwei jump (CRD ch.57 R57.3.2).
+    let num = wei_from_big_decimal(&"0.033".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"0.03729".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
 
-    // send several transactions concurrently to check that they are not using same nonce
-    // using real ETH dev node
-    let (ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://195.201.0.6:8565".into()], None);
-    let mut futures = vec![];
-    for _ in 0..5 {
-        futures.push(sign_and_send_transaction_impl(
-            ctx.clone(),
-            coin.clone(),
-            1000000000000u64.into(),
-            Action::Call(coin.my_address),
-            vec![],
-            21000.into(),
-        ));
-    }
-    let results = block_on(join_all(futures));
-    for result in results {
-        result.unwrap();
-    }
-    // Waiting for NONCE_LOCK… might not appear at all if waiting takes less than 0.5 seconds
-    // but all transactions are sent successfully still
-    // wait_for_log(&ctx.log, 1.1, &|line| line.contains("Waiting for NONCE_LOCK…")));
-    block_on(wait_for_log(&ctx, 1.1, |line| line.contains("get_addr_nonce…"))).unwrap();
+    let num = wei_from_big_decimal(&"0.005".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"0.00565".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
+
+    // At and above the old floor threshold the result is unchanged.
+    let num = wei_from_big_decimal(&"100".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"113".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
+
+    let num = wei_from_big_decimal(&"30.1".parse().unwrap(), 9).unwrap();
+    let expected = wei_from_big_decimal(&"34.013".parse().unwrap(), 9).unwrap();
+    assert_eq!(expected, increase_by_percent(num, 13));
+
+    // Zero and sub-100-wei bases get a zero increment.
+    assert_eq!(U256::zero(), increase_by_percent(U256::zero(), 13));
+    assert_eq!(U256::from(99), increase_by_percent(U256::from(99), 13));
+    assert_eq!(U256::from(113), increase_by_percent(U256::from(100), 13));
 }
 
 #[test]
-fn test_add_ten_pct_one_gwei() {
-    let num = wei_from_big_decimal(&"0.1".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"1.1".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
-
-    let num = wei_from_big_decimal(&"9.9".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"10.9".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
-
-    let num = wei_from_big_decimal(&"30.1".parse().unwrap(), 9).unwrap();
-    let expected = wei_from_big_decimal(&"33.11".parse().unwrap(), 9).unwrap();
-    let actual = increase_by_percent_one_gwei(num, GAS_PRICE_PERCENT);
-    assert_eq!(expected, actual);
+fn test_trade_preimage_stage_is_single_proportional_increase() {
+    let num = wei_from_big_decimal(&"0.033".parse().unwrap(), 9).unwrap();
+    // 33_000_000 wei at 7%: 330_000 * 7 = 2_310_000, no gigawei added.
+    assert_eq!(
+        num + U256::from(2_310_000u64),
+        increase_gas_price_by_stage(num, &FeeApproxStage::TradePreimage)
+    );
+    assert_eq!(num, increase_gas_price_by_stage(num, &FeeApproxStage::WithoutApprox));
 }
 
 #[test]
 fn get_sender_trade_preimage() {
-    /// Trade fee for the ETH coin is `2 * 150_000 * gas_price` always.
+    /// Trade fee for the ETH coin is `(eth_payment + eth_sender_refund) * gas_price` always: 65_000 + 100_000
+    /// (CRD R57.5.2; the baseline constant was 300_000).
     fn expected_fee(gas_price: u64) -> TradeFee {
-        let amount = u256_to_big_decimal((2 * 150_000 * gas_price).into(), 18).expect("!u256_to_big_decimal");
+        let amount = u256_to_big_decimal(((65_000 + 100_000) * gas_price).into(), 18).expect("!u256_to_big_decimal");
         TradeFee {
             coin: "ETH".to_owned(),
             amount: amount.into(),
@@ -972,6 +1010,7 @@ fn get_erc20_sender_trade_preimage() {
         .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(unsafe { ALLOWANCE.into() }))));
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         unsafe { ESTIMATE_GAS_CALLED = true };
         MockResult::Return(Box::new(futures01::future::ok(APPROVE_GAS_LIMIT.into())))
@@ -1050,7 +1089,8 @@ fn get_receiver_trade_preimage() {
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
 
     let (_ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://dummy.dummy".into()], None);
-    let amount = u256_to_big_decimal((150_000 * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
+    // `eth_receiver_spend` default (CRD R57.5.2); the baseline constant was 150_000.
+    let amount = u256_to_big_decimal((65_000 * GAS_PRICE).into(), 18).expect("!u256_to_big_decimal");
     let expected_fee = TradeFee {
         coin: "ETH".to_owned(),
         amount: amount.into(),
@@ -1070,6 +1110,7 @@ fn test_get_fee_to_send_taker_fee() {
     const TRANSFER_GAS_LIMIT: u64 = 40_000;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     EthCoinImpl::estimate_gas
         .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(TRANSFER_GAS_LIMIT.into()))));
 
@@ -1121,6 +1162,7 @@ fn test_get_fee_to_send_taker_fee_insufficient_balance() {
     const GAS_PRICE: u64 = 40;
 
     EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
     // Reproduce the revert some ERC20 tokens raise when the sender can't afford the transfer.
     EthCoinImpl::estimate_gas.mock_safe(|_, _| {
         MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
@@ -1149,73 +1191,46 @@ fn test_get_fee_to_send_taker_fee_insufficient_balance() {
     );
 }
 
+/// A wallet can hold plenty of the token being sent yet none of the platform coin the
+/// gas is paid in — BSC reports this as `-32000 "gas required exceeds allowance (0)"`.
+/// The shortfall must be reported against the *platform* ticker, because that is what
+/// makes callers classify it as `NotSufficientBaseCoinBalance` ("not enough ETH/BNB
+/// for fees") instead of surfacing the raw provider error.
 #[test]
-fn validate_dex_fee_invalid_sender_eth() {
-    let (_ctx, coin) = eth_coin_for_test(
-        EthCoinType::Eth,
-        vec!["https://mainnet.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b".into()],
-        None,
-    );
-    // the real dex fee sent on mainnet
-    // https://etherscan.io/tx/0x7e9ca16c85efd04ee5e31f2c1914b48f5606d6f9ce96ecce8c96d47d6857278f
-    let tx = {
-        use alloy::providers::Provider as _;
-        let hash = alloy::primitives::B256::from_slice(
-            &hex::decode("7e9ca16c85efd04ee5e31f2c1914b48f5606d6f9ce96ecce8c96d47d6857278f").unwrap(),
-        );
-        let alloy_tx = block_on(coin.web3.get_transaction_by_hash(hash)).unwrap().unwrap();
-        signed_tx_from_alloy_tx(alloy_tx).unwrap()
-    };
-    let tx = tx.into();
-    let amount: BigDecimal = "0.000526435076465".parse().unwrap();
-    let validate_err = coin
-        .validate_fee(ValidateFeeArgs {
-            fee_tx: &tx,
-            expected_sender: test_dex_fee_addr_raw_pubkey(),
-            fee_addr: test_dex_fee_addr_raw_pubkey(),
-            dex_fee: &DexFee::Standard(amount.into()),
-            min_block_number: 0,
-            uuid: &[],
-        })
-        .wait()
-        .unwrap_err();
-    assert!(validate_err.contains("was sent from wrong address"));
-}
+fn test_get_fee_to_send_taker_fee_insufficient_gas_balance() {
+    const DEX_FEE_AMOUNT: u64 = 100_000_000_000;
+    const GAS_PRICE: u64 = 40;
 
-#[test]
-fn validate_dex_fee_invalid_sender_erc() {
+    EthCoin::get_gas_price.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(GAS_PRICE.into()))));
+    mock_estimation_fee(GAS_PRICE);
+    EthCoinImpl::estimate_gas.mock_safe(|_, _| {
+        MockResult::Return(Box::new(futures01::future::err(MmError::new(Web3RpcError::Transport(
+            "error code -32000: gas required exceeds allowance (0)".to_string(),
+        )))))
+    });
+    // Plenty of the token being sent, so the sent-coin check must not fire...
+    EthCoin::my_balance.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::from(u64::MAX)))));
+    // ...but no platform coin at all to pay the gas with.
+    EthCoin::base_coin_balance.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
+
     let (_ctx, coin) = eth_coin_for_test(
         EthCoinType::Erc20 {
             platform: "ETH".to_string(),
-            token_addr: Address::from_slice(&hex::decode("a1d6df714f91debf4e0802a542e13067f31b8262").unwrap()),
+            token_addr: Address::from_slice(&hex::decode("aD22f63404f7305e4713CcBd4F296f34770513f4").unwrap()),
         },
-        vec!["http://eth1.cipig.net:8555".into()],
+        vec!["http://dummy.dummy".into()],
         None,
     );
-    // the real dex fee sent on mainnet
-    // https://etherscan.io/tx/0xd6403b41c79f9c9e9c83c03d920ee1735e7854d85d94cef48d95dfeca95cd600
-    let tx = {
-        use alloy::providers::Provider as _;
-        let hash = alloy::primitives::B256::from_slice(
-            &hex::decode("d6403b41c79f9c9e9c83c03d920ee1735e7854d85d94cef48d95dfeca95cd600").unwrap(),
-        );
-        let alloy_tx = block_on(coin.web3.get_transaction_by_hash(hash)).unwrap().unwrap();
-        signed_tx_from_alloy_tx(alloy_tx).unwrap()
-    };
-    let tx = tx.into();
-    let amount: BigDecimal = "5.548262548262548262".parse().unwrap();
-    let validate_err = coin
-        .validate_fee(ValidateFeeArgs {
-            fee_tx: &tx,
-            expected_sender: test_dex_fee_addr_raw_pubkey(),
-            fee_addr: test_dex_fee_addr_raw_pubkey(),
-            dex_fee: &DexFee::Standard(amount.into()),
-            min_block_number: 0,
-            uuid: &[],
-        })
-        .wait()
-        .unwrap_err();
-    assert!(validate_err.contains("was sent from wrong address"));
+    let dex_fee_amount = u256_to_big_decimal(DEX_FEE_AMOUNT.into(), 18).expect("!u256_to_big_decimal");
+
+    let error = block_on(coin.get_fee_to_send_taker_fee(dex_fee_amount, FeeApproxStage::WithoutApprox)).unwrap_err();
+    log!((error));
+    match error.get_inner() {
+        // Reported against the platform coin, not the token: that ticker mismatch is
+        // what `CheckBalanceError::from_trade_preimage_error` keys on.
+        TradePreimageError::NotSufficientBalance { coin, .. } => assert_eq!(coin, "ETH"),
+        other => panic!("Expected TradePreimageError::NotSufficientBalance for the platform coin, got {other:?}"),
+    }
 }
 
 fn sender_compressed_pub(tx: &SignedEthTx) -> [u8; 33] {
@@ -1225,78 +1240,6 @@ fn sender_compressed_pub(tx: &SignedEthTx) -> [u8; 33] {
     raw_pubkey[1..].copy_from_slice(tx_pubkey.as_bytes());
     let secp_public = PublicKey::from_slice(&raw_pubkey).unwrap();
     secp_public.serialize()
-}
-
-#[test]
-fn validate_dex_fee_eth_confirmed_before_min_block() {
-    let (_ctx, coin) = eth_coin_for_test(
-        EthCoinType::Eth,
-        vec!["https://mainnet.infura.io/v3/c01c1b4cf66642528547624e1d6d9d6b".into()],
-        None,
-    );
-    // the real dex fee sent on mainnet
-    // https://etherscan.io/tx/0x7e9ca16c85efd04ee5e31f2c1914b48f5606d6f9ce96ecce8c96d47d6857278f
-    let tx = {
-        use alloy::providers::Provider as _;
-        let hash = alloy::primitives::B256::from_slice(
-            &hex::decode("7e9ca16c85efd04ee5e31f2c1914b48f5606d6f9ce96ecce8c96d47d6857278f").unwrap(),
-        );
-        let alloy_tx = block_on(coin.web3.get_transaction_by_hash(hash)).unwrap().unwrap();
-        signed_tx_from_alloy_tx(alloy_tx).unwrap()
-    };
-    let compressed_public = sender_compressed_pub(&tx);
-    let tx = tx.into();
-    let amount: BigDecimal = "0.000526435076465".parse().unwrap();
-    let validate_err = coin
-        .validate_fee(ValidateFeeArgs {
-            fee_tx: &tx,
-            expected_sender: &compressed_public,
-            fee_addr: test_dex_fee_addr_raw_pubkey(),
-            dex_fee: &DexFee::Standard(amount.into()),
-            min_block_number: 11784793,
-            uuid: &[],
-        })
-        .wait()
-        .unwrap_err();
-    assert!(validate_err.contains("confirmed before min_block"));
-}
-
-#[test]
-fn validate_dex_fee_erc_confirmed_before_min_block() {
-    let (_ctx, coin) = eth_coin_for_test(
-        EthCoinType::Erc20 {
-            platform: "ETH".to_string(),
-            token_addr: Address::from_slice(&hex::decode("a1d6df714f91debf4e0802a542e13067f31b8262").unwrap()),
-        },
-        vec!["http://eth1.cipig.net:8555".into()],
-        None,
-    );
-    // the real dex fee sent on mainnet
-    // https://etherscan.io/tx/0xd6403b41c79f9c9e9c83c03d920ee1735e7854d85d94cef48d95dfeca95cd600
-    let tx = {
-        use alloy::providers::Provider as _;
-        let hash = alloy::primitives::B256::from_slice(
-            &hex::decode("d6403b41c79f9c9e9c83c03d920ee1735e7854d85d94cef48d95dfeca95cd600").unwrap(),
-        );
-        let alloy_tx = block_on(coin.web3.get_transaction_by_hash(hash)).unwrap().unwrap();
-        signed_tx_from_alloy_tx(alloy_tx).unwrap()
-    };
-
-    let compressed_public = sender_compressed_pub(&tx);
-    let tx = tx.into();
-    let amount: BigDecimal = "5.548262548262548262".parse().unwrap();
-    let validate_err = coin
-        .validate_fee(ValidateFeeArgs {
-            fee_tx: &tx,
-            expected_sender: &compressed_public,
-            fee_addr: test_dex_fee_addr_raw_pubkey(),
-            dex_fee: &DexFee::Standard(amount.into()),
-            min_block_number: 11823975,
-            uuid: &[],
-        })
-        .wait()
-        .unwrap_err();
-    assert!(validate_err.contains("confirmed before min_block"));
 }
 
 #[test]
@@ -1324,6 +1267,22 @@ fn test_negotiate_swap_contract_addr_no_fallback() {
     let slice: &[u8] = coin.swap_contract_address.as_ref();
     let result = coin.negotiate_swap_contract_addr(Some(slice)).unwrap();
     assert_eq!(Some(slice.to_vec().into()), result);
+}
+
+#[test]
+fn test_negotiate_swap_contract_addr_refuses_a_coin_without_a_swap_contract() {
+    // A wallet-only coin is activated without a swap contract; it must never take part in a swap, not even
+    // against a peer that names the zero address.
+    let (_, coin) = eth_coin_for_test(EthCoinType::Eth, vec!["http://eth1.cipig.net:8555".into()], None);
+    let mut inner = Arc::try_unwrap(coin.0).unwrap_or_else(|_| panic!("a fresh coin has one owner"));
+    inner.swap_contract_address = Address::default();
+    let coin = EthCoin(Arc::new(inner));
+
+    let zero: &[u8] = &[0; 20];
+    for other_side in [None, Some(zero)] {
+        let error = coin.negotiate_swap_contract_addr(other_side).unwrap_err().into_inner();
+        assert_eq!(NegotiateSwapContractAddrErr::NoSwapContract, error);
+    }
 }
 
 #[test]
@@ -1482,7 +1441,11 @@ fn test_message_hash() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1509,11 +1472,14 @@ fn test_message_hash() {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
 
     let message_hash = coin.sign_message_hash("test").unwrap();
@@ -1529,7 +1495,11 @@ fn test_sign_verify_message() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8545".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8545".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let my_addr = key_pair.address();
     let coin = EthCoin(Arc::new(EthCoinImpl {
@@ -1556,11 +1526,14 @@ fn test_sign_verify_message() {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: None,
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
 
     let message = "test";
@@ -1708,7 +1681,11 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
     let public = *key_pair.public();
     let derivation_path = DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap();
 
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://dummy.dummy".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://dummy.dummy".into()]),
+        vec![],
+    )
+    .unwrap();
     let conf = json!({ "netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [] });
     let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
     let ticker = match coin_type {
@@ -1747,13 +1724,45 @@ fn trezor_eth_coin_for_test(coin_type: EthCoinType) -> (MmArc, EthCoin) {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: Some(1),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(address),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, eth_coin)
+}
+
+/// A hardware-backed coin is never a software HD wallet, so the one-shot `enable_erc20` keeps refusing it: that
+/// call has no `user_action` channel for the device to confirm through (CRD R35.2.5). The coin under test keeps
+/// its `HDWallet` derivation and differs from the software one only by its signer, so the hardware clauses of the
+/// predicate are the ones being exercised.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+#[test]
+fn a_trezor_signed_hd_coin_is_not_a_software_hd_wallet() {
+    let (_ctx, software, address) = eth_hd_coin_for_test(EthCoinType::Eth);
+    assert!(matches!(software.derivation_method, DerivationMethod::HDWallet(_)));
+    assert!(software.uses_software_hd_wallet(), "the control: a software HD coin");
+
+    let key_pair = KeyPair::from_secret_slice(
+        &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
+    )
+    .unwrap();
+    let mut inner = Arc::try_unwrap(software.0).unwrap_or_else(|_| panic!("a sole owner of the fixture"));
+    inner.signer = EthSigner::Trezor(EthTrezorSigner {
+        derivation_path: DerivationPath::from_str("m/44'/60'/0'/0/0").unwrap(),
+        address,
+        public: *key_pair.public(),
+    });
+    let hardware = EthCoin(Arc::new(inner));
+
+    assert!(matches!(hardware.derivation_method, DerivationMethod::HDWallet(_)));
+    assert!(hardware.uses_hardware_signer());
+    assert!(hardware.hardware_derivation_path().is_some());
+    assert!(!hardware.uses_software_hd_wallet());
 }
 
 /// R50.24 / R49.6: the direct legacy `withdraw` method rejects a Trezor-policy
@@ -1805,4 +1814,1859 @@ fn tron_v1_wait_for_tx_spend_returns_error_without_decoding() {
         .wait()
         .unwrap_err();
     assert!(matches!(err, TransactionErr::Plain(msg) if msg.contains("TRON V1 swap spend watchers")));
+}
+
+fn legacy_eip155_vector_bytes() -> Vec<u8> {
+    hex::decode(
+        "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83",
+    )
+    .unwrap()
+}
+
+#[test]
+fn test_signed_eth_tx_from_bytes_legacy_unchanged() {
+    let bytes = legacy_eip155_vector_bytes();
+    let signed = signed_eth_tx_from_bytes(&bytes).unwrap();
+    assert_eq!(alloy::rlp::encode(&*signed), bytes);
+    assert_eq!(
+        format!("{:x}", signed.tx_hash()),
+        "33469b22e9f636356c4160a87eb19df52b7412e8eac32a4a55ffe88ea8350788"
+    );
+}
+
+fn typed_envelope(type_byte: u8) -> Vec<u8> {
+    // `type_byte || rlp(list of a few plausible fields)`; need not be a valid typed transaction.
+    let mut bytes = vec![type_byte];
+    bytes.extend_from_slice(&alloy::rlp::encode(&vec![1u64, 2, 3]));
+    bytes
+}
+
+#[test]
+fn test_signed_eth_tx_from_bytes_typed_eip4844_and_eip7702_rejected() {
+    for (type_byte, name) in [(0x03u8, "EIP-4844"), (0x04, "EIP-7702")] {
+        let bytes = typed_envelope(type_byte);
+        let err = signed_eth_tx_from_bytes(&bytes).unwrap_err();
+        assert!(err.contains(&format!("type 0x{type_byte:02x}")), "{err}");
+        assert!(err.contains(name), "{err}");
+        assert!(err.contains("only legacy, EIP-2930 and EIP-1559"), "{err}");
+        assert!(err.contains(&format!("payload length {} bytes", bytes.len())), "{err}");
+        assert!(!err.contains('\n'));
+    }
+}
+
+#[test]
+fn test_signed_eth_tx_from_bytes_typed_unknown() {
+    let bytes = typed_envelope(0x7f);
+    let err = signed_eth_tx_from_bytes(&bytes).unwrap_err();
+    assert!(err.contains("type 0x7f"), "{err}");
+    assert!(err.contains("unknown type"), "{err}");
+    assert!(err.contains("only legacy, EIP-2930 and EIP-1559"), "{err}");
+}
+
+#[test]
+fn test_signed_eth_tx_from_bytes_malformed_supported_typed_reports_length_and_prefix() {
+    for type_byte in [0x01u8, 0x02] {
+        let bytes = typed_envelope(type_byte);
+        let err = signed_eth_tx_from_bytes(&bytes).unwrap_err();
+        assert!(err.contains(&format!("payload length {} bytes", bytes.len())), "{err}");
+        assert!(err.contains(&format!("0x{type_byte:02x}")), "{err}");
+    }
+}
+
+#[test]
+fn test_signed_eth_tx_from_bytes_non_transaction_payload() {
+    // A bare RLP-encoded 32-byte string (e.g. a hash): 0xa0 || 32 bytes.
+    let bytes = alloy::rlp::encode(&[0xabu8; 32][..]);
+    assert_eq!(bytes.len(), 33);
+    let err = signed_eth_tx_from_bytes(&bytes).unwrap_err();
+    assert!(err.contains("payload length 33 bytes"), "{err}");
+    assert!(err.contains(&format!("first 10 bytes 0xa0{}", "ab".repeat(9))), "{err}");
+    assert!(!err.contains("typed EIP-2718"), "{err}");
+    assert!(!err.contains('\n'));
+
+    let err = signed_eth_tx_from_bytes(&[]).unwrap_err();
+    assert!(err.contains("payload length 0 bytes"), "{err}");
+}
+
+mod swap_gas_fee_policy_tx_form {
+    //! CRD R35.6.6 / R35.6A.17: the stored swap gas-fee policy decides the pricing and the
+    //! serialized form of a swap transaction. These tests exercise the construction and signing
+    //! path, not the store-and-echo behaviour of the policy RPCs.
+    use super::*;
+    use crate::eth::fee_estimation::eip1559::{EstimationSource, FeePerGasEstimated, FeePerGasLevel};
+    use mm2_eth::keys::{public_to_address, Secret};
+    use std::str::FromStr;
+
+    const SECRET: &str = "4646464646464646464646464646464646464646464646464646464646464646";
+    const CHAIN_ID: u64 = 1;
+
+    fn secret() -> Secret { Secret::from_str(SECRET).unwrap() }
+
+    fn sender() -> Address {
+        let pair = mm2_eth::keys::KeyPair::from_secret(secret()).unwrap();
+        public_to_address(&pair.public())
+    }
+
+    fn level(prio: u64, max_fee: u64) -> FeePerGasLevel {
+        FeePerGasLevel {
+            max_priority_fee_per_gas: U256::from(prio),
+            max_fee_per_gas: U256::from(max_fee),
+            min_wait_time: None,
+            max_wait_time: None,
+        }
+    }
+
+    /// Three distinguishable tiers, none equal to the legacy gas price used below.
+    fn estimate() -> FeePerGasEstimated {
+        FeePerGasEstimated {
+            base_fee: U256::from(10_000_000_000u64),
+            source: EstimationSource::Simple,
+            base_fee_trend: String::new(),
+            priority_fee_trend: String::new(),
+            low: level(1_000_000_000, 12_000_000_000),
+            medium: level(2_000_000_000, 14_000_000_000),
+            high: level(3_000_000_000, 17_000_000_000),
+        }
+    }
+
+    fn swap_tx(fee: SwapFee) -> SwapTx {
+        SwapTx::new(
+            fee,
+            U256::from(9u64),
+            U256::from(21000u64),
+            Action::Call(Address::from_str("3535353535353535353535353535353535353535").unwrap()),
+            U256::from(1_000_000_000_000_000_000u64),
+            vec![0xde, 0xad, 0xbe, 0xef],
+        )
+    }
+
+    fn sign_legacy(tx: SwapTx) -> SignedEthTx {
+        match tx {
+            SwapTx::Legacy(tx) => tx.sign(&secret(), Some(CHAIN_ID)),
+            SwapTx::Eip1559(_) => panic!("expected the legacy form"),
+        }
+    }
+
+    fn sign_typed(tx: SwapTx) -> SignedEthTx {
+        match tx {
+            SwapTx::Eip1559(tx) => tx.sign(&secret()).unwrap(),
+            SwapTx::Legacy(_) => panic!("expected the EIP-1559 form"),
+        }
+    }
+
+    #[test]
+    fn non_legacy_tiers_produce_type_2_with_the_tiers_fee_fields() {
+        let est = estimate();
+        for (policy, expect) in [
+            (SwapGasFeePolicy::Low, &est.low),
+            (SwapGasFeePolicy::Medium, &est.medium),
+            (SwapGasFeePolicy::High, &est.high),
+        ] {
+            let fee = eip1559_swap_fee(policy, CHAIN_ID, &est).unwrap();
+            let signed = sign_typed(swap_tx(fee));
+            let bytes = alloy::rlp::encode(&signed);
+            assert_eq!(bytes[0], 0x02, "{:?} must emit a type-2 envelope", policy);
+            match &signed.kind {
+                TxKind::Typed(t) => {
+                    assert_eq!(t.tx_type, 2);
+                    assert_eq!(t.chain_id, CHAIN_ID);
+                    assert_eq!(t.max_fee_per_gas, Some(expect.max_fee_per_gas), "{:?}", policy);
+                    assert_eq!(
+                        t.max_priority_fee_per_gas,
+                        Some(expect.max_priority_fee_per_gas),
+                        "{:?}",
+                        policy
+                    );
+                    assert_eq!(t.gas_price, None, "a type-2 transaction carries no legacy gas_price");
+                },
+                TxKind::Legacy { .. } => panic!("{:?} emitted the legacy form", policy),
+            }
+        }
+    }
+
+    #[test]
+    fn tiers_are_distinct_and_ordered() {
+        let est = estimate();
+        let fee = |p| match eip1559_swap_fee(p, CHAIN_ID, &est).unwrap() {
+            SwapFee::Eip1559 {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                ..
+            } => (max_fee_per_gas, max_priority_fee_per_gas),
+            SwapFee::Legacy { .. } => panic!("unexpected legacy fee"),
+        };
+        let (low, medium, high) = (
+            fee(SwapGasFeePolicy::Low),
+            fee(SwapGasFeePolicy::Medium),
+            fee(SwapGasFeePolicy::High),
+        );
+        assert!(low < medium && medium < high);
+    }
+
+    #[test]
+    fn legacy_policy_has_no_eip1559_tier() {
+        assert!(eip1559_swap_fee(SwapGasFeePolicy::Legacy, CHAIN_ID, &estimate()).is_err());
+    }
+
+    #[test]
+    fn inconsistent_estimate_is_rejected_not_clamped() {
+        let mut est = estimate();
+        est.high = level(5_000_000_000, 1_000_000_000);
+        assert!(eip1559_swap_fee(SwapGasFeePolicy::High, CHAIN_ID, &est).is_err());
+    }
+
+    #[test]
+    fn typed_signed_transaction_round_trips_through_our_decoder() {
+        let est = estimate();
+        for policy in [SwapGasFeePolicy::Low, SwapGasFeePolicy::Medium, SwapGasFeePolicy::High] {
+            let fee = eip1559_swap_fee(policy, CHAIN_ID, &est).unwrap();
+            let signed = sign_typed(swap_tx(fee));
+            assert_eq!(signed.sender(), sender(), "sender recovered at signing time");
+
+            let bytes = alloy::rlp::encode(&signed);
+            // Decode the emitted bytes the way a counterparty's bytes are decoded.
+            let decoded = signed_eth_tx_from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.sender(), sender());
+            assert_eq!(decoded.tx_hash(), signed.tx_hash());
+            // The identifier is the hash of the whole envelope.
+            assert_eq!(decoded.tx_hash(), H256::from_slice(keccak256(&bytes).as_slice()));
+            assert_eq!(alloy::rlp::encode(&decoded), bytes);
+            assert_eq!(decoded.nonce, U256::from(9u64));
+            assert_eq!(decoded.gas, U256::from(21000u64));
+            assert_eq!(decoded.value, U256::from(1_000_000_000_000_000_000u64));
+            assert_eq!(decoded.data, vec![0xde, 0xad, 0xbe, 0xef]);
+        }
+    }
+
+    #[test]
+    fn typed_signing_message_is_keccak_of_type_byte_and_unsigned_payload() {
+        use alloy::rlp::{Encodable, Header};
+        let fee = eip1559_swap_fee(SwapGasFeePolicy::Medium, CHAIN_ID, &estimate()).unwrap();
+        let SwapTx::Eip1559(tx) = swap_tx(fee) else {
+            panic!("expected the EIP-1559 form")
+        };
+        // Independent construction of 0x02 || rlp([chain_id, nonce, prio, max_fee, gas, to, value,
+        // data, access_list]) straight from the EIP, not through alloy's transaction type.
+        let to = Address::from_str("3535353535353535353535353535353535353535").unwrap();
+        let mut payload = Vec::new();
+        CHAIN_ID.encode(&mut payload);
+        9u64.encode(&mut payload);
+        2_000_000_000u64.encode(&mut payload);
+        14_000_000_000u64.encode(&mut payload);
+        21000u64.encode(&mut payload);
+        to.0[..].encode(&mut payload);
+        1_000_000_000_000_000_000u64.encode(&mut payload);
+        [0xdeu8, 0xad, 0xbe, 0xef][..].encode(&mut payload);
+        Header {
+            list: true,
+            payload_length: 0,
+        }
+        .encode(&mut payload); // empty access list
+        let mut msg = vec![0x02];
+        Header {
+            list: true,
+            payload_length: payload.len(),
+        }
+        .encode(&mut msg);
+        msg.extend_from_slice(&payload);
+        assert_eq!(tx.signing_hash().unwrap(), H256::from_slice(keccak256(&msg).as_slice()));
+    }
+
+    #[test]
+    fn legacy_form_is_unchanged_and_pinned() {
+        let fee = SwapFee::Legacy {
+            gas_price: U256::from(20_000_000_000u64),
+        };
+        // EIP-155 specification vector (empty data) to pin the bytes of the legacy form.
+        let tx = SwapTx::new(
+            fee,
+            U256::from(9u64),
+            U256::from(21000u64),
+            Action::Call(Address::from_str("3535353535353535353535353535353535353535").unwrap()),
+            U256::from(1_000_000_000_000_000_000u64),
+            Vec::new(),
+        );
+        let signed = sign_legacy(tx);
+        let expected = hex::decode(
+            "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83",
+        )
+        .unwrap();
+        assert_eq!(alloy::rlp::encode(&signed), expected);
+        assert_eq!(signed.gas_price(), Some(U256::from(20_000_000_000u64)));
+        assert!(matches!(signed.kind, TxKind::Legacy { .. }));
+    }
+
+    #[test]
+    fn legacy_form_with_data_round_trips_and_is_untyped() {
+        let signed = sign_legacy(swap_tx(SwapFee::Legacy {
+            gas_price: U256::from(7u64),
+        }));
+        let bytes = alloy::rlp::encode(&signed);
+        assert!(bytes[0] >= 0xc0, "legacy form leads with an RLP list header");
+        let decoded = signed_eth_tx_from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.sender(), sender());
+        assert_eq!(decoded.tx_hash(), signed.tx_hash());
+    }
+
+    #[test]
+    fn default_policy_is_legacy() {
+        assert_eq!(SwapGasFeePolicy::default(), SwapGasFeePolicy::Legacy);
+    }
+}
+
+/// A scripted EVM JSON-RPC node on a local socket, shared by the tests that must run the real
+/// network-facing code without a network: every request is answered by the handler closure
+/// (`method`, `params` -> `result`). Its thread stops when the node is dropped.
+mod scripted_evm_node {
+    use serde_json::{json, Value as Json};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    pub struct ScriptedNode {
+        pub url: String,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Drop for ScriptedNode {
+        fn drop(&mut self) { self.stop.store(true, Ordering::SeqCst); }
+    }
+
+    type Handler = Arc<dyn Fn(&str, &Json) -> Json + Send + Sync>;
+
+    fn serve(mut stream: TcpStream, handler: &Handler) {
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let body_at = loop {
+            let n = match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => n,
+            };
+            raw.extend_from_slice(&buf[..n]);
+            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..end]).to_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= end + 4 + len {
+                    break end + 4;
+                }
+            }
+        };
+        let request: Json = serde_json::from_slice(&raw[body_at..]).unwrap();
+        let reply = |req: &Json| {
+            let answer = handler(req["method"].as_str().unwrap(), &req["params"]);
+            // A handler answers with an error response by returning `{"__rpc_error": {"code": .., "message": ..}}`.
+            match answer.get("__rpc_error") {
+                Some(error) => json!({"jsonrpc": "2.0", "id": req["id"], "error": error}),
+                None => json!({"jsonrpc": "2.0", "id": req["id"], "result": answer}),
+            }
+        };
+        let body = match request.as_array() {
+            Some(batch) => Json::Array(batch.iter().map(reply).collect()),
+            None => reply(&request),
+        }
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).ok();
+    }
+
+    /// Starts a node answering every request through `handler`. A method the test did not script
+    /// must panic in the handler, so a test never silently depends on an unscripted read.
+    pub fn spawn(handler: impl Fn(&str, &Json) -> Json + Send + Sync + 'static) -> ScriptedNode {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_t = stop.clone();
+        let handler: Handler = Arc::new(handler);
+        std::thread::spawn(move || {
+            while !stop_t.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let handler = handler.clone();
+                        std::thread::spawn(move || serve(stream, &handler));
+                    },
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+                }
+            }
+        });
+        ScriptedNode { url, stop }
+    }
+}
+
+/// The serialized form of what the swap send path really broadcasts is pinned against the swap
+/// gas-fee policy: the whole path (`SwapOps` entry point, `sign_and_send_transaction_impl`, signing,
+/// `eth_sendRawTransaction`) runs against a scripted node on a local socket and the assertion reads
+/// the first byte of the broadcast bytes -- the EIP-2718 envelope byte a counterparty parses.
+mod swap_send_path_wire_form {
+    use super::scripted_evm_node::{spawn, ScriptedNode};
+    use super::*;
+    use mm2_eth::keys::{public_to_address, KeyPair as EthKeyPair, Secret};
+    use serde_json::{json, Value as Json};
+
+    const POLYGON_CHAIN_ID: u64 = 137;
+
+    fn answer(method: &str, params: &Json, sent: &Mutex<Vec<Vec<u8>>>) -> Json {
+        match method {
+            "parity_nextNonce" | "eth_getTransactionCount" => {
+                // The send path polls until the node reports the nonce moved past the used one.
+                json!(if sent.lock().unwrap().is_empty() { "0x0" } else { "0x1" })
+            },
+            "eth_gasPrice" => json!("0x3b9aca00"),
+            "eth_feeHistory" => {
+                let count = match &params[0] {
+                    Json::String(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap(),
+                    other => other.as_u64().unwrap(),
+                } as usize;
+                let percentiles = params[2].as_array().map(|p| p.len()).unwrap_or(0);
+                json!({
+                    "oldestBlock": "0x1",
+                    "baseFeePerGas": vec!["0x2540be400"; count + 1],
+                    "gasUsedRatio": vec![0.5; count],
+                    "reward": vec![vec!["0x3b9aca00"; percentiles]; count],
+                })
+            },
+            "eth_sendRawTransaction" => {
+                let raw = params[0].as_str().unwrap().trim_start_matches("0x");
+                sent.lock().unwrap().push(hex::decode(raw).unwrap());
+                json!(format!("0x{}", "11".repeat(32)))
+            },
+            other => panic!("the scripted node does not serve `{}`", other),
+        }
+    }
+
+    fn spawn_send_node() -> (ScriptedNode, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let sent_h = sent.clone();
+        (spawn(move |method, params| answer(method, params, &sent_h)), sent)
+    }
+
+    /// An ERC-20 token coin on a chain-137 platform with `policy` as its stored swap gas-fee policy. The
+    /// platform carries `"max_eth_tx_type": 2`, as every shipped coin with a non-legacy policy does.
+    pub(super) fn polygon_token(url: &str, policy: SwapGasFeePolicy, token_addr: Address) -> (MmArc, EthCoin) {
+        polygon_token_with_conf(
+            url,
+            policy,
+            token_addr,
+            json!([{"coin": "MATIC", "max_eth_tx_type": 2}]),
+            json!({}),
+        )
+    }
+
+    /// As [`polygon_token`], with `extra_coins` appended to the coins file and `node_conf` merged into the
+    /// node configuration (compatibility switches).
+    fn polygon_token_with_conf(
+        url: &str,
+        policy: SwapGasFeePolicy,
+        token_addr: Address,
+        extra_coins: Json,
+        node_conf: Json,
+    ) -> (MmArc, EthCoin) {
+        let key_pair = EthKeyPair::from_secret_slice(
+            &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
+        )
+        .unwrap();
+        let web3 = crate::eth::alloy_compat::build_provider(
+            crate::node_url::listed_nodes("TEST", vec![url.to_owned()]),
+            vec![],
+        )
+        .unwrap();
+        let mut coins = vec![
+            json!({"coin": "USDC-PLG20", "protocol": {"type": "ERC20", "protocol_data":
+                {"platform": "MATIC", "contract_address": format!("{:#x}", token_addr)}}}),
+        ];
+        coins.extend(extra_coins.as_array().unwrap().iter().cloned());
+        let mut conf = json!({
+            "netid": mm2_net_config::SUPPORTED_NETIDS[0],
+            "coins": coins,
+        });
+        for (k, v) in node_conf.as_object().unwrap() {
+            conf[k] = v.clone();
+        }
+        let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
+        let my_address = public_to_address(&key_pair.public());
+        let coin = EthCoin(Arc::new(EthCoinImpl {
+            coin_type: EthCoinType::Erc20 {
+                platform: "MATIC".to_owned(),
+                token_addr,
+            },
+            decimals: 6,
+            gas_station_url: None,
+            gas_station_decimals: ETH_GAS_STATION_DECIMALS,
+            history_sync_state: Mutex::new(HistorySyncState::NotEnabled),
+            gas_station_policy: GasStationPricePolicy::MeanAverageFast,
+            my_address,
+            sign_message_prefix: None,
+            signer: EthSigner::Local(key_pair),
+            swap_contract_address: Address::from_str("9130b257d37a52e52f21054c4da3450c72f595ce").unwrap(),
+            fallback_swap_contract: None,
+            ticker: "USDC-PLG20".to_owned(),
+            web3_instances: vec![Web3Instance {
+                web3: web3.clone(),
+                is_parity: true,
+            }],
+            web3,
+            ctx: ctx.weak(),
+            required_confirmations: 1.into(),
+            tron_api: None,
+            nft_swap_v2_contract: None,
+            swap_gas_fee_policy: Mutex::new(policy),
+            erc20_tokens_infos: Default::default(),
+            custom_token: false,
+            chain_id: Some(POLYGON_CHAIN_ID),
+            logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
+            derivation_method: DerivationMethod::Iguana(my_address),
+            swap_v2_contracts: None,
+            gas_limit: EthGasLimit::default(),
+            gas_limit_v2: EthGasLimitV2::default(),
+            estimate_gas_mult: None,
+        }));
+        (ctx, coin)
+    }
+
+    /// The counterparty's `erc20Payment` transaction (legacy form) that the spend refers to.
+    fn counterparty_payment(coin: &EthCoin, token_addr: Address) -> Vec<u8> {
+        let function = SWAP_CONTRACT.function("erc20Payment").unwrap();
+        let data = function
+            .encode_input(&[
+                Token::FixedBytes(vec![7u8; 32]),
+                Token::Uint(U256::from(1_000_000u64)),
+                Token::Address(token_addr),
+                Token::Address(coin.my_address),
+                Token::FixedBytes(vec![9u8; 20]),
+                Token::Uint(U256::from(1_800_000_000u64)),
+            ])
+            .unwrap();
+        let unsigned = UnSignedEthTx {
+            nonce: U256::from(3u64),
+            gas_price: U256::from(1_000_000_000u64),
+            gas: U256::from(150_000u64),
+            action: Action::Call(coin.swap_contract_address),
+            value: U256::zero(),
+            data,
+        };
+        let counterparty =
+            Secret::from_str("4646464646464646464646464646464646464646464646464646464646464646").unwrap();
+        rlp::encode(&unsigned.sign(&counterparty, Some(POLYGON_CHAIN_ID))).to_vec()
+    }
+
+    /// Drives one swap send and returns the bytes the node received.
+    fn broadcast(policy: SwapGasFeePolicy, send: impl Fn(&EthCoin, &[u8]) -> TransactionFut) -> Vec<u8> {
+        EthCoin::payment_status
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(PAYMENT_STATE_SENT.into()))));
+        let (node, sent) = spawn_send_node();
+        let token_addr = Address::from_str("3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap();
+        let (_ctx, coin) = polygon_token(&node.url, policy, token_addr);
+        let payment = counterparty_payment(&coin, token_addr);
+        block_on(send(&coin, &payment).compat()).expect("the swap send succeeds");
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "exactly one transaction is broadcast");
+        sent[0].clone()
+    }
+
+    fn spend_maker_payment(coin: &EthCoin, payment: &[u8]) -> TransactionFut {
+        coin.send_taker_spends_maker_payment(
+            payment,
+            0,
+            &[],
+            &[5u8; 32],
+            &[],
+            &Some(BytesJson::from(coin.swap_contract_address.as_bytes().to_vec())),
+        )
+    }
+
+    fn refund_own_payment(coin: &EthCoin, payment: &[u8]) -> TransactionFut {
+        coin.send_taker_refunds_payment(
+            payment,
+            0,
+            &[],
+            &[],
+            &[],
+            &Some(BytesJson::from(coin.swap_contract_address.as_bytes().to_vec())),
+        )
+    }
+
+    fn assert_untyped_legacy(raw: &[u8]) {
+        assert!(
+            raw[0] >= 0xc0,
+            "legacy form leads with an RLP list header, got 0x{:02x}",
+            raw[0]
+        );
+        let decoded = signed_eth_tx_from_bytes(raw).unwrap();
+        assert!(matches!(decoded.kind, TxKind::Legacy { .. }));
+    }
+
+    fn assert_type_2(raw: &[u8]) {
+        assert_eq!(raw[0], 0x02, "a tier must emit the EIP-1559 envelope byte");
+        let decoded = signed_eth_tx_from_bytes(raw).unwrap();
+        match &decoded.kind {
+            TxKind::Typed(t) => {
+                assert_eq!(t.tx_type, 2);
+                assert_eq!(t.chain_id, POLYGON_CHAIN_ID);
+            },
+            TxKind::Legacy { .. } => panic!("decoded as legacy"),
+        }
+    }
+
+    #[test]
+    fn legacy_policy_spend_of_the_counterpartys_payment_is_untyped() {
+        assert_untyped_legacy(&broadcast(SwapGasFeePolicy::Legacy, spend_maker_payment));
+    }
+
+    #[test]
+    fn every_tier_spend_of_the_counterpartys_payment_is_type_2() {
+        for policy in [SwapGasFeePolicy::Low, SwapGasFeePolicy::Medium, SwapGasFeePolicy::High] {
+            assert_type_2(&broadcast(policy, spend_maker_payment));
+        }
+    }
+
+    #[test]
+    fn refund_follows_the_policy_form() {
+        assert_untyped_legacy(&broadcast(SwapGasFeePolicy::Legacy, refund_own_payment));
+        assert_type_2(&broadcast(SwapGasFeePolicy::Medium, refund_own_payment));
+    }
+
+    // ── CRD D35.7: the per-coin cap on the emitted transaction type ─────────────────────────────
+
+    /// Drives one swap send and returns its outcome with every transaction the node received.
+    fn try_broadcast(
+        policy: SwapGasFeePolicy,
+        extra_coins: Json,
+        node_conf: Json,
+    ) -> (Result<(), String>, Vec<Vec<u8>>) {
+        EthCoin::payment_status
+            .mock_safe(|_, _, _| MockResult::Return(Box::new(futures01::future::ok(PAYMENT_STATE_SENT.into()))));
+        let (node, sent) = spawn_send_node();
+        let token_addr = Address::from_str("3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap();
+        let (_ctx, coin) = polygon_token_with_conf(&node.url, policy, token_addr, extra_coins, node_conf);
+        let payment = counterparty_payment(&coin, token_addr);
+        let result = block_on(spend_maker_payment(&coin, &payment).compat())
+            .map(|_| ())
+            .map_err(|e| format!("{:?}", e));
+        let sent = sent.lock().unwrap().clone();
+        (result, sent)
+    }
+
+    fn platform_with_cap(cap: Json) -> Json { json!([{"coin": "MATIC", "max_eth_tx_type": cap}]) }
+
+    fn assert_refused_without_broadcast(outcome: (Result<(), String>, Vec<Vec<u8>>)) -> String {
+        let (result, sent) = outcome;
+        let err = result.expect_err("a type above the coin's maximum must be refused at signing");
+        assert!(err.contains("refusing to sign a type-2 transaction"), "{err}");
+        assert!(
+            sent.is_empty(),
+            "nothing is broadcast, and in particular no lower type is substituted"
+        );
+        err
+    }
+
+    #[test]
+    fn a_sufficient_cap_lets_the_typed_send_proceed() {
+        for cap in [2, 3] {
+            let (result, sent) = try_broadcast(SwapGasFeePolicy::Medium, platform_with_cap(json!(cap)), json!({}));
+            result.expect("the send succeeds");
+            assert_eq!(sent.len(), 1);
+            assert_type_2(&sent[0]);
+        }
+    }
+
+    #[test]
+    fn an_insufficient_cap_refuses_the_typed_send_at_signing() {
+        for cap in [0, 1] {
+            let err = assert_refused_without_broadcast(try_broadcast(
+                SwapGasFeePolicy::Medium,
+                platform_with_cap(json!(cap)),
+                json!({}),
+            ));
+            assert!(err.contains(&format!("is {}", cap)), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_cap_does_not_affect_an_untyped_send() {
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::Legacy, platform_with_cap(json!(0)), json!({}));
+        result.expect("the send succeeds");
+        assert_untyped_legacy(&sent[0]);
+    }
+
+    #[test]
+    fn an_absent_cap_is_refused_by_default() {
+        // The token and its platform are both silent: the default matches the reference, where the absent
+        // key reads as 0.
+        let absent = assert_refused_without_broadcast(try_broadcast(
+            SwapGasFeePolicy::Medium,
+            json!([{"coin": "MATIC"}]),
+            json!({}),
+        ));
+        // The refusal is the one an explicit cap of 0 gets, down to the stated maximum.
+        let explicit_zero = assert_refused_without_broadcast(try_broadcast(
+            SwapGasFeePolicy::Medium,
+            platform_with_cap(json!(0)),
+            json!({}),
+        ));
+        assert!(
+            absent.contains("is 0 ") && explicit_zero.contains("is 0 "),
+            "{absent} / {explicit_zero}"
+        );
+        // An untyped send is unaffected by the default.
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::Legacy, json!([{"coin": "MATIC"}]), json!({}));
+        result.expect("the send succeeds");
+        assert_untyped_legacy(&sent[0]);
+    }
+
+    #[test]
+    fn the_switch_makes_an_absent_cap_unrestricted() {
+        let switch = json!({ "max_eth_tx_type_absent_unrestricted": true });
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::Medium, json!([{"coin": "MATIC"}]), switch.clone());
+        result.expect("the send succeeds");
+        assert_type_2(&sent[0]);
+        // An untyped send is unaffected by the switch.
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::Legacy, json!([]), switch.clone());
+        result.expect("the send succeeds");
+        assert_untyped_legacy(&sent[0]);
+        // The switch never overrides a key that is present.
+        assert_refused_without_broadcast(try_broadcast(
+            SwapGasFeePolicy::Medium,
+            platform_with_cap(json!(0)),
+            switch.clone(),
+        ));
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::Medium, platform_with_cap(json!(2)), switch);
+        result.expect("the send succeeds");
+        assert_type_2(&sent[0]);
+    }
+
+    #[test]
+    fn anything_but_the_boolean_true_leaves_the_switch_off() {
+        for off in [json!("true"), json!(1), json!(false), json!(null)] {
+            assert_refused_without_broadcast(try_broadcast(
+                SwapGasFeePolicy::Medium,
+                json!([]),
+                json!({ "max_eth_tx_type_absent_unrestricted": off }),
+            ));
+        }
+    }
+
+    /// The token coin (USDC-PLG20) has no `max_eth_tx_type` of its own; its platform (MATIC) does. The
+    /// precedence of a token's own entry over the platform's is pinned by `resolve_max_eth_tx_type`.
+    #[test]
+    fn a_token_inherits_its_platforms_cap() {
+        assert_refused_without_broadcast(try_broadcast(
+            SwapGasFeePolicy::High,
+            platform_with_cap(json!(0)),
+            json!({}),
+        ));
+        let (result, sent) = try_broadcast(SwapGasFeePolicy::High, platform_with_cap(json!(2)), json!({}));
+        result.expect("the send succeeds");
+        assert_type_2(&sent[0]);
+    }
+}
+
+/// Tests that used to talk to live EVM nodes and now run the same real code against a scripted local
+/// node (see [`scripted_evm_node`]). Do not point them back at a network: the hosts and the Ropsten
+/// chain they used are gone, and a keyless public endpoint refuses the archive reads such tests need.
+mod scripted_node_ports {
+    use super::scripted_evm_node::spawn;
+    use super::*;
+    use mm2_eth::keys::{KeyPair as EthKeyPair, Secret};
+    use serde_json::{json, Value as Json};
+    use std::collections::HashMap;
+
+    const TEST_KEY: &str = "809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f";
+    const TOKEN_ADDR: &str = "a1d6df714f91debf4e0802a542e13067f31b8262";
+    const FEE_BLOCK: u64 = 1_000;
+    const ETH_FEE: &str = "0.000526435076465";
+    const ERC20_FEE: &str = "5.548262548262548262";
+
+    fn fee_addr() -> Address { addr_from_raw_pubkey(test_dex_fee_addr_raw_pubkey()).unwrap() }
+
+    /// The `eth_getTransactionByHash` result a node reports for a legacy transaction mined in `block`.
+    fn rpc_tx(tx: &SignedEthTx, block: u64) -> Json {
+        let to = match &tx.action {
+            Action::Call(addr) => json!(format!("{:#x}", addr)),
+            Action::Create => Json::Null,
+        };
+        json!({
+            "type": "0x0",
+            "hash": format!("{:#x}", tx.tx_hash()),
+            "nonce": format!("{:#x}", tx.nonce),
+            "blockHash": format!("0x{}", "22".repeat(32)),
+            "blockNumber": format!("{:#x}", block),
+            "transactionIndex": "0x0",
+            "from": format!("{:#x}", tx.sender()),
+            "to": to,
+            "value": format!("{:#x}", tx.value),
+            "gas": format!("{:#x}", tx.gas),
+            "gasPrice": format!("{:#x}", tx.gas_price().expect("a legacy transaction")),
+            "input": format!("0x{}", hex::encode(&tx.data)),
+            "v": format!("{:#x}", tx.v),
+            "r": format!("{:#x}", tx.r),
+            "s": format!("{:#x}", tx.s),
+        })
+    }
+
+    /// A dex-fee transaction signed by the test key, as the fee payer would have sent it:
+    /// a plain transfer for ETH, `transfer(fee_addr, amount)` on the token contract for an ERC20.
+    fn fee_tx(erc20: bool) -> SignedEthTx {
+        let (to, value, data) = if erc20 {
+            let amount = wei_from_big_decimal(&ERC20_FEE.parse().unwrap(), 18).unwrap();
+            let data = ERC20_CONTRACT
+                .function("transfer")
+                .unwrap()
+                .encode_input(&[Token::Address(fee_addr()), Token::Uint(amount)])
+                .unwrap();
+            (Address::from_str(TOKEN_ADDR).unwrap(), U256::zero(), data)
+        } else {
+            let amount = wei_from_big_decimal(&ETH_FEE.parse().unwrap(), 18).unwrap();
+            (fee_addr(), amount, vec![])
+        };
+        let secret = Secret::from_str(TEST_KEY).unwrap();
+        let tx = SwapTx::new(
+            SwapFee::Legacy {
+                gas_price: U256::from(50_000_000_000u64),
+            },
+            U256::from(7u64),
+            U256::from(100_000u64),
+            Action::Call(to),
+            value,
+            data,
+        );
+        match tx {
+            SwapTx::Legacy(tx) => tx.sign(&secret, Some(1)),
+            SwapTx::Eip1559(_) => unreachable!("a legacy fee was given"),
+        }
+    }
+
+    /// Runs `validate_fee` for `fee_tx(erc20)` against a node that reports it mined in `FEE_BLOCK`.
+    /// `expected_sender` is `None` for the sender that really signed it.
+    fn validate(erc20: bool, wrong_sender: bool, min_block_number: u64) -> Result<(), String> {
+        let tx = fee_tx(erc20);
+        let reported = rpc_tx(&tx, FEE_BLOCK);
+        let hash = format!("{:#x}", tx.tx_hash());
+        // `validate_fee` reads the transaction by hash and nothing else.
+        let node = spawn(move |method, params| match method {
+            "eth_getTransactionByHash" => {
+                assert_eq!(params[0].as_str().unwrap(), hash);
+                reported.clone()
+            },
+            other => panic!("the scripted node does not serve `{}`", other),
+        });
+        let coin_type = if erc20 {
+            EthCoinType::Erc20 {
+                platform: "ETH".to_string(),
+                token_addr: Address::from_str(TOKEN_ADDR).unwrap(),
+            }
+        } else {
+            EthCoinType::Eth
+        };
+        let (_ctx, coin) = eth_coin_for_test(coin_type, vec![node.url.clone()], None);
+        // As the original tests did: the transaction is fetched back through the node's own answer.
+        let fetched = {
+            use alloy::providers::Provider as _;
+            let hash = alloy::primitives::B256::from_slice(tx.tx_hash().as_bytes());
+            let alloy_tx = block_on(coin.web3.get_transaction_by_hash(hash)).unwrap().unwrap();
+            signed_tx_from_alloy_tx(alloy_tx).unwrap()
+        };
+        let sender = sender_compressed_pub(&fetched);
+        let fetched = fetched.into();
+        let amount: BigDecimal = if erc20 { ERC20_FEE } else { ETH_FEE }.parse().unwrap();
+        let expected_sender: &[u8] = if wrong_sender {
+            test_dex_fee_addr_raw_pubkey()
+        } else {
+            &sender
+        };
+        coin.validate_fee(ValidateFeeArgs {
+            fee_tx: &fetched,
+            expected_sender,
+            fee_addr: test_dex_fee_addr_raw_pubkey(),
+            dex_fee: &DexFee::Standard(amount.into()),
+            min_block_number,
+            uuid: &[],
+        })
+        .wait()
+    }
+
+    // The four tests below used to fetch two real mainnet dex-fee transactions through a hosted
+    // Infura project and a community node; both hosts are gone or keyless-refused. Each now signs an
+    // equivalent fee transaction with the test key and serves it from a scripted node.
+
+    #[test]
+    fn validate_dex_fee_invalid_sender_eth() {
+        let err = validate(false, true, 0).unwrap_err();
+        assert!(err.contains("was sent from wrong address"), "{err}");
+    }
+
+    #[test]
+    fn validate_dex_fee_invalid_sender_erc() {
+        let err = validate(true, true, 0).unwrap_err();
+        assert!(err.contains("was sent from wrong address"), "{err}");
+    }
+
+    #[test]
+    fn validate_dex_fee_eth_confirmed_before_min_block() {
+        // Mined in FEE_BLOCK, so a min_block at or above it must be rejected, one below it accepted.
+        let err = validate(false, false, FEE_BLOCK + 1).unwrap_err();
+        assert!(err.contains("confirmed before min_block"), "{err}");
+        let err = validate(false, false, FEE_BLOCK).unwrap_err();
+        assert!(err.contains("confirmed before min_block"), "{err}");
+        validate(false, false, FEE_BLOCK - 1).unwrap();
+    }
+
+    #[test]
+    fn validate_dex_fee_erc_confirmed_before_min_block() {
+        let err = validate(true, false, FEE_BLOCK + 1).unwrap_err();
+        assert!(err.contains("confirmed before min_block"), "{err}");
+        let err = validate(true, false, FEE_BLOCK).unwrap_err();
+        assert!(err.contains("confirmed before min_block"), "{err}");
+        validate(true, false, FEE_BLOCK - 1).unwrap();
+    }
+
+    /// Several transactions sent at once must each get a distinct, consecutive nonce.
+    ///
+    /// The original sent five transactions at once to a public dev node and only checked that every
+    /// send succeeded and the nonce lookup was logged, which cannot detect a nonce collision on its
+    /// own. The scripted node here behaves like a real one in the one respect that matters: its
+    /// next nonce moves only when a transaction is actually broadcast. Without `NONCE_LOCK` the five
+    /// concurrent sends would all read nonce 0; the assertion is that the nodes saw 0..5 exactly once.
+    #[test]
+    fn test_nonce_lock() {
+        use futures::future::join_all;
+        use mm2_test_helpers::for_tests::wait_for_log;
+
+        let sent: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+        let sent_h = sent.clone();
+        let node = spawn(move |method, params| match method {
+            "parity_nextNonce" | "eth_getTransactionCount" => json!(format!("{:#x}", sent_h.lock().unwrap().len())),
+            "eth_gasPrice" => json!("0x3b9aca00"),
+            "eth_feeHistory" => json!({
+                "oldestBlock": "0x1",
+                "baseFeePerGas": ["0x3b9aca00", "0x3b9aca00"],
+                "gasUsedRatio": [0.5],
+                "reward": [[]],
+            }),
+            "eth_sendRawTransaction" => {
+                let raw = hex::decode(params[0].as_str().unwrap().trim_start_matches("0x")).unwrap();
+                let tx = signed_eth_tx_from_bytes(&raw).unwrap();
+                sent_h.lock().unwrap().push(tx.nonce.as_u64());
+                json!(format!("{:#x}", tx.tx_hash()))
+            },
+            other => panic!("the scripted node does not serve `{}`", other),
+        });
+        let (ctx, coin) = eth_coin_for_test(EthCoinType::Eth, vec![node.url.clone()], None);
+        let futures: Vec<_> = (0..5)
+            .map(|_| {
+                sign_and_send_transaction_impl(
+                    ctx.clone(),
+                    coin.clone(),
+                    1000000000000u64.into(),
+                    Action::Call(coin.my_address),
+                    vec![],
+                    21000.into(),
+                )
+            })
+            .collect();
+        for result in block_on(join_all(futures)) {
+            result.unwrap();
+        }
+        let mut nonces = sent.lock().unwrap().clone();
+        nonces.sort_unstable();
+        assert_eq!(nonces, vec![0, 1, 2, 3, 4], "each transaction must use its own nonce");
+        block_on(wait_for_log(&ctx, 1.1, |line| line.contains("get_addr_nonce…"))).unwrap();
+    }
+
+    /// `get_addr_nonce` asks every configured node and answers with the highest nonce (CRD ch.35 R35.1.12).
+    ///
+    /// The original (`#[ignore]`d, Ropsten via a hosted project key, a gas station that is gone, and a
+    /// real broadcast) only logged the nonce afterwards. What it was after, several URLs of which one
+    /// is dead, is checked here: one node lags and one never answers. The lagging node must not hold the
+    /// answer: the highest value wins in the first round.
+    #[test]
+    fn test_nonce_several_urls() {
+        let lagging_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let lag = lagging_calls.clone();
+        let behind = spawn(move |method, _| match method {
+            "eth_getTransactionCount" => {
+                lag.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                json!("0x4")
+            },
+            other => panic!("the scripted node does not serve `{}`", other),
+        });
+        let ahead = spawn(|method, _| match method {
+            "eth_getTransactionCount" => json!("0x5"),
+            other => panic!("the scripted node does not serve `{}`", other),
+        });
+        // A closed loopback port stands in for the node that never answers.
+        let dead_url = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            format!("http://127.0.0.1:{}", l.local_addr().unwrap().port())
+        };
+        let instances: Vec<Web3Instance> = [behind.url.clone(), ahead.url.clone(), dead_url]
+            .into_iter()
+            .map(|url| Web3Instance {
+                web3: crate::eth::alloy_compat::build_provider(
+                    crate::node_url::listed_nodes("TEST", vec![url]),
+                    vec![],
+                )
+                .unwrap(),
+                is_parity: false,
+            })
+            .collect();
+        let key = EthKeyPair::from_secret_slice(&hex::decode(TEST_KEY).unwrap()).unwrap();
+        let nonce = get_addr_nonce(key.address(), instances).wait().unwrap();
+        assert_eq!(nonce, U256::from(5u64));
+        assert_eq!(
+            lagging_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the lagging node is asked once; its disagreement forces no second round"
+        );
+    }
+
+    /// CRD ch.56 R5, R6, D5 (tests T4, T5, T6): the "fee cap below block base fee" rejection is a typed error,
+    /// and a gas-limit estimation carries the fee fields the transaction is signed with.
+    mod fee_cap_below_base_fee {
+        use super::super::swap_send_path_wire_form::polygon_token;
+        use super::*;
+        use crate::request_fee_scope::with_request_fee_scope;
+        use crate::FeeCapBelowBaseFee;
+        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+
+        // ── T4: the classification, no node ─────────────────────────────────────────────────────────────────
+
+        /// The observed text of CRD ch.56 §56.1A, as the daemon's own log renders the error.
+        const FIELD_LINE: &str = "Transport error: server returned an error response: error code -32000: failed \
+            with 16777216 gas: max fee per gas less than block base fee: address \
+            0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c, maxFeePerGas: 260384509, baseFee: 289502753 \
+            (node https://ethereum.public.blockpi.network)";
+
+        const PHRASES: [&str; 3] = [
+            "max fee per gas less than block base fee",
+            "fee cap less than block base fee",
+            "miner premium is negative",
+        ];
+
+        fn rejection(cap: u64, base: u64, node: Option<&str>) -> FeeCapBelowBaseFee {
+            FeeCapBelowBaseFee {
+                max_fee_per_gas: Some(U256::from(cap)),
+                base_fee: Some(U256::from(base)),
+                node: node.map(str::to_owned),
+            }
+        }
+
+        #[test]
+        fn the_observed_field_line_is_classified_with_both_amounts_and_the_node() {
+            assert_eq!(
+                classify_fee_cap_below_base_fee(FIELD_LINE),
+                Some(rejection(
+                    260_384_509,
+                    289_502_753,
+                    Some("https://ethereum.public.blockpi.network")
+                ))
+            );
+        }
+
+        #[test]
+        fn every_phrasing_is_classified_embedded_in_the_observed_shape_and_bare() {
+            for phrase in PHRASES {
+                let embedded = format!(
+                    "server returned an error response: error code -32000: failed with 16777216 gas: {phrase}: \
+                     address 0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c, maxFeePerGas: 260384509, \
+                     baseFee: 289502753"
+                );
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(&embedded),
+                    Some(rejection(260_384_509, 289_502_753, None)),
+                    "{phrase}"
+                );
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(phrase),
+                    Some(FeeCapBelowBaseFee {
+                        max_fee_per_gas: None,
+                        base_fee: None,
+                        node: None
+                    }),
+                    "bare: {phrase}"
+                );
+                // The node label alone, without the amounts.
+                let labelled = format!("{phrase} (node http://127.0.0.1:8545)");
+                assert_eq!(
+                    classify_fee_cap_below_base_fee(&labelled).and_then(|r| r.node),
+                    Some("http://127.0.0.1:8545".to_owned()),
+                    "{phrase}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_similar_error_about_something_else_is_not_classified() {
+            for text in [
+                "server returned an error response: error code -32000: failed with 16777216 gas: insufficient \
+                 funds for gas * price + value: address 0x8F7248e7a636aEc5b175AA30d742f99504fC2D4c have 0 want \
+                 5000000000000000",
+                "error code -32000: gas required exceeds allowance (0)",
+                "error code -32016: The execution failed due to an exception.",
+                "execution reverted",
+                // The spelling is the node's: a near miss is not a match.
+                "Max Fee Per Gas Less Than Block Base Fee",
+                "max fee per gas less than block",
+                "",
+            ] {
+                assert_eq!(classify_fee_cap_below_base_fee(text), None, "{text}");
+            }
+        }
+
+        #[test]
+        fn the_typed_error_reaches_every_error_type_of_the_coin_layer_unflattened() {
+            let typed = || Web3RpcError::FeeCapBelowBaseFee(classify_fee_cap_below_base_fee(FIELD_LINE).unwrap());
+            let expected = classify_fee_cap_below_base_fee(FIELD_LINE).unwrap();
+            assert!(matches!(WithdrawError::from(typed()), WithdrawError::FeeCapBelowBaseFee(r) if r == expected));
+            assert!(
+                matches!(TradePreimageError::from(typed()), TradePreimageError::FeeCapBelowBaseFee(r) if r == expected)
+            );
+            assert!(matches!(BalanceError::from(typed()), BalanceError::FeeCapBelowBaseFee(r) if r == expected));
+            // The rejection of a Transport text stays what it was.
+            assert!(matches!(
+                TradePreimageError::from(Web3RpcError::Transport("down".to_owned())),
+                TradePreimageError::Transport(_)
+            ));
+        }
+
+        #[test]
+        fn the_user_text_names_both_amounts_and_the_host_only_node_label() {
+            let text = classify_fee_cap_below_base_fee(FIELD_LINE).unwrap().to_string();
+            assert!(text.contains("0.260384509 gwei (260384509 wei)"), "{text}");
+            assert!(text.contains("0.289502753 gwei (289502753 wei)"), "{text}");
+            assert!(
+                text.contains("(node https://ethereum.public.blockpi.network)"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("0x8F7248e7"),
+                "the account address is not repeated: {text}"
+            );
+            // Whole gwei and amounts above a gwei.
+            let text = rejection(3_000_000_000, 12_500_000_001, None).to_string();
+            assert!(text.contains("3 gwei (3000000000 wei)"), "{text}");
+            assert!(text.contains("12.500000001 gwei (12500000001 wei)"), "{text}");
+            // Without the amounts the text still says what happened.
+            assert!(classify_fee_cap_below_base_fee(PHRASES[0])
+                .unwrap()
+                .to_string()
+                .contains("below the block base fee"));
+        }
+
+        #[test]
+        fn the_rpc_error_types_carry_it_as_their_own_variant_with_decimal_wei_in_the_json() {
+            let err = WithdrawError::FeeCapBelowBaseFee(classify_fee_cap_below_base_fee(FIELD_LINE).unwrap());
+            assert_eq!(
+                common::HttpStatusCode::status_code(&err),
+                http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            let json = serde_json::to_value(&err).unwrap();
+            assert_eq!(json["error_type"], "FeeCapBelowBaseFee");
+            assert_eq!(json["error_data"]["max_fee_per_gas"], "260384509");
+            assert_eq!(json["error_data"]["base_fee"], "289502753");
+            let back: WithdrawError = serde_json::from_value(json).unwrap();
+            assert!(matches!(back, WithdrawError::FeeCapBelowBaseFee(_)));
+        }
+
+        // ── the scripted fee market ─────────────────────────────────────────────────────────────────────────
+
+        /// How the base fee moves when an `eth_estimateGas` arrives, before the node validates it.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Rise {
+            /// It does not move.
+            Never,
+            /// It rises by one-eighth, once: the first estimation arrives one block later than the price query.
+            Once,
+            /// It rises by one-eighth at every estimation: no retry can catch up.
+            Always,
+        }
+
+        /// A chain whose base fee is `seen` when the daemon asks for a price, and whose node validates the fee
+        /// fields of every estimation request against the base fee of that moment.
+        struct FeeMarket {
+            seen: AtomicU64,
+            rise: Rise,
+            risen: AtomicBool,
+            /// The `eth_estimateGas` request objects, in arrival order.
+            estimates: Mutex<Vec<Json>>,
+            /// The raw transactions broadcast, and whether a broadcast is rejected as underpriced.
+            sent: Mutex<Vec<Vec<u8>>>,
+            reject_broadcast: bool,
+            gas_price_queries: AtomicUsize,
+            fee_history_queries: AtomicUsize,
+        }
+
+        const BASE_FEE: u64 = 100_000_000_000;
+        const ESTIMATED_GAS: u64 = 60_000;
+        const TIP: u64 = 1_000_000_000;
+
+        impl FeeMarket {
+            fn new(rise: Rise) -> Arc<FeeMarket> {
+                Arc::new(FeeMarket {
+                    seen: AtomicU64::new(BASE_FEE),
+                    rise,
+                    risen: AtomicBool::new(false),
+                    estimates: Mutex::default(),
+                    sent: Mutex::default(),
+                    reject_broadcast: false,
+                    gas_price_queries: AtomicUsize::new(0),
+                    fee_history_queries: AtomicUsize::new(0),
+                })
+            }
+
+            fn rejecting_broadcast() -> Arc<FeeMarket> {
+                Arc::new(FeeMarket {
+                    seen: AtomicU64::new(BASE_FEE),
+                    rise: Rise::Never,
+                    risen: AtomicBool::new(false),
+                    estimates: Mutex::default(),
+                    sent: Mutex::default(),
+                    reject_broadcast: true,
+                    gas_price_queries: AtomicUsize::new(0),
+                    fee_history_queries: AtomicUsize::new(0),
+                })
+            }
+
+            fn node(self: &Arc<Self>) -> super::super::scripted_evm_node::ScriptedNode {
+                let market = self.clone();
+                spawn(move |method, params| market.answer(method, params))
+            }
+
+            fn quantity(value: &Json) -> u64 {
+                match value {
+                    Json::String(s) => u64::from_str_radix(s.trim_start_matches("0x"), 16).unwrap(),
+                    other => other.as_u64().unwrap(),
+                }
+            }
+
+            fn answer(&self, method: &str, params: &Json) -> Json {
+                let hex = |v: u64| json!(format!("{v:#x}"));
+                match method {
+                    "parity_nextNonce" | "eth_getTransactionCount" => hex(self.sent.lock().unwrap().len() as u64),
+                    "eth_gasPrice" => {
+                        self.gas_price_queries.fetch_add(1, AtomicOrdering::SeqCst);
+                        hex(self.seen.load(AtomicOrdering::SeqCst))
+                    },
+                    "eth_feeHistory" => {
+                        self.fee_history_queries.fetch_add(1, AtomicOrdering::SeqCst);
+                        let seen = self.seen.load(AtomicOrdering::SeqCst);
+                        let count = Self::quantity(&params[0]) as usize;
+                        let percentiles = params[2].as_array().map(|p| p.len()).unwrap_or(0);
+                        // The oldest entry is a block old: the mined block of a one-block request is below the
+                        // base fee the pending block carries, as on a chain whose blocks are full.
+                        let mut base_fees = vec![hex(seen); count + 1];
+                        base_fees[0] = hex(seen / 10 * 9);
+                        json!({
+                            "oldestBlock": "0x1",
+                            "baseFeePerGas": base_fees,
+                            "gasUsedRatio": vec![0.5; count],
+                            "reward": vec![vec![hex(TIP); percentiles]; count],
+                        })
+                    },
+                    // The allowance of the swap contract: none.
+                    "eth_call" => json!(format!("0x{}", "00".repeat(32))),
+                    "eth_estimateGas" => {
+                        let request = params[0].clone();
+                        self.estimates.lock().unwrap().push(request.clone());
+                        let base = match self.rise {
+                            Rise::Never => self.seen.load(AtomicOrdering::SeqCst),
+                            Rise::Once if self.risen.swap(true, AtomicOrdering::SeqCst) => {
+                                self.seen.load(AtomicOrdering::SeqCst)
+                            },
+                            Rise::Once | Rise::Always => {
+                                let risen = self.seen.load(AtomicOrdering::SeqCst) / 8 * 9;
+                                self.seen.store(risen, AtomicOrdering::SeqCst);
+                                risen
+                            },
+                        };
+                        // A legacy price counts as both caps.
+                        let cap = request
+                            .get("maxFeePerGas")
+                            .or_else(|| request.get("gasPrice"))
+                            .map(Self::quantity);
+                        match cap {
+                            Some(cap) if cap < base => json!({"__rpc_error": {
+                                "code": -32000,
+                                "message": format!(
+                                    "failed with 16777216 gas: max fee per gas less than block base fee: address \
+                                     {}, maxFeePerGas: {cap}, baseFee: {base}",
+                                    request["from"].as_str().unwrap_or("0x")
+                                ),
+                            }}),
+                            _ => hex(ESTIMATED_GAS),
+                        }
+                    },
+                    "eth_sendRawTransaction" => {
+                        let raw = hex::decode(params[0].as_str().unwrap().trim_start_matches("0x")).unwrap();
+                        if self.reject_broadcast {
+                            let tx = signed_eth_tx_from_bytes(&raw).unwrap();
+                            let (max_fee, _, price) = Self::fees_of(&tx);
+                            let cap = max_fee.or(price).unwrap();
+                            return json!({"__rpc_error": {
+                                "code": -32000,
+                                "message": format!(
+                                    "max fee per gas less than block base fee: address {:#x}, maxFeePerGas: {cap}, \
+                                     baseFee: {}",
+                                    tx.sender(),
+                                    cap + 1
+                                ),
+                            }});
+                        }
+                        self.sent.lock().unwrap().push(raw);
+                        json!(format!("0x{}", "11".repeat(32)))
+                    },
+                    other => panic!("the scripted node does not serve `{}`", other),
+                }
+            }
+
+            /// `(max fee, max priority fee, gas price)` of a signed transaction, whichever form it has.
+            fn fees_of(tx: &SignedEthTx) -> (Option<U256>, Option<U256>, Option<U256>) {
+                match &tx.kind {
+                    TxKind::Legacy { gas_price } => (None, None, Some(*gas_price)),
+                    TxKind::Typed(t) => (t.max_fee_per_gas, t.max_priority_fee_per_gas, t.gas_price),
+                }
+            }
+
+            /// Wei out of a quantity member of a recorded estimation request.
+            fn field(request: &Json, member: &str) -> Option<U256> {
+                request.get(member).map(|v| U256::from(Self::quantity(v)))
+            }
+        }
+
+        fn token(node: &super::super::scripted_evm_node::ScriptedNode, policy: SwapGasFeePolicy) -> (MmArc, EthCoin) {
+            polygon_token(
+                &node.url,
+                policy,
+                Address::from_str("3c499c542cef5e3811e1192ce70d8cc03d5c3359").unwrap(),
+            )
+        }
+
+        fn spender() -> Address { Address::from_str("9130b257d37a52e52f21054c4da3450c72f595ce").unwrap() }
+
+        /// The fee fields of the one signed transaction the node received: `(max fee, max priority fee, price)`.
+        fn signed_fees(market: &FeeMarket) -> (Option<U256>, Option<U256>, Option<U256>) {
+            let sent = market.sent.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly one transaction is broadcast");
+            FeeMarket::fees_of(&signed_eth_tx_from_bytes(&sent[0]).unwrap())
+        }
+
+        fn approve(coin: &EthCoin) -> Result<SignedEthTx, TransactionErr> {
+            block_on(coin.approve_for_v1_payment(spender(), U256::max_value()).compat())
+        }
+
+        // ── T5: the estimation carries the fee fields the transaction is signed with ──────────────────────────
+
+        #[test]
+        fn t5_the_swap_approve_estimate_carries_the_pair_of_the_signed_approve_under_a_tier() {
+            for policy in [SwapGasFeePolicy::Low, SwapGasFeePolicy::Medium, SwapGasFeePolicy::High] {
+                let market = FeeMarket::new(Rise::Never);
+                let node = market.node();
+                let (_ctx, coin) = token(&node, policy);
+                approve(&coin).expect("the approve succeeds");
+
+                let estimates = market.estimates.lock().unwrap().clone();
+                assert_eq!(estimates.len(), 1, "{policy:?}");
+                let (max_fee, priority, price) = signed_fees(&market);
+                assert!(price.is_none(), "a tier signs a type-2 transaction");
+                assert!(max_fee.is_some() && priority.is_some());
+                assert_eq!(FeeMarket::field(&estimates[0], "maxFeePerGas"), max_fee, "{policy:?}");
+                assert_eq!(
+                    FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                    priority,
+                    "{policy:?}"
+                );
+                assert!(estimates[0].get("gasPrice").is_none(), "{policy:?}: no legacy price");
+                // One fee fetch priced both the estimation and the signature.
+                assert_eq!(market.fee_history_queries.load(AtomicOrdering::SeqCst), 1, "{policy:?}");
+            }
+        }
+
+        #[test]
+        fn t5_the_swap_approve_estimate_carries_the_gas_price_of_the_signed_approve_under_the_legacy_policy() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            approve(&coin).expect("the approve succeeds");
+
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            let (max_fee, priority, price) = signed_fees(&market);
+            assert!(
+                max_fee.is_none() && priority.is_none(),
+                "the legacy policy signs an untyped transaction"
+            );
+            assert!(price.is_some());
+            assert_eq!(FeeMarket::field(&estimates[0], "gasPrice"), price);
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+            assert_eq!(
+                market.gas_price_queries.load(AtomicOrdering::SeqCst),
+                1,
+                "one price fetch"
+            );
+        }
+
+        fn allowance_is_short(coin: &EthCoin) -> Result<TradeFee, MmError<TradePreimageError>> {
+            block_on(coin.get_sender_trade_fee(TradePreimageValue::Exact(1.into()), FeeApproxStage::WithoutApprox))
+        }
+
+        #[test]
+        fn t5_the_trade_preimage_approve_estimate_carries_the_tier_pair_or_the_legacy_price() {
+            // A tier: both caps of the tier, which the signing path would take, and no legacy price.
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Medium);
+            allowance_is_short(&coin).expect("the preview succeeds");
+            let tier = block_on(coin.get_eip1559_gas_fee(false)).unwrap().medium;
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxFeePerGas"),
+                Some(tier.max_fee_per_gas)
+            );
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                Some(tier.max_priority_fee_per_gas)
+            );
+            assert!(estimates[0].get("gasPrice").is_none());
+
+            // The legacy policy: the price alone.
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            allowance_is_short(&coin).expect("the preview succeeds");
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert!(FeeMarket::field(&estimates[0], "gasPrice").is_some());
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+        }
+
+        fn taker_fee_preview(coin: &EthCoin) -> Result<TradeFee, MmError<TradePreimageError>> {
+            let dex_fee = u256_to_big_decimal(1_000_000u64.into(), 6).unwrap();
+            block_on(coin.get_fee_to_send_taker_fee(dex_fee, FeeApproxStage::WithoutApprox))
+        }
+
+        #[test]
+        fn t5_the_taker_fee_preview_estimate_carries_the_tier_pair_or_the_legacy_price() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::High);
+            taker_fee_preview(&coin).expect("the preview succeeds");
+            let tier = block_on(coin.get_eip1559_gas_fee(false)).unwrap().high;
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 1);
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxFeePerGas"),
+                Some(tier.max_fee_per_gas)
+            );
+            assert_eq!(
+                FeeMarket::field(&estimates[0], "maxPriorityFeePerGas"),
+                Some(tier.max_priority_fee_per_gas)
+            );
+            assert!(estimates[0].get("gasPrice").is_none());
+
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            taker_fee_preview(&coin).expect("the preview succeeds");
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert!(FeeMarket::field(&estimates[0], "gasPrice").is_some());
+            assert!(estimates[0].get("maxFeePerGas").is_none() && estimates[0].get("maxPriorityFeePerGas").is_none());
+        }
+
+        // ── T6: the field symptom, end to end ─────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn t6_a_legacy_priced_step_is_accepted_on_the_d5_retry_and_signs_with_the_accepted_price() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            approve(&coin).expect("the retry is accepted");
+
+            let estimates = market.estimates.lock().unwrap().clone();
+            assert_eq!(estimates.len(), 2, "one rejected request and one retry");
+            let (first, retry) = (
+                FeeMarket::field(&estimates[0], "gasPrice").unwrap(),
+                FeeMarket::field(&estimates[1], "gasPrice").unwrap(),
+            );
+            let risen = U256::from(BASE_FEE / 8 * 9);
+            assert!(
+                first < risen,
+                "the first price is below the base fee one block later: {first}"
+            );
+            assert!(retry >= risen, "the retry is priced again, afresh: {retry}");
+            // The approve is signed with the price that was accepted, not the rejected one.
+            assert_eq!(signed_fees(&market).2, Some(retry));
+        }
+
+        #[test]
+        fn t6_without_a_retry_the_legacy_priced_step_surfaces_the_typed_error_not_a_transport_error() {
+            let market = FeeMarket::new(Rise::Always);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            let err = approve(&coin).expect_err("the node rejects twice");
+            let TransactionErr::FeeCapBelowBaseFee { rejection, tx } = &err else {
+                panic!("expected the typed fee-cap error, got {err:?}");
+            };
+            assert!(tx.is_none(), "nothing was signed");
+            assert!(rejection.max_fee_per_gas.is_some() && rejection.base_fee.is_some());
+            assert!(rejection.max_fee_per_gas < rejection.base_fee);
+            assert!(
+                rejection.node.as_deref().is_some_and(|node| node.contains("127.0.0.1")),
+                "{rejection:?}"
+            );
+            assert_eq!(market.estimates.lock().unwrap().len(), 2, "exactly one retry");
+            assert!(market.sent.lock().unwrap().is_empty(), "nothing is broadcast");
+
+            // The same two rejections reach a trade preimage and the taker-fee preview typed. The preview
+            // returns it before it looks at any balance: the scripted node serves no balance read.
+            match allowance_is_short(&coin) {
+                Err(e) if matches!(e.get_inner(), TradePreimageError::FeeCapBelowBaseFee(_)) => {},
+                other => panic!("expected the typed error from the trade preimage, got {other:?}"),
+            }
+            match taker_fee_preview(&coin) {
+                Err(e) if matches!(e.get_inner(), TradePreimageError::FeeCapBelowBaseFee(_)) => {},
+                other => panic!("expected the typed error from the taker-fee preview, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn t6_the_eip1559_tier_is_accepted_first_time_because_its_headroom_covers_one_block() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Medium);
+            approve(&coin).expect("the approve succeeds");
+            assert_eq!(market.estimates.lock().unwrap().len(), 1, "no retry was needed");
+            let (max_fee, _, _) = signed_fees(&market);
+            assert!(max_fee.unwrap() >= U256::from(BASE_FEE / 8 * 9));
+        }
+
+        #[test]
+        fn t6_a_reading_cached_in_the_request_scope_is_not_used_for_the_estimate() {
+            let market = FeeMarket::new(Rise::Never);
+            let node = market.node();
+            let (ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            let (cached, estimated_price) = block_on(with_request_fee_scope(&ctx, async {
+                // An order-posting request reads the gas price: the reading is kept in the request and the cache.
+                let cached = coin.get_gas_price().compat().await.unwrap();
+                // Several blocks later the chain is far above that reading.
+                market.seen.store(2 * BASE_FEE, AtomicOrdering::SeqCst);
+                // The approve estimate of the same request is priced afresh.
+                coin.approve_gas_estimate(coin.get_token_address().unwrap(), Bytes::default())
+                    .compat()
+                    .await
+                    .unwrap();
+                let estimates = market.estimates.lock().unwrap().clone();
+                assert_eq!(estimates.len(), 1, "accepted first time");
+                (cached, FeeMarket::field(&estimates[0], "gasPrice").unwrap())
+            }));
+            assert!(estimated_price >= U256::from(2 * BASE_FEE), "{estimated_price}");
+            assert!(cached < estimated_price, "the stale reading {cached} was not sent");
+        }
+
+        #[test]
+        fn t6_a_fee_cap_rejection_discards_the_cached_gas_price_of_the_chain() {
+            let market = FeeMarket::new(Rise::Once);
+            let node = market.node();
+            let (ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+
+            // Request 1 reads and caches the gas price, then its approve estimate is rejected once (D5(a)).
+            block_on(with_request_fee_scope(&ctx, async {
+                coin.get_gas_price().compat().await.unwrap();
+                coin.approve_gas_estimate(coin.get_token_address().unwrap(), Bytes::default())
+                    .compat()
+                    .await
+                    .unwrap();
+            }));
+            let queries = market.gas_price_queries.load(AtomicOrdering::SeqCst);
+            // Request 2 would reuse the cached reading (15 s default) if the rejection had not discarded it.
+            block_on(with_request_fee_scope(&ctx, async {
+                coin.get_gas_price().compat().await.unwrap();
+            }));
+            assert_eq!(
+                market.gas_price_queries.load(AtomicOrdering::SeqCst),
+                queries + 1,
+                "the next order-posting request read the gas price afresh"
+            );
+        }
+
+        // ── the broadcast sites ───────────────────────────────────────────────────────────────────────────────
+
+        #[test]
+        fn a_rejected_swap_broadcast_surfaces_the_typed_error_with_the_signed_transaction_and_is_not_retried() {
+            for policy in [SwapGasFeePolicy::Legacy, SwapGasFeePolicy::Medium] {
+                let market = FeeMarket::rejecting_broadcast();
+                let node = market.node();
+                let (_ctx, coin) = token(&node, policy);
+                let err = block_on(coin.send_to_address(spender(), U256::one()).compat())
+                    .expect_err("the node rejects the broadcast");
+                let TransactionErr::FeeCapBelowBaseFee { rejection, tx } = &err else {
+                    panic!("{policy:?}: expected the typed fee-cap error, got {err:?}");
+                };
+                assert!(tx.is_some(), "{policy:?}: the signed transaction is kept for recovery");
+                assert!(
+                    rejection.max_fee_per_gas.is_some() && rejection.base_fee.is_some(),
+                    "{policy:?}"
+                );
+                assert!(err.get_tx().is_some());
+                assert!(
+                    err.get_plain_text_format().contains("below the block base fee"),
+                    "{policy:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_raw_transaction_send_reports_the_rejection_with_both_amounts() {
+            use crate::eth::eth_market_ops::*;
+            let market = FeeMarket::rejecting_broadcast();
+            let node = market.node();
+            let (_ctx, coin) = token(&node, SwapGasFeePolicy::Legacy);
+            // Any signed transaction will do for the scripted node.
+            let unsigned = UnSignedEthTx {
+                nonce: 0.into(),
+                gas_price: 1_000_000_000u64.into(),
+                gas: 21_000.into(),
+                action: Action::Call(spender()),
+                value: 1.into(),
+                data: vec![],
+            };
+            let secret = Secret::from_str(TEST_KEY).unwrap();
+            let raw = rlp::encode(&unsigned.sign(&secret, Some(137))).to_vec();
+            let err = coin.send_raw_tx_bytes(&raw).wait().expect_err("the node rejects it");
+            assert!(err.contains("(1000000000 wei)"), "{err}");
+            assert!(err.contains("(1000000001 wei)"), "{err}");
+            assert!(err.contains("below the block base fee"), "{err}");
+        }
+    }
+}
+
+/// ch.57 T10 (R57.7A.1, R57.7A.3): an EVM coin's minimum trading volume is exactly one smallest unit,
+/// 10^-decimals, and its minimum transaction amount is exactly zero.
+#[test]
+fn t10_evm_min_trading_vol_is_one_smallest_unit() {
+    let erc20 = || EthCoinType::Erc20 {
+        platform: "ETH".to_string(),
+        token_addr: Address::from_slice(&hex::decode("2b294F029Fde858b2c62184e8390591755521d8E").unwrap()),
+    };
+    // 24 > 19: `10u64.pow(24)` would overflow, so this pins the absence of a machine-integer power.
+    for decimals in [18u8, 8, 6, 24] {
+        for coin_type in [EthCoinType::Eth, erc20()] {
+            let (_ctx, coin) = eth_coin_for_test_with_netid_and_decimals(
+                coin_type,
+                vec!["http://dummy.dummy".into()],
+                None,
+                mm2_net_config::SUPPORTED_NETIDS[0],
+                decimals,
+            );
+            let expected = MmNumber::from(mm2_number::BigRational::new(1.into(), num_bigint_pow10(decimals)));
+            assert_eq!(coin.min_trading_vol(), expected, "decimals {decimals}");
+            assert_eq!(coin.min_tx_amount(), BigDecimal::from(0), "decimals {decimals}");
+        }
+    }
+
+    let (_ctx, coin8) = eth_coin_for_test_with_netid_and_decimals(
+        erc20(),
+        vec!["http://dummy.dummy".into()],
+        None,
+        mm2_net_config::SUPPORTED_NETIDS[0],
+        8,
+    );
+    // The baseline integer-division formula yields 10^-2 for eight decimals; it must not come back.
+    assert_ne!(coin8.min_trading_vol(), MmNumber::from((1, 100)));
+    assert_eq!(coin8.min_trading_vol(), MmNumber::from((1, 100_000_000)));
+}
+
+fn num_bigint_pow10(decimals: u8) -> mm2_number::BigInt {
+    let mut v = mm2_number::BigInt::from(1);
+    for _ in 0..decimals {
+        v *= 10;
+    }
+    v
+}
+
+/// CRD ch.57 R57.2.1 (the node queries of one gas-price resolution are concurrent) and R57.2.6 item 1 (one
+/// resolution per coin and order-posting request), against a scripted node whose queries take time.
+mod gas_price_resolution {
+    use super::scripted_evm_node::spawn;
+    use super::*;
+    use crate::request_fee_scope::with_request_fee_scope;
+    use serde_json::{json, Value as Json};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    const NODE_LATENCY: Duration = Duration::from_millis(400);
+    const GAS_PRICE_WEI: u64 = 1_000_000_000;
+    const BASE_FEE_WEI: u64 = 10_000_000_000;
+
+    #[derive(Default)]
+    struct Calls {
+        gas_price: AtomicUsize,
+        fee_history: AtomicUsize,
+    }
+
+    /// A node answering both gas-price sources after [`NODE_LATENCY`]. A source in `broken` answers a value
+    /// that is not a result of that method.
+    fn node(calls: Arc<Calls>, broken: &'static [&'static str]) -> super::scripted_evm_node::ScriptedNode {
+        spawn(move |method, _params| {
+            std::thread::sleep(NODE_LATENCY);
+            match method {
+                "eth_gasPrice" => {
+                    calls.gas_price.fetch_add(1, Ordering::SeqCst);
+                    if broken.contains(&method) {
+                        return json!("not a price");
+                    }
+                    json!(format!("{:#x}", GAS_PRICE_WEI))
+                },
+                "eth_feeHistory" => {
+                    calls.fee_history.fetch_add(1, Ordering::SeqCst);
+                    if broken.contains(&method) {
+                        return json!("not a fee history");
+                    }
+                    json!({
+                        "oldestBlock": "0x1",
+                        "baseFeePerGas": [format!("{:#x}", BASE_FEE_WEI), format!("{:#x}", BASE_FEE_WEI)],
+                        "gasUsedRatio": [0.5],
+                    })
+                },
+                other => panic!("the scripted node does not serve `{}`", other),
+            }
+        })
+    }
+
+    fn coin_on(node: &super::scripted_evm_node::ScriptedNode) -> EthCoin {
+        eth_coin_for_test(EthCoinType::Eth, vec![node.url.clone()], None).1
+    }
+
+    fn fee_history_price() -> U256 { increase_by_percent(U256::from(BASE_FEE_WEI), BASE_BLOCK_FEE_DIFF_PCT) }
+
+    /// R57.2.1: two queries of N ms each resolve in about N ms, not 2N, and the maximum wins.
+    #[test]
+    fn the_node_queries_are_concurrent_and_the_maximum_wins() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let coin = coin_on(&node);
+
+        let started = Instant::now();
+        let price = block_on(coin.get_gas_price().compat()).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(price, fee_history_price());
+        assert!(price > U256::from(GAS_PRICE_WEI));
+        assert!(
+            elapsed < NODE_LATENCY * 2 - Duration::from_millis(100),
+            "the two queries ran one after another: {elapsed:?}"
+        );
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+    }
+
+    /// R57.2.1: a source that errors is dropped; with none left the resolution fails.
+    #[test]
+    fn a_failing_source_is_dropped_and_no_source_is_an_error() {
+        let calls = Arc::new(Calls::default());
+        let node_without_history = node(calls.clone(), &["eth_feeHistory"]);
+        let price = block_on(coin_on(&node_without_history).get_gas_price().compat()).unwrap();
+        assert_eq!(price, U256::from(GAS_PRICE_WEI));
+
+        let node_without_price = node(calls.clone(), &["eth_gasPrice"]);
+        let price = block_on(coin_on(&node_without_price).get_gas_price().compat()).unwrap();
+        assert_eq!(price, fee_history_price());
+
+        let dead_node = node(calls, &["eth_gasPrice", "eth_feeHistory"]);
+        let err = block_on(coin_on(&dead_node).get_gas_price().compat()).unwrap_err();
+        assert!(matches!(err.into_inner(), Web3RpcError::Internal(m) if m == "All requests failed"));
+    }
+
+    /// R57.2.7: the platform coin and a token of it share one gas-price reading, within a request and across
+    /// requests of the node; outside a request each resolves afresh.
+    #[test]
+    fn a_platform_and_its_token_share_one_gas_price_reading() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let platform = coin_on(&node);
+        let token = eth_coin_for_test(
+            EthCoinType::Erc20 {
+                platform: "ETH".to_owned(),
+                token_addr: Address::from_slice(&[7; 20]),
+            },
+            vec![node.url.clone()],
+            None,
+        )
+        .1;
+        assert_eq!((platform.ticker.as_str(), token.ticker.as_str()), ("ETH", "JST"));
+        // The node whose cache is used: its coins file lists the token under its platform.
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new()
+            .with_conf(json!({"coins": [
+                {"coin": "ETH", "protocol": {"type": "ETH"}},
+                {"coin": "JST", "protocol": {"type": "ERC20", "protocol_data": {"platform": "ETH"}}},
+            ]}))
+            .into_mm_arc();
+
+        // Within one request the token asks first, then the platform.
+        let (from_token, from_platform) = block_on(with_request_fee_scope(&ctx, async {
+            let token_price = token.get_gas_price().compat().await.unwrap();
+            let platform_price = platform.get_gas_price().compat().await.unwrap();
+            (token_price, platform_price)
+        }));
+        assert_eq!((from_token, from_platform), (fee_history_price(), fee_history_price()));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+
+        // A later request, platform first this time: the same reading.
+        block_on(with_request_fee_scope(&ctx, async {
+            platform.get_gas_price().compat().await.unwrap();
+            token.get_gas_price().compat().await.unwrap();
+        }));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+
+        // Outside a request (swap execution) every coin resolves afresh.
+        block_on(async {
+            token.get_gas_price().compat().await.unwrap();
+            platform.get_gas_price().compat().await.unwrap();
+        });
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 3);
+    }
+
+    /// R57.2.6 item 1: inside one order-posting request the sender fee, the receiver fee and the maximum volume
+    /// resolve the gas price once; outside a request (swap execution) every consumer resolves it afresh.
+    #[test]
+    fn the_gas_price_is_resolved_once_per_order_posting_request() {
+        let calls = Arc::new(Calls::default());
+        let node = node(calls.clone(), &[]);
+        let coin = coin_on(&node);
+
+        let prices = block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                let sender = coin.get_gas_price().compat().await.unwrap();
+                let receiver = coin.get_gas_price().compat().await.unwrap();
+                let max_volume = coin.get_gas_price().compat().await.unwrap();
+                (sender, receiver, max_volume)
+            },
+        ));
+        assert_eq!(prices, (fee_history_price(), fee_history_price(), fee_history_price()));
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 1);
+
+        // The same three consumers outside a request, as in swap execution, read three times.
+        block_on(async {
+            for _ in 0..3 {
+                coin.get_gas_price().compat().await.unwrap();
+            }
+        });
+        assert_eq!(calls.gas_price.load(Ordering::SeqCst), 4);
+        assert_eq!(calls.fee_history.load(Ordering::SeqCst), 4);
+    }
 }

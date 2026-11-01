@@ -1,5 +1,5 @@
+use bitcoin::secp256k1::PublicKey;
 use lightning_invoice::Invoice;
-use secp256k1::PublicKey;
 use serde::{de, Serialize, Serializer};
 use std::fmt;
 use std::net::{SocketAddr, ToSocketAddrs};

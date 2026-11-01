@@ -10,7 +10,7 @@ pub(crate) const QRC20_PAYMENT_GAS_LIMIT: u64 = 200_000;
 pub const QRC20_GAS_PRICE_DEFAULT: u64 = 40;
 pub const QRC20_DUST: u64 = 0;
 // Keccak-256 hash of `Transfer` event
-pub(crate) const QRC20_TRANSFER_TOPIC: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+pub const QRC20_TRANSFER_TOPIC: &str = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 pub(crate) const QRC20_PAYMENT_SENT_TOPIC: &str = "ccc9c05183599bd3135da606eaaf535daffe256e9de33c048014cffcccd4ad57";
 pub(crate) const QRC20_RECEIVER_SPENT_TOPIC: &str = "36c177bcb01c6d568244f05261e2946c8c977fa50822f3fa098c470770ee1f3e";
 pub(crate) const QRC20_SENDER_REFUNDED_TOPIC: &str = "1797d500133f8e427eb9da9523aa4a25cb40f50ebc7dbda3c7c81778973f35ba";

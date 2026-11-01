@@ -38,7 +38,7 @@ If markers are absent, treat the entire chapter as the spec.
 
 ## Stub policy (acceptable intermediate state)
 
-If you cannot finish in one pass, leave a compile-clean state with `unimplemented!("ch<N> phase 2: <one-line reason>")` markers for missing methods. Record each stub in `/memories/session/ch<N>-impl-state.md` as `STUB: <module>::<fn> — <why>`. Compile-clean with stubs beats ambitious-but-broken.
+If you cannot finish in one pass, leave a compile-clean state with `unimplemented!("ch<N> phase 2: <one-line reason>")` markers for missing methods. Record each stub in `/memories/session/ch<N>-impl-state.md` as `STUB: <module>::<fn> — <why>`. Compile-clean with stubs beats ambitious-but-broken. A placeholder/fallback value (empty bytes, a zeroed field, `::default()` standing in for missing data) is never an acceptable form of this — `unimplemented!()` is honest about being unfinished; a placeholder value is not.
 
 ## Output (report at end)
 
@@ -47,6 +47,7 @@ If you cannot finish in one pass, leave a compile-clean state with `unimplemente
 - Tests added with pass / fail results.
 - Each `<<<IMPL ... IMPL>>>` block: did you fully address it? If not, what's missing.
 - Anything in the spec that was ambiguous, contradictory, or missing — describe precisely so the dispatcher can refine the chapter for the next pass.
+- Any placeholder/fallback value you introduced for data you didn't have, and why it's safe (provably unreachable — say why) or not (needs a follow-up — say what).
 
 ## Anti-patterns
 
@@ -54,6 +55,7 @@ If you cannot finish in one pass, leave a compile-clean state with `unimplemente
 - Do NOT add new public APIs not implied by the chapter.
 - Do NOT delete existing code unless the chapter explicitly directs it.
 - Do NOT skip tests because they're hard — mark them as TODO with a one-line reason in `ch<N>-impl-state.md`.
+- Do NOT substitute a placeholder/default/empty value for data you don't have at a call site, merely to make a match arm compile and return something — in a funds-moving or state-machine path this is worse than an `unimplemented!()`, because it looks finished. If a state genuinely lacks data a downstream transition needs, that's a design gap in the state's field set, not a value to paper over: stop, follow the stub policy above, and say so explicitly in your report so the dispatcher can decide whether to extend the state or scope a different fix.
 
 ---
 

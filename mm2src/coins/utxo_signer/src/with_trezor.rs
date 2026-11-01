@@ -45,7 +45,7 @@ impl<TxP: TxProvider + Send + Sync> TrezorTxSigner<TxP> {
         let signed_inputs = self
             .params
             .inputs()
-            .zip(signatures.into_iter())
+            .zip(signatures)
             .map(|((unsigned_input, input_info), signature)| match input_info {
                 SpendingInputInfo::P2PKH { address_pubkey, .. } => {
                     p2pkh_spend_with_signature(unsigned_input, address_pubkey, self.fork_id, Bytes::from(signature))

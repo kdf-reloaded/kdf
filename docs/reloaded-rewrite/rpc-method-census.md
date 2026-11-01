@@ -347,6 +347,74 @@ parity diff must preserve every name in each group, not just one.
 
 ---
 
+## Reloaded-routed activation names vs reference versions
+
+Activation method strings that Reloaded routes, checked against the routing of
+the two GLEEC reference release tags (`v2.6.0-beta`, the netid-8762 legacy
+reference, and `v3.0.0-beta`, the reference release of
+[Chapter 55](55-coin-activation-wire-contract.md)). "Routed" means the string
+reaches a handler on the v2 surface or on the legacy surface; a string that is
+not routed answers `NoSuchMethod` there.
+
+| Reloaded method string | Routed in `v2.6.0-beta` | Routed in `v3.0.0-beta` | Reference equivalent |
+| --- | --- | --- | --- |
+| `enable_solana_with_tokens` (routed, refuses in this beta) | no | no | `experimental::enable_solana_with_assets` |
+| `enable_spl` (routed, refuses in this beta) | no | no | `experimental::enable_solana_token` |
+| `enable_lightning` (one-shot) | no | no | none one-shot; `task::enable_lightning::*` |
+| `init_lightning` | no | no | `task::enable_lightning::init` |
+| `init_lightning_status` | no | no | `task::enable_lightning::status` |
+| `init_lightning_user_action` | no | no | `task::enable_lightning::user_action` |
+| `cancel_init_lightning` | no | no | `task::enable_lightning::cancel` |
+| `init_z_coin` | no | no | `task::enable_z_coin::init` |
+| `init_z_coin_status` | no | no | `task::enable_z_coin::status` |
+| `init_z_coin_user_action` | no | no | `task::enable_z_coin::user_action` |
+| `init_utxo` | no | no | `task::enable_utxo::init` |
+| `init_utxo_status` | no | no | `task::enable_utxo::status` |
+| `init_utxo_user_action` | no | no | `task::enable_utxo::user_action` |
+| `init_qtum` | no | no | `task::enable_qtum::init` |
+| `init_qtum_status` | no | no | `task::enable_qtum::status` |
+| `init_qtum_user_action` | no | no | `task::enable_qtum::user_action` |
+| `init_trezor` | no | no | `task::init_trezor::init` |
+| `init_trezor_status` | no | no | `task::init_trezor::status` |
+| `init_trezor_user_action` | no | no | `task::init_trezor::user_action` |
+| `enable_sia` | yes (flat alias of `task::enable_sia::init`) | yes (same) | itself |
+
+Every name in the table except `enable_sia` is a Reloaded-only name. The
+pinned baseline (Chapter 02), which predates the `task::` prefix, already
+routes `init_utxo*`, `init_qtum*`, `init_z_coin*`, `init_trezor*`,
+`enable_lightning`, `enable_solana_with_tokens` and `enable_spl`; the
+`init_lightning*` and `cancel_init_lightning` names are not in the baseline. Neither reference tag routes any of them, and the two tags
+agree on every row. A client written against either
+reference uses the `task::` or `experimental::` equivalent, so Reloaded must
+route that equivalent; keeping the Reloaded-only name as an additional alias is
+a Reloaded extension (Chapter 55 R55.6.3 for the UTXO, QTUM and Trezor aliases;
+[Chapter 40](40-solana-coin.md) and [Chapter 41](41-lightning-network.md) for
+the Solana and Lightning names).
+
+**Disposition (maintainer decision, 2026-10-11).** Every Reloaded-only name in
+the table stays routed, as a documented Reloaded extension, because each one
+adds stability, backward compatibility or uniform naming:
+
+- `init_utxo*`, `init_qtum*`, `init_z_coin*`, `init_trezor*` and
+  `enable_lightning`: routed by the pinned baseline, so clients written against
+  baseline-era KDF keep working (backward compatibility).
+- `init_lightning*` and `cancel_init_lightning`: a Reloaded addition that gives
+  Lightning the same flat `init_<coin>*` names the other task families have
+  (uniform naming).
+- `enable_solana_with_tokens` and `enable_spl`: Reloaded's primary Solana
+  surface ([Chapter 40](40-solana-coin.md)). In this beta both stay routed but
+  refuse every request with "Solana support is not available in this build",
+  because Solana is switched off (`SOLANA_ACTIVATION_AVAILABLE` is `false`,
+  maintainer decision 2026-10-26); it is planned to return in the next beta.
+
+None of these names is routed by `v2.6.0-beta`, so keeping them is not required
+for compatibility with clients written for that tag, and does not conflict with
+it either: such clients use the `task::` equivalents, which Reloaded routes. An
+extension name shall behave exactly as its reference equivalent where one
+exists.
+
+---
+
 ## Distinct method-string totals per surface
 
 | surface | distinct method strings |
@@ -359,3 +427,16 @@ parity diff must preserve every name in each group, not just one.
 | OTHER (`experimental::` incl. children) | 16 |
 | LEGACY | 52 |
 | **TOTAL (all surfaces)** | **232** |
+
+> **Reconciling this total with the 223 figure in
+> [`UPSTREAM-PARITY-GAPS.md`](UPSTREAM-PARITY-GAPS.md).** These are two
+> different, both-correct counts, not a discrepancy: 232 is the *sum of
+> each surface's distinct method-string count*, so any name routed on more
+> than one surface is counted once per surface; 223 is the count of
+> *globally-unique method strings* across the whole census, counting each
+> name once no matter how many surfaces route it. The gap is exactly the 9
+> names that exist on both the LEGACY and V2 surfaces under the same wire
+> string (`active_swaps`, `best_orders`, `get_enabled_coins`,
+> `my_recent_swaps`, `my_swap_status`, `my_tx_history`, `orderbook`,
+> `trade_preimage`, `withdraw` -- each flagged `v1+v2 (envelope)` in its
+> alias-of column above): 232 - 9 = 223.

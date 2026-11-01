@@ -8,6 +8,19 @@
 > surface, and the V1 atomic-swap trait shape, against a platform
 > coin and CW20-style token model that the baseline did not provide.
 
+> **Availability in the beta (maintainer decision 2026-10-26).**
+> Tendermint swap support is not finished, so for the coming beta every
+> Tendermint platform coin and token is wallet-only: while the build
+> constant `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is
+> `false`, activation, balances, addresses and `withdraw` work, while
+> `setprice`, `buy`, `sell` and `start_swap` refuse the coin with the
+> usual "… is wallet only" answer, Tendermint coins decline to match, and an
+> order with a Tendermint coin saved by an earlier version is cancelled
+> at startup. A swap that has already started still completes or is
+> recovered. Swaps are postponed, not dropped: they are planned to
+> return in a later release, and the swap rules of this chapter
+> (§18.3, §18.5) stay the target for that return.
+
 ---
 
 ## 18.0 Executive Summary
@@ -198,10 +211,17 @@ Refund:  *no broadcast required* — the chain auto-refunds on the block in whic
 The auto-refund is the most important divergence from the UTXO and
 EVM HTLC families: there is no `MsgRefundHTLC` message; the funds
 return to the sender automatically once the timelock elapses. The
-project's V1 swap surface, which expects every coin to be able to
-broadcast a refund transaction, is satisfied here by returning a
-sentinel from the refund-method family that the swap state machine
+project's V1 swap surface expects every coin to be able to
+broadcast a refund transaction; for this family the refund-method
+family is to answer with an outcome the swap state machine
 recognises as "no refund tx is needed; the chain will auto-refund".
+
+> **Reloaded status (informative).** Both refund methods answer an
+> error whose text is "Tendermint HTLCs auto-refund on chain; no
+> broadcast required.". The swap state machine does not yet recognise
+> that answer as a distinct outcome; teaching it to is part of the
+> Tendermint swap work planned for a later release (see the
+> availability note at the top of this chapter).
 
 ### 18.3.2 Wire types
 
@@ -281,7 +301,7 @@ methods; the table below lists the eleven that carry behavioural
 intent for this chapter (the remaining five — the two refund
 methods, the swap-contract-address negotiator, the HTLC key-pair
 accessor, and the platform-coin pubkey helper — are either
-auto-refund sentinels or thin delegations to chain-wide
+auto-refund answers or thin delegations to chain-wide
 configuration):
 
 | Method                                  | Behaviour                                                                            |
@@ -294,17 +314,18 @@ configuration):
 | `validate_fee`                         | Decodes the fee tx, asserts denoms and recipients per `DexFee`.                      |
 | `validate_maker_payment`               | Validates the on-chain HTLC for the payment denom against negotiated parameters.    |
 | `validate_taker_payment`               | Validates the on-chain HTLC for the payment denom against negotiated parameters.    |
-| `check_if_my_payment_sent`             | ABCI-query HTLC state by id.                                                         |
+| `check_if_my_payment_sent`             | Searches the coin's own create-HTLC transactions (`tx_search` on `create_htlc.sender`, newest first) and returns the one whose hash lock equals the swap's secret hash. |
 | `search_for_swap_tx_spend_my/other`    | Cosmos-tx-search for a claim-HTLC referencing the HTLC id.                           |
 | `extract_secret`                       | Decode a claim-HTLC from a spend tx and return the `secret` field.                  |
 
-The two refund-method entries return a sentinel that the swap
-state machine recognises as "no refund tx is needed; the chain
-will auto-refund" (§18.3.1). The swap-contract-address negotiator
-returns `None` (Tendermint HTLC does not use a separate
-swap-contract address) and the HTLC key-pair accessor returns
-`None` (the HTLC key pair is the coin's primary signing key, so
-there is no separate pair to surface).
+The two refund-method entries answer the auto-refund error of
+§18.3.1, which the swap state machine does not yet recognise as a
+distinct outcome (see the Reloaded status note there). The
+swap-contract-address negotiator returns `None` (Tendermint HTLC
+does not use a separate swap-contract address) and the HTLC
+key-pair accessor returns the coin's activated key pair (the HTLC
+key pair is the coin's primary signing key; a token returns its
+platform coin's pair).
 
 ### 18.5.1 Pre-burn (`DexFee::WithBurn`) is supported
 
@@ -319,12 +340,43 @@ path. Implementation:
   - `outputs[1] = { address: bech32(dhash160(burn_pubkey)), coins: burn_amount }`.
 - `WithBurn { burn_destination: KmdOpReturn }` → rejected
   (`KmdOpReturn` is a UTXO concept; Tendermint has no OP_RETURN).
-- `NoFee` and `Standard` → single `MsgSend`.
+- `Standard` → single `MsgSend`.
+- `NoFee` → rejected with an internal error; no transaction is
+  built or broadcast.
 
 Tendermint is treated as a V1-only counterparty by the V2
 state-machine driver. The V2 maker- and taker-side trait surfaces
 are not implemented for this chain family in this chapter's scope;
 treatment of a V2 path for Tendermint is out of scope here.
+
+> **Code-quality finding (informative).** Tendermint's fee-send
+> implementation rejects `DexFee::NoFee` with an error rather than
+> completing a fee-less send. The UTXO fee-send implementation
+> ([Chapter 16](16-swap-v2-pre-burn-output.md) family) treats
+> `NoFee` as a zero-output, gracefully-completed case instead of an
+> error. Since 2026-09-27 the factory of
+> [Chapter 16 §16.4](16-swap-v2-pre-burn-output.md) returns `NoFee` for
+> any non-privacy taker whose key equals the network burn key (Chapter
+> 16 R7, Chapter 08 R15C), independent of the burn predicates. So a
+> Tendermint taker can now receive `NoFee`. The legacy state machine
+> never calls fee-send for `NoFee` (Chapter 51 R27), so the rejecting
+> branch is still unreachable through a swap. It stays a latent
+> inconsistency for any other caller. Aligning
+> the Tendermint branch with the UTXO precedent (zero-output success
+> rather than a rejection) is a reasonable fix; not applied here
+> because it is untested production behavior change outside this
+> chapter's documentation-accuracy scope.
+
+### 18.5.2 Trading floors (Spec Reader 2026-10-25; cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+A Tendermint platform coin's, and a Tendermint token's, minimum trading
+volume and minimum transaction amount are both one base unit of that
+coin or token — `10^-decimals` of its own configured decimals — in both
+reference designations (`v2.6.0-beta` and `v3.0.0-beta` agree), and in
+reloaded. The HTLC claim fee is paid by the claiming account, not
+deducted from the HTLC amount, so no fee deduction makes a floor-sized
+Tendermint payment unspendable. Consumption and refusal points:
+[Chapter 60](60-trading-floors-and-refusal-contract.md) (row C1).
 
 ---
 
@@ -538,9 +590,24 @@ The chapter relies on one baseline-state claim:
   `c1d46c0c1592faa0860f704008b2b2381bc3840f`; chapter 31 (the
   central application-context substrate the Tendermint coins
   context is fetched through as a sub-context slot per chapter 31
-  R7); Cosmos SDK proto
+  R7); [Chapter 16](16-swap-v2-pre-burn-output.md) (the `DexFee`
+  descriptor and per-coin burn-policy substrate consumed by
+  §18.5.1); the present-day working tree, re-verified for this
+  revision against `mm2src/coins/tendermint/tendermint_swap_ops.rs`
+  for the `DexFee` match arms bound in §18.5.1, and on 2026-10-26
+  against the same file, `tendermint_token.rs` and the swap state
+  machine for the refund answers, `check_if_my_payment_sent` and the
+  HTLC key-pair accessor (§18.3.1, §18.5); Cosmos SDK proto
   definitions for `Coin`, `MsgSend`, `MsgMultiSend`; ICS-20
   (`ibc.applications.transfer.v1.MsgTransfer`); the Iris-mod HTLC
   proto repository at `https://github.com/irismod/htlc`; BIP-173
   bech32; the CometBFT ABCI-Query and JSON-RPC specifications.
-- *Forbidden corpus:* not consulted.
+- *Forbidden corpus:* not consulted, except for §18.5.2 (added
+  2026-10-25): under the chapter-01 two-team procedure, at the
+  designations `v2.6.0-beta` and `v3.0.0-beta`, only to establish that
+  both report one base unit as a Tendermint coin's and token's minimum
+  trading volume and minimum transaction amount. No discretionary
+  expression was reproduced. §18.5.2 passed the KDF Dirty Gate on
+  2026-10-25 with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  (PASS, measure 0.02, no findings; scope attestation recorded in
+  chapter 60 §60.12).

@@ -337,7 +337,7 @@ async fn stat_collection_loop(ctx: MmArc, interval: f64) {
                             log::error!("Error inserting node {} version {} into db: {}", name, v, e);
                         };
                     },
-                    PeerDecodedResponse::Err(e) => {
+                    PeerDecodedResponse::Err(e) | PeerDecodedResponse::LocalErr(_, e) => {
                         log::error!(
                             "Node {} responded to version request with error: {}",
                             name.clone(),

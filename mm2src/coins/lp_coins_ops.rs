@@ -15,6 +15,50 @@ pub fn is_wallet_only_ticker(ctx: &MmArc, ticker: &str) -> bool {
     let coin_conf = coin_conf(ctx, ticker);
     coin_conf["wallet_only"].as_bool().unwrap_or(false)
 }
+/// Beta switch: whether TRON (TRX, TRC20) coins can be activated.
+///
+/// TRON support is postponed for the current beta. While this is `false`, every activation route for the
+/// family answers [`TRON_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
+/// tests keep running. Set it to `true` to turn the family back on.
+pub const TRON_ACTIVATION_AVAILABLE: bool = false;
+
+/// Beta switch: whether Solana (SOL, SPL tokens) coins can be activated.
+///
+/// Solana support is postponed for the current beta. While this is `false`, every activation route for the
+/// family answers [`SOLANA_NOT_AVAILABLE`] and registers nothing; the coin code stays compiled and its unit
+/// tests keep running. Set it to `true` to turn the family back on.
+pub const SOLANA_ACTIVATION_AVAILABLE: bool = false;
+
+/// Beta switch: whether Tendermint (Cosmos-family) coins and their tokens can take part in orders and swaps.
+///
+/// Swaps for the family are postponed for the current beta. While this is `false`, every Tendermint platform
+/// coin and every Tendermint token reports itself as wallet-only: activation, balances, addresses and
+/// `withdraw` work as before, while `setprice`, `buy`, `sell` and the other ways to start a new trade refuse the
+/// coin with the usual wallet-only error, and an order or request that already exists is not matched. A swap
+/// that has already started is not affected (nothing on the swap, kick-start, refund or recovery path asks
+/// whether a coin is wallet-only). The read-only views (`orderbook`, `best_orders`, `trade_preimage`) look at the
+/// coins-config `wallet_only` flag alone and are not changed by this switch. Set it to `true` to give the family
+/// back the behavior its coins-config entry asks for.
+pub const TENDERMINT_SWAPS_AVAILABLE: bool = false;
+
+/// The refusal text of every TRON activation route while [`TRON_ACTIVATION_AVAILABLE`] is `false`.
+pub const TRON_NOT_AVAILABLE: &str = "TRON support is not available in this build";
+
+/// The refusal text of every Solana activation route while [`SOLANA_ACTIVATION_AVAILABLE`] is `false`.
+pub const SOLANA_NOT_AVAILABLE: &str = "Solana support is not available in this build";
+
+/// The refusal text for a coin protocol whose family is switched off in this build, if it is.
+fn unavailable_protocol_message(protocol: &CoinProtocol) -> Option<&'static str> {
+    match protocol {
+        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } if !TRON_ACTIVATION_AVAILABLE => Some(TRON_NOT_AVAILABLE),
+        #[cfg(not(target_arch = "wasm32"))]
+        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } if !SOLANA_ACTIVATION_AVAILABLE => {
+            Some(SOLANA_NOT_AVAILABLE)
+        },
+        _ => None,
+    }
+}
+
 /// Adds a new currency into the list of currencies configured.
 ///
 /// Returns an error if the currency already exists. Initializing the same currency twice is a bad habit
@@ -56,6 +100,10 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         );
     }
     let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(coins_en["protocol"].clone()));
+
+    if let Some(message) = unavailable_protocol_message(&protocol) {
+        return ERR!("{}", message);
+    }
 
     let coin: MmCoinEnum = match &protocol {
         CoinProtocol::UTXO => {
@@ -106,7 +154,6 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
             let token = SlpToken::new(*decimals, ticker.into(), (*token_id).into(), platform_coin, confs);
             token.into()
         },
-        #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::ZHTLC(_) => return ERR!("ZHTLC protocol is not supported by lp_coininit"),
         #[cfg(not(target_arch = "wasm32"))]
         CoinProtocol::LIGHTNING { .. } => return ERR!("Lightning protocol is not supported by lp_coininit"),
@@ -118,8 +165,14 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         CoinProtocol::SPLTOKEN { .. } => {
             return ERR!("SplToken protocol is not supported by lp_coininit - use enable_spl instead")
         },
+        // The legacy `enable` method activates a Sia-protocol coin synchronously: the Sia members sit at
+        // the top level of the legacy request, next to `coin`, and construction (including the walletd
+        // reachability probe) is the one `task::enable_sia::init` uses (CRD ch.46 R46.6.3, ch.55 R55.4.8).
+        // Any failure is reported through the legacy error envelope.
         CoinProtocol::SIA => {
-            return ERR!("SIA protocol is not supported by lp_coininit - use task::enable_sia::init instead")
+            let request = try_s!(siacoin::SiaCoinActivationRequest::from_legacy_req(req));
+            let priv_key_policy = try_s!(PrivKeyBuildPolicy::detect_priv_key_policy(ctx));
+            try_s!(siacoin::SiaCoin::new(ctx, coins_en.clone(), &request, priv_key_policy).await).into()
         },
         CoinProtocol::TENDERMINT { .. } => {
             return ERR!(
@@ -136,6 +189,10 @@ pub async fn lp_coininit(ctx: &MmArc, ticker: &str, req: &Json) -> Result<MmCoin
         },
         // TRON activation routes through a dedicated builder that populates
         // `EthCoin.tron_api`. P10.2 wiring.
+        // Docs vs reference (CRD ch.55 R55.4.7, D55.5): the reference release rejects TRX and TRC20 on the
+        // legacy path and requires an mmrpc 2.0 activation. Reloaded has no mmrpc 2.0 TRON activation, so
+        // rejecting them here would remove TRON activation entirely; it keeps them as a documented extension
+        // (maintainer decision 2026-10-11). A client written for the reference never sends such a request.
         CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => try_s!(
             crate::eth::tron::tron_coin_from_conf_and_request(ctx, ticker, &coins_en, req, &secret, protocol).await
         )
@@ -177,19 +234,38 @@ pub async fn lp_register_coin(
     if coins.contains_key(&ticker) {
         return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() });
     }
+    cctx.fee_estimate_cache.forget_coin(&ticker);
     coins.insert(ticker.clone(), coin.clone());
     if tx_history {
         lp_spawn_tx_history(ctx.clone(), coin).map_to_mm(RegisterCoinError::Internal)?;
     }
-    let ctx_weak = ctx.weak();
-    spawn(async move { check_balance_update_loop(ctx_weak, ticker).await });
     Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
 fn lp_spawn_tx_history(ctx: MmArc, coin: MmCoinEnum) -> Result<(), String> {
-    try_s!(std::thread::Builder::new()
-        .name(format!("tx_history_{}", coin.ticker()))
-        .spawn(move || coin.process_history_loop(ctx).wait()));
+    // A plain std::thread + futures01 .wait() has no ambient Tokio runtime
+    // context. That was never a problem for the coins that have used this
+    // path so far (their history fetch doesn't need one), but a coin whose
+    // history loop makes async HTTP calls through a Tokio-based client
+    // (e.g. Sia's, built on reqwest) silently fails the moment it tries to
+    // do any I/O: reqwest/tokio's internals require a runtime handle a raw
+    // OS thread doesn't have. This surfaces as the loop never completing
+    // even its first pass -- sync_status stuck at its initial NotStarted
+    // value forever, with nothing to log, because the failure happens
+    // before the loop body ever runs far enough to call
+    // set_history_sync_state even once.
+    //
+    // ETH already hit this and worked around it by routing its own history
+    // loop through `spawn` (the shared Tokio runtime, CORE) instead of this
+    // function (see start_history_background_fetching in
+    // eth_with_tokens_activation.rs) -- do the same here, generically, so
+    // every coin gets a runtime-aware spawn rather than only the one coin
+    // that happened to need it worked around first. This mirrors the
+    // wasm32 branch below, which already spawns onto its own executor
+    // rather than a raw thread.
+    common::executor::spawn(async move {
+        let _res = coin.process_history_loop(ctx).compat().await;
+    });
     Ok(())
 }
 #[cfg(target_arch = "wasm32")]
@@ -455,10 +531,51 @@ pub async fn send_raw_transaction(ctx: MmArc, req: Json) -> Result<Response<Vec<
         Ok(None) => return ERR!("No such coin: {}", ticker),
         Err(err) => return ERR!("!lp_coinfind({}): {}", ticker, err),
     };
-    let bytes_string = try_s!(req["tx_hex"].as_str().ok_or("No 'tx_hex' field"));
-    let res = try_s!(coin.send_raw_tx(bytes_string).compat().await);
+    let res = match try_s!(select_raw_tx_carrier(&req)) {
+        RawTxCarrier::Hex(hex) => try_s!(coin.send_raw_tx(hex).compat().await),
+        // A JSON carrier is already the coin's native serialised form, so its
+        // bytes go to the bytes-taking half of the trait rather than through
+        // the hex layer `send_raw_tx` exists to strip.
+        RawTxCarrier::Json(tx_json) => {
+            let bytes = try_s!(json::to_vec(tx_json));
+            try_s!(coin.send_raw_tx_bytes(&bytes).compat().await)
+        },
+    };
     let body = try_s!(json::to_vec(&json!({ "tx_hash": res })));
     Ok(try_s!(Response::builder().body(body)))
+}
+
+/// Which of `send_raw_transaction`'s two accepted transaction carriers a
+/// request selected (CRD ch.20 R-W8).
+#[derive(Debug, PartialEq)]
+enum RawTxCarrier<'a> {
+    /// `tx_hex`: hex, for every coin whose transactions have a binary wire form.
+    Hex(&'a str),
+    /// `tx_json`: the transaction's native JSON object, for a coin whose native
+    /// serialisation is JSON text -- currently Sia only.
+    Json(&'a Json),
+}
+
+/// Pick the carrier a `send_raw_transaction` request supplied, per ch.20 R-W8.
+///
+/// `tx_hex` wins whenever it is present, so a caller that echoes back a whole
+/// transaction-details object -- which for Sia carries both (ch.20 R-W6/R-W7) --
+/// broadcasts the same transaction whichever coin it holds. A present-but-
+/// malformed carrier is an error rather than a reason to fall through to the
+/// other one: falling through would broadcast a transaction the caller did not
+/// select. A `null` counts as absent, so that echoing an object whose optional
+/// carrier was serialised as `null` behaves like omitting it.
+fn select_raw_tx_carrier(req: &Json) -> Result<RawTxCarrier<'_>, String> {
+    let present = |field| req.get(field).filter(|value| !value.is_null());
+    match (present("tx_hex"), present("tx_json")) {
+        (Some(tx_hex), _) => match tx_hex.as_str() {
+            Some(tx_hex) => Ok(RawTxCarrier::Hex(tx_hex)),
+            None => ERR!("'tx_hex' must be a string"),
+        },
+        (None, Some(tx_json)) if tx_json.is_object() => Ok(RawTxCarrier::Json(tx_json)),
+        (None, Some(_)) => ERR!("'tx_json' must be an object"),
+        (None, None) => ERR!("Request must carry either a 'tx_hex' or a 'tx_json' field"),
+    }
 }
 #[derive(Deserialize)]
 struct MyTxHistoryRequest {
@@ -576,7 +693,10 @@ pub async fn disable_coin(ctx: &MmArc, ticker: &str) -> Result<(), String> {
     let coins_ctx = try_s!(CoinsContext::from_ctx(ctx));
     let mut coins = coins_ctx.coins.lock().await;
     match coins.remove(ticker) {
-        Some(_) => Ok(()),
+        Some(_) => {
+            coins_ctx.fee_estimate_cache.forget_coin(ticker);
+            Ok(())
+        },
         None => ERR!("{} is disabled already", ticker),
     }
 }
@@ -637,32 +757,6 @@ pub async fn show_priv_key(ctx: MmArc, req: Json) -> Result<Response<Vec<u8>>, S
     })));
     Ok(try_s!(Response::builder().body(res)))
 }
-pub async fn check_balance_update_loop(ctx: MmWeak, ticker: String) {
-    let mut current_balance = None;
-    loop {
-        Timer::sleep(10.).await;
-        let ctx = match MmArc::from_weak(&ctx) {
-            Some(ctx) => ctx,
-            None => return,
-        };
-
-        match lp_coinfind(&ctx, &ticker).await {
-            Ok(Some(coin)) => {
-                let balance = match coin.my_spendable_balance().compat().await {
-                    Ok(balance) => balance,
-                    Err(_) => continue,
-                };
-                if Some(&balance) != current_balance.as_ref() {
-                    let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
-                    coins_ctx.balance_updated(&coin, &balance).await;
-                    current_balance = Some(balance);
-                }
-            },
-            Ok(None) => break,
-            Err(_) => continue,
-        }
-    }
-}
 pub async fn register_balance_update_handler(
     ctx: MmArc,
     handler: Box<dyn BalanceTradeFeeUpdatedHandler + Send + Sync>,
@@ -692,19 +786,27 @@ pub fn update_coins_config(mut config: Json) -> Result<Json, String> {
                     .as_str()
                     .ok_or(ERRL!("Expected etomic as string, found {:?}", etomic))?;
                 if etomic == "0x0000000000000000000000000000000000000000" {
-                    CoinProtocol::ETH { chain_id: None }
+                    // This legacy-upgrade path never knows a chain_id, so build the
+                    // wire shape directly instead of round-tripping
+                    // `CoinProtocol::ETH { chain_id: None }` through serde: the
+                    // adjacently-tagged derive emits `"protocol_data": {"chain_id":
+                    // null}` for that value (chain_id's `#[serde(default)]` only
+                    // affects deserialization, not serialization), which is a
+                    // config-shape regression a pre-chain_id `coins` file never
+                    // had and callers do not expect from this upgrade step.
+                    json!({ "type": "ETH" })
                 } else {
                     let contract_address = etomic.to_owned();
-                    CoinProtocol::ERC20 {
+                    json::to_value(CoinProtocol::ERC20 {
                         platform: "ETH".into(),
                         contract_address,
-                    }
+                    })
+                    .map_err(|e| ERRL!("Error {:?} on process {:?}", e, coin_as_str))?
                 }
             },
-            _ => CoinProtocol::UTXO,
+            _ => json::to_value(CoinProtocol::UTXO).map_err(|e| ERRL!("Error {:?} on process {:?}", e, coin_as_str))?,
         };
 
-        let protocol = json::to_value(protocol).map_err(|e| ERRL!("Error {:?} on process {:?}", e, coin_as_str))?;
         coin.insert("protocol".into(), protocol);
     }
 
@@ -734,56 +836,6 @@ pub async fn convert_utxo_address(ctx: MmArc, req: Json) -> Result<Response<Vec<
         "result": addr.to_string(),
     })));
     Ok(try_s!(Response::builder().body(response)))
-}
-pub fn address_by_coin_conf_and_pubkey_str(
-    ctx: &MmArc,
-    coin: &str,
-    conf: &Json,
-    pubkey: &str,
-    addr_format: UtxoAddressFormat,
-) -> Result<String, String> {
-    let protocol: CoinProtocol = try_s!(CoinProtocol::from_conf_json(conf["protocol"].clone()));
-    match protocol {
-        CoinProtocol::ERC20 { .. } | CoinProtocol::ETH { .. } => eth::addr_from_pubkey_str(pubkey),
-        CoinProtocol::UTXO | CoinProtocol::QTUM | CoinProtocol::QRC20 { .. } | CoinProtocol::BCH { .. } => {
-            utxo::address_by_conf_and_pubkey_str(coin, conf, pubkey, addr_format)
-        },
-        CoinProtocol::SLPTOKEN { platform, .. } => {
-            let platform_conf = coin_conf(ctx, &platform);
-            if platform_conf.is_null() {
-                return ERR!("platform {} conf is null", platform);
-            }
-            // TODO is there any way to make it better without duplicating the prefix in the SLP conf?
-            let platform_protocol: CoinProtocol =
-                try_s!(CoinProtocol::from_conf_json(platform_conf["protocol"].clone()));
-            match platform_protocol {
-                CoinProtocol::BCH { slp_prefix } => {
-                    slp_addr_from_pubkey_str(pubkey, &slp_prefix).map_err(|e| ERRL!("{}", e))
-                },
-                _ => ERR!("Platform protocol {:?} is not BCH", platform_protocol),
-            }
-        },
-        #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::LIGHTNING { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not implemented for lightning protocol yet!")
-        },
-        #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::SOLANA | CoinProtocol::SPLTOKEN { .. } => {
-            ERR!("Solana pubkey is the public address - you do not need to use this rpc call.")
-        },
-        #[cfg(not(target_arch = "wasm32"))]
-        CoinProtocol::ZHTLC(_) => ERR!("address_by_coin_conf_and_pubkey_str is not supported for ZHTLC protocol!"),
-        CoinProtocol::SIA => ERR!("address_by_coin_conf_and_pubkey_str is not supported for SIA protocol!"),
-        CoinProtocol::TENDERMINT { .. } | CoinProtocol::TENDERMINTTOKEN { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for Tendermint protocol!")
-        },
-        CoinProtocol::TRX { .. } | CoinProtocol::TRC20 { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for TRON protocol!")
-        },
-        CoinProtocol::NFT { .. } => {
-            ERR!("address_by_coin_conf_and_pubkey_str is not supported for NFT protocol - use enable_nft instead!")
-        },
-    }
 }
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn load_history_from_file_impl<T>(coin: &T, ctx: &MmArc) -> TxHistoryFut<Vec<TransactionDetails>>
@@ -901,4 +953,121 @@ where
         Ok(())
     };
     Box::new(fut.boxed().compat())
+}
+
+#[cfg(test)]
+mod send_raw_transaction_carrier_tests {
+    //! `send_raw_transaction`'s carrier selection (CRD ch.20 R-W8, T-W2/T-W3).
+    //! Only the selection is exercised here: the broadcast itself needs an
+    //! activated coin and a live node.
+
+    use super::*;
+
+    #[test]
+    fn a_hex_carrier_is_selected() {
+        let req = json!({ "coin": "SC", "tx_hex": "7b7d" });
+        assert_eq!(select_raw_tx_carrier(&req), Ok(RawTxCarrier::Hex("7b7d")));
+    }
+
+    #[test]
+    fn a_json_carrier_is_selected_when_hex_is_absent() {
+        let req = json!({ "coin": "SC", "tx_json": { "minerFee": "0" } });
+        let expected = json!({ "minerFee": "0" });
+        assert_eq!(select_raw_tx_carrier(&req), Ok(RawTxCarrier::Json(&expected)));
+    }
+
+    /// T-W2: a caller that echoes back a whole transaction-details object hands
+    /// in both carriers. `tx_hex` wins, so the same transaction is broadcast
+    /// whichever coin the object came from.
+    #[test]
+    fn hex_wins_when_both_carriers_are_present() {
+        let req = json!({ "coin": "SC", "tx_hex": "7b7d", "tx_json": { "minerFee": "0" } });
+        assert_eq!(select_raw_tx_carrier(&req), Ok(RawTxCarrier::Hex("7b7d")));
+    }
+
+    /// T-W2: a malformed selected carrier is an error, never a reason to fall
+    /// through to the other one -- falling through would broadcast a
+    /// transaction the caller did not select.
+    #[test]
+    fn a_malformed_hex_carrier_does_not_fall_through_to_json() {
+        let req = json!({ "coin": "SC", "tx_hex": 42, "tx_json": { "minerFee": "0" } });
+        assert!(select_raw_tx_carrier(&req).is_err());
+    }
+
+    /// T-W3: neither carrier present fails validation, naming both fields.
+    #[test]
+    fn neither_carrier_is_a_validation_error_naming_both() {
+        let err = select_raw_tx_carrier(&json!({ "coin": "SC" })).expect_err("neither carrier is supplied");
+        assert!(err.contains("tx_hex"), "{err}");
+        assert!(err.contains("tx_json"), "{err}");
+    }
+
+    /// A `null` counts as absent, so echoing an object whose optional carrier
+    /// serialised as `null` behaves like omitting it rather than failing.
+    #[test]
+    fn a_null_carrier_counts_as_absent() {
+        let req = json!({ "coin": "SC", "tx_hex": null, "tx_json": { "minerFee": "0" } });
+        let expected = json!({ "minerFee": "0" });
+        assert_eq!(select_raw_tx_carrier(&req), Ok(RawTxCarrier::Json(&expected)));
+    }
+
+    #[test]
+    fn a_non_object_json_carrier_is_rejected() {
+        let req = json!({ "coin": "SC", "tx_json": "not an object" });
+        assert!(select_raw_tx_carrier(&req).is_err());
+    }
+}
+
+#[cfg(test)]
+mod postponed_family_switch_tests {
+    use super::*;
+
+    /// Flipping a family switch is a deliberate change: this test fails when someone does, and must be updated in
+    /// the same commit that turns the family back on (and removes the refusal tests that go with it).
+    #[test]
+    fn postponed_families_are_switched_off_for_this_beta() {
+        assert!(!TRON_ACTIVATION_AVAILABLE);
+        assert!(!SOLANA_ACTIVATION_AVAILABLE);
+        assert!(!TENDERMINT_SWAPS_AVAILABLE);
+        assert_eq!(TRON_NOT_AVAILABLE, "TRON support is not available in this build");
+        assert_eq!(SOLANA_NOT_AVAILABLE, "Solana support is not available in this build");
+    }
+
+    #[test]
+    fn tron_protocols_are_refused_while_the_switch_is_off() {
+        let trx = CoinProtocol::TRX {
+            network: crate::eth::tron::Network::Mainnet,
+        };
+        let trc20 = CoinProtocol::TRC20 {
+            platform: "TRX".to_owned(),
+            contract_address: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t".to_owned(),
+        };
+        assert_eq!(unavailable_protocol_message(&trx), Some(TRON_NOT_AVAILABLE));
+        assert_eq!(unavailable_protocol_message(&trc20), Some(TRON_NOT_AVAILABLE));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solana_protocols_are_refused_while_the_switch_is_off() {
+        let spl = CoinProtocol::SPLTOKEN {
+            platform: "SOL".to_owned(),
+            token_contract_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_owned(),
+            decimals: 6,
+        };
+        assert_eq!(
+            unavailable_protocol_message(&CoinProtocol::SOLANA),
+            Some(SOLANA_NOT_AVAILABLE)
+        );
+        assert_eq!(unavailable_protocol_message(&spl), Some(SOLANA_NOT_AVAILABLE));
+    }
+
+    #[test]
+    fn other_protocols_are_not_affected() {
+        assert_eq!(unavailable_protocol_message(&CoinProtocol::UTXO), None);
+        assert_eq!(unavailable_protocol_message(&CoinProtocol::QTUM), None);
+        assert_eq!(
+            unavailable_protocol_message(&CoinProtocol::ETH { chain_id: Some(1) }),
+            None
+        );
+    }
 }

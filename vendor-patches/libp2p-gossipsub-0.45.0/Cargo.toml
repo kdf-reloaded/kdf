@@ -1,0 +1,84 @@
+# VENDOR PATCH of libp2p-gossipsub 0.45.0, taken verbatim from
+# KomodoPlatform/rust-libp2p tag k-0.52.12 (commit 8bcc1fda) and patched for
+# GHSA-gc42-3jg7-rxr2 / GHSA-xqmp-fxgv-xvq5 -- a remotely reachable panic on a
+# crafted PRUNE backoff. See PATCH-NOTES.md next to this file.
+#
+# The fork declares these deps via `[workspace.dependencies]`; vendored here as
+# explicit git deps on the SAME fork tag so Cargo unifies them with the copies
+# the root `libp2p = { git = ..., tag = "k-0.52.12" }` pin already resolves.
+# They must stay pinned to that tag: a mismatch would produce two incompatible
+# copies of libp2p-core and fail to compile.
+[package]
+name = "libp2p-gossipsub"
+edition = "2021"
+rust-version = "1.65.0"
+description = "Gossipsub protocol for libp2p"
+version = "0.45.0"
+authors = ["Age Manning <Age@AgeManning.com>"]
+license = "MIT"
+repository = "https://github.com/libp2p/rust-libp2p"
+keywords = ["peer-to-peer", "libp2p", "networking"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+wasm-bindgen = ["getrandom/js", "instant/wasm-bindgen"]
+
+[dependencies]
+asynchronous-codec = "0.6"
+base64 = "0.21.2"
+byteorder = "1.3.4"
+bytes = "1.4"
+either = "1.5"
+fnv = "1.0.7"
+futures = "0.3.28"
+futures-ticker = "0.0.3"
+getrandom = "0.2.9"
+hex_fmt = "0.3.0"
+instant = "0.1.12"
+libp2p-core = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+libp2p-identity = "0.2.1"
+libp2p-swarm = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+log = "0.4.19"
+quick-protobuf = "0.8"
+quick-protobuf-codec = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+rand = "0.8"
+regex = "1.8.3"
+serde = { version = "1", optional = true, features = ["derive"] }
+sha2 = "0.10.7"
+smallvec = "1.6.1"
+unsigned-varint = { version = "0.7.0", features = ["asynchronous_codec"] }
+void = "1.0.2"
+
+# Metrics dependencies
+prometheus-client = "0.21.0"
+
+[dev-dependencies]
+async-std = { version = "1.6.3", features = ["unstable"] }
+env_logger = "0.10.0"
+hex = "0.4.2"
+libp2p-core = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+libp2p-yamux = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+libp2p-noise = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+libp2p-swarm-test = { git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+quickcheck = { package = "quickcheck-ext", git = "https://github.com/KomodoPlatform/rust-libp2p.git", tag = "k-0.52.12" }
+# Standalone-test support: `libp2p-swarm-test` calls `Keypair::generate_ed25519`
+# and the tests below call `PeerId::random()`, both of which are feature-gated.
+# In the root workspace `mm2_p2p` already enables `rand`, so feature unification
+# covers it there; building this crate on its own it has to be asked for here.
+libp2p-identity = { version = "0.2.1", features = ["ed25519", "rand"] }
+
+# Passing arguments to the docsrs builder in order to properly document cfg's.
+# More information: https://docs.rs/about/builds#cross-compiling
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+rustc-args = ["--cfg", "docsrs"]
+
+# Vendoring artifact only. In the fork this crate is a git dependency, so Cargo
+# never surfaced its warnings; as a local path crate it does. These five are all
+# pre-existing upstream 0.45.0 issues, unrelated to the security patch -- allowed
+# rather than "fixed" so the vendored source stays diffable against the fork.
+[lints.rust]
+dead_code = "allow"
+unused_doc_comments = "allow"
+mismatched_lifetime_syntaxes = "allow"

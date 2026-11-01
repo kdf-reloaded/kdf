@@ -140,6 +140,7 @@ impl AsRef<dyn ZRpcOps + Send + Sync> for UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Native(native) => native,
             UtxoRpcClientEnum::Electrum(_) => panic!("Electrum client does not support ZRpcOps"),
+            UtxoRpcClientEnum::LightWalletD(_) => panic!("lightwalletd client does not support ZRpcOps"),
         }
     }
 }

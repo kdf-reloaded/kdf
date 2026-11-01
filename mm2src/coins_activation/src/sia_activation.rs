@@ -4,11 +4,12 @@ use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoin
                              InitStandaloneCoinInitialStatus, InitStandaloneCoinTaskHandle,
                              InitStandaloneCoinTaskManagerShared};
 use async_trait::async_trait;
-use coins::coin_balance::{EnableCoinBalance, IguanaWalletBalance};
+use coins::coin_balance::{EnableCoinBalance, EnableCoinBalanceOps, EnableCoinScanPolicy, IguanaWalletBalance};
+use coins::hd_pubkey::RpcTaskXPubExtractor;
 use coins::siacoin::{SiaCoin, SiaCoinActivationRequest, SiaCoinNewError};
-use coins::{BalanceError, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
-use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
-use crypto::CryptoCtxError;
+use coins::{BalanceError, CoinBalance, CoinProtocol, MarketCoinOps, PrivKeyBuildPolicy, RegisterCoinError};
+use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
+use crypto::{CryptoCtx, CryptoCtxError};
 use derive_more::Display;
 use futures::compat::Future01CompatExt;
 use mm2_core::mm_ctx::MmArc;
@@ -74,8 +75,6 @@ pub enum SiaInitError {
     CoinIsAlreadyActivated {
         ticker: String,
     },
-    #[display(fmt = "Private key is not allowed: {}", _0)]
-    PrivKeyNotAllowed(String),
     #[display(fmt = "Initialization task has timed out {:?}", duration)]
     TaskTimedOut {
         duration: Duration,
@@ -85,12 +84,37 @@ pub enum SiaInitError {
     Internal(String),
 }
 
+/// The `MM2.json` key of the compatibility switch for the shape of `wallet_balance` under an HD wallet.
+const SIA_SINGLE_ADDRESS_BALANCE_KEY: &str = "sia_activation_single_address_balance";
+
+/// Whether `wallet_balance` is always reported in the single-address `"Iguana"` form (CRD ch.46 R46.2.4).
+///
+/// Docs vs reference: the public docs do not document Sia activation at all. The reference always reports
+/// the single-address `"Iguana"` form, also under an HD wallet. Reloaded deliberately reports the HD
+/// per-account report under an HD wallet instead, so that a Sia coin shows its balance in the same shape
+/// as the other coins of an HD wallet (maintainer decision 2026-10-11, R46.2.4). Both shapes carry the
+/// same single address and balance, and a client tells them apart by `wallet_type`. Setting this switch to
+/// `true` restores the reference behavior: `wallet_balance` is then always the single-address form, with
+/// `address` being the single derived address under HD. Under the single-key policy the switch changes
+/// nothing, because that form is the only one.
+fn single_address_balance_requested(conf: &Json) -> bool {
+    conf[SIA_SINGLE_ADDRESS_BALANCE_KEY].as_bool() == Some(true)
+}
+
+/// The single-address `wallet_balance` of R46.2.4.
+fn single_address_wallet_balance(address: String, balance: CoinBalance) -> EnableCoinBalance {
+    EnableCoinBalance::Iguana(IguanaWalletBalance { address, balance })
+}
+
 impl SiaInitError {
     fn from_new_err(err: SiaCoinNewError, ticker: String) -> Self {
         match err {
-            SiaCoinNewError::UnsupportedPrivKeyPolicy => SiaInitError::PrivKeyNotAllowed(
-                "Sia supports only the single-key and single-address HD signing policies".to_string(),
-            ),
+            // A signing policy other than the single-key and the HD one is a task-level
+            // `CoinCreationError`, not a dedicated key-policy discriminant (CRD ch.46 R46.1.3, R46.5.2).
+            SiaCoinNewError::UnsupportedPrivKeyPolicy => SiaInitError::CoinCreationError {
+                ticker,
+                error: "Sia supports only the single-key and single-address HD signing policies".to_string(),
+            },
             other => SiaInitError::CoinCreationError {
                 ticker,
                 error: other.to_string(),
@@ -136,10 +160,12 @@ impl From<SiaInitError> for InitStandaloneCoinError {
             SiaInitError::CoinIsAlreadyActivated { ticker } => {
                 InitStandaloneCoinError::CoinIsAlreadyActivated { ticker }
             },
-            SiaInitError::PrivKeyNotAllowed(e) => InitStandaloneCoinError::PrivKeyNotAllowed(e),
             SiaInitError::TaskTimedOut { duration } => InitStandaloneCoinError::TaskTimedOut { duration },
+            // The coin was built (walletd answered the probe) but the height or the balance could not be
+            // read afterwards (CRD ch.46 R46.5.2). The public catalogue's `CouldNotGetBalance` and
+            // `CouldNotGetBlockCount` names never reach the wire (R46.5.3).
             SiaInitError::CouldNotGetBalance(e) | SiaInitError::CouldNotGetBlockCount(e) => {
-                InitStandaloneCoinError::Internal(e)
+                InitStandaloneCoinError::Transport(e)
             },
             SiaInitError::Internal(e) => InitStandaloneCoinError::Internal(e),
         }
@@ -191,7 +217,7 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
 
     async fn get_activation_result(
         &self,
-        _ctx: MmArc,
+        ctx: MmArc,
         task_handle: &SiaRpcTaskHandle,
         _activation_request: &Self::ActivationRequest,
     ) -> MmResult<Self::ActivationResult, SiaInitError> {
@@ -204,8 +230,46 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
             .await
             .map_to_mm(SiaInitError::CouldNotGetBlockCount)?;
 
-        let balance = self.my_balance().compat().await.mm_err(Into::into)?;
-        let address = self.my_address().map_to_mm(SiaInitError::Internal)?;
+        // `wallet_balance`'s shape is dictated by ch.46 R46.2.4: the single-address
+        // ("Iguana") `{address, balance}` report or, for an HD wallet, the generic
+        // per-account/per-address balance report -- the same `EnableCoinBalanceOps`
+        // blanket impl UTXO/ETH's own activation results use, which branches on
+        // `self.derivation_method()` (CRD ch.20 D1). `xpub_extractor` is
+        // constructed the same way UTXO/ETH's own `get_activation_result` construct
+        // theirs, but for Sia it is *always* `None` in practice: a Trezor priv-key
+        // policy is rejected long before this point (R-T3, ch.46 R46.1.3), so
+        // `crypto_ctx.hw_ctx()` can never be `Some` for an activated `SiaCoin`.
+        let xpub_extractor = RpcTaskXPubExtractor::new_unchecked(&ctx, task_handle, sia_xpub_extractor_rpc_statuses());
+        let crypto_ctx = CryptoCtx::from_ctx(&ctx).mm_err(|error| SiaInitError::Internal(error.to_string()))?;
+        let xpub_extractor = if crypto_ctx.hw_ctx().is_some() {
+            Some(&xpub_extractor)
+        } else {
+            None
+        };
+
+        // Activation itself never grows the HD wallet past account 0 (ch.46
+        // R46.1.3: only a single-address HD-account state reaches a successfully
+        // activated Sia coin) -- `EnableCoinScanPolicy::default()`
+        // (`ScanIfNewWallet`) only scans a *newly created* account's addresses up
+        // to its gap limit; it never creates a second account, and `SiaHDWallet`
+        // has no persistent account storage to have grown one from a prior run
+        // (`sia_hd_wallet.rs` module doc comment), so the "new wallet" branch is
+        // the only one ever taken here.
+        let wallet_balance = if single_address_balance_requested(&ctx.conf) {
+            // Compatibility switch `sia_activation_single_address_balance`: the reference's
+            // single-address report, also under HD (see `single_address_balance_requested`).
+            let address = self.my_address().map_to_mm(SiaInitError::Internal)?;
+            let balance = self
+                .my_balance()
+                .compat()
+                .await
+                .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?;
+            single_address_wallet_balance(address, balance)
+        } else {
+            self.enable_coin_balance(xpub_extractor, EnableCoinScanPolicy::default(), 0)
+                .await
+                .mm_err(|error| SiaInitError::CouldNotGetBalance(error.to_string()))?
+        };
 
         task_handle
             .update_in_progress_status(SiaInProgressStatus::Finishing)
@@ -214,7 +278,123 @@ impl InitStandaloneCoinActivationOps for SiaCoin {
         Ok(SiaActivationResult {
             ticker: self.ticker().to_owned(),
             current_block,
-            wallet_balance: EnableCoinBalance::Iguana(IguanaWalletBalance { address, balance }),
+            wallet_balance,
         })
+    }
+}
+
+/// `HwConnectStatuses` mandates values even for the Trezor-connect states Sia can
+/// never reach in practice (see `get_activation_result`'s doc comment) --
+/// `SiaInProgressStatus` deliberately gains no new variants for them (unlike
+/// `UtxoStandardInProgressStatus`'s `WaitingForTrezorToConnect`/
+/// `WaitingForUserToConfirmPubkey`); the existing states are reused since these
+/// slots are structurally required but never actually surfaced for Sia.
+fn sia_xpub_extractor_rpc_statuses() -> HwConnectStatuses<SiaInProgressStatus, SiaAwaitingStatus> {
+    HwConnectStatuses {
+        on_connect: SiaInProgressStatus::ActivatingCoin,
+        on_connected: SiaInProgressStatus::ActivatingCoin,
+        on_connection_failed: SiaInProgressStatus::Finishing,
+        on_button_request: SiaInProgressStatus::ActivatingCoin,
+        on_pin_request: SiaAwaitingStatus::EnterTrezorPin,
+        on_passphrase_request: SiaAwaitingStatus::EnterTrezorPassphrase,
+        on_ready: SiaInProgressStatus::ActivatingCoin,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{HttpStatusCode, StatusCode};
+    use serde_json::json;
+
+    fn task_error(err: SiaInitError) -> (Json, StatusCode) {
+        let err: InitStandaloneCoinError = err.into();
+        (serde_json::to_value(&err).unwrap(), err.status_code())
+    }
+
+    #[test]
+    fn height_and_balance_failures_are_transport_errors_with_a_string() {
+        // T46.8.2 (b)
+        for err in [
+            SiaInitError::CouldNotGetBlockCount("walletd consensus tip is unavailable".to_owned()),
+            SiaInitError::CouldNotGetBalance("walletd balance is unavailable".to_owned()),
+        ] {
+            let (wire, status) = task_error(err);
+            assert_eq!(wire["error_type"], "Transport");
+            assert!(wire["error_data"].is_string());
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[test]
+    fn unsupported_key_policy_is_a_coin_creation_error() {
+        // T46.8.2 (c)
+        let err = SiaInitError::from_new_err(SiaCoinNewError::UnsupportedPrivKeyPolicy, "SC".to_owned());
+        let (wire, status) = task_error(err);
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "SC");
+        assert!(wire["error_data"]["error"].is_string());
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn no_sia_error_exposes_a_forbidden_discriminant() {
+        // R46.5.3
+        let forbidden = [
+            "PrivKeyNotAllowed",
+            "UnexpectedDerivationMethod",
+            "HwError",
+            "HardwareWalletsAreNotSupportedYet",
+            "CouldNotGetBalance",
+            "CouldNotGetBlockCount",
+        ];
+        for err in [
+            SiaInitError::CoinCreationError {
+                ticker: "SC".to_owned(),
+                error: "e".to_owned(),
+            },
+            SiaInitError::CoinIsAlreadyActivated {
+                ticker: "SC".to_owned(),
+            },
+            SiaInitError::TaskTimedOut {
+                duration: Duration::from_secs(1),
+            },
+            SiaInitError::CouldNotGetBalance("e".to_owned()),
+            SiaInitError::CouldNotGetBlockCount("e".to_owned()),
+            SiaInitError::Internal("e".to_owned()),
+        ] {
+            let (wire, _) = task_error(err);
+            let name = wire["error_type"].as_str().unwrap().to_owned();
+            assert!(!forbidden.contains(&name.as_str()), "{name} must not be observable");
+        }
+    }
+
+    #[test]
+    fn single_address_balance_switch_defaults_to_false_and_needs_a_boolean_true() {
+        // T46.8.3: the two values of `sia_activation_single_address_balance`.
+        assert!(!single_address_balance_requested(&json!({})));
+        assert!(!single_address_balance_requested(
+            &json!({ "sia_activation_single_address_balance": false })
+        ));
+        assert!(!single_address_balance_requested(
+            &json!({ "sia_activation_single_address_balance": "true" })
+        ));
+        assert!(single_address_balance_requested(
+            &json!({ "sia_activation_single_address_balance": true })
+        ));
+    }
+
+    #[test]
+    fn single_address_wallet_balance_has_the_iguana_wire_shape() {
+        // R46.2.4: what the switch selects under HD is the single-address "Iguana" form.
+        let balance = single_address_wallet_balance("addr:abc".to_owned(), CoinBalance::default());
+        assert_eq!(
+            serde_json::to_value(balance).unwrap(),
+            json!({
+                "wallet_type": "Iguana",
+                "address": "addr:abc",
+                "balance": { "spendable": "0", "unspendable": "0" }
+            })
+        );
     }
 }

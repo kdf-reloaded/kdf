@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::eth::{addr_from_raw_pubkey, checksum_address};
 use crate::tendermint::account_id_from_pubkey_hex;
-use crate::utxo::utxo_builder::UtxoConfBuilder;
+use crate::utxo::utxo_builder::{UnrecognisedEnumPolicy, UtxoConfBuilder};
 use crate::utxo::{Address as UtxoAddress, AddressHashEnum, KeyPair as UtxoKeyPair, Private as UtxoPrivate,
                   UtxoActivationParams};
 use crate::{coin_conf, lp_coinfind, CoinProtocol, MarketCoinOps};
@@ -499,13 +499,14 @@ fn derive_utxo(
             reason: e.to_string(),
         }
     })?;
-    let utxo_conf =
-        UtxoConfBuilder::new(conf, &params, ticker)
-            .build()
-            .mm_err(|e| GetPrivateKeysError::KeyDerivationFailed {
-                ticker: ticker.to_owned(),
-                reason: e.to_string(),
-            })?;
+    let utxo_conf = UtxoConfBuilder::new(conf, &params, ticker)
+        // Only the address fields are read here, never the signing algorithm.
+        .with_unrecognised_enum_policy(UnrecognisedEnumPolicy::NotUsed)
+        .build()
+        .mm_err(|e| GetPrivateKeysError::KeyDerivationFailed {
+            ticker: ticker.to_owned(),
+            reason: e.to_string(),
+        })?;
 
     let private = UtxoPrivate {
         prefix: utxo_conf.wif_prefix,
@@ -704,7 +705,7 @@ mod tests {
     #[test]
     fn test_requests_superset() {
         // Reduced (always-available) form requests no superset capability.
-        assert!(!reduced_req(vec!["RICK".into()]).requests_superset());
+        assert!(!reduced_req(vec!["DOC".into()]).requests_superset());
 
         // Each opt-in capability independently flags the request as superset.
         let hd = GetPrivateKeysRequest {
@@ -776,7 +777,7 @@ mod tests {
         let ctx = MmCtxBuilder::new().with_conf(json!({})).into_mm_arc();
         let req = GetPrivateKeysRequest {
             offline: true,
-            ..reduced_req(vec!["RICK".into()])
+            ..reduced_req(vec!["DOC".into()])
         };
         match block_on(get_private_keys(ctx, req)) {
             Ok(_) => panic!("expected InsecureExportDisabled"),

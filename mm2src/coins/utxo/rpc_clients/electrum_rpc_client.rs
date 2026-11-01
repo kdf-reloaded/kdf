@@ -1,5 +1,12 @@
+#[cfg(test)] use super::electrum_pool::ServerStateSnapshot;
+use super::electrum_pool::{ElectrumPoolOptions, PoolShared};
 use super::*;
+use crate::utxo::header_layout_fallback::{FallbackReadError, HeaderReadPolicy};
+use futures::channel::mpsc as futures_mpsc;
 use script::Script;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
+use std::sync::Mutex as StdMutex;
 
 // Response/request data types and the `electrum_script_hash` helper live in
 // the sibling `electrum_types` module (carved out via P13.5 follow-up to keep
@@ -23,116 +30,278 @@ enum ElectrumConfig {
     WSS,
 }
 
-fn addr_to_socket_addr(input: &str) -> Result<SocketAddr, String> {
-    let mut addr = match input.to_socket_addrs() {
-        Ok(a) => a,
-        Err(e) => return ERR!("{} resolve error {:?}", input, e),
-    };
-    match addr.next() {
-        Some(a) => Ok(a),
-        None => ERR!("{} resolved to None.", input),
+/// What it takes to connect one listed server, parsed and checked once when the server joins the pool.
+pub(crate) struct ServerSpec {
+    /// `host:port`, the only form in which the server is named (CRD ch.38 R38.6.9a).
+    addr: String,
+    config: ElectrumConfig,
+    #[cfg(not(target_arch = "wasm32"))]
+    host: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    port: u16,
+    /// The WebSocket URL, scheme included.
+    #[cfg(target_arch = "wasm32")]
+    ws_url: String,
+}
+
+/// The debug form shows `host:port` only; the WebSocket URL of the browser build is not part of it.
+impl fmt::Debug for ServerSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerSpec")
+            .field("addr", &self.addr)
+            .field("config", &self.config)
+            .finish_non_exhaustive()
     }
 }
 
-/// Attempts to process the request (parse url, etc), build up the config and create new electrum connection
+/// Splits `host:port` (an IPv6 literal is written `[::1]:port`) into the host and the port.
+///
+/// The address must be exactly a host and a port: a scheme, userinfo, path, query or fragment makes it unusable.
+/// No error text echoes the address (CRD ch.38 R38.6.9a).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn spawn_electrum(
-    req: &ElectrumRpcRequest,
-    event_handlers: Vec<RpcTransportEventHandlerShared>,
-) -> Result<ElectrumConnection, String> {
+fn parse_host_port(addr: &str) -> Result<(String, u16), String> {
+    const NOT_HOST_PORT: &str = "the address is not a host:port address";
+    if electrum_host_port(addr).as_deref() != Some(addr) {
+        return Err(NOT_HOST_PORT.to_owned());
+    }
+    let (host, port) = addr.rsplit_once(':').ok_or_else(|| NOT_HOST_PORT.to_owned())?;
+    let host = match host.strip_prefix('[').and_then(|host| host.strip_suffix(']')) {
+        Some(ipv6) => ipv6,
+        None if host.contains(':') => return Err(NOT_HOST_PORT.to_owned()),
+        None => host,
+    };
+    if host.is_empty() {
+        return Err("the address has no host".to_owned());
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|e| format!("the address has no valid port: {}", e))?;
+    Ok((host.to_owned(), port))
+}
+
+/// Attempts to process the request (parse url, etc) and build up what is needed to connect the server.
+/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3). No error text echoes the configured
+/// address (CRD ch.38 R38.6.9a).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
+    let (host, port) = parse_host_port(&req.url)?;
     let config = match req.protocol {
         ElectrumProtocol::TCP => ElectrumConfig::TCP,
         ElectrumProtocol::SSL => {
             let uri: Uri = try_s!(req.url.parse());
-            let host = uri
-                .host()
-                .ok_or(ERRL!("Couldn't retrieve host from addr {}", req.url))?;
+            let host = uri.host().ok_or(ERRL!("Couldn't retrieve a host from the address"))?;
 
-            // check the dns name
-            try_s!(DnsNameRef::try_from_ascii_str(host));
+            // check the dns name (IP literals are rejected here, as they always were)
+            try_s!(DnsName::try_from(host));
 
             ElectrumConfig::SSL {
                 dns_name: host.into(),
                 skip_validation: req.disable_cert_verification,
             }
         },
+        // Not a missing feature: 'ws'/'wss' are the browser/WASM transport, the same
+        // way 'TCP'/'SSL' are rejected by the WASM client below.
         ElectrumProtocol::WS | ElectrumProtocol::WSS => {
-            return ERR!("'ws' and 'wss' protocols are not supported yet. Consider using 'TCP' or 'SSL'")
+            return ERR!("'ws' and 'wss' are browser-only Electrum protocols and cannot be used by a native node. Use 'TCP' or 'SSL'")
         },
     };
 
-    Ok(electrum_connect(req.url.clone(), config, event_handlers))
+    Ok(ServerSpec {
+        // The address is exactly `host:port` (checked above), so it names the server in logs.
+        addr: req.url.clone(),
+        config,
+        host,
+        port,
+    })
 }
 
-/// Attempts to process the request (parse url, etc), build up the config and create new electrum connection
+/// Attempts to process the request (parse url, etc) and build up what is needed to connect the server.
+/// An error means that retrying cannot cure it (CRD ch.38 R38.6.4d item 3). No error text echoes the configured
+/// address (CRD ch.38 R38.6.9a).
 #[cfg(target_arch = "wasm32")]
-pub fn spawn_electrum(
-    req: &ElectrumRpcRequest,
-    event_handlers: Vec<RpcTransportEventHandlerShared>,
-) -> Result<ElectrumConnection, String> {
-    let mut url = req.url.clone();
+pub(crate) fn server_spec(req: &ElectrumRpcRequest) -> Result<ServerSpec, String> {
     let uri: Uri = try_s!(req.url.parse());
 
     if uri.scheme().is_some() {
         return ERR!(
-            "There has not to be a scheme in the url: {}. \
+            "There has not to be a scheme in the url. \
             'ws://' scheme is used by default. \
-            Consider using 'protocol: \"WSS\"' in the electrum request to switch to the 'wss://' scheme.",
-            url
+            Consider using 'protocol: \"WSS\"' in the electrum request to switch to the 'wss://' scheme."
         );
     }
 
-    let config = match req.protocol {
-        ElectrumProtocol::WS => {
-            url.insert_str(0, "ws://");
-            ElectrumConfig::WS
-        },
-        ElectrumProtocol::WSS => {
-            url.insert_str(0, "wss://");
-            ElectrumConfig::WSS
-        },
+    let (config, ws_url) = match req.protocol {
+        ElectrumProtocol::WS => (ElectrumConfig::WS, format!("ws://{}", req.url)),
+        ElectrumProtocol::WSS => (ElectrumConfig::WSS, format!("wss://{}", req.url)),
         ElectrumProtocol::TCP | ElectrumProtocol::SSL => {
             return ERR!("'TCP' and 'SSL' are not supported in a browser. Please use 'WS' or 'WSS' protocols");
         },
     };
 
-    Ok(electrum_connect(url, config, event_handlers))
+    Ok(ServerSpec {
+        // Only the host and the port name the server; the WebSocket URL keeps the rest of the address.
+        addr: electrum_host_port(&req.url).ok_or_else(|| "the address has no usable host".to_owned())?,
+        config,
+        ws_url,
+    })
 }
 
-#[derive(Debug)]
-/// Represents the active Electrum connection to selected address
-pub struct ElectrumConnection {
-    /// The client connected to this SocketAddr
+/// Tells the pool that the connection with the given id ended.
+pub(crate) type SessionEnded = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// Tells the pool the height of a header notification that arrived over a connection (CRD ch.38 R38.6.4l item 2).
+pub(crate) type HeaderNotified = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// No tip is known yet.
+const NO_TIP: u64 = u64::MAX;
+
+/// What a connection has learned about the chain tip: the height of the last header it carried, and whether
+/// a header request was answered over it, which makes the server push a notification for each new tip
+/// (CRD ch.38 R38.6.4l items 2 and 6, D38.6.4l.4).
+pub(crate) struct HeaderTrack {
+    notifying: AtomicBool,
+    tip: AtomicU64,
+    on_notification: HeaderNotified,
+}
+
+impl HeaderTrack {
+    fn new(on_notification: HeaderNotified) -> HeaderTrack {
+        HeaderTrack {
+            notifying: AtomicBool::new(false),
+            tip: AtomicU64::new(NO_TIP),
+            on_notification,
+        }
+    }
+
+    /// The answer to a header request: the server now pushes the tips that follow.
+    fn note_answer(&self, height: u64) {
+        self.tip.store(height, AtomicOrdering::Relaxed);
+        self.notifying.store(true, AtomicOrdering::Relaxed);
+    }
+
+    /// A header notification: the connection's height moves, and the pool is told.
+    fn note_notification(&self, height: u64) {
+        self.note_answer(height);
+        (self.on_notification)(height);
+    }
+
+    /// The height of the last header the connection carried.
+    pub(crate) fn tip(&self) -> Option<u64> {
+        let tip = self.tip.load(AtomicOrdering::Relaxed);
+        (tip != NO_TIP).then_some(tip)
+    }
+
+    /// Whether header notifications can arrive over the connection.
+    pub(crate) fn is_notifying(&self) -> bool { self.notifying.load(AtomicOrdering::Relaxed) }
+}
+
+/// One established connection to an Electrum server: the sender of the writing task, the answers
+/// waiting for a response, and the handle that ends the background tasks.
+///
+/// A session never reconnects; when it ends the pool decides what happens to its server.
+pub(crate) struct Session {
+    id: u64,
     addr: String,
-    /// Configuration
-    #[allow(dead_code)]
-    config: ElectrumConfig,
-    /// The Sender forwarding requests to writing part of underlying stream
-    tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
-    /// The Sender used to shutdown the background connection loop when ElectrumConnection is dropped
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    tx: StdMutex<mpsc::Sender<Vec<u8>>>,
     /// Responses are stored here
     responses: JsonRpcPendingRequestsShared,
-    /// Selected protocol version. The value is initialized after the server.version RPC call.
-    protocol_version: AsyncMutex<Option<f32>>,
+    closed: Arc<AtomicBool>,
+    /// The chain tip as this connection has seen it.
+    headers: Arc<HeaderTrack>,
+    /// Ends the background tasks of the session.
+    shutdown_tx: StdMutex<Option<oneshot::Sender<()>>>,
 }
 
-impl ElectrumConnection {
-    async fn is_connected(&self) -> bool { self.tx.lock().await.is_some() }
+impl Session {
+    pub(crate) fn id(&self) -> u64 { self.id }
 
-    async fn set_protocol_version(&self, version: f32) { self.protocol_version.lock().await.replace(version); }
+    pub(crate) fn addr(&self) -> &str { &self.addr }
+
+    pub(crate) fn is_closed(&self) -> bool { self.closed.load(AtomicOrdering::Relaxed) }
+
+    pub(crate) fn headers(&self) -> &HeaderTrack { &self.headers }
+
+    /// Ends the session. The background tasks stop and the pool is told through [`SessionEnded`].
+    pub(crate) fn close(&self) {
+        self.closed.store(true, AtomicOrdering::Relaxed);
+        let shutdown_tx = self
+            .shutdown_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(shutdown_tx) = shutdown_tx {
+            // The tasks may have ended already.
+            let _ = shutdown_tx.send(());
+        }
+    }
+
+    /// Sends `request` and waits for its response for at most `timeout`.
+    pub(crate) async fn request(
+        &self,
+        request: &JsonRpcRequestEnum,
+        timeout: Duration,
+    ) -> Result<JsonRpcResponseEnum, String> {
+        if self.is_closed() {
+            return Err("the connection is closed".to_owned());
+        }
+        let json = json::to_string(request).map_err(|e| e.to_string())?;
+        // Electrum request and responses must end with \n
+        // https://electrumx.readthedocs.io/en/latest/protocol-basics.html#message-stream
+        #[cfg(not(target_arch = "wasm32"))]
+        let json = format!("{}\n", json);
+
+        let id = request.rpc_id();
+        let (req_tx, resp_rx) = async_oneshot::channel();
+        self.responses.lock().await.insert(id.clone(), req_tx);
+        let tx = self.tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let exchange = async move {
+            tx.send(json.into_bytes())
+                .compat()
+                .await
+                .map_err(|_| "the connection is closed".to_owned())?;
+            resp_rx
+                .await
+                .map_err(|_| "the connection ended before the server answered".to_owned())
+        };
+        let started = now_ms();
+        let outcome = exchange.boxed().timeout(timeout).await;
+        // Every request message of the session passes here: one debug line per message, with the method names
+        // only (never params, script hashes, addresses or payloads).
+        let result = match &outcome {
+            Ok(Ok(_)) => now_ms().saturating_sub(started).to_string(),
+            Ok(Err(_)) => "failed".to_owned(),
+            Err(_) => "timeout".to_owned(),
+        };
+        common::log::debug!("electrum {} {} {}", self.addr(), request_methods(request), result);
+        let error = match outcome {
+            Ok(Ok(response)) => {
+                self.note_header_answer(request, &response);
+                return Ok(response);
+            },
+            Ok(Err(error)) => error,
+            Err(_) => format!("no answer within {:.1} s", timeout.as_secs_f64()),
+        };
+        self.responses.lock().await.remove(&id);
+        Err(error)
+    }
 }
 
-impl Drop for ElectrumConnection {
-    fn drop(&mut self) {
-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
-            if shutdown_tx.send(()).is_err() {
-                warn!("electrum_connection_drop] Warning, shutdown_tx already closed");
+impl Session {
+    /// An answer to a lone header request (`blockchain.headers.subscribe`) tells the connection's height.
+    fn note_header_answer(&self, request: &JsonRpcRequestEnum, response: &JsonRpcResponseEnum) {
+        if let (JsonRpcRequestEnum::Single(request), JsonRpcResponseEnum::Single(response)) = (request, response) {
+            if request.method == BLOCKCHAIN_HEADERS_SUB_ID && response.error.is_null() {
+                if let Some(height) = response.result["height"].as_u64() {
+                    self.headers.note_answer(height);
+                }
             }
         }
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) { self.close(); }
+}
 #[derive(Debug)]
 struct ConcurrentRequestState<V> {
     is_running: bool,
@@ -195,59 +364,45 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> ConcurrentRequestMap<K, V> {
 #[derive(Debug)]
 pub struct ElectrumClientImpl {
     coin_ticker: String,
-    connections: AsyncMutex<Vec<ElectrumConnection>>,
-    next_id: AtomicU64,
+    /// The servers listed at activation and the connections to them (CRD ch.38 R38.6.4b).
+    pub(super) pool: Arc<PoolShared>,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
     protocol_version: OrdRange<f32>,
     get_balance_concurrent_map: ConcurrentRequestMap<String, ElectrumBalance>,
     list_unspent_concurrent_map: ConcurrentRequestMap<String, Vec<ElectrumUnspent>>,
+    /// Concurrent-request map of the R38.6.3a balance batch, keyed by the P2PKH and P2PK script hashes.
+    get_balance_with_p2pk_concurrent_map:
+        ConcurrentRequestMap<(String, String), (ElectrumBalance, Vec<ElectrumUnspent>)>,
+    /// Concurrent-request map of the R38.6.3a unspent-list batch, keyed by the P2PKH and P2PK script hashes.
+    list_unspent_with_p2pk_concurrent_map:
+        ConcurrentRequestMap<(String, String), (Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)>,
+    /// Script hashes this client has asked its servers to watch (R38.6.5).
+    ///
+    /// Held so every subscription can be placed again over another connection
+    /// (R38.6.4h): a subscription belongs to one TCP session, so a dropped
+    /// connection silently loses it. Nothing may assume a subscription
+    /// survived.
+    watched_script_hashes: AsyncMutex<HashSet<String>>,
+}
+
+impl fmt::Debug for PoolShared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "PoolShared") }
+}
+
+/// Drops the duplicates the server can return in an unspent list, keeping the first occurrence.
+fn dedup_unspents(unspents: Vec<ElectrumUnspent>) -> Vec<ElectrumUnspent> {
+    unspents
+        .into_iter()
+        .unique_by(|unspent| (unspent.tx_hash, unspent.tx_pos))
+        .collect()
 }
 
 async fn electrum_request_multi(
     client: ElectrumClient,
     request: JsonRpcRequestEnum,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
-    let mut futures = vec![];
-    let connections = client.connections.lock().await;
-    for (i, connection) in connections.iter().enumerate() {
-        let connection_addr = connection.addr.clone();
-        match &*connection.tx.lock().await {
-            Some(tx) => {
-                let fut = electrum_request(
-                    request.clone(),
-                    tx.clone(),
-                    connection.responses.clone(),
-                    ELECTRUM_TIMEOUT / (connections.len() - i) as u64,
-                )
-                .map(|response| (JsonRpcRemoteAddr(connection_addr), response));
-                futures.push(fut)
-            },
-            None => (),
-        }
-    }
-    drop(connections);
-    if futures.is_empty() {
-        return ERR!("All electrums are currently disconnected");
-    }
-
-    match request {
-        JsonRpcRequestEnum::Single(single) if single.method == "server.ping" => {
-            // server.ping must be sent to all servers to keep all connections alive
-            return select_ok(futures)
-                .map(|(result, _)| result)
-                .map_err(|e| ERRL!("{:?}", e))
-                .compat()
-                .await;
-        },
-        _ => (),
-    }
-
-    let (res, no_of_failed_requests) = select_ok_sequential(futures)
-        .compat()
-        .await
-        .map_err(|e| ERRL!("{:?}", e))?;
-    client.rotate_servers(no_of_failed_requests).await;
-    Ok(res)
+    let budget = client.pool.timings.call_budget;
+    client.pool.route(request, budget).await
 }
 
 async fn electrum_request_to(
@@ -255,108 +410,57 @@ async fn electrum_request_to(
     request: JsonRpcRequestEnum,
     to_addr: String,
 ) -> Result<(JsonRpcRemoteAddr, JsonRpcResponseEnum), String> {
-    let (tx, responses) = {
-        let connections = client.connections.lock().await;
-        let connection = connections
-            .iter()
-            .find(|c| c.addr == to_addr)
-            .ok_or(ERRL!("Unknown destination address {}", to_addr))?;
-        let responses = connection.responses.clone();
-        let tx = {
-            match &*connection.tx.lock().await {
-                Some(tx) => tx.clone(),
-                None => return ERR!("Connection {} is not established yet", to_addr),
-            }
-        };
-        (tx, responses)
-    };
-
-    let response = try_s!(
-        electrum_request(request.clone(), tx, responses, ELECTRUM_TIMEOUT)
-            .compat()
-            .await
-    );
-    Ok((JsonRpcRemoteAddr(to_addr.to_owned()), response))
+    client.pool.route_directed(request, &to_addr).await
 }
 
 impl ElectrumClientImpl {
-    /// Create an Electrum connection and spawn a green thread actor to handle it.
-    pub async fn add_server(&self, req: &ElectrumRpcRequest) -> Result<(), String> {
-        let connection = try_s!(spawn_electrum(req, self.event_handlers.clone()));
-        self.connections.lock().await.push(connection);
-        Ok(())
+    /// Replaces the pool settings. To be called before the first server is added.
+    pub fn configure_pool(&mut self, options: ElectrumPoolOptions) {
+        self.pool = Arc::new(PoolShared::new(
+            self.coin_ticker.clone(),
+            options,
+            self.protocol_version.clone(),
+            self.event_handlers.clone(),
+        ));
     }
 
-    /// Remove an Electrum connection and stop corresponding spawned actor.
-    pub async fn remove_server(&self, server_addr: &str) -> Result<(), String> {
-        let mut connections = self.connections.lock().await;
-        // do not use retain, we would have to return an error if we did not find connection by the passd address
-        let pos = connections
-            .iter()
-            .position(|con| con.addr == server_addr)
-            .ok_or(ERRL!("Unknown electrum address {}", server_addr))?;
-        // shutdown_tx will be closed immediately on the connection drop
-        connections.remove(pos);
-        Ok(())
-    }
+    /// Adds a server to the pool. The position in the call order is the server's priority; see [`Self::add_servers`]. A server
+    /// this build cannot use stays in the pool as removed and the reason is returned.
+    pub fn add_server(&self, req: &ElectrumRpcRequest) -> Result<(), String> { self.pool.add_server(req) }
 
-    /// Moves the Electrum servers that fail in a multi request to the end.
-    pub async fn rotate_servers(&self, no_of_rotations: usize) {
-        let mut connections = self.connections.lock().await;
-        connections.rotate_left(no_of_rotations);
-    }
+    /// Adds the servers, given in the listed order, ranked by the pool's order: drawn once at random, or
+    /// the listed order (CRD ch.38 R38.6.4b-R). Returns the servers this build cannot use, with the reason.
+    pub fn add_servers(&self, reqs: &[ElectrumRpcRequest]) -> Vec<(String, String)> { self.pool.add_servers(reqs) }
 
-    /// Check if one of the spawned connections is connected.
-    pub async fn is_connected(&self) -> bool {
-        for connection in self.connections.lock().await.iter() {
-            if connection.is_connected().await {
-                return true;
-            }
-        }
-        false
-    }
+    /// The activation probe (CRD ch.38 R38.6.4k-R): connects every server of the pool at once and
+    /// returns when the first connection is established, or fails with the failure of each server.
+    /// To be called after the servers are added and before [`Self::start_pool`].
+    pub async fn activation_probe(self: &Arc<Self>) -> Result<(), String> { self.pool.activation_probe().await }
 
-    pub async fn count_connections(&self) -> usize { self.connections.lock().await.len() }
+    /// Starts the background maintenance of the pool: the first pass connects the servers in the
+    /// background and later passes keep the maintained set (CRD ch.38 R38.6.4c). Nothing waits for it.
+    /// With `spawn_ping` the maintained connections are pinged on a regular cadence.
+    pub fn start_pool(self: &Arc<Self>, spawn_ping: bool) { self.pool.start(Arc::downgrade(self), spawn_ping); }
 
-    pub async fn count_connected(&self) -> usize {
-        let mut connected = 0;
-        for connection in self.connections.lock().await.iter() {
-            if connection.is_connected().await {
-                connected += 1;
-            }
-        }
-        connected
-    }
+    /// Check if one of the connections is open.
+    pub async fn is_connected(&self) -> bool { self.pool.has_open_connection() }
 
-    pub async fn is_server_connected(&self, server_addr: &str) -> Option<bool> {
-        let connections = self.connections.lock().await;
-        let connection = connections.iter().find(|connection| connection.addr == server_addr)?;
-        Some(connection.is_connected().await)
-    }
+    /// The number of servers in the pool, those removed from it excluded.
+    pub async fn count_connections(&self) -> usize { self.pool.usable_count() }
 
-    /// Check if the protocol version was checked for one of the spawned connections.
-    pub async fn is_protocol_version_checked(&self) -> bool {
-        for connection in self.connections.lock().await.iter() {
-            if connection.protocol_version.lock().await.is_some() {
-                return true;
-            }
-        }
-        false
-    }
+    /// The size of the maintained set.
+    pub async fn count_connected(&self) -> usize { self.pool.maintained_count() }
 
-    /// Set the protocol version for the specified server.
-    pub async fn set_protocol_version(&self, server_addr: &str, version: f32) -> Result<(), String> {
-        let connections = self.connections.lock().await;
-        let con = connections
-            .iter()
-            .find(|con| con.addr == server_addr)
-            .ok_or(ERRL!("Unknown electrum address {}", server_addr))?;
-        con.set_protocol_version(version).await;
-        Ok(())
-    }
+    /// The addresses of the servers in the pool, in priority order (CRD ch.38 R38.6.4b), those removed
+    /// from it excluded. These are the names a directed request (R38.6.4g) is addressed to.
+    pub fn server_addrs(&self) -> Vec<String> { self.pool.usable_addrs() }
 
     /// Get available protocol versions.
     pub fn protocol_version(&self) -> &OrdRange<f32> { &self.protocol_version }
+
+    /// What a test sees of each server of the pool.
+    #[cfg(test)]
+    pub(crate) fn pool_snapshot(&self) -> Vec<ServerStateSnapshot> { self.pool.snapshot() }
 }
 
 #[derive(Clone, Debug)]
@@ -366,7 +470,89 @@ impl Deref for ElectrumClient {
     fn deref(&self) -> &ElectrumClientImpl { &*self.0 }
 }
 
-const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
+pub(super) const BLOCKCHAIN_HEADERS_SUB_ID: &str = "blockchain.headers.subscribe";
+pub(super) const BLOCKCHAIN_SCRIPTHASH_SUB_ID: &str = "blockchain.scripthash.subscribe";
+pub(super) const BLOCKCHAIN_CONTRACT_EVENT_SUB_ID: &str = "blockchain.contract.event.subscribe";
+
+/// Registry key for a Qtum contract-event subscription.
+///
+/// A QRC20 balance lives in contract storage rather than in the address's UTXO
+/// set, so a token transfer need not change the QTUM address's script hash and
+/// cannot be observed through a script-hash subscription. Contract events are
+/// therefore watched per (address, contract, topic) triple rather than per
+/// address, and share the same registry by carrying a distinct key.
+pub fn contract_event_key(address_hash160: &str, contract_addr: &str, topic: &str) -> String {
+    format!("contract:{address_hash160}:{contract_addr}:{topic}")
+}
+
+// Script hash -> the party that asked for it to be watched.
+//
+// Keyed globally rather than per client because a script hash already
+// identifies exactly one address of one coin, and because the notification
+// arrives deep inside a connection read loop that holds no client handle.
+// Threading one through every connection would buy nothing the key does not
+// already give us.
+lazy_static! {
+    static ref SCRIPTHASH_WATCHERS: std::sync::Mutex<HashMap<String, Vec<futures_mpsc::UnboundedSender<String>>>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+/// Register `sender` to be woken whenever `script_hash` changes status.
+///
+/// The receiver is a wake signal, not a data feed: it carries the script hash
+/// only so the consumer knows which address to re-read. Balances are always
+/// re-read authoritatively, never inferred from the notification.
+///
+/// More than one consumer may care about the same hash -- the balance streamer
+/// and the transaction-history loop both watch a coin's address -- so watchers
+/// accumulate rather than replace. Storing one sender per hash would let
+/// whichever registered last silently starve the other.
+pub fn watch_scripthash(script_hash: String, sender: futures_mpsc::UnboundedSender<String>) {
+    SCRIPTHASH_WATCHERS
+        .lock()
+        .expect("scripthash watcher registry poisoned")
+        .entry(script_hash)
+        .or_default()
+        .push(sender);
+}
+
+/// Drop any watcher of `script_hash` whose receiver is gone, removing the entry
+/// once none remain. Safe to call for an unregistered hash.
+///
+/// Consumers signal departure by dropping their receiver; this is the sweep
+/// that reclaims the registration. It deliberately does not drop live watchers,
+/// because one consumer going away must not silence the others.
+pub fn unwatch_scripthash(script_hash: &str) {
+    let mut watchers = match SCRIPTHASH_WATCHERS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(senders) = watchers.get_mut(script_hash) {
+        senders.retain(|sender| !sender.is_closed());
+        if senders.is_empty() {
+            watchers.remove(script_hash);
+        }
+    }
+}
+
+/// Deliver a status change to whoever registered for it.
+///
+/// A closed receiver means the consumer went away, so the registration is
+/// dropped rather than retried.
+fn notify_scripthash_change(script_hash: &str) {
+    let mut watchers = match SCRIPTHASH_WATCHERS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(senders) = watchers.get_mut(script_hash) {
+        // Departed consumers are pruned as a side effect, so a registration
+        // cannot outlive its receiver for the life of the process.
+        senders.retain(|sender| sender.unbounded_send(script_hash.to_owned()).is_ok());
+        if senders.is_empty() {
+            watchers.remove(script_hash);
+        }
+    }
+}
 
 impl UtxoJsonRpcClientInfo for ElectrumClient {
     fn coin_name(&self) -> &str { self.coin_ticker.as_str() }
@@ -375,7 +561,7 @@ impl UtxoJsonRpcClientInfo for ElectrumClient {
 impl JsonRpcClient for ElectrumClient {
     fn version(&self) -> &'static str { "2.0" }
 
-    fn next_id(&self) -> String { self.next_id.fetch_add(1, AtomicOrdering::Relaxed).to_string() }
+    fn next_id(&self) -> String { self.pool.fresh_request_id() }
 
     fn client_info(&self) -> String { UtxoJsonRpcClientInfo::client_info(self) }
 
@@ -389,6 +575,53 @@ impl JsonRpcBatchClient for ElectrumClient {}
 impl JsonRpcMultiClient for ElectrumClient {
     fn transport_exact(&self, to_addr: String, request: JsonRpcRequestEnum) -> JsonRpcResponseFut {
         Box::new(electrum_request_to(self.clone(), request, to_addr).boxed().compat())
+    }
+}
+
+// A separate block so the header fetches can be mocked in tests (`mockable` cannot take the async
+// methods of the block below).
+#[cfg_attr(test, mockable)]
+impl ElectrumClient {
+    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-header
+    pub fn blockchain_block_header(&self, height: u64) -> RpcRes<BytesJson> {
+        rpc_func!(self, "blockchain.block.header", height)
+    }
+
+    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
+    pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
+        rpc_func!(self, "blockchain.block.headers", start_height, count)
+    }
+}
+
+/// Read-only requests addressed to one named server (CRD ch.38 R38.6.4g): the request opens the server's
+/// connection if it is closed and releases it afterwards when the server is not maintained, and it is
+/// answered by that server or fails naming it. Used where the answer of a particular server is the
+/// point (chain-identity checks of the shielded-coin fallback, CRD ch.39 R39.11.25).
+impl ElectrumClient {
+    /// `blockchain.block.header` of `server`.
+    pub fn blockchain_block_header_from(&self, server: &str, height: u64) -> RpcRes<BytesJson> {
+        rpc_func_from!(self, server, "blockchain.block.header", height)
+    }
+
+    /// `blockchain.headers.subscribe` of `server`: its tip.
+    pub fn blockchain_headers_subscribe_from(&self, server: &str) -> RpcRes<ElectrumBlockHeader> {
+        rpc_func_from!(self, server, "blockchain.headers.subscribe")
+    }
+
+    /// `blockchain.scripthash.get_history` of `server`.
+    pub fn scripthash_get_history_from(&self, server: &str, hash: &str) -> RpcRes<Vec<ElectrumTxHistoryItem>> {
+        rpc_func_from!(self, server, "blockchain.scripthash.get_history", hash)
+    }
+
+    /// `blockchain.scripthash.listunspent` of `server`, as the server returns it.
+    pub fn scripthash_list_unspent_from(&self, server: &str, hash: &str) -> RpcRes<Vec<ElectrumUnspent>> {
+        rpc_func_from!(self, server, "blockchain.scripthash.listunspent", hash)
+    }
+
+    /// `blockchain.transaction.get` of `server`, the raw transaction bytes.
+    pub fn transaction_get_from(&self, server: &str, txid: &H256Json) -> RpcRes<BytesJson> {
+        let verbose = false;
+        rpc_func_from!(self, server, "blockchain.transaction.get", txid, verbose)
     }
 }
 
@@ -454,6 +687,89 @@ impl ElectrumClient {
         }))
     }
 
+    /// CRD ch.38 R38.6.3a: the P2PKH balance of `p2pkh_hash` and the P2PK unspents of `p2pk_hash` in ONE
+    /// Electrum JSON-RPC batch, that is one request message for the server.
+    /// The unspents are de-duplicated exactly as [`ElectrumClient::scripthash_list_unspent`] does.
+    pub fn scripthash_get_balance_and_list_unspent(
+        &self,
+        p2pkh_hash: &str,
+        p2pk_hash: &str,
+    ) -> RpcRes<(ElectrumBalance, Vec<ElectrumUnspent>)> {
+        let arc = self.clone();
+        let key = (p2pkh_hash.to_owned(), p2pk_hash.to_owned());
+        let request = self.p2pk_batch(
+            rpc_req!(self, "blockchain.scripthash.get_balance", p2pkh_hash),
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pk_hash),
+            |balance, p2pk_unspents| (balance, dedup_unspents(p2pk_unspents)),
+        );
+        let fut = async move {
+            arc.get_balance_with_p2pk_concurrent_map
+                .wrap_request(key, request)
+                .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// CRD ch.38 R38.6.3a: the unspents of `p2pkh_hash` and those of `p2pk_hash` in ONE Electrum JSON-RPC
+    /// batch, that is one request message for the server. Returns `(p2pkh_unspents, p2pk_unspents)`, each
+    /// de-duplicated exactly as [`ElectrumClient::scripthash_list_unspent`] does.
+    pub fn scripthash_list_unspent_with_p2pk(
+        &self,
+        p2pkh_hash: &str,
+        p2pk_hash: &str,
+    ) -> RpcRes<(Vec<ElectrumUnspent>, Vec<ElectrumUnspent>)> {
+        let arc = self.clone();
+        let key = (p2pkh_hash.to_owned(), p2pk_hash.to_owned());
+        let request = self.p2pk_batch(
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pkh_hash),
+            rpc_req!(self, "blockchain.scripthash.listunspent", p2pk_hash),
+            |p2pkh_unspents: Vec<ElectrumUnspent>, p2pk_unspents: Vec<ElectrumUnspent>| {
+                (dedup_unspents(p2pkh_unspents), dedup_unspents(p2pk_unspents))
+            },
+        );
+        let fut = async move {
+            arc.list_unspent_with_p2pk_concurrent_map
+                .wrap_request(key, request)
+                .await
+        };
+        Box::new(fut.boxed().compat())
+    }
+
+    /// Sends the two requests as one JSON-RPC batch and decodes the two responses, in the order requested.
+    fn p2pk_batch<A, B, R>(
+        &self,
+        p2pkh_request: JsonRpcRequest,
+        p2pk_request: JsonRpcRequest,
+        combine: impl FnOnce(A, B) -> R + Send + 'static,
+    ) -> RpcRes<R>
+    where
+        A: serde::de::DeserializeOwned + Send + 'static,
+        B: serde::de::DeserializeOwned + Send + 'static,
+        R: Send + 'static,
+    {
+        let client_info = JsonRpcClient::client_info(self);
+        let context_request = p2pkh_request.clone();
+        let fut = self
+            .batch_rpc::<_, Json>([p2pkh_request, p2pk_request])
+            .compat()
+            .map(move |result| {
+                let parse_error = |e: String| JsonRpcError {
+                    client_info: client_info.clone(),
+                    request: JsonRpcRequestEnum::Single(context_request.clone()),
+                    error: JsonRpcErrorType::Parse(JsonRpcRemoteAddr::default(), e),
+                };
+                let mut items = result?.into_iter();
+                let (first, second) = match (items.next(), items.next()) {
+                    (Some(first), Some(second)) => (first, second),
+                    _ => return Err(parse_error("expected two responses in the batch".to_owned())),
+                };
+                let first = json::from_value(first).map_err(|e| parse_error(e.to_string()))?;
+                let second = json::from_value(second).map_err(|e| parse_error(e.to_string()))?;
+                Ok(combine(first, second))
+            });
+        Box::new(fut.boxed().compat())
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-scripthash-get-history
     pub fn scripthash_get_history(&self, hash: &str) -> RpcRes<Vec<ElectrumTxHistoryItem>> {
         rpc_func!(self, "blockchain.scripthash.get_history", hash)
@@ -482,6 +798,48 @@ impl ElectrumClient {
         self.batch_rpc(requests)
     }
 
+    /// Ask the servers to notify us when `script_hash` changes status.
+    ///
+    /// The hash is remembered so it can be re-subscribed on a newly connected
+    /// server (R38.6.5): a subscription lives with one session, so a reconnect
+    /// or a server swap drops it silently.
+    ///
+    /// A failure here is not fatal. The caller keeps its existing polling, so
+    /// the effect of a lost subscription is added latency rather than a stale
+    /// balance.
+    pub async fn subscribe_scripthash(&self, script_hash: String) -> Result<(), String> {
+        let epoch = self.pool.session_epoch();
+        let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
+            .compat()
+            .await;
+        res.map_err(|e| ERRL!("{}", e))?;
+        self.watched_script_hashes.lock().await.insert(script_hash);
+        // The connection that carried the subscription may have ended before the hash was remembered
+        // (a call that had to open a connection of its own releases it when it is done).
+        if self.pool.session_epoch() != epoch {
+            self.pool.request_resubscribe();
+        }
+        Ok(())
+    }
+
+    /// Place every remembered subscription again over a maintained connection (R38.6.4h). Failures are
+    /// logged and skipped so one unusable server cannot stall the rest; `false` tells that some
+    /// subscription could not be placed and the attempt is to be repeated.
+    pub async fn resubscribe_watched_scripthashes(&self) -> bool {
+        let hashes: Vec<String> = self.watched_script_hashes.lock().await.iter().cloned().collect();
+        let mut all_placed = true;
+        for script_hash in hashes {
+            let res: Result<Json, _> = rpc_func!(self, BLOCKCHAIN_SCRIPTHASH_SUB_ID, &script_hash)
+                .compat()
+                .await;
+            if let Err(e) = res {
+                common::log::debug!("Could not re-subscribe script hash {}: {}", script_hash, e);
+                all_placed = false;
+            }
+        }
+        all_placed
+    }
+
     /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-headers-subscribe
     pub fn blockchain_headers_subscribe(&self) -> RpcRes<ElectrumBlockHeader> {
         rpc_func!(self, "blockchain.headers.subscribe")
@@ -505,20 +863,11 @@ impl ElectrumClient {
         }
     }
 
-    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-header
-    pub fn blockchain_block_header(&self, height: u64) -> RpcRes<BytesJson> {
-        rpc_func!(self, "blockchain.block.header", height)
-    }
-
-    /// https://electrumx.readthedocs.io/en/latest/protocol-methods.html#blockchain-block-headers
-    pub fn blockchain_block_headers(&self, start_height: u64, count: NonZeroU64) -> RpcRes<ElectrumBlockHeadersRes> {
-        rpc_func!(self, "blockchain.block.headers", start_height, count)
-    }
-
     pub fn retrieve_last_headers(
         &self,
         blocks_limit_to_check: NonZeroU64,
         block_height: u64,
+        policy: HeaderReadPolicy,
     ) -> UtxoRpcFut<(HashMap<u64, BlockHeader>, Vec<BlockHeader>)> {
         let (from, count) = {
             let from = if block_height < blocks_limit_to_check.get() {
@@ -536,14 +885,13 @@ impl ElectrumClient {
                         if headers.count == 0 {
                             return MmError::err(UtxoRpcError::Internal("No headers available".to_string()));
                         }
-                        let len = CompactInteger::from(headers.count);
-                        let mut serialized = serialize(&len).take();
-                        serialized.extend(headers.hex.0.into_iter());
-                        let mut reader = Reader::new_with_coin_variant(serialized.as_slice(), CoinVariant::Standard);
-                        let maybe_block_headers = reader.read_list::<BlockHeader>();
-                        let block_headers = match maybe_block_headers {
+                        let count = usize::try_from(headers.count)
+                            .map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+                        let block_headers = match policy.read_list(&headers.hex.0, count) {
                             Ok(headers) => headers,
-                            Err(e) => return MmError::err(UtxoRpcError::InvalidResponse(format!("{:?}", e))),
+                            Err(e) => {
+                                return MmError::err(UtxoRpcError::InvalidResponse(e.reason(|e| format!("{:?}", e))))
+                            },
                         };
                         let mut block_registry: HashMap<u64, BlockHeader> = HashMap::new();
                         let mut starting_height = from;
@@ -588,6 +936,59 @@ impl ElectrumClient {
                 }),
         )
     }
+}
+
+#[cfg_attr(test, mockable)]
+impl ElectrumClient {
+    /// CRD ch.38 R38.6.3a: the balance of the P2PKH script of `address`, and the unspents locked by
+    /// `p2pk_script` (the P2PK lookup R38.6.3 adds to a legacy-address balance), read in ONE Electrum
+    /// request message. Returns `(p2pkh_balance, p2pk_unspents)`.
+    pub fn display_balance_with_p2pk(
+        &self,
+        address: &Address,
+        decimals: u8,
+        p2pk_script: &Script,
+    ) -> UtxoRpcFut<(BigDecimal, Vec<UnspentInfo>)> {
+        let p2pkh_hash = hex::encode(electrum_script_hash(&output_script(address, ScriptType::P2PKH)));
+        let p2pk_hash = hex::encode(electrum_script_hash(p2pk_script));
+        Box::new(
+            self.scripthash_get_balance_and_list_unspent(&p2pkh_hash, &p2pk_hash)
+                .map_to_mm_fut(UtxoRpcError::from)
+                .map(move |(balance, p2pk_unspents)| {
+                    (balance.to_big_decimal(decimals), unspents_to_infos(&p2pk_unspents))
+                }),
+        )
+    }
+
+    /// CRD ch.38 R38.6.3a: the unspents of the P2PKH script of `address` followed by those locked by
+    /// `p2pk_script`, read in ONE Electrum request message.
+    pub fn list_unspent_with_p2pk(&self, address: &Address, p2pk_script: &Script) -> UtxoRpcFut<Vec<UnspentInfo>> {
+        let p2pkh_hash = hex::encode(electrum_script_hash(&output_script(address, ScriptType::P2PKH)));
+        let p2pk_hash = hex::encode(electrum_script_hash(p2pk_script));
+        Box::new(
+            self.scripthash_list_unspent_with_p2pk(&p2pkh_hash, &p2pk_hash)
+                .map_to_mm_fut(UtxoRpcError::from)
+                .map(move |(p2pkh_unspents, p2pk_unspents)| {
+                    let mut unspents = unspents_to_infos(&p2pkh_unspents);
+                    unspents.extend(unspents_to_infos(&p2pk_unspents));
+                    unspents
+                }),
+        )
+    }
+}
+
+fn unspents_to_infos(unspents: &[ElectrumUnspent]) -> Vec<UnspentInfo> {
+    unspents
+        .iter()
+        .map(|unspent| UnspentInfo {
+            outpoint: OutPoint {
+                hash: unspent.tx_hash.reversed().into(),
+                index: unspent.tx_pos,
+            },
+            value: unspent.value,
+            height: unspent.height,
+        })
+        .collect()
 }
 
 // if mockable is placed before async_trait there is `munmap_chunk(): invalid pointer` error on async fn mocking attempt
@@ -785,6 +1186,15 @@ impl UtxoRpcClientOps for ElectrumClient {
         count: NonZeroU64,
         coin_variant: CoinVariant,
     ) -> UtxoRpcFut<u32> {
+        self.get_median_time_past_with_policy(starting_block, count, HeaderReadPolicy::with_layout(coin_variant))
+    }
+
+    fn get_median_time_past_with_policy(
+        &self,
+        starting_block: u64,
+        count: NonZeroU64,
+        policy: HeaderReadPolicy,
+    ) -> UtxoRpcFut<u32> {
         let from = if starting_block <= count.get() {
             0
         } else {
@@ -793,15 +1203,16 @@ impl UtxoRpcClientOps for ElectrumClient {
         Box::new(
             self.blockchain_block_headers(from, count)
                 .map_to_mm_fut(UtxoRpcError::from)
-                .and_then(|res| {
+                .and_then(move |res| {
                     if res.count == 0 {
                         return MmError::err(UtxoRpcError::InvalidResponse("Server returned zero count".to_owned()));
                     }
-                    let len = CompactInteger::from(res.count);
-                    let mut serialized = serialize(&len).take();
-                    serialized.extend(res.hex.0.into_iter());
-                    let mut reader = Reader::new_with_coin_variant(serialized.as_slice(), coin_variant);
-                    let headers = reader.read_list::<BlockHeader>()?;
+                    let count =
+                        usize::try_from(res.count).map_to_mm(|e| UtxoRpcError::InvalidResponse(e.to_string()))?;
+                    let headers = policy.read_list(&res.hex.0, count).map_err(|e| match e {
+                        FallbackReadError::Rejected(e) => MmError::new(UtxoRpcError::from(e)),
+                        other => MmError::new(UtxoRpcError::InvalidResponse(other.reason(|e| format!("{:?}", e)))),
+                    })?;
                     let mut timestamps: Vec<_> = headers.into_iter().map(|block| block.time).collect();
                     // can unwrap because count is non zero
                     Ok(median(timestamps.as_mut_slice()).unwrap())
@@ -810,9 +1221,19 @@ impl UtxoRpcClientOps for ElectrumClient {
     }
 
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>> {
+        self.get_block_timestamp_with_policy(height, &HeaderReadPolicy::standard())
+            .await
+    }
+
+    async fn get_block_timestamp_with_policy(
+        &self,
+        height: u64,
+        policy: &HeaderReadPolicy,
+    ) -> Result<u64, MmError<UtxoRpcError>> {
         let header_bytes = self.blockchain_block_header(height).compat().await?;
-        let header: BlockHeader =
-            deserialize(header_bytes.0.as_slice()).map_to_mm(|e| UtxoRpcError::InvalidResponse(format!("{:?}", e)))?;
+        let header = policy
+            .read_header(&header_bytes.0)
+            .map_to_mm(|e| UtxoRpcError::InvalidResponse(e.reason(|e| format!("{:?}", e))))?;
         Ok(header.time as u64)
     }
 }
@@ -822,13 +1243,20 @@ impl ElectrumClientImpl {
     pub fn new(coin_ticker: String, event_handlers: Vec<RpcTransportEventHandlerShared>) -> ElectrumClientImpl {
         let protocol_version = OrdRange::new(1.2, 1.4).unwrap();
         ElectrumClientImpl {
+            pool: Arc::new(PoolShared::new(
+                coin_ticker.clone(),
+                ElectrumPoolOptions::default(),
+                protocol_version.clone(),
+                event_handlers.clone(),
+            )),
             coin_ticker,
-            connections: AsyncMutex::new(vec![]),
-            next_id: 0.into(),
             event_handlers,
             protocol_version,
             get_balance_concurrent_map: ConcurrentRequestMap::new(),
             list_unspent_concurrent_map: ConcurrentRequestMap::new(),
+            get_balance_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
+            list_unspent_with_p2pk_concurrent_map: ConcurrentRequestMap::new(),
+            watched_script_hashes: AsyncMutex::new(HashSet::new()),
         }
     }
 
@@ -838,10 +1266,13 @@ impl ElectrumClientImpl {
         event_handlers: Vec<RpcTransportEventHandlerShared>,
         protocol_version: OrdRange<f32>,
     ) -> ElectrumClientImpl {
-        ElectrumClientImpl {
+        let mut client = ElectrumClientImpl {
             protocol_version,
             ..ElectrumClientImpl::new(coin_ticker, event_handlers)
-        }
+        };
+        // The pool negotiates the protocol version, so it must know the range.
+        client.configure_pool(ElectrumPoolOptions::default());
+        client
     }
 }
 
@@ -850,17 +1281,19 @@ fn rx_to_stream(rx: mpsc::Receiver<Vec<u8>>) -> impl Stream<Item = Vec<u8>, Erro
     rx.map_err(|_| panic!("errors not possible on rx"))
 }
 
-async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
+async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShared, headers: Option<&HeaderTrack>) {
     // detect if we got standard JSONRPC response or subscription response as JSONRPC request
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum ElectrumRpcResponseEnum {
+        /// The subscription response as JSONRPC request. It is tried first: it needs a `method`, which a
+        /// response never has, while every field of `JsonRpcResponse` has a default, so a notification
+        /// would match the single response, be looked up under an empty id, and be dropped.
+        SubscriptionNotification(JsonRpcRequest),
         /// The standard JSONRPC single response.
         SingleResponse(JsonRpcResponse),
         /// The batch of standard JSONRPC responses.
         BatchResponses(JsonRpcBatchResponse),
-        /// The subscription response as JSONRPC request.
-        SubscriptionNotification(JsonRpcRequest),
     }
 
     let response: ElectrumRpcResponseEnum = match json::from_value(raw_json) {
@@ -875,10 +1308,44 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
         ElectrumRpcResponseEnum::SingleResponse(single) => JsonRpcResponseEnum::Single(single),
         ElectrumRpcResponseEnum::BatchResponses(batch) => JsonRpcResponseEnum::Batch(batch),
         ElectrumRpcResponseEnum::SubscriptionNotification(req) => {
+            // A script-hash notification is an event, not the answer to a
+            // pending request, so it is dispatched here and never reaches the
+            // request-matching path below.
+            if req.method == BLOCKCHAIN_SCRIPTHASH_SUB_ID {
+                if let Some(script_hash) = req.params.first().and_then(|p| p.as_str()) {
+                    notify_scripthash_change(script_hash);
+                }
+                return;
+            }
+            // A contract-event notification echoes the subscription's own
+            // arguments, so the registry key is rebuilt from them exactly as it
+            // was built when subscribing.
+            if req.method == BLOCKCHAIN_CONTRACT_EVENT_SUB_ID {
+                let arg = |i: usize| req.params.get(i).and_then(|p| p.as_str());
+                if let (Some(address), Some(contract), Some(topic)) = (arg(0), arg(1), arg(2)) {
+                    notify_scripthash_change(&contract_event_key(address, contract, topic));
+                } else {
+                    common::log::debug!(
+                        "Contract-event notification with unexpected parameters: {:?}",
+                        req.params
+                    );
+                }
+                return;
+            }
             let id = match req.method.as_ref() {
-                BLOCKCHAIN_HEADERS_SUB_ID => BLOCKCHAIN_HEADERS_SUB_ID,
+                BLOCKCHAIN_HEADERS_SUB_ID => {
+                    if let (Some(headers), Some(height)) =
+                        (headers, req.params.first().and_then(|p| p["height"].as_u64()))
+                    {
+                        headers.note_notification(height);
+                    }
+                    BLOCKCHAIN_HEADERS_SUB_ID
+                },
+                // Unknown subscription kinds are ignored rather than treated as
+                // errors: a server is free to send notifications we never asked
+                // for, and dropping them must not disturb the connection.
                 _ => {
-                    error!("Couldn't get id of request {:?}", req);
+                    common::log::debug!("Ignoring unrecognised subscription notification {:?}", req.method);
                     return;
                 },
             };
@@ -899,7 +1366,12 @@ async fn electrum_process_json(raw_json: Json, arc: &JsonRpcPendingRequestsShare
     }
 }
 
-async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared) {
+#[cfg(test)]
+pub(super) async fn electrum_process_json_for_test(raw_json: Json, arc: &JsonRpcPendingRequestsShared) {
+    electrum_process_json(raw_json, arc, None).await
+}
+
+async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared, headers: &HeaderTrack) {
     // we should split the received chunk because we can get several responses in 1 chunk.
     let split = chunk.split(|item| *item == b'\n');
     for chunk in split {
@@ -912,52 +1384,9 @@ async fn electrum_process_chunk(chunk: &[u8], arc: &JsonRpcPendingRequestsShared
                     return;
                 },
             };
-            electrum_process_json(raw_json, arc).await
+            electrum_process_json(raw_json, arc, Some(headers)).await
         }
     }
-}
-
-fn increase_delay(delay: &AtomicU64) {
-    if delay.load(AtomicOrdering::Relaxed) < 60 {
-        delay.fetch_add(5, AtomicOrdering::Relaxed);
-    }
-}
-
-fn replace_if_connection_error_changed(last_error: &mut Option<String>, current_error: &str) -> bool {
-    if last_error.as_deref() == Some(current_error) {
-        false
-    } else {
-        *last_error = Some(current_error.to_owned());
-        true
-    }
-}
-
-macro_rules! try_loop {
-    ($e:expr, $addr: ident, $delay: ident, $last_error: ident) => {
-        match $e {
-            Ok(res) => res,
-            Err(e) => {
-                let error_text = format!("{:?}", e);
-                if replace_if_connection_error_changed(&mut $last_error, &error_text) {
-                    error!("{:?} error {}", $addr, error_text);
-                } else {
-                    common::log::debug!("{:?} repeated connection error {}", $addr, error_text);
-                }
-                increase_delay(&$delay);
-                continue;
-            },
-        }
-    };
-    ($e:expr, $addr: ident, $delay: ident) => {
-        match $e {
-            Ok(res) => res,
-            Err(e) => {
-                error!("{:?} error {:?}", $addr, e);
-                increase_delay(&$delay);
-                continue;
-            },
-        }
-    };
 }
 
 /// The enum wrapping possible variants of underlying Streams
@@ -1012,43 +1441,52 @@ impl AsyncWrite for ElectrumStream {
     }
 }
 
-const ELECTRUM_TIMEOUT: u64 = 60;
-
-async fn electrum_last_chunk_loop(last_chunk: Arc<AtomicU64>) {
+/// Closes a session that has been silent for `cutoff` (CRD ch.38 R38.6.4e item 3), no earlier.
+async fn idle_cutoff_loop(last_chunk: Arc<AtomicU64>, cutoff: Duration) {
+    let cutoff_ms = cutoff.as_millis() as u64;
     loop {
-        Timer::sleep(ELECTRUM_TIMEOUT as f64).await;
-        let last = (last_chunk.load(AtomicOrdering::Relaxed) / 1000) as f64;
-        if now_float() - last > ELECTRUM_TIMEOUT as f64 {
+        let idle_ms = now_ms().saturating_sub(last_chunk.load(AtomicOrdering::Relaxed));
+        if idle_ms >= cutoff_ms {
             warn!(
-                "Didn't receive any data since {}. Shutting down the connection.",
-                last as i64
+                "Didn't receive any data for {} ms. Shutting down the connection.",
+                idle_ms
             );
             break;
         }
+        Timer::sleep((cutoff_ms - idle_ms) as f64 / 1000.).await;
     }
 }
 
+/// Builds the Electrum TLS client configuration.
+///
+/// The `ring` provider is passed explicitly (`builder_with_provider`) rather than read from the
+/// process-global default, which would panic at the first connection if two providers were ever
+/// compiled in. `tls12` is enabled on the `rustls` dependency and the default protocol versions
+/// are TLS 1.3 and TLS 1.2: Electrum servers in the wild include TLS 1.2-only deployments.
 #[cfg(not(target_arch = "wasm32"))]
 fn rustls_client_config(unsafe_conf: bool) -> Arc<ClientConfig> {
-    let mut cert_store = RootCertStore::empty();
+    let cert_store = RootCertStore {
+        roots: TLS_SERVER_ROOTS.to_vec(),
+    };
+    build_rustls_client_config(unsafe_conf, cert_store)
+}
 
-    cert_store.add_server_trust_anchors(
-        TLS_SERVER_ROOTS
-            .0
-            .iter()
-            .map(|ta| OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)),
-    );
+#[cfg(not(target_arch = "wasm32"))]
+fn build_rustls_client_config(unsafe_conf: bool, cert_store: RootCertStore) -> Arc<ClientConfig> {
+    let provider = Arc::new(rustls_ring::default_provider());
 
-    let mut tls_config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_root_certificates(cert_store)
-        .with_no_client_auth();
+    let builder = ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports the default protocol versions");
 
-    if unsafe_conf {
-        tls_config
+    let tls_config = if unsafe_conf {
+        builder
             .dangerous()
-            .set_certificate_verifier(Arc::new(NoCertificateVerification {}));
-    }
+            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification::new(provider)))
+            .with_no_client_auth()
+    } else {
+        builder.with_root_certificates(cert_store).with_no_client_auth()
+    };
     Arc::new(tls_config)
 }
 
@@ -1058,298 +1496,277 @@ lazy_static! {
     static ref UNSAFE_TLS_CONFIG: Arc<ClientConfig> = rustls_client_config(true);
 }
 
+/// Connects the server and starts the tasks that move the bytes of the session. Resolving the
+/// address, connecting and the TLS handshake happen here; the caller bounds the time they take
+/// (CRD ch.38 R38.6.4e item 1).
 #[cfg(not(target_arch = "wasm32"))]
-async fn connect_loop(
-    config: ElectrumConfig,
-    addr: String,
-    responses: JsonRpcPendingRequestsShared,
-    connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
+pub(crate) async fn open_session(
+    id: u64,
+    spec: &ServerSpec,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
-) -> Result<(), ()> {
-    let delay = Arc::new(AtomicU64::new(0));
-    let mut last_connect_error = None;
+    idle_cutoff: Duration,
+    on_end: SessionEnded,
+    on_header: HeaderNotified,
+) -> Result<Session, String> {
+    let addr = spec.addr.clone();
+    let connect_f = match &spec.config {
+        ElectrumConfig::TCP => {
+            Either::Left(TcpStream::connect((spec.host.as_str(), spec.port)).map_ok(ElectrumStream::Tcp))
+        },
+        ElectrumConfig::SSL {
+            dns_name,
+            skip_validation,
+        } => {
+            let tls_connector = if *skip_validation {
+                TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
+            } else {
+                TlsConnector::from(SAFE_TLS_CONFIG.clone())
+            };
+            let dns_name = dns_name.clone();
 
-    loop {
-        let current_delay = delay.load(AtomicOrdering::Relaxed);
-        if current_delay > 0 {
-            Timer::sleep(current_delay as f64).await;
-        };
-
-        let socket_addr = try_loop!(addr_to_socket_addr(&addr), addr, delay, last_connect_error);
-
-        let connect_f = match config.clone() {
-            ElectrumConfig::TCP => Either::Left(TcpStream::connect(&socket_addr).map_ok(ElectrumStream::Tcp)),
-            ElectrumConfig::SSL {
-                dns_name,
-                skip_validation,
-            } => {
-                let tls_connector = if skip_validation {
-                    TlsConnector::from(UNSAFE_TLS_CONFIG.clone())
-                } else {
-                    TlsConnector::from(SAFE_TLS_CONFIG.clone())
-                };
-
-                Either::Right(TcpStream::connect(&socket_addr).and_then(move |stream| {
+            Either::Right(
+                TcpStream::connect((spec.host.as_str(), spec.port)).and_then(move |stream| {
                     // Can use `unwrap` cause `dns_name` is pre-checked.
-                    let dns = ServerName::try_from(dns_name.as_str())
-                        .map_err(|e| fomat!([e]))
-                        .unwrap();
+                    let dns = ServerName::try_from(dns_name).map_err(|e| fomat!([e])).unwrap();
                     tls_connector.connect(dns, stream).map_ok(ElectrumStream::Tls)
-                }))
-            },
-        };
+                }),
+            )
+        },
+    };
 
-        let stream = try_loop!(connect_f.await, addr, delay, last_connect_error);
-        try_loop!(stream.as_ref().set_nodelay(true), addr, delay, last_connect_error);
-        info!("Electrum client connected to {}", addr);
-        try_loop!(
-            event_handlers.on_connected(addr.clone()),
-            addr,
-            delay,
-            last_connect_error
-        );
-        last_connect_error = None;
-        let last_chunk = Arc::new(AtomicU64::new(now_ms()));
-        let mut last_chunk_f = electrum_last_chunk_loop(last_chunk.clone()).boxed().fuse();
+    let stream = connect_f.await.map_err(|e| e.to_string())?;
+    stream.as_ref().set_nodelay(true).map_err(|e| e.to_string())?;
+    info!("Electrum client connected to {}", addr);
+    event_handlers.on_connected(addr.clone())?;
 
-        let (tx, rx) = mpsc::channel(0);
-        *connection_tx.lock().await = Some(tx);
-        let rx = rx_to_stream(rx).inspect(|data| {
+    let last_chunk = Arc::new(AtomicU64::new(now_ms()));
+    let closed = Arc::new(AtomicBool::new(false));
+    let responses: JsonRpcPendingRequestsShared = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
+    let (tx, rx) = mpsc::channel(0);
+    let rx = rx_to_stream(rx).inspect({
+        let event_handlers = event_handlers.clone();
+        move |data| {
             // measure the length of each sent packet
             event_handlers.on_outgoing_request(data);
-        });
+        }
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let headers = Arc::new(HeaderTrack::new(on_header));
 
-        let (read, mut write) = tokio::io::split(stream);
-        let recv_f = {
-            let delay = delay.clone();
-            let addr = addr.clone();
-            let responses = responses.clone();
-            let event_handlers = event_handlers.clone();
-            async move {
-                let mut buffer = String::with_capacity(1024);
-                let mut buf_reader = BufReader::new(read);
-                loop {
-                    match buf_reader.read_line(&mut buffer).await {
-                        Ok(c) => {
-                            if c == 0 {
-                                info!("EOF from {}", addr);
-                                break;
-                            }
-                            // reset the delay if we've connected successfully and only if we received some data from connection
-                            delay.store(0, AtomicOrdering::Relaxed);
-                        },
-                        Err(e) => {
-                            error!("Error on read {} from {}", e, addr);
+    let (read, mut write) = tokio::io::split(stream);
+    let recv_f = {
+        let addr = addr.clone();
+        let responses = responses.clone();
+        let last_chunk = last_chunk.clone();
+        let headers = headers.clone();
+        async move {
+            let mut buffer = String::with_capacity(1024);
+            let mut buf_reader = BufReader::new(read);
+            loop {
+                match buf_reader.read_line(&mut buffer).await {
+                    Ok(c) => {
+                        if c == 0 {
+                            info!("EOF from {}", addr);
                             break;
-                        },
-                    };
-                    // measure the length of each incoming packet
-                    event_handlers.on_incoming_response(buffer.as_bytes());
-                    last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
+                        }
+                    },
+                    Err(e) => {
+                        error!("Error on read {} from {}", e, addr);
+                        break;
+                    },
+                };
+                // measure the length of each incoming packet
+                event_handlers.on_incoming_response(buffer.as_bytes());
+                last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
 
-                    electrum_process_chunk(buffer.as_bytes(), &responses).await;
-                    buffer.clear();
+                electrum_process_chunk(buffer.as_bytes(), &responses, &headers).await;
+                buffer.clear();
+            }
+        }
+    };
+
+    let send_f = {
+        let addr = addr.clone();
+        let mut rx = rx.compat();
+        async move {
+            while let Some(Ok(bytes)) = rx.next().await {
+                if let Err(e) = write.write_all(&bytes).await {
+                    error!("Write error {} to {}", e, addr);
+                    break;
                 }
             }
-        };
-        let mut recv_f = Box::pin(recv_f).fuse();
-
-        let send_f = {
-            let addr = addr.clone();
-            let mut rx = rx.compat();
-            async move {
-                while let Some(Ok(bytes)) = rx.next().await {
-                    if let Err(e) = write.write_all(&bytes).await {
-                        error!("Write error {} to {}", e, addr);
-                    }
-                }
-            }
-        };
-        let mut send_f = Box::pin(send_f).fuse();
-        macro_rules! reset_tx_and_continue {
-            () => {
-                info!("{} connection dropped", addr);
-                *connection_tx.lock().await = None;
-                increase_delay(&delay);
-                continue;
-            };
         }
+    };
 
-        select! {
-            _last_chunk = last_chunk_f => { reset_tx_and_continue!(); },
-            _recv = recv_f => { reset_tx_and_continue!(); },
-            _send = send_f => { reset_tx_and_continue!(); },
-        }
-    }
+    spawn(session_task(
+        id,
+        addr.clone(),
+        recv_f,
+        send_f,
+        last_chunk,
+        idle_cutoff,
+        shutdown_rx,
+        responses.clone(),
+        closed.clone(),
+        on_end,
+    ));
+
+    Ok(Session {
+        id,
+        addr,
+        tx: StdMutex::new(tx),
+        responses,
+        closed,
+        headers,
+        shutdown_tx: StdMutex::new(Some(shutdown_tx)),
+    })
 }
 
+/// Connects the server and starts the tasks that move the messages of the session. The caller bounds
+/// the time this takes (CRD ch.38 R38.6.4e item 1).
 #[cfg(target_arch = "wasm32")]
-async fn connect_loop(
-    _config: ElectrumConfig,
-    addr: String,
-    responses: JsonRpcPendingRequestsShared,
-    connection_tx: Arc<AsyncMutex<Option<mpsc::Sender<Vec<u8>>>>>,
+pub(crate) async fn open_session(
+    id: u64,
+    spec: &ServerSpec,
     event_handlers: Vec<RpcTransportEventHandlerShared>,
-) -> Result<(), ()> {
+    idle_cutoff: Duration,
+    on_end: SessionEnded,
+    on_header: HeaderNotified,
+) -> Result<Session, String> {
+    use mm2_net::wasm_ws::ws_transport;
     use std::sync::atomic::AtomicUsize;
 
     lazy_static! {
         static ref CONN_IDX: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     }
 
-    use mm2_net::wasm_ws::ws_transport;
+    let addr = spec.addr.clone();
+    let conn_idx = CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed);
+    let (mut transport_tx, mut transport_rx) = ws_transport(conn_idx, &spec.ws_url)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
 
-    let delay = Arc::new(AtomicU64::new(0));
-    loop {
-        let current_delay = delay.load(AtomicOrdering::Relaxed);
-        if current_delay > 0 {
-            Timer::sleep(current_delay as f64).await;
-        }
+    info!("Electrum client connected to {}", addr);
+    event_handlers.on_connected(addr.clone())?;
 
-        let conn_idx = CONN_IDX.fetch_add(1, AtomicOrdering::Relaxed);
-        let (mut transport_tx, mut transport_rx) = try_loop!(ws_transport(conn_idx, &addr).await, addr, delay);
-
-        info!("Electrum client connected to {}", addr);
-        try_loop!(event_handlers.on_connected(addr.clone()), addr, delay);
-
-        let last_chunk = Arc::new(AtomicU64::new(now_ms()));
-        let mut last_chunk_fut = electrum_last_chunk_loop(last_chunk.clone()).boxed().fuse();
-
-        let (outgoing_tx, outgoing_rx) = mpsc::channel(0);
-        *connection_tx.lock().await = Some(outgoing_tx);
-
-        let incoming_fut = {
-            let delay = delay.clone();
-            let addr = addr.clone();
-            let responses = responses.clone();
-            let event_handlers = event_handlers.clone();
-            async move {
-                while let Some(incoming_res) = transport_rx.next().await {
-                    last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
-                    match incoming_res {
-                        Ok(incoming_json) => {
-                            // reset the delay if we've connected successfully and only if we received some data from connection
-                            delay.store(0, AtomicOrdering::Relaxed);
-                            // measure the length of each incoming packet
-                            let incoming_str = incoming_json.to_string();
-                            event_handlers.on_incoming_response(incoming_str.as_bytes());
-
-                            electrum_process_json(incoming_json, &responses).await;
-                        },
-                        Err(e) => {
-                            error!("{} error: {:?}", addr, e);
-                        },
-                    }
-                }
-            }
-        };
-        let mut incoming_fut = Box::pin(incoming_fut).fuse();
-
-        let outgoing_fut = {
-            let addr = addr.clone();
-            let mut outgoing_rx = rx_to_stream(outgoing_rx).compat();
-            let event_handlers = event_handlers.clone();
-            async move {
-                while let Some(Ok(data)) = outgoing_rx.next().await {
-                    let raw_json: Json = match json::from_slice(&data) {
-                        Ok(js) => js,
-                        Err(e) => {
-                            error!("Error {} deserializing the outgoing data: {:?}", e, data);
-                            continue;
-                        },
-                    };
-                    // measure the length of each sent packet
-                    event_handlers.on_outgoing_request(&data);
-
-                    if let Err(e) = transport_tx.send(raw_json).await {
-                        error!("Error sending to {}: {:?}", addr, e);
-                    }
-                }
-            }
-        };
-        let mut outgoing_fut = Box::pin(outgoing_fut).fuse();
-
-        macro_rules! reset_tx_and_continue {
-            () => {
-                info!("{} connection dropped", addr);
-                *connection_tx.lock().await = None;
-                increase_delay(&delay);
-                continue;
-            };
-        }
-
-        select! {
-            _last_chunk = last_chunk_fut => { reset_tx_and_continue!(); },
-            _incoming = incoming_fut => { reset_tx_and_continue!(); },
-            _outgoing = outgoing_fut => { reset_tx_and_continue!(); },
-        }
-    }
-}
-
-/// Builds up the electrum connection, spawns endless loop that attempts to reconnect to the server
-/// in case of connection errors
-fn electrum_connect(
-    addr: String,
-    config: ElectrumConfig,
-    event_handlers: Vec<RpcTransportEventHandlerShared>,
-) -> ElectrumConnection {
+    let last_chunk = Arc::new(AtomicU64::new(now_ms()));
+    let closed = Arc::new(AtomicBool::new(false));
+    let responses: JsonRpcPendingRequestsShared = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
+    let (outgoing_tx, outgoing_rx) = mpsc::channel(0);
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let responses = Arc::new(AsyncMutex::new(JsonRpcPendingRequests::default()));
-    let tx = Arc::new(AsyncMutex::new(None));
+    let headers = Arc::new(HeaderTrack::new(on_header));
 
-    let connect_loop = connect_loop(
-        config.clone(),
+    let incoming_fut = {
+        let addr = addr.clone();
+        let responses = responses.clone();
+        let last_chunk = last_chunk.clone();
+        let event_handlers = event_handlers.clone();
+        let headers = headers.clone();
+        async move {
+            while let Some(incoming_res) = transport_rx.next().await {
+                last_chunk.store(now_ms(), AtomicOrdering::Relaxed);
+                match incoming_res {
+                    Ok(incoming_json) => {
+                        // measure the length of each incoming packet
+                        let incoming_str = incoming_json.to_string();
+                        event_handlers.on_incoming_response(incoming_str.as_bytes());
+
+                        electrum_process_json(incoming_json, &responses, Some(&headers)).await;
+                    },
+                    Err(e) => {
+                        error!("{} error: {:?}", addr, e);
+                    },
+                }
+            }
+        }
+    };
+
+    let outgoing_fut = {
+        let addr = addr.clone();
+        let mut outgoing_rx = rx_to_stream(outgoing_rx).compat();
+        async move {
+            while let Some(Ok(data)) = outgoing_rx.next().await {
+                let raw_json: Json = match json::from_slice(&data) {
+                    Ok(js) => js,
+                    Err(e) => {
+                        error!("Error {} deserializing the outgoing data: {:?}", e, data);
+                        continue;
+                    },
+                };
+                // measure the length of each sent packet
+                event_handlers.on_outgoing_request(&data);
+
+                if let Err(e) = transport_tx.send(raw_json).await {
+                    error!("Error sending to {}: {:?}", addr, e);
+                    break;
+                }
+            }
+        }
+    };
+
+    spawn(session_task(
+        id,
         addr.clone(),
+        incoming_fut,
+        outgoing_fut,
+        last_chunk,
+        idle_cutoff,
+        shutdown_rx,
         responses.clone(),
-        tx.clone(),
-        event_handlers,
-    );
+        closed.clone(),
+        on_end,
+    ));
 
-    let connect_loop = select_func(connect_loop.boxed(), shutdown_rx.compat());
-    spawn(connect_loop.map(|_| ()));
-    ElectrumConnection {
+    Ok(Session {
+        id,
         addr,
-        config,
-        tx,
-        shutdown_tx: Some(shutdown_tx),
+        tx: StdMutex::new(outgoing_tx),
         responses,
-        protocol_version: AsyncMutex::new(None),
+        closed,
+        headers,
+        shutdown_tx: StdMutex::new(Some(shutdown_tx)),
+    })
+}
+
+/// The method names of a request message, comma-separated for a batch. Only names: never params, script hashes,
+/// addresses or payloads.
+fn request_methods(request: &JsonRpcRequestEnum) -> String {
+    match request {
+        JsonRpcRequestEnum::Single(single) => single.method.clone(),
+        JsonRpcRequestEnum::Batch(batch) => batch.methods().join(","),
     }
 }
 
-fn electrum_request(
-    request: JsonRpcRequestEnum,
-    tx: mpsc::Sender<Vec<u8>>,
+/// Runs until the session ends: the read side or the write side stops, the idle cutoff strikes, or
+/// the session is closed. Then it fails the requests still waiting and tells the pool.
+#[allow(clippy::too_many_arguments)]
+async fn session_task(
+    id: u64,
+    addr: String,
+    read_side: impl std::future::Future<Output = ()> + Send + 'static,
+    write_side: impl std::future::Future<Output = ()> + Send + 'static,
+    last_chunk: Arc<AtomicU64>,
+    idle_cutoff: Duration,
+    shutdown_rx: oneshot::Receiver<()>,
     responses: JsonRpcPendingRequestsShared,
-    timeout: u64,
-) -> Box<dyn Future<Item = JsonRpcResponseEnum, Error = String> + Send + 'static> {
-    let send_fut = async move {
-        let json = try_s!(json::to_string(&request));
-        #[cfg(not(target_arch = "wasm32"))]
-        let json = {
-            let mut json = json;
-            // Electrum request and responses must end with \n
-            // https://electrumx.readthedocs.io/en/latest/protocol-basics.html#message-stream
-            json.push('\n');
-            json
-        };
-
-        let (req_tx, resp_rx) = async_oneshot::channel();
-        responses.lock().await.insert(request.rpc_id(), req_tx);
-        try_s!(tx.send(json.into_bytes()).compat().await);
-        let resps = try_s!(resp_rx.await);
-        Ok(resps)
-    };
-    let send_fut = send_fut
-        .boxed()
-        .timeout(Duration::from_secs(timeout))
-        .compat()
-        .then(|res| match res {
-            Ok(response) => response,
-            Err(timeout_error) => ERR!("{}", timeout_error),
-        })
-        .map_err(|e| ERRL!("{}", e));
-    Box::new(send_fut)
+    closed: Arc<AtomicBool>,
+    on_end: SessionEnded,
+) {
+    let mut idle_f = Box::pin(idle_cutoff_loop(last_chunk, idle_cutoff)).fuse();
+    let mut read_f = Box::pin(read_side).fuse();
+    let mut write_f = Box::pin(write_side).fuse();
+    let mut shutdown_f = shutdown_rx.compat().fuse();
+    select! {
+        _idle = idle_f => (),
+        _read = read_f => (),
+        _write = write_f => (),
+        _shutdown = shutdown_f => (),
+    }
+    info!("{} connection dropped", addr);
+    closed.store(true, AtomicOrdering::Relaxed);
+    // The requests still waiting get no answer anymore: dropping their senders fails them at once.
+    responses.lock().await.clear();
+    on_end(id);
 }
 
 pub(crate) fn address_balance_from_unspent_map(
@@ -1370,28 +1787,548 @@ pub(crate) fn address_balance_from_unspent_map(
 
 #[cfg(test)]
 mod connection_error_tests {
-    use super::replace_if_connection_error_changed;
+    use super::{contract_event_key, futures_mpsc, notify_scripthash_change, unwatch_scripthash, watch_scripthash};
+
+    /// A registered watcher is woken with the hash that changed, so the
+    /// consumer knows which address to re-read.
+    #[test]
+    fn scripthash_notification_reaches_its_watcher() {
+        let (tx, mut rx) = futures_mpsc::unbounded();
+        watch_scripthash("aabb".to_owned(), tx);
+
+        notify_scripthash_change("aabb");
+
+        assert_eq!(rx.try_recv().unwrap(), "aabb".to_owned());
+        unwatch_scripthash("aabb");
+    }
+
+    /// Two consumers watching the same address must both be woken.
+    ///
+    /// The balance streamer and the transaction-history loop both watch a
+    /// coin's address, so a registry holding one sender per hash would let
+    /// whichever registered second silently starve the first -- a failure that
+    /// looks exactly like "that subsystem just never updates".
+    #[test]
+    fn multiple_watchers_of_one_hash_are_all_woken() {
+        let (tx_a, mut rx_a) = futures_mpsc::unbounded();
+        let (tx_b, mut rx_b) = futures_mpsc::unbounded();
+        watch_scripthash("shared".to_owned(), tx_a);
+        watch_scripthash("shared".to_owned(), tx_b);
+
+        notify_scripthash_change("shared");
+
+        assert_eq!(rx_a.try_recv().unwrap(), "shared".to_owned(), "first watcher");
+        assert_eq!(rx_b.try_recv().unwrap(), "shared".to_owned(), "second watcher");
+        unwatch_scripthash("shared");
+    }
+
+    /// One consumer departing must not silence the other.
+    #[test]
+    fn departed_watcher_does_not_silence_its_peer() {
+        let (tx_gone, rx_gone) = futures_mpsc::unbounded();
+        let (tx_live, mut rx_live) = futures_mpsc::unbounded();
+        watch_scripthash("peer".to_owned(), tx_gone);
+        watch_scripthash("peer".to_owned(), tx_live);
+        drop(rx_gone);
+
+        unwatch_scripthash("peer");
+        notify_scripthash_change("peer");
+
+        assert_eq!(
+            rx_live.try_recv().unwrap(),
+            "peer".to_owned(),
+            "the surviving watcher must still be notified"
+        );
+        unwatch_scripthash("peer");
+    }
+
+    /// A notification for a hash nobody registered must be a no-op rather than
+    /// an error: servers may push subscriptions we never asked for, and that
+    /// must not disturb the connection.
+    #[test]
+    fn unwatched_scripthash_notification_is_ignored() {
+        notify_scripthash_change("never-registered");
+
+        let (tx, mut rx) = futures_mpsc::unbounded();
+        watch_scripthash("ccdd".to_owned(), tx);
+        notify_scripthash_change("some-other-hash");
+        assert!(rx.try_recv().is_err(), "an unrelated hash must not wake this watcher");
+        unwatch_scripthash("ccdd");
+    }
+
+    /// If the consumer is gone the registration is dropped, so a departed
+    /// streamer cannot leak an entry for the life of the process.
+    #[test]
+    fn dropped_receiver_deregisters_its_watch() {
+        let (tx, rx) = futures_mpsc::unbounded();
+        watch_scripthash("eeff".to_owned(), tx);
+        drop(rx);
+
+        notify_scripthash_change("eeff");
+
+        let (tx2, mut rx2) = futures_mpsc::unbounded();
+        watch_scripthash("eeff".to_owned(), tx2);
+        notify_scripthash_change("eeff");
+        assert_eq!(rx2.try_recv().unwrap(), "eeff".to_owned());
+        unwatch_scripthash("eeff");
+    }
+
+    /// Unwatching reclaims a departed watcher's registration.
+    ///
+    /// It prunes by receiver liveness rather than by key, because several
+    /// consumers may share a hash and one leaving must not silence the rest.
+    #[test]
+    fn unwatch_reclaims_a_departed_watcher() {
+        let (tx, rx) = futures_mpsc::unbounded();
+        watch_scripthash("1122".to_owned(), tx);
+        drop(rx);
+
+        unwatch_scripthash("1122");
+
+        // With the entry reclaimed, a fresh watcher starts clean and is the
+        // only recipient.
+        let (tx2, mut rx2) = futures_mpsc::unbounded();
+        watch_scripthash("1122".to_owned(), tx2);
+        notify_scripthash_change("1122");
+        assert_eq!(rx2.try_recv().unwrap(), "1122".to_owned());
+        assert!(rx2.try_recv().is_err(), "exactly one delivery, not a duplicate");
+        unwatch_scripthash("1122");
+    }
+
+    /// Contract-event keys are distinct from script-hash keys for the same
+    /// address, so a QRC20 token and its platform coin do not collide.
+    ///
+    /// A QRC20 balance lives in contract storage; if both keyed on the address
+    /// alone, a token notification would wake the platform coin's watcher and
+    /// vice versa, and one would displace the other at registration.
+    #[test]
+    fn contract_event_and_scripthash_keys_do_not_collide() {
+        let address = "abcd";
+        let event_key = contract_event_key(address, "contract1", "topic1");
+        assert_ne!(
+            event_key, address,
+            "a contract-event key must not equal the bare address"
+        );
+
+        let (tx_addr, mut rx_addr) = futures_mpsc::unbounded();
+        let (tx_event, mut rx_event) = futures_mpsc::unbounded();
+        watch_scripthash(address.to_owned(), tx_addr);
+        watch_scripthash(event_key.clone(), tx_event);
+
+        notify_scripthash_change(&event_key);
+
+        assert_eq!(rx_event.try_recv().unwrap(), event_key.clone(), "token watcher woken");
+        assert!(
+            rx_addr.try_recv().is_err(),
+            "the platform coin's watcher must not be woken"
+        );
+
+        unwatch_scripthash(address);
+        unwatch_scripthash(&event_key);
+    }
+
+    /// Different tokens held at the same address must key differently, or one
+    /// token's transfer would be reported as another's.
+    #[test]
+    fn contract_event_keys_differ_per_token() {
+        let a = contract_event_key("addr", "token_a", "topic");
+        let b = contract_event_key("addr", "token_b", "topic");
+        assert_ne!(a, b);
+    }
+
+    /// Stress the watcher registry far past any realistic wallet, to answer
+    /// whether a subscription cap is needed.
+    ///
+    /// Realistic worst case today is one subscription per activated
+    /// Electrum-backed coin, because the balance streamer watches a single
+    /// address per coin. This registers three orders of magnitude more and
+    /// asserts both correctness and that the work stays trivial, so the
+    /// no-cap decision rests on a measurement rather than an assumption.
+    #[test]
+    fn watcher_registry_handles_far_more_than_any_realistic_wallet() {
+        use std::time::Instant;
+
+        const COUNT: usize = 10_000;
+
+        let mut receivers = Vec::with_capacity(COUNT);
+        let hashes: Vec<String> = (0..COUNT).map(|i| format!("stress{i:059}")).collect();
+
+        let registered = Instant::now();
+        for hash in &hashes {
+            let (tx, rx) = futures_mpsc::unbounded();
+            watch_scripthash(hash.clone(), tx);
+            receivers.push(rx);
+        }
+        let register_elapsed = registered.elapsed();
+
+        let notified = Instant::now();
+        for hash in &hashes {
+            notify_scripthash_change(hash);
+        }
+        let notify_elapsed = notified.elapsed();
+
+        // Every watcher must receive exactly its own hash: a registry that
+        // collapsed or cross-wired entries under load would be worse than one
+        // that simply refused the work.
+        for (rx, hash) in receivers.iter_mut().zip(hashes.iter()) {
+            assert_eq!(rx.try_recv().unwrap(), hash.clone());
+        }
+
+        for hash in &hashes {
+            unwatch_scripthash(hash);
+        }
+
+        // Generous bounds: the point is to catch a pathological cost such as a
+        // per-notification scan of the whole registry, not to benchmark.
+        assert!(
+            register_elapsed.as_millis() < 2_000,
+            "registering {COUNT} watchers took {register_elapsed:?}"
+        );
+        assert!(
+            notify_elapsed.as_millis() < 2_000,
+            "notifying {COUNT} watchers took {notify_elapsed:?}"
+        );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tls_tests {
+    use super::*;
+    use rustls::version::{TLS12, TLS13};
+    use rustls::{ProtocolVersion, ServerConfig, SupportedProtocolVersion};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+
+    struct TestServer {
+        port: u16,
+        cert: CertificateDer<'static>,
+    }
+
+    /// A one-shot loopback TLS server restricted to `versions` that echoes a 4-byte payload.
+    async fn spawn_server(versions: &[&'static SupportedProtocolVersion], names: &[&str]) -> TestServer {
+        let certified = rcgen::generate_simple_self_signed(names.iter().map(|n| n.to_string()).collect::<Vec<_>>())
+            .expect("self-signed certificate");
+        let cert = CertificateDer::from(certified.cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(certified.key_pair.serialize_der()).expect("key");
+        let provider = Arc::new(rustls_ring::default_provider());
+        let config = ServerConfig::builder_with_provider(provider)
+            .with_protocol_versions(versions)
+            .expect("protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .expect("server certificate");
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                if let Ok(mut tls) = acceptor.accept(tcp).await {
+                    let mut buf = [0u8; 4];
+                    if tls.read_exact(&mut buf).await.is_ok() {
+                        let _ = tls.write_all(&buf).await;
+                        let _ = tls.flush().await;
+                    }
+                }
+            }
+        });
+        TestServer { port, cert }
+    }
+
+    /// Connects with `config`, sends a 4-byte payload and returns the negotiated version.
+    async fn connect(
+        config: Arc<ClientConfig>,
+        server: &TestServer,
+        name: &'static str,
+    ) -> std::io::Result<ProtocolVersion> {
+        let tcp = TcpStream::connect(("127.0.0.1", server.port)).await?;
+        let mut tls = TlsConnector::from(config)
+            .connect(ServerName::try_from(name).unwrap(), tcp)
+            .await?;
+        tls.write_all(b"ping").await?;
+        tls.flush().await?;
+        let mut buf = [0u8; 4];
+        tls.read_exact(&mut buf).await?;
+        assert_eq!(&buf, b"ping");
+        Ok(tls.get_ref().1.protocol_version().expect("negotiated version"))
+    }
+
+    fn trusting(cert: &CertificateDer<'static>) -> Arc<ClientConfig> {
+        let mut store = RootCertStore::empty();
+        store.add(cert.clone()).expect("trust anchor");
+        build_rustls_client_config(false, store)
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
 
     #[test]
-    fn identical_connection_errors_are_reported_once_until_state_changes() {
-        let mut last_error = None;
-        assert!(replace_if_connection_error_changed(
-            &mut last_error,
-            "certificate error"
-        ));
-        assert!(!replace_if_connection_error_changed(
-            &mut last_error,
-            "certificate error"
-        ));
-        assert!(replace_if_connection_error_changed(
-            &mut last_error,
-            "connection refused"
-        ));
+    fn validating_config_completes_handshake_on_tls12_only_and_tls13() {
+        run(async {
+            let tls12 = spawn_server(&[&TLS12], &["localhost"]).await;
+            assert_eq!(
+                connect(trusting(&tls12.cert), &tls12, "localhost").await.unwrap(),
+                ProtocolVersion::TLSv1_2
+            );
+            let tls13 = spawn_server(&[&TLS13], &["localhost"]).await;
+            assert_eq!(
+                connect(trusting(&tls13.cert), &tls13, "localhost").await.unwrap(),
+                ProtocolVersion::TLSv1_3
+            );
+        });
+    }
 
-        last_error = None;
-        assert!(replace_if_connection_error_changed(
-            &mut last_error,
-            "certificate error"
-        ));
+    #[test]
+    fn validating_config_rejects_untrusted_and_misnamed_certificates() {
+        run(async {
+            let server = spawn_server(&[&TLS12, &TLS13], &["localhost"]).await;
+            // Only the bundled webpki roots: a self-signed certificate is not trusted.
+            let roots_only = rustls_client_config(false);
+            assert!(connect(roots_only, &server, "localhost").await.is_err());
+            // Trusted certificate, wrong server name.
+            assert!(connect(trusting(&server.cert), &server, "example.test").await.is_err());
+        });
+    }
+
+    #[test]
+    fn skip_validation_accepts_self_signed_and_misnamed_certificates_on_both_versions() {
+        run(async {
+            let config = rustls_client_config(true);
+            let tls12 = spawn_server(&[&TLS12], &["localhost"]).await;
+            assert_eq!(
+                connect(config.clone(), &tls12, "localhost").await.unwrap(),
+                ProtocolVersion::TLSv1_2
+            );
+            // Name mismatch is also tolerated, as it was with rustls 0.20.
+            assert!(connect(config.clone(), &tls12, "example.test").await.is_ok());
+            let tls13 = spawn_server(&[&TLS13], &["localhost"]).await;
+            assert_eq!(
+                connect(config, &tls13, "localhost").await.unwrap(),
+                ProtocolVersion::TLSv1_3
+            );
+        });
+    }
+
+    #[test]
+    fn host_precheck_accepts_hostnames_and_rejects_ip_literals() {
+        assert!(DnsName::try_from("electrum.example.org").is_ok());
+        assert!(DnsName::try_from("localhost").is_ok());
+        assert!(DnsName::try_from("127.0.0.1").is_err());
+        assert!(DnsName::try_from("").is_err());
+    }
+}
+
+/// An Electrum client connected to a loopback stub server (see `electrum_stub_server`), for tests that count request
+/// messages. `script` sets the stub's canned answers before the client connects; the stub records every message
+/// the client writes, and `StubServer::request_messages` returns those that are not the connection's own traffic.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn electrum_client_over_stub(
+    script: impl FnOnce(&super::electrum_stub_server::StubServer),
+) -> (ElectrumClient, super::electrum_stub_server::StubServer) {
+    use super::electrum_stub_server::{StubBehavior, StubServer};
+
+    common::block_on(async {
+        let server = StubServer::start(StubBehavior::Answer).await;
+        script(&server);
+        let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+        client
+            .add_server(&server.request())
+            .expect("the stub is a usable server");
+        let client = Arc::new(client);
+        client
+            .activation_probe()
+            .await
+            .expect("the stub accepts the connection");
+        (ElectrumClient(client), server)
+    })
+}
+
+/// An Electrum client over several loopback stub servers, ranked in the given order, with the default pool settings
+/// (read spreading on). Returns once every server is in the maintained set.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) async fn electrum_client_over_stubs(servers: &[&super::electrum_stub_server::StubServer]) -> ElectrumClient {
+    let client = ElectrumClientImpl::new("MOCK".to_owned(), vec![]);
+    for server in servers {
+        client.add_server(&server.request()).expect("a stub is a usable server");
+    }
+    let client = Arc::new(client);
+    client
+        .activation_probe()
+        .await
+        .expect("the stubs accept the connection");
+    let started = std::time::Instant::now();
+    while client.count_connected().await < servers.len() {
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "the stubs did not all join the maintained set"
+        );
+        common::executor::Timer::sleep(0.01).await;
+    }
+    ElectrumClient(client)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod p2pk_batch_tests {
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::rpc_clients::UtxoRpcClientOps;
+    use common::block_on;
+    use serde_json::json;
+
+    const P2PKH_HASH: &str = "aa";
+    const P2PK_HASH: &str = "bb";
+
+    fn script_balance(server: &StubServer) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.get_balance",
+            P2PKH_HASH,
+            json!({"confirmed": 500, "unconfirmed": 20}),
+        );
+    }
+
+    fn script_unspents(server: &StubServer) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            P2PKH_HASH,
+            json!([
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 300},
+                // The server can repeat an unspent; it is dropped as in the single-hash read.
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 300},
+            ]),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            P2PK_HASH,
+            json!([
+                {"tx_hash": "02".repeat(32), "tx_pos": 1, "height": 11, "value": 70}
+            ]),
+        );
+    }
+
+    fn script(server: &StubServer) {
+        script_balance(server);
+        script_unspents(server);
+    }
+
+    #[test]
+    fn balance_and_p2pk_lookups_travel_in_one_request_message() {
+        let (client, server) = electrum_client_over_stub(script);
+        let (balance, p2pk_unspents) = block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        )
+        .unwrap();
+
+        assert_eq!((balance.confirmed, balance.unconfirmed), (500, 20));
+        assert_eq!(p2pk_unspents.len(), 1);
+        assert_eq!(p2pk_unspents[0].value, 70);
+
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1, "one request message, not one per lookup");
+        let batch = messages[0].as_array().expect("a JSON-RPC batch");
+        let lookups: Vec<_> = batch
+            .iter()
+            .map(|r| (r["method"].as_str().unwrap(), r["params"][0].as_str().unwrap()))
+            .collect();
+        assert_eq!(lookups, vec![
+            ("blockchain.scripthash.get_balance", P2PKH_HASH),
+            ("blockchain.scripthash.listunspent", P2PK_HASH),
+        ]);
+    }
+
+    #[test]
+    fn unspent_lists_travel_in_one_request_message_and_keep_their_order() {
+        let (client, server) = electrum_client_over_stub(script);
+        let (p2pkh, p2pk) = block_on(client.scripthash_list_unspent_with_p2pk(P2PKH_HASH, P2PK_HASH).compat()).unwrap();
+
+        assert_eq!(
+            p2pkh.iter().map(|u| u.value).collect::<Vec<_>>(),
+            vec![300],
+            "duplicates dropped"
+        );
+        assert_eq!(p2pk.iter().map(|u| u.value).collect::<Vec<_>>(), vec![70]);
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_single_hash_read_is_still_one_plain_request() {
+        let (client, server) = electrum_client_over_stub(script);
+        let balance = block_on(client.scripthash_get_balance(P2PKH_HASH).compat()).unwrap();
+        assert_eq!(balance.confirmed, 500);
+        let messages = server.request_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].is_object(), "not a batch");
+    }
+
+    /// One debug line per request message, naming the server and the methods and nothing else.
+    #[test]
+    fn every_request_message_is_logged_once_without_its_payload() {
+        use crate::eth::alloy_compat::transport::test_support::{captured_log_lines, install_log_capture};
+        if !install_log_capture() {
+            // Another logger owns the process, so there is nothing to read the lines from.
+            return;
+        }
+        let (client, server) = electrum_client_over_stub(script);
+        let addr = server.addr();
+
+        block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        )
+        .unwrap();
+        block_on(client.scripthash_get_balance(P2PKH_HASH).compat()).unwrap();
+        assert_eq!(server.request_messages().len(), 2);
+
+        // The client also logs its connection events with the address; the request lines are the debug ones.
+        let lines: Vec<String> = captured_log_lines()
+            .into_iter()
+            .filter(|line| line.starts_with("DEBUG electrum ") && line.contains(&addr))
+            .collect();
+        assert_eq!(lines.len(), 2, "one line per message: {lines:?}");
+        let fields = |line: &str| -> Vec<String> {
+            // "DEBUG electrum <addr> <methods> <ms>"
+            line.split_whitespace().map(str::to_owned).collect()
+        };
+        let batch = fields(&lines[0]);
+        assert_eq!(batch.len(), 5, "{lines:?}");
+        assert_eq!(&batch[..3], &["DEBUG", "electrum", addr.as_str()]);
+        assert_eq!(
+            batch[3],
+            "blockchain.scripthash.get_balance,blockchain.scripthash.listunspent"
+        );
+        assert!(batch[4].parse::<u64>().is_ok(), "{lines:?}");
+        let single = fields(&lines[1]);
+        assert_eq!(single.len(), 5, "{lines:?}");
+        assert_eq!(single[3], "blockchain.scripthash.get_balance");
+        assert!(single[4].parse::<u64>().is_ok(), "{lines:?}");
+        // The hashes (params) are not logged.
+        assert!(lines
+            .iter()
+            .all(|l| !l.contains(P2PKH_HASH) || l.contains("scripthash")));
+        assert!(lines.iter().all(|l| !l.contains(P2PK_HASH) || l.contains("scripthash")));
+    }
+
+    #[test]
+    fn a_failing_lookup_fails_the_whole_read() {
+        let (client, _server) = electrum_client_over_stub(|server| {
+            script_unspents(server);
+            // A balance answer that is not a balance.
+            server.set_result("blockchain.scripthash.get_balance", json!("not a balance"));
+        });
+        let res = block_on(
+            client
+                .scripthash_get_balance_and_list_unspent(P2PKH_HASH, P2PK_HASH)
+                .compat(),
+        );
+        assert!(res.is_err());
     }
 }

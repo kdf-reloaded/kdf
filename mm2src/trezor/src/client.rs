@@ -33,8 +33,10 @@ impl TrezorClient {
     pub async fn session(&self) -> TrezorResult<TrezorSession<'_>> {
         let mut session = TrezorSession {
             inner: self.inner.lock().await,
+            device_info: TrezorDeviceInfo::default(),
         };
-        session.initialize_device().await?;
+        let features = session.initialize_device().await?;
+        session.device_info = TrezorDeviceInfo::from(features);
         Ok(session)
     }
 
@@ -53,7 +55,10 @@ impl TrezorClient {
             Some(guard) => guard,
             None => return true,
         };
-        let mut session = TrezorSession { inner: guard };
+        let mut session = TrezorSession {
+            inner: guard,
+            device_info: TrezorDeviceInfo::default(),
+        };
         session.initialize_device().await.is_ok()
     }
 }
@@ -62,11 +67,34 @@ pub struct TrezorClientImpl {
     transport: Box<dyn Transport + Send + Sync + 'static>,
 }
 
+/// Descriptive device fields reported by the device's `Features` message.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrezorDeviceInfo {
+    pub model: Option<String>,
+    /// The user-visible device label.
+    pub device_name: Option<String>,
+    pub device_id: Option<String>,
+}
+
+impl From<proto_management::Features> for TrezorDeviceInfo {
+    fn from(features: proto_management::Features) -> Self {
+        TrezorDeviceInfo {
+            model: features.model,
+            device_name: features.label,
+            device_id: features.device_id,
+        }
+    }
+}
+
 pub struct TrezorSession<'a> {
     inner: AsyncMutexGuard<'a, TrezorClientImpl>,
+    device_info: TrezorDeviceInfo,
 }
 
 impl<'a> TrezorSession<'a> {
+    /// The device description received when the session was initialised.
+    pub fn device_info(&self) -> &TrezorDeviceInfo { &self.device_info }
+
     /// Sends a message and returns a TrezorResponse with either the
     /// expected response message, a failure or an interaction request.
     pub async fn call<'b, T: 'static, S: TrezorMessage>(

@@ -261,7 +261,7 @@ Chapter-bound sub-context slots known at landing MUST include:
 | `p2p_ctx`                         | Chapter 28 P2P substrate.                        |
 | `coins_ctx`                       | Chapter-bound coins-activation substrate.        |
 | `coins_activation_ctx`            | Chapter-bound coins-activation substrate.        |
-| `crypto_ctx`                      | Chapter 04 / chapter 05 crypto substrate.        |
+| `crypto_ctx`                      | Chapter 05 crypto substrate.                     |
 | `swaps_ctx`                       | Chapter 13 / chapter 15 swap substrate.          |
 | `stats_ctx`                       | Chapter-bound stats substrate.                   |
 | `account_ctx`                     | Chapter 24 graphical-user-interface substrate.   |
@@ -667,7 +667,9 @@ state record by adding chapter-bound those fields.
   commit of chapter 02 (covering V1, V2, V3); chapter 02 (the
   chapter-02 R4 workspace-member registry containing the
   chapter-bound application-context crate `mm2_core` at the
-  chapter-02-anchored shape); chapter 06 (the chapter-bound
+  chapter-02-anchored shape); chapter 05 (the chapter-bound
+  crypto substrate owning the `crypto_ctx` sub-context slot of
+  R7); chapter 06 (the chapter-bound
   configuration record of R6); chapter 07 (the chapter-bound
   wallet-lifecycle substrate registering the chapter-bound
   public-key and chapter-bound process-identifier of R3 / R6);

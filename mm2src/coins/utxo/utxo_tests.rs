@@ -5,6 +5,7 @@ use crate::hd_wallet_storage::{HDWalletMockStorage, HDWalletStorageInternalOps};
 use crate::rpc_command::account_balance::{AccountBalanceParams, AccountBalanceRpcOps, HDAccountBalanceResponse};
 use crate::rpc_command::init_scan_for_new_addresses::{InitScanAddressesRpcOps, ScanAddressesParams,
                                                       ScanAddressesResponse};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::qtum::{qtum_coin_with_priv_key, QtumCoin, QtumDelegationOps, QtumDelegationRequest};
 use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClient, ElectrumClientImpl,
                                GetAddressInfoRes, ListSinceBlockRes, ListTransactionsItem, NativeClient,
@@ -12,7 +13,9 @@ use crate::utxo::rpc_clients::{BlockHashOrHeight, ElectrumBalance, ElectrumClien
                                VerboseBlock};
 use crate::utxo::tx_cache::dummy_tx_cache::DummyVerboseCache;
 use crate::utxo::tx_cache::UtxoVerboseCacheOps;
-use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps};
+use crate::utxo::utxo_builder::{UtxoArcBuilder, UtxoCoinBuilderCommonOps, UtxoConfBuilder, UtxoConfError,
+                                UtxoConfResult};
+use crate::utxo::utxo_common::calc_interest_of_tx;
 use crate::utxo::utxo_common::{address_from_pubkey, get_htlc_key_pair_v2, my_public_key,
                                trade_preimage_sender_address, UtxoTxBuilder};
 use crate::utxo::utxo_common_tests;
@@ -22,13 +25,14 @@ use crate::{CoinBalance, CommonSwapOpsV2, ParseCoinAssocTypes, PrivKeyBuildPolic
             SwapOps, TradePreimageValue, TxFeeDetails};
 use crate::{DexFee, ValidateFeeArgs};
 use bigdecimal::{BigDecimal, Signed};
-use chain::OutPoint;
+use chain::{OutPoint, TransactionInput};
 use common::executor::Timer;
 use common::{block_on, now_ms, OrdRange, PagingOptionsEnum};
 use crypto::{privkey::key_pair_from_seed, Bip44Chain, RpcDerivationPath};
 use futures::future::join_all;
 use futures::TryFutureExt;
 use mm2_core::mm_ctx::MmCtxBuilder;
+use mm2_number::MmNumber;
 use mocktopus::mocking::*;
 use rpc::v1::types::H256 as H256Json;
 use serialization::{deserialize, CoinVariant};
@@ -46,13 +50,13 @@ fn test_dex_fee_addr_raw_pubkey() -> &'static [u8] {
     mm2_net_config::net_config_or_panic(8762).dex_fee_addr_raw_pubkey()
 }
 
-const TEST_COIN_NAME: &'static str = "RICK";
-// Made-up hrp for rick to test p2wpkh script
+const TEST_COIN_NAME: &'static str = "DOC";
+// Made-up hrp for doc to test p2wpkh script
 const TEST_COIN_HRP: &'static str = "rck";
-const RICK_ELECTRUM_ADDRS: &[&'static str] = &[
-    "electrum1.cipig.net:10017",
-    "electrum2.cipig.net:10017",
-    "electrum3.cipig.net:10017",
+const DOC_ELECTRUM_ADDRS: &[&str] = &[
+    "doc.electrum1.cipig.net:10020",
+    "doc.electrum2.cipig.net:10020",
+    "doc.electrum3.cipig.net:10020",
 ];
 const TEST_COIN_DECIMALS: u8 = 8;
 
@@ -101,7 +105,7 @@ fn test_utxo_activation_params_min_addresses_number() {
     assert_eq!(params_without_minimum.min_addresses_number, None);
 }
 
-fn utxo_coin_fields_for_test(
+pub(crate) fn utxo_coin_fields_for_test(
     rpc_client: UtxoRpcClientEnum,
     force_seed: Option<&str>,
     is_segwit_coin: bool,
@@ -181,6 +185,11 @@ fn utxo_coin_fields_for_test(
             estimate_fee_blocks: 1,
             trezor_coin: None,
             enable_spv_proof: false,
+            header_layout: None,
+            chain_variant: None,
+            protocol_header_reader: CoinVariant::Standard,
+            header_layout_fallback_families: vec!["BTC".to_owned()],
+            header_layout_fallback_logged: Default::default(),
         },
         decimals: TEST_COIN_DECIMALS,
         dust_amount: UTXO_DUST_AMOUNT,
@@ -198,7 +207,7 @@ fn utxo_coin_fields_for_test(
     }
 }
 
-fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
+pub(crate) fn utxo_coin_from_fields(coin: UtxoCoinFields) -> UtxoStandardCoin {
     let arc: UtxoArc = coin.into();
     arc.into()
 }
@@ -209,6 +218,66 @@ fn utxo_coin_for_test(
     is_segwit_coin: bool,
 ) -> UtxoStandardCoin {
     utxo_coin_from_fields(utxo_coin_fields_for_test(rpc_client, force_seed, is_segwit_coin))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn floor_test_coin(ticker: &str, fee: TxFee, dust: u64, decimals: u8) -> UtxoStandardCoin {
+    let client = native_client_for_test();
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    fields.conf.ticker = ticker.to_owned();
+    fields.tx_fee = fee;
+    fields.dust_amount = dust;
+    fields.decimals = decimals;
+    utxo_coin_from_fields(fields)
+}
+
+/// CRD ch.09 R17: the UTXO-style families do not opt in to watching until their watcher methods exist, so a node
+/// neither subscribes to their watcher topics nor starts a watcher for their swaps.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_families_do_not_opt_in_to_watchers() {
+    use crate::WatcherOps;
+
+    let fields = || utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    assert!(!utxo_coin_from_fields(fields()).is_supported_by_watchers());
+    assert!(!QtumCoin::from(UtxoArc::new(fields())).is_supported_by_watchers());
+    assert!(!crate::utxo::bch::bch_coin_without_network_for_test().is_supported_by_watchers());
+}
+
+/// T60.1: exact minimum trading volume values, ticker-independent (R38.6.6e, R38.6.6f).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_trading_vol_values() {
+    let dynamic = || TxFee::Dynamic(EstimateFeeMethod::Standard);
+    let cases: Vec<(&str, TxFee, u64, &str)> = vec![
+        ("KMD", TxFee::FixedPerKb(1000), 1000, "0.0001"),
+        ("LTC", TxFee::FixedPerKb(1000), 5460, "0.000546"),
+        ("DOGE", TxFee::FixedPerKb(1_000_000), 1_000_000, "0.1"),
+        ("RVN", TxFee::FixedPerKb(1_000_000), 1000, "0.0496"),
+        ("ZEC", TxFee::FixedPerKb(100_000), 1000, "0.00496"),
+        ("ZEC", TxFee::FixedPerKb(70_000), 1000, "0.003472"),
+        ("QTUM", TxFee::FixedPerKb(400_000), 72_800, "0.01984"),
+        ("BTC", dynamic(), 1000, "0.0001"),
+        ("BTC-segwit", dynamic(), 1000, "0.0001"),
+        ("ARRR", TxFee::FixedPerKb(1000), 1000, "0.0001"),
+        ("SYNTH-A", TxFee::FixedPerKb(1_001), 1000, "0.0001"),
+        ("SYNTH-B", TxFee::FixedPerKb(30_001), 1000, "0.001488"),
+        ("SYNTH-C", dynamic(), 5460, "0.000546"),
+    ];
+    for (ticker, fee, dust, expected) in cases {
+        let coin = floor_test_coin(ticker, fee, dust, 8);
+        assert_eq!(coin.min_trading_vol(), MmNumber::from(expected), "{ticker}");
+    }
+}
+
+/// T60.2: the UTXO minimum transaction amount equals the dust.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_tx_amount_equals_dust() {
+    let kmd = floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8);
+    assert_eq!(kmd.min_tx_amount(), BigDecimal::from_str("0.00001").unwrap());
+    let ltc = floor_test_coin("LTC", TxFee::FixedPerKb(1000), 5460, 8);
+    assert_eq!(ltc.min_tx_amount(), BigDecimal::from_str("0.0000546").unwrap());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -482,7 +551,7 @@ fn test_v2_trezor_htlc_keypair_reports_unsupported_script_mode() {
 
 #[test]
 fn test_extract_secret() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
 
     let tx_hex = hex::decode("0100000001de7aa8d29524906b2b54ee2e0281f3607f75662cbc9080df81d1047b78e21dbc00000000d7473044022079b6c50820040b1fbbe9251ced32ab334d33830f6f8d0bf0a40c7f1336b67d5b0220142ccf723ddabb34e542ed65c395abc1fbf5b6c3e730396f15d25c49b668a1a401209da937e5609680cb30bff4a7661364ca1d1851c2506fa80c443f00a3d3bf7365004c6b6304f62b0e5cb175210270e75970bb20029b3879ec76c4acd320a8d0589e003636264d01a7d566504bfbac6782012088a9142fb610d856c19fd57f2d0cffe8dff689074b3d8a882103f368228456c940ac113e53dad5c104cf209f2f102a409207269383b6ab9b03deac68ffffffff01d0dc9800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac40280e5c").unwrap();
@@ -494,7 +563,7 @@ fn test_extract_secret() {
 
 #[test]
 fn test_send_maker_spends_taker_payment_recoverable_tx() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
     let tx_hex = hex::decode("0100000001de7aa8d29524906b2b54ee2e0281f3607f75662cbc9080df81d1047b78e21dbc00000000d7473044022079b6c50820040b1fbbe9251ced32ab334d33830f6f8d0bf0a40c7f1336b67d5b0220142ccf723ddabb34e542ed65c395abc1fbf5b6c3e730396f15d25c49b668a1a401209da937e5609680cb30bff4a7661364ca1d1851c2506fa80c443f00a3d3bf7365004c6b6304f62b0e5cb175210270e75970bb20029b3879ec76c4acd320a8d0589e003636264d01a7d566504bfbac6782012088a9142fb610d856c19fd57f2d0cffe8dff689074b3d8a882103f368228456c940ac113e53dad5c104cf209f2f102a409207269383b6ab9b03deac68ffffffff01d0dc9800000000001976a9146d9d2b554d768232320587df75c4338ecc8bf37d88ac40280e5c").unwrap();
     let secret = hex::decode("9da937e5609680cb30bff4a7661364ca1d1851c2506fa80c443f00a3d3bf7365").unwrap();
@@ -523,7 +592,7 @@ fn test_send_maker_spends_taker_payment_recoverable_tx() {
 
 #[test]
 fn test_generate_transaction() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
     let unspents = vec![UnspentInfo {
         value: 10000000000,
@@ -551,7 +620,7 @@ fn test_generate_transaction() {
 
     let outputs = vec![TransactionOutput {
         script_pubkey: vec![].into(),
-        value: 98001,
+        value: 98900,
     }];
 
     let builder = UtxoTxBuilder::new(&coin)
@@ -562,8 +631,9 @@ fn test_generate_transaction() {
     // so no extra outputs should appear in generated transaction
     assert_eq!(generated.0.outputs.len(), 1);
 
-    assert_eq!(generated.1.fee_amount, 1000);
-    assert_eq!(generated.1.unused_change, Some(999));
+    // plain fixed 1,000 per kB charges the transaction's own 186 bytes, not a whole kilobyte (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 186);
+    assert_eq!(generated.1.unused_change, Some(914));
     assert_eq!(generated.1.received_by_me, 0);
     assert_eq!(generated.1.spent_by_me, 100000);
 
@@ -587,11 +657,11 @@ fn test_generate_transaction() {
     let generated = block_on(builder.build()).unwrap();
     assert_eq!(generated.0.outputs.len(), 1);
 
-    assert_eq!(generated.1.fee_amount, 1000);
+    assert_eq!(generated.1.fee_amount, 211);
     assert_eq!(generated.1.unused_change, None);
-    assert_eq!(generated.1.received_by_me, 99000);
+    assert_eq!(generated.1.received_by_me, 99789);
     assert_eq!(generated.1.spent_by_me, 100000);
-    assert_eq!(generated.0.outputs[0].value, 99000);
+    assert_eq!(generated.0.outputs[0].value, 99789);
 
     let unspents = vec![UnspentInfo {
         value: 100000,
@@ -614,7 +684,7 @@ fn test_generate_transaction() {
 
 #[test]
 fn test_addresses_from_script() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
     // P2PKH
     let script: Script = "76a91405aab5342166f8594baf17a7d9bef5d56744332788ac".into();
@@ -667,6 +737,24 @@ fn test_kmd_interest() {
     // at least 1 hour should pass
     let actual = kmd_interest(height, value, lock_time, lock_time + 30);
     assert_eq!(actual, Err(KmdRewardsNotAccruedReason::OneHourNotPassedYet));
+
+    // CRD ch.38 R38.4.3 -- KIP-0001 reward reduction (issue #11).
+    // Issue #11 vector, post-fork: the pre-reduction figure (1,744,260) MUST NOT
+    // be produced; the KIP-0001-reduced figure (3,488) MUST be.
+    let issue11_value = 1_473_232_138;
+    let issue11_height = Some(5_108_257);
+    let issue11_lock_time = 1_789_721_423;
+    let issue11_ref_time = 1_790_472_552;
+    let actual = kmd_interest(issue11_height, issue11_value, issue11_lock_time, issue11_ref_time).unwrap();
+    assert_eq!(actual, 3_488);
+
+    // Same vector, pre-fork height: the reward keeps the pre-reduction figure.
+    let actual = kmd_interest(Some(3_484_957), issue11_value, issue11_lock_time, issue11_ref_time).unwrap();
+    assert_eq!(actual, 1_744_260);
+
+    // Fork boundary: height exactly 3,484,958 already applies the reduction.
+    let actual = kmd_interest(Some(3_484_958), issue11_value, issue11_lock_time, issue11_ref_time).unwrap();
+    assert_eq!(actual, 3_488);
 }
 
 #[test]
@@ -782,26 +870,28 @@ fn test_wait_for_payment_spend_timeout_electrum() {
 
 #[test]
 fn test_search_for_swap_tx_spend_electrum_was_spent() {
-    let secret = [0; 32];
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
         false,
     );
 
-    // raw tx bytes of https://rick.kmd.dev/tx/ba881ecca15b5d4593f14f25debbcdfe25f101fd2e9cf8d0b5d92d19813d4424
-    let payment_tx_bytes = hex::decode("0400008085202f8902e115acc1b9e26a82f8403c9f81785445cc1285093b63b6246cf45aabac5e0865000000006b483045022100ca578f2d6bae02f839f71619e2ced54538a18d7aa92bd95dcd86ac26479ec9f802206552b6c33b533dd6fc8985415a501ebec89d1f5c59d0c923d1de5280e9827858012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffb0721bf69163f7a5033fb3d18ba5768621d8c1347ebaa2fddab0d1f63978ea78020000006b483045022100a3309f99167982e97644dbb5cd7279b86630b35fc34855e843f2c5c0cafdc66d02202a8c3257c44e832476b2e2a723dad1bb4ec1903519502a49b936c155cae382ee012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0300e1f5050000000017a91443fde927a77b3c1d104b78155dc389078c4571b0870000000000000000166a14b8bcb07f6344b42ab04250c86a6e8b75d3fdbbc64b8cd736000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acba0ce35e000000000000000000000000000000")
+    // A DOC swap payment made by this key (DOC height 478093), spent by the counterparty,
+    // which revealed the secret: payment 9f817411b36b9a57847d3ed9f04eee73a0239af2590e312d00d4361059706aa7,
+    // spend e469afa4933bb306124b09fa25ca6e449c82b499b450bec19670189b21f9585b.
+    let secret = hex::decode("23f843429d0c94d4cfc338d566f4b77ba9085aa43f1def3bb11de81f58628036").unwrap();
+    let other_pub = hex::decode("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62").unwrap();
+    let payment_tx_bytes = hex::decode("0400008085202f8901b91fa7b21c70acf4209821df8227b97585f56b873d2b56d6dce3a66258f1cdc2020000006a473044022019711a750e1cad2a969f41415363bd53de3600511e19192b71b1ec151998a2690220154c1a2c43cee2edb777beb043f901b3dc0ba8590549576f5f600d74cbf7fdc1012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff03404b4c000000000017a914563b96f3c2b757f5013b84c9276bdbd71d0a9205870000000000000000166a14b2788846eca0392f3adbb8751d7703a0a03f948ee2f83a7b000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac8513fc65000000000000000000000000000000")
         .unwrap();
-
-    // raw tx bytes of https://rick.kmd.dev/tx/cea8028f93f7556ce0ef96f14b8b5d88ef2cd29f428df5936e02e71ca5b0c795
-    let spend_tx_bytes = hex::decode("0400008085202f890124443d81192dd9b5d0f89c2efd01f125fecdbbde254ff193455d5ba1cc1e88ba00000000d74730440220519d3eed69815a16357ff07bf453b227654dc85b27ffc22a77abe077302833ec02205c27f439ddc542d332504112871ecac310ea710b99e1922f48eb179c045e44ee01200000000000000000000000000000000000000000000000000000000000000000004c6b6304a9e5e25eb1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a914b8bcb07f6344b42ab04250c86a6e8b75d3fdbbc6882102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac68ffffffff0118ddf505000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acbffee25e000000000000000000000000000000")
+    let spend_tx_bytes = hex::decode("0400008085202f8901a76a70591036d4002d310e59f29a23a073ee4ef0d93e7d84579a6bb31174819f00000000d74730440220167039ebed8a54a10ec21e42ec1593c159f8046d73884ecacf64f702add54c4d0220229451757215fbe92673d76949e461230f26e9331d52f85cfdc2e71e000b8e32012023f843429d0c94d4cfc338d566f4b77ba9085aa43f1def3bb11de81f58628036004c6b63047250fc65b1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a914b2788846eca0392f3adbb8751d7703a0a03f948e882102d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62ac68ffffffff0158474c00000000001976a914f26650dc9aa4e4505978ad635cdb15491cee70e188ac7250fc65000000000000000000000000000000")
         .unwrap();
     let spend_tx = TransactionEnum::UtxoTx(deserialize(spend_tx_bytes.as_slice()).unwrap());
 
     let found = block_on(coin.search_for_swap_tx_spend_my(
-        1591928233,
-        &*coin.my_public_key().unwrap(),
+        1711034482,
+        coin.my_public_key().unwrap(),
+        &other_pub,
         &*dhash160(&secret),
         &payment_tx_bytes,
         0,
@@ -814,27 +904,29 @@ fn test_search_for_swap_tx_spend_electrum_was_spent() {
 
 #[test]
 fn test_search_for_swap_tx_spend_electrum_was_refunded() {
-    let secret = [0; 20];
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
         false,
     );
 
-    // raw tx bytes of https://rick.kmd.dev/tx/78ea7839f6d1b0dafda2ba7e34c1d8218676a58bd1b33f03a5f76391f61b72b0
-    let payment_tx_bytes = hex::decode("0400008085202f8902bf17bf7d1daace52e08f732a6b8771743ca4b1cb765a187e72fd091a0aabfd52000000006a47304402203eaaa3c4da101240f80f9c5e9de716a22b1ec6d66080de6a0cca32011cd77223022040d9082b6242d6acf9a1a8e658779e1c655d708379862f235e8ba7b8ca4e69c6012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffff023ca13c0e9e085dd13f481f193e8a3e8fd609020936e98b5587342d994f4d020000006b483045022100c0ba56adb8de923975052312467347d83238bd8d480ce66e8b709a7997373994022048507bcac921fdb2302fa5224ce86e41b7efc1a2e20ae63aa738dfa99b7be826012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0300e1f5050000000017a9141ee6d4c38a3c078eab87ad1a5e4b00f21259b10d870000000000000000166a1400000000000000000000000000000000000000001b94d736000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac2d08e35e000000000000000000000000000000")
+    // A DOC swap payment made by this key (DOC height 480241) that the counterparty never
+    // claimed, refunded after its lock time: payment ba08822b2da3f7120f5ad90cd999d5f0f4be4a63de496f4f76af202c68e4f5eb,
+    // refund 1b4e30f0e3101374464ec159c2f35b03412034fadee8c5769e8adcd5c91359bd.
+    let secret_hash = hex::decode("7a752434d4564c11b9333743122dab3a0aa21bd9").unwrap();
+    let other_pub = hex::decode("02d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62").unwrap();
+    let payment_tx_bytes = hex::decode("0400008085202f8901b2781d994b79be8e1f687a7f376109063bbe8b51ab36d04b35d4ff437b21d2a5010000006a47304402201832294ceb2b62a197bc2049218dcee69dcabb414249403efcc35ad65c17e73d0220348fbbb2b40880408bdef604e5a6cba34f514b84d5d6a9a4c4713669cd765fd2012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0320a107000000000017a91489dd2a32ae17a0575759581afb0002176296777b870000000000000000166a147a752434d4564c11b9333743122dab3a0aa21bd94af2de7a000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac2b0efe65000000000000000000000000000000")
         .unwrap();
-
-    // raw tx bytes of https://rick.kmd.dev/tx/65085eacab5af46c24b6633b098512cc455478819f3c40f8826ae2b9c1ac15e1
-    let refund_tx_bytes = hex::decode("0400008085202f8901b0721bf69163f7a5033fb3d18ba5768621d8c1347ebaa2fddab0d1f63978ea7800000000b6473044022052e06c1abf639148229a3991fdc6da15fe51c97577f4fda351d9c606c7cf53670220780186132d67d354564cae710a77d94b6bb07dcbd7162a13bebee261ffc0963601514c6b63041dfae25eb1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a9140000000000000000000000000000000000000000882102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac68feffffff0118ddf505000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ace6fae25e000000000000000000000000000000")
+    let refund_tx_bytes = hex::decode("0400008085202f8901ebf5e4682c20af764f6f49de634abef4f0d599d90cd95a0f12f7a32d2b8208ba00000000b647304402205bd140728b1b6de7b891025873d552a439c488dd7fe4234fd982eaa193e5776602205ad9fea8bc771d94de9d2fdc450186ea21f4fc81f28c2f2f75b5d2ad84891d8f01514c6b63049f0efe65b1752102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ac6782012088a9147a752434d4564c11b9333743122dab3a0aa21bd9882102d74dc5ec4c823f40dae5c563d7b22aab52c80f9f18226f47ea6d83107618df62ac68feffffff01389d0700000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acb80efe65000000000000000000000000000000")
         .unwrap();
     let refund_tx = TransactionEnum::UtxoTx(deserialize(refund_tx_bytes.as_slice()).unwrap());
 
     let found = block_on(coin.search_for_swap_tx_spend_my(
-        1591933469,
-        coin.as_ref().priv_key_policy.key_pair_or_err().unwrap().public(),
-        &secret,
+        1711148703,
+        coin.my_public_key().unwrap(),
+        &other_pub,
+        &secret_hash,
         &payment_tx_bytes,
         0,
         &None,
@@ -1145,7 +1237,7 @@ fn test_withdraw_kmd_rewards_impl(
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some("KMD".into()),
-        amount: "0.00001".parse().unwrap(),
+        amount: "0.00000245".parse().unwrap(),
     });
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     assert_eq!(tx_details.fee_details, Some(expected_fee));
@@ -1185,9 +1277,289 @@ fn test_withdraw_kmd_rewards_zero() {
     test_withdraw_kmd_rewards_impl(TX_HASH, TX_HEX, VERBOSE_SERIALIZED, CURRENT_MTP, Some(expected_rewards));
 }
 
+/// CRD ch.38 R38.4.3 "build-surface integration" vector (issue #11): a KMD
+/// spend of a post-KIP-0001 UTXO must claim the reduced reward (3,488 base
+/// units, i.e. 0.00003488 KMD), not the pre-reduction figure (1,744,260 /
+/// 0.0174426 KMD).
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
-fn test_withdraw_rick_rewards_none() {
+fn test_withdraw_kmd_rewards_post_fork_reduction() {
+    const UTXO_VALUE: u64 = 1_473_232_138;
+    const UTXO_HEIGHT: u64 = 5_108_257;
+    const UTXO_LOCKTIME: u32 = 1_789_721_423;
+    const REF_TIME: u32 = 1_790_472_552;
+
+    let mut prev_tx = UtxoTx::default();
+    prev_tx.version = 4;
+    prev_tx.outputs.push(TransactionOutput {
+        value: UTXO_VALUE,
+        script_pubkey: vec![0xaa; 23].into(),
+    });
+    let prev_tx_hash = prev_tx.hash();
+
+    UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, _| {
+        let unspents = vec![UnspentInfo {
+            outpoint: OutPoint {
+                hash: prev_tx_hash,
+                index: 0,
+            },
+            value: UTXO_VALUE,
+            height: Some(UTXO_HEIGHT),
+        }];
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+    UtxoStandardCoin::get_current_mtp
+        .mock_safe(move |_fields| MockResult::Return(Box::pin(futures::future::ok(REF_TIME))));
+    NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+        let verbose = RpcTransaction {
+            hex: Default::default(),
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            hash: None,
+            size: Default::default(),
+            vsize: Default::default(),
+            version: 4,
+            locktime: UTXO_LOCKTIME,
+            vin: vec![],
+            vout: vec![],
+            blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            confirmations: 100,
+            rawconfirmations: None,
+            time: UTXO_LOCKTIME,
+            blocktime: UTXO_LOCKTIME,
+            height: Some(UTXO_HEIGHT),
+        };
+        MockResult::Return(Box::new(futures01::future::ok(verbose)))
+    });
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let withdraw_req = WithdrawRequest {
+        amount: BigDecimal::from_str("0.00001").unwrap(),
+        from: None,
+        to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+        coin: "KMD".to_owned(),
+        max: false,
+        fee: None,
+    };
+    let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
+
+    let expected_rewards = Some(KmdRewardsDetails {
+        amount: BigDecimal::from_str("0.00003488").unwrap(),
+        claimed_by_me: true,
+    });
+    assert_eq!(tx_details.kmd_rewards, expected_rewards);
+}
+
+/// CRD ch.38 R38.4.3 "surface agreement": the transaction-history reward
+/// (`calc_interest_of_tx`) MUST equal the R38.4.1 value for the same UTXO and
+/// reference time used by the build-surface test above.
+#[test]
+fn test_calc_interest_of_tx_agrees_with_kmd_interest_post_fork() {
+    use std::collections::HashMap;
+
+    const UTXO_VALUE: u64 = 1_473_232_138;
+    const UTXO_HEIGHT: u64 = 5_108_257;
+    const UTXO_LOCKTIME: u32 = 1_789_721_423;
+    const REF_TIME: u32 = 1_790_472_552;
+
+    let mut prev_tx = UtxoTx::default();
+    prev_tx.version = 4;
+    prev_tx.lock_time = UTXO_LOCKTIME;
+    prev_tx.outputs.push(TransactionOutput {
+        value: UTXO_VALUE,
+        script_pubkey: vec![0xaa; 23].into(),
+    });
+    let prev_tx_hash = prev_tx.hash();
+
+    let mut input_transactions: HistoryUtxoTxMap = HashMap::new();
+    input_transactions.insert(prev_tx_hash.reversed().into(), HistoryUtxoTx {
+        tx: prev_tx,
+        height: Some(UTXO_HEIGHT),
+    });
+
+    let mut spending_tx = UtxoTx::default();
+    spending_tx.lock_time = REF_TIME;
+    spending_tx.inputs.push(TransactionInput {
+        previous_output: OutPoint {
+            hash: prev_tx_hash,
+            index: 0,
+        },
+        script_sig: vec![].into(),
+        sequence: 0,
+        script_witness: vec![],
+    });
+
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let history_reward = block_on(calc_interest_of_tx(&coin, &spending_tx, &mut input_transactions)).unwrap();
+    let direct_reward = kmd_interest(Some(UTXO_HEIGHT), UTXO_VALUE, UTXO_LOCKTIME as u64, REF_TIME as u64).unwrap();
+    assert_eq!(history_reward, 3_488);
+    assert_eq!(history_reward, direct_reward);
+}
+
+/// A transaction whose only input spends output 5 of a transaction that has a single output, and
+/// the history map that already holds that previous transaction (CRD ch.38 R38.5A.9, T38.5A.7).
+fn spend_of_a_missing_output() -> (UtxoTx, HistoryUtxoTxMap) {
+    let mut prev_tx = UtxoTx::default();
+    prev_tx.outputs.push(TransactionOutput {
+        value: 1_000,
+        script_pubkey: vec![0xaa; 23].into(),
+    });
+    let prev_tx_hash = prev_tx.hash();
+
+    let mut input_transactions = HistoryUtxoTxMap::default();
+    input_transactions.insert(prev_tx_hash.reversed().into(), HistoryUtxoTx {
+        tx: prev_tx,
+        height: Some(100),
+    });
+
+    let mut spending_tx = UtxoTx::default();
+    spending_tx.inputs.push(TransactionInput {
+        previous_output: OutPoint {
+            hash: prev_tx_hash,
+            index: 5,
+        },
+        script_sig: vec![].into(),
+        sequence: 0,
+        script_witness: vec![],
+    });
+    (spending_tx, input_transactions)
+}
+
+#[test]
+fn tx_details_prev_output_index_out_of_range_is_an_error() {
+    let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
+    let spending_hex = BytesJson::from(serialization::serialize(&spending_tx).take());
+    NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+        let verbose = RpcTransaction {
+            hex: spending_hex.clone(),
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            hash: None,
+            size: Default::default(),
+            vsize: Default::default(),
+            version: 1,
+            locktime: 0,
+            vin: vec![],
+            vout: vec![],
+            blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            confirmations: 1,
+            rawconfirmations: None,
+            time: 1,
+            blocktime: 1,
+            height: Some(101),
+        };
+        MockResult::Return(Box::new(futures01::future::ok(verbose)))
+    });
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+        UtxoRpcClientEnum::Native(client),
+        None,
+        false,
+    ));
+
+    let hash = spending_tx.hash().reversed().to_vec();
+    let err = block_on(coin.tx_details_by_hash(&hash, &mut input_transactions)).unwrap_err();
+    assert!(
+        err.contains("output 5 of transaction") && err.contains("it has 1 outputs"),
+        "unexpected error: {}",
+        err
+    );
+}
+
+#[test]
+fn kmd_rewards_prev_output_index_out_of_range_is_an_error() {
+    let (spending_tx, mut input_transactions) = spend_of_a_missing_output();
+
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let err = block_on(calc_interest_of_tx(&coin, &spending_tx, &mut input_transactions)).unwrap_err();
+    match err.into_inner() {
+        UtxoRpcError::InvalidResponse(msg) => {
+            assert!(msg.contains("output 5 of transaction"), "unexpected error: {}", msg)
+        },
+        other => panic!("expected InvalidResponse, got {:?}", other),
+    }
+}
+
+/// CRD ch.38 R38.4.3 "surface agreement": `kmd_rewards_info`'s
+/// `accrued_rewards` MUST equal the same R38.4.1 value for the same UTXO and
+/// reference time.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_kmd_rewards_info_agrees_with_kmd_interest_post_fork() {
+    const UTXO_VALUE: u64 = 1_473_232_138;
+    const UTXO_HEIGHT: u64 = 5_108_257;
+    const UTXO_LOCKTIME: u32 = 1_789_721_423;
+    const REF_TIME: u32 = 1_790_472_552;
+
+    let mut prev_tx = UtxoTx::default();
+    prev_tx.version = 4;
+    prev_tx.outputs.push(TransactionOutput {
+        value: UTXO_VALUE,
+        script_pubkey: vec![0xaa; 23].into(),
+    });
+    let prev_tx_hash = prev_tx.hash();
+
+    NativeClient::list_unspent.mock_safe(move |_coin, _address, _decimals| {
+        let unspents = vec![UnspentInfo {
+            outpoint: OutPoint {
+                hash: prev_tx_hash,
+                index: 0,
+            },
+            value: UTXO_VALUE,
+            height: Some(UTXO_HEIGHT),
+        }];
+        MockResult::Return(Box::new(futures01::future::ok(unspents)))
+    });
+    NativeClient::get_verbose_transaction.mock_safe(move |_coin, _txid| {
+        let verbose = RpcTransaction {
+            hex: Default::default(),
+            txid: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            hash: None,
+            size: Default::default(),
+            vsize: Default::default(),
+            version: 4,
+            locktime: UTXO_LOCKTIME,
+            vin: vec![],
+            vout: vec![],
+            blockhash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            confirmations: 100,
+            rawconfirmations: None,
+            time: UTXO_LOCKTIME,
+            blocktime: UTXO_LOCKTIME,
+            height: Some(UTXO_HEIGHT),
+        };
+        MockResult::Return(Box::new(futures01::future::ok(verbose)))
+    });
+    UtxoStandardCoin::get_current_mtp
+        .mock_safe(move |_fields| MockResult::Return(Box::pin(futures::future::ok(REF_TIME))));
+
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    fields.conf.ticker = "KMD".to_owned();
+    let coin = utxo_coin_from_fields(fields);
+
+    let info = block_on(kmd_rewards_info(&coin)).unwrap();
+    assert_eq!(info.len(), 1);
+    match &info[0].accrued_rewards {
+        KmdRewardsAccrueInfo::Accrued(amount) => {
+            assert_eq!(*amount, BigDecimal::from_str("0.00003488").unwrap());
+        },
+        KmdRewardsAccrueInfo::NotAccruedReason(_) => panic!("expected Accrued"),
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_withdraw_doc_rewards_none() {
     // https://rick.explorer.dexstats.info/tx/7181400be323acc6b5f3164240e6c4601ff4c252f40ce7649f87e81634330209
     const TX_HEX: &str = "0400008085202f8901df8119c507aa61d32332cd246dbfeb3818a4f96e76492454c1fbba5aa097977e000000004847304402205a7e229ea6929c97fd6dde254c19e4eb890a90353249721701ae7a1c477d99c402206a8b7c5bf42b5095585731d6b4c589ce557f63c20aed69ff242eca22ecfcdc7a01feffffff02d04d1bffbc050000232102afdbba3e3c90db5f0f4064118f79cf308f926c68afd64ea7afc930975663e4c4ac402dd913000000001976a9143e17014eca06281ee600adffa34b4afb0922a22288ac2bdab86035a00e000000000000000000000000";
 
@@ -1213,13 +1585,13 @@ fn test_withdraw_rick_rewards_none() {
         amount: BigDecimal::from_str("0.00001").unwrap(),
         from: None,
         to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
-        coin: "RICK".to_owned(),
+        coin: "DOC".to_owned(),
         max: false,
         fee: None,
     };
     let expected_fee = TxFeeDetails::Utxo(UtxoFeeDetails {
         coin: Some(TEST_COIN_NAME.into()),
-        amount: "0.00001".parse().unwrap(),
+        amount: "0.00000245".parse().unwrap(),
     });
     let tx_details = coin.withdraw(withdraw_req).wait().unwrap();
     assert_eq!(tx_details.fee_details, Some(expected_fee));
@@ -1229,7 +1601,7 @@ fn test_withdraw_rick_rewards_none() {
 #[test]
 fn test_utxo_lock() {
     // send several transactions concurrently to check that they are not using same inputs
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(client.into(), None, false);
     let output = TransactionOutput {
         value: 1000000,
@@ -1247,15 +1619,19 @@ fn test_utxo_lock() {
 
 #[test]
 fn test_spv_proof() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    // RICK, the chain this test used before, is retired. DOC is its successor
+    // test chain in the same family (Komodo asset chain, Equihash headers,
+    // overwintered v4 transactions), so the proof exercises the same path.
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
         false,
     );
 
-    // https://rick.explorer.dexstats.info/tx/78ea7839f6d1b0dafda2ba7e34c1d8218676a58bd1b33f03a5f76391f61b72b0
-    let tx_str = "0400008085202f8902bf17bf7d1daace52e08f732a6b8771743ca4b1cb765a187e72fd091a0aabfd52000000006a47304402203eaaa3c4da101240f80f9c5e9de716a22b1ec6d66080de6a0cca32011cd77223022040d9082b6242d6acf9a1a8e658779e1c655d708379862f235e8ba7b8ca4e69c6012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffff023ca13c0e9e085dd13f481f193e8a3e8fd609020936e98b5587342d994f4d020000006b483045022100c0ba56adb8de923975052312467347d83238bd8d480ce66e8b709a7997373994022048507bcac921fdb2302fa5224ce86e41b7efc1a2e20ae63aa738dfa99b7be826012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0300e1f5050000000017a9141ee6d4c38a3c078eab87ad1a5e4b00f21259b10d870000000000000000166a1400000000000000000000000000000000000000001b94d736000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac2d08e35e000000000000000000000000000000";
+    // DOC height 1357312, position 5 in its block (a three-level Merkle branch):
+    // txid 193831c822b3e879e872f766236bc1a20fc2bbb1ce9b6dab9e571069147afc9d
+    let tx_str = "0400008085202f8902c55b1d7ebd78ed1f533a9e12f86981abb2a0022ca06cc36cfa4884bdd4cb1db3000000006a47304402207e3fbd998bac475f4bc7ebc762afbf7a73920115467b1cef88bdcd90a2846ace02205daa4bc6efdf95e124f5d387ea5058744d0d5dd4be1e188c0eda72d9f269f415012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffffc55b1d7ebd78ed1f533a9e12f86981abb2a0022ca06cc36cfa4884bdd4cb1db3010000006a47304402207cde81386bee3f1e16c82f56073889b5afe4d00dd5a7d074beac3932fb365769022060d3acd30b61cbabf0dd1d0dd17da8952933bc8b2beb8525717238720ace7109012102031d4256c4bc9f99ac88bf3dba21773132281f65f9bf23a59928bce08961e2f3ffffffff0240420f00000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788ac11825300000000001976a91405aab5342166f8594baf17a7d9bef5d56744332788acd177ab69000000000000000000000000000000";
     let tx: UtxoTx = tx_str.into();
 
     let res = block_on(utxo_common::validate_spv_proof(coin.clone(), tx, now_ms() / 1000 + 30));
@@ -1273,9 +1649,9 @@ fn list_since_block_btc_serde() {
 // https://github.com/KomodoPlatform/atomicDEX-API/issues/587
 fn get_tx_details_coinbase_transaction() {
     let client = electrum_client_for_test(&[
-        "electrum1.cipig.net:10018",
-        "electrum2.cipig.net:10018",
-        "electrum3.cipig.net:10018",
+        "marty.electrum1.cipig.net:10021",
+        "marty.electrum2.cipig.net:10021",
+        "marty.electrum3.cipig.net:10021",
     ]);
     let coin = utxo_coin_for_test(
         client.into(),
@@ -1305,8 +1681,10 @@ fn test_electrum_rpc_client_error() {
     let actual = format!("{}", err);
     let debug_actual = format!("{:?}", err);
 
-    assert!(actual.contains("JsonRpcError { client_info: coin: RICK"));
-    assert!(actual.contains("request: blockchain.transaction.get id=1 params=2"));
+    assert!(actual.contains("JsonRpcError { client_info: coin: DOC"));
+    // The pool draws its request ids (the version negotiation included) from one counter, so the id is not 1.
+    assert!(actual.contains("request: blockchain.transaction.get id="));
+    assert!(actual.contains(" params=2"));
     assert!(actual.contains("response from electrum1.cipig.net:10060"));
     assert!(actual.contains("No such mempool or blockchain transaction"));
     assert!(!actual.contains("params: [String("));
@@ -1429,12 +1807,14 @@ fn test_generate_transaction_relay_fee_is_used_when_dynamic_fee_is_lower() {
         .with_fee(ActualTxFee::Dynamic(100));
 
     let generated = block_on(builder.build()).unwrap();
-    assert_eq!(generated.0.outputs.len(), 1);
+    // payment and change outputs
+    assert_eq!(generated.0.outputs.len(), 2);
 
-    // generated transaction fee must be equal to relay fee if calculated dynamic fee is lower than relay
-    assert_eq!(generated.1.fee_amount, 100000000);
+    // the fee is the proportional relay fee (relay rate 1.0 per kB, 220 bytes with the change output)
+    // because the calculated dynamic fee is lower (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 22000000);
     assert_eq!(generated.1.unused_change, None);
-    assert_eq!(generated.1.received_by_me, 0);
+    assert_eq!(generated.1.received_by_me, 78000000);
     assert_eq!(generated.1.spent_by_me, 1000000000);
     assert!(unsafe { GET_RELAY_FEE_CALLED });
 }
@@ -1473,15 +1853,51 @@ fn test_generate_transaction_relay_fee_is_used_when_dynamic_fee_is_lower_and_ded
 
     let generated = block_on(tx_builder.build()).unwrap();
     assert_eq!(generated.0.outputs.len(), 1);
-    // `output (= 10.0) - fee_amount (= 1.0)`
-    assert_eq!(generated.0.outputs[0].value, 900000000);
+    // `output (= 10.0) - fee_amount (= 0.186)`
+    assert_eq!(generated.0.outputs[0].value, 981400000);
 
-    // generated transaction fee must be equal to relay fee if calculated dynamic fee is lower than relay
-    assert_eq!(generated.1.fee_amount, 100000000);
+    // the fee is the proportional relay fee (relay rate 1.0 per kB, 186 bytes) because the calculated
+    // dynamic fee is lower (R38.6.6b)
+    assert_eq!(generated.1.fee_amount, 18600000);
     assert_eq!(generated.1.unused_change, None);
     assert_eq!(generated.1.received_by_me, 0);
     assert_eq!(generated.1.spent_by_me, 1000000000);
     assert!(unsafe { GET_RELAY_FEE_CALLED });
+}
+
+/// CRD ch.38 R38.6.6b: the forced minimum relay fee is proportional to the transaction size, so a
+/// 226-byte transaction with a relay rate of 1,000 per kB pays 226, not a whole kilobyte.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn test_generate_transaction_forced_relay_fee_is_proportional_r38_6_6b() {
+    NativeClient::get_relay_fee
+        .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok("0.00001".parse().unwrap()))));
+    let client = UtxoRpcClientEnum::Native(NativeClient(Arc::new(NativeClientImpl::default())));
+    let mut coin = utxo_coin_fields_for_test(client, None, false);
+    coin.conf.ticker = "LTC".to_owned();
+    coin.conf.force_min_relay_fee = true;
+    let coin = utxo_coin_from_fields(coin);
+    let unspents = vec![UnspentInfo {
+        value: 100_000,
+        outpoint: OutPoint::default(),
+        height: Default::default(),
+    }];
+    // one input and a 40-byte output script make a 226-byte transaction without a change output
+    let outputs = vec![TransactionOutput {
+        script_pubkey: vec![0x51; 40].into(),
+        value: 99_000,
+    }];
+    let builder = UtxoTxBuilder::new(&coin)
+        .add_available_inputs(unspents)
+        .add_outputs(outputs)
+        .with_fee(ActualTxFee::FixedPerKb(100));
+    let (tx, data) = block_on(builder.build()).unwrap();
+    assert_eq!(
+        utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)),
+        226
+    );
+    assert_eq!(data.fee_amount, 226);
+    assert_eq!(data.unused_change, Some(774));
 }
 
 #[test]
@@ -1766,8 +2182,13 @@ fn test_network_info_negative_time_offset() {
     let _info: NetworkInfo = json::from_str(&info_str).unwrap();
 }
 
+/// A server that answers a protocol version outside the client's range is removed from the pool; with no other
+/// server the activation probe fails (CRD ch.38 R38.6.4e item 1, R38.6.4k-R item 5), naming the server.
 #[test]
+#[cfg(not(target_arch = "wasm32"))]
 fn test_unavailable_electrum_proto_version() {
+    use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
+
     ElectrumClientImpl::new.mock_safe(|coin_ticker, event_handlers| {
         MockResult::Return(ElectrumClientImpl::with_protocol_version(
             coin_ticker,
@@ -1776,32 +2197,42 @@ fn test_unavailable_electrum_proto_version() {
         ))
     });
 
-    let conf = json!({"coin":"RICK","asset":"RICK","rpcport":8923});
+    let server = block_on(StubServer::start(StubBehavior::Answer));
+    let conf = json!({"coin":"DOC","asset":"DOC","rpcport":62415});
     let req = json!({
          "method": "electrum",
-         "servers": [{"url":"electrum1.cipig.net:10017"}],
+         "servers": [{"url": server.addr()}],
     });
 
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+    let started = std::time::Instant::now();
     let error = block_on(utxo_standard_coin_with_priv_key(
-        &ctx, "RICK", &conf, &params, &[1u8; 32],
+        &ctx, "DOC", &conf, &params, &[1u8; 32],
     ))
     .err()
     .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let error = error.to_string();
     log!("Error: "(error));
-    assert!(error.contains("There are no Electrums with the required protocol version"));
+    assert!(error.contains("DOC"), "{error}");
+    assert!(error.contains(&server.addr()), "{error}");
+    assert!(error.contains("unsupported protocol version 1.4"), "{error}");
 }
 
 #[test]
 #[ignore]
-// The test provided to dimxy to recreate "stuck mempool" problem of komodod on RICK chain.
+// The test provided to dimxy to recreate "stuck mempool" problem of komodod on DOC chain.
 // Leaving this test here for a while because it might be still useful
-fn test_spam_rick() {
-    let conf = json!({"coin":"RICK","asset":"RICK","fname":"RICK (TESTCOIN)","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"required_confirmations":1,"avg_blocktime":1,"protocol":{"type":"UTXO"}});
+fn test_spam_doc() {
+    let conf = json!({"coin":"DOC","asset":"DOC","fname":"DOC (TESTCOIN)","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"required_confirmations":1,"avg_blocktime":1,"protocol":{"type":"UTXO"}});
     let req = json!({
          "method": "enable",
-         "coin": "RICK",
+         "coin": "DOC",
     });
 
     let key_pair = key_pair_from_seed("my_seed").unwrap();
@@ -1809,7 +2240,7 @@ fn test_spam_rick() {
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
     let coin = block_on(utxo_standard_coin_with_priv_key(
         &ctx,
-        "RICK",
+        "DOC",
         &conf,
         &params,
         &*key_pair.private().secret,
@@ -2083,8 +2514,13 @@ fn test_qtum_my_balance() {
 #[test]
 fn test_qtum_my_balance_with_check_utxo_maturity_false() {
     const DISPLAY_BALANCE: u64 = 68;
-    ElectrumClient::display_balance.mock_safe(move |_, _, _| {
-        MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(DISPLAY_BALANCE))))
+    // The qtum address is legacy and belongs to the activated key, so its P2PKH balance and P2PK lookup are one
+    // Electrum request (R38.6.3a); this is the client method that carries them.
+    ElectrumClient::display_balance_with_p2pk.mock_safe(move |_, _, _, _| {
+        MockResult::Return(Box::new(futures01::future::ok((
+            BigDecimal::from(DISPLAY_BALANCE),
+            Vec::new(),
+        ))))
     });
     QtumCoin::get_all_unspent_ordered_list.mock_safe(move |_, _| {
         panic!(
@@ -2126,7 +2562,7 @@ fn test_get_mature_unspent_ordered_map_from_cache_impl(
 ) {
     const TX_HASH: &str = "0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f";
     let tx_hash: H256Json = hex::decode(TX_HASH).unwrap().as_slice().into();
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let mut verbose = client.get_verbose_transaction(&tx_hash).wait().unwrap();
     verbose.confirmations = cached_confs;
     verbose.height = cached_height;
@@ -2824,18 +3260,180 @@ fn test_get_sender_trade_fee_dynamic_tx_fee() {
     assert_eq!(fee1, fee3);
 }
 
+/// Sender trade-fee preview (a swap payment of `amount` coins) for a fixed-fee policy, from `count` unspents of
+/// `unspent_value` base units each.
+#[cfg(not(target_arch = "wasm32"))]
+fn fixed_policy_preview_fee_sat(policy: ActualTxFee, count: u64, unspent_value: u64, amount: &str) -> u64 {
+    UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+    UtxoStandardCoin::get_unspent_ordered_list.mock_safe(move |coin, _| {
+        let cache = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        let unspents = (0..count)
+            .map(|index| UnspentInfo {
+                outpoint: OutPoint {
+                    hash: 1.into(),
+                    index: index as u32,
+                },
+                value: unspent_value,
+                height: Default::default(),
+            })
+            .collect();
+        MockResult::Return(Box::pin(futures::future::ok((unspents, cache))))
+    });
+    let client = NativeClient(Arc::new(NativeClientImpl::default()));
+    let mut coin_fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(client), None, false);
+    coin_fields.tx_fee = match policy {
+        ActualTxFee::Dynamic(_) => TxFee::Dynamic(EstimateFeeMethod::Standard),
+        ActualTxFee::FixedPerKb(rate) => TxFee::FixedPerKb(rate),
+        ActualTxFee::FixedPerStartedKb(rate) => TxFee::FixedPerStartedKb(rate),
+    };
+    let coin = utxo_coin_from_fields(coin_fields);
+    let fee = futures::executor::block_on(coin.get_sender_trade_fee(
+        TradePreimageValue::Exact(BigDecimal::from_str(amount).unwrap()),
+        FeeApproxStage::WithoutApprox,
+    ))
+    .expect("!get_sender_trade_fee");
+    sat_from_big_decimal(&fee.amount.to_decimal(), TEST_COIN_DECIMALS).unwrap()
+}
+
+/// CRD ch.38 R38.6.6b: the fee of a transaction of s = 226, 1000 and 1001 bytes under each fixed policy.
+#[test]
+fn test_actual_tx_fee_arithmetic_r38_6_6b() {
+    let plain = ActualTxFee::FixedPerKb(1000);
+    assert_eq!([226, 1000, 1001].map(|s| plain.fee_for_size(s)), [226, 1000, 1001]);
+    let whole_kb = ActualTxFee::FixedPerStartedKb(1000);
+    assert_eq!([226, 1000, 1001].map(|s| whole_kb.fee_for_size(s)), [1000, 1000, 2000]);
+    // Plain fixed truncates and the dynamic rate keeps its proportional rule.
+    assert_eq!(ActualTxFee::FixedPerKb(1001).fee_for_size(999), 999);
+    assert_eq!(ActualTxFee::Dynamic(20_000).fee_for_size(496), 9_920);
+    // A zero-size transaction costs nothing under either rule; large products saturate.
+    assert_eq!(whole_kb.fee_for_size(0), 0);
+    assert_eq!(ActualTxFee::FixedPerKb(u64::MAX).fee_for_size(u64::MAX), u64::MAX);
+    assert_eq!(ActualTxFee::FixedPerStartedKb(u64::MAX).fee_for_size(2000), u64::MAX);
+    // The 34-byte change output increase.
+    assert_eq!(plain.change_output_increase(226), 34);
+    assert_eq!(whole_kb.change_output_increase(226), 0);
+    assert_eq!(whole_kb.change_output_increase(966), 0);
+    assert_eq!(whole_kb.change_output_increase(967), 1000);
+    assert_eq!(whole_kb.change_output_increase(1000), 1000);
+    assert_eq!(whole_kb.change_output_increase(1001), 0);
+}
+
+/// CRD ch.38 R38.6.6b: the builder charges the fee of the final transaction (change output included) under
+/// each fixed policy, and a plain fixed coin no longer pays for a whole kilobyte.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_tx_builder_fixed_policies_r38_6_6b() {
+    let coin = floor_test_coin("LTC", TxFee::FixedPerKb(1000), 1000, 8);
+    let build = |policy: ActualTxFee| {
+        let unspents = vec![UnspentInfo {
+            value: 10_000_000,
+            outpoint: OutPoint::default(),
+            height: None,
+        }];
+        let outputs = vec![TransactionOutput {
+            value: 100_000,
+            script_pubkey: vec![0x51; 25].into(),
+        }];
+        let (tx, data) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .add_available_inputs(unspents)
+                .add_outputs(outputs)
+                .with_fee(policy)
+                .build(),
+        )
+        .unwrap();
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        (data.fee_amount, size)
+    };
+    let (plain_fee, size) = build(ActualTxFee::FixedPerKb(1000));
+    assert_eq!(
+        plain_fee, size,
+        "plain fixed 1,000 charges one base unit per byte of the final transaction"
+    );
+    assert!(size < 1000);
+    let (whole_kb_fee, whole_kb_size) = build(ActualTxFee::FixedPerStartedKb(1000));
+    assert_eq!((whole_kb_fee, whole_kb_size), (1000, size));
+}
+
+/// CRD ch.38 R38.6.6b: the trade-fee preview allows for one change output under each policy's own rule.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_sender_trade_fee_preview_fixed_policies_r38_6_6b() {
+    // (unspents of 0.1 coin each, payment amount, plain fixed 1,000, whole-kilobyte 1,000)
+    let cases = [
+        // One input: 240 bytes plus the 34-byte change allowance, far below one kilobyte.
+        (1u64, "0.099", 274, 1000),
+        // Five inputs: 866 bytes with the change allowance, still one started kilobyte.
+        (5, "0.499", 866, 1000),
+        // Six inputs: 980 bytes without the change output, 1,014 with it. The allowance crosses into a
+        // further started kilobyte, so the whole-kilobyte policy adds one more rate.
+        (6, "0.599", 1014, 2000),
+    ];
+    for (count, amount, plain_expected, whole_kb_expected) in cases {
+        let plain = fixed_policy_preview_fee_sat(ActualTxFee::FixedPerKb(1000), count, 10_000_000, amount);
+        let whole_kb = fixed_policy_preview_fee_sat(ActualTxFee::FixedPerStartedKb(1000), count, 10_000_000, amount);
+        assert_eq!(plain, plain_expected, "plain fixed, {count} inputs");
+        assert_eq!(whole_kb, whole_kb_expected, "whole-kilobyte fixed, {count} inputs");
+    }
+}
+
+/// CRD ch.60 T60.1 whole-kilobyte cases (R38.6.6e): F = r, not floor(0.496 r).
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_utxo_min_trading_vol_whole_kb_values() {
+    // DINGO: whole-kilobyte 100,000,000, dust 100,000,000: max(10 * dust, 10 * r) = 10 coins.
+    let dingo = floor_test_coin("DINGO", TxFee::FixedPerStartedKb(100_000_000), 100_000_000, 8);
+    assert_eq!(dingo.min_trading_vol(), MmNumber::from("10"));
+    // whole-kilobyte 300,000 with dust 1,000: 10 * 300,000 = 3,000,000 base units = 0.03.
+    let coin = floor_test_coin("SYNTH-W", TxFee::FixedPerStartedKb(300_000), 1000, 8);
+    assert_eq!(coin.min_trading_vol(), MmNumber::from("0.03"));
+    // The same rate as plain fixed keeps the truncated 0.496 share.
+    let plain = floor_test_coin("SYNTH-P", TxFee::FixedPerKb(300_000), 1000, 8);
+    assert_eq!(plain.min_trading_vol(), MmNumber::from("0.01488"));
+}
+
+/// CRD ch.38 R38.6.6c: the legacy HTLC spend and refund estimate is R38.6.6b over 496 bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn test_htlc_spend_fee_r38_6_6c() {
+    assert_eq!(utxo_common::DEFAULT_SWAP_TX_SPEND_SIZE, 496);
+    let size = utxo_common::DEFAULT_SWAP_TX_SPEND_SIZE;
+    let cases = [
+        // KMD, plain fixed 1,000.
+        (ActualTxFee::FixedPerKb(1000), 496),
+        // Whole-kilobyte r.
+        (ActualTxFee::FixedPerStartedKb(1_000), 1_000),
+        (ActualTxFee::FixedPerStartedKb(100_000_000), 100_000_000),
+        // Dynamic e = 20,000: floor(0.496 * e), no volatility increase.
+        (ActualTxFee::Dynamic(20_000), 9_920),
+    ];
+    for (policy, expected) in cases {
+        UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+        let coin = floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8);
+        let legacy = block_on(utxo_common::get_htlc_spend_fee(&coin, size)).unwrap();
+        assert_eq!(legacy, expected, "legacy estimate under {policy:?}");
+        // CRD ch.16 R14A: the version-two estimate is the same figure, r for the whole-kilobyte policy.
+        let v2 = block_on(utxo_common::get_v2_swap_spend_fee(
+            &coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(v2, expected, "version-two estimate under {policy:?}");
+    }
+}
+
 #[test]
 fn test_validate_fee_wrong_sender() {
     let rpc_client = electrum_client_for_test(&[
-        "electrum1.cipig.net:10018",
-        "electrum2.cipig.net:10018",
-        "electrum3.cipig.net:10018",
+        "marty.electrum1.cipig.net:10021",
+        "marty.electrum2.cipig.net:10021",
+        "marty.electrum3.cipig.net:10021",
     ]);
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Electrum(rpc_client), None, false);
-    // https://morty.explorer.dexstats.info/tx/fe4b0e1c4537e22f2956b5b74513fc936ebd87ada21513e850899cb07a45d475
-    let tx_bytes = hex::decode("0400008085202f890199cc492c24cc617731d13cff0ef22e7b0c277a64e7368a615b46214424a1c894020000006a473044022071edae37cf518e98db3f7637b9073a7a980b957b0c7b871415dbb4898ec3ebdc022031b402a6b98e64ffdf752266449ca979a9f70144dba77ed7a6a25bfab11648f6012103ad6f89abc2e5beaa8a3ac28e22170659b3209fe2ddf439681b4b8f31508c36faffffffff0202290200000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac8a96e70b000000001976a914d55f0df6cb82630ad21a4e6049522a6f2b6c9d4588ac8afb2c60000000000000000000000000000000").unwrap();
+    // A dex fee payment on MARTY (height 1338797): fae33048eb2941fd376d3af78acb44c5e254d6b58f574ebb0a360173235d5fdd
+    let tx_bytes = hex::decode("0400008085202f8901f23ad270f0a668e30b9cf9c995c7c76ae536ba95e3a41205d1651f2eaf12e07e020000006a47304402206d1e0883b2917b8b9a0c481ccf8ef9ebe81257a83ea9e6123449b52f6ce9b7df0220424ae158c4d405ab2a80ceb9aca684893d8eda101a6dd959ad33ff1a6f840ca3012103de7fc0bcf2f3392441ce737d519e1db542364d6389ebdaf74a7ba877d9da301affffffff02bcf60100000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac7af9f702000000001976a9147551b5ce335bcc3818f9e7ff45538d9c08b70d1d88acf47ed169000000000000000000000000000000").unwrap();
     let taker_fee_tx = coin.tx_enum_from_bytes(&tx_bytes).unwrap();
-    let amount: BigDecimal = "0.0014157".parse().unwrap();
+    let amount: BigDecimal = "0.001287".parse().unwrap();
     let validate_err = coin
         .validate_fee(ValidateFeeArgs {
             fee_tx: &taker_fee_tx,
@@ -2853,23 +3451,23 @@ fn test_validate_fee_wrong_sender() {
 #[test]
 fn test_validate_fee_min_block() {
     let rpc_client = electrum_client_for_test(&[
-        "electrum1.cipig.net:10018",
-        "electrum2.cipig.net:10018",
-        "electrum3.cipig.net:10018",
+        "marty.electrum1.cipig.net:10021",
+        "marty.electrum2.cipig.net:10021",
+        "marty.electrum3.cipig.net:10021",
     ]);
     let coin = utxo_coin_for_test(UtxoRpcClientEnum::Electrum(rpc_client), None, false);
-    // https://morty.explorer.dexstats.info/tx/fe4b0e1c4537e22f2956b5b74513fc936ebd87ada21513e850899cb07a45d475
-    let tx_bytes = hex::decode("0400008085202f890199cc492c24cc617731d13cff0ef22e7b0c277a64e7368a615b46214424a1c894020000006a473044022071edae37cf518e98db3f7637b9073a7a980b957b0c7b871415dbb4898ec3ebdc022031b402a6b98e64ffdf752266449ca979a9f70144dba77ed7a6a25bfab11648f6012103ad6f89abc2e5beaa8a3ac28e22170659b3209fe2ddf439681b4b8f31508c36faffffffff0202290200000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac8a96e70b000000001976a914d55f0df6cb82630ad21a4e6049522a6f2b6c9d4588ac8afb2c60000000000000000000000000000000").unwrap();
+    // A dex fee payment on MARTY (height 1338797): fae33048eb2941fd376d3af78acb44c5e254d6b58f574ebb0a360173235d5fdd
+    let tx_bytes = hex::decode("0400008085202f8901f23ad270f0a668e30b9cf9c995c7c76ae536ba95e3a41205d1651f2eaf12e07e020000006a47304402206d1e0883b2917b8b9a0c481ccf8ef9ebe81257a83ea9e6123449b52f6ce9b7df0220424ae158c4d405ab2a80ceb9aca684893d8eda101a6dd959ad33ff1a6f840ca3012103de7fc0bcf2f3392441ce737d519e1db542364d6389ebdaf74a7ba877d9da301affffffff02bcf60100000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac7af9f702000000001976a9147551b5ce335bcc3818f9e7ff45538d9c08b70d1d88acf47ed169000000000000000000000000000000").unwrap();
     let taker_fee_tx = coin.tx_enum_from_bytes(&tx_bytes).unwrap();
-    let amount: BigDecimal = "0.0014157".parse().unwrap();
-    let sender_pub = hex::decode("03ad6f89abc2e5beaa8a3ac28e22170659b3209fe2ddf439681b4b8f31508c36fa").unwrap();
+    let amount: BigDecimal = "0.001287".parse().unwrap();
+    let sender_pub = hex::decode("03de7fc0bcf2f3392441ce737d519e1db542364d6389ebdaf74a7ba877d9da301a").unwrap();
     let validate_err = coin
         .validate_fee(ValidateFeeArgs {
             fee_tx: &taker_fee_tx,
             expected_sender: &sender_pub,
             fee_addr: test_dex_fee_addr_raw_pubkey(),
             dex_fee: &DexFee::Standard(amount.into()),
-            min_block_number: 810329,
+            min_block_number: 1338798,
             uuid: &[],
         })
         .wait()
@@ -2990,7 +3588,7 @@ fn firo_lelantus_tx_details() {
 
 #[test]
 fn test_generate_tx_doge_fee() {
-    // A tx below 1kb is always 0,01 doge fee per kb.
+    // DOGE is plain fixed 1,000,000 per kB with a forced minimum relay fee; both are proportional (R38.6.6b).
     let config = json!({
         "coin": "DOGE",
         "name": "dogecoin",
@@ -3021,63 +3619,35 @@ fn test_generate_tx_doge_fee() {
     ))
     .unwrap();
 
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![TransactionOutput {
-        value: 100000000,
-        script_pubkey: vec![0; 26].into(),
-    }];
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 1000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        40
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 2000000;
-    assert_eq!(expected_fee, data.fee_amount);
-
-    let unspents = vec![UnspentInfo {
-        outpoint: Default::default(),
-        value: 1000000000000,
-        height: None,
-    }];
-    let outputs = vec![
-        TransactionOutput {
-            value: 100000000,
-            script_pubkey: vec![0; 26].into(),
-        }
-        .clone();
-        60
-    ];
-
-    let builder = UtxoTxBuilder::new(&doge)
-        .add_available_inputs(unspents)
-        .add_outputs(outputs);
-    let (_, data) = block_on(builder.build()).unwrap();
-    let expected_fee = 3000000;
-    assert_eq!(expected_fee, data.fee_amount);
+    // CRD ch.38 R38.6.6b: the fee is proportional to the size of the final transaction, never below the
+    // forced minimum relay fee: max(floor(txfee * size / 1000), floor(relay_rate * size / 1000)).
+    let relay_rate_sat = {
+        let relay = block_on(doge.as_ref().rpc_client.get_relay_fee().compat()).unwrap();
+        sat_from_big_decimal(&relay, doge.as_ref().decimals).unwrap()
+    };
+    for outputs_count in [1usize, 40, 60] {
+        let unspents = vec![UnspentInfo {
+            outpoint: Default::default(),
+            value: 1000000000000,
+            height: None,
+        }];
+        let outputs = vec![
+            TransactionOutput {
+                value: 100000000,
+                script_pubkey: vec![0; 26].into(),
+            };
+            outputs_count
+        ];
+        let builder = UtxoTxBuilder::new(&doge)
+            .add_available_inputs(unspents)
+            .add_outputs(outputs);
+        let (tx, data) = block_on(builder.build()).unwrap();
+        let size = utxo_common::tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(tx)) as u64;
+        let expected_fee = ActualTxFee::FixedPerKb(1000000)
+            .fee_for_size(size)
+            .max(ActualTxFee::Dynamic(relay_rate_sat).fee_for_size(size));
+        assert_eq!(expected_fee, data.fee_amount, "{outputs_count} outputs, {size} bytes");
+    }
 }
 
 #[test]
@@ -3513,13 +4083,13 @@ fn test_utxo_standard_with_check_utxo_maturity_true() {
         MockResult::Return(Box::pin(futures::future::ok((MatureUnspentList::default(), cache))))
     });
 
-    let conf = json!({"coin":"RICK","asset":"RICK","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"UTXO"}});
+    let conf = json!({"coin":"DOC","asset":"DOC","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"UTXO"}});
     let req = json!({
          "method": "electrum",
          "servers": [
-             {"url":"electrum1.cipig.net:10017"},
-             {"url":"electrum2.cipig.net:10017"},
-             {"url":"electrum3.cipig.net:10017"},
+             {"url":"doc.electrum1.cipig.net:10020"},
+             {"url":"doc.electrum2.cipig.net:10020"},
+             {"url":"doc.electrum3.cipig.net:10020"},
          ],
         "check_utxo_maturity": true,
     });
@@ -3528,7 +4098,7 @@ fn test_utxo_standard_with_check_utxo_maturity_true() {
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
 
     let coin = block_on(utxo_standard_coin_with_priv_key(
-        &ctx, "RICK", &conf, &params, &[1u8; 32],
+        &ctx, "DOC", &conf, &params, &[1u8; 32],
     ))
     .unwrap();
 
@@ -3556,13 +4126,13 @@ fn test_utxo_standard_without_check_utxo_maturity() {
         panic!("'UtxoStandardCoin::get_mature_unspent_ordered_list' is not expected to be called when `check_utxo_maturity` is not set")
     });
 
-    let conf = json!({"coin":"RICK","asset":"RICK","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"UTXO"}});
+    let conf = json!({"coin":"DOC","asset":"DOC","rpcport":25435,"txversion":4,"overwintered":1,"mm2":1,"protocol":{"type":"UTXO"}});
     let req = json!({
          "method": "electrum",
          "servers": [
-             {"url":"electrum1.cipig.net:10017"},
-             {"url":"electrum2.cipig.net:10017"},
-             {"url":"electrum3.cipig.net:10017"},
+             {"url":"doc.electrum1.cipig.net:10020"},
+             {"url":"doc.electrum2.cipig.net:10020"},
+             {"url":"doc.electrum3.cipig.net:10020"},
          ]
     });
 
@@ -3570,7 +4140,7 @@ fn test_utxo_standard_without_check_utxo_maturity() {
     let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
 
     let coin = block_on(utxo_standard_coin_with_priv_key(
-        &ctx, "RICK", &conf, &params, &[1u8; 32],
+        &ctx, "DOC", &conf, &params, &[1u8; 32],
     ))
     .unwrap();
 
@@ -4336,7 +4906,7 @@ fn test_electrum_balance_deserializing() {
 
 #[test]
 fn test_electrum_display_balances() {
-    let rpc_client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let rpc_client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     block_on(utxo_common_tests::test_electrum_display_balances(&rpc_client));
 }
 
@@ -4401,7 +4971,7 @@ fn test_native_display_balances() {
 
 #[test]
 fn test_message_hash() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
@@ -4415,7 +4985,7 @@ fn test_message_hash() {
 
 #[test]
 fn test_sign_verify_message() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
@@ -4436,7 +5006,7 @@ fn test_sign_verify_message() {
 
 #[test]
 fn test_sign_verify_message_segwit() {
-    let client = electrum_client_for_test(RICK_ELECTRUM_ADDRS);
+    let client = electrum_client_for_test(DOC_ELECTRUM_ADDRS);
     let coin = utxo_coin_for_test(
         client.into(),
         Some("spice describe gravity federal blast come thank unfair canal monkey style afraid"),
@@ -4934,11 +5504,15 @@ mod swap_v2_funding_spend_tests {
 mod swap_v2_taker_payment_spend_tests {
     use crate::utxo::rpc_clients::UtxoRpcClientEnum;
     use crate::utxo::swap_proto_v2_scripts::taker_payment_script;
-    use crate::utxo::utxo_common::{build_taker_payment_spend_cooperative_script_sig,
-                                   build_taker_payment_spend_preimage_tx, sign_taker_payment_spend_input};
-    use crate::utxo::utxo_tests::{native_client_for_test, utxo_coin_fields_for_test};
-    use crate::utxo::{output_script, ScriptType, UtxoTx};
+    use crate::utxo::utxo_common::{address_from_raw_pubkey, build_taker_payment_spend_cooperative_script_sig,
+                                   build_taker_payment_spend_preimage_tx, gen_taker_payment_spend_preimage,
+                                   sign_taker_payment_spend_input};
+    use crate::utxo::utxo_tests::{native_client_for_test, utxo_coin_fields_for_test, utxo_coin_from_fields};
+    use crate::utxo::{output_script, ScriptType, UtxoCommonOps, UtxoTx};
+    use crate::{DexFee, GenTakerPaymentSpendArgs};
     use chain::TransactionOutput;
+    use common::block_on;
+    use common::mm_number::MmNumber;
     use crypto::privkey::key_pair_from_seed;
     use kdf_crypto::ChecksumType;
     use keys::{Address, AddressFormat as UtxoAddressFormat, KeyPair, Public};
@@ -4950,9 +5524,11 @@ mod swap_v2_taker_payment_spend_tests {
     const TAKER_PAYMENT_VALUE: u64 = 1_000_000;
     const DEX_FEE_SAT: u64 = 10_000;
     const SPEND_FEE: u64 = 1_000;
+    const SWAP_UNIQUE_DATA: &[u8] = b"ch16 payment-spend tests";
 
     fn taker_kp() -> KeyPair { key_pair_from_seed("ch15 payment-spend taker").unwrap() }
     fn maker_kp() -> KeyPair { key_pair_from_seed("ch15 payment-spend maker").unwrap() }
+    fn fee_kp() -> KeyPair { key_pair_from_seed("ch16 payment-spend fee").unwrap() }
 
     fn maker_address() -> Address {
         Address {
@@ -4977,26 +5553,54 @@ mod swap_v2_taker_payment_spend_tests {
         tx
     }
 
-    /// §15.5.11 step 1 — DexFee::Standard preimage has a single output whose
-    /// `script_pubkey` is `output_script(maker_address)` and whose value is
-    /// `taker_payment_value - dex_fee - spend_fee`.
+    /// CRD ch.16 R14 — a `DexFee::Standard` preimage has a single output: the
+    /// fee-collection P2PKH for the full converted fee amount. The maker
+    /// payout is not part of the preimage; the maker appends it later (R18).
+    /// Replaces the withdrawn pre-correction test of the same name, which
+    /// asserted the maker payout was output 0 (the earlier, wrong contract;
+    /// see ch.16's "Compatibility correction").
     #[test]
     fn should_build_taker_payment_spend_preimage_with_expected_output_to_maker_address() {
-        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Native(native_client_for_test()),
+            None,
+            false,
+        ));
         let taker_payment = synthetic_taker_payment_tx();
         let maker_addr = maker_address();
-        let expected_value = TAKER_PAYMENT_VALUE - DEX_FEE_SAT - SPEND_FEE;
-        let expected_script_pubkey = output_script(&maker_addr, ScriptType::P2PKH).to_bytes();
-        let outputs = vec![TransactionOutput {
-            value: expected_value,
-            script_pubkey: expected_script_pubkey.clone(),
-        }];
+        let taker_pub = *taker_kp().public();
+        let maker_pub = *maker_kp().public();
+        let dex_fee_addr_raw_pubkey = *fee_kp().public();
+        let dex_fee = DexFee::Standard(MmNumber::from((DEX_FEE_SAT, 100_000_000u64)));
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_payment,
+            time_lock: TAKER_PAYMENT_TIME_LOCK as u64,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_addr,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: dex_fee_addr_raw_pubkey.as_ref(),
+        };
+        let preimage = block_on(gen_taker_payment_spend_preimage(&coin, &args, SWAP_UNIQUE_DATA)).expect("preimage");
+        let signer = preimage.preimage.0;
 
-        let signer = build_taker_payment_spend_preimage_tx(&fields, &taker_payment, outputs).expect("build preimage");
+        let fee_address = address_from_raw_pubkey(
+            dex_fee_addr_raw_pubkey.as_ref(),
+            coin.as_ref().conf.pub_addr_prefix,
+            coin.as_ref().conf.pub_t_addr_prefix,
+            coin.as_ref().conf.checksum_type,
+            coin.as_ref().conf.bech32_hrp.clone(),
+            coin.addr_format().clone(),
+        )
+        .unwrap();
+        let expected_script_pubkey = output_script(&fee_address, ScriptType::P2PKH).to_bytes();
 
         assert_eq!(signer.outputs.len(), 1, "Standard preimage has exactly one output");
         assert_eq!(signer.outputs[0].script_pubkey, expected_script_pubkey);
-        assert_eq!(signer.outputs[0].value, expected_value);
+        assert_eq!(signer.outputs[0].value, DEX_FEE_SAT);
 
         assert_eq!(signer.inputs.len(), 1);
         assert_eq!(signer.inputs[0].previous_output.hash, taker_payment.hash());
@@ -5004,9 +5608,14 @@ mod swap_v2_taker_payment_spend_tests {
         assert_eq!(signer.inputs[0].amount, TAKER_PAYMENT_VALUE);
     }
 
-    /// §15.5.12 — the partial signature returned by `sign_taker_payment_spend_input`
-    /// verifies (via `keys::Public::verify`) against the signing party's pub
-    /// for the cooperative-branch sighash of the taker-payment redeem script.
+    /// Reviewed for CRD ch.16 R14/R15 (issue #11): this exercises the
+    /// generic `sign_taker_payment_spend_input` sign/verify mechanics against
+    /// an arbitrary single-output preimage under the `SINGLE` flag -- it does
+    /// not assert which output that is, so it is unaffected by the ch.16
+    /// output-ordering correction. The partial signature returned by
+    /// `sign_taker_payment_spend_input` verifies (via `keys::Public::verify`)
+    /// against the signing party's pub for the cooperative-branch sighash of
+    /// the taker-payment redeem script.
     #[test]
     fn should_recover_partial_signature_from_taker_payment_spend_preimage() {
         let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
@@ -5049,9 +5658,13 @@ mod swap_v2_taker_payment_spend_tests {
         );
     }
 
-    /// §15.5.13 — cooperative-branch script_sig pushes (bottom→top):
+    /// CRD ch.16 R15/R18 — cooperative-branch script_sig pushes (bottom→top):
     /// `maker_sig, taker_sig, maker_secret, OP_0, redeem`. No leading OP_0
-    /// stuffer because the redeem uses CHECKSIGVERIFY/CHECKSIG, not OP_CHECKMULTISIG.
+    /// stuffer because the redeem uses CHECKSIGVERIFY/CHECKSIG, not
+    /// OP_CHECKMULTISIG. Each signature carries its own flag byte -- the
+    /// maker's ALL (0x01) and the taker's SINGLE (0x03) here, proving the two
+    /// can differ (the `Standard` case). A single shared byte (the withdrawn
+    /// pre-correction contract) could not represent this.
     #[test]
     fn should_select_maker_secret_branch_for_taker_payment_spend_script_data() {
         let redeem = taker_payment_script(
@@ -5062,26 +5675,28 @@ mod swap_v2_taker_payment_spend_tests {
         );
         let maker_sig_der = vec![0x30, 0x44, 0xAA, 0xBB];
         let taker_sig_der = vec![0x30, 0x44, 0xCC, 0xDD];
-        let sighash_byte = 0x01u8;
+        let maker_sighash_byte = 0x01u8;
+        let taker_sighash_byte = 0x03u8;
 
         let script_sig_bytes = build_taker_payment_spend_cooperative_script_sig(
             &maker_sig_der,
             &taker_sig_der,
             &MAKER_SECRET,
-            sighash_byte,
+            maker_sighash_byte,
+            taker_sighash_byte,
             &redeem,
         );
         let script: Script = script_sig_bytes.into();
         let instrs: Vec<_> = script.iter().collect::<Result<Vec<_>, _>>().expect("script parses");
 
         assert_eq!(instrs.len(), 5, "expected 5 stack contributions");
-        // instrs[0]: maker_sig + sighash
+        // instrs[0]: maker_sig + its own sighash byte
         let mut expected_maker = maker_sig_der.clone();
-        expected_maker.push(sighash_byte);
+        expected_maker.push(maker_sighash_byte);
         assert_eq!(instrs[0].data, Some(expected_maker.as_slice()));
-        // instrs[1]: taker_sig + sighash
+        // instrs[1]: taker_sig + its own (different) sighash byte
         let mut expected_taker = taker_sig_der.clone();
-        expected_taker.push(sighash_byte);
+        expected_taker.push(taker_sighash_byte);
         assert_eq!(instrs[1].data, Some(expected_taker.as_slice()));
         // instrs[2]: 32-byte maker secret
         assert_eq!(instrs[2].opcode, Opcode::OP_PUSHBYTES_32);
@@ -5096,11 +5711,12 @@ mod swap_v2_taker_payment_spend_tests {
 /// §16.6 — Pre-burn output unit tests for the V2 taker-payment-spend.
 #[cfg(test)]
 mod swap_v2_pre_burn_tests {
-    use crate::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum};
+    use crate::utxo::rpc_clients::{NativeClient, UnspentInfo, UtxoRpcClientEnum, UtxoRpcClientOps};
     use crate::utxo::utxo_common;
     use crate::utxo::utxo_standard::UtxoStandardCoin;
     use crate::utxo::utxo_tests::{native_client_for_test, utxo_coin_fields_for_test, utxo_coin_from_fields};
-    use crate::utxo::{output_script, ActualTxFee, GenerateTxError, ScriptType, UtxoTx};
+    use crate::utxo::{output_script, sat_from_big_decimal, ActualTxFee, GenerateTxError, ScriptType, UtxoCommonOps,
+                      UtxoTx, UtxoTxGenerationOps};
     use crate::{calc_dex_fee_for_burn_account, calc_dex_fee_for_op_return, DexFee, DexFeeBurnDestination,
                 GenTakerPaymentSpendArgs, MmCoin, ValidateTakerPaymentSpendPreimageError};
     use chain::{OutPoint, TransactionOutput};
@@ -5109,16 +5725,18 @@ mod swap_v2_pre_burn_tests {
     use kdf_crypto::ChecksumType;
     use keys::{Address, AddressFormat as UtxoAddressFormat};
     use mm2_net_config::net_config_or_panic;
-    use script::{Builder, Opcode};
+    use mocktopus::mocking::*;
+    use rpc::v1::types::H256 as H256Json;
+    use script::{Builder, Opcode, Script};
 
     const MAKER_SECRET_HASH: [u8; 32] = [0xbb; 32];
     const TAKER_PAYMENT_TIME_LOCK: u32 = 0x6810_0000;
     const TAKER_PAYMENT_VALUE: u64 = 100_000_000;
     const SWAP_UNIQUE_DATA: &[u8] = b"ch16 pre-burn unit tests";
 
-    /// Build a non-KMD `UtxoStandardCoin` (ticker = "RICK") with the standard
+    /// Build a non-KMD `UtxoStandardCoin` (ticker = "DOC") with the standard
     /// test fixture; both burn opt-ins are false.
-    fn rick_coin() -> UtxoStandardCoin {
+    fn doc_coin() -> UtxoStandardCoin {
         let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
         utxo_coin_from_fields(fields)
     }
@@ -5162,7 +5780,7 @@ mod swap_v2_pre_burn_tests {
     /// A non-KMD UTXO taker on netid 8762 retains the single-output form.
     #[test]
     fn should_keep_non_kmd_fee_standard_on_netid_8762() {
-        let coin = rick_coin();
+        let coin = doc_coin();
         let net_cfg = net_config_or_panic(8762);
         let total = MmNumber::from("1");
         let dex_fee = DexFee::new_from_taker_coin(&coin as &dyn MmCoin, net_cfg, total.clone());
@@ -5260,117 +5878,182 @@ mod swap_v2_pre_burn_tests {
         );
     }
 
-    /// A small netid-8762 KMD trade legitimately has a fee-collection leg
-    /// below KMD's generic output dust after the legacy 75/25 split. Only that
-    /// protocol-defined output is exempt; the OP_RETURN leg is already
-    /// unspendable and under-dust change is still folded into the miner fee.
+    /// CRD ch.08 R8 / T5A -- the three exact-rational ranges of the KMD
+    /// direct-burn split, netid 8762, eight decimals, dust 1,000 base units.
+    /// Replaces the withdrawn pre-correction test that asserted the 868/289
+    /// split and a builder dust exemption (issue #11): the reference emits
+    /// 1,000 + 158 for a 0.01 KMD taker, not 868 + 289. No descriptor this
+    /// factory emits needs any builder dust exemption any more (R15A).
     #[test]
-    fn should_build_small_v2_6_0_beta_kmd_taker_fee_without_weakening_dust_policy() {
+    fn should_apply_kmd_direct_burn_ranges_t5a() {
         let kmd = kmd_coin();
         let net_cfg = net_config_or_panic(8762);
+        let fee_address = maker_address_for(&kmd);
+        let discounted_rate = MmNumber::from((9, 7770));
+
+        // (trade amount as an exact fraction, expected fee-output value,
+        // expected burn value or None for a single-output Standard(dust)
+        // descriptor).
+        let cases: &[((u64, u64), u64, Option<u64>)] = &[
+            ((84, 10000), 1_000, None),
+            // 259/30000 KMD is the exact range-1/range-3 boundary (product == dust).
+            ((259, 30000), 1_000, None),
+            ((1, 100), 1_000, Some(158)),
+            ((115, 10000), 1_000, Some(332)),
+            ((116, 10000), 1_007, Some(335)),
+        ];
+
+        for (trade_amount, expected_fee, expected_burn) in cases {
+            let trade_amount = MmNumber::from(*trade_amount);
+            let total = &trade_amount * &discounted_rate;
+            let dex_fee = DexFee::new_from_taker_coin(&kmd as &dyn MmCoin, net_cfg, total);
+            let outputs = utxo_common::generate_taker_fee_tx_outputs(&kmd, &dex_fee, &fee_address).unwrap();
+
+            match expected_burn {
+                None => {
+                    assert_eq!(outputs.len(), 1, "trade {}", trade_amount);
+                    assert_eq!(outputs[0].value, *expected_fee, "trade {}", trade_amount);
+                    assert_eq!(
+                        outputs[0].script_pubkey,
+                        output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
+                        "trade {}",
+                        trade_amount
+                    );
+                },
+                Some(expected_burn) => {
+                    assert_eq!(outputs.len(), 2, "trade {}", trade_amount);
+                    assert_eq!(outputs[0].value, *expected_fee, "trade {}", trade_amount);
+                    assert_eq!(
+                        outputs[0].script_pubkey,
+                        output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
+                        "trade {}",
+                        trade_amount
+                    );
+                    assert_eq!(outputs[1].value, *expected_burn, "trade {}", trade_amount);
+                    assert_eq!(
+                        outputs[1].script_pubkey,
+                        Builder::default().push_opcode(Opcode::OP_RETURN).into_bytes(),
+                        "trade {}",
+                        trade_amount
+                    );
+                },
+            }
+
+            // None of these descriptors needs a builder dust exemption any more.
+            let builder_coin = doc_coin();
+            let unspents = vec![UnspentInfo {
+                value: 10_000_000,
+                outpoint: OutPoint::default(),
+                height: None,
+            }];
+            let (tx, _) = block_on(
+                utxo_common::UtxoTxBuilder::new(&builder_coin)
+                    .add_available_inputs(unspents)
+                    .add_outputs(outputs.clone())
+                    .with_fee(ActualTxFee::FixedPerKb(1_000))
+                    .build(),
+            )
+            .unwrap();
+            assert_eq!(tx.outputs.len(), outputs.len() + 1, "trade {} (+ change)", trade_amount);
+        }
+    }
+
+    /// CRD ch.08 T5B -- a maker validating the 0.01 KMD descriptor of T5A
+    /// MUST accept the `v2.6.0-beta` on-wire shape (1,000 + 158) and MUST
+    /// reject the withdrawn pre-correction shape (868 + 289).
+    #[test]
+    fn should_validate_kmd_taker_fee_per_reference_wire_shape_t5b() {
+        let kmd = kmd_coin();
+        let net_cfg = net_config_or_panic(8762);
+        let fee_address = maker_address_for(&kmd);
         let trade_amount = MmNumber::from("0.01");
         let total = &trade_amount * &MmNumber::from((9, 7770));
         let dex_fee = DexFee::new_from_taker_coin(&kmd as &dyn MmCoin, net_cfg, total);
-        let fee_address = maker_address_for(&kmd);
-        let outputs = utxo_common::generate_taker_fee_tx_outputs(&kmd, &dex_fee, &fee_address).unwrap();
 
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(outputs[0].value, 868);
-        assert_eq!(
-            outputs[0].script_pubkey,
-            output_script(&fee_address, ScriptType::P2PKH).to_bytes()
-        );
-        assert_eq!(outputs[1].value, 289);
-        assert_eq!(
-            outputs[1].script_pubkey,
-            Builder::default().push_opcode(Opcode::OP_RETURN).into_bytes()
-        );
-        let allowed_underdust_output = utxo_common::taker_fee_allowed_underdust_output(&dex_fee);
-        assert_eq!(allowed_underdust_output, Some(utxo_common::DEFAULT_FEE_VOUT));
+        // v2.6.0-beta wire shape: 1,000 to the fee address, then 158 on a
+        // bare OP_RETURN, then change.
+        let reference_outputs = vec![
+            TransactionOutput {
+                value: 1_000,
+                script_pubkey: output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
+            },
+            TransactionOutput {
+                value: 158,
+                script_pubkey: Builder::default().push_opcode(Opcode::OP_RETURN).into_bytes(),
+            },
+            TransactionOutput {
+                value: 5_000,
+                script_pubkey: output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
+            },
+        ];
+        let mut reference_tx = UtxoTx::default();
+        reference_tx.version = 4;
+        reference_tx.outputs = reference_outputs;
 
-        // Use the non-KMD fixture to exercise the pure builder without KMD
-        // interest RPCs. Its dust and fixed transaction fee are both 1,000.
-        let builder_coin = rick_coin();
-        let unspents = vec![UnspentInfo {
-            value: 3_156,
-            outpoint: OutPoint::default(),
-            height: None,
-        }];
+        match &dex_fee {
+            DexFee::WithBurn {
+                fee_amount,
+                burn_amount,
+                burn_destination: DexFeeBurnDestination::KmdOpReturn,
+            } => {
+                let decimals = kmd.as_ref().decimals;
+                let fee_sat = sat_from_big_decimal(&fee_amount.to_decimal(), decimals).unwrap();
+                let burn_sat = sat_from_big_decimal(&burn_amount.to_decimal(), decimals).unwrap();
+                assert_eq!(fee_sat, 1_000);
+                assert_eq!(burn_sat, 158);
+                assert!(reference_tx.outputs[0].value >= fee_sat);
+                assert!(reference_tx.outputs[1].value >= burn_sat);
 
-        let generic_error = block_on(
-            utxo_common::UtxoTxBuilder::new(&builder_coin)
-                .add_available_inputs(unspents.clone())
-                .add_outputs(outputs.clone())
-                .with_fee(ActualTxFee::FixedPerKb(1_000))
-                .build(),
-        )
-        .unwrap_err()
-        .into_inner();
-        assert!(matches!(generic_error, GenerateTxError::OutputValueLessThanDust {
-            value: 868,
-            dust: 1_000
-        }));
-
-        let (tx, tx_data) = block_on(
-            utxo_common::UtxoTxBuilder::new(&builder_coin)
-                .add_available_inputs(unspents)
-                .add_outputs(outputs)
-                .with_fee(ActualTxFee::FixedPerKb(1_000))
-                .allow_underdust_output(allowed_underdust_output.unwrap())
-                .build(),
-        )
-        .unwrap();
-        assert_eq!(tx.outputs.len(), 2);
-        assert_eq!(tx.outputs[0].value, 868);
-        assert_eq!(tx.outputs[1].value, 289);
-        assert_eq!(tx_data.unused_change, Some(999));
-
-        let unrelated_underdust_output = TransactionOutput {
-            value: 999,
-            script_pubkey: output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
-        };
-        let scoped_error = block_on(
-            utxo_common::UtxoTxBuilder::new(&builder_coin)
-                .add_available_inputs(vec![UnspentInfo {
-                    value: 10_000,
-                    outpoint: OutPoint::default(),
-                    height: None,
-                }])
-                .add_outputs(vec![
-                    TransactionOutput {
-                        value: 868,
-                        script_pubkey: output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
-                    },
-                    unrelated_underdust_output,
-                ])
-                .with_fee(ActualTxFee::FixedPerKb(1_000))
-                .allow_underdust_output(utxo_common::DEFAULT_FEE_VOUT)
-                .build(),
-        )
-        .unwrap_err()
-        .into_inner();
-        assert!(matches!(scoped_error, GenerateTxError::OutputValueLessThanDust {
-            value: 999,
-            dust: 1_000
-        }));
+                // The withdrawn pre-correction shape (868 fee) MUST be rejected:
+                // its value is below the now-expected 1,000.
+                let old_fee_output = TransactionOutput {
+                    value: 868,
+                    script_pubkey: output_script(&fee_address, ScriptType::P2PKH).to_bytes(),
+                };
+                assert!(old_fee_output.value < fee_sat);
+            },
+            other => panic!("expected WithBurn{{KmdOpReturn}}, got {:?}", other),
+        }
     }
 
-    /// An inactive netid-6133 burn key must not turn a standard fee into NoFee.
+    /// CRD ch.08 R15C / ch.16 R7 (issue #11): a taker whose taker-coin swap
+    /// public key equals the network burn/waiver key pays no fee, on both
+    /// production networks, independently of the burn gate. This inverts the
+    /// withdrawn `should_not_waive_fee_for_inactive_burn_key_on_netid_6133`
+    /// (which asserted the opposite before the R7 correction).
     #[test]
-    fn should_not_waive_fee_for_inactive_burn_key_on_netid_6133() {
-        let coin = rick_coin();
-        let net_cfg = net_config_or_panic(6133);
+    fn should_waive_fee_for_burn_key_taker_on_both_netids() {
+        for netid in [8762u16, 6133u16] {
+            let coin = doc_coin();
+            let net_cfg = net_config_or_panic(netid);
+            let total = MmNumber::from("1");
+            let burn_pubkey = net_cfg.burn_addr_raw_pubkey().to_vec();
+            assert!(!burn_pubkey.is_empty(), "netid {} burn key must be non-empty", netid);
+            let dex_fee = DexFee::new_with_taker_pubkey(&coin as &dyn MmCoin, net_cfg, total, &burn_pubkey);
+            assert_eq!(dex_fee, DexFee::NoFee, "netid {}", netid);
+        }
+    }
+
+    /// A key differing in one byte from the waiver key MUST NOT waive the fee.
+    #[test]
+    fn should_not_waive_fee_for_a_different_pubkey() {
+        let coin = doc_coin();
+        let net_cfg = net_config_or_panic(8762);
         let total = MmNumber::from("1");
-        let burn_pubkey = net_cfg.burn_addr_raw_pubkey();
-        let dex_fee = DexFee::new_with_taker_pubkey(&coin as &dyn MmCoin, net_cfg, total.clone(), burn_pubkey);
+        let mut not_burn_pubkey = net_cfg.burn_addr_raw_pubkey().to_vec();
+        let last = not_burn_pubkey.len() - 1;
+        not_burn_pubkey[last] ^= 0x01;
+        let dex_fee = DexFee::new_with_taker_pubkey(&coin as &dyn MmCoin, net_cfg, total.clone(), &not_burn_pubkey);
         assert_eq!(dex_fee, DexFee::Standard(total));
     }
 
-    /// §16.5.1 — `gen_taker_payment_spend_preimage` for `WithBurn{PreBurnAccount}`
-    /// produces three outputs: maker / fee / burn.
+    /// CRD ch.16 R14/R20 — `gen_taker_payment_spend_preimage` for
+    /// `WithBurn{PreBurnAccount}` produces three outputs in order: fee, burn,
+    /// maker. Replaces the withdrawn pre-correction test of the same name,
+    /// which asserted the old maker-first order.
     #[test]
     fn should_build_taker_payment_spend_preimage_with_three_outputs_for_with_burn() {
-        let coin = rick_coin();
+        let coin = doc_coin();
         let net_cfg = net_config_or_panic(6133);
         let taker_payment = synthetic_taker_payment_tx();
         let maker_addr = maker_address_for(&coin);
@@ -5393,6 +6076,7 @@ mod swap_v2_pre_burn_tests {
             dex_fee: &dex_fee,
             premium_amount: 0u64.into(),
             trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
         };
         let preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
             &coin,
@@ -5402,20 +6086,39 @@ mod swap_v2_pre_burn_tests {
         .expect("preimage");
         let signer = preimage.preimage.0;
         assert_eq!(signer.outputs.len(), 3, "WithBurn preimage has 3 outputs");
-        // Output 0 — maker P2PKH.
+        // Output 0 — fee P2PKH to the network's fee address, value 750_000 sat.
+        let expected_fee = output_script(
+            &utxo_common::address_from_raw_pubkey(
+                net_cfg.dex_fee_addr_raw_pubkey(),
+                coin.as_ref().conf.pub_addr_prefix,
+                coin.as_ref().conf.pub_t_addr_prefix,
+                coin.as_ref().conf.checksum_type,
+                coin.as_ref().conf.bech32_hrp.clone(),
+                coin.addr_format().clone(),
+            )
+            .unwrap(),
+            ScriptType::P2PKH,
+        )
+        .to_bytes();
+        assert_eq!(signer.outputs[0].script_pubkey, expected_fee);
+        assert_eq!(signer.outputs[0].value, 750_000);
+        // Output 1 — P2PKH for the burn pubkey, value = 250_000 sat (0.0025 * 10^8).
+        assert_eq!(signer.outputs[1].value, 250_000);
+        assert_eq!(signer.outputs[1].script_pubkey.len(), 25, "P2PKH is 25 bytes");
+        // Output 2 — maker P2PKH, value = 100_000_000 - 750_000 - 250_000 - 496 (S).
         let expected_maker = output_script(&maker_addr, ScriptType::P2PKH).to_bytes();
-        assert_eq!(signer.outputs[0].script_pubkey, expected_maker);
-        // Output 2 — P2PKH for the burn pubkey, value = 250_000 sat (0.0025 * 10^8).
-        assert_eq!(signer.outputs[2].value, 250_000);
-        // Sanity: P2PKH has 25-byte script.
-        assert_eq!(signer.outputs[2].script_pubkey.len(), 25);
+        assert_eq!(signer.outputs[2].script_pubkey, expected_maker);
+        assert_eq!(signer.outputs[2].value, TAKER_PAYMENT_VALUE - 750_000 - 250_000 - 496);
     }
 
-    /// §16.5.1 — KMD `WithBurn{KmdOpReturn}` path: output 2 is an
-    /// `OP_RETURN` whose value is zero.
+    /// CRD ch.16 R14/R20 — KMD `WithBurn{KmdOpReturn}` path: output 1 is a
+    /// bare `OP_RETURN` (no data push) whose value carries the burned
+    /// amount. Replaces the withdrawn pre-correction test, which asserted a
+    /// zero-value `OP_RETURN` at output 2.
     #[test]
     fn should_build_taker_payment_spend_preimage_with_op_return_for_kmd_burn() {
         let coin = kmd_coin();
+        let net_cfg = net_config_or_panic(8762);
         let taker_payment = synthetic_taker_payment_tx();
         let maker_addr = maker_address_for(&coin);
         let taker_pub = *coin.as_ref().priv_key_policy.key_pair_or_err().unwrap().public();
@@ -5435,6 +6138,7 @@ mod swap_v2_pre_burn_tests {
             dex_fee: &dex_fee,
             premium_amount: 0u64.into(),
             trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
         };
         let preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
             &coin,
@@ -5444,12 +6148,26 @@ mod swap_v2_pre_burn_tests {
         .expect("preimage");
         let signer = preimage.preimage.0;
         assert_eq!(signer.outputs.len(), 3, "WithBurn preimage has 3 outputs");
-        assert_eq!(signer.outputs[2].value, 0, "OP_RETURN output value must be 0");
+        // Output 1 is the OP_RETURN burn leg: value carries the burned
+        // amount, script is the bare opcode with no data push (R20).
         assert_eq!(
-            signer.outputs[2].script_pubkey[0],
+            signer.outputs[1].value, 1_000_000,
+            "OP_RETURN output value carries the burned amount"
+        );
+        assert_eq!(
+            signer.outputs[1].script_pubkey.len(),
+            1,
+            "OP_RETURN script must be the bare opcode with no data push"
+        );
+        assert_eq!(
+            signer.outputs[1].script_pubkey[0],
             Opcode::OP_RETURN as u8,
             "OP_RETURN opcode must lead the burn script"
         );
+        // Output 2 is the maker payout.
+        let expected_maker = output_script(&maker_addr, ScriptType::P2PKH).to_bytes();
+        assert_eq!(signer.outputs[2].script_pubkey, expected_maker);
+        assert_eq!(signer.outputs[2].value, TAKER_PAYMENT_VALUE - 1_000_000 - 496);
     }
 
     /// §16.5.2 — the taker's partial signature on a `WithBurn` preimage
@@ -5459,7 +6177,7 @@ mod swap_v2_pre_burn_tests {
     fn should_recover_partial_signature_from_with_burn_preimage_under_sighash_all() {
         use crate::utxo::swap_proto_v2_scripts::taker_payment_script;
 
-        let coin = rick_coin();
+        let coin = doc_coin();
         let net_cfg = net_config_or_panic(6133);
         let taker_payment = synthetic_taker_payment_tx();
         let maker_addr = maker_address_for(&coin);
@@ -5483,6 +6201,7 @@ mod swap_v2_pre_burn_tests {
             dex_fee: &dex_fee,
             premium_amount: 0u64.into(),
             trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
         };
         let preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
             &coin,
@@ -5507,11 +6226,15 @@ mod swap_v2_pre_burn_tests {
         );
     }
 
-    /// §16.5.2 — mutating the burn output's value triggers
-    /// `InvalidPreimage("burn output value …")`.
+    /// CRD ch.16 R17 — mutating any single output value by one base unit
+    /// (here, the burn output at index 1) MUST be rejected: the maker
+    /// rebuilds the expected preimage and requires an exact match, with no
+    /// tolerance. Replaces the withdrawn pre-correction test of the same
+    /// name, which mutated the (then maker-first) output 2 and asserted a
+    /// 10%-tolerance-specific error message.
     #[test]
     fn should_reject_with_burn_preimage_with_wrong_burn_value() {
-        let coin = rick_coin();
+        let coin = doc_coin();
         let net_cfg = net_config_or_panic(6133);
         let taker_payment = synthetic_taker_payment_tx();
         let maker_addr = maker_address_for(&coin);
@@ -5534,6 +6257,7 @@ mod swap_v2_pre_burn_tests {
             dex_fee: &dex_fee,
             premium_amount: 0u64.into(),
             trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
         };
         let mut preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
             &coin,
@@ -5541,22 +6265,2957 @@ mod swap_v2_pre_burn_tests {
             SWAP_UNIQUE_DATA,
         ))
         .expect("preimage");
-        // Mutate burn output value to something well outside the expected.
-        preimage.preimage.0.outputs[2].value = 1;
+        // Output 1 is the burn leg under the new fee/burn/maker order (R14).
+        // Mutate it by a single base unit -- no tolerance applies (R17).
+        preimage.preimage.0.outputs[1].value += 1;
 
         let res = block_on(utxo_common::validate_taker_payment_spend_preimage(
             &coin, &args, &preimage,
         ));
-        let err = res.expect_err("validation must fail when burn output value is wrong");
+        let err = res.expect_err("validation must fail when the burn output value is off by one");
         let msg = err.to_string();
         match err.into_inner() {
             ValidateTakerPaymentSpendPreimageError::InvalidPreimage(_) => (),
             other => panic!("expected InvalidPreimage, got {:?} ({})", other, msg),
         }
         assert!(
-            msg.contains("burn output value"),
-            "error message must mention burn output value, got: {}",
+            msg.contains("do not exactly match"),
+            "error message must state the exact-match mismatch, got: {}",
             msg
         );
+    }
+
+    /// CRD ch.16 T6 -- version-two exact vector, netid 8762, KMD taker
+    /// (`NoFee` by R12B). Trade 1 KMD: taker-payment value P = 99,999,504
+    /// (funding 100,000,000 minus the funding-spend fee S=496, chapter 15
+    /// R21). This test starts directly from P -- the funding-spend
+    /// conversion step itself is chapter 15's own R21/R22 concern, already
+    /// covered by the funding-spend tests with the updated fee constant.
+    /// The taker-payment-spend preimage MUST be `[maker 99,999,008]`
+    /// (P - S), with both signature flag bytes `0x01` (`ALL`, fork id 0).
+    #[test]
+    fn t6_v2_nofee_exact_vector_netid_8762_kmd_taker() {
+        const P: u64 = 99_999_504;
+
+        let coin = kmd_coin();
+        let mut taker_payment = UtxoTx::default();
+        taker_payment.version = 4;
+        taker_payment.outputs.push(TransactionOutput {
+            value: P,
+            script_pubkey: vec![0xaa; 23].into(),
+        });
+        let maker_addr = maker_address_for(&coin);
+        let taker_pub = *coin.as_ref().priv_key_policy.key_pair_or_err().unwrap().public();
+        let maker_pub = taker_pub;
+        let dex_fee = DexFee::NoFee;
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_payment,
+            time_lock: TAKER_PAYMENT_TIME_LOCK as u64,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_addr,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: &[],
+        };
+        let preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
+            &coin,
+            &args,
+            SWAP_UNIQUE_DATA,
+        ))
+        .expect("preimage");
+        let signer = preimage.preimage.0;
+        assert_eq!(signer.outputs.len(), 1, "NoFee preimage has exactly one output");
+        assert_eq!(signer.outputs[0].value, 99_999_008, "P - S");
+        let expected_maker = output_script(&maker_addr, ScriptType::P2PKH).to_bytes();
+        assert_eq!(signer.outputs[0].script_pubkey, expected_maker);
+
+        // Both flags ALL (0x01); KMD has fork identifier zero.
+        let flag_byte = (1u32 | coin.as_ref().conf.fork_id) as u8;
+        assert_eq!(flag_byte, 0x01);
+    }
+
+    /// CRD ch.16 T7 -- version-two exact vector, `Standard` layout, netid
+    /// 6133, KMD taker vs a non-GLEEC maker (base rate 2/100). Trade 0.01
+    /// KMD: fee 20,000 sat, taker-payment value P = 1,019,504 (funding
+    /// 1,020,000 minus the funding-spend fee S=496 -- see T6's note on
+    /// scope). The taker preimage MUST be `[fee P2PKH 20,000]` alone (flag
+    /// `0x03`, `SINGLE`); the maker MUST append `[maker 999,008]` as output
+    /// 1 (flag `0x01`, `ALL`), giving a final two-output transaction with
+    /// the fee output first.
+    #[test]
+    fn t7_v2_standard_exact_vector_netid_6133_kmd_taker() {
+        const P: u64 = 1_019_504;
+        const FEE_SAT: u64 = 20_000;
+        const MAKER_VALUE: u64 = 999_008;
+        const MAKER_SECRET: [u8; 32] = [0x42; 32];
+
+        let coin = kmd_coin();
+        let net_cfg = net_config_or_panic(6133);
+        let mut taker_payment = UtxoTx::default();
+        taker_payment.version = 4;
+        taker_payment.outputs.push(TransactionOutput {
+            value: P,
+            script_pubkey: vec![0xaa; 23].into(),
+        });
+        let maker_addr = maker_address_for(&coin);
+        let taker_pub = *coin.as_ref().priv_key_policy.key_pair_or_err().unwrap().public();
+        let maker_pub = taker_pub;
+        let dex_fee = DexFee::Standard(MmNumber::from((FEE_SAT, 100_000_000u64)));
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_payment,
+            time_lock: TAKER_PAYMENT_TIME_LOCK as u64,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_addr,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: MmNumber::from((1u64, 100u64)).to_decimal(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
+        };
+        let preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
+            &coin,
+            &args,
+            SWAP_UNIQUE_DATA,
+        ))
+        .expect("preimage");
+        {
+            let signer = &preimage.preimage.0;
+            assert_eq!(signer.outputs.len(), 1, "Standard preimage carries only the fee output");
+            assert_eq!(signer.outputs[0].value, FEE_SAT);
+        }
+        // Taker signs SINGLE (0x03 with fork id 0).
+        assert_eq!((3u32 | coin.as_ref().conf.fork_id) as u8, 0x03);
+
+        NativeClient::send_transaction
+            .mock_safe(|_, _| MockResult::Return(Box::new(futures01::future::ok(H256Json::default()))));
+        let final_tx = block_on(utxo_common::sign_and_broadcast_taker_payment_spend(
+            &coin,
+            Some(&preimage),
+            &args,
+            &MAKER_SECRET,
+            SWAP_UNIQUE_DATA,
+        ))
+        .expect("sign and broadcast");
+        assert_eq!(
+            final_tx.outputs.len(),
+            2,
+            "final tx has the fee output then the maker payout"
+        );
+        assert_eq!(final_tx.outputs[0].value, FEE_SAT);
+        assert_eq!(final_tx.outputs[1].value, MAKER_VALUE);
+        let expected_maker_script = output_script(&maker_addr, ScriptType::P2PKH).to_bytes();
+        assert_eq!(final_tx.outputs[1].script_pubkey, expected_maker_script);
+
+        // CRD ch.16 R15/R18 regression: the two signatures in the
+        // cooperative script_sig MUST carry their own, different sighash
+        // bytes for `Standard` -- maker ALL (0x01), taker SINGLE (0x03).
+        // Before this fix both signatures shared one byte (the taker's, or
+        // the maker's, whichever the code happened to reuse), which is
+        // wire-incompatible with a reference peer.
+        let script_sig: Script = final_tx.inputs[0].script_sig.clone().into();
+        let instrs: Vec<_> = script_sig
+            .iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("script_sig parses");
+        assert_eq!(
+            *instrs[0].data.unwrap().last().unwrap(),
+            0x01,
+            "maker signature must carry the ALL byte"
+        );
+        assert_eq!(
+            *instrs[1].data.unwrap().last().unwrap(),
+            0x03,
+            "taker signature must carry the SINGLE byte"
+        );
+    }
+
+    /// CRD ch.16 T8 -- a burn output carrying a data push (the withdrawn
+    /// pre-correction `OP_RETURN` encoding) MUST be rejected by R17: the
+    /// bound R20 form is a bare opcode with no data push, and the maker's
+    /// exact rebuild-and-compare has no tolerance for a different script.
+    #[test]
+    fn t8_v2_withburn_rejects_burn_output_with_data_push() {
+        let coin = kmd_coin();
+        let net_cfg = net_config_or_panic(8762);
+        let taker_payment = synthetic_taker_payment_tx();
+        let maker_addr = maker_address_for(&coin);
+        let taker_pub = *coin.as_ref().priv_key_policy.key_pair_or_err().unwrap().public();
+        let maker_pub = taker_pub;
+        let dex_fee = DexFee::WithBurn {
+            fee_amount: MmNumber::from("0.0075"),
+            burn_amount: MmNumber::from("0.0025"),
+            burn_destination: DexFeeBurnDestination::KmdOpReturn,
+        };
+        let args = GenTakerPaymentSpendArgs {
+            taker_tx: &taker_payment,
+            time_lock: TAKER_PAYMENT_TIME_LOCK as u64,
+            maker_secret_hash: &MAKER_SECRET_HASH,
+            maker_pub: &maker_pub,
+            maker_address: &maker_addr,
+            taker_pub: &taker_pub,
+            dex_fee: &dex_fee,
+            premium_amount: 0u64.into(),
+            trading_amount: 1u64.into(),
+            dex_fee_addr_raw_pubkey: net_cfg.dex_fee_addr_raw_pubkey(),
+        };
+        let mut preimage = block_on(utxo_common::gen_taker_payment_spend_preimage(
+            &coin,
+            &args,
+            SWAP_UNIQUE_DATA,
+        ))
+        .expect("preimage");
+        // Replace the bare OP_RETURN (R20) with the withdrawn, payload-carrying form.
+        preimage.preimage.0.outputs[1].script_pubkey = Builder::default()
+            .push_opcode(Opcode::OP_RETURN)
+            .push_bytes(&250_000u64.to_le_bytes())
+            .into_bytes();
+
+        let res = block_on(utxo_common::validate_taker_payment_spend_preimage(
+            &coin, &args, &preimage,
+        ));
+        let err = res.expect_err("a data-push OP_RETURN burn output must be rejected");
+        match err.into_inner() {
+            ValidateTakerPaymentSpendPreimageError::InvalidPreimage(_) => (),
+            other => panic!("expected InvalidPreimage, got {:?}", other),
+        }
+    }
+
+    /// CRD ch.16 T9 -- spend-fee estimate (R14A). A fixed rate of 1,000 base
+    /// units per kB gives S = 496, not 1,000 (the legacy `get_htlc_spend_fee`
+    /// rounds a 496-byte spend up to a whole kilobyte) and not the legacy
+    /// 305-byte reference size's figure. A dynamic rate gives the same
+    /// proportional formula, and the whole-kilobyte fixed policy
+    /// (chapter 38 R38.6.6a) gives its rate `r`.
+    #[test]
+    fn t9_v2_spend_fee_estimate_is_proportional_not_rounded_up() {
+        // Fixed-rate: the standard test fixture is FixedPerKb(1000).
+        let fixed_coin = kmd_coin();
+        let s = block_on(utxo_common::get_v2_swap_spend_fee(
+            &fixed_coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(s, 496);
+        assert_ne!(s, 1_000, "must not round a 496-byte spend up to a whole kilobyte");
+
+        // Dynamic rate: same proportional formula.
+        UtxoStandardCoin::get_tx_fee
+            .mock_safe(|_| MockResult::Return(Box::pin(futures::future::ok(ActualTxFee::Dynamic(2_000)))));
+        let dynamic_coin = doc_coin();
+        let s_dynamic = block_on(utxo_common::get_v2_swap_spend_fee(
+            &dynamic_coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(s_dynamic, (2_000 * 496) / 1000);
+
+        // Whole-kilobyte fixed: the rate itself.
+        UtxoStandardCoin::get_tx_fee
+            .mock_safe(|_| MockResult::Return(Box::pin(futures::future::ok(ActualTxFee::FixedPerStartedKb(7_000)))));
+        let whole_kb_coin = doc_coin();
+        let s_whole_kb = block_on(utxo_common::get_v2_swap_spend_fee(
+            &whole_kb_coin,
+            utxo_common::V2_SWAP_SPEND_TX_SIZE,
+        ))
+        .unwrap();
+        assert_eq!(s_whole_kb, 7_000);
+    }
+}
+
+/// CRD ch.15 R16/R17 regression (issue #11 batch 2): the version-two funding
+/// amount MUST be trading + premium + the dex-fee *total spend amount* (fee
+/// + burn for `WithBurn`, zero for `NoFee`), not `fee_amount()` alone, which
+/// silently omitted the burn leg. `send_taker_funding` (R16) and
+/// `validate_taker_funding` (R17) share the formula.
+///
+/// This is a source-shape regression pin rather than an end-to-end test:
+/// `send_taker_funding` broadcasts and `validate_taker_funding`'s
+/// native-mode path issues a best-effort `import_address` RPC call, neither
+/// of which this test harness mocks (same limitation the `t18`/`t16_4a`/
+/// `t16_4b` tests in `dex_fee.rs` document for the V2 swap machines).
+#[test]
+fn ch15_r16_r17_funding_amount_uses_total_spend_amount_not_fee_amount() {
+    let src = include_str!("utxo_common/utxo_common_swap.rs");
+    assert_eq!(
+        src.matches("&args.dex_fee.total_spend_amount().to_decimal()").count(),
+        2,
+        "send_taker_funding (R16) and validate_taker_funding (R17) must both use total_spend_amount()"
+    );
+    assert!(
+        !src.contains("&args.dex_fee.fee_amount().to_decimal()"),
+        "the funding-amount formula must not use fee_amount() alone (it silently omits the burn leg)"
+    );
+}
+
+// ---- protocol.header_layout (CRD ch.37 R37.5.9) -------------------------------------
+
+fn conf_with_header_layout(protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
+    let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+    let conf = json!({ "coin": "RIC", "protocol": protocol });
+    UtxoConfBuilder::new(&conf, &params, "RIC").build()
+}
+
+#[test]
+fn header_layout_absent_has_no_effect() {
+    let conf = conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
+    assert_eq!(conf.header_layout, None);
+    // No header_layout key: the family's reader governs, here "BTC" (the standard reader).
+    assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), CoinVariant::Standard);
+}
+
+#[test]
+fn header_layout_values_are_read_beside_type_and_win_over_the_default() {
+    for (value, expected) in [
+        ("riecoin", CoinVariant::Riecoin),
+        ("kawpow_auxpow_mixed", CoinVariant::KawpowAuxpowMixed),
+    ] {
+        let conf =
+            conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": value })).unwrap();
+        assert_eq!(conf.header_layout, Some(expected));
+        assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), expected);
+    }
+}
+
+#[test]
+fn header_layout_unknown_value_fails_the_coin_build_naming_the_ticker() {
+    for bad in [
+        json!("foo"),
+        json!("Riecoin"),
+        json!("RIECOIN"),
+        json!(""),
+        json!(112),
+        json!(null),
+    ] {
+        let err = conf_with_header_layout(json!({ "type": "UTXO", "header_layout": bad }))
+            .expect_err("an unrecognized value must not fall back to any layout");
+        let text = err.to_string();
+        assert!(text.contains("RIC"), "{text}");
+        assert!(text.contains("header_layout"), "{text}");
+        assert!(matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayout { .. }));
+    }
+}
+
+#[test]
+fn header_layout_does_not_change_how_the_protocol_object_parses() {
+    let with = json!({ "type": "UTXO", "header_layout": "riecoin" });
+    let without = json!({ "type": "UTXO" });
+    let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
+    assert_eq!(parse(with), parse(without));
+}
+
+/// The RIC tip list served by a public Electrum server, taken through the configured key to the
+/// median: the layout of the coin entry plus the key, the list read, the median of parsed times.
+#[test]
+fn header_layout_ric_entry_yields_the_median_of_the_served_list() {
+    let conf =
+        conf_with_header_layout(json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" })).unwrap();
+    let hex = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    let served = hex::decode(hex.trim()).unwrap();
+    let variant = HeaderReadPolicy::for_conf(&conf).layout();
+    let headers = chain::BlockHeader::list_from_served_bytes(&served, 11, variant).unwrap();
+    let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
+    assert_eq!(common::median(times.as_mut_slice()), Some(1_792_892_599));
+    // Without the key the same list is rejected: the pre-fix behavior.
+    assert!(chain::BlockHeader::list_from_served_bytes(&served, 11, CoinVariant::Standard).is_err());
+}
+
+// ---- node switch header_layout_fallback_families (CRD ch.37 R37.5.9e) -------------------------
+
+mod header_layout_fallback_tests {
+    use super::*;
+    use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+    use crate::utxo::header_layout_fallback::{read_with_fallback, FallbackReadError, HeaderLayoutFallback};
+    use crate::utxo::utxo_builder::header_layout_fallback_families;
+    use mm2_core::mm_ctx::MmCtxBuilder;
+    use std::sync::atomic::Ordering;
+
+    const RIC_LIST: &str = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    const RIC_LONE: &str = include_str!("../../kdf_chain/src/test_data/ric_2658955_lone_v20000000.hex");
+    const MEWC_MIXED: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124756_x11_9native_2auxpow.hex");
+    const MEWC_TAIL: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124727_x3_80_80_120.hex");
+    const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+    const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
+    const MEWC_LONE_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_lone_native.hex");
+
+    fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
+
+    fn ctx_with(conf: Json) -> mm2_core::mm_ctx::MmArc { MmCtxBuilder::new().with_conf(conf).into_mm_arc() }
+
+    /// A conf built the way the activation builders build it: the node switch from `MM2.json`.
+    fn conf(mm2_json: Json, protocol: Json) -> UtxoConfResult<UtxoCoinConf> {
+        let families = header_layout_fallback_families(&ctx_with(mm2_json))?;
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let coin_conf = json!({ "coin": "RIC", "protocol": protocol });
+        UtxoConfBuilder::new(&coin_conf, &params, "RIC")
+            .with_header_layout_fallback_families(families)
+            .build()
+    }
+
+    fn list_times(
+        conf: &UtxoCoinConf,
+        bytes: &[u8],
+        count: usize,
+    ) -> Result<u32, FallbackReadError<serialization::Error>> {
+        let headers = HeaderReadPolicy::for_conf(conf).read_list(bytes, count)?;
+        let mut times: Vec<u32> = headers.into_iter().map(|h| h.time).collect();
+        Ok(common::median(times.as_mut_slice()).unwrap())
+    }
+
+    fn keyed_median(layout: CoinVariant, bytes: &[u8], count: usize) -> u32 {
+        let mut times: Vec<u32> = chain::BlockHeader::list_from_served_bytes(bytes, count, layout)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.time)
+            .collect();
+        common::median(times.as_mut_slice()).unwrap()
+    }
+
+    #[test]
+    fn switch_defaults_to_btc_and_accepts_only_distinct_chain_variant_names() {
+        assert_eq!(header_layout_fallback_families(&ctx_with(json!({}))).unwrap(), vec![
+            "BTC"
+        ]);
+        for (value, expected) in [
+            (json!([]), vec![]),
+            (json!(["BTC"]), vec!["BTC"]),
+            (json!(["BTC", "PPC"]), vec!["BTC", "PPC"]),
+        ] {
+            let got = header_layout_fallback_families(&ctx_with(json!({ "header_layout_fallback_families": value })))
+                .unwrap();
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn switch_of_the_wrong_shape_is_a_configuration_error() {
+        for bad in [
+            json!("BTC"),
+            json!(true),
+            json!(1),
+            json!(null),
+            json!({}),
+            json!(["BTC", 1]),
+            json!(["btc"]),
+            json!(["FOO"]),
+            json!(["BTC", "BTC"]),
+        ] {
+            let ctx = ctx_with(json!({ "header_layout_fallback_families": bad.clone() }));
+            let err = header_layout_fallback_families(&ctx).expect_err("a malformed switch must not default");
+            let text = err.to_string();
+            assert!(text.contains("header_layout_fallback_families"), "{text}");
+            assert!(text.contains(&bad.to_string()), "{text}");
+            assert!(
+                matches!(err.into_inner(), UtxoConfError::InvalidHeaderLayoutFallbackFamilies(_)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn ric_and_mewc_lists_parse_without_the_key_under_the_default_switch() {
+        let conf = conf(json!({}), json!({ "type": "UTXO", "chain_variant": "BTC" })).unwrap();
+        assert_eq!(conf.header_layout, None);
+        let ric = served(RIC_LIST);
+        assert_eq!(list_times(&conf, &ric, 11).unwrap(), 1_792_892_599);
+        assert_eq!(
+            list_times(&conf, &ric, 11).unwrap(),
+            keyed_median(CoinVariant::Riecoin, &ric, 11)
+        );
+        for (hex, count) in [(MEWC_MIXED, 11), (MEWC_TAIL, 3), (MEWC_ALL_NATIVE, 11)] {
+            let bytes = served(hex);
+            assert_eq!(
+                list_times(&conf, &bytes, count).unwrap(),
+                keyed_median(CoinVariant::KawpowAuxpowMixed, &bytes, count),
+                "{count}"
+            );
+        }
+        assert!(conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn lone_headers_use_the_same_cascade() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let fallback = HeaderLayoutFallback::for_conf(&conf);
+        for hex in [RIC_LONE, MEWC_LONE_NATIVE] {
+            let bytes = served(hex);
+            assert!(chain::BlockHeader::from_served_bytes(&bytes, CoinVariant::Standard).is_err());
+            let header = read_with_fallback(CoinVariant::Standard, fallback.as_ref(), |layout| {
+                chain::BlockHeader::from_served_bytes(&bytes, layout)
+            })
+            .unwrap();
+            assert_eq!(header.time, u32::from_le_bytes(bytes[68..72].try_into().unwrap()));
+        }
+    }
+
+    #[test]
+    fn empty_switch_rejects_the_same_lists() {
+        let conf = conf(
+            json!({ "header_layout_fallback_families": [] }),
+            json!({ "type": "UTXO" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_err());
+        assert!(list_times(&conf, &served(MEWC_MIXED), 11).is_err());
+        assert!(list_times(&conf, &served(MEWC_ALL_NATIVE), 11).is_err());
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_family_outside_the_set_is_not_probed() {
+        let conf = conf(
+            json!({ "header_layout_fallback_families": ["RVN"] }),
+            json!({ "type": "UTXO" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_err());
+    }
+
+    #[test]
+    fn a_genuine_80_byte_list_is_never_fallback_parsed() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let bytes = served(MEWC_ALL_AUXPOW);
+        assert_eq!(bytes.len(), 6 * 80);
+        // Count how often the cascade runs a non-standard layout.
+        let probes = std::cell::Cell::new(0);
+        let fallback = HeaderLayoutFallback::for_conf(&conf);
+        let headers = read_with_fallback(CoinVariant::Standard, fallback.as_ref(), |layout| {
+            if layout != CoinVariant::Standard {
+                probes.set(probes.get() + 1);
+            }
+            chain::BlockHeader::list_from_served_bytes(&bytes, 6, layout)
+        })
+        .unwrap();
+        assert_eq!(headers.len(), 6);
+        assert_eq!(
+            probes.get(),
+            0,
+            "the standard read succeeded, so no other layout may be tried"
+        );
+        assert!(
+            !conf.header_layout_fallback_logged.load(Ordering::Relaxed),
+            "no info line"
+        );
+    }
+
+    #[test]
+    fn a_pinned_layout_never_consults_the_fallback() {
+        let conf = conf(
+            json!({}),
+            json!({ "type": "UTXO", "chain_variant": "BTC", "header_layout": "riecoin" }),
+        )
+        .unwrap();
+        assert!(HeaderLayoutFallback::for_conf(&conf).is_none());
+        // The pinned layout governs: the RIC list parses, a MEWC list does not, and nothing is logged.
+        assert!(list_times(&conf, &served(RIC_LIST), 11).is_ok());
+        assert!(list_times(&conf, &served(MEWC_MIXED), 11).is_err());
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_list_no_layout_fits_propagates_the_original_rejection() {
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        let mut bytes = served(RIC_LIST);
+        bytes.push(0);
+        let original = chain::BlockHeader::list_from_served_bytes(&bytes, 11, CoinVariant::Standard).unwrap_err();
+        let err = list_times(&conf, &bytes, 11).unwrap_err();
+        assert!(matches!(&err, FallbackReadError::Rejected(e) if format!("{e:?}") == format!("{original:?}")));
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+    }
+
+    /// Five headers, 560 bytes: read as 5 x 112 (Riecoin) and as 4 x 120 + 1 x 80 (mixed). The bytes
+    /// are built so both layouts consume exactly: zero upper time halves at every 112-byte boundary,
+    /// AuxPoW flag clear in the first four versions and set in the fifth.
+    #[test]
+    fn a_five_header_list_that_two_layouts_consume_is_ambiguous() {
+        let mut bytes = vec![0u8; 560];
+        bytes[481] = 0x01; // version of the 5th mixed header at 480: bit 8 set
+        let conf = conf(json!({}), json!({ "type": "UTXO" })).unwrap();
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Riecoin).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::KawpowAuxpowMixed).is_ok());
+        assert!(chain::BlockHeader::list_from_served_bytes(&bytes, 5, CoinVariant::Standard).is_err());
+        match list_times(&conf, &bytes, 5) {
+            Err(FallbackReadError::Ambiguous(reason)) => {
+                assert!(
+                    reason.contains("riecoin") && reason.contains("kawpow_auxpow_mixed"),
+                    "{reason}"
+                );
+            },
+            other => panic!("expected an ambiguity, got {other:?}"),
+        }
+        assert!(!conf.header_layout_fallback_logged.load(Ordering::Relaxed));
+        // Pinned, the same bytes parse.
+        let pinned = self::conf(
+            json!({}),
+            json!({ "type": "UTXO", "header_layout": "kawpow_auxpow_mixed" }),
+        )
+        .unwrap();
+        assert!(list_times(&pinned, &bytes, 5).is_ok());
+    }
+
+    #[test]
+    fn length_collision_arithmetic_for_eleven_headers() {
+        const COUNT: usize = 11;
+        let standard = COUNT * 80;
+        let riecoin = COUNT * 112;
+        assert_eq!((standard, riecoin), (880, 1232));
+        for natives in 0..=COUNT {
+            // A mixed list of `natives` 120-byte headers and the rest 80-byte ones.
+            let mixed = standard + 40 * natives;
+            assert_ne!(mixed, riecoin, "k = {natives}");
+        }
+        // 1232 would need 8.8 native headers, so the Riecoin probe can never swallow a mixed list.
+        assert_eq!((riecoin - standard) % 40, 32);
+    }
+}
+
+/// CRD ch.60 T60.5, R60.6.4 and finding F3: every UTXO HTLC spend and refund builder refuses, without building
+/// or broadcasting, when the spend fee is not smaller than the HTLC value.
+#[cfg(not(target_arch = "wasm32"))]
+mod spend_refusal_tests {
+    use super::*;
+    use crate::utxo::utxo_common::{build_and_broadcast_maker_v2_spend, build_funding_spend_preimage_tx,
+                                   DEFAULT_SWAP_TX_SPEND_SIZE};
+    use crate::{SwapOps, TransactionErr};
+    use serialization::serialize;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
+    const SPEND_FEE: u64 = 496;
+    const REFUSAL: &str = "is not smaller than the HTLC value";
+
+    fn payment_tx_bytes(value: u64) -> Vec<u8> {
+        let mut tx = UtxoTx::default();
+        tx.outputs.push(TransactionOutput {
+            value,
+            script_pubkey: vec![0xa9; 23].into(),
+        });
+        serialize(&tx).take()
+    }
+
+    /// A KMD-like coin whose fixed policy makes the R38.6.6c spend fee 496, with `p2sh_spending_tx` mocked to
+    /// record that a spend was built and to fail, so that no test touches the network.
+    fn coin_with_spend_probe() -> (UtxoStandardCoin, Arc<AtomicBool>) {
+        UtxoStandardCoin::get_tx_fee
+            .mock_safe(|_| MockResult::Return(Box::pin(futures::future::ok(ActualTxFee::FixedPerKb(1000)))));
+        let built = Arc::new(AtomicBool::new(false));
+        let built_in_mock = built.clone();
+        UtxoStandardCoin::p2sh_spending_tx.mock_safe(move |_, _, _, _, _, _, _, _| {
+            built_in_mock.store(true, Ordering::SeqCst);
+            MockResult::Return(Box::pin(futures::future::err(
+                "mocked: the spend would be built".to_owned(),
+            )))
+        });
+        (floor_test_coin("KMD", TxFee::FixedPerKb(1000), 1000, 8), built)
+    }
+
+    fn assert_refused(result: Result<TransactionEnum, TransactionErr>, built: &AtomicBool, what: &str) {
+        match result {
+            Err(TransactionErr::Plain(msg)) => assert!(msg.contains(REFUSAL), "{what}: unexpected refusal: {msg}"),
+            other => panic!("{what}: expected an orderly refusal, got {other:?}"),
+        }
+        assert!(
+            !built.load(Ordering::SeqCst),
+            "{what}: a refused spend must not be built"
+        );
+    }
+
+    fn assert_reaches_builder(result: Result<TransactionEnum, TransactionErr>, built: &AtomicBool, what: &str) {
+        match result {
+            Err(TransactionErr::Plain(msg)) => assert!(!msg.contains(REFUSAL), "{what}: refused: {msg}"),
+            other => panic!("{what}: expected the mocked builder failure, got {other:?}"),
+        }
+        assert!(
+            built.load(Ordering::SeqCst),
+            "{what}: a spend above the fee must be built"
+        );
+    }
+
+    #[test]
+    fn t60_5_legacy_spends_and_refunds_refuse_a_value_not_above_the_fee() {
+        assert_eq!(DEFAULT_SWAP_TX_SPEND_SIZE, 496);
+        let other_pub = key_pair_from_seed("t60.5 counterparty").unwrap().public().to_vec();
+        let privkey = key_pair_from_seed("t60.5 mine").unwrap().private().secret.to_vec();
+        let secret = [7u8; 32];
+        let secret_hash = [8u8; 20];
+
+        type Spend = fn(&UtxoStandardCoin, &[u8], &[u8], &[u8], &[u8], &[u8]) -> crate::TransactionFut;
+        let cases: [(&str, Spend); 4] = [
+            ("taker spends maker payment", |c, tx, pubkey, secret, _hash, key| {
+                c.send_taker_spends_maker_payment(tx, 100, pubkey, secret, key, &None)
+            }),
+            ("maker spends taker payment", |c, tx, pubkey, secret, _hash, key| {
+                c.send_maker_spends_taker_payment(tx, 100, pubkey, secret, key, &None)
+            }),
+            ("taker refunds payment", |c, tx, pubkey, _secret, hash, key| {
+                c.send_taker_refunds_payment(tx, 100, pubkey, hash, key, &None)
+            }),
+            ("maker refunds payment", |c, tx, pubkey, _secret, hash, key| {
+                c.send_maker_refunds_payment(tx, 100, pubkey, hash, key, &None)
+            }),
+        ];
+        for (what, spend) in cases {
+            for value in [SPEND_FEE - 1, SPEND_FEE] {
+                let (coin, built) = coin_with_spend_probe();
+                let result = spend(
+                    &coin,
+                    &payment_tx_bytes(value),
+                    &other_pub,
+                    &secret,
+                    &secret_hash,
+                    &privkey,
+                )
+                .wait();
+                assert_refused(result, &built, &format!("{what} at {value}"));
+            }
+            let (coin, built) = coin_with_spend_probe();
+            let result = spend(
+                &coin,
+                &payment_tx_bytes(SPEND_FEE + 1),
+                &other_pub,
+                &secret,
+                &secret_hash,
+                &privkey,
+            )
+            .wait();
+            assert_reaches_builder(result, &built, &format!("{what} at {}", SPEND_FEE + 1));
+        }
+    }
+
+    /// T60.6 (a), (c) and R60.6.7 item 6: the UTXO safe amount is the R38.6.6c spend-fee estimate at the moment of
+    /// the call plus the dust; an unavailable estimate is a typed error, not a placeholder.
+    #[test]
+    fn t60_6_utxo_safe_amount_is_the_spend_fee_plus_dust() {
+        use crate::{MmCoin, SpendSafeAmountError};
+        let cases = [
+            // (a) dynamic rate 20,000, dust 1,000: 9,920 + 1,000.
+            (ActualTxFee::Dynamic(20_000), 1_000, "0.0001092"),
+            // (c) KMD, plain fixed 1,000: 496 + 1,000.
+            (ActualTxFee::FixedPerKb(1_000), 1_000, "0.00001496"),
+            (ActualTxFee::FixedPerStartedKb(1_000), 1_000, "0.00002"),
+        ];
+        for (policy, dust, expected) in cases {
+            UtxoStandardCoin::get_tx_fee.mock_safe(move |_| MockResult::Return(Box::pin(futures::future::ok(policy))));
+            let coin = floor_test_coin("KMD", TxFee::FixedPerKb(1000), dust, 8);
+            let safe = block_on(coin.spend_safe_amount()).unwrap();
+            assert_eq!(safe, Some(MmNumber::from(expected)), "{policy:?}");
+        }
+
+        UtxoStandardCoin::get_tx_fee.mock_safe(|_| {
+            MockResult::Return(Box::pin(futures::future::err(
+                UtxoRpcError::Internal("no estimate".to_owned()).into(),
+            )))
+        });
+        let coin = floor_test_coin("BTC", TxFee::Dynamic(EstimateFeeMethod::Standard), 1000, 8);
+        assert!(matches!(
+            block_on(coin.spend_safe_amount()).map_err(|e| e.into_inner()),
+            Err(SpendSafeAmountError::EstimateUnavailable(_))
+        ));
+    }
+
+    /// The version-two maker-payment spend and refund builders share one helper.
+    #[test]
+    fn t60_5_v2_maker_payment_spend_refuses_a_value_not_above_the_fee() {
+        let kp = key_pair_from_seed("t60.5 v2").unwrap();
+        for value in [SPEND_FEE - 1, SPEND_FEE] {
+            let (coin, built) = coin_with_spend_probe();
+            let result = block_on(build_and_broadcast_maker_v2_spend(
+                &coin,
+                &payment_tx_bytes(value),
+                Script::new(Bytes::new()),
+                Script::new(Bytes::new()),
+                0,
+                0,
+                &kp,
+            ))
+            .map(TransactionEnum::from);
+            assert_refused(result, &built, &format!("v2 maker payment spend at {value}"));
+        }
+        let (coin, built) = coin_with_spend_probe();
+        let result = block_on(build_and_broadcast_maker_v2_spend(
+            &coin,
+            &payment_tx_bytes(SPEND_FEE + 1),
+            Script::new(Bytes::new()),
+            Script::new(Bytes::new()),
+            0,
+            0,
+            &kp,
+        ))
+        .map(TransactionEnum::from);
+        assert_reaches_builder(result, &built, "v2 maker payment spend above the fee");
+    }
+
+    /// CRD ch.15 R21 step 2: the funding value shall be at least the spend fee plus the coin's dust.
+    #[test]
+    fn t60_5_v2_funding_spend_requires_fee_plus_dust() {
+        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, false);
+        let dust = fields.dust_amount;
+        assert_eq!(dust, 1000);
+        let redeem = Script::new(Bytes::new());
+        let funding_with = |value: u64| {
+            let mut tx = UtxoTx::default();
+            tx.outputs.push(TransactionOutput {
+                value,
+                script_pubkey: vec![0xaa; 23].into(),
+            });
+            tx
+        };
+        let at_minimum = SPEND_FEE + dust;
+        assert!(matches!(
+            build_funding_spend_preimage_tx(&fields, &funding_with(at_minimum - 1), &redeem, SPEND_FEE),
+            Err(crate::TxGenError::PrevOutputTooLow)
+        ));
+        let signer = build_funding_spend_preimage_tx(&fields, &funding_with(at_minimum), &redeem, SPEND_FEE)
+            .expect("fee plus dust is enough");
+        assert_eq!(signer.outputs[0].value, dust);
+    }
+}
+
+// ---- the layout on every header read path (CRD ch.37 R37.5.1a, R37.5.9a, R37.5.9e) ---------------
+
+/// Plumbing coverage: each production read path is driven with a Riecoin and a mixed Meowcoin
+/// header (list), from a pinned coin, from an unpinned coin under the default switch, from an
+/// unpinned coin with the switch off, from a pinned coin whose layout does not fit and with a plain
+/// standard-80 header. The Electrum fetches are mocked, so nothing touches the network.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod header_read_path_tests {
+    use super::*;
+    use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+    use crate::utxo::rpc_clients::ElectrumBlockHeadersRes;
+    use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, BlockHeaderStorageOps};
+    use crate::utxo::utxo_common::{block_header_from_storage_or_rpc, valid_block_header_from_storage,
+                                   verify_anchor_header};
+    use crate::utxo::utxo_sql_block_header_storage::SqliteBlockHeadersStorage;
+    use crate::utxo::{SPVBlockHeader, SPVConf};
+    use rpc::v1::types::Bytes as BytesJson;
+    use std::sync::atomic::Ordering;
+
+    const RIC_LIST: &str = include_str!("../../kdf_chain/src/test_data/ric_2658945_x11_v20000000.hex");
+    const RIC_LONE: &str = include_str!("../../kdf_chain/src/test_data/ric_2658955_lone_v20000000.hex");
+    const MEWC_MIXED: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124756_x11_9native_2auxpow.hex");
+    const MEWC_LONE_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_lone_native.hex");
+    const MEWC_ALL_AUXPOW: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124789_x6_all_auxpow.hex");
+    const MEWC_ALL_NATIVE: &str = include_str!("../../kdf_chain/src/test_data/mewc_2124580_x11_all_native.hex");
+
+    const TICKER: &str = "PLUMB";
+
+    fn served(hex: &str) -> Vec<u8> { hex::decode(hex.trim()).unwrap() }
+
+    pub(crate) const PIVX_FILES: [(&str, &str); 9] = [
+        (
+            "v3",
+            include_str!("../../kdf_chain/src/test_data/pivx_100000_x11_v3.hex"),
+        ),
+        (
+            "v3_to_v4",
+            include_str!("../../kdf_chain/src/test_data/pivx_863780_x11_v3_to_v4.hex"),
+        ),
+        (
+            "v4",
+            include_str!("../../kdf_chain/src/test_data/pivx_1500000_x11_v4.hex"),
+        ),
+        (
+            "v5",
+            include_str!("../../kdf_chain/src/test_data/pivx_1900000_x11_v5.hex"),
+        ),
+        (
+            "v6_to_v7",
+            include_str!("../../kdf_chain/src/test_data/pivx_2153195_x11_v6_to_v7.hex"),
+        ),
+        (
+            "v7",
+            include_str!("../../kdf_chain/src/test_data/pivx_2400000_x11_v7.hex"),
+        ),
+        (
+            "v7_to_v8",
+            include_str!("../../kdf_chain/src/test_data/pivx_2700495_x11_v7_to_v8.hex"),
+        ),
+        (
+            "v10_v11",
+            include_str!("../../kdf_chain/src/test_data/pivx_3000000_x11_v10_v11.hex"),
+        ),
+        (
+            "tip",
+            include_str!("../../kdf_chain/src/test_data/pivx_5642858_x11_v11_tip.hex"),
+        ),
+    ];
+    pub(crate) const LBC_FILES: [(&str, &str); 4] = [
+        ("lbc_1", include_str!("../../kdf_chain/src/test_data/lbc_1_x11.hex")),
+        (
+            "lbc_500000",
+            include_str!("../../kdf_chain/src/test_data/lbc_500000_x11.hex"),
+        ),
+        (
+            "lbc_2000000",
+            include_str!("../../kdf_chain/src/test_data/lbc_2000000_x11.hex"),
+        ),
+        (
+            "lbc_tip",
+            include_str!("../../kdf_chain/src/test_data/lbc_2209626_x11_tip.hex"),
+        ),
+    ];
+    const RUNES_TIP: &str = include_str!("../../kdf_chain/src/test_data/runes_2953197_x11_qtum_tip.hex");
+    const RUNES_500K: &str = include_str!("../../kdf_chain/src/test_data/runes_500000_x11_qtum.hex");
+
+    fn time_at(bytes: &[u8], start: usize) -> u32 { time_at_offset(bytes, start, 68) }
+
+    fn time_at_offset(bytes: &[u8], start: usize, offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[start + offset..start + offset + 4].try_into().unwrap())
+    }
+
+    /// The size of the PIVX header at the start of `bytes`, stated from its version field by the
+    /// chapter's rule (4-6 and 8 and above carry the 32-byte field), independent of the reader.
+    pub(crate) fn pivx_size(bytes: &[u8]) -> usize {
+        match u32::from_le_bytes(bytes[..4].try_into().unwrap()) {
+            4..=6 | 8.. => 112,
+            _ => 80,
+        }
+    }
+
+    /// Size of a Qtum header with a one-byte compact-size signature.
+    fn qtum_size(bytes: &[u8]) -> usize { 181 + usize::from(bytes[180]) }
+
+    pub(crate) fn split_by(bytes: &[u8], size: fn(&[u8]) -> usize) -> Vec<&[u8]> {
+        let (mut out, mut rest) = (Vec::new(), bytes);
+        while !rest.is_empty() {
+            let (head, tail) = rest.split_at(size(rest));
+            out.push(head);
+            rest = tail;
+        }
+        out
+    }
+
+    /// One served chain section: a lone header and a list, both in the layout `layout`.
+    pub(crate) struct Fixture {
+        pub(crate) layout: CoinVariant,
+        pub(crate) lone: Vec<u8>,
+        pub(crate) list: Vec<u8>,
+        pub(crate) count: usize,
+        /// Where the time field sits in a header of this layout.
+        pub(crate) time_offset: usize,
+    }
+
+    impl Fixture {
+        pub(crate) fn riecoin() -> Self {
+            Fixture {
+                layout: CoinVariant::Riecoin,
+                lone: served(RIC_LONE),
+                list: served(RIC_LIST),
+                count: 11,
+                time_offset: 68,
+            }
+        }
+
+        pub(crate) fn mewc() -> Self {
+            Fixture {
+                layout: CoinVariant::KawpowAuxpowMixed,
+                lone: served(MEWC_LONE_NATIVE),
+                list: served(MEWC_MIXED),
+                count: 11,
+                time_offset: 68,
+            }
+        }
+
+        /// Eleven Qtum proof-of-stake headers (246 bytes each): the standard 80 bytes, the state and UTXO
+        /// roots, the stake outpoint and a 65-byte compact-size-prefixed block signature. Built from the
+        /// layout of `kdf_chain`'s Qtum reader (no real Qtum list is in the tree); the version value is the
+        /// one Qtum shares with plain BIP9-signalling chains, so only the Qtum reader consumes the bytes.
+        pub(crate) fn qtum() -> Self {
+            let headers: Vec<Vec<u8>> = (0..11u32)
+                .map(|i| {
+                    let mut h = Vec::with_capacity(246);
+                    h.extend_from_slice(&0x2000_0000u32.to_le_bytes());
+                    h.extend_from_slice(&[i as u8 + 1; 32]); // previous hash
+                    h.extend_from_slice(&[0x5a; 32]); // merkle root
+                    h.extend_from_slice(&(1_700_000_000 + 60 * i).to_le_bytes());
+                    h.extend_from_slice(&0x1b00_ffffu32.to_le_bytes());
+                    h.extend_from_slice(&i.to_le_bytes()); // nonce
+                    h.extend_from_slice(&[0x66; 32]); // hash_state_root
+                    h.extend_from_slice(&[0x77; 32]); // hash_utxo_root
+                    h.extend_from_slice(&[0x88; 36]); // prevout_stake
+                    h.push(65); // compact-size length of the block signature
+                    h.extend_from_slice(&[0x99; 65]);
+                    h
+                })
+                .collect();
+            Fixture {
+                layout: CoinVariant::Qtum,
+                lone: headers[0].clone(),
+                list: headers.concat(),
+                count: 11,
+                time_offset: 68,
+            }
+        }
+
+        /// Eleven 120-byte KawPoW headers: the real native Meowcoin headers of `MEWC_ALL_NATIVE`
+        /// (height 2124580 and the ten before it) with the version field rewritten to the KawPoW
+        /// signalling value 0x30000000 that the version-signalled reader and `"RVN"` key on. The bodies
+        /// (previous hash, Merkle root, time, bits, height, 64-bit nonce, mix hash) are the chain's own.
+        pub(crate) fn kawpow() -> Self {
+            let mut list = served(MEWC_ALL_NATIVE);
+            assert_eq!(list.len(), 11 * 120);
+            for header in list.chunks_mut(120) {
+                header[..4].copy_from_slice(&0x3000_0000u32.to_le_bytes());
+            }
+            Fixture {
+                layout: CoinVariant::Standard,
+                lone: list[..120].to_vec(),
+                count: 11,
+                list,
+                time_offset: 68,
+            }
+        }
+
+        pub(crate) fn standard() -> Self {
+            let list = served(MEWC_ALL_AUXPOW);
+            Fixture {
+                layout: CoinVariant::Standard,
+                lone: list[..80].to_vec(),
+                count: 6,
+                list,
+                time_offset: 68,
+            }
+        }
+
+        /// A real PIVX window; the lone header is its first header.
+        pub(crate) fn pivx(hex: &str) -> Self {
+            let list = served(hex);
+            let lone = split_by(&list, pivx_size)[0].to_vec();
+            Fixture {
+                layout: CoinVariant::Pivx,
+                lone,
+                count: 11,
+                list,
+                time_offset: 68,
+            }
+        }
+
+        /// A real LBC window (eleven 112-byte headers); the lone header is its first header.
+        pub(crate) fn lbc(hex: &str) -> Self {
+            let list = served(hex);
+            Fixture {
+                layout: CoinVariant::Lbc,
+                lone: list[..112].to_vec(),
+                count: 11,
+                list,
+                time_offset: 100,
+            }
+        }
+
+        /// A real Runebase window (Qtum-shaped headers); the lone header is its first header.
+        pub(crate) fn runes(hex: &str) -> Self {
+            let list = served(hex);
+            let lone = split_by(&list, qtum_size)[0].to_vec();
+            Fixture {
+                layout: CoinVariant::Qtum,
+                lone,
+                count: 11,
+                list,
+                time_offset: 68,
+            }
+        }
+
+        /// The median of the eleven time fields, read straight from the fixture bytes.
+        pub(crate) fn independent_median(&self, size: fn(&[u8]) -> usize) -> u64 {
+            let mut times: Vec<u32> = split_by(&self.list, size)
+                .iter()
+                .map(|piece| time_at_offset(piece, 0, self.time_offset))
+                .collect();
+            times.sort_unstable();
+            times[times.len() / 2] as u64
+        }
+
+        pub(crate) fn lone_time(&self) -> u64 { time_at_offset(&self.lone, 0, self.time_offset) as u64 }
+
+        pub(crate) fn list_time(&self) -> u64 { time_at_offset(&self.list, 0, self.time_offset) as u64 }
+
+        /// The median the median-time-past path derives from the whole list, stated from the parse
+        /// under the fixture's true layout.
+        pub(crate) fn median(&self) -> u64 {
+            let mut times: Vec<u32> = chain::BlockHeader::list_from_served_bytes(&self.list, self.count, self.layout)
+                .unwrap()
+                .into_iter()
+                .map(|h| h.time)
+                .collect();
+            common::median(times.as_mut_slice()).unwrap() as u64
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Setup {
+        /// `protocol.header_layout` set.
+        Pinned(CoinVariant),
+        /// No key, the default node switch.
+        Default,
+        /// No key, `header_layout_fallback_families: []`.
+        Off,
+    }
+
+    /// A coin on a mocked Electrum client with a SQLite header store, both holding the policy of the
+    /// setup, exactly as the activation builders derive it from the conf.
+    pub(crate) fn coin(setup: Setup) -> UtxoStandardCoin {
+        coin_with(|fields| match setup {
+            Setup::Pinned(layout) => fields.conf.header_layout = Some(layout),
+            Setup::Default => (),
+            Setup::Off => fields.conf.header_layout_fallback_families = vec![],
+        })
+    }
+
+    /// As [`coin`], with the conf built by `UtxoConfBuilder` from a coin JSON whose `protocol` object is
+    /// `protocol`, under the node switch `families` (`None` is the default switch). The test proves the
+    /// builder reads the keys; nothing pokes a conf field.
+    pub(crate) fn coin_from_protocol(protocol: Json, families: Option<&[&str]>) -> UtxoStandardCoin {
+        let conf = conf_from_protocol(protocol, families).unwrap();
+        coin_with(|fields| fields.conf = conf)
+    }
+
+    pub(crate) fn conf_from_protocol(protocol: Json, families: Option<&[&str]>) -> UtxoConfResult<UtxoCoinConf> {
+        let params = UtxoActivationParams::from_legacy_req(&json!({ "method": "enable" })).unwrap();
+        let coin_conf = json!({ "coin": TICKER, "protocol": protocol });
+        let mut builder = UtxoConfBuilder::new(&coin_conf, &params, TICKER);
+        if let Some(families) = families {
+            builder = builder.with_header_layout_fallback_families(families.iter().map(|f| (*f).to_owned()).collect());
+        }
+        builder.build()
+    }
+
+    fn coin_with(configure: impl FnOnce(&mut UtxoCoinFields)) -> UtxoStandardCoin {
+        let client = ElectrumClient(Arc::new(ElectrumClientImpl::new(TICKER.into(), Default::default())));
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        fields.conf.ticker = TICKER.into();
+        configure(&mut fields);
+        let policy = HeaderReadPolicy::for_conf(&fields.conf);
+        let storage = BlockHeaderStorage {
+            inner: Box::new(SqliteBlockHeadersStorage::in_memory_with_policy(policy)),
+            conf: SPVConf {
+                starting_block_header: SPVBlockHeader {
+                    height: 0,
+                    hash: "00".repeat(32),
+                    time: 0,
+                    bits: 0,
+                },
+                max_stored_block_headers: None,
+                validation_params: None,
+            },
+        };
+        block_on(storage.init(TICKER)).unwrap();
+        fields.block_headers_storage = Some(storage);
+        utxo_coin_from_fields(fields)
+    }
+
+    pub(crate) fn policy_of(coin: &UtxoStandardCoin) -> HeaderReadPolicy {
+        HeaderReadPolicy::for_conf(&coin.as_ref().conf)
+    }
+
+    pub(crate) fn logged(coin: &UtxoStandardCoin) -> bool {
+        coin.as_ref().conf.header_layout_fallback_logged.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn electrum(coin: &UtxoStandardCoin) -> ElectrumClient {
+        match &coin.as_ref().rpc_client {
+            UtxoRpcClientEnum::Electrum(client) => client.clone(),
+            _ => unreachable!("the test coin is Electrum-served"),
+        }
+    }
+
+    /// Makes `blockchain.block.header` serve `bytes` and `blockchain.block.headers` serve `list`.
+    pub(crate) fn serve(lone: &[u8], list: &[u8], count: u64) {
+        let lone = lone.to_vec();
+        ElectrumClient::blockchain_block_header
+            .mock_safe(move |_, _| MockResult::Return(Box::new(futures01::future::ok(BytesJson::from(lone.clone())))));
+        let list = list.to_vec();
+        ElectrumClient::blockchain_block_headers.mock_safe(move |_, _, _| {
+            let res: ElectrumBlockHeadersRes =
+                json::from_value(json!({ "count": count, "hex": hex::encode(&list), "max": 2016 })).unwrap();
+            MockResult::Return(Box::new(futures01::future::ok(res)))
+        });
+    }
+
+    /// Drives one read path through the five situations. `read` returns a value the path derives from
+    /// the served bytes; `expected` states it independently of the parser.
+    pub(crate) fn run_matrix(
+        read: impl Fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>,
+        expected: impl Fn(&Fixture) -> u64,
+    ) {
+        let (ric, mewc, std80) = (Fixture::riecoin(), Fixture::mewc(), Fixture::standard());
+
+        // (a) a pinned coin reads its layout and never logs a fallback.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Pinned(fx.layout));
+            assert_eq!(read(&coin, fx), Ok(expected(fx)), "pinned {:?}", fx.layout);
+            assert!(!logged(&coin), "a pinned coin must not be fallback-parsed");
+        }
+        // (b) no key, default switch: the fallback reads both, and logs once per coin.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Default);
+            assert_eq!(read(&coin, fx), Ok(expected(fx)), "fallback {:?}", fx.layout);
+            assert!(logged(&coin));
+        }
+        // (c) no key, switch off: rejected as before and nothing is logged.
+        for fx in [&ric, &mewc] {
+            let coin = coin(Setup::Off);
+            assert!(read(&coin, fx).is_err(), "switch off {:?}", fx.layout);
+            assert!(!logged(&coin));
+        }
+        // (d) a pinned coin whose layout does not fit is rejected without the fallback.
+        for (pinned, fx) in [(CoinVariant::Riecoin, &mewc), (CoinVariant::KawpowAuxpowMixed, &ric)] {
+            let coin = coin(Setup::Pinned(pinned));
+            assert!(
+                read(&coin, fx).is_err(),
+                "pinned {pinned:?} must reject {:?}",
+                fx.layout
+            );
+            assert!(!logged(&coin), "a pinned coin must not consult the fallback");
+        }
+        // (e) a plain standard-80 header is read by the standard layout and never fallback-parsed.
+        for setup in [Setup::Default, Setup::Off] {
+            let coin = coin(setup);
+            assert_eq!(read(&coin, &std80), Ok(expected(&std80)));
+            assert!(!logged(&coin));
+        }
+    }
+
+    fn describe<E: std::fmt::Debug>(e: E) -> String { format!("{e:?}") }
+
+    pub(crate) type PathFn = fn(&UtxoStandardCoin, &Fixture) -> Result<u64, String>;
+
+    fn path_retrieve_last_headers(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let limit = NonZeroU64::new(fx.count as u64).unwrap();
+        let (registry, headers) = electrum(coin)
+            .retrieve_last_headers(limit, 5000, policy_of(coin))
+            .wait()
+            .map_err(describe)?;
+        let from = 5000 - fx.count as u64;
+        assert_eq!(headers.len(), fx.count);
+        assert_eq!(registry.len(), fx.count);
+        assert_eq!(registry[&from].raw().len(), headers[0].raw().len());
+        let reencoded: Vec<u8> = headers.iter().flat_map(|h| h.raw().to_vec()).collect();
+        assert_eq!(reencoded, fx.list, "the registry keeps the served bytes");
+        Ok(registry[&from].time as u64)
+    }
+
+    fn path_get_block_timestamp(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(coin)),
+        )
+        .map_err(describe)
+    }
+
+    fn path_valid_block_header_from_storage(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let client = electrum(coin);
+        let header = block_on(valid_block_header_from_storage(coin, 5000, storage, &client)).map_err(describe)?;
+        assert_eq!(header.raw().len(), fx.lone.len());
+        Ok(header.time as u64)
+    }
+
+    fn path_direct_fetch(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        let client = electrum(coin);
+        block_on(block_header_from_storage_or_rpc(coin, 5000, &None, &client))
+            .map(|header| header.time as u64)
+            .map_err(describe)
+    }
+
+    fn path_verify_anchor_header(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        // The anchor states what the true layout parses the served header to.
+        let truth = chain::BlockHeader::from_served_bytes(&fx.lone, fx.layout).unwrap();
+        let bits = match truth.bits {
+            chain::BlockHeaderBits::Compact(compact) => u32::from(compact),
+            chain::BlockHeaderBits::U32(bits) => bits,
+        };
+        let anchor = SPVBlockHeader {
+            height: 77,
+            hash: truth.hash().reversed().to_string(),
+            time: truth.time,
+            bits,
+        };
+        let client = electrum(coin);
+        match block_on(verify_anchor_header(&client, &anchor, &policy_of(coin))) {
+            Ok(true) => Ok(fx.lone_time()),
+            other => Err(format!("{other:?}")),
+        }
+    }
+
+    /// The median-time-past path, through the coin's own `get_current_mtp`.
+    fn path_median(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        serve(&fx.lone, &fx.list, fx.count as u64);
+        ElectrumClient::get_block_count.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(5000u64))));
+        block_on(coin.get_current_mtp()).map(u64::from).map_err(describe)
+    }
+
+    /// Stores the fixture's headers in the coin's store (which holds the coin's policy) and reads
+    /// them back through the store's two decode paths.
+    fn path_store(coin: &UtxoStandardCoin, fx: &Fixture) -> Result<u64, String> {
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        // The headers are stored the way the sync loop stores them: `header.raw()` of the parse
+        // under the true layout of the chain.
+        let headers = chain::BlockHeader::list_from_served_bytes(&fx.list, fx.count, fx.layout).unwrap();
+        let registry: HashMap<u64, chain::BlockHeader> =
+            headers.iter().cloned().zip(100u64..).map(|(h, n)| (n, h)).collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).map_err(describe)?;
+        for (height, expected) in (100u64..).zip(&headers) {
+            let read = block_on(storage.get_block_header(TICKER, height))
+                .map_err(describe)?
+                .expect("stored");
+            assert_eq!(
+                read.raw(),
+                expected.raw(),
+                "the store re-reads the served bytes at {height}"
+            );
+        }
+        // The scan-based lookup decodes every stored row.
+        let found = block_on(storage.get_block_height_by_hash(TICKER, headers[0].hash())).map_err(describe)?;
+        assert_eq!(found, Some(100));
+        Ok(headers[0].time as u64)
+    }
+
+    /// Every threaded read path of the coin layer that a test can drive here, with the value each
+    /// derives from the served bytes (the WalletConnect genesis read is driven from its own module).
+    pub(crate) fn paths() -> Vec<(&'static str, PathFn, fn(&Fixture) -> u64)> {
+        vec![
+            ("retrieve_last_headers", path_retrieve_last_headers, |fx| fx.list_time()),
+            ("get_block_timestamp", path_get_block_timestamp, |fx| fx.lone_time()),
+            (
+                "valid_block_header_from_storage",
+                path_valid_block_header_from_storage,
+                |fx| fx.lone_time(),
+            ),
+            ("block_header_from_storage_or_rpc", path_direct_fetch, |fx| {
+                fx.lone_time()
+            }),
+            ("verify_anchor_header", path_verify_anchor_header, |fx| fx.lone_time()),
+            ("median", path_median, |fx| fx.median()),
+            ("sqlite_store", path_store, |fx| fx.list_time()),
+        ]
+    }
+
+    #[test]
+    fn retrieve_last_headers_reads_the_list_under_the_policy() {
+        run_matrix(path_retrieve_last_headers, |fx| fx.list_time());
+    }
+
+    #[test]
+    fn retrieve_last_headers_rejects_a_count_mismatch() {
+        for setup in [Setup::Pinned(CoinVariant::Riecoin), Setup::Default] {
+            let coin = coin(setup);
+            let fx = Fixture::riecoin();
+            let limit = NonZeroU64::new(11).unwrap();
+            for wrong in [10u64, 12] {
+                serve(&fx.lone, &fx.list, wrong);
+                assert!(electrum(&coin)
+                    .retrieve_last_headers(limit, 5000, policy_of(&coin))
+                    .wait()
+                    .is_err());
+            }
+            // The correct count is read.
+            serve(&fx.lone, &fx.list, 11);
+            assert!(electrum(&coin)
+                .retrieve_last_headers(limit, 5000, policy_of(&coin))
+                .wait()
+                .is_ok());
+        }
+    }
+
+    #[test]
+    fn get_block_timestamp_reads_the_header_under_the_policy() {
+        run_matrix(path_get_block_timestamp, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn the_standard_get_block_timestamp_is_unchanged() {
+        let coin = coin(Setup::Pinned(CoinVariant::Riecoin));
+        let (ric, std80) = (Fixture::riecoin(), Fixture::standard());
+        serve(&ric.lone, &ric.list, 11);
+        assert!(block_on(coin.as_ref().rpc_client.get_block_timestamp(77)).is_err());
+        serve(&std80.lone, &std80.list, 6);
+        assert_eq!(
+            block_on(coin.as_ref().rpc_client.get_block_timestamp(77)).unwrap(),
+            std80.lone_time()
+        );
+    }
+
+    #[test]
+    fn valid_block_header_from_storage_reads_the_single_header_under_the_policy() {
+        run_matrix(path_valid_block_header_from_storage, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn block_header_from_storage_or_rpc_reads_the_direct_fetch_under_the_policy() {
+        run_matrix(path_direct_fetch, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn verify_anchor_header_reads_the_anchor_under_the_policy() {
+        run_matrix(path_verify_anchor_header, |fx| fx.lone_time());
+    }
+
+    #[test]
+    fn the_median_path_reads_the_list_under_the_policy() { run_matrix(path_median, |fx| fx.median()); }
+
+    #[test]
+    fn the_sqlite_store_rereads_stored_headers_under_the_policy() { run_matrix(path_store, |fx| fx.list_time()); }
+
+    #[test]
+    fn the_store_keeps_112_120_and_80_byte_headers() {
+        let coin = coin(Setup::Default);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        let mixed =
+            chain::BlockHeader::list_from_served_bytes(&Fixture::mewc().list, 11, CoinVariant::KawpowAuxpowMixed)
+                .unwrap();
+        let native = mixed.iter().find(|h| h.raw().len() == 120).unwrap().clone();
+        let merged = mixed.iter().find(|h| h.raw().len() == 80).unwrap().clone();
+        assert_eq!(ric.raw().len(), 112);
+        let registry: HashMap<u64, chain::BlockHeader> = [(1, ric.clone()), (2, native.clone()), (3, merged.clone())]
+            .into_iter()
+            .collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+        for (height, header) in [(1, ric), (2, native), (3, merged)] {
+            let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+            assert_eq!(read.raw(), header.raw());
+        }
+        assert!(logged(&coin), "the 112- and 120-byte rows were read by the fallback");
+    }
+
+    // ---- protocol.chain_variant read at activation (CRD ch.37 R37.5.1, R37.5.9a, R37.5.9e) ----------
+
+    fn utxo(chain_variant: Json) -> Json { json!({ "type": "UTXO", "chain_variant": chain_variant }) }
+
+    fn read_ok(name: &str, coin: &UtxoStandardCoin, fx: &Fixture, read: PathFn, expected: fn(&Fixture) -> u64) {
+        assert_eq!(read(coin, fx), Ok(expected(fx)), "{name}: {:?}", fx.layout);
+    }
+
+    fn read_err(name: &str, coin: &UtxoStandardCoin, fx: &Fixture, read: PathFn) -> String {
+        read(coin, fx).expect_err(&format!("{name}: {:?} must be rejected", fx.layout))
+    }
+
+    /// The hazard: the registry pins `RIC` and `MEWC` to `"BTC"`, with no `header_layout` key. Once the
+    /// value is really read, the standard read of their headers fails and only the R37.5.9e fallback
+    /// rescues them, on every path, because `"BTC"` is in the default switch.
+    #[test]
+    fn btc_chain_variant_rescues_ric_and_mewc_on_every_path_under_the_default_switch() {
+        for (name, read, expected) in paths() {
+            for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                let coin = coin_from_protocol(utxo(json!("BTC")), None);
+                read_ok(name, &coin, &fx, read, expected);
+                assert!(logged(&coin), "{name}: the fallback logs once for the coin");
+            }
+        }
+    }
+
+    #[test]
+    fn btc_chain_variant_is_rejected_with_the_switch_off_or_without_btc() {
+        for families in [&[][..], &["PPC"][..]] {
+            for (name, read, _) in paths() {
+                for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                    let coin = coin_from_protocol(utxo(json!("BTC")), Some(families));
+                    read_err(name, &coin, &fx, read);
+                    assert!(!logged(&coin), "{name}: nothing is fallback-parsed under {families:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_switch_membership_uses_the_coins_real_family() {
+        // (chain_variant, switch, the fallback exists)
+        let cases: [(Option<&str>, Option<&[&str]>, bool); 12] = [
+            (None, None, true),
+            (None, Some(&[]), false),
+            (None, Some(&["PPC"]), false), // an absent key counts as "BTC"
+            (Some("BTC"), None, true),
+            (Some("BTC"), Some(&["PPC"]), false),
+            (Some("BTC"), Some(&["BTC", "PPC"]), true),
+            (Some("PPC"), None, false),
+            (Some("PPC"), Some(&["PPC"]), true),
+            (Some("PPC"), Some(&["BTC", "PPC"]), true),
+            (Some("QTUM"), None, false),
+            (Some("QTUM"), Some(&["QTUM"]), true),
+            (Some("RVN"), None, false),
+        ];
+        for (variant, families, expected) in cases {
+            let protocol = match variant {
+                Some(v) => utxo(json!(v)),
+                None => json!({ "type": "UTXO" }),
+            };
+            let conf = conf_from_protocol(protocol, families).unwrap();
+            assert_eq!(
+                crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_some(),
+                expected,
+                "{variant:?} under {families:?}"
+            );
+        }
+        // The Qtum protocol-type reader is a reader choice, not a family: an unkeyed QTUM-type coin is "BTC".
+        let conf = conf_from_protocol(json!({ "type": "QTUM" }), None).unwrap();
+        assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_some());
+        let conf = conf_from_protocol(json!({ "type": "QTUM" }), Some(&["PPC"])).unwrap();
+        assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_none());
+    }
+
+    #[test]
+    fn a_non_btc_family_in_the_switch_falls_back_and_logs_once_per_coin() {
+        let fx = Fixture::riecoin();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("PPC")), Some(&["PPC"]));
+            assert!(!logged(&coin));
+            read_ok(name, &coin, &fx, read, expected);
+            assert!(logged(&coin), "{name}: the log fired for the fallback");
+        }
+        // A second activation is a new coin and logs again; the PPC coin outside the default switch does not.
+        let other = coin_from_protocol(utxo(json!("PPC")), None);
+        read_err("retrieve_last_headers", &other, &fx, path_retrieve_last_headers);
+        assert!(!logged(&other));
+    }
+
+    #[test]
+    fn qtum_chain_variant_reads_qtum_headers_on_every_path_and_never_falls_back() {
+        let qtum = Fixture::qtum();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("QTUM")), None);
+            read_ok(name, &coin, &qtum, read, expected);
+            assert!(!logged(&coin));
+            // outside the default switch, so a Riecoin list is rejected, never rescued.
+            for fx in [Fixture::riecoin(), Fixture::mewc()] {
+                read_err(name, &coin, &fx, read);
+                assert!(!logged(&coin), "{name}: a QTUM-pinned coin never falls back");
+            }
+            // a standard coin does not read the Qtum layout
+            let standard = coin_from_protocol(utxo(json!("BTC")), None);
+            read_err(name, &standard, &qtum, read);
+        }
+    }
+
+    #[test]
+    fn rvn_chain_variant_reads_the_120_byte_kawpow_form_on_every_path() {
+        let kawpow = Fixture::kawpow();
+        for (name, read, expected) in paths() {
+            let coin = coin_from_protocol(utxo(json!("RVN")), None);
+            read_ok(name, &coin, &kawpow, read, expected);
+            assert!(!logged(&coin), "{name}: the version-signalled read, not the fallback");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_chain_variant_fails_the_coin_build_naming_the_ticker_and_value() {
+        for bad in [
+            json!("FOO"),
+            json!("btc"),
+            json!("Btc"),
+            json!(""),
+            json!(7),
+            json!(null),
+            json!(["BTC"]),
+        ] {
+            let err = conf_from_protocol(utxo(bad.clone()), None).expect_err("no fallback to the default family");
+            let text = err.to_string();
+            assert!(text.contains(TICKER), "{text}");
+            assert!(text.contains("chain_variant"), "{text}");
+            assert!(text.contains(&bad.to_string()), "{text}");
+        }
+        // Read and validated even when header_layout pins the layout (R37.5.9a).
+        let err = conf_from_protocol(
+            json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": "FOO" }),
+            None,
+        )
+        .expect_err("the key does not excuse an invalid chain_variant");
+        assert!(err.to_string().contains("chain_variant"));
+        // The eight spellings are accepted verbatim.
+        for ok in ["BTC", "QTUM", "LBC", "PPC", "RICK", "MORTY", "RVN", "PIVX"] {
+            conf_from_protocol(utxo(json!(ok)), None).unwrap();
+        }
+    }
+
+    #[test]
+    fn chain_variant_does_not_change_how_the_protocol_object_parses() {
+        let with = utxo(json!("QTUM"));
+        let without = json!({ "type": "UTXO" });
+        let parse = |v: Json| json::to_value(json::from_value::<crate::CoinProtocol>(v).unwrap()).unwrap();
+        assert_eq!(parse(with), parse(without));
+    }
+
+    #[test]
+    fn an_absent_key_behaves_as_before_on_every_path() {
+        let (std80, qtum) = (Fixture::standard(), Fixture::qtum());
+        for (name, read, expected) in paths() {
+            // Standard coin: standard headers read, Qtum headers rejected, RIC rescued by the fallback.
+            let coin = coin_from_protocol(json!({ "type": "UTXO" }), None);
+            read_ok(name, &coin, &std80, read, expected);
+            read_err(name, &coin, &qtum, read);
+            let rescued = coin_from_protocol(json!({ "type": "UTXO" }), None);
+            read_ok(name, &rescued, &Fixture::riecoin(), read, expected);
+            // QTUM and QRC20 protocol types keep reading Qtum headers (documented divergence of the
+            // maintainer) on every path, the median path included.
+            for protocol in [
+                json!({ "type": "QTUM" }),
+                json!({ "type": "QRC20", "protocol_data": { "platform": "QTUM", "contract_address": "0x00" } }),
+            ] {
+                let coin = coin_from_protocol(protocol, None);
+                read_ok(name, &coin, &qtum, read, expected);
+                assert!(!logged(&coin));
+            }
+        }
+    }
+
+    #[test]
+    fn header_layout_wins_over_a_conflicting_chain_variant_and_the_fallback_is_never_consulted() {
+        for conflicting in ["QTUM", "BTC", "PPC", "LBC", "PIVX"] {
+            for (name, read, expected) in paths() {
+                let protocol = json!({ "type": "UTXO", "header_layout": "riecoin", "chain_variant": conflicting });
+                let coin = coin_from_protocol(protocol.clone(), Some(&["BTC", "QTUM", "PPC", "LBC", "PIVX"]));
+                read_ok(name, &coin, &Fixture::riecoin(), read, expected);
+                // the key's layout does not fit: rejected whole, with no fallback even in the switch.
+                read_err(name, &coin, &Fixture::mewc(), read);
+                read_err(name, &coin, &Fixture::qtum(), read);
+                assert!(!logged(&coin), "{name}/{conflicting}: a pinned coin never falls back");
+            }
+        }
+    }
+
+    fn all_pivx() -> Vec<(&'static str, Fixture)> { PIVX_FILES.iter().map(|(n, h)| (*n, Fixture::pivx(h))).collect() }
+
+    fn all_lbc() -> Vec<(&'static str, Fixture)> { LBC_FILES.iter().map(|(n, h)| (*n, Fixture::lbc(h))).collect() }
+
+    #[test]
+    fn pivx_chain_variant_reads_every_era_window_on_every_path() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_pivx() {
+                let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+                read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                assert!(!logged(&coin), "{name}/{window}: a PIVX coin never falls back");
+            }
+        }
+    }
+
+    #[test]
+    fn lbc_chain_variant_reads_every_window_on_every_path() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_lbc() {
+                let coin = coin_from_protocol(utxo(json!("LBC")), None);
+                read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                assert!(!logged(&coin), "{name}/{window}: an LBC coin never falls back");
+            }
+        }
+    }
+
+    /// The swap-critical case: the median time past of the latest eleven headers is the true
+    /// median of their time fields, stated here from the fixture bytes.
+    #[test]
+    fn the_tip_window_median_time_past_is_the_true_median_of_the_eleven_times() {
+        let cases: [(&str, Fixture, fn(&[u8]) -> usize); 2] = [
+            ("PIVX", Fixture::pivx(PIVX_FILES[8].1), pivx_size),
+            ("LBC", Fixture::lbc(LBC_FILES[3].1), |_| 112),
+        ];
+        for (variant, fx, size) in cases {
+            let expected = fx.independent_median(size);
+            let coin = coin_from_protocol(utxo(json!(variant)), None);
+            assert_eq!(path_median(&coin, &fx), Ok(expected), "{variant}: get_current_mtp");
+            let via_client = electrum(&coin)
+                .get_median_time_past_with_policy(5000, NonZeroU64::new(11).unwrap(), policy_of(&coin))
+                .wait()
+                .unwrap();
+            assert_eq!(
+                via_client as u64, expected,
+                "{variant}: get_median_time_past_with_policy"
+            );
+        }
+        // Every PIVX era window, including the boundaries, gives its true median too.
+        for (window, fx) in all_pivx() {
+            let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+            assert_eq!(
+                path_median(&coin, &fx),
+                Ok(fx.independent_median(pivx_size)),
+                "{window}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_store_keeps_112_and_80_byte_pivx_and_112_byte_lbc_headers() {
+        for (variant, fx, size) in [
+            ("PIVX", Fixture::pivx(PIVX_FILES[1].1), pivx_size as fn(&[u8]) -> usize),
+            ("LBC", Fixture::lbc(LBC_FILES[3].1), |_| 112),
+        ] {
+            let coin = coin_from_protocol(utxo(json!(variant)), None);
+            let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+            let pieces = split_by(&fx.list, size);
+            let headers = chain::BlockHeader::list_from_served_bytes(&fx.list, 11, fx.layout).unwrap();
+            let registry: HashMap<u64, chain::BlockHeader> = (100u64..).zip(headers.iter().cloned()).collect();
+            block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+            for (height, piece) in (100u64..).zip(&pieces) {
+                let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+                assert_eq!(
+                    &read.raw()[..],
+                    *piece,
+                    "{variant}: stored bytes equal served bytes at {height}"
+                );
+            }
+            let lens: std::collections::BTreeSet<usize> = pieces.iter().map(|p| p.len()).collect();
+            let wanted: Vec<usize> = if variant == "PIVX" { vec![80, 112] } else { vec![112] };
+            assert_eq!(lens.into_iter().collect::<Vec<_>>(), wanted);
+            assert!(!logged(&coin));
+        }
+    }
+
+    #[test]
+    fn pivx_and_lbc_reject_malformed_input_on_every_path_without_panicking() {
+        for (variant, good) in [
+            ("PIVX", Fixture::pivx(PIVX_FILES[7].1)),
+            ("LBC", Fixture::lbc(LBC_FILES[0].1)),
+        ] {
+            let mut cases: Vec<(&str, Vec<u8>, Vec<u8>, u64)> = Vec::new();
+            let mut trailing = good.list.clone();
+            trailing.push(0);
+            cases.push(("trailing byte", good.lone.clone(), trailing, 11));
+            cases.push((
+                "truncated",
+                good.lone.clone(),
+                good.list[..good.list.len() - 1].to_vec(),
+                11,
+            ));
+            cases.push((
+                "one header short",
+                good.lone.clone(),
+                good.list[..10 * 112].to_vec(),
+                11,
+            ));
+            cases.push(("count mismatch (10)", good.lone.clone(), good.list.clone(), 10));
+            cases.push(("count mismatch (12)", good.lone.clone(), good.list.clone(), 12));
+            for (what, lone, list, count) in cases {
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                let fx = Fixture {
+                    layout: good.layout,
+                    lone,
+                    list,
+                    count: count as usize,
+                    time_offset: good.time_offset,
+                };
+                // the list-based paths reject; the lone-header paths are not affected by a bad list
+                for (name, read) in [
+                    ("retrieve_last_headers", path_retrieve_last_headers as PathFn),
+                    ("median", path_median as PathFn),
+                ] {
+                    let err = read(&coin, &fx);
+                    assert!(err.is_err(), "{variant}/{what}/{name}: {err:?}");
+                }
+            }
+        }
+        // LBC is fixed-layout: a list of 80-byte headers, and a lone 80-byte header, are malformed.
+        let lbc = Fixture::lbc(LBC_FILES[0].1);
+        let eighty: Vec<u8> = lbc.list.chunks(112).flat_map(|c| c[..80].to_vec()).collect();
+        let coin = coin_from_protocol(utxo(json!("LBC")), None);
+        serve(&lbc.list[..80], &eighty, 11);
+        assert!(electrum(&coin)
+            .retrieve_last_headers(NonZeroU64::new(11).unwrap(), 5000, policy_of(&coin))
+            .wait()
+            .is_err());
+        assert!(block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin))
+        )
+        .is_err());
+        // PIVX: a version-7 header served with 112 bytes is rejected (not 80 bytes, not its layout).
+        let v7 = Fixture::pivx(PIVX_FILES[5].1);
+        let mut padded = v7.lone.clone();
+        padded.extend_from_slice(&[0u8; 32]);
+        let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+        serve(&padded, &v7.list, 11);
+        assert!(block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin))
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pivx_structural_guard_accepts_an_exactly_80_byte_version_4_header_as_std_80() {
+        // R37.5.6 covers the PIVX trailing field, which the version chooses: a header served as
+        // exactly 80 bytes is read as std-80 (here a stripped version-4 header).
+        let v4 = Fixture::pivx(PIVX_FILES[2].1);
+        let coin = coin_from_protocol(utxo(json!("PIVX")), None);
+        serve(&v4.lone[..80], &v4.list, 11);
+        let time = block_on(
+            coin.as_ref()
+                .rpc_client
+                .get_block_timestamp_with_policy(77, &policy_of(&coin)),
+        )
+        .unwrap();
+        assert_eq!(time, v4.lone_time());
+        // A 79-byte or 81-byte header gets no re-read.
+        for len in [79, 81] {
+            serve(&v4.lone[..len], &v4.list, 11);
+            assert!(block_on(
+                coin.as_ref()
+                    .rpc_client
+                    .get_block_timestamp_with_policy(77, &policy_of(&coin))
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn pivx_and_lbc_do_not_read_the_other_layouts() {
+        // The Qtum-shaped list (246-byte headers) fits neither fixed length family.
+        let qtum = Fixture::qtum();
+        for variant in ["LBC", "PIVX"] {
+            for (name, read, _) in paths() {
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                read_err(name, &coin, &qtum, read);
+                assert!(!logged(&coin));
+            }
+        }
+        // A plain 80-byte header chain is not an LBC chain.
+        let coin = coin_from_protocol(utxo(json!("LBC")), None);
+        read_err(
+            "retrieve_last_headers",
+            &coin,
+            &Fixture::standard(),
+            path_retrieve_last_headers,
+        );
+    }
+
+    #[test]
+    fn pivx_and_lbc_are_outside_the_default_switch_so_they_never_fall_back() {
+        for variant in ["PIVX", "LBC"] {
+            let conf = conf_from_protocol(utxo(json!(variant)), None).unwrap();
+            assert!(crate::utxo::header_layout_fallback::HeaderLayoutFallback::for_conf(&conf).is_none());
+            assert_eq!(
+                crate::utxo::header_layout_fallback::coin_family(&conf),
+                variant,
+                "the family is the chain_variant value"
+            );
+            let expected = if variant == "PIVX" {
+                CoinVariant::Pivx
+            } else {
+                CoinVariant::Lbc
+            };
+            assert_eq!(HeaderReadPolicy::for_conf(&conf).layout(), expected);
+        }
+    }
+
+    /// Regression pin: a coin with no `chain_variant` reads PIVX-shaped bytes exactly as before this
+    /// change: the 80-byte eras are standard headers, the 112-byte eras are rejected (no fallback
+    /// rescues them), on every path.
+    #[test]
+    fn a_coin_without_chain_variant_reads_pivx_bytes_as_before() {
+        for (name, read, expected) in paths() {
+            for (window, fx) in all_pivx() {
+                let coin = coin_from_protocol(json!({ "type": "UTXO" }), None);
+                let eighty_only = matches!(window, "v3" | "v7");
+                if eighty_only {
+                    // The standard reader reads them; the fixture states the parse under the PIVX
+                    // layout, which for 80-byte headers is the same read.
+                    read_ok(&format!("{name}/{window}"), &coin, &fx, read, expected);
+                } else if window == "v4" || window == "v5" || window == "tip" {
+                    read_err(&format!("{name}/{window}"), &coin, &fx, read);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn runebase_qtum_lists_read_on_the_median_and_sync_paths() {
+        for (hex, label) in [(RUNES_TIP, "tip"), (RUNES_500K, "500000")] {
+            let fx = Fixture::runes(hex);
+            assert_eq!(fx.list.len(), 11 * fx.lone.len(), "{label}: eleven equal-size headers");
+            let expected_median = fx.independent_median(qtum_size);
+            for protocol in [utxo(json!("QTUM")), json!({ "type": "QTUM" })] {
+                let coin = coin_from_protocol(protocol, None);
+                // median path
+                assert_eq!(path_median(&coin, &fx), Ok(expected_median), "{label}: median");
+                // sync path: retrieve_last_headers consumes the bytes exactly and re-encodes them
+                assert_eq!(
+                    path_retrieve_last_headers(&coin, &fx),
+                    Ok(fx.list_time()),
+                    "{label}: retrieve_last_headers"
+                );
+                // the lone-header paths and the store
+                assert_eq!(path_get_block_timestamp(&coin, &fx), Ok(fx.lone_time()), "{label}");
+                assert_eq!(
+                    path_valid_block_header_from_storage(&coin, &fx),
+                    Ok(fx.lone_time()),
+                    "{label}"
+                );
+                assert!(!logged(&coin));
+                // a fresh coin: the paths above already stored these headers at other heights
+                let fresh = coin_from_protocol(utxo(json!("QTUM")), None);
+                assert_eq!(path_store(&fresh, &fx), Ok(fx.list_time()), "{label}: store");
+            }
+        }
+    }
+
+    #[test]
+    fn ppc_rick_and_morty_read_standard_80_exactly_like_an_absent_key() {
+        // Plan step H4 (exclusivity, the thresholded rules, the Equihash reading of RICK/MORTY and
+        // PPC's version-4 suppression) is not implemented: these three resolve to the standard reader.
+        let std80 = Fixture::standard();
+        for variant in ["PPC", "RICK", "MORTY"] {
+            for (name, read, expected) in paths() {
+                let coin = coin_from_protocol(utxo(json!(variant)), None);
+                read_ok(name, &coin, &std80, read, expected);
+                let absent = coin_from_protocol(json!({ "type": "UTXO" }), None);
+                read_ok(name, &absent, &std80, read, expected);
+                read_err(name, &coin, &Fixture::qtum(), read);
+            }
+        }
+    }
+
+    #[test]
+    fn a_keyless_btc_coin_rereads_stored_112_and_120_byte_headers_through_the_conf() {
+        let coin = coin_from_protocol(utxo(json!("BTC")), None);
+        let storage = coin.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        let native =
+            chain::BlockHeader::from_served_bytes(&Fixture::mewc().lone, CoinVariant::KawpowAuxpowMixed).unwrap();
+        assert_eq!((ric.raw().len(), native.raw().len()), (112, 120));
+        let registry: HashMap<u64, chain::BlockHeader> = [(1, ric.clone()), (2, native.clone())].into_iter().collect();
+        block_on(storage.add_block_headers_to_storage(TICKER, registry)).unwrap();
+        for (height, header) in [(1, ric), (2, native)] {
+            let read = block_on(storage.get_block_header(TICKER, height)).unwrap().unwrap();
+            assert_eq!(read.raw(), header.raw());
+        }
+        assert!(logged(&coin));
+        // With the switch off the same rows are unreadable.
+        let off = coin_from_protocol(utxo(json!("BTC")), Some(&[]));
+        let storage = off.as_ref().block_headers_storage.as_ref().unwrap();
+        let ric = chain::BlockHeader::from_served_bytes(&Fixture::riecoin().lone, CoinVariant::Riecoin).unwrap();
+        block_on(storage.add_block_headers_to_storage(TICKER, [(1u64, ric)].into_iter().collect())).unwrap();
+        assert!(block_on(storage.get_block_header(TICKER, 1)).is_err());
+    }
+}
+
+/// The legacy `electrum` method honors `min_connected` and `max_connected` (CRD ch. 55 R55.4.3, ch. 38 R38.6.4).
+#[cfg(not(target_arch = "wasm32"))]
+mod legacy_electrum_connection_settings {
+    use super::*;
+    use crate::lp_coininit;
+    use crate::qrc20::Qrc20ActivationParams;
+    use crate::utxo::bch::BchActivationRequest;
+    use crypto::CryptoCtx;
+    use std::net::TcpListener;
+
+    const SERVERS: [&str; 2] = ["127.0.0.1:1", "127.0.0.1:2"];
+
+    /// The probe returns on the first connection and the rest connect in the background (CRD ch.38
+    /// R38.6.4k-R), so the maintained set is waited for.
+    fn wait_for_maintained(client: &ElectrumClient, count: usize) {
+        let started = std::time::Instant::now();
+        while block_on(client.count_connected()) != count {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "no {count} maintained connections"
+            );
+            block_on(Timer::sleep(0.02));
+        }
+    }
+
+    fn request(extra: Json) -> Json {
+        let mut req = json!({
+            "method": "electrum",
+            "coin": "RCK",
+            "servers": SERVERS.iter().map(|url| json!({ "url": url })).collect::<Vec<_>>(),
+        });
+        req.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        req
+    }
+
+    fn settings(params: &UtxoActivationParams) -> (usize, Option<usize>, Option<usize>) {
+        match &params.mode {
+            UtxoRpcMode::Electrum {
+                servers,
+                min_connected,
+                max_connected,
+            } => (servers.len(), *min_connected, *max_connected),
+            UtxoRpcMode::Native => panic!("Electrum mode expected"),
+        }
+    }
+
+    #[test]
+    fn max_connected_reaches_the_params() {
+        let params = UtxoActivationParams::from_legacy_req(&request(json!({ "max_connected": 1 }))).unwrap();
+        assert_eq!(settings(&params), (2, None, Some(1)));
+
+        let params =
+            UtxoActivationParams::from_legacy_req(&request(json!({ "min_connected": 2, "max_connected": 2 }))).unwrap();
+        assert_eq!(settings(&params), (2, Some(2), Some(2)));
+    }
+
+    #[test]
+    fn absent_or_null_values_keep_the_defaults() {
+        for extra in [json!({}), json!({ "min_connected": null, "max_connected": null })] {
+            let params = UtxoActivationParams::from_legacy_req(&request(extra)).unwrap();
+            assert_eq!(settings(&params), (2, None, None));
+        }
+    }
+
+    #[test]
+    fn unusable_values_are_refused() {
+        let cases = [
+            (json!({ "min_connected": 0 }), "'min_connected' must be at least 1"),
+            (json!({ "max_connected": 0 }), "'max_connected' must be at least 1"),
+            (
+                json!({ "min_connected": 2, "max_connected": 1 }),
+                "'min_connected' must not exceed 'max_connected'",
+            ),
+        ];
+        for (extra, reason) in cases {
+            let error = UtxoActivationParams::from_legacy_req(&request(extra)).unwrap_err();
+            assert_eq!(
+                error.get_inner().to_string(),
+                format!("Unusable Electrum connection settings: {}", reason)
+            );
+        }
+
+        let mut empty = request(json!({}));
+        empty["servers"] = json!([]);
+        let error = UtxoActivationParams::from_legacy_req(&empty).unwrap_err();
+        assert_eq!(
+            error.get_inner().to_string(),
+            "Unusable Electrum connection settings: no server is configured"
+        );
+
+        for (key, value) in [
+            ("min_connected", json!("1")),
+            ("max_connected", json!("1")),
+            ("max_connected", json!(-1)),
+            ("max_connected", json!(1.5)),
+            ("min_connected", json!(true)),
+        ] {
+            let error = UtxoActivationParams::from_legacy_req(&request(json!({ key: value }))).unwrap_err();
+            assert!(
+                matches!(
+                    error.get_inner(),
+                    UtxoFromLegacyReqErr::InvalidMinConnected(_) | UtxoFromLegacyReqErr::InvalidMaxConnected(_)
+                ),
+                "{key}: {error}"
+            );
+        }
+    }
+
+    /// The legacy `enable` method (native daemon) has no Electrum settings and ignores both keys.
+    #[test]
+    fn enable_ignores_the_keys() {
+        let params = UtxoActivationParams::from_legacy_req(
+            &json!({ "method": "enable", "coin": "RCK", "min_connected": 0, "max_connected": "x" }),
+        )
+        .unwrap();
+        assert!(matches!(params.mode, UtxoRpcMode::Native));
+    }
+
+    #[test]
+    fn bch_and_qrc20_inherit_the_values() {
+        let bch = BchActivationRequest::from_legacy_req(&request(json!({
+            "max_connected": 1,
+            "bchd_urls": [],
+            "allow_slp_unsafe_conf": true,
+        })))
+        .unwrap();
+        assert_eq!(settings(&bch.utxo_params), (2, None, Some(1)));
+
+        let error = BchActivationRequest::from_legacy_req(&request(json!({
+            "max_connected": 0,
+            "bchd_urls": [],
+        })))
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Unusable Electrum connection settings: 'max_connected' must be at least 1"));
+
+        let qrc20 = Qrc20ActivationParams::from_legacy_req(&request(json!({
+            "max_connected": 1,
+            "swap_contract_address": "0x2f754733acd6d753731c00fee32cb484551cc15d",
+        })))
+        .unwrap();
+        assert_eq!(settings(&qrc20.utxo_params), (2, None, Some(1)));
+    }
+
+    /// The error the legacy `electrum` method answers (HTTP 500 with `{"error": string}`, R55.1.10) is the
+    /// string `lp_coininit` returns; no connection is attempted before the settings are refused.
+    #[test]
+    fn lp_coininit_refuses_unusable_values_before_connecting() {
+        let ctx = MmCtxBuilder::new()
+            .with_conf(json!({ "coins": [{ "coin": "RCK", "mm2": 1, "protocol": { "type": "UTXO" } }] }))
+            .into_mm_arc();
+        CryptoCtx::init_with_iguana_passphrase(ctx.clone(), "legacy electrum settings test").unwrap();
+        let error = block_on(lp_coininit(
+            &ctx,
+            "RCK",
+            &request(json!({ "min_connected": 2, "max_connected": 1 })),
+        ))
+        .err()
+        .expect("the request must be refused");
+        assert!(
+            error.contains("Unusable Electrum connection settings: 'min_connected' must not exceed 'max_connected'"),
+            "{error}"
+        );
+        let error = block_on(lp_coininit(&ctx, "RCK", &request(json!({ "max_connected": "one" }))))
+            .err()
+            .expect("the request must be refused");
+        assert!(
+            error.contains("Invalid 'max_connected': invalid type: string \"one\", expected usize"),
+            "{error}"
+        );
+    }
+
+    /// Two loopback servers, `max_connected: 1`: the client builder opens a single connection in the background.
+    /// With the default maximum it opens one per server.
+    #[test]
+    fn the_client_builder_honors_max_connected() {
+        let listeners: Vec<_> = (0..2).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+        let servers: Vec<_> = listeners
+            .iter()
+            .map(|listener| json!({ "url": listener.local_addr().unwrap().to_string() }))
+            .collect();
+
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let build = |extra: Json| {
+            let mut req = request(extra);
+            req["servers"] = json!(servers);
+            let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+            let builder = UtxoArcBuilder::new(
+                &ctx,
+                TEST_COIN_NAME,
+                &Json::Null,
+                &params,
+                PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::default()),
+                UtxoStandardCoin::from,
+            );
+            let args = ElectrumBuilderArgs {
+                spawn_ping: false,
+                negotiate_version: false,
+                collect_metrics: false,
+            };
+            let (servers, min_connected, max_connected) = match params.mode.clone() {
+                UtxoRpcMode::Electrum {
+                    servers,
+                    min_connected,
+                    max_connected,
+                } => (servers, min_connected, max_connected),
+                UtxoRpcMode::Native => unreachable!(),
+            };
+            block_on(builder.electrum_client(args, servers, min_connected, max_connected)).unwrap()
+        };
+
+        // The pool is made of both servers, but the maintained set stays at the ceiling.
+        let limited = build(json!({ "max_connected": 1 }));
+        assert_eq!(block_on(limited.count_connections()), 2);
+        wait_for_maintained(&limited, 1);
+        block_on(Timer::sleep(0.3));
+        assert_eq!(block_on(limited.count_connected()), 1);
+
+        let unlimited = build(json!({}));
+        assert_eq!(block_on(unlimited.count_connections()), 2);
+        wait_for_maintained(&unlimited, 2);
+    }
+}
+
+/// The client builder against scripted Electrum servers (CRD ch.38 R38.6.4k-R, T38.6.4.12-R). The builder
+/// uses the production timings, so these tests keep every server fast or refusing.
+#[cfg(not(target_arch = "wasm32"))]
+mod electrum_pool_activation {
+    use super::*;
+    use crate::utxo::rpc_clients::electrum_stub_server::{StubBehavior, StubServer};
+    use std::time::{Duration, Instant};
+
+    fn build_client(servers: &[&StubServer]) -> crate::utxo::utxo_builder::UtxoCoinBuildResult<ElectrumClient> {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let servers: Vec<_> = servers.iter().map(|server| json!({ "url": server.addr() })).collect();
+        let req = json!({ "method": "electrum", "servers": servers });
+        let params = UtxoActivationParams::from_legacy_req(&req).unwrap();
+        let builder = UtxoArcBuilder::new(
+            &ctx,
+            TEST_COIN_NAME,
+            &Json::Null,
+            &params,
+            PrivKeyBuildPolicy::IguanaPrivKey(keys::Secret::default()),
+            UtxoStandardCoin::from,
+        );
+        let args = ElectrumBuilderArgs {
+            spawn_ping: false,
+            negotiate_version: true,
+            collect_metrics: false,
+        };
+        let servers = match params.mode.clone() {
+            UtxoRpcMode::Electrum { servers, .. } => servers,
+            UtxoRpcMode::Native => unreachable!(),
+        };
+        block_on(builder.electrum_client(args, servers, None, None))
+    }
+
+    /// T38.6.4.12-R: the build waits for the first connection and no longer, and the block-height query that
+    /// follows is answered over it.
+    #[test]
+    fn the_build_waits_for_the_first_connection_and_the_height_is_then_answered() {
+        let servers = block_on(async {
+            let servers = [
+                StubServer::start(StubBehavior::Answer).await,
+                StubServer::start(StubBehavior::Answer).await,
+            ];
+            for server in &servers {
+                server.set_accept_delay(Duration::from_millis(300));
+                server.set_result("blockchain.headers.subscribe", json!({"height": 777, "hex": "00"}));
+            }
+            servers
+        });
+
+        let started = Instant::now();
+        let client = build_client(&[&servers[0], &servers[1]]).unwrap();
+        let built_after = started.elapsed();
+        assert!(built_after >= Duration::from_millis(250), "{built_after:?}");
+        assert!(built_after < Duration::from_secs(5), "{built_after:?}");
+        assert!(block_on(client.count_connected()) >= 1);
+
+        assert_eq!(block_on(client.get_block_count().compat()).unwrap(), 777);
+    }
+
+    /// T38.6.4.12-R: with no server reachable the build fails at once, naming the coin and every server; the
+    /// activation reports it as `Transport` (CRD ch.55 R55.5.14, tested in `coins_activation`).
+    #[test]
+    fn an_unreachable_server_set_fails_the_build_naming_each_server() {
+        let servers = block_on(async {
+            [
+                StubServer::start(StubBehavior::Down).await,
+                StubServer::start(StubBehavior::Down).await,
+            ]
+        });
+        let started = Instant::now();
+        let error = build_client(&[&servers[0], &servers[1]]).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        let crate::utxo::utxo_builder::UtxoCoinBuildError::FailedToConnectToElectrums(failure) = error.into_inner()
+        else {
+            panic!("an unreachable server set is a connection failure");
+        };
+        for server in &servers {
+            assert!(failure.contains(&server.addr()), "{failure}");
+        }
+        assert!(failure.contains(TEST_COIN_NAME), "{failure}");
+    }
+
+    /// The wallet maintainer's case: the first listed servers are down or silent, a later one is up. The coin is
+    /// enabled in the time of the live server's connection, not after the silent server's 20 s, and its
+    /// block-height query is answered.
+    #[test]
+    fn dead_servers_first_and_a_live_one_last_do_not_stall_the_activation() {
+        let servers = block_on(async {
+            let servers = [
+                StubServer::start(StubBehavior::Down).await,
+                StubServer::start(StubBehavior::Silent).await,
+                StubServer::start(StubBehavior::Answer).await,
+            ];
+            servers[2].set_result("blockchain.headers.subscribe", json!({"height": 4242, "hex": "00"}));
+            servers
+        });
+        let started = Instant::now();
+        let client = build_client(&[&servers[0], &servers[1], &servers[2]]).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(block_on(client.count_connected()), 1);
+        let height = block_on(client.get_block_count().compat()).unwrap();
+        assert_eq!(height, 4242);
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+}
+
+// ---- Order-posting latency: one Electrum request message per legacy-address read (CRD ch.38 R38.6.3a) and one
+// fee reading per coin and order-posting request (R38.6.6j item 1) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod order_posting_latency {
+    use super::*;
+    use crate::request_fee_scope::with_request_fee_scope;
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::utxo::utxo_common::{address_balance, get_all_unspent_ordered_list};
+    use crate::{FeeApproxStage, TradePreimageValue};
+    use serde_json::Value as Json;
+
+    /// What the scripted Electrum server holds for the coin of the tests below: the balance and the unspent list of
+    /// the coin's P2PKH script hash, the unspent list of its P2PK script hash, and the fee readings.
+    fn script_electrum(server: &StubServer, p2pkh_hash: &str, p2pk_hash: &str) {
+        server.set_scripthash_result(
+            "blockchain.scripthash.get_balance",
+            p2pkh_hash,
+            json!({"confirmed": 1_000_000, "unconfirmed": 5}),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            p2pkh_hash,
+            json!([
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 900_000},
+                {"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": 900_000},
+            ]),
+        );
+        server.set_scripthash_result(
+            "blockchain.scripthash.listunspent",
+            p2pk_hash,
+            json!([
+                {"tx_hash": "02".repeat(32), "tx_pos": 3, "height": 11, "value": 100_000}
+            ]),
+        );
+        server.set_result("blockchain.estimatefee", json!(0.0001));
+        server.set_result("blockchain.relayfee", json!(0.00002));
+    }
+
+    /// The P2PKH and P2PK script hashes of the test coin's address. The scripted server needs them, and they depend
+    /// on the seed's key; the coin is built once here to learn its address and key, and again with the client that
+    /// answers for them.
+    pub(super) fn script_hashes_of_test_coin(segwit: bool) -> (String, String) {
+        let probe = utxo_coin_fields_for_test(UtxoRpcClientEnum::Native(native_client_for_test()), None, segwit);
+        let address = match &probe.derivation_method {
+            DerivationMethod::Iguana(address) => address.clone(),
+            _ => unreachable!("the test coin has an Iguana address"),
+        };
+        let p2pkh = output_script(&address, ScriptType::P2PKH);
+        let p2pk = Builder::build_p2pk(probe.priv_key_policy.key_pair().unwrap().public());
+        (
+            hex::encode(electrum_script_hash(&p2pkh)),
+            hex::encode(electrum_script_hash(&p2pk)),
+        )
+    }
+
+    /// A coin on a scripted Electrum server. Returns the coin and the stub server, which has recorded the request messages.
+    fn coin_on_scripted_electrum(
+        segwit: bool,
+        fee: TxFee,
+        force_min_relay_fee: bool,
+    ) -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(segwit);
+        let (client, server) = electrum_client_over_stub(|server| script_electrum(server, &p2pkh_hash, &p2pk_hash));
+        let mut fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, segwit);
+        fields.tx_fee = fee;
+        fields.conf.force_min_relay_fee = force_min_relay_fee;
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    pub(super) fn my_address(coin: &UtxoStandardCoin) -> Address {
+        match &coin.as_ref().derivation_method {
+            DerivationMethod::Iguana(address) => address.clone(),
+            _ => unreachable!("the test coin has an Iguana address"),
+        }
+    }
+
+    /// The `(method, scripthash)` lookups of every request message, one entry per message.
+    pub(super) fn lookups(server: &StubServer) -> Vec<Vec<(String, String)>> {
+        server
+            .request_messages()
+            .iter()
+            .map(|message| {
+                let requests = match message.as_array() {
+                    Some(batch) => batch.clone(),
+                    None => vec![message.clone()],
+                };
+                requests
+                    .iter()
+                    .map(|r| {
+                        (
+                            r["method"].as_str().unwrap().to_owned(),
+                            r["params"][0].as_str().unwrap_or_default().to_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    pub(super) fn count_requests(server: &StubServer, method: &str) -> usize {
+        lookups(server).iter().flatten().filter(|(m, _)| m == method).count()
+    }
+
+    /// R38.6.3a: a legacy-address balance read is ONE request message carrying the P2PKH balance lookup and the
+    /// P2PK lookup, and the balance is the same as before: the P2PKH balance plus the P2PK unspents.
+    #[test]
+    fn legacy_address_balance_read_is_one_request_message() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        let balance = block_on(address_balance(&coin, &my_address(&coin))).unwrap();
+
+        // (1_000_000 + 5) base units of the P2PKH script, plus the 100_000 of the P2PK output; 8 decimals.
+        assert_eq!(balance.spendable, "0.01100005".parse::<BigDecimal>().unwrap());
+        assert_eq!(balance.unspendable, BigDecimal::from(0));
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "one request message: {:?}", sent);
+        assert_eq!(sent[0].len(), 2);
+        assert_eq!(sent[0][0].0, "blockchain.scripthash.get_balance");
+        assert_eq!(sent[0][1].0, "blockchain.scripthash.listunspent");
+    }
+
+    /// R38.6.3a: a legacy-address unspent-list read is ONE request message, and the unspents are those of
+    /// before: the P2PKH ones (de-duplicated) and the P2PK one.
+    #[test]
+    fn legacy_address_unspent_list_read_is_one_request_message() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &my_address(&coin))).unwrap();
+
+        let mut values: Vec<_> = unspents.iter().map(|u| u.value).collect();
+        values.sort();
+        assert_eq!(values, vec![100_000, 900_000]);
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "one request message: {:?}", sent);
+        assert_eq!(sent[0].len(), 2);
+        assert!(sent[0].iter().all(|(m, _)| m == "blockchain.scripthash.listunspent"));
+        assert_ne!(sent[0][0].1, sent[0][1].1, "the P2PKH and the P2PK script hashes");
+    }
+
+    /// R38.6.3a: a segwit address sends the P2PKH lookup alone, as before.
+    #[test]
+    fn segwit_address_reads_send_the_p2pkh_lookup_alone() {
+        let (coin, server) = coin_on_scripted_electrum(true, TxFee::FixedPerKb(1000), false);
+        let balance = block_on(address_balance(&coin, &my_address(&coin))).unwrap();
+        assert_eq!(balance.spendable, "0.01000005".parse::<BigDecimal>().unwrap());
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 1, "{:?}", sent);
+        assert_eq!(sent[0].len(), 1);
+        assert_eq!(sent[0][0].0, "blockchain.scripthash.get_balance");
+
+        let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &my_address(&coin))).unwrap();
+        assert_eq!(unspents.iter().map(|u| u.value).collect::<Vec<_>>(), vec![900_000]);
+        let sent = lookups(&server);
+        assert_eq!(sent.len(), 2, "{:?}", sent);
+        assert_eq!(sent[1].len(), 1);
+        assert_eq!(sent[1][0].0, "blockchain.scripthash.listunspent");
+    }
+
+    /// R38.6.6j item 1: inside one order-posting request the spend check, the sender trade fee, the receiver
+    /// trade fee and a second spend check read a dynamic-fee coin's estimate exactly once.
+    #[test]
+    fn dynamic_fee_estimate_is_read_once_per_order_posting_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), false);
+        let (spend_safe, receiver_fee) = block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                let first = coin.spend_safe_amount().await.unwrap();
+                let sender = coin
+                    .get_sender_trade_fee(
+                        TradePreimageValue::Exact("0.001".parse().unwrap()),
+                        FeeApproxStage::OrderIssue,
+                    )
+                    .await
+                    .unwrap();
+                assert!(sender.amount.to_decimal() > BigDecimal::from(0));
+                let receiver = coin
+                    .get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                    .compat()
+                    .await
+                    .unwrap();
+                let second = coin.spend_safe_amount().await.unwrap();
+                assert_eq!(first, second);
+                (first, receiver)
+            },
+        ));
+        assert!(spend_safe.is_some());
+        // 0.0001 coin/kB over the 496 byte HTLC spend.
+        assert_eq!(
+            receiver_fee.amount.to_decimal(),
+            "0.0000496".parse::<BigDecimal>().unwrap()
+        );
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 1);
+    }
+
+    /// R38.6.6j item 3: outside an order-posting request every consumer reads a fresh estimate, as swap
+    /// execution does.
+    #[test]
+    fn dynamic_fee_estimate_is_read_fresh_outside_a_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), false);
+        block_on(async {
+            coin.spend_safe_amount().await.unwrap();
+            coin.spend_safe_amount().await.unwrap();
+            coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                .compat()
+                .await
+                .unwrap();
+        });
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 3);
+    }
+
+    /// R38.6.6j item 1: the forced minimum relay fee is read once per request as well, and afresh outside one.
+    #[test]
+    fn forced_min_relay_fee_is_read_once_per_order_posting_request() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::Dynamic(EstimateFeeMethod::Standard), true);
+        block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async {
+                coin.spend_safe_amount().await.unwrap();
+                coin.get_receiver_trade_fee(FeeApproxStage::OrderIssue)
+                    .compat()
+                    .await
+                    .unwrap();
+                coin.spend_safe_amount().await.unwrap();
+            },
+        ));
+        assert_eq!(count_requests(&server, "blockchain.relayfee"), 1);
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 1);
+
+        block_on(async {
+            coin.spend_safe_amount().await.unwrap();
+            coin.spend_safe_amount().await.unwrap();
+        });
+        assert_eq!(count_requests(&server, "blockchain.relayfee"), 3);
+        assert_eq!(count_requests(&server, "blockchain.estimatefee"), 3);
+    }
+
+    /// CRD ch.38 R38.6.4a item 4: the recently-spent-output cache shields a read that follows this node's own
+    /// broadcast from a session that has not seen it yet, whichever session answers. The broadcast goes to the
+    /// first server, the next unspent-list read is answered by the second, which still lists the spent output, and
+    /// so is the one after it by the third; the spent output stays out and its replacement is in.
+    #[test]
+    fn a_spent_output_stays_excluded_when_another_session_answers_the_read() {
+        use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stubs;
+        use crate::utxo::rpc_clients::UnspentInfo;
+        use chain::TransactionOutput;
+
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let servers = block_on(async {
+            [
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+                StubServer::start(crate::utxo::rpc_clients::electrum_stub_server::StubBehavior::Answer).await,
+            ]
+        });
+        for server in &servers {
+            // None of them has seen the broadcast: every one still lists the output the broadcast spends.
+            script_electrum(server, &p2pkh_hash, &p2pk_hash);
+            server.set_result("blockchain.transaction.broadcast", json!("ab".repeat(32)));
+        }
+        let client = block_on(electrum_client_over_stubs(&[&servers[0], &servers[1], &servers[2]]));
+        let coin = utxo_coin_from_fields(utxo_coin_fields_for_test(
+            UtxoRpcClientEnum::Electrum(client),
+            None,
+            false,
+        ));
+        let address = my_address(&coin);
+
+        // The first read (the first server's turn) shows the output the node is about to spend.
+        let (unspents, guard) = block_on(get_all_unspent_ordered_list(&coin, &address)).unwrap();
+        drop(guard);
+        let spent: UnspentInfo = unspents.iter().find(|u| u.value == 900_000).cloned().unwrap();
+
+        // The node broadcasts a spend of it (priority routing: the first server), and records it as sent.
+        block_on(
+            coin.as_ref()
+                .rpc_client
+                .send_raw_transaction(vec![1, 2, 3].into())
+                .compat(),
+        )
+        .unwrap();
+        let change_script = output_script(&address, ScriptType::P2PKH).to_bytes();
+        block_on(async {
+            coin.as_ref().recently_spent_outpoints.lock().await.add_spent(
+                vec![spent.clone()],
+                H256::from([9; 32]),
+                vec![TransactionOutput {
+                    value: 800_000,
+                    script_pubkey: change_script,
+                }],
+            );
+        });
+
+        // The next two reads are answered by the second and the third server, which know nothing of the spend.
+        for _ in 0..2 {
+            let (unspents, _guard) = block_on(get_all_unspent_ordered_list(&coin, &address)).unwrap();
+            let mut values: Vec<_> = unspents.iter().map(|u| u.value).collect();
+            values.sort();
+            assert_eq!(values, vec![100_000, 800_000], "the spent 900_000 is excluded");
+            assert!(unspents.iter().all(|u| u.outpoint != spent.outpoint));
+        }
+        let listed = |server: &StubServer| count_requests(server, "blockchain.scripthash.listunspent");
+        assert_eq!(count_requests(&servers[0], "blockchain.transaction.broadcast"), 1);
+        assert_eq!(count_requests(&servers[1], "blockchain.transaction.broadcast"), 0);
+        // Two lookups (P2PKH and P2PK) per read: the first server answered one read, the others one each.
+        assert_eq!([listed(&servers[0]), listed(&servers[1]), listed(&servers[2])], [
+            2, 2, 2
+        ]);
+    }
+
+    /// A fixed-fee coin has nothing to read, in or out of a request.
+    #[test]
+    fn fixed_fee_coin_reads_nothing() {
+        let (coin, server) = coin_on_scripted_electrum(false, TxFee::FixedPerKb(1000), false);
+        block_on(with_request_fee_scope(
+            &mm2_core::mm_ctx::MmCtxBuilder::default().into_mm_arc(),
+            async { coin.spend_safe_amount().await.unwrap() },
+        ));
+        assert!(lookups(&server).is_empty());
+    }
+}
+
+// ---- A withdraw's spend is recorded when its broadcast is accepted (CRD ch.38 R38.5B.9, tests T38.5B.1-T38.5B.10) ----
+
+#[cfg(not(target_arch = "wasm32"))]
+mod withdraw_recent_spent {
+    use super::order_posting_latency::{count_requests, my_address, script_hashes_of_test_coin};
+    use super::*;
+    use crate::rpc_command::init_withdraw::{init_withdraw, withdraw_status, WithdrawCompatRpcStatus,
+                                            WithdrawStatusRequest};
+    use crate::utxo::rpc_clients::electrum_rpc_client::electrum_client_over_stub;
+    use crate::utxo::rpc_clients::electrum_stub_server::StubServer;
+    use crate::{CoinsContext, MmCoinEnum, TransactionDetails};
+    use futures::compat::Future01CompatExt;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
+
+    /// The one output the scripted backend lists, whatever happens to it.
+    const LISTED_VALUE: u64 = 900_000;
+    const BROADCAST: &str = "blockchain.transaction.broadcast";
+    const TTL_MS: u64 = PENDING_WITHDRAW_TTL_MS;
+
+    fn listed_outpoint() -> OutPoint {
+        OutPoint {
+            hash: H256::from([1; 32]),
+            index: 0,
+        }
+    }
+
+    /// A coin on a scripted Electrum server that keeps listing one unspent output of the coin's address
+    /// (`LISTED_VALUE`, as a backend that has not indexed any broadcast would) and accepts every broadcast.
+    fn coin_on_backend() -> (UtxoStandardCoin, StubServer) {
+        let (p2pkh_hash, p2pk_hash) = script_hashes_of_test_coin(false);
+        let (client, server) = electrum_client_over_stub(|server| {
+            server.set_scripthash_result(
+                "blockchain.scripthash.listunspent",
+                &p2pkh_hash,
+                json!([{"tx_hash": "01".repeat(32), "tx_pos": 0, "height": 10, "value": LISTED_VALUE}]),
+            );
+            server.set_scripthash_result("blockchain.scripthash.listunspent", &p2pk_hash, json!([]));
+            server.set_result(BROADCAST, json!("ab".repeat(32)));
+        });
+        let fields = utxo_coin_fields_for_test(UtxoRpcClientEnum::Electrum(client), None, false);
+        (utxo_coin_from_fields(fields), server)
+    }
+
+    fn withdraw_request() -> WithdrawRequest {
+        WithdrawRequest {
+            amount: "0.001".parse().unwrap(),
+            from: None,
+            to: "RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa".to_string(),
+            coin: TEST_COIN_NAME.into(),
+            max: false,
+            fee: None,
+        }
+    }
+
+    fn legacy_withdraw(coin: &UtxoStandardCoin) -> TransactionDetails {
+        block_on(coin.withdraw(withdraw_request()).compat()).unwrap()
+    }
+
+    /// Drives `task::withdraw::init` to its terminal status through the real task path.
+    fn task_withdraw(ctx: &MmArc) -> TransactionDetails {
+        let init = block_on(init_withdraw(ctx.clone(), withdraw_request())).unwrap();
+        let started = Instant::now();
+        loop {
+            let request = WithdrawStatusRequest {
+                task_id: init.task_id,
+                forget_if_finished: false,
+            };
+            let status = block_on(withdraw_status(ctx.clone(), request)).unwrap_or_else(|e| panic!("{}", e));
+            match status {
+                WithdrawCompatRpcStatus::Ok(details) => return details,
+                WithdrawCompatRpcStatus::Error(e) => panic!("the task withdraw failed: {:?}", e),
+                _ => (),
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the task withdraw did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn tx_of(details: &TransactionDetails) -> UtxoTx { deserialize(details.tx_hex.as_slice()).unwrap() }
+
+    fn inputs_of(tx: &UtxoTx) -> Vec<OutPoint> { tx.inputs.iter().map(|i| i.previous_output.clone()).collect() }
+
+    /// The unspent list a spend is built from, as the withdraw path reads it.
+    fn listing(coin: &UtxoStandardCoin) -> Vec<UnspentInfo> {
+        let (unspents, _guard) = block_on(coin.get_unspent_ordered_list(&my_address(coin))).unwrap();
+        unspents
+    }
+
+    /// The change output of a withdraw built by the tests, as the listing offers it once the spend is recorded.
+    fn change_of(coin: &UtxoStandardCoin, tx: &UtxoTx) -> UnspentInfo {
+        let script = Builder::build_p2pkh(&my_address(coin).hash).to_bytes();
+        let (index, output) = tx
+            .outputs
+            .iter()
+            .enumerate()
+            .find(|(_, output)| output.script_pubkey == script)
+            .expect("the withdraw has a change output");
+        UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx.hash(),
+                index: index as u32,
+            },
+            value: output.value,
+            height: None,
+        }
+    }
+
+    fn broadcast_hex(coin: &UtxoStandardCoin, details: &TransactionDetails) -> Result<String, String> {
+        block_on(coin.send_raw_tx(&hex::encode(&details.tx_hex.0)).compat())
+    }
+
+    fn record_is_empty(coin: &UtxoStandardCoin) -> bool {
+        let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        record.input_to_output_map.is_empty() && record.output_to_input_map.is_empty()
+    }
+
+    fn pending_count(coin: &UtxoStandardCoin) -> usize {
+        block_on(coin.as_ref().recently_spent_outpoints.lock())
+            .pending_withdraws
+            .len()
+    }
+
+    fn only_pending_created_ms(coin: &UtxoStandardCoin) -> u64 {
+        let record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        assert_eq!(record.pending_withdraws.len(), 1);
+        record.pending_withdraws.values().next().unwrap().created_ms
+    }
+
+    /// T38.5B.1 (R38.5B.1): a swap-side send enters the record only once the backend has accepted the broadcast.
+    #[test]
+    fn swap_side_send_is_recorded_only_after_acceptance() {
+        let (coin, server) = coin_on_backend();
+        let to_other = TransactionOutput {
+            value: 100_000,
+            script_pubkey: Builder::build_p2pkh(&Address::from("RQq6fWoy8aGGMLjvRfMY5mBNVm2RQxJyLa").hash).to_bytes(),
+        };
+        let before = listing(&coin);
+        assert_eq!(before.iter().map(|u| u.outpoint.clone()).collect::<Vec<_>>(), vec![
+            listed_outpoint()
+        ]);
+
+        // The backend refuses: the record and the next listing are unchanged.
+        server.set_error(BROADCAST, "txn-mempool-conflict");
+        block_on(send_outputs_from_my_address_impl(coin.clone(), vec![to_other.clone()])).unwrap_err();
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+
+        // The backend accepts, and keeps listing the spent input: the listing omits it and offers the change.
+        server.clear_error(BROADCAST);
+        let sent = block_on(send_outputs_from_my_address_impl(coin.clone(), vec![to_other])).unwrap();
+        let after = listing(&coin);
+        assert_eq!(after, vec![change_of(&coin, &sent)]);
+    }
+
+    /// T38.5B.2 (R38.5B.2, R38.5B.9 item 3): withdraws alone write nothing to the record.
+    #[test]
+    fn withdraws_alone_write_nothing_to_the_record() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let first = tx_of(&legacy_withdraw(&coin));
+        let second = tx_of(&legacy_withdraw(&coin));
+
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+    }
+
+    /// T38.5B.3 (R38.5B.9 items 2 and 6): an accepted broadcast of a withdraw's bytes records the spend.
+    #[test]
+    fn accepted_broadcast_of_a_withdraw_records_the_spend() {
+        let (coin, server) = coin_on_backend();
+        let first_details = legacy_withdraw(&coin);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        assert_eq!(count_requests(&server, BROADCAST), 1);
+        assert_eq!(pending_count(&coin), 0, "the pending entry was promoted");
+        // The backend still lists the input; the listing omits it and offers the change in its place.
+        let change = change_of(&coin, &first);
+        assert_eq!(listing(&coin), vec![change.clone()]);
+
+        // A second withdraw excludes the first one's input and spends its change.
+        let second = tx_of(&legacy_withdraw(&coin));
+        assert_eq!(inputs_of(&second), vec![change.outpoint]);
+    }
+
+    /// T38.5B.3, task path: the same assertions hold for `task::withdraw::*`.
+    #[test]
+    fn accepted_broadcast_of_a_task_withdraw_records_the_spend() {
+        let (coin, _server) = coin_on_backend();
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        let coins_ctx = CoinsContext::from_ctx(&ctx).unwrap();
+        block_on(coins_ctx.add_coin(MmCoinEnum::UtxoCoin(coin.clone()))).unwrap();
+
+        let first_details = task_withdraw(&ctx);
+        let first = tx_of(&first_details);
+        assert_eq!(inputs_of(&first), vec![listed_outpoint()]);
+        assert!(record_is_empty(&coin), "building and signing writes nothing");
+        assert_eq!(pending_count(&coin), 1);
+
+        broadcast_hex(&coin, &first_details).unwrap();
+        let change = change_of(&coin, &first);
+        assert_eq!(listing(&coin), vec![change.clone()]);
+
+        let second = tx_of(&task_withdraw(&ctx));
+        assert_eq!(inputs_of(&second), vec![change.outpoint]);
+    }
+
+    /// The byte-carrier form of the helper behaves like the hex form.
+    #[test]
+    fn send_raw_tx_bytes_promotes_like_send_raw_tx() {
+        let (coin, _server) = coin_on_backend();
+        let details = legacy_withdraw(&coin);
+        let first = tx_of(&details);
+
+        block_on(coin.send_raw_tx_bytes(&details.tx_hex.0).compat()).unwrap();
+        assert_eq!(pending_count(&coin), 0);
+        assert_eq!(listing(&coin), vec![change_of(&coin, &first)]);
+    }
+
+    /// T38.5B.6 (R38.5B.9 item 2, R38.5B.6): a refused broadcast records nothing, keeps the legacy refusal shape and
+    /// leaves the pending entry to age out.
+    #[test]
+    fn refused_broadcast_records_nothing() {
+        let (coin, server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+
+        server.set_error(BROADCAST, "txn-mempool-conflict");
+        let error = broadcast_hex(&coin, &details).unwrap_err();
+        assert!(error.contains("txn-mempool-conflict"), "{}", error);
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+        assert_eq!(pending_count(&coin), 1, "the entry is still pending");
+        let second = tx_of(&legacy_withdraw(&coin));
+        assert_eq!(inputs_of(&second), vec![listed_outpoint()]);
+
+        // The entry ages out.
+        let created = only_pending_created_ms(&coin);
+        let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+        assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &[7, 7, 7]));
+        assert!(record.pending_withdraws.is_empty());
+    }
+
+    /// T38.5B.7 (R38.5B.9 item 3): a withdraw that is never broadcast hides nothing, at once or later.
+    #[test]
+    fn unbroadcast_withdraw_hides_nothing_and_ages_out() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+
+        assert_eq!(listing(&coin), before);
+        let created = only_pending_created_ms(&coin);
+
+        // Just short of the lifetime the entry is still there; after it, an entry made later drops it.
+        {
+            let mut record = block_on(coin.as_ref().recently_spent_outpoints.lock());
+            record.note_pending_withdraw_at(created + TTL_MS - 1, &[1], vec![], H256::from([3; 32]), vec![]);
+            assert_eq!(record.pending_withdraws.len(), 2);
+            record.note_pending_withdraw_at(created + TTL_MS, &[2], vec![], H256::from([4; 32]), vec![]);
+            assert_eq!(
+                record.pending_withdraws.len(),
+                2,
+                "the withdraw's entry is gone, the two newer remain"
+            );
+            // An expired entry is not promoted by a broadcast that arrives late.
+            assert!(!record.promote_pending_withdraw_at(created + TTL_MS, &details.tx_hex.0));
+        }
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before, "no phantom change output is offered");
+    }
+
+    /// T38.5B.8 (R38.5B.9 item 2): bytes the node did not build promote nothing and change nothing.
+    #[test]
+    fn bytes_the_node_did_not_build_promote_nothing() {
+        let (coin, _server) = coin_on_backend();
+        let before = listing(&coin);
+        let details = legacy_withdraw(&coin);
+        let mut reserialized = tx_of(&details);
+        reserialized.lock_time += 1;
+
+        // A transaction no withdraw built, and one a caller re-serialized after the withdraw.
+        block_on(coin.send_raw_tx_bytes(&[1, 2, 3]).compat()).unwrap();
+        block_on(coin.send_raw_tx_bytes(&serialize(&reserialized)).compat()).unwrap();
+
+        assert!(record_is_empty(&coin));
+        assert_eq!(listing(&coin), before);
+        assert_eq!(pending_count(&coin), 1, "the withdraw's own entry is untouched");
+    }
+
+    /// T38.5B.9 (R38.5B.9 item 3): at most 64 pending entries are kept, the oldest dropped first, and an entry
+    /// older than ten minutes is dropped when the next one is made.
+    #[test]
+    fn pending_entries_are_bounded_and_expire() {
+        let script = Bytes::from(vec![5u8; 25]);
+        let mut record = RecentlySpentOutPoints::new(script);
+        let digest = |i: u8| sha256(&[i]);
+
+        for i in 0..70u8 {
+            record.note_pending_withdraw_at(1_000 + i as u64, &[i], vec![], H256::from([i; 32]), vec![]);
+        }
+        assert_eq!(record.pending_withdraws.len(), PENDING_WITHDRAW_CAP);
+        let kept: HashSet<_> = record.pending_withdraws.keys().cloned().collect();
+        let expected: HashSet<_> = (6..70u8).map(digest).collect();
+        assert_eq!(kept, expected, "the six oldest were dropped");
+
+        // Entries made within one millisecond are dropped in the order they were made.
+        let mut same_ms = RecentlySpentOutPoints::new(Bytes::from(vec![5u8; 25]));
+        for i in 0..65u8 {
+            same_ms.note_pending_withdraw_at(500, &[i], vec![], H256::from([i; 32]), vec![]);
+        }
+        assert!(!same_ms.pending_withdraws.contains_key(&digest(0)));
+        assert!(same_ms.pending_withdraws.contains_key(&digest(64)));
+
+        // Ten minutes: an entry exactly that old is dropped by the next entry; a younger one stays.
+        let mut aging = RecentlySpentOutPoints::new(Bytes::from(vec![5u8; 25]));
+        aging.note_pending_withdraw_at(0, &[1], vec![], H256::from([1; 32]), vec![]);
+        aging.note_pending_withdraw_at(1, &[2], vec![], H256::from([2; 32]), vec![]);
+        aging.note_pending_withdraw_at(TTL_MS, &[3], vec![], H256::from([3; 32]), vec![]);
+        let kept: HashSet<_> = aging.pending_withdraws.keys().cloned().collect();
+        assert_eq!(kept, [digest(2), digest(3)].into_iter().collect::<HashSet<_>>());
+    }
+
+    /// T38.5B.10 (R38.5B.9 item 3, D38.5B.2): an entry promoted into the record does not expire.
+    #[test]
+    fn promoted_entry_does_not_expire() {
+        let own_script = Bytes::from(vec![5u8; 25]);
+        let mut record = RecentlySpentOutPoints::new(own_script.clone());
+        let spent = UnspentInfo {
+            outpoint: listed_outpoint(),
+            value: LISTED_VALUE,
+            height: Some(10),
+        };
+        let tx_hash = H256::from([9; 32]);
+        let outputs = vec![
+            TransactionOutput {
+                value: 100_000,
+                script_pubkey: Bytes::from(vec![6u8; 25]),
+            },
+            TransactionOutput {
+                value: 790_000,
+                script_pubkey: own_script,
+            },
+        ];
+        record.note_pending_withdraw_at(1_000, &[1, 2, 3], vec![spent.clone()], tx_hash, outputs);
+        assert!(record.promote_pending_withdraw_at(1_001, &[1, 2, 3]));
+
+        // Far beyond the pending lifetime, other entries come and go, and the record still holds the spend.
+        let much_later = 1_000 + 1_000 * TTL_MS;
+        record.note_pending_withdraw_at(much_later, &[4], vec![], H256::from([4; 32]), vec![]);
+        assert!(!record.promote_pending_withdraw_at(much_later, &[1, 2, 3]));
+        let change = UnspentInfo {
+            outpoint: OutPoint {
+                hash: tx_hash,
+                index: 1,
+            },
+            value: 790_000,
+            height: None,
+        };
+        let replaced = record.replace_spent_outputs_with_cache([spent].into_iter().collect());
+        assert_eq!(replaced, [change].into_iter().collect::<HashSet<_>>());
     }
 }

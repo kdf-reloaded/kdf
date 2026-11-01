@@ -11,6 +11,12 @@ supported networks.
 
 ## Supported Networks
 
+Both production networks are supported side by side in one binary, and each uses its own
+fee rules. Netid 8762 stays usable in KDF Reloaded: the upstream v3.0 releases name it a
+retired identifier and refuse to start on it, and KDF Reloaded does not. Netid 6133 is the
+GLEEC network, upstream's default since v3.0, with a 2% trading fee (1% with GLEEC on one
+side of the pair). See the README for why the project keeps both.
+
 ### netid 8762 — AtomicDEX (Komodo)
 
 The original AtomicDEX network.
@@ -21,11 +27,28 @@ The original AtomicDEX network.
 | Discounted tickers | KMD |
 | Discounted fee rate | 9/7770 (~0.116%, 10% discount) |
 | Minimum fee | Taker coin's minimum transaction amount (no additional network floor) |
-| Burn | KMD taker only — 75% fee output, 25% OP_RETURN output |
+| Burn | KMD taker only — three ranges on the dust-floored total: at or below dust, a single fee output for exactly dust; above dust with a 75% share at or above dust, a 75%/25% fee/OP_RETURN split; otherwise a fee output of exactly dust and an OP_RETURN burn of the remainder |
+| No-fee waiver key | `0369aa10c061cd9e085f4adb7399375ba001b54136145cb748eb4c48657be13153` — a taker whose taker-coin swap public key equals this value pays no DEX fee, on both swap protocols, independently of the burn setting above |
+| Version-two no-fee tickers | `KMD` — a version-two swap with KMD on either side of the pair carries no dex fee |
 | Hardcoded seed nodes | None — provide `"seednodes"` in MM2.json |
 
+**Operator note:** a node on netid 8762 has no default seed nodes. Without `"seednodes"` in
+MM2.json (or `"i_am_seed": true`) it starts but finds no peers (found in swaplab testing,
+2026-10-26). See [Seed Nodes](#seed-nodes).
+
 Swap fee behavior on this network is pinned to the `v2.6.0-beta` compatibility
-reference. Non-KMD takers keep the standard single-output fee transaction.
+reference. Non-KMD takers keep the standard single-output fee transaction. For
+a KMD taker, the exact split is dust-aware, not a flat 75/25: a 0.01 KMD trade
+converts to a 1,000-base-unit fee output and a 158-base-unit OP_RETURN output,
+matching a `v2.6.0-beta` node on the wire (issue #11) — not the 868/289 an
+earlier revision of this project produced.
+
+The version-two no-fee ticker exemption is now wired into the version-two
+swap machinery itself (both roles, before and after negotiation): a
+version-two swap with `KMD` on either side carries `NoFee` end to end, and
+the taker-payment-spend preimage takes the single-output `NoFee` layout.
+Previously the accessor existed but nothing in the version-two path consulted
+it.
 
 ### netid 6133 — GLEEC DEX
 
@@ -38,11 +61,14 @@ The GLEEC decentralized exchange network.
 | Discounted fee rate | 1/100 (1%, 50% discount) |
 | Minimum fee | Taker coin's minimum transaction amount (no additional network floor) |
 | Burn | Disabled — all takers use a single standard fee output |
+| No-fee waiver key | `03a778d9bd346fa704cf3e2508cd074d93a1bbc1e504fbecbb0a8d48e7cccbbf5c` (equal to the fee key) — a taker whose taker-coin swap public key equals this value pays no DEX fee, on both swap protocols, even though burn is disabled |
+| Version-two no-fee tickers | None |
 | Hardcoded seed nodes | None — provide `"seednodes"` in MM2.json |
 
 Swap fee behavior on this network follows the applicable unreleased v3/dev
-compatibility reference. The configured inactive burn key is retained as a
-compatibility value but does not enable a burn transaction.
+compatibility reference. The configured burn key equals the fee key: it does
+not enable a burn split (burn stays disabled), but it is still live as the
+no-fee waiver key above — this does not depend on the burn setting.
 
 ### netid 7777 — Deprecated
 
@@ -92,6 +118,53 @@ the `"seednodes"` field in MM2.json, or run the node as a seed itself (`"i_am_se
 
 If `"seednodes"` is omitted and `"i_am_seed"` is not set, the node will start
 but will not be able to discover peers until it receives incoming connections.
+
+### Hostnames from Other Peers
+
+Nodes ask each other for peer addresses every five minutes, and some peers give a seed by its
+hostname instead of its IP address. KDF Reloaded looks such a name up through the operating
+system's resolver. It does at most one lookup at a time, looks the same name up at most once per
+30 minutes, and does no lookup while it is connected to that peer. It keeps the result only if it
+is a public IPv4 address on the network's port (see below for tests), and stores the address,
+never the name. Its own answers to other peers carry only such addresses. To turn this off, set:
+
+```json
+{
+  "p2p_resolve_peer_hostnames": false,
+  ...
+}
+```
+
+The node then skips every hostname a peer gives, without a lookup, and its own answers give each
+peer it dialed under the address it dialed, hostnames included.
+
+> **Compatibility:** for behavior matching GLEEC KDF (and the upstream pre-divergence Komodo DeFi
+> Framework), set this to `false`. *(GLEEC KDF never looks up a hostname it receives from a
+> peer.)*
+
+### Private Addresses (Tests Only)
+
+By default, a node keeps a peer address it learns from another peer only if it is a public IPv4
+address on the network's port. For a test network where every node has a private address, set:
+
+```json
+{
+  "p2p_allow_private_addresses": true,
+  ...
+}
+```
+
+The node then also keeps private, loopback and link-local IPv4 addresses, including those that a
+hostname resolves to, and logs a warning at start-up. Do not use this setting in production.
+
+> **Compatibility:** GLEEC KDF has no equivalent. Leave at the default to retain GLEEC-equivalent
+> behavior.
+
+Two resolvers are involved:
+- **Hostnames that other peers hand out** are looked up through the operating system's resolver,
+  so `/etc/hosts` entries and a local DNS server both work.
+- **Hostnames in `"seednodes"`** are resolved by the network transport through a fixed public
+  resolver. That resolver honors `/etc/hosts`, but not a local DNS server.
 
 ## Adding a New Network
 

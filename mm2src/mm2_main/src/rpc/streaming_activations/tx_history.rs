@@ -139,19 +139,19 @@ mod tests {
             .await
             .expect("timeout waiting for tx-history event")
             .expect("event channel closed");
-        assert_eq!(event.origin(), "TX_HISTORY:RICK");
+        assert_eq!(event.origin(), "TX_HISTORY:DOC");
         assert!(!event.is_error());
         event.get().1.clone()
     }
 
     #[test]
     fn tx_history_streamer_id_pins_activation_response_origin() {
-        let streamer = TxHistoryStreamer::new("RICK".to_owned());
-        assert_eq!(streamer.streamer_id().to_string(), "TX_HISTORY:RICK");
+        let streamer = TxHistoryStreamer::new("DOC".to_owned());
+        assert_eq!(streamer.streamer_id().to_string(), "TX_HISTORY:DOC");
         let response = EnableStreamingResponse::new(streamer.streamer_id().to_string());
         assert_eq!(
             serde_json::to_value(response).unwrap(),
-            json!({ "streamer_id": "TX_HISTORY:RICK" })
+            json!({ "streamer_id": "TX_HISTORY:DOC" })
         );
     }
 
@@ -160,13 +160,13 @@ mod tests {
         let ctx = MmCtxBuilder::default().into_mm_arc();
         let mut handle = ctx.event_stream_manager.new_client(1);
         ctx.event_stream_manager
-            .add(1, TxHistoryStreamer::new("RICK".to_owned()))
+            .add(1, TxHistoryStreamer::new("DOC".to_owned()))
             .await
             .unwrap();
 
         ctx.event_stream_manager
             .send(
-                &StreamerId::TxHistory("RICK".to_owned()),
+                &StreamerId::TxHistory("DOC".to_owned()),
                 TxHistoryStreamerInput::Records(vec![json!({ "internal_id": "a" }), json!({ "internal_id": "b" })]),
             )
             .unwrap();
@@ -186,24 +186,24 @@ mod tests {
         let mut handle1 = ctx.event_stream_manager.new_client(1);
         let mut handle2 = ctx.event_stream_manager.new_client(2);
         ctx.event_stream_manager
-            .add(1, TxHistoryStreamer::new("RICK".to_owned()))
+            .add(1, TxHistoryStreamer::new("DOC".to_owned()))
             .await
             .unwrap();
         ctx.event_stream_manager
-            .add(2, TxHistoryStreamer::new("RICK".to_owned()))
+            .add(2, TxHistoryStreamer::new("DOC".to_owned()))
             .await
             .unwrap();
 
         super::super::disable_streaming(ctx.clone(), super::super::DisableStreamingRequest {
             client_id: 1,
-            streamer_id: "TX_HISTORY:RICK".to_owned(),
+            streamer_id: "TX_HISTORY:DOC".to_owned(),
         })
         .await
         .unwrap();
 
         ctx.event_stream_manager
             .send(
-                &StreamerId::TxHistory("RICK".to_owned()),
+                &StreamerId::TxHistory("DOC".to_owned()),
                 TxHistoryStreamerInput::Records(vec![json!({ "internal_id": "after-disable" })]),
             )
             .unwrap();
@@ -219,6 +219,6 @@ mod tests {
         );
         assert!(ctx
             .event_stream_manager
-            .is_active(&StreamerId::TxHistory("RICK".to_owned())));
+            .is_active(&StreamerId::TxHistory("DOC".to_owned())));
     }
 }

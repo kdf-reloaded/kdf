@@ -1,4 +1,9 @@
 use super::*;
+use common::mm_number::DecimalMemo;
+use std::sync::LazyLock;
+
+/// Number of entries the memo of unreserved available amounts holds before it is emptied.
+const UNRESERVED_AVAILABLE_MEMO_CAPACITY: usize = 32_768;
 
 pub(crate) fn get_true() -> bool { true }
 
@@ -154,6 +159,132 @@ pub struct TakerOrderBuilder<'a> {
     pub(crate) swap_version: SwapVersion,
 }
 
+/// Returns the ticker of the first coin of the pair that cannot trade: a Lightning coin, until
+/// Lightning trading is supported, or a Solana coin or SPL token, whose swap, fee and trade-preimage
+/// operations are unimplemented (CRD ch.60 R60.2.3, R60.6.5). Order creation and the trade preimage
+/// refuse such a pair with an error before any of those operations is reached.
+pub(crate) fn untradable_coin_ticker(base: &MmCoinEnum, rel: &MmCoinEnum) -> Option<String> {
+    [base, rel]
+        .into_iter()
+        .find(|coin| is_untradable_coin(coin))
+        .map(|coin| coin.ticker().to_owned())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_untradable_coin(coin: &MmCoinEnum) -> bool {
+    matches!(
+        coin,
+        MmCoinEnum::LightningCoin(_) | MmCoinEnum::SolanaCoin(_) | MmCoinEnum::SplToken(_)
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_untradable_coin(_coin: &MmCoinEnum) -> bool { false }
+
+/// CRD ch.60 R60.6.7 item 7: the MM2.json boolean `pre_trade_spend_check`, default `true`. Only an explicit
+/// JSON `false` turns the pre-trade spend-safety check off, which is the reference behaviour.
+pub(crate) fn pre_trade_spend_check_enabled(ctx: &MmArc) -> bool {
+    ctx.conf["pre_trade_spend_check"].as_bool() != Some(false)
+}
+
+/// CRD ch.59 R59.4.6: the MM2.json boolean `suppress_unchanged_order_updates`, default `true`. Only an
+/// explicit JSON `false` makes `update_maker_order` broadcast an update that changes nothing.
+pub(crate) fn suppress_unchanged_order_updates(ctx: &MmArc) -> bool {
+    ctx.conf["suppress_unchanged_order_updates"].as_bool() != Some(false)
+}
+
+/// CRD ch.32 §32.9B R-MP1 item 5 (D9): the MM2.json boolean `maker_update_coalescing`, default `false`. Only an
+/// explicit JSON `true` turns the maker outbox on. Otherwise (missing, `false`, any other value) every maker-order
+/// message leaves at once, as without the outbox.
+pub(crate) fn maker_update_coalescing(ctx: &MmArc) -> bool {
+    ctx.conf["maker_update_coalescing"].as_bool() == Some(true)
+}
+
+/// CRD ch.32 §32.9B R-MP2 item 1: the MM2.json number `maker_update_rate_max`, the ceiling of the rate at
+/// which the outbox releases created and updated messages, per second per maker pubkey. The default is 20;
+/// a value that is not a positive finite number is ignored.
+pub(crate) fn maker_update_rate_max(ctx: &MmArc) -> f64 {
+    ctx.conf["maker_update_rate_max"]
+        .as_f64()
+        .filter(|rate| rate.is_finite() && *rate > 0.0)
+        .unwrap_or(DEFAULT_MAKER_UPDATE_RATE_MAX)
+}
+
+/// CRD ch.59 R59.6.1a: the MM2.json boolean `order_messages_refresh_liveness`, default `true`. Only an
+/// explicit JSON `false` makes a maker's liveness instant depend on its keep-alives alone, which is the
+/// reference behaviour.
+pub(crate) fn order_messages_refresh_liveness(ctx: &MmArc) -> bool {
+    ctx.conf["order_messages_refresh_liveness"].as_bool() != Some(false)
+}
+
+/// Refusal of the pre-trade spend-safety check (CRD ch.60 R60.6.7 items 4 and 6).
+#[derive(Debug, Display)]
+pub(crate) enum SpendSafetyError {
+    /// A covered leg of the smallest trade the order can produce is below the coin's safe amount.
+    #[display(
+        fmt = "The volume {} of the {} coin is too low, required at least {}: a payment of that size could not be spent or refunded",
+        volume,
+        coin,
+        threshold
+    )]
+    VolumeTooLow {
+        coin: String,
+        volume: BigDecimal,
+        threshold: BigDecimal,
+    },
+    /// The dynamic-fee estimate of a covered coin could not be obtained.
+    #[display(fmt = "Cannot check the {} coin spend safety: {}", coin, error)]
+    EstimateUnavailable { coin: String, error: String },
+}
+
+/// CRD ch.60 R60.6.7 items 2 to 6: the pre-trade spend-safety check of an order of this node's own.
+///
+/// The smallest trade the order can produce is its minimum volume of the base coin and that volume times
+/// `price` of the rel coin; each covered leg shall be at least that coin's safe amount. `min_base_vol` is the
+/// operator-set minimum volume, `None` for the default of R60.4.2 step 3, which is never raised by this check.
+/// An order the order builder refuses anyway (price below the minimum, operator-set minimum below the default)
+/// is left to the builder, whose refusals precede this one.
+pub(crate) async fn check_pre_trade_spend_safety(
+    ctx: &MmArc,
+    base_coin: &MmCoinEnum,
+    rel_coin: &MmCoinEnum,
+    min_base_vol: Option<MmNumber>,
+    price: &MmNumber,
+) -> Result<(), SpendSafetyError> {
+    if !pre_trade_spend_check_enabled(ctx) || validate_price(price.clone()).is_err() {
+        return Ok(());
+    }
+    let min_base_vol = match validate_and_get_min_vol(
+        base_coin.min_trading_vol(),
+        rel_coin.min_trading_vol(),
+        min_base_vol,
+        price.clone(),
+    ) {
+        Ok(min_base_vol) => min_base_vol,
+        Err(_) => return Ok(()),
+    };
+    let rel_vol = &min_base_vol * price;
+    for (coin, volume) in [(base_coin, min_base_vol), (rel_coin, rel_vol)] {
+        let safe_amount = coin
+            .spend_safe_amount()
+            .await
+            .map_err(|e| SpendSafetyError::EstimateUnavailable {
+                coin: coin.ticker().to_owned(),
+                error: e.to_string(),
+            })?;
+        if let Some(safe_amount) = safe_amount {
+            if volume < safe_amount {
+                return Err(SpendSafetyError::VolumeTooLow {
+                    coin: coin.ticker().to_owned(),
+                    volume: volume.to_decimal(),
+                    threshold: safe_amount.to_decimal(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub enum TakerOrderBuildError {
     BaseEqualRel,
     /// Base amount too low with threshold
@@ -178,6 +309,10 @@ pub enum TakerOrderBuildError {
     },
     SenderPubkeyIsZero,
     ConfsSettingsNotSet,
+    /// The pair involves a coin that cannot trade (Lightning, until Lightning trading exists).
+    TradingNotSupported {
+        coin: String,
+    },
 }
 
 impl fmt::Display for TakerOrderBuildError {
@@ -210,6 +345,9 @@ impl fmt::Display for TakerOrderBuildError {
             ),
             TakerOrderBuildError::SenderPubkeyIsZero => write!(f, "Sender pubkey can not be zero"),
             TakerOrderBuildError::ConfsSettingsNotSet => write!(f, "Confirmation settings must be set"),
+            TakerOrderBuildError::TradingNotSupported { coin } => {
+                write!(f, "Trading is not supported for coin {}", coin)
+            },
         }
     }
 }
@@ -297,6 +435,10 @@ impl<'a> TakerOrderBuilder<'a> {
 
     /// Validate fields and build
     pub fn build(self) -> Result<TakerOrder, TakerOrderBuildError> {
+        if let Some(coin) = untradable_coin_ticker(self.base_coin, self.rel_coin) {
+            return Err(TakerOrderBuildError::TradingNotSupported { coin });
+        }
+
         let min_base_amount = self.base_coin.min_trading_vol();
         let min_rel_amount = self.rel_coin.min_trading_vol();
 
@@ -624,6 +766,10 @@ pub enum MakerOrderBuildError {
         min: MmNumber,
         max: MmNumber,
     },
+    /// The pair involves a coin that cannot trade (Lightning, until Lightning trading exists).
+    TradingNotSupported {
+        coin: String,
+    },
 }
 
 impl fmt::Display for MakerOrderBuildError {
@@ -661,6 +807,9 @@ impl fmt::Display for MakerOrderBuildError {
                 max.to_decimal(),
                 min.to_decimal()
             ),
+            MakerOrderBuildError::TradingNotSupported { coin } => {
+                write!(f, "Trading is not supported for coin {}", coin)
+            },
         }
     }
 }
@@ -793,6 +942,10 @@ impl<'a> MakerOrderBuilder<'a> {
 
     /// Build MakerOrder
     pub fn build(self) -> Result<MakerOrder, MakerOrderBuildError> {
+        if let Some(coin) = untradable_coin_ticker(self.base_coin, self.rel_coin) {
+            return Err(MakerOrderBuildError::TradingNotSupported { coin });
+        }
+
         if self.base_coin.ticker() == self.rel_coin.ticker() {
             return Err(MakerOrderBuildError::BaseEqualRel);
         }
@@ -883,6 +1036,23 @@ pub(crate) fn zero_rat() -> BigRational { BigRational::zero() }
 impl MakerOrder {
     pub(crate) fn available_amount(&self) -> MmNumber { &self.max_base_vol - &self.reserved_amount() }
 
+    /// The decimal rendering of [`MakerOrder::available_amount`] for RPC answers.
+    ///
+    /// An order without matches reserves nothing, so its available amount is a function of `max_base_vol`
+    /// alone, and the rendering is memoized under the exact `max_base_vol` (a separate memo from the one for
+    /// plain decimals, because the subtraction can reduce a fraction that was stored unreduced). An order
+    /// with matches is computed in full.
+    pub(crate) fn available_amount_rendered(&self) -> RenderedDecimal {
+        if self.matches.is_empty() {
+            static UNRESERVED_AVAILABLE: LazyLock<DecimalMemo> =
+                LazyLock::new(|| DecimalMemo::with_capacity(UNRESERVED_AVAILABLE_MEMO_CAPACITY));
+            UNRESERVED_AVAILABLE
+                .get_or_compute_with(self.max_base_vol.as_ratio(), || self.available_amount().to_decimal())
+        } else {
+            self.available_amount().to_rendered_decimal()
+        }
+    }
+
     pub(crate) fn reserved_amount(&self) -> MmNumber {
         self.matches.iter().fold(
             MmNumber::from(BigRational::from_integer(0.into())),
@@ -893,7 +1063,7 @@ impl MakerOrder {
     pub(crate) fn is_cancellable(&self) -> bool { !self.has_ongoing_matches() }
 
     pub(crate) fn has_ongoing_matches(&self) -> bool {
-        for (_, order_match) in self.matches.iter() {
+        for order_match in self.matches.values() {
             // if there's at least 1 ongoing match the order is not cancellable
             if order_match.connected.is_none() && order_match.connect.is_none() {
                 return true;

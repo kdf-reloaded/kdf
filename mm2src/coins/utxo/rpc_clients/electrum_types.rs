@@ -76,6 +76,9 @@ impl ElectrumBlockHeaderV12 {
             n_height: None,
             n_nonce_u64: None,
             mix_hash: None,
+            wide_time: false,
+            claim_trie_root: None,
+            pivx_trailer: None,
         }
     }
 
@@ -214,7 +217,7 @@ impl Default for ElectrumProtocol {
 
 #[cfg(target_arch = "wasm32")]
 impl Default for ElectrumProtocol {
-    fn default() -> Self { ElectrumProtocol::WS }
+    fn default() -> Self { ElectrumProtocol::WSS }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -225,7 +228,7 @@ pub struct ElectrumProtocolVersion {
     pub protocol_version: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 /// Electrum request RPC representation
 pub struct ElectrumRpcRequest {
     pub url: String,
@@ -233,4 +236,32 @@ pub struct ElectrumRpcRequest {
     pub protocol: ElectrumProtocol,
     #[serde(default)]
     pub disable_cert_verification: bool,
+    /// The time to wait for this server to answer a request, in seconds. The default applies when unset.
+    #[serde(default)]
+    pub timeout_sec: Option<f64>,
+}
+
+/// The debug form names the server as `host:port` only (CRD ch.38 R38.6.9a).
+impl fmt::Debug for ElectrumRpcRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ElectrumRpcRequest")
+            .field("url", &self.name())
+            .field("protocol", &self.protocol)
+            .field("disable_cert_verification", &self.disable_cert_verification)
+            .field("timeout_sec", &self.timeout_sec)
+            .finish()
+    }
+}
+
+impl ElectrumRpcRequest {
+    /// The server in the only form a text may name it: `host:port`, or a fixed placeholder when the address
+    /// cannot be reduced to a host (CRD ch.38 R38.6.9a).
+    pub fn name(&self) -> String { electrum_server_name(&self.url).unwrap_or_else(|| UNNAMED_SERVER.to_owned()) }
+
+    /// The per-server request timeout, if the request set a usable one (finite and positive).
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.timeout_sec
+            .filter(|secs| secs.is_finite() && *secs > 0.)
+            .map(Duration::from_secs_f64)
+    }
 }

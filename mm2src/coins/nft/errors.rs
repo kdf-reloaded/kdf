@@ -253,6 +253,9 @@ pub enum EnableNftError {
     /// could not reach the indexer.
     #[display(fmt = "Initial inventory crawl failed: {}", _0)]
     CrawlFailed(String),
+    /// The indexer rejected the request as invalid.
+    #[display(fmt = "The indexer rejected the request: {}", _0)]
+    ProviderRejectedRequest(String),
     /// A persistent storage operation failed.
     #[display(fmt = "DB error: {}", _0)]
     Storage(String),
@@ -270,6 +273,7 @@ impl HttpStatusCode for EnableNftError {
             | EnableNftError::UnsupportedPlatform { .. }
             | EnableNftError::PlatformMismatch { .. } => StatusCode::BAD_REQUEST,
             EnableNftError::CrawlFailed(_) => StatusCode::FAILED_DEPENDENCY,
+            EnableNftError::ProviderRejectedRequest(_) => StatusCode::BAD_REQUEST,
             EnableNftError::Storage(_) | EnableNftError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

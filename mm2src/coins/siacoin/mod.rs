@@ -23,11 +23,11 @@ pub(crate) use super::{BalanceError, CoinBalance, CoinsContext, HistorySyncState
                        SignRawTransactionRequest, SignatureError, SwapOps, TradeFee, TransactionDetails,
                        TransactionEnum, TransactionErr, TransactionFut, TransactionType, UnexpectedDerivationMethod,
                        VerificationError};
-pub(crate) use crate::{BalanceFut, CanRefundHtlc, DexFee, FeeApproxStage, FoundSwapTxSpend,
-                       NegotiateSwapContractAddrErr, PrivKeyBuildPolicy, PrivKeyPolicy, RawTransactionRes,
-                       SignatureResult, TradePreimageFut, TradePreimageResult, TradePreimageValue, Transaction,
-                       TxFeeDetails, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput, VerificationResult,
-                       WatcherOps, WithdrawFut, WithdrawRequest};
+pub(crate) use crate::{BalanceFut, CanRefundHtlc, CoinWithDerivationMethod, DerivationMethod, DexFee, FeeApproxStage,
+                       FoundSwapTxSpend, NegotiateSwapContractAddrErr, PrivKeyBuildPolicy, PrivKeyPolicy,
+                       RawTransactionRes, SignatureResult, TradePreimageFut, TradePreimageResult, TradePreimageValue,
+                       Transaction, TxFeeDetails, ValidateAddressResult, ValidateFeeArgs, ValidatePaymentInput,
+                       VerificationResult, WatcherOps, WithdrawFut, WithdrawRequest};
 
 pub(crate) use async_trait::async_trait;
 pub(crate) use bigdecimal::BigDecimal;
@@ -65,8 +65,8 @@ pub use sia_rust;
 pub use sia_rust::transport::client::{error as client_error, ApiClient as SiaApiClient, ApiClientHelpers,
                                       Client as SiaClient};
 pub use sia_rust::transport::endpoints::{AddressesEventsRequest, ConsensusTipRequest, GetAddressUtxosRequest,
-                                         GetEventRequest, TxpoolBroadcastRequest, TxpoolTransactionsRequest,
-                                         TxpoolTransactionsResponse};
+                                         GetEventRequest, TxpoolBroadcastRequest, TxpoolFeeRequest,
+                                         TxpoolTransactionsRequest, TxpoolTransactionsResponse};
 pub use sia_rust::types::{Address, Currency, Event, EventDataWrapper, EventPayout, EventType, Hash256, Hash256Error,
                           Keypair as SiaKeypair, KeypairError, Preimage, PreimageError, PublicKey, PublicKeyError,
                           SiacoinElement, SiacoinOutput, SiacoinOutputId, SpendPolicy, TransactionId, V1Transaction,
@@ -80,16 +80,20 @@ pub use error::SiaCoinNewError;
 pub(crate) use error::*;
 
 pub mod sia_hd_wallet;
+pub(crate) use sia_hd_wallet::SiaHDWallet;
 mod sia_withdraw;
 pub(crate) use sia_withdraw::SiaWithdrawBuilder;
 
 // ─── Split sub-modules ─────────────────────────────────────────────────────
 
 mod siacoin_helpers;
+mod siacoin_history;
 mod siacoin_market_ops;
 mod siacoin_mm_coin;
 mod siacoin_swap_ops;
 mod siacoin_types;
+
+pub use siacoin_history::process_history_loop;
 
 // Re-export split module contents for backward-compatible access paths
 pub use siacoin_types::*;
@@ -110,6 +114,11 @@ pub struct SiaCoinGeneric<T: SiaApiClient + ApiClientHelpers> {
     /// Keyed on the active netid, so trades on netid 6133 use 6133's fee address
     /// rather than the netid 8762 default.
     pub(crate) fee_address: Address,
+    /// Iguana (single-key) vs. HD-wallet address-derivation mode (CRD ch.20 D1).
+    /// Arc-wrapped like the coin's other shared state (`client`, `priv_key_policy`,
+    /// `history_sync_state`) so `SiaCoinGeneric` can stay cheaply `Clone`: `SiaHDWallet`
+    /// holds an internal `HDAccountsMutex` and is not itself `Clone`.
+    pub derivation_method: Arc<DerivationMethod<Address, SiaHDWallet>>,
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

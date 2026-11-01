@@ -505,12 +505,17 @@ fn hist_to_message(hist: &Histogram<u64>, quantiles: &[f64]) -> String {
 
 pub mod prometheus {
     use super::*;
-    use futures::future::{Future, FutureExt};
-    use hyper::http::{self, header, Request, Response, StatusCode};
-    use hyper::service::{make_service_fn, service_fn};
-    use hyper::{Body, Server};
-    use std::convert::Infallible;
+    use futures::future::{self, Either, Future};
+    use http::{self, header, Request, Response, StatusCode};
+    use http_body_util::Full;
+    use hyper::body::{Bytes, Incoming};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use hyper_util::server::graceful::GracefulShutdown;
     use std::net::SocketAddr;
+
+    type Body = Full<Bytes>;
 
     #[derive(Clone)]
     pub struct PrometheusCredentials {
@@ -523,38 +528,57 @@ pub mod prometheus {
         shutdown_detector: impl Future<Output = ()> + 'static + Send,
         credentials: Option<PrometheusCredentials>,
     ) -> Result<(), String> {
-        let make_svc = make_service_fn(move |_conn| {
-            let metrics = metrics.clone();
-            let credentials = credentials.clone();
-            futures::future::ready(Ok::<_, Infallible>(service_fn(move |req| {
-                futures::future::ready(scrape_handle(req, metrics.clone(), credentials.clone()))
-            })))
+        // Binding is synchronous so that a bind failure is still reported to the caller.
+        let listener = try_s!(common::wio::bind_listener(address));
+
+        spawn(async move {
+            let graceful = GracefulShutdown::new();
+            let mut shutdown = Box::pin(shutdown_detector);
+            loop {
+                let stream = match future::select(Box::pin(listener.accept()), shutdown).await {
+                    Either::Left((Ok((stream, _)), pending_shutdown)) => {
+                        shutdown = pending_shutdown;
+                        stream
+                    },
+                    Either::Left((Err(err), pending_shutdown)) => {
+                        // Back off so that a persistent failure (e.g. out of descriptors) does not spin.
+                        log!((err));
+                        shutdown = pending_shutdown;
+                        Timer::sleep(1.).await;
+                        continue;
+                    },
+                    Either::Right(_) => break,
+                };
+                let metrics = metrics.clone();
+                let credentials = credentials.clone();
+                let service = service_fn(move |req: Request<Incoming>| {
+                    future::ready(scrape_handle(req, metrics.clone(), credentials.clone()))
+                });
+                // `half_close(false)`: https://github.com/hyperium/hyper/issues/1764
+                let conn = http1::Builder::new()
+                    .half_close(false)
+                    .serve_connection(TokioIo::new(stream), service);
+                let conn = graceful.watch(conn);
+                spawn(async move {
+                    if let Err(err) = conn.await {
+                        log!((err));
+                    }
+                });
+            }
+            drop(listener);
+            graceful.shutdown().await;
         });
-
-        let server = try_s!(Server::try_bind(&address))
-            .http1_half_close(false) // https://github.com/hyperium/hyper/issues/1764
-            .serve(make_svc)
-            .with_graceful_shutdown(shutdown_detector);
-
-        let server = server.then(|r| {
-            if let Err(err) = r {
-                log!((err));
-            };
-            futures::future::ready(())
-        });
-
-        spawn(server);
         Ok(())
     }
 
     fn scrape_handle(
-        req: Request<Body>,
+        req: Request<Incoming>,
         metrics: MetricsWeak,
         credentials: Option<PrometheusCredentials>,
     ) -> Result<Response<Body>, http::Error> {
         fn on_error(status: StatusCode, error: String) -> Result<Response<Body>, http::Error> {
             log!((error));
-            Response::builder().status(status).body(Body::empty()).map_err(|err| {
+            Response::builder().status(status).body(Body::default()).map_err(|err| {
                 log!((err));
                 err
             })
@@ -584,7 +608,7 @@ pub mod prometheus {
         };
 
         let body = match metrics.0.collect_prometheus_format() {
-            Ok(body) => Body::from(body),
+            Ok(body) => Body::new(Bytes::from(body)),
             _ => {
                 return on_error(
                     StatusCode::BAD_REQUEST,
@@ -603,7 +627,7 @@ pub mod prometheus {
             })
     }
 
-    fn check_auth_credentials(req: &Request<Body>, expected: PrometheusCredentials) -> Result<(), String> {
+    fn check_auth_credentials(req: &Request<Incoming>, expected: PrometheusCredentials) -> Result<(), String> {
         let header_value = req
             .headers()
             .get(header::AUTHORIZATION)
@@ -711,5 +735,71 @@ mod tests {
             "More metrics collected than expected. Excess metrics: {:?}",
             actual
         );
+    }
+
+    /// Loopback test of the Prometheus exporter on `hyper` 1: routing, basic auth and the graceful stop.
+    #[test]
+    fn test_prometheus_exporter_serves_scrapes() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        fn get(address: std::net::SocketAddr, uri: &str, authorization: Option<&str>) -> String {
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let auth = authorization
+                .map(|value| format!("Authorization: {value}\r\n"))
+                .unwrap_or_default();
+            write!(
+                stream,
+                "GET {uri} HTTP/1.1\r\nHost: x\r\n{auth}Connection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        }
+
+        let metrics = MetricsArc::new();
+        metrics.init().unwrap();
+        mm_counter!(metrics, "rpc.traffic.tx", 62, "coin" => "BTC");
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+        let credentials = prometheus::PrometheusCredentials {
+            userpass: "user:pass".to_owned(),
+        };
+        prometheus::spawn_prometheus_exporter(
+            metrics.weak(),
+            address,
+            async move {
+                let _ = stop_rx.await;
+            },
+            Some(credentials),
+        )
+        .unwrap();
+
+        let authorization = format!("Basic {}", base64::encode_config("user:pass", base64::URL_SAFE));
+        let ok = get(address, "/metrics", Some(&authorization));
+        assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+        assert!(ok.to_ascii_lowercase().contains("content-type: text/plain"), "{ok}");
+        assert!(ok.contains("rpc_traffic_tx"), "{ok}");
+
+        assert!(get(address, "/metrics", None).starts_with("HTTP/1.1 401"));
+        assert!(get(address, "/other", Some(&authorization)).starts_with("HTTP/1.1 400"));
+
+        // After the stop signal the listener goes away.
+        stop_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while TcpStream::connect(address).is_ok() {
+            assert!(std::time::Instant::now() < deadline, "the exporter did not stop");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

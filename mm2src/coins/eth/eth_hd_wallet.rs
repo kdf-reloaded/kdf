@@ -23,7 +23,7 @@ use alloy::primitives::Address as AlloyAddress;
 use alloy::providers::Provider;
 use std::future::IntoFuture;
 
-use super::EthCoin;
+use super::{checksum_address, Erc20TokenInfo, EthCoin};
 
 // -------------------------------------------------------------------
 // Type aliases mirroring the UTXO pattern
@@ -293,14 +293,24 @@ async fn set_known_addresses_number(
 impl ExtractExtendedPubkey for EthCoin {
     type ExtendedPublicKey = Secp256k1ExtendedPublicKey;
 
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(unused_variables))]
     async fn extract_extended_pubkey<XPubExtractor>(
         &self,
-        _xpub_extractor: Option<&XPubExtractor>,
+        xpub_extractor: Option<&XPubExtractor>,
         derivation_path: DerivationPath,
     ) -> MmResult<Self::ExtendedPublicKey, HDExtractPubkeyError>
     where
         XPubExtractor: HDXPubExtractor + Sync,
     {
+        // A hardware-wallet coin takes the account key from the device; deriving it from the software seed
+        // would bind the account to a key the device does not control.
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
+        if matches!(self.signer, super::EthSigner::Trezor(_)) {
+            let xpub_extractor = xpub_extractor.or_mm_err(|| HDExtractPubkeyError::HwContextNotInitialized)?;
+            let xpub = xpub_extractor.extract_eth_xpub(derivation_path).await?;
+            return Secp256k1ExtendedPublicKey::from_str(&xpub)
+                .map_to_mm(|e| HDExtractPubkeyError::Internal(format!("Invalid device EVM xpub: {}", e)));
+        }
         // For software wallets we derive from the BIP39 root key directly.
         let ctx = MmArc::from_weak(&self.ctx)
             .or_mm_err(|| HDExtractPubkeyError::Internal("MmArc not available".to_string()))?;
@@ -429,6 +439,45 @@ impl HDWalletBalanceOps for EthCoin {
         .await
     }
 
+    /// Overrides the trait default only in how an address is rendered: the default uses the
+    /// `Display` of the address, which abbreviates a 20-byte EVM address, while the wire form of an
+    /// EVM address is the full EIP-55 checksummed string (CRD R35.1.3).
+    async fn known_addresses_balances_with_ids<Ids>(
+        &self,
+        hd_account: &Self::HDAccount,
+        chain: Bip44Chain,
+        address_ids: Ids,
+    ) -> BalanceResult<Vec<HDAddressBalance>>
+    where
+        Self: MarketCoinOps,
+        Self::Address: std::fmt::Display + Clone,
+        Ids: Iterator<Item = u32> + Send,
+    {
+        let mut derived = Vec::new();
+        for address_id in address_ids {
+            let HDAddress {
+                address,
+                derivation_path,
+                ..
+            } = self.derive_address(hd_account, chain, address_id).mm_err(Into::into)?;
+            derived.push((address, derivation_path));
+        }
+
+        let addresses = derived.iter().map(|(address, _)| *address).collect();
+        let balances = self.known_addresses_balances(addresses).await?;
+        // [`HDWalletBalanceOps::known_addresses_balances`] returns pairs in the order they were requested.
+        Ok(balances
+            .into_iter()
+            .zip(derived)
+            .map(|((address, balance), (_, derivation_path))| HDAddressBalance {
+                address: checksum_address(&format!("{:#x}", address)),
+                derivation_path: RpcDerivationPath(derivation_path),
+                chain,
+                balance: coin_balance_map_for_ticker(self.ticker(), balance),
+            })
+            .collect())
+    }
+
     async fn all_known_addresses_balances(&self, hd_account: &Self::HDAccount) -> BalanceResult<Vec<HDAddressBalance>> {
         let external_ids = 0..hd_account.external_addresses_number;
         self.known_addresses_balances_with_ids(hd_account, Bip44Chain::External, external_ids)
@@ -436,6 +485,10 @@ impl HDWalletBalanceOps for EthCoin {
     }
 
     async fn known_address_balance(&self, address: &Self::Address) -> BalanceResult<CoinBalance> {
+        // The balance of a token coin is the `balanceOf` of its contract, not the native balance.
+        if let Some(info) = self.erc20_token_info() {
+            return self.erc20_balance_of(&info, *address).await;
+        }
         let provider = self.alloy_provider();
         let alloy_addr = AlloyAddress::from(address.0);
         let balance = assert_send_future(provider.get_balance(alloy_addr).into_future())
@@ -502,14 +555,14 @@ async fn scan_for_new_addresses_impl(
                         .derive_address(hd_account, chain, empty_address_id)
                         .mm_err(Into::into)?;
                     balances.push(HDAddressBalance {
-                        address: format!("{:#02x}", empty_address.address),
+                        address: super::checksum_address(&format!("{:#x}", empty_address.address)),
                         derivation_path: RpcDerivationPath(empty_address.derivation_path),
                         chain,
                         balance: coin_balance_map_for_ticker(coin.ticker(), CoinBalance::default()),
                     });
                 }
                 balances.push(HDAddressBalance {
-                    address: format!("{:#02x}", checking_address),
+                    address: super::checksum_address(&format!("{:#x}", checking_address)),
                     derivation_path: RpcDerivationPath(checking_address_der_path),
                     chain,
                     balance: coin_balance_map_for_ticker(coin.ticker(), non_empty_balance),
@@ -603,4 +656,74 @@ fn u256_to_big_decimal(value: ethereum_types::U256, decimals: u8) -> BalanceResu
     let decimal_str = format!("{}.{}", whole_str, remainder_str);
     BigDecimal::from_str(&decimal_str)
         .map_err(|e| BalanceError::Internal(format!("BigDecimal parse error: {}", e)).into())
+}
+
+// -------------------------------------------------------------------
+// ERC-20 balances of an HD wallet report (CRD R35.1.3(b), R35.3A.5)
+// -------------------------------------------------------------------
+
+impl EthCoin {
+    /// Adds the balance of every ERC-20 token registered on this platform coin to each address of an HD wallet
+    /// report, and recomputes the per-account totals (CRD R35.1.3(b): each balance map covers the platform
+    /// ticker and every activated token ticker).
+    pub async fn add_erc20_balances_to_hd_report(&self, report: &mut HDWalletBalance) -> BalanceResult<()> {
+        let tokens = self.get_erc20_tokens_infos();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        for account in report.accounts.iter_mut() {
+            for address in account.addresses.iter_mut() {
+                let owner = super::addr_from_str(&address.address).map_to_mm(BalanceError::Internal)?;
+                for (ticker, info) in tokens.iter() {
+                    let balance = self.erc20_balance_of(info, owner).await?;
+                    address.balance.insert(ticker.clone(), balance);
+                }
+            }
+            account.total_balance = crate::coin_balance::sum_hd_address_balances(self.ticker(), &account.addresses);
+        }
+        Ok(())
+    }
+
+    /// The HD wallet report of one ERC-20 token over the known addresses of this platform coin's HD wallet:
+    /// every balance map holds the token ticker only (CRD R35.3A.5).
+    pub async fn erc20_hd_wallet_balance(
+        &self,
+        token_ticker: &str,
+        info: &Erc20TokenInfo,
+    ) -> BalanceResult<HDWalletBalance> {
+        let hd_wallet = match &self.derivation_method {
+            DerivationMethod::HDWallet(hd_wallet) => hd_wallet,
+            DerivationMethod::Iguana(_) => {
+                return MmError::err(BalanceError::UnexpectedDerivationMethod(
+                    crate::UnexpectedDerivationMethod::HDWalletUnavailable,
+                ))
+            },
+        };
+        let accounts = hd_wallet.accounts.lock().await;
+        let mut report = HDWalletBalance {
+            accounts: Vec::with_capacity(accounts.len()),
+        };
+        for account in accounts.values() {
+            let mut addresses = Vec::with_capacity(account.external_addresses_number as usize);
+            for address_id in 0..account.external_addresses_number {
+                let hd_address = self
+                    .derive_address(account, Bip44Chain::External, address_id)
+                    .mm_err(Into::into)?;
+                let balance = self.erc20_balance_of(info, hd_address.address).await?;
+                addresses.push(HDAddressBalance {
+                    address: checksum_address(&format!("{:#x}", hd_address.address)),
+                    derivation_path: RpcDerivationPath(hd_address.derivation_path),
+                    chain: Bip44Chain::External,
+                    balance: coin_balance_map_for_ticker(token_ticker, balance),
+                });
+            }
+            report.accounts.push(HDAccountBalance {
+                account_index: account.account_id,
+                derivation_path: RpcDerivationPath(account.account_derivation_path()),
+                total_balance: crate::coin_balance::sum_hd_address_balances(token_ticker, &addresses),
+                addresses,
+            });
+        }
+        Ok(report)
+    }
 }

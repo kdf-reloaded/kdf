@@ -114,7 +114,15 @@ message TreeState {
     uint64 height = 2;
     string hash = 3;    // block id
     uint32 time = 4;    // Unix epoch time when the block was mined
-    string tree = 5;    // sapling commitment tree state
+    string tree = 5;    // sapling commitment tree state (upstream name: saplingTree)
+    // Added by Pirate lightwalletd v1.0.0.0. Carries the same bytes as `tree`
+    // whenever the node could supply a frontier; used only to cross-check the
+    // value in field 5. Absent (empty) on older servers.
+    string saplingFrontier = 6;
+    // Added by Pirate lightwalletd v1.0.0.0. Ironwood commitment tree state.
+    // Pirate's Ironwood pool is empty and this wallet is Sapling-only, so the
+    // field is decoded for diagnostics and never consumed.
+    string ironwoodTree = 7;
 }
 
 message GetAddressUtxosArg {

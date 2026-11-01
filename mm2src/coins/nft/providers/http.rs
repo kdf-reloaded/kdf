@@ -7,12 +7,14 @@
 use derive_more::Display;
 use http::StatusCode;
 use mm2_err_handle::prelude::*;
+use mm2_net::host_label::host_only;
 use mm2_net::transport::{slurp_url_with_headers, SlurpError};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value as Json;
 
-/// Errors produced by the providers HTTP layer.
+/// Errors produced by the providers HTTP layer. A `uri` field holds the host-only form of the request URL, which
+/// can carry a provider key in its path or query (CRD ch.35 R35.1.17).
 #[derive(Debug, Display, Serialize)]
 pub enum FetchError {
     /// Underlying HTTP transport returned an error.
@@ -54,12 +56,12 @@ where
     let (status, _hdrs, body) = slurp_url_with_headers(uri, owned).await.mm_err(FetchError::from)?;
     if !status.is_success() {
         return MmError::err(FetchError::HttpStatus {
-            uri: uri.to_owned(),
+            uri: host_only(uri),
             status: status.as_u16(),
         });
     }
     serde_json::from_slice(&body).map_to_mm(|err| FetchError::Deserialize {
-        uri: uri.to_owned(),
+        uri: host_only(uri),
         error: err.to_string(),
     })
 }
@@ -133,5 +135,70 @@ mod tests {
             },
             _ => panic!("expected Transport variant"),
         }
+    }
+
+    const SECRET_PARTS: [&str; 4] = ["bob", "hunter2", "APIKEY", "token=X"];
+
+    fn assert_host_only(err: &FetchError, host: &str) {
+        let text = format!("{err} {err:?}");
+        assert!(
+            text.contains(host),
+            "the host-only form is missing from the rendered error"
+        );
+        for (i, secret) in SECRET_PARTS.iter().enumerate() {
+            assert!(!text.contains(secret), "secret part {i} leaked into the rendered error");
+        }
+    }
+
+    /// Serves one canned HTTP/1.1 response on a loopback port and returns the port.
+    fn serve_once(response: &'static [u8]) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            stream.write_all(response).unwrap();
+        });
+        port
+    }
+
+    fn secret_url(port: u16) -> String { format!("http://bob:hunter2@127.0.0.1:{port}/v3/APIKEY?token=X") }
+
+    #[test]
+    fn fetch_errors_name_the_provider_host_only() {
+        use common::block_on;
+
+        // Transport: nothing listens on the port.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let err = block_on(fetch_json::<Json>(&secret_url(port), &[])).unwrap_err();
+        assert!(
+            matches!(err.get_inner(), FetchError::Transport { .. }),
+            "the error is not a transport error"
+        );
+        assert_host_only(err.get_inner(), &format!("http://127.0.0.1:{port}"));
+
+        // HttpStatus.
+        let port = serve_once(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let err = block_on(fetch_json::<Json>(&secret_url(port), &[])).unwrap_err();
+        assert!(
+            matches!(err.get_inner(), FetchError::HttpStatus { status: 404, .. }),
+            "the error is not a 404 status error"
+        );
+        assert_host_only(err.get_inner(), &format!("http://127.0.0.1:{port}"));
+
+        // Deserialize.
+        let port = serve_once(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nnot json");
+        let err = block_on(fetch_json::<Json>(&secret_url(port), &[])).unwrap_err();
+        assert!(
+            matches!(err.get_inner(), FetchError::Deserialize { .. }),
+            "the error is not a deserialize error"
+        );
+        assert_host_only(err.get_inner(), &format!("http://127.0.0.1:{port}"));
     }
 }

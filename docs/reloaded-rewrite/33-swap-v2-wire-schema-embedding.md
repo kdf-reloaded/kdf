@@ -1,7 +1,7 @@
 # Chapter 33 -- Bound Swap V2 P2P Wire Schema (B-gleec Embedding)
 
-**Status:** B-gleec embedding appendix (rule R31 of
-[Chapter 1 §1.11](01-clean-room-rules.md))
+**Status:** driving-spec (B-gleec embedding appendix; rule R31 of
+[Chapter 1 §1.11](01-clean-room-rules.md)).
 
 > **One-sentence claim:** the Swap V2 protocol's
 > peer-to-peer wire-message schema is fixed by a single
@@ -134,11 +134,20 @@ message SwapMessage {
 **R1.** **Verbatim embedding.** The descriptor of §33.1 is
 the chapter-bound substrate. The implementer MUST place
 the file at the path `mm2src/mm2_main/src/lp_swap/swap_v2.proto`
-with byte-identical content to the §33.1 block (excluding
-fenced-code-block delimiters). Any divergence —
-re-ordering, comment additions, field renames, field-number
+with content matching the §33.1 block exactly in every element
+that carries function or external identity: message order,
+message names, field names, field numbers, field types,
+`optional` markers, oneof grouping and tags, and the
+`syntax`/`package` declarations. Any divergence in one of
+those elements — re-ordering, field renames, field-number
 changes, type changes, oneof-tag changes, package-name
-changes, syntax-level changes — is a chapter violation.
+changes, syntax-level changes — is a chapter violation. Per
+[Chapter 1 §1.11 R36](01-clean-room-rules.md), comments are
+informative, not binding: the implementer's copy of the file
+MAY carry comments the §33.1 block does not show (and the
+§33.1 block itself carries none, per the R31 sanitization
+discipline of dropping upstream commentary), and such
+comments are conformant, not a chapter violation.
 
 **R2.** **`proto3` syntax.** The descriptor MUST declare
 `syntax = "proto3";` as its first non-empty line. The
@@ -322,6 +331,12 @@ contract. Future inner variants MUST take numbers 8 and 9
 (in oneof position) before any new top-level field is
 considered.
 
+**R12.** Receivers MUST treat a `SwapMessage` whose `inner`
+oneof carries none of the seven variants of §33.3.11 as a
+protocol violation and MUST drop the connection, mirroring
+the empty-oneof handling R8 binds for `TakerNegotiation`'s
+`action` oneof.
+
 ## 33.4 Outgoing Cross-References
 
 The wire envelope's signature semantics of §33.3.1 R5 are
@@ -378,11 +393,23 @@ D2. **Forward-secret signing keys.** The signing in
 
 ## 33.8 Provenance Footer
 
-This chapter is a B-gleec embedding per
-[Chapter 1 §1.11 R31](01-clean-room-rules.md). The
-descriptor of §33.1 is reproduced verbatim from the
-upstream `swap_v2.proto` substrate; upstream prose is
-not preserved. The §33.2–§33.6 commentary is clean-room
-CRD authored from the descriptor's structural shape and
-the substrate's runtime behaviour as bound in
-[Chapters 15-17](15-swap-v2-utxo-path.md).
+- *Inputs:* the chapter-bound wire descriptor embedded verbatim in
+  §33.1 (a B-gleec embedding per chapter 01 §1.11 R31, sourced from
+  the `swap_v2.proto` substrate at
+  `mm2src/mm2_main/src/lp_swap/swap_v2.proto`; upstream prose is not
+  preserved); chapter 01 (the R31 embedding discipline and the R36
+  binding-scope rule §33.2's R1 applies); chapter 15 and chapter 17
+  (the descriptor's runtime behaviour as consumed by the version-two
+  maker/taker state machines); chapter 52 (the state-machine-level
+  message contract that sits above this chapter's wire schema).
+- *Permitted-input classes used:* wire formats and external
+  interfaces the project must inter-operate with (chapter 01 R4);
+  the Interop / wire-format reuse category of chapter 01 R29–R31.
+- *Sibling-allowlist consultations:* none.
+- *Forbidden corpus:* not consulted for the §33.2–§33.6 commentary,
+  which is clean-room CRD authored from the descriptor's structural
+  shape and the substrate's runtime behaviour as bound in
+  [Chapters 15-17](15-swap-v2-utxo-path.md). The descriptor in §33.1
+  itself is the R31 verbatim embedding named above, not clean-room
+  derived; see chapter 34 §34.3 (Interop reuse — wire-format-only
+  source) for its ledger entry.

@@ -2,14 +2,14 @@ name: Security Audit
 
 on:
   push:
-    branches: [ reloaded-gplv2-base, dev ]
+    branches: [ reloaded-gplv2-base, dev, staging, main ]
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - 'deny.toml'
       - '.github/workflows/audit.yml'
   pull_request:
-    branches: [ reloaded-gplv2-base, dev ]
+    branches: [ reloaded-gplv2-base, dev, staging, main ]
     paths:
       - '**/Cargo.toml'
       - '**/Cargo.lock'
@@ -20,6 +20,10 @@ on:
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
+
+# Least privilege for every job; dependabot-alerts re-declares it explicitly.
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -49,3 +53,125 @@ jobs:
           tool: cargo-deny@0.19.9
       - name: cargo-deny (advisories)
         run: cargo deny check advisories
+
+  bans:
+    # Targeted bans only (deny.toml [bans].deny): a second rustls CryptoProvider
+    # (aws-lc-rs / aws-lc-sys) panics at runtime on first connect, and rustls
+    # below 0.23.46 is under the RUSTSEC-2026-0349 floor. `multiple-versions` is
+    # deliberately "allow" -- this is not a duplicate-version gate.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - name: cargo-deny (bans)
+        run: cargo deny check bans
+
+  licenses:
+    # Fails when a dependency's license is neither in deny.toml's `allow` list
+    # nor covered by a per-crate `exceptions` entry, so a new dependency must be
+    # compatible with the GPL-2.0-only combined work (LEGAL/LICENSING-POLICY.md).
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cargo-deny (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - name: cargo-deny (licenses)
+        run: cargo deny check licenses
+
+  # cargo-deny reads the RustSec advisory database. The GitHub Advisory Database is
+  # a superset of it, and the gap is not theoretical: on 2026-09-23 five open alerts
+  # against the root lockfile -- including two remotely reachable gossipsub panics
+  # (GHSA-gc42-3jg7-rxr2, GHSA-xqmp-fxgv-xvq5) and a yamux one -- had no RUSTSEC id
+  # at all, so `cargo deny check advisories` printed `advisories ok` while a remote
+  # crash sat in the tree.
+  #
+  # This job closes that gap by reading Dependabot's own findings. It only considers
+  # the root `Cargo.lock`, which is the lockfile the shipped binaries resolve from;
+  # vendor-patch and orphan lockfiles are Dependabot noise, not build inputs. The
+  # accept mechanism here is *dismissing* the alert on the Security tab (with a
+  # reason and a justification), the same way deny.toml's `ignore` list is the accept
+  # mechanism for the cargo-deny job -- a dismissed alert is no longer "open".
+  dependabot-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      # Read at job level so the `env` context can be tested in a step `if:`,
+      # which is what lets the token step be skipped cleanly when the App is not
+      # configured (and on fork PRs, where no secret is exposed at all).
+      AUDIT_APP_ID: ${{ secrets.AUDIT_APP_ID }}
+    steps:
+      # The default GITHUB_TOKEN CANNOT read the Dependabot alerts API -- it
+      # returns 403 "Resource not accessible by integration", and there is no
+      # `permissions:` key that grants it (`security-events: read` is not the
+      # relevant scope). Reading alerts needs a GitHub App token or a PAT with
+      # `dependabot_alerts` / `security_events` read.
+      #
+      # ONE-TIME SETUP, preferred: a GitHub App owned by this org, installed on
+      # this repo with `Dependabot alerts: Read-only`, its App ID and private key
+      # in the AUDIT_APP_ID / AUDIT_APP_PRIVATE_KEY secrets. No expiry, no
+      # rotation, and alert reads are attributed to the App rather than to a
+      # person. A DEPENDABOT_ALERTS_TOKEN PAT still works as a fallback.
+      #
+      # Until one of those exists the job warns and passes rather than failing --
+      # a gate that is permanently red because it is misconfigured teaches
+      # everyone to ignore it. See the 403 branch below and
+      # docs/plans/dependabot-triage-2026-09.md.
+      - name: Mint a GitHub App token
+        id: app-token
+        if: env.AUDIT_APP_ID != ''
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.AUDIT_APP_ID }}
+          private-key: ${{ secrets.AUDIT_APP_PRIVATE_KEY }}
+
+      - name: Open Dependabot alerts against the root lockfile
+        env:
+          # App token if the App is configured, else a PAT, else the default
+          # token -- which 403s into the inert-with-a-warning branch below.
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.DEPENDABOT_ALERTS_TOKEN || secrets.GITHUB_TOKEN }}
+          # Dependabot alert state is a property of the repository, derived from
+          # the DEFAULT branch -- there is no per-ref view. A PR that fixes an
+          # alert therefore cannot close it until it merges, so failing this job
+          # on `pull_request` would mark every such PR red for the thing it is
+          # fixing. Report there, enforce on the default branch.
+          ENFORCE: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -uo pipefail
+          if ! alerts=$(gh api --paginate \
+                "/repos/${{ github.repository }}/dependabot/alerts?state=open&per_page=100" \
+                --jq '.[] | select(.dependency.manifest_path == "Cargo.lock")
+                          | "\(.security_advisory.severity)\t\(.dependency.package.name)\t\(.security_advisory.ghsa_id)\t\(.security_advisory.summary)"' \
+                2>&1); then
+            printf '%s\n' "$alerts"
+            if printf '%s' "$alerts" | grep -qiE 'not accessible by integration|HTTP 403'; then
+              echo "::warning::dependabot-alerts is INERT: this token cannot read the Dependabot alerts API. Add a DEPENDABOT_ALERTS_TOKEN repo secret (a PAT with dependabot_alerts/security_events read) to arm it. See docs/plans/dependabot-triage-2026-09.md."
+              exit 0
+            fi
+            echo "::error::Could not query the Dependabot alerts API."
+            exit 1
+          fi
+
+          if [ -z "$alerts" ]; then
+            echo "No open Dependabot alerts against the root Cargo.lock."
+            exit 0
+          fi
+
+          printf '%s\n' "$alerts"
+          echo
+          echo "Fix the dependency, or dismiss the alert on the Security tab with a"
+          echo "reason and a written justification, and record that rationale in deny.toml."
+          if [ "$ENFORCE" = "true" ]; then
+            echo "::error::Open Dependabot alerts against the root Cargo.lock (see above)."
+            exit 1
+          fi
+          # Workflow commands must be a single line.
+          echo "::warning::Open Dependabot alerts against the root Cargo.lock (see the job log). Not failing the PR: alert state follows the default branch, so a fix on this branch cannot close them until it merges."

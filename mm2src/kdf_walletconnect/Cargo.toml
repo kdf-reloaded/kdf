@@ -24,7 +24,7 @@ pairing_api.workspace = true
 rand.workspace = true
 relay_client.workspace = true
 relay_rpc.workspace = true
-secp256k1 = "0.20"
+secp256k1 = "0.29"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 sha2.workspace = true

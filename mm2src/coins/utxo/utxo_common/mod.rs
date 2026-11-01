@@ -67,7 +67,7 @@ pub(crate) use common::log::{debug, error, info, warn};
 pub(crate) use common::mm_number::MmNumber;
 pub(crate) use common::{now_ms, one_hundred, ten_f64};
 pub(crate) use crypto::privkey::key_pair_from_secret;
-pub(crate) use crypto::{Bip32DerPathOps, Bip44Chain, Bip44DerPathError, Bip44DerivationPath, RpcDerivationPath};
+pub(crate) use crypto::{Bip32DerPathOps, Bip44Chain, RpcDerivationPath, StandardHDPath, StandardHDPathError};
 pub(crate) use futures::compat::Future01CompatExt;
 pub(crate) use futures::future::{FutureExt, TryFutureExt};
 pub(crate) use futures01::future::Either;
@@ -83,7 +83,8 @@ pub(crate) use mm2_metrics::MetricsArc;
 pub(crate) use primitives::hash::H512;
 pub(crate) use rpc::v1::types::{Bytes as BytesJson, ToTxHash, TransactionInputEnum, H256 as H256Json};
 pub(crate) use script::{Builder, Opcode, Script, ScriptAddress, TransactionInputSigner, UnsignedTransactionInput};
-pub(crate) use secp256k1::{PublicKey, Signature};
+pub(crate) use secp256k1::ecdsa::Signature;
+pub(crate) use secp256k1::PublicKey;
 pub(crate) use serde_json::{self as json};
 pub(crate) use serialization::{deserialize, serialize, serialize_list, serialize_with_flags, CoinVariant,
                                CompactInteger, Serializable, Stream, SERIALIZE_TRANSACTION_WITNESS};

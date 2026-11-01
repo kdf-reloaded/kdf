@@ -31,8 +31,8 @@ pub mod store;
 
 pub use context::NftCtx;
 
-pub use activation::{enable_nft, EnableNftRequest, EnableNftResponse, NftActivationParams, NftActivationProtocol,
-                     NftProtocolData, NftProvider, NftProviderInfo};
+pub use activation::{enable_nft, fetch_and_store_owned_nfts, EnableNftRequest, EnableNftResponse, NftActivationParams,
+                     NftActivationProtocol, NftProtocolData, NftProvider, NftProviderInfo};
 pub use errors::{ClearNftDbError, EnableNftError, GetNftInfoError, LockDbError, MetadataFetchError, ParseChainError,
                  ParseContractTypeError, ParseTransferStatusError, SpamFilterError, TransferConfirmationsError,
                  UpdateNftError, UpdateSpamPhishingError};

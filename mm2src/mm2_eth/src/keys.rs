@@ -10,7 +10,7 @@
 //! only.
 
 use mm2_err_handle::prelude::*;
-use secp256k1::recovery::{RecoverableSignature, RecoveryId};
+use secp256k1::ecdsa::{RecoverableSignature, RecoveryId};
 use secp256k1::{Message as SecpMessage, PublicKey, Secp256k1, SecretKey};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
@@ -138,10 +138,10 @@ pub fn recover_public_key(message_hash: H256, mut sig: Signature) -> MmResult<H5
 
     let recovery_id = RecoveryId::from_i32(sig[64] as i32).map_to_mm(EthKeyError::from)?;
     let recoverable = RecoverableSignature::from_compact(&sig[0..64], recovery_id).map_to_mm(EthKeyError::from)?;
-    let msg =
-        SecpMessage::from_slice(AsRef::<[u8]>::as_ref(&message_hash)).map_to_mm(|_| EthKeyError::InvalidMessage)?;
+    let msg = SecpMessage::from_digest_slice(AsRef::<[u8]>::as_ref(&message_hash))
+        .map_to_mm(|_| EthKeyError::InvalidMessage)?;
     let pubkey = Secp256k1::new()
-        .recover(&msg, &recoverable)
+        .recover_ecdsa(&msg, &recoverable)
         .map_to_mm(EthKeyError::from)?;
 
     let serialized = pubkey.serialize_uncompressed(); // [u8; 65] starting with 0x04
@@ -254,8 +254,9 @@ impl KeyPair {
 /// (the secp256k1 recovery id, *not* Ethereum's `v ∈ {27, 28}`).
 pub fn sign(secret: &Secret, message: &H256) -> Result<Signature, EthKeyError> {
     let sk = SecretKey::from_slice(secret.as_bytes()).map_err(|_| EthKeyError::InvalidSecret)?;
-    let msg = SecpMessage::from_slice(AsRef::<[u8]>::as_ref(message)).map_err(|_| EthKeyError::InvalidMessage)?;
-    let recoverable = Secp256k1::new().sign_recoverable(&msg, &sk);
+    let msg =
+        SecpMessage::from_digest_slice(AsRef::<[u8]>::as_ref(message)).map_err(|_| EthKeyError::InvalidMessage)?;
+    let recoverable = Secp256k1::new().sign_ecdsa_recoverable(&msg, &sk);
     let (recid, compact) = recoverable.serialize_compact();
     let mut buf = [0u8; 65];
     buf[0..64].copy_from_slice(&compact);
@@ -271,8 +272,9 @@ pub fn verify_address(address: &Address, signature: &Signature, message: &H256) 
     }
     let recid = RecoveryId::from_i32(sig.0[64] as i32)?;
     let recoverable = RecoverableSignature::from_compact(&sig.0[0..64], recid)?;
-    let msg = SecpMessage::from_slice(AsRef::<[u8]>::as_ref(message)).map_err(|_| EthKeyError::InvalidMessage)?;
-    let pubkey = Secp256k1::new().recover(&msg, &recoverable)?;
+    let msg =
+        SecpMessage::from_digest_slice(AsRef::<[u8]>::as_ref(message)).map_err(|_| EthKeyError::InvalidMessage)?;
+    let pubkey = Secp256k1::new().recover_ecdsa(&msg, &recoverable)?;
     let serialized = pubkey.serialize_uncompressed();
     let mut public = Public::default();
     AsMut::<[u8]>::as_mut(&mut public).copy_from_slice(&serialized[1..]);

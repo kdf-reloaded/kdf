@@ -685,7 +685,20 @@ plumbing that consumes them is owned by a sibling activation
 chapter). *Partially discharged:* the software extended-public-key
 source and identity for global-HD accounts are bound in §5.9A
 (R29–R31); the UTXO per-account bootstrap, new-address, and scan
-behaviour are bound in Chapter 38 §38.8.
+behaviour are bound in Chapter 38 §38.8. Chapter 20 binds a second,
+structurally distinct activation-plumbing consumer: a non-UTXO,
+SLIP-0010 ed25519 coin family (Sia) whose HD account and wallet
+types consume this chapter's R15 `derive_ed25519_signing_key`
+helper and the `GlobalHDAccount` policy (R20), but do not and
+cannot consume the secp256k1 extended-public-key path of §5.9A
+(R29–R31) — SLIP-0010, unlike BIP-32, defines no public-key-only
+(non-hardened) child derivation, so there is no ed25519 analogue of
+an `xpub`. This is a structural property of the curve, not a gap
+in this chapter's derivation surface: an ed25519 HD account
+necessarily carries the account-level *private* signing key rather
+than an extended public key. §5.9A's scope note ("Bitcoin-family
+(UTXO) coins") already excludes this case; Chapter 20 §20.10 D1
+binds the ed25519-specific account type and its activation wiring.
 
 **D2.** A second password-hashing scheme alongside Argon2id
 (the substrate binds Argon2id as the only password-mode
@@ -702,10 +715,18 @@ chapter.
 integration as WebAssembly-target-only; native parity is
 deferred.
 
-**D5.** Mnemonic-export RPC. Chapter 7 explicitly forbids a
-mnemonic-export RPC at substrate landing time; lifting that
-restriction is deferred and would require coordinated changes
-across chapter 7 and this chapter.
+**D5.** *(Superseded.)* Mnemonic-export RPC. An earlier draft of
+this chapter deferred a mnemonic-export RPC because Chapter 7
+forbade one at substrate landing time. Chapter 7 §7.3A now binds a
+wallet-password-gated own-seed export RPC (`get_mnemonic`,
+Chapter 7 R-K7) and a password re-encryption RPC
+(`change_mnemonic_password`, Chapter 7 R-K8) as first-class,
+non-deferred capabilities under a default-off / opt-in posture that
+applies only to the wider bulk/offline/HD/ZHTLC export superset
+(Chapter 7 R-K1–R-K4). Both RPCs decrypt and re-encrypt through this
+chapter's mnemonic module and encryption envelope (§5.4–§5.5) but
+are themselves bound, gated and tested entirely within Chapter 7; no
+further coordinated change to this chapter is required.
 
 ## 5.15 Baseline Verifications
 
@@ -765,12 +786,16 @@ surface.
 
 - *Inputs:* the baseline workspace at the pinned baseline-revision
   commit; chapter 01 (clean-room rules); chapter 07 (the
-  encrypted-mnemonic envelope this chapter's format payloads);
-  chapter 14 (the version-two atomic-swap state machines that
-  consume R27); chapter 26 (the WebAssembly-target gating
-  pattern used by R26); the public specification documents
-  enumerated in 5.16; public crate documentation for the five
-  dependency surfaces named in R3.
+  encrypted-mnemonic envelope this chapter's format payloads, and
+  the now-bound `get_mnemonic` / `change_mnemonic_password` export
+  RPCs referenced in the corrected D5); chapter 14 (the version-two
+  atomic-swap state machines that consume R27); chapter 20 (the Sia
+  ed25519 hierarchical-deterministic account, a second D1 activation
+  consumer of R15's `derive_ed25519_signing_key`, cross-referenced in
+  D1); chapter 26 (the WebAssembly-target gating pattern used by
+  R26); the public specification documents enumerated in 5.16;
+  public crate documentation for the five dependency surfaces named
+  in R3.
 - *Permitted-input classes used:* baseline source; bound substrate
   identifiers introduced with in-chapter justification; public
   specification documents; public crate documentation.

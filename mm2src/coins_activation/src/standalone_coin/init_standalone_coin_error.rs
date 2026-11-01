@@ -1,6 +1,7 @@
 use crate::prelude::CoinConfWithProtocolError;
-use coins::CoinProtocol;
+use coins::{CoinProtocol, RegisterCoinError};
 use common::{HttpStatusCode, StatusCode};
+use crypto::HwRpcError;
 use derive_more::Display;
 use rpc_task::rpc_common::{RpcTaskStatusError, RpcTaskUserActionError};
 use rpc_task::{RpcTaskError, TaskId};
@@ -13,6 +14,12 @@ pub type InitStandaloneCoinUserActionError = RpcTaskUserActionError;
 
 #[derive(Clone, Debug, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
+// `UnexpectedCoinProtocol` carries a `CoinProtocol` by value for diagnostics on
+// a cold error path. Boxing it (clippy's suggestion) would force `Box::new` at
+// every construction site in this compatibility-sensitive activation code for a
+// negligible size win on a rarely built RPC error enum. The per-item allow is
+// the established precedent for this lint across coins_activation.
+#[allow(clippy::large_enum_variant)]
 pub enum InitStandaloneCoinError {
     NoSuchTask(TaskId),
     #[display(fmt = "Initialization task has timed out {:?}", duration)]
@@ -39,10 +46,9 @@ pub enum InitStandaloneCoinError {
         ticker: String,
         error: String,
     },
-    #[display(fmt = "Private key is not allowed: {}", _0)]
-    PrivKeyNotAllowed(String),
-    #[display(fmt = "Unexpected derivation method: {}", _0)]
-    UnexpectedDerivationMethod(String),
+    /// A hardware-wallet failure classified into the public hardware RPC error names (CRD ch. 55 R55.2.17).
+    #[display(fmt = "Hardware wallet error: {}", _0)]
+    HwError(HwRpcError),
     Transport(String),
     Internal(String),
 }
@@ -60,6 +66,17 @@ impl From<CoinConfWithProtocolError> for InitStandaloneCoinError {
             CoinConfWithProtocolError::UnexpectedProtocol { ticker, protocol } => {
                 InitStandaloneCoinError::UnexpectedCoinProtocol { ticker, protocol }
             },
+        }
+    }
+}
+
+impl From<RegisterCoinError> for InitStandaloneCoinError {
+    fn from(e: RegisterCoinError) -> Self {
+        match e {
+            RegisterCoinError::CoinIsInitializedAlready { coin } => {
+                InitStandaloneCoinError::CoinIsAlreadyActivated { ticker: coin }
+            },
+            RegisterCoinError::Internal(internal) => InitStandaloneCoinError::Internal(internal),
         }
     }
 }
@@ -82,9 +99,8 @@ impl HttpStatusCode for InitStandaloneCoinError {
             | InitStandaloneCoinError::CoinConfigIsNotFound { .. }
             | InitStandaloneCoinError::CoinProtocolParseError { .. }
             | InitStandaloneCoinError::UnexpectedCoinProtocol { .. }
-            | InitStandaloneCoinError::CoinCreationError { .. }
-            | InitStandaloneCoinError::PrivKeyNotAllowed(_)
-            | InitStandaloneCoinError::UnexpectedDerivationMethod(_) => StatusCode::BAD_REQUEST,
+            | InitStandaloneCoinError::CoinCreationError { .. } => StatusCode::BAD_REQUEST,
+            InitStandaloneCoinError::HwError(_) => StatusCode::GONE,
             InitStandaloneCoinError::TaskTimedOut { .. } => StatusCode::REQUEST_TIMEOUT,
             InitStandaloneCoinError::Transport(_) | InitStandaloneCoinError::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR

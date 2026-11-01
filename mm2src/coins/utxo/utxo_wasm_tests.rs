@@ -8,7 +8,7 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-const TEST_COIN_NAME: &'static str = "RICK";
+const TEST_COIN_NAME: &'static str = "DOC";
 
 pub async fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
     let client = ElectrumClientImpl::new(TEST_COIN_NAME.into(), Default::default());
@@ -18,10 +18,12 @@ pub async fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
                 url: server.to_string(),
                 protocol: ElectrumProtocol::WSS,
                 disable_cert_verification: false,
+                timeout_sec: None,
             })
-            .await
             .expect("!add_server");
     }
+    let client = Arc::new(client);
+    client.start_pool(false);
 
     let mut attempts = 0;
     while !client.is_connected().await {
@@ -33,12 +35,12 @@ pub async fn electrum_client_for_test(servers: &[&str]) -> ElectrumClient {
         attempts += 1;
     }
 
-    ElectrumClient(Arc::new(client))
+    ElectrumClient(client)
 }
 
 #[wasm_bindgen_test]
 async fn test_electrum_rpc_client() {
-    let client = electrum_client_for_test(&["electrum1.cipig.net:30017", "electrum2.cipig.net:30017"]).await;
+    let client = electrum_client_for_test(&["doc.electrum1.cipig.net:30020", "doc.electrum2.cipig.net:30020"]).await;
 
     let tx_hash: H256Json = hex::decode("0a0fda88364b960000f445351fe7678317a1e0c80584de0413377ede00ba696f")
         .unwrap()
@@ -56,6 +58,7 @@ async fn test_electrum_rpc_client() {
 
 #[wasm_bindgen_test]
 async fn test_electrum_display_balances() {
-    let rpc_client = electrum_client_for_test(&["electrum1.cipig.net:30017", "electrum2.cipig.net:30017"]).await;
+    let rpc_client =
+        electrum_client_for_test(&["doc.electrum1.cipig.net:30020", "doc.electrum2.cipig.net:30020"]).await;
     utxo_common_tests::test_electrum_display_balances(&rpc_client).await;
 }

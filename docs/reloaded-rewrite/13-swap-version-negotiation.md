@@ -277,7 +277,11 @@ R14. **Non-fungible-token outcome enum.** Where the
      "version mismatch (advertise maker+taker values)",
      and "no NFT contract configured", so callers can
      distinguish a downgrade decision from a
-     mis-configuration.
+     mis-configuration. [Chapter 17 §17.9](17-swap-v2-evm-path.md#179-nft-variant)
+     binds the concrete dispatch-decision interface, production
+     call-site contract, and per-outcome behaviour for the EVM
+     coin family — the only family the non-fungible-token-extended
+     value currently applies to.
 
 ## 13.7A Non-Method `cancel_swap` Behaviour
 
@@ -395,6 +399,11 @@ D3. **Anti-downgrade challenge.** R10 prohibits mutation
   on which R8's backward-compatibility hinge depends.
 - The hash-time-locked-contract atomic-swap protocol that
   the version tag governs the dispatch of.
+- [Chapter 59](59-legacy-ordermatch-negotiation.md) — the
+  negotiation loop that carries this chapter's version tag
+  on its first two messages (ch. 59 §59.2, R59.4.3) and
+  that performs the per-side protocol-support and
+  lock-duration checks alongside it (ch. 59 R59.4.5).
 
 ## 13.11 Baseline Verifications
 

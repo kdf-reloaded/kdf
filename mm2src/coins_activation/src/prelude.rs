@@ -18,6 +18,10 @@ impl TxHistory for UtxoActivationParams {
     fn tx_history(&self) -> bool { self.tx_history }
 }
 
+impl TxHistory for coins::utxo::bch::BchActivationRequest {
+    fn tx_history(&self) -> bool { self.utxo_params.tx_history }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DerivationMethod {
@@ -28,6 +32,8 @@ pub enum DerivationMethod {
     HDWallet(String),
 }
 
+// Only the Solana result uses it, and Solana is native-only.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Clone, Debug, Serialize)]
 pub struct CoinAddressInfo<Balance> {
     pub(crate) derivation_method: DerivationMethod,
@@ -49,6 +55,9 @@ pub trait TryFromCoinProtocol {
         Self: Sized;
 }
 
+// Cold error path: created at most once per failed activation request and
+// converted immediately, so the variant's size is irrelevant.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum CoinConfWithProtocolError {
     ConfigIsNotFound(String),
