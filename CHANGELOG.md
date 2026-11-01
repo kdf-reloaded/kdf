@@ -536,8 +536,8 @@ it and, where one exists, the CRD rule, for readers who want more.
   Set the environment variable `MALLOC_ARENA_MAX` to choose your own (the daemon then leaves the
   allocator alone), or the `MM2.json` whole number `malloc_arena_max`; `0` keeps the allocator's own
   default, and an invalid value is reported and replaced by `2`. Its effect on swaps and coin
-  activation is not measured yet. Detail: [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md);
-  CRD ch.45 R45.6A.
+  activation is not measured yet. Detail: issue #191;
+  [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.
 - **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
   addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
   they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the

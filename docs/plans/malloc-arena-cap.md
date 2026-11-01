@@ -8,7 +8,7 @@
 > threads on a many-core host and about 30 on an 8-core host. Limiting the arenas to two removed the growth in the lab.
 > This is a Reloaded-original change. It is not part of the compatibility contract, and it changes no order, swap, wallet
 > or network behavior. The binding rules are CRD ch.45 §45.6A (R45.6A.1–7, T45.10–T45.13). Decision BJ, 2026-10-31:
-> the limit goes in **before** the first beta, with minimal verification.
+> the limit goes in **before** the first beta, with minimal verification. The finding is recorded in issue #191.
 
 ## What was measured
 
