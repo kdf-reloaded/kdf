@@ -35,9 +35,10 @@ load, the same binary each time, `RUST_LOG=debug`.
 
 Spec: CRD ch.45 §45.6A. Code, after the CRD PR is merged, by `kdf-coder`:
 
-1. One allocator call, `mallopt(M_ARENA_MAX, n)`, in `run_lp_main` (`mm2src/mm2_main/src/mm2.rs`) after the
-   configuration is read and before the daemon starts its runtimes. Linux with glibc only; not in the embedded-library
-   path, which lives inside the process of a host application.
+1. One allocator call, `mallopt(M_ARENA_MAX, n)`, in the start-up path of `mm2src/mm2_main/src/mm2.rs` after the
+   configuration is read and before the daemon starts its runtimes (the new module `malloc_arena.rs` holds the
+   decision and the call; `run_lp_main_impl` calls it only for the native daemon). Linux with glibc only; not in the
+   embedded-library path, which calls `run_lp_main` inside the process of a host application.
 2. The value: `MALLOC_ARENA_MAX` in the environment wins (no call from us); otherwise the key `malloc_arena_max` in
    `MM2.json` (`0` leaves the allocator's default); otherwise `2`. An invalid value gives a warning and `2`. A failed call
    gives a warning. Nothing refuses the launch.
