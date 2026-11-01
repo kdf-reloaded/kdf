@@ -230,8 +230,9 @@ it and, where one exists, the CRD rule, for readers who want more.
   forces the node's minimum relay fee pays that rate proportionally as well. A segwit transaction's
   size is its virtual size rounded up, as nodes count it, so a fee at the relay minimum is never one
   unit short. Swap spends and refunds are estimated over 496 bytes instead of 305 bytes rounded up
-  to a whole kilobyte: a KMD spend costs 496. An explicit `UtxoFixed` withdraw fee keeps its
-  meaning. Detail: PR #72; CRD ch.38 R38.6.6b–c.
+  to a whole kilobyte: a KMD spend costs 496. An explicit `UtxoFixed` withdraw fee is still charged
+  for every started kilobyte, which the reference does not do (see Known limitations). Detail:
+  PR #72; CRD ch.38 R38.6.6b–c.
 - **The coins-file option `dingo_fee` is now honored.** With `dingo_fee: true` and a positive
   `txfee`, a coin pays `txfee` for every started kilobyte. DINGO, DEV, NYC, SHIC, TRMP and XVG carry
   it. Their version-two swap spend fee is now one `txfee`, matching a reference peer that validates
@@ -1159,12 +1160,34 @@ lives.
   coin is offered only once the Electrum server lists it. More in
   [`withdraw-entry-expiry-by-block-time`](docs/plans/withdraw-entry-expiry-by-block-time.md).
   Detail: PR #181; CRD ch.38 R38.5B.8, D38.5B.2, D38.5B.4.
+- **A withdrawal with an explicit fixed fee can cost more than on Komodo or GLEEC KDF.** When a UTXO
+  `withdraw` gives its fee as `{"type":"UtxoFixed","amount":…}`, KDF Reloaded charges that amount for
+  every started kilobyte of the transaction, while Komodo and GLEEC KDF charge it in proportion to
+  the size. For the same request, a 245-byte KMD withdrawal paid the whole fee here and about a
+  quarter of it on the reference, and a 1,404-byte DOGE withdrawal paid twice the fee here and about
+  1.4 times it there. You never pay less than the fee you entered, and a withdrawal without `fee`,
+  swaps and the DEX fee are not affected. Parity is planned after the beta. More in the
+  [GLEEC compatibility guide](docs/GLEEC_COMPATIBILITY.md). Detail: PR #72.
 - **The swap watcher does not work yet.** A watcher is another node that finishes a swap for you
   when you are offline. No swap hands its data to a watcher yet, for any coin (issue #56), so keep
   your node running until your swaps have finished. Bitcoin-family coins (UTXO coins such as RIN,
   BCH and QTUM) also no longer offer to watch other traders' swaps, because the checks a watcher
   runs are not implemented for them; only Siacoin (SC) offers watching. Detail: PR #177; CRD ch.09
   R17.
+- **A maker that changes its orders many times a second can drop out of the order book of a relay
+  with a slow link.** In a test, a node that kept 480 orders and changed their prices about 80 times
+  a second sent its updates to a GLEEC KDF relay whose incoming link was limited to 100 kbit/s. Within
+  2 to 4 minutes the orders were gone from that relay's order book, and from the nodes behind it, for
+  the rest of the test; the maker itself reported no errors. Setting the `MM2.json` boolean
+  `maker_update_coalescing` to `true` kept all 480 orders visible in the same test. It is off by
+  default because it has a cost: price changes reached other nodes about 20 to 25 seconds later, for
+  5 minutes after the relay fell behind other nodes learned changes only through the keep-alive
+  synchronization, and the relay logged 6 to 18 failed order-book synchronization requests a minute.
+  More in [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md). Detail: CRD ch.32
+  D9.
+- **Other nodes can keep showing a cancelled order for a while if its cancellation is lost on the
+  way.** Such an order cannot be matched or traded, and it disappears once the maker posts again on
+  that pair or goes offline. Detail: PR #188; CRD ch.32 D12.
 - **ARRR (Pirate) atomic swaps work only between two KDF Reloaded nodes.** ARRR now uses a newer
   transaction format (v6, from the Ironwood upgrade) that no other KDF implementation can handle, so a
   swap with a Komodo or GLEEC counterparty cannot complete. A swap between two KDF Reloaded nodes has
