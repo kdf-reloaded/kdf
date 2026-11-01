@@ -501,6 +501,10 @@ live remote on 2026-10-24 (255 tags).
 | `PR #2713 (merged 2026-02-23)` | pull-request merge (squash) | `02a8a3ce69b6ce9a945acf40216b6e24008f0868` | 2026-02-23 |
 | `PR #2710 (merged 2026-03-06)` | pull-request merge | `8309b0bdbb5acf8fc8f5965f12cec4b4640e46a6` | 2026-03-06 |
 | `PR #2715 (merged 2026-03-06)` | pull-request merge (changelog bump) | `b9a8627e46feb702229f645cf78fc3ccbda8d194` | 2026-03-06 |
+| `PR #1878 (merged 2023-10-02)` | pull-request merge (squash) | `a2cb99bfff328da74f9fb5cdfc877ffa1ef7bafe` | 2023-10-02 |
+| `PR #2580 (merged 2025-08-12)` | pull-request merge (squash) | `f5f0b18ccda65fbd363192a4d7631a75786f008a` | 2025-08-12 |
+| `PR #2605 (merged 2025-09-10)` | pull-request merge (squash) | `c6c3cc1b3053571ca785812634b077b8e114e415` | 2025-09-10 |
+| `PR #2631 (merged 2025-10-06)` | pull-request merge (reverts the changes of the rows `PR #2580` and `PR #2605`; both release rows from `v2.6.0-beta` on descend from it) | `4025b8cd4374439a963047f804d924031abefbb3` | 2025-10-06 |
 
 The `v1.0.0-beta` to `v1.0.7-beta`, `v1.1.0` and `v1.0.1172` rows were
 added on 2026-10-25 under the author duty above. The other `v1.0.N`

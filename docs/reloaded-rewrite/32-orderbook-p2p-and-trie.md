@@ -41,7 +41,10 @@ This chapter binds, by behaviour and public/dictated interface:
   all of the above (§32.9);
 - the bounded and unbounded state of the subsystem and of the
   substrate beneath it, as facts of the reference every peer relies
-  on (§32.9A).
+  on (§32.9A);
+- the removal of a maker's stale orders at other nodes — what a
+  keep-alive does not say, how an answer is applied, what expires, and
+  the maker's re-pricing flow (§32.9C).
 
 > **Binding scope (R36).** Throughout this chapter, requirements
 > bind observable *behaviour*, the *public* cross-crate
@@ -169,7 +172,9 @@ on insert so that a `Cancel` message that races ahead of its
 matching `Create` cannot resurrect an order. The guard's TTL is
 bound by [§11.2](11-order-match-cancellation.md) and §32.9; this
 chapter binds only the guard's presence and the obligation to
-consult it on insert. *(Post-2022 component per §32.1.)*
+consult it on insert. *(Post-2022 component per §32.1.)* How a cancel
+that never arrives leaves a stale entry behind, and the paths that
+remove it, are bound in §32.9C R-GH1 and R-GH5.
 
 **R-C6.** A set of this node's *own* ephemeral per-order
 pubkeys MUST be tracked, so that orders this node published
@@ -260,7 +265,9 @@ snapshot (§32.6 R-T4).
 
 **R-P6.** A per-pubkey record is evicted when no fresh keep-alive
 arrives within the subsystem's pubkey-state TTL; eviction is
-performed by the periodic maintenance described in §32.8/§32.9.
+performed by the periodic maintenance described in §32.8/§32.9. A pair
+the pubkey stops advertising is not evicted on its own (§32.9C R-GH1,
+R-GH3).
 
 ## 32.5 Order-Record Wire/In-Memory Split
 
@@ -770,7 +777,9 @@ per diverging pair. The reference puts the **advertised** root into
 each entry, so the request literally says "I hold the root you just
 advertised; bring me from there to your current state"; the
 consequences of that choice are drawn in R-Q4a. A matching root
-produces no request and no other action.
+produces no request and no other action. What the answer does to the
+held set, and that the requester never checks the root it reaches, are
+bound in §32.9C R-GH4.
 
 **R-Q4a (Reloaded option: name the root actually held).**
 *Reloaded-original, wire-compatible.* Because the responder (R-Q5)
@@ -1817,7 +1826,10 @@ keep-alive receipt (§32.4 R-P3) has aged past the pubkey-state
 TTL MUST be evicted, dropping its tries and per-pair state. The
 per-pair delta history is independently TTL-bounded (§32.4
 R-P5). Expiry sweeps are part of the subsystem's periodic
-maintenance.
+maintenance. This per-pubkey eviction is the only expiry of another
+maker's entries at the reference's release rows; §32.9C R-GH3 binds that
+fact, and R-GH6 item 7 records the per-pair variant of the reference's
+later, unreleased change.
 
 The TTL's concrete value, its operator override, the
 advertisement interval R-K2 runs at, and the exemption of the
@@ -2376,6 +2388,370 @@ waiting up to 30 seconds for the next tick.
   - after the first 2 minutes, no node drops the maker's orders for a
     missing keep-alive.
 
+## 32.9C Removal of a Maker's Stale Orders at Other Nodes
+
+> *Authored by the KDF Spec Reader 2026-11-01 from the rows `v2.6.0-beta`
+> and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A,
+> identical at both in every surface this section binds (R-GH7), and,
+> where a rule says so, from the rows `PR #1878 (merged 2023-10-02)`,
+> `PR #2580 (merged 2025-08-12)`, `PR #2605 (merged 2025-09-10)` and
+> `PR #2631 (merged 2025-10-06)`, compared with the baseline anchor.
+> Prompted by a field observation on the public network (2026-10-31): a
+> maker running the reference re-priced its orders with `setprice` and
+> `cancel_previous`, yet other nodes, Reloaded seeds among them, kept
+> showing five entries for that maker's pubkey on one pair where only two
+> were valid, and the extra entries left only when the maker restarted.
+> **Passed the KDF Dirty Gate on 2026-11-01**, measure 0.03; §32.13.
+> This section records what the reference does at the two release rows
+> (the behavior Reloaded is at parity with today, R-GH10), and separately
+> what the reference's later, unreleased change does (R-GH6). Nothing in
+> it changes a wire shape; the one decision it opens is §32.10 D12.*
+
+Throughout, "a pair" is the alphabetically-ordered pair of §32.4, "the
+record" is a maker pubkey's per-pubkey record of R-P1, and "an entry" is
+one order of that pubkey held in the read index and the pair's trie.
+
+**R-GH1 (pairs a keep-alive does not name).** At both release rows a
+keep-alive from pubkey P changes nothing for a pair it does not name. The
+receiver neither removes the entries it holds for (P, pair), nor
+requests anything for them, nor marks them; its only pubkey-wide effect is
+the receipt time of R-P3. Entries of (P, pair) leave the receiver only by
+one of four paths:
+
+1. a cancel message for the order, signed by P (R-GH5);
+2. a later keep-alive **naming that pair** with a root different from the
+   held one, followed by an answer whose application removes them (R-GH4);
+3. eviction of P's whole record (R-GH3);
+4. a local order-book request for the pair (R-F4, the request-and-fill
+   path), whose answer lists P: the receiver then **replaces** its whole
+   (P, pair) slice with the answer's set. A pubkey the answer does not list
+   keeps every entry the receiver holds for it.
+
+Because a pair whose root is all zeros or the empty-trie root is never
+advertised (§32.9 R-K2a), a pair on which the maker has cancelled every
+order is exactly a pair absent from every later keep-alive. Entries a node
+still holds for such a pair, from a cancel it never received, therefore
+persist for as long as P's record lives — that is, for as long as P keeps
+sending keep-alives for **any** pair (R-GH3, §32.9A R-B1 row 1), in the
+field until the maker goes offline for the liveness window. The same holds
+at the baseline anchor and at the row `PR #1878 (merged 2023-10-02)`: no
+state the author read removes a pair a keep-alive does not name. What
+that row changed is the keep-alive's shape — from one message carrying
+every pair's root, published on every one of the maker's pair topics, to
+the one-pair, one-topic message of R-K2a — not what a receiver does with
+pairs the message leaves out.
+
+**R-GH2 (what a maker sends for a pair whose last order was cancelled).**
+At both release rows the maker publishes one cancel message per cancelled
+order (R-GH9) and then **nothing** for the pair: no keep-alive entry, no
+zero or empty-trie root (R-K2a). Its own record keeps the pair's entry at
+the empty-trie root (§32.7.3 R-Q5a item 2), so a synchronization request
+for that pair addressed to the maker itself is answered with an empty full
+snapshot (T-Q5a), and a request addressed to a relay that has applied
+such a snapshot fails with the missing-pair outcome (R-Q5a item 3). No
+cancel is repeated, and no later message tells a receiver that the pair is
+empty. *(At the row `PR #2605 (merged 2025-09-10)` the maker advertises
+every pair of its own record at every tick, including a pair whose root is
+all zeros or the empty-trie root, and a receiver treats such an
+advertisement as "clear this pair" — R-GH6 items 2 and 6. That row's maker
+never drops an emptied pair from its own record, so it keeps advertising
+the empty pair every 30 s for the life of the process.)*
+
+**R-GH3 (what expires, and on whose clock).** At both release rows the
+only expiry of another maker's entries is the **per-pubkey** eviction of
+§32.9 R-K3 and [Chapter 59](59-legacy-ordermatch-negotiation.md)
+R59.6.4: P's record, with every entry of every pair under it, is removed
+once the receiver's **own** receipt time of P's most recent keep-alive —
+for any pair, named or not — is older than the window, by default three
+advertisement intervals (90 s), overridable by the `maker_order_timeout`
+member. The sender's timestamp plays no part (R-P3, R59.6.2). There is
+**no per-pair expiry** and **no per-order expiry** on the receiving side:
+an entry has no age of its own, a pair has no liveness of its own, and a
+pair the maker stopped advertising is kept exactly as long as the record.
+The eviction sweep is part of the periodic order-match maintenance (ch. 59
+R59.6.4) and runs more than once a second, so eviction follows the window's
+end closely. A maker's own orders expire on the maker only, through the
+per-order timeout of [Chapter 12](12-order-match-state-store.md), which
+produces an ordinary cancel message (R-GH9). The delta-history bounds of
+R-P5 (5 min per delta, 4 h per pair history) bound the synchronization
+history, not the entries.
+
+**R-GH4 (what a synchronization answer does to the held set, and what it
+cannot detect).** At both release rows the requester applies each pair of
+the answer as follows, under the read-index lock, queuing the matching
+mutation events for the trie worker (R-T7):
+
+1. a **full snapshot** for the pair **replaces** the (P, pair) slice: every
+   held entry of P for the pair is removed first (the clear of R-F2 item a),
+   then every order of the snapshot is inserted — subject to the
+   cancellation guard of R-C5, which drops an order cancelled by P within the
+   last 120 s;
+2. a **delta** for the pair is applied as a delta (R-F2 item b): an order
+   present in it is inserted or updated, an order marked removed is removed,
+   and every other held entry is untouched;
+3. **no check** is made that the root the slice reaches equals the root the
+   keep-alive advertised, that every requested pair is answered, or that
+   every answered pair was requested: an omitted pair stays as it was, an
+   unrequested pair in the answer is applied all the same, and the requester
+   learns that it is still diverged only when the next keep-alive for the
+   pair arrives and the comparison of R-Q4 fails again;
+4. a "no data" outcome, an error answer, a transport failure or the 10 s
+   timeout changes nothing (R-F3b, R-Q6).
+
+Because the responder answers from its **own** held state (R-Q5), an answer
+carries the responder's view, correct or not. The consequence for a missed
+cancel: a requester that holds a cancelled order and asks a peer whose view
+is correct receives a full snapshot (the responder's current root equals the
+advertised one, R-Q4a note) or a delta, and the stale entry is gone after
+one round; a requester that asks a peer holding the **same** stale view
+receives a full snapshot of that same view and keeps the entry; a requester
+that asks a peer holding a **different** stale view adopts that view. A
+chain of relays therefore heals from the maker outward, one hop per
+advertisement interval at best, and only while every request on the chain
+succeeds; the requester has no way to tell a stale answer from a current
+one and never asks a different peer (R-Q4, R-Q6). *(The row `PR #2605
+(merged 2025-09-10)` compares the reached root with the advertised one and
+clears the pair on mismatch — R-GH6 item 4.)*
+
+**R-GH5 (order messages for a pair the receiver holds no root for; late
+duplicates).** At both release rows, after signature verification and the
+pubkey ban check:
+
+1. a **created** message is inserted unconditionally, apart from the
+   cancellation guard of R-C5: it creates P's record and the pair's
+   held-root entry if absent (R-T8), whatever root P's keep-alives have
+   advertised or will advertise. The message's own `pair_trie_root` member
+   is zeros and is read by no receiver (§32.5.1 R-W1a). The receiver's next
+   comparison with P's advertised root (R-Q4) runs on the root the
+   insertion produced;
+2. an **updated** message is applied only to an order the receiver holds
+   under P; for an order it does not hold, the message is reported as not
+   advancing state (no application-level forward, R-F3b) and changes
+   nothing;
+3. a **cancelled** message always records the guard entry — the order
+   identifier with P as the cancelling publisher, for 120 s (R-K1) — whether
+   or not the order is held; it removes the order if held under P; for an
+   unknown order it has no other effect and still counts as handled;
+4. a **late duplicate** of a cancelled order's created message is dropped
+   while the guard entry lives and inserted again after it — the entry then
+   persists under R-GH1 until one of its four paths removes it. A cancel is
+   never re-sent by the maker, so a cancel lost on the way to a node is lost
+   for that node (R-GH9).
+
+**R-GH6 (the reference's later change; informative for Reloaded, bound as
+the behavior of its row).** The row `PR #2605 (merged 2025-09-10)`, which
+also carries the row `PR #2580 (merged 2025-08-12)`, behaves as follows on
+the surfaces above. **Neither release row carries this behavior**: the row
+`PR #2631 (merged 2025-10-06)` and both release rows have the behavior of
+R-GH1 to R-GH5, R-GH8 and R-GH9. The rows are named here so that the gate
+can verify them; a continuation of the work exists on an unmerged,
+unreleased branch of the reference and is not bound.
+
+1. *Per-pair rejection of a repeated or older keep-alive, on the sender's
+   timestamp.* For each pair the message names that the node considers
+   (subscribed, or any pair on a relay), the message's `timestamp` must be
+   strictly greater than the last sender timestamp accepted for (P, pair);
+   if it is not, the **whole message** is rejected: nothing is recorded (not
+   even the receipt time), no request is made, and the message is reported
+   as not advancing state. The per-pair sender timestamp is also advanced by
+   a cancel message's `timestamp` (item 5), is kept when the pair is pruned
+   (item 7) and is dropped only with the whole record. This is the one point
+   at which that row **uses** the sender's timestamp; the release rows ignore
+   it (R-P3, R59.6.2).
+2. *A zero or empty-trie root clears the pair.* An advertised root that is
+   all zeros or the empty-trie root removes every held entry of (P, pair),
+   drops the pair's history, records that root as the held root, records the
+   message's sender timestamp for the pair and **removes the pair's liveness
+   instant**, so the sweep of item 7 prunes the pair's entry at its next pass.
+   No request is made for such a pair. *(At the release rows such a root is
+   skipped without effect, R-Q4 item 2.)*
+3. *An advertised root equal to the held root refreshes the pair.* The
+   pair's liveness instant is set to the receiver's clock and its sender
+   timestamp recorded. A diverged pair is requested as before and is **not**
+   refreshed until item 4 accepts it.
+4. *The answer is accepted per pair only when it reproduces the advertised
+   root.* The request still names the advertised root and still goes once to
+   the forwarding peer (R-Q4, R-Q6). Of the answer, only pairs the request
+   named are applied. After a pair is applied (snapshot or delta, as in
+   R-GH4 items 1 and 2) the root the slice reaches is compared with the
+   advertised root: if equal, the pair is accepted — liveness instant set to
+   the receiver's clock, sender timestamp recorded; if not, **the pair is
+   cleared** — every held entry of P for the pair removed, the pair's
+   held-root entry and history dropped — and left unresolved. A pair
+   unresolved for any reason (mismatch, omitted from the answer, no answer,
+   error, timeout) makes the handling report failure, so the application-
+   level forward of R-F3b is withheld; nothing is retried; the next
+   keep-alive for the pair starts again from no held root. A stale responder
+   therefore costs the requester **all** of the maker's entries on the pair,
+   valid ones included, until a correct answer is accepted.
+5. *Order messages.* A created or updated message, and every insertion made
+   by an answer or by an order-book request, sets the pair's liveness
+   instant to the receiver's clock. A cancelled message additionally advances
+   the pair's sender-timestamp floor to the cancel's `timestamp` (so a
+   keep-alive published before the cancel but arriving after it is rejected
+   under item 1) and, if the cancel left the pair at an all-zero or
+   empty-trie root, removes the pair's liveness instant; it does not refresh
+   liveness. Gossip signed by one of the node's own pubkeys is not processed
+   and is reported as handled.
+6. *The maker advertises every pair of its record*, including pairs at an
+   all-zero or empty-trie root (the skip of R-K2a is absent at that row).
+7. *Per-pair liveness and sweep, on the receiver's clock.* Each (P, pair)
+   has its own liveness instant, set only by items 3, 4 and 5. The
+   maintenance sweep prunes every pair whose instant is older than a **fixed**
+   window of three advertisement intervals (90 s) — removing its entries,
+   its held-root entry and its history — and removes P's record only when
+   **no** pair of it is within the window; a pair entry with no instant at
+   all (one created by the placeholder of R-Q4 item 3, or whose instant item
+   2 or 5 removed) is pruned at the next pass. The node's own pubkeys are
+   exempt. The `maker_order_timeout` member is **not** read by that row's
+   sweep.
+8. *The order-book answer's per-pubkey `last_keep_alive` member* carries the
+   latest per-pair liveness instant of that pubkey (zero if none). At the
+   release rows it carries the record's receipt time. No receiver uses the
+   member at either state.
+9. *Unchanged from the release rows:* the request and answer shapes (R-Q1,
+   R-Q2a) and the root the request names; one request, to the forwarding
+   peer, 10 s, no retry, no de-duplication, no rate limit (R-Q6); the
+   responder's semantics (R-Q5, R-Q5a); the 120 s cancellation guard; the
+   maker's re-pricing flow and its cancel messages (R-GH8, R-GH9); the
+   exemption of own pubkeys from eviction.
+
+**R-GH7 (the two release rows agree).** `v2.6.0-beta` and `v3.0.0-beta`
+do not differ in any surface R-GH1 to R-GH5, R-GH8 and R-GH9 bind. In the
+files compared, the inter-row difference is confined to copyright lines, an
+order-book-address arm for a coin protocol unrelated to this section, the
+default network identifier and build-feature gating of the gossip
+behavior.
+
+**R-GH8 (the maker's re-pricing: when a replaced order leaves the
+advertised root).** At both release rows, `setprice` with
+`cancel_previous` replaces every own maker order whose **directed** pair
+equals the request's `base` and `rel` — orders of the reverse direction
+are not touched, and the replacement is not conditioned on the order's
+match state. For each such order the maker, before publishing its cancel
+message, removes the order from its own order set and from its read index
+and queues the trie removal for the worker (R-T7). The keep-alive of the
+next tick advertises the pair's root **as the trie store holds it at that
+moment**, without waiting for the worker. A replaced order therefore leaves
+the advertised root as soon as the worker has applied the removal —
+normally within milliseconds — and no periodic rebuild is involved; the
+only condition under which an advertised root still covers a replaced
+order is a worker backlog at the tick (the unbounded queue of §32.10 D6),
+for as long as the backlog lasts, and the first tick after the worker
+catches up advertises the correct root. *(Reloaded is stricter: R-T3b item
+2 advertises only a root of a caught-up store, or skips the tick. At the
+row `PR #2605 (merged 2025-09-10)` the trie is updated synchronously with
+the read index, so an advertised root never covers a replaced order.)*
+Should the balance check of the new order fail, the replaced orders are
+cancelled all the same and no new order is created.
+
+**R-GH9 (one cancel per replaced order; ordering).** At both release rows
+the maker publishes, for **each** replaced order, exactly **one** cancel
+message, signed by the order's own key (persistent or per-order), on the
+order's directed-pair topic, with the `timestamp` of the moment it is
+built and an all-zero `pair_trie_root` (R-W1a). It is published once: no
+retry, no repetition and no redundancy beyond what the mesh adds (a
+reference relay's second copy, R-F3b; a Reloaded relay's priority lane,
+§32.9B R-MP1 item 2). The ordering at the maker is: for each replaced
+order, local removal, then its cancel message; all cancel messages of the
+request, then the new order is built, saved and inserted locally, then its
+created message (a new identifier, so the guard of R-C5 does not affect
+it) is published; the next keep-alive is **not** triggered by the change
+but comes at the next tick of the 30 s advertisement loop (R-K2a), and
+advertises whatever root the store then holds — normally one excluding
+every replaced order and including the new one (R-GH8). The mesh gives a
+receiver no ordering guarantee between the cancel, the created message and
+the keep-alive ([Chapter 11](11-order-match-cancellation.md) §11.0); a
+receiver that gets the keep-alive first requests the pair and receives the
+maker's current set (R-GH4), one that gets the cancel first removes the
+order and guards its identifier, and one that never gets the cancel keeps
+the entry under R-GH1 until the next keep-alive for the pair triggers a
+request to a peer whose view is correct — or indefinitely, if every peer it
+asks shares its stale view.
+
+**R-GH10 (Reloaded today).** *Established 2026-11-01 against this
+repository's own keep-alive receiver, synchronization applier, order-
+message handlers, eviction sweep, keep-alive producer and re-pricing path;
+no forbidden-class input.* Reloaded has the behavior of R-GH1 to R-GH5,
+R-GH8 and R-GH9 (**parity**), with these recorded differences: the request
+names the held root (R-Q4a), which changes which answer arrives but not
+R-GH4's lack of a root check; an accepted order message refreshes the
+pubkey's liveness instant (ch. 59 R59.6.1a), so a maker whose keep-alives
+are lost but whose order messages arrive keeps its record — and with it any
+stale entry of R-GH1 — alive longer than on a reference node; the
+advertisement never reflects a lagging store (R-T3b item 2); a request that
+fails quickly is asked once more (R-Q5c), and a request for a pair still
+being synchronized is answered when it lands (R-Q5b). Reloaded has **no
+per-pair liveness and no root check after applying an answer**: the
+exposure R-GH1 and R-GH4 describe is the same as at the release rows, and
+the field observation above is consistent with it. Whether to adopt one of
+the remedies of the later reference change, and in what form, is §32.10
+D12.
+
+**T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
+P on pairs X and Y receives a keep-alive from P naming only X with X's held
+root: Y's entries, root and history are unchanged, no request is sent, and
+only P's receipt time moves. The same with Y's last order cancelled at the
+maker but the cancel never delivered: Y's entries stay through any number
+of keep-alives naming X, and leave only when P's record is evicted 90 s
+after the last keep-alive for any pair.
+
+**T-GH2** *An emptied pair is silent (R-GH2).* After the maker cancels
+every order on X, no keep-alive names X (T-K3); a request for (P, X) to the
+maker yields an empty full snapshot; to a relay that applied that
+snapshot, the missing-pair outcome.
+
+**T-GH3** *Expiry is per pubkey only (R-GH3).* With P sending keep-alives
+for X only, entries of P on Y, Z are kept indefinitely; when P falls silent,
+every entry of P on every pair is removed at the sweep after 90 s (or the
+configured `maker_order_timeout`), and no entry or pair of P is removed
+before that.
+
+**T-GH4** *An answer is applied without a root check (R-GH4).* A requester
+holding a stale entry on (P, X) that asks a responder with the correct view
+ends with the maker's current set; one that asks a responder holding the
+same stale set ends unchanged and sends no further request until the next
+keep-alive; one that asks a responder holding a different stale set adopts
+it. An answer omitting a requested pair leaves that pair as it was; an
+answer carrying an unrequested pair applies it.
+
+**T-GH5** *Order messages and duplicates (R-GH5).* A created message from P
+for a pair the node holds no root for creates P's record and the pair's
+entry and inserts the order; a late duplicate of a cancelled order is
+dropped within 120 s of the cancel and inserted after; an updated message
+for an unknown order changes nothing and is reported as not advancing
+state; a cancel for an unknown order records the guard entry and counts as
+handled.
+
+**T-GH6** *Later-change behavior, conditional (R-GH6).* Applies only if
+D12 adopts an item of R-GH6; its tests are written with the adopting
+change. Until then the only test is negative: a keep-alive advertising an
+all-zero or empty-trie root changes nothing (T-Q4), and a keep-alive with a
+`timestamp` older than the last one is processed like any other (ch. 59
+T8).
+
+**T-GH8** *A replaced order leaves the root promptly (R-GH8).* A maker
+with two orders on (base, rel) re-prices with `cancel_previous`: once the
+worker is idle, the pair's held root covers the two new orders and neither
+old one; the keep-alive of the next tick advertises that root; with the
+worker held back across a tick, Reloaded skips or delays the advertisement
+(R-T3b item 2) rather than advertising a root covering an old order. Orders
+of (rel, base) are untouched; a failed balance check still cancels the old
+orders and creates none.
+
+**T-GH9** *One cancel per replaced order, in order (R-GH9).* The same
+re-pricing publishes exactly two cancel messages, one per old order
+identifier, each signed by that order's key on the pair's topic, both
+before the single created message of the new order; no cancel is repeated
+within the next two advertisement intervals; the next keep-alive arrives
+at the loop's tick, not earlier.
+
+**T-GH10** *Reloaded parity (R-GH10).* T-GH1 to T-GH5, T-GH8 and T-GH9
+pass on a Reloaded node with `orderbook_sync_names_held_root` at either
+value and `order_messages_refresh_liveness` at either value; with
+`order_messages_refresh_liveness` at its default, T-GH3's silence is
+counted from the last keep-alive **or order message** of P.
+
 ## 32.10 Deferred Work
 
 D1. **Module split.** The subsystem is a single large module.
@@ -2612,6 +2988,75 @@ D11. **Second copy only for priority messages (Reloaded-original;
     connection, which the single copy makes common under load, is logged
     at INFO (the note "Consequence for a relay's connections" under
     R-F3b).*
+
+D12. **Stale entries of a maker that keeps sending keep-alives (open
+    decision; added 2026-11-01; the reference facts it rests on are
+    §32.9C).** At the release rows and in Reloaded, an entry a node holds
+    from a cancel it never received leaves only by the four paths of R-GH1;
+    for a pair the maker no longer advertises it leaves only with the
+    maker's whole record. The reference's later, unreleased change (R-GH6)
+    adds per-pair liveness on the receiver's clock, a root check after
+    every applied answer with the pair cleared on mismatch, clearing on an
+    advertised zero or empty-trie root, and a per-pair order on the
+    sender's timestamp. Candidates for Reloaded, none bound here and none
+    changing a wire shape:
+
+    - (a) **per-pair liveness on the receiver's clock** (R-GH6 item 7
+      without the sender-timestamp order, keeping the `maker_order_timeout`
+      override): a pair the maker stops advertising is pruned within the
+      window while the record lives. This alone closes the fully-cancelled-
+      pair case of R-GH1; its cost is that a pair whose keep-alive is lost
+      for a window is pruned and refilled at the next one;
+    - (b) **a root check after applying an answer, with a milder remedy
+      than clearing**: when the reached root differs from the advertised
+      one, keep the set, mark the pair diverged and ask a *different* peer
+      once (the maker itself when connected, else another relay), instead
+      of waiting for the next keep-alive. R-GH6 item 4's clear drops the
+      maker's valid orders on the pair with the stale ones and is not
+      recommended as it stands;
+    - (c) **Reloaded makers advertising an emptied pair** with its zero or
+      empty-trie root for a bounded number of ticks: a reference receiver
+      skips such a root without effect (R-Q4 item 2), so the message is
+      harmless to it, and a receiver under (d) clears the pair. Effective
+      among Reloaded nodes only;
+    - (d) **treating an advertised zero or empty-trie root as a clear**
+      (R-GH6 item 2) on the receiving side; it has an effect only when some
+      maker sends one, which a reference maker at the release rows never
+      does.
+
+    The sender-timestamp order of R-GH6 item 1 is **not** a candidate: it
+    reintroduces the sender's clock that R-P3 and ch. 59 R59.6.1 remove,
+    and a maker with a wrong clock would have its keep-alives rejected
+    whole. Each adopted candidate is a divergence to record in the
+    operator-facing compatibility documents.
+
+    **Decided 2026-11-01 by the maintainer: no candidate before the
+    beta.** The beta's release notes list the behavior as a known
+    limitation. The decision rests on a lab run of this project's own
+    nodes, in which a live pair healed one hop per advertisement interval
+    once a keep-alive named it, an emptied pair kept its stale entry until
+    the maker posted on it again, and the maker's eviction followed the
+    window of R-GH3; and on this project's own seed logs, in which one
+    seed's synchronization requests timed out for hours while another
+    seed's did not. After the beta, in this order:
+
+    1. (b) in this form: one request to a *different* connected relay when
+       a request times out or fails, or when the root a pair reaches
+       after an applied answer still differs from the advertised one. The
+       pair is never cleared on a mismatch;
+    2. (e) **a cancel this node received is final for synchronization
+       answers** (Reloaded-original, added 2026-11-01): an order whose
+       cancel the node received is not re-admitted from an answer for a
+       window longer than the 120 s of R-K1 (for example one hour), so a
+       stale responder cannot bring it back. It is stricter than R-GH5
+       item 4 on the receiving side only;
+    3. (a);
+    4. two changes to the deferral of R-Q5b for start-up and re-post
+       bursts: parking a request for a pair named by a keep-alive the
+       node is still handling, before its placeholder exists, and a
+       review of the parking limits.
+
+    (c) and (d) only if (a) is rejected.
 
 ## 32.11 External References
 
@@ -3178,3 +3623,61 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   runs on, the connection handling of `mm2_p2p`, and our own nodes' logs
   from a lab run. The forbidden corpus was not consulted for this
   amendment, and it needs no Dirty Gate pass of its own.
+- *Scoped addition (2026-11-01) -- §32.9C (R-GH1 to R-GH10, T-GH1 to
+  T-GH10), §32.10 D12, and the pointer sentences appended to §32.0, §32.3
+  R-C5, §32.4 R-P6, §32.7.3 R-Q4 and §32.9 R-K3.* **KDF Dirty Gate: PASS on
+  2026-11-01, measure 0.03.** Prompted by stale entries of a reference maker
+  observed on the public network on 2026-10-31. *Inputs:* this repository's
+  own keep-alive receiver, synchronization applier, order-message handlers,
+  eviction sweep, keep-alive producer and re-pricing path (R-GH10 and every
+  parity statement rest on these); and the forbidden corpus, consulted at
+  the rows `v2.6.0-beta` and `v3.0.0-beta` of [Chapter
+  02](02-baseline-state.md) §2.15A, which agree in every respect taken, and
+  at the rows `PR #1878 (merged 2023-10-02)`, `PR #2580 (merged
+  2025-08-12)`, `PR #2605 (merged 2025-09-10)` and `PR #2631 (merged
+  2025-10-06)`, compared with the baseline anchor, **only** to establish:
+  that a keep-alive does not affect pairs it does not name, at every state
+  read; the four paths by which a held entry leaves a node; what a maker
+  sends for an emptied pair; that expiry is per pubkey on the receiver's
+  clock, with the window, its override and the sweep's cadence; how a
+  synchronization answer is applied (replace, delta, no root check, no
+  completeness check) and the resulting propagation of a stale view; the
+  handling of created, updated and cancelled messages and of a late
+  duplicate; the later change's per-pair sender-timestamp order, clear on a
+  zero root, root-check acceptance with clear on mismatch, per-pair liveness
+  and sweep, maker-side advertisement of empty pairs, order-book-answer
+  liveness member and dropped override; the absence of inter-row
+  differences; and the maker's re-pricing flow (directed pair, local removal
+  before the cancel, one cancel per order, the order of cancel, create and
+  keep-alive, no wait on the trie worker). What crosses into this chapter is
+  behavior, dictated wire members already bound (`trie_roots`, `timestamp`,
+  `pair_trie_root`, `last_keep_alive`, the request tag of R-Q1), public RPC
+  and configuration names (`setprice`, `cancel_previous`, `base`, `rel`,
+  `maker_order_timeout`) and numeric values a peer can observe on the wire
+  or in timing (30 s, 90 s, 120 s, 10 s, 5 min, 4 h); no function, type or
+  field name outside those, no helper decomposition, no control-flow
+  transcription, no error, log, comment, commit-message or review text was
+  reproduced. The candidates of D12 and the T-items are Reloaded-original.
+- *Dirty Gate clearance for the 2026-11-01 Spec Reader addition (chapter 01
+  T1, R40):* Dirty Gate pass 2026-11-01: PASS, measure 0.03 on the
+  discretionary-expression basis (R35), no findings.
+  - *Extent:* the reference's order-matching subsystem as §32.9C names it
+    (keep-alive receiver and producer, synchronization
+    requester/responder/applier, order-message handlers, cancellation guard,
+    eviction sweep, re-pricing / cancel-previous path, order-book request
+    fill) compared at the two release rows (principal source file in all
+    those regions plus the complete inter-row difference), at the baseline
+    anchor (keep-alive receiver and producer), and at the four pull-request
+    rows tabled in §2.15A (each: its change to the module's principal source
+    file; test files excluded); about 2,600 diff lines and 1,500 release-row
+    lines read; the later unmerged continuation was not compared.
+  - *Method:* reading, checkout of the tabled commits inside the gated corpus
+    clone; no mechanical tool (candidate has no code blocks).
+  - *Reference-state check (ch.02 R13):* all seven state names have §2.15A
+    rows with the exact identifiers read; kinds and ancestry statements hold;
+    no identifier appears outside the tables and footers.
+- *Clean-side edits to the 2026-11-01 Spec Reader addition (2026-11-01).*
+  The inline gate-pending markers were replaced by the clearance record;
+  D12 records the maintainer's decision and adds candidate (e); the D12
+  pointers in ch. 59 D2 and in UPSTREAM-PARITY-GAPS.md #20 say it is
+  decided. No reference input was used for these edits.
