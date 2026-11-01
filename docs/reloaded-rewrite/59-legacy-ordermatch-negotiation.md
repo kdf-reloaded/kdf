@@ -606,7 +606,7 @@ synchronisation-response construction, which belongs to
 [Chapter 32](32-orderbook-p2p-and-trie.md) §32.7 and §32.9C: R-GH1 and
 R-GH4 there bind the facts (a stale relay passes its view to every peer
 that asks it, and no requester checks the root it reaches), and §32.10
-D12 holds the open decision.
+D12 holds the decision (decided 2026-11-01).
 
 **D3.** *The silence window.* Between a maker going silent and its
 eviction under R59.6.4 there is a window of up to the configured window

@@ -3030,6 +3030,34 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     whole. Each adopted candidate is a divergence to record in the
     operator-facing compatibility documents.
 
+    **Decided 2026-11-01 by the maintainer: no candidate before the
+    beta.** The beta's release notes list the behavior as a known
+    limitation. The decision rests on a lab run of this project's own
+    nodes, in which a live pair healed one hop per advertisement interval
+    once a keep-alive named it, an emptied pair kept its stale entry until
+    the maker posted on it again, and the maker's eviction followed the
+    window of R-GH3; and on this project's own seed logs, in which one
+    seed's synchronization requests timed out for hours while another
+    seed's did not. After the beta, in this order:
+
+    1. (b) in this form: one request to a *different* connected relay when
+       a request times out or fails, or when the root a pair reaches
+       after an applied answer still differs from the advertised one. The
+       pair is never cleared on a mismatch;
+    2. (e) **a cancel this node received is final for synchronization
+       answers** (Reloaded-original, added 2026-11-01): an order whose
+       cancel the node received is not re-admitted from an answer for a
+       window longer than the 120 s of R-K1 (for example one hour), so a
+       stale responder cannot bring it back. It is stricter than R-GH5
+       item 4 on the receiving side only;
+    3. (a);
+    4. two changes to the deferral of R-Q5b for start-up and re-post
+       bursts: parking a request for a pair named by a keep-alive the
+       node is still handling, before its placeholder exists, and a
+       review of the parking limits.
+
+    (c) and (d) only if (a) is rejected.
+
 ## 32.11 External References
 
 - The trie machinery is built on the Substrate Patricia-Merkle
@@ -3648,3 +3676,8 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   - *Reference-state check (ch.02 R13):* all seven state names have §2.15A
     rows with the exact identifiers read; kinds and ancestry statements hold;
     no identifier appears outside the tables and footers.
+- *Clean-side edits to the 2026-11-01 Spec Reader addition (2026-11-01).*
+  The inline gate-pending markers were replaced by the clearance record;
+  D12 records the maintainer's decision and adds candidate (e); the D12
+  pointers in ch. 59 D2 and in UPSTREAM-PARITY-GAPS.md #20 say it is
+  decided. No reference input was used for these edits.
