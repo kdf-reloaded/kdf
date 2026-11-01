@@ -252,6 +252,7 @@ error (never a panic).
 | `rpcport` | Tolerated → default port | `0` → bind any free port; `<1024` non-zero → refuse; `>65535` → refuse; numeric string accepted | `7783` |
 | `allow_weak_password` | Tolerated → `false` | Non-boolean → `false` | `false` |
 | `enable_hd` | Tolerated → `false` (Iguana single-key identity) | Non-boolean → `false` | `false`; truthy selects the global-HD identity (R45.4.8) |
+| `malloc_arena_max` *(Reloaded-original, §45.6A)* | Tolerated → limit `2` | Not a whole number from `0` to `2147483647` → warning and limit `2` (R45.6A.4) | `2`; `0` leaves the allocator's own default |
 
 R45.5.2 **`rpc_password` absence/empty.** An absent or empty `rpc_password`
 shall not silently grant unauthenticated access to protected methods: protected
@@ -305,6 +306,86 @@ to the default log level and shall never refuse or panic the launch.
 
 R45.6.5 No environment variable bound in this chapter is *required* for a
 successful launch; each has a bound default or a bound degraded mode.
+
+## 45.6A Memory Allocator Arena Limit (Reloaded-original)
+
+> **Reloaded-original (2026-10-31, Decision BJ).** This section binds a
+> startup setting that the compatibility contract of this chapter does not
+> cover. It changes how the process asks the system's memory allocator for
+> memory. It changes no order, swap, wallet or network behavior, and no value
+> any peer or client can observe. The plan is
+> [`docs/plans/malloc-arena-cap.md`](../plans/malloc-arena-cap.md).
+
+**Why.** On Linux with the standard (glibc) allocator, every thread that
+allocates memory can get an allocation area of its own, an *arena*. The
+daemon runs several hundred threads on a many-core host (about 780 on a
+256-core host) and about 30 on an 8-core host. Memory that a thread frees
+inside its arena is often not reusable by the others and cannot always be
+returned to the system. Under heavy order updating the memory held by the
+process then grows although the data the daemon holds does not. Limiting the
+number of arenas removes that growth (R45.6A.7).
+
+R45.6A.1 **Platform.** The limit is applied only by the native daemon process
+on Linux built against glibc. On every other platform (other operating systems,
+other C libraries) and in the embedded-library launch path, in which the daemon
+runs inside the process of a host application, the daemon neither sets a limit
+nor logs a line about it.
+
+R45.6A.2 **Moment.** The limit is applied once per process, after the
+configuration has been read and before the daemon starts any of its worker
+threads. A limit set later does not reduce arenas that exist already, so the
+moment is part of the contract.
+
+R45.6A.3 **Source and precedence.** The limit in effect is taken from the first
+of these that applies:
+
+1. *The environment.* If the environment variable `MALLOC_ARENA_MAX` is set to
+   a non-empty value, the operator has chosen. The daemon makes no allocator
+   call of its own, so the allocator's own reading of that variable applies, and
+   the configuration key is ignored.
+2. *The configuration key `malloc_arena_max`.* A whole number from `0` to
+   `2147483647` selects that limit; `0` means "leave the allocator's own
+   default" and the daemon makes no allocator call of its own.
+3. *The default.* If the key is absent or `null`, the limit is `2`.
+
+R45.6A.4 **Tolerance.** A `malloc_arena_max` value that is not a whole number in
+the range of R45.6A.3 item 2 (a string, a boolean, a fraction, a negative
+number, a number above `2147483647`, an array or an object) is treated as
+invalid: the daemon logs a warning that names the key and states that the
+default is used, and the limit in effect is `2`. If the allocator refuses the
+limit, the daemon logs a warning that states the value it asked for, and goes on
+with the allocator's own default. Neither case refuses or aborts the launch
+(R45.7.1).
+
+R45.6A.5 **Startup line.** On a platform where R45.6A.1 applies, the daemon
+logs exactly one information-level line at launch that states the outcome in
+plain words and names the source, one of: the limit in effect set from the
+default; the limit in effect set from the configuration; the limit left to the
+environment, with the value of `MALLOC_ARENA_MAX` as given; or no limit set
+because the configuration key is `0`. An invalid key (R45.6A.4) is reported by
+its warning, and the line then states the default.
+
+R45.6A.6 **What it is not.** The limit is not a cap on the memory of the
+process. It does not change how much data the daemon holds. A value of `1` or
+`2` makes threads wait for each other more often when they allocate at the same
+time; the default `2` is chosen from the measurements in R45.6A.7, which show no
+slowdown in the order-update workload they covered. The effect on activation
+and swap workloads under the default is not measured (D45.4).
+
+R45.6A.7 **Measured basis (informative).** One maker with 480 orders on 16
+pairs, each order updated once about every 6 seconds (about 80 updates per
+second) for 40 minutes, the same binary each time:
+
+| Setting | Arenas | Memory growth per minute (from minute 10) | Data held by the daemon |
+|---|---|---|---|
+| Allocator default, 256-core host | about 780 | about +1.2 MB | about 63 MB, flat from minute 20 |
+| Allocator default, 8 cores | 36 | about +1.0 MB | about 55 MB, flat from minute 20 |
+| `MALLOC_ARENA_MAX=2`, 256-core host | 2 | about −0.04 MB (flat) | about 61 MB, flat from minute 20 |
+
+With the limit the update rate (81.8 against 81.3 updates per second) and the
+processor use (22.3 % against 21.7 % of one core) were the same within noise.
+Whether the growth without the limit levels off in a longer run was not
+measured.
 
 ## 45.7 No-Panic-On-Launch Obligation (security/robustness)
 
@@ -363,6 +444,31 @@ prevent, and it would break every node older than the shared coins file it
 reads. *(Cleared with R45.3.7 -- see the clearance statement above that rule in
 §45.3 and the record in §45.12.)*
 
+T45.10 *Arena limit decision (R45.6A.3, R45.6A.4).* A table-driven test of the
+decision from (environment value, configuration value) to (call to make, line
+to log) MUST cover at least: nothing set → limit `2` from the default; key `4`
+→ limit `4` from the configuration; key `0` → no call, "no limit set"; key
+`null` → `2`; environment `3` with key `4` → no call, "left to the
+environment"; environment empty with key `4` → `4`; key `"2"` (string), `-1`,
+`1.5`, `true`, `2147483648` and `[]` → warning and `2`.
+
+T45.11 *Arena limit call (R45.6A.1, R45.6A.4).* On Linux with glibc a test MUST
+call the allocator to set the limit it already has and MUST see success; it
+MUST NOT change the arena limit of the test process to a lower value. A failed
+call is exercised through the decision function, which returns the warning
+without any process-wide effect.
+
+T45.12 *Arena limit in a running daemon (lab).* On Linux with glibc the
+allocator statistics of a started daemon MUST show at most 3 arenas with the
+default; with the key `0` they MUST show as many arenas as before this section
+existed; with `MALLOC_ARENA_MAX` set they MUST follow the variable whatever the
+key says. The startup line of R45.6A.5 MUST appear once, naming the matching
+source. A 40-minute run of the workload of R45.6A.7 with the default MUST show a
+memory growth below 0.3 MB per minute from minute 10.
+
+T45.13 *Invalid key never refuses the launch (R45.6A.4, R45.7.1).* Each invalid
+value listed in T45.10 MUST start the daemon.
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -374,6 +480,22 @@ D45.2 A launch-time "configuration lint" that warns (without refusing) on
 suspicious-but-tolerated inputs — for example an empty seed set on a non-seed
 node, or a `gui` value that is present but not a string — is deferred as an
 operator-experience enhancement.
+
+D45.3 Sizing the worker threads of the daemon's three executors (two
+multi-threaded runtimes and the async-std executor, each started with one
+worker per core) explicitly, instead of one per core each, is deferred. It
+would reduce threads and stacks on many-core hosts and is independent of
+R45.6A.
+
+D45.4 Measuring the arena limit under activation and swap workloads (start-up
+time of a UTXO set, an EVM coin with tokens and a shielded coin; swap
+completion; latency of the query methods under order updating) and re-checking
+the default of `2` against them is deferred past the first beta. The release
+that carries R45.6A has only the order-update measurements of R45.6A.7.
+
+D45.5 A 3-hour run at about 20 order updates per second, with and without the
+limit, to learn whether the growth without the limit levels off, is deferred
+past the first beta.
 
 ## 45.10 External References
 
@@ -435,6 +557,9 @@ operator-experience enhancement.
   documentation.
 - *Sibling chapters cross-referenced:* Chapter 02, Chapter 06, Chapter 07,
   Chapter 43, Chapter 57.
+- *Section 45.6A (arena limit):* Reloaded-original, written from our own
+  measurements (R45.6A.7) and the documentation of the system allocator; no
+  reference material was consulted for it.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the
