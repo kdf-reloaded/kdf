@@ -3,7 +3,7 @@
 > **GPLv2 continuation of the Komodo DeFi Framework — peer-to-peer atomic swaps, no central authority.**
 
 [![License: GPL v2](https://img.shields.io/badge/License-GPLv2-blue.svg)](LEGAL/LICENSE)
-[![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)](#alpha-disclaimer)
+[![Status: Beta](https://img.shields.io/badge/status-beta-yellow.svg)](#beta-disclaimer)
 
 KDF Reloaded is an open-source [atomic-swap](https://en.wikipedia.org/wiki/Atomic_swap) engine for trustless peer-to-peer trading across blockchains, derived from the Komodo DeFi Framework / AtomicDEX-API codebase as it stood under the GPLv2 license.
 
@@ -34,9 +34,9 @@ clean-room rewrite. For the full technical derivation record, read the
 
 For the relationship to other downstream projects (notably the GLEEC fork), see [`RELOADED_VS_GLEEC.md`](RELOADED_VS_GLEEC.md).
 
-## Alpha disclaimer
+## Beta disclaimer
 
-KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
+KDF Reloaded is currently in **public beta** (see [`ROADMAP.md`](ROADMAP.md)). APIs, on-disk formats, and the network protocol may still change between pre-1.0 releases. Use only with funds you can afford to lose.
 
 > **Release note:** This repository is published with a documented GPLv2 continuation posture and an explicit pre-release checklist; see [`SECURITY.md`](SECURITY.md) and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) for release controls and operator guidance.
 
@@ -54,12 +54,12 @@ KDF Reloaded is currently in **public alpha** (see [`ROADMAP.md`](ROADMAP.md)). 
 
 ## Networks
 
-| netid | Network | Base trading fee | Discounted rate | Status in alpha |
+| netid | Network | Base trading fee | Discounted rate | Status in beta |
 |------:|---------|------------------|-----------------|-----------------|
 | 8762  | AtomicDEX | 1/777 of the trade (~0.129%) | 9/7770 (~0.116%) with KMD on one side of the pair | Supported |
 | 6133  | GLEEC DEX | 2/100 of the trade (2%) | 1/100 (1%) with GLEEC on one side of the pair | Supported |
 
-Each network's complete fee parameters — discounts, minimums, burn behavior and fee keys — are documented in [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md), together with the test-only netids that exist in the codebase under the `regtest-netid` Cargo feature, off by default. Other netids, including 7777, 8100, 8999, 9000 and 9998, are not part of the supported alpha surface.
+Each network's complete fee parameters — discounts, minimums, burn behavior and fee keys — are documented in [`docs/NETWORK_CONFIG.md`](docs/NETWORK_CONFIG.md), together with the test-only netids that exist in the codebase under the `regtest-netid` Cargo feature, off by default. Other netids, including 7777, 8100, 8999, 9000 and 9998, are not part of the supported beta surface.
 
 ## Building from source
 
@@ -108,7 +108,7 @@ Minimal example:
 > the allocator's own default. The environment variable `MALLOC_ARENA_MAX`, when
 > set, takes precedence and the daemon then leaves the allocator alone.
 
-iOS builds are not currently part of the alpha release matrix.
+iOS builds are not currently part of the beta release matrix.
 
 ## Usage
 
@@ -152,7 +152,7 @@ auditing, or redistributing the project:
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the [PR review checklist](docs/PR_REVIEW_CHECKLIST.md). All contributors must agree to the [Developer Agreement](LEGAL/DEVELOPER-AGREEMENT) and abide by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-For the project roadmap beyond the current alpha, see [`ROADMAP.md`](ROADMAP.md). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
+For the project roadmap beyond the current beta, see [`ROADMAP.md`](ROADMAP.md). For the change log, see [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 
