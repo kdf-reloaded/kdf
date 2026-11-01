@@ -67,6 +67,9 @@ pub mod database;
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "lp_wallet.rs"]
 pub mod lp_wallet;
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "malloc_arena.rs"]
+mod malloc_arena;
 #[path = "rpc.rs"] pub mod rpc;
 
 #[cfg(any(test, target_arch = "wasm32"))]
@@ -467,7 +470,7 @@ pub fn mm2_main() {
         return;
     }
 
-    if let Err(err) = run_lp_main(first_arg, &|_| ()) {
+    if let Err(err) = run_lp_main_impl(first_arg, &|_| (), true) {
         log!((err));
         exit(1);
     }
@@ -535,9 +538,20 @@ pub fn get_mm2config(first_arg: Option<&str>) -> Result<Json, String> {
 ///   allowing the `run_lp_main` caller to communicate with MM.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_lp_main(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32)) -> Result<(), String> {
+    run_lp_main_impl(first_arg, ctx_cb, false)
+}
+
+/// `native_daemon` is set only by `mm2_main`. The embedded library runs inside the process of a host application,
+/// whose allocator settings are not ours to change (CRD ch.45 R45.6A.1).
+#[cfg(not(target_arch = "wasm32"))]
+fn run_lp_main_impl(first_arg: Option<&str>, ctx_cb: &dyn Fn(u32), native_daemon: bool) -> Result<(), String> {
     let conf = get_mm2config(first_arg)?;
 
     let log_filter = LogLevel::from_env();
+    if native_daemon {
+        // Must happen before any worker thread starts (R45.6A.2).
+        malloc_arena::apply_at_startup(&conf, log_filter.unwrap_or_default());
+    }
 
     let params = LpMainParams::with_conf(conf).log_filter(log_filter);
     try_s!(block_on(lp_main(params, ctx_cb)));

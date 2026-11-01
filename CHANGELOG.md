@@ -524,6 +524,20 @@ it and, where one exists, the CRD rule, for readers who want more.
   `orderbook.history.evicted`. More in
   [`orderbook-queue-and-history-caps`](docs/plans/orderbook-queue-and-history-caps.md). Detail:
   PR #164; CRD ch.32 R-K5, R-K6.
+- **On Linux the daemon now limits the memory allocator to two arenas at start-up.** The system's
+  memory allocator (glibc) gives each thread that allocates an area of its own, and the daemon runs
+  from about 30 threads on an 8-core host to several hundred on a many-core one. Memory freed in
+  one area is mostly not reused by the others, so a maker that updated hundreds of orders every few
+  seconds held steadily more memory although the data it holds stayed the same. In tests a maker
+  with 480 orders on 16 pairs, updating about 80 times a second, grew by about 1 MB a minute with
+  the allocator's own default and stopped growing with two arenas, with no change in update rate or
+  processor use. The limit applies only to the daemon on Linux with glibc, not to the embedded
+  library or other systems, and the start-up log has one line that says where the limit came from.
+  Set the environment variable `MALLOC_ARENA_MAX` to choose your own (the daemon then leaves the
+  allocator alone), or the `MM2.json` whole number `malloc_arena_max`; `0` keeps the allocator's own
+  default, and an invalid value is reported and replaced by `2`. Its effect on swaps and coin
+  activation is not measured yet. Detail: issue #191;
+  [`malloc-arena-cap`](docs/plans/malloc-arena-cap.md); CRD ch.45 R45.6A.
 - **Peer exchange keeps the usable addresses of a peer list.** Nodes ask each other for peer
   addresses every five minutes. Some peers that do not run Reloaded include the hostname under which
   they reached a seed, such as `/dns/seed04.kmdefi.net/tcp/42845`. Reloaded used to throw away the
