@@ -1,6 +1,7 @@
 // qrc20_market_ops — MarketCoinOps trait implementation.
 
 use super::*;
+use crate::one_smallest_unit;
 
 impl MarketCoinOps for Qrc20Coin {
     fn ticker(&self) -> &str { &self.utxo.conf.ticker }
@@ -122,10 +123,7 @@ impl MarketCoinOps for Qrc20Coin {
 
     fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
 
-    fn min_trading_vol(&self) -> MmNumber {
-        let pow = self.utxo.decimals / 3;
-        MmNumber::from(1) / MmNumber::from(10u64.pow(pow as u32))
-    }
+    fn min_trading_vol(&self) -> MmNumber { one_smallest_unit(self.utxo.decimals) }
 
     fn sign_raw_tx(&self, args: &SignRawTransactionRequest) -> RawTransactionFut {
         Box::new(utxo_common::sign_raw_tx(self.clone(), args.clone()).boxed().compat())

@@ -241,7 +241,12 @@ helper MUST reconstruct the expected redeem script from the
 secret-hash-typed enumeration accessor, compare the output's
 script-pubkey to its pay-to-script-hash form, verify the amount,
 poll for confirmations, and (under the chapter-bound electrum
-mode) verify the simplified-payment-verification proof.
+mode) verify the simplified-payment-verification proof. The
+simplified-payment-verification proof step, its `enable_spv_proof`
+config gate, and its relationship to the header store are bound by
+[chapter 37](37-utxo-spv-and-block-header-validation.md) §37.6; this
+chapter's confirmation-count wait and validation contract are
+unaffected by whether that proof step is configured.
 
 The secret-hash-typed enumeration's `redeem_script()` accessor
 MUST dispatch the three version-two variants
@@ -293,8 +298,10 @@ the coin's decimals accessor.
 **R16.** `send_taker_funding` MUST: (1) derive the taker
 hash-time-locked-contract keypair from the swap-unique data via
 R36; (2) compute the funding amount as the trading amount plus
-the premium amount plus the dex-fee fee component (the chapter-08
-`fee_amount` accessor); (3) build the taker-funding script of R8
+the premium amount plus the dex-fee *total spend amount* (the
+chapter-08 `total_spend_amount` accessor: fee plus burn for
+`WithBurn`, zero for `NoFee`), summed as an exact decimal and
+converted to base units once, by truncation; (3) build the taker-funding script of R8
 and the pay-to-script-hash output; (4) reuse the chapter-bound
 version-one output-generation and broadcast helpers; (5) return
 the funding transaction.
@@ -303,8 +310,9 @@ the funding transaction.
 transaction; (2) reconstruct the expected script via the R8
 builder; (3) verify the output at the bound default index equals
 the pay-to-script-hash form of the script; (4) verify the output
-value equals the chapter-bound funding-amount formula (R16's
-formula, converted to satoshi); (5) on the chapter-bound native
+value equals exactly the chapter-bound funding-amount formula
+(R16's formula, converted to satoshi), with the descriptor
+recomputed with the taker's key (chapter 16 R12A, R12B); (5) on the chapter-bound native
 mode, call the chapter-bound address-import helper for the
 pay-to-script-hash address so the node tracks spends; (6) return
 the success arm of the bound validation-result enumeration.
@@ -345,15 +353,23 @@ unsigned transaction that, once both parties sign, converts the
 funding output into the taker-payment output. It MUST: (1) build
 the taker-payment script of R9 with the taker-payment time-lock
 and the maker-secret-hash; (2) compute the funding-spend fee via
-the chapter-bound coin-estimated fee-policy variant with the
-bound default swap-spend transaction-size constant
-of R40; (3) build a transaction-input signer spending the funding
+the spend-fee estimate of chapter 16 R14A (the reference size of
+R40: 496 bytes, with proportional fixed-rate pricing), and
+require the funding value to be at least that fee plus the coin's
+dust amount; (3) build a transaction-input signer spending the funding
 output with a single pay-to-script-hash output for value
 `funding_value - fee`; (4) set lock-time zero and sequence
 `SEQUENCE_FINAL`; (5) sign the input with the taker
 hash-time-locked-contract keypair using the chapter-bound
 all-outputs sighash flag; (6) return the
 preimage-plus-signature pair.
+
+> **Code-quality pointer (informative, 2026-10-25; this repository's
+> code).** Step (2)'s lower bound is fee **plus dust**; reloaded's
+> funding-spend builder today refuses only when the funding value does not
+> exceed the fee. Recorded with the related unchecked spend arithmetic as
+> [Chapter 60](60-trading-floors-and-refusal-contract.md) finding F3 and
+> requirement R60.6.4.
 
 **R22.** `validate_taker_funding_spend_preimage` (maker side)
 MUST re-derive the expected preimage as in R21, then: (1)
@@ -365,7 +381,13 @@ supplied taker signature against the preimage's input
 signature-hash for the funding-script cooperative co-signature
 branch (not the timelock path), using the all-outputs
 sighash digest; (3) return the success arm or the appropriate
-chapter-bound error variant.
+chapter-bound error variant. The references use a different,
+stricter tolerance: the ratio of expected to actual spend fee
+must lie within [0.9, 1.1], followed by an exact rebuild. That
+difference only makes this project's side more permissive, so it
+is deferred as non-blocking (chapter 16 D5). Interoperability with
+a reference maker depends on this project's taker using the R14A
+fee estimate.
 
 **R23.** `sign_and_send_taker_funding_spend` (taker side, having
 received the maker's signature on top of the preimage) MUST: (1)
@@ -404,36 +426,38 @@ agreed amount to the maker and the dex-fee amount to the
 dex-fee address. The construction MUST branch on the chapter-08
 dex-fee variant:
 
-- *`Standard(amount)` arm:* build a single-output preimage —
-  maker's address receiving
-  `taker_payment_value − dex_fee_amount − fee_estimate`. The
-  dex-fee output is appended later by the maker in R28. Sign with
-  the chapter-bound single-output sighash flag so the maker can
-  append outputs without invalidating the signature.
-- *`WithBurn` and `NoFee` arms:* deferred to chapter 16. The
-  substrate MUST emit an explicit chapter-bound
-  deferred-variant rejection error in this method and in R27, R28
-  for the deferred arms; chapter 16 binds the deferred-arm
-  replacement (R13–R20 of chapter 16).
+- *`Standard(amount)` arm:* build a single-output preimage whose
+  only output is the dex-fee P2PKH carrying the converted fee
+  amount. The maker payout is appended later by the maker in R28.
+  Sign with the chapter-bound single-output sighash flag, which
+  covers only output 0, so the maker can append its payout without
+  invalidating the signature.
+- *All arms:* the exact layouts, the spend-fee estimate, the
+  signature-hash flags of both parties, and the validation rule
+  are bound by chapter 16 §16.5 (R13–R20). Chapter 16 governs
+  wherever this summary is less specific.
 
 **R27.** `validate_taker_payment_spend_preimage` (maker side)
 MUST mirror R26: (1) re-derive the expected preimage; (2)
-verify the taker signature against the appropriate
-signature-hash (single-output for the `Standard` arm,
-all-outputs for the chapter-16-bound arms); (3) for `Standard`,
-allow that the preimage has only the maker-bound output and the
-dex-fee output will be appended; (4) return the success arm or
-the appropriate chapter-bound error variant.
+verify the taker signature over the re-derived preimage against
+the appropriate signature-hash (single-output for the `Standard`
+arm, all-outputs for `WithBurn` and `NoFee`); (3) require the
+received preimage to equal the re-derived one exactly, with no
+value tolerance (chapter 16 R17). For `Standard` that preimage
+holds only the dex-fee output. (4) Return the success arm or the
+appropriate chapter-bound error variant.
 
 **R28.** `sign_and_broadcast_taker_payment_spend` (maker side,
 finalising with her secret) MUST: (1) start from the validated
-preimage; (2) for `Standard`, append the dex-fee output (value
-`dex_fee.fee_amount()`, address from the coin's chapter-bound
-dex-fee-address configuration), with the new output's fee taken
-out of the maker's share, not re-computed; (3) sign the
-taker-payment input matching the sighash scheme the taker used;
-(4) assemble the script-sig as `[maker_sig, taker_sig,
-maker_secret, OP_0, redeem_script]` — the `OP_0` selects the
+preimage; (2) for `Standard`, check that the spend fee, the dust
+amount and the fee together do not exceed the taker-payment
+value, then append the maker payout output (value: taker-payment
+value minus spend fee minus fee; address: the maker's taker-coin
+address) as output 1; (3) sign the taker-payment input under the
+all-outputs flag, whatever the taker's flag; (4) assemble the
+script-sig as `[maker_sig, taker_sig, maker_secret, OP_0,
+redeem_script]`, each signature carrying its own flag byte
+(chapter 16 R15, R18); the `OP_0` selects the
 cooperative-with-secret branch of the taker-payment script of
 R9; (5) broadcast.
 
@@ -576,11 +600,11 @@ exactly:
 | ------------------------------ | --------------- | -------------------------------------------------------------------------------------------------------- |
 | Default swap-output index constant | `0`         | Hash-time-locked-contract output index in every swap transaction.                                        |
 | Default swap-input index constant  | `0`         | Input index that consumes a swap output in every spend transaction.                                      |
-| Default swap-spend transaction-size constant | byte count sized for the three-output pre-burn case bound by chapter 16 | Estimated spend-transaction size for fee calculation.                          |
+| Default swap-spend transaction-size constant | `496` bytes | Reference spend size for the version-two funding-spend and taker-payment-spend fee estimate; the fee rule is chapter 16 R14A. |
 | `SEQUENCE_FINAL`               | `0xFFFFFFFF`    | Disables checklocktimeverify and check-sequence-verify checks; used for cooperative and secret-reveal branches. |
 | `SEQUENCE_FINAL - 1`           | `0xFFFFFFFE`    | Enables checklocktimeverify check; used in timelock-refund spends.                                       |
 | All-outputs sighash flag       | `0x01`          | Standard signature-hash for fully-fixed-outputs spends.                                                  |
-| Single-output sighash flag     | `0x03`          | Signature-hash for the chapter-08 `Standard` taker-payment-spend preimage.                              |
+| Single-output sighash flag     | `0x03`          | The taker's signature over the chapter-08 `Standard` taker-payment-spend preimage (the maker always signs with the all-outputs flag). |
 
 All values either already exist in the chapter-bound UTXO
 swap-helper module or in the chapter-bound underlying script
@@ -918,7 +942,8 @@ non-participation noted in chapter 16 R23.
   secret-hash-algorithm discriminator and the key-pair policy
   discriminator the script builders and the derivation helper
   consume); chapter 08 (the typed dex-fee enumeration, the
-  three-variant closure, the `fee_amount` accessor); chapter 14
+  three-variant closure, the `total_spend_amount` accessor R16 now
+  uses); chapter 14
   (the generic storable state-machine runtime that drives every
   version-two swap); chapter 16 (the pre-burn-output substrate
   that completes the deferred arms of R26, R27, R28); chapter 17
@@ -927,6 +952,11 @@ non-participation noted in chapter 16 R23.
   version-two trait definitions and argument-and-result type
   enumerations carried forward unchanged from the baseline trait
   module; public Bitcoin-script and signature-hash documentation.
+  R16, R17, R21, R22, R26–R28 and R40 were corrected on 2026-09-27
+  (issue #11 scope extension) under the two-team Spec Reader /
+  Dirty Gate workflow, against the `v2.6.0-beta` and v3-lineage
+  version-two wire contract. They are stated as observable
+  behaviour only.
 - *Permitted-input classes used:* baseline source; bound substrate
   identifiers introduced with in-chapter justification; public
   protocol documentation; restricted behavior-analysis corpus

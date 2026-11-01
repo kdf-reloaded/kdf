@@ -94,11 +94,13 @@ impl TokenActivationOps for TendermintToken {
         )
         .mm_err(|e| EnableTokenError::Internal(e.to_string()))?;
 
-        // Register the token on the platform coin so the platform's balance
-        // enumeration includes it.
-        platform_coin.register_token_info(&token);
-
-        let balance = token.my_balance().compat().await.mm_err(EnableTokenError::from)?;
+        // CRD R36.2.4: a failed balance read, all nodes unreachable included, is `CouldNotFetchBalance`
+        // (string, 500) and never `Transport`.
+        let balance = token
+            .my_balance()
+            .compat()
+            .await
+            .mm_err(|e| EnableTokenError::CouldNotFetchBalance(e.to_string()))?;
         let my_address = token.my_address().map_to_mm(EnableTokenError::Internal)?;
         let mut balances = HashMap::new();
         balances.insert(my_address, balance);
@@ -108,6 +110,11 @@ impl TokenActivationOps for TendermintToken {
             platform_coin: platform_coin.ticker().to_owned(),
         };
         Ok((token, init_result))
+    }
+
+    // The platform's balance enumeration includes the token only once it is registered (CRD R36.2.2).
+    fn on_token_registered(platform_coin: &Self::PlatformCoin, token: &Self) {
+        platform_coin.register_token_info(token);
     }
 }
 

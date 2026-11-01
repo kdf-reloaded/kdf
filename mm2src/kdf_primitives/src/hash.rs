@@ -149,7 +149,7 @@ macro_rules! define_hash {
         impl cmp::Eq for $name {}
 
         impl cmp::PartialOrd for $name {
-            fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> { Some(self.0[..].cmp(&other.0[..])) }
+            fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> { Some(self.cmp(other)) }
         }
 
         impl cmp::Ord for $name {

@@ -43,7 +43,7 @@ impl RepositoryOperations for GithubClient {
     ) -> Result<Vec<FileMetadata>, MmError<GitControllerError>> {
         let uri = format!(
             "{}/repos/{}/{}/contents/{}?ref={}",
-            &self.api_address, owner, repository_name, dir, branch
+            self.api_address, owner, repository_name, dir, branch
         );
 
         let (_status_code, _headers, data) = slurp_url_with_headers(&uri, vec![(

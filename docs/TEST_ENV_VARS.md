@@ -100,6 +100,7 @@ here.
 | `QTUM_REGTEST_DOCKER_IMAGE` | docker test | built-in default | override the QTUM regtest image |
 | `ONE_INCH_API_TEST_AUTH` | test | empty | 1inch API auth token for trading-api tests |
 | `POLYGON_RPC_URL` | test | unset → skip | live Polygon RPC for `polygon_check_if_my_payment_sent` (read-only; skips if unset) |
+| `KDF_REQUIRE_GETH` | test | unset → tests skip when `geth` is absent | when non-empty, `GethDev::start()` panics instead of returning `None`, so a missing or broken `geth` fails the test rather than skipping it; set by the `evm-geth-tests` CI job |
 | `WASM_BINDGEN_TEST_TIMEOUT` | wasm test | — | per-test timeout (seconds) |
 | `GECKODRIVER` | wasm test | — | path to the geckodriver binary |
 | `RUST_WASM_TEST_LOG` | wasm test | — | wasm log level |

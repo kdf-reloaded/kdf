@@ -133,6 +133,15 @@ impl MetamaskCtx {
             .map_to_mm(|e| MetamaskError::Internal(format!("invalid chainId '{active_chain_hex}': {e}")))?;
         if active_chain_id != chain_id {
             session.wallet_switch_ethereum_chain(chain_id).await?;
+            // The wallet must report the requested chain after the switch; anything else is not a usable chain.
+            let switched_chain_hex = session.eth_chain_id().await?;
+            let switched_chain_id = u64::from_str_radix(switched_chain_hex.trim_start_matches("0x"), 16)
+                .map_to_mm(|e| MetamaskError::Internal(format!("invalid chainId '{switched_chain_hex}': {e}")))?;
+            if switched_chain_id != chain_id {
+                return MmError::err(MetamaskError::Internal(format!(
+                    "the wallet reports chain {switched_chain_id} instead of the requested chain {chain_id}"
+                )));
+            }
         }
         Ok(())
     }

@@ -14,6 +14,19 @@
 > model, and the public Tron node HTTP API; atomic-swap and NFT
 > participation are explicitly deferred.
 
+> **Availability in the beta (maintainer decision 2026-10-26).** TRON
+> support is not finished, so it is switched off for the coming beta:
+> while the build constant `TRON_ACTIVATION_AVAILABLE`
+> (`coins/lp_coins_ops.rs`) is `false`, every TRON activation route
+> (legacy `enable` and `electrum`, the only routes that activate TRX
+> or TRC20, Chapter 55 D55.5) answers "TRON support is not available
+> in this build" and registers nothing; the coin code stays compiled
+> and its unit tests keep running. TRON is postponed, not dropped: it
+> is planned to return in the next beta, and the rules of this
+> chapter stay the target for that return. Statements below that
+> describe TRON as activatable or functional describe the code with
+> the constant set to `true`.
+
 ## 21.0 Executive Summary
 
 Tron support is a coin-support capability inside the workspace's
@@ -27,7 +40,9 @@ transactions, SHA-256 transaction hashing, the bandwidth/energy
 fee model, and a Tron node HTTP client) are bound on top of that
 shared base.
 
-The integration is **wallet-only and withdraw-capable today**.
+The integration is **wallet-only and withdraw-capable today**
+when switched on (in this beta it is switched off; see the
+availability note above).
 Activation, address handling, transaction construction, signing,
 resource-based fee estimation, and the withdraw pipeline for both
 native TRX and TRC20 are functional. Atomic-swap participation
@@ -157,6 +172,13 @@ public method strings are part of the external API contract
 | `enable_eth_with_tokens` | One-shot activation of the platform coin (TRX) together with its TRC20 tokens |
 | `task::enable_eth::init` | Begin task-based activation (long-running) |
 | `task::enable_eth::status` | Poll activation status |
+
+> **In this beta (informative).** TRON activation is switched off
+> (`TRON_ACTIVATION_AVAILABLE` is `false`; see the availability note
+> at the top of this chapter): no route activates TRX or TRC20, and
+> the legacy `enable` / `electrum` answer "TRON support is not
+> available in this build". The flow below is the target for when
+> TRON returns, planned for the next beta.
 
 > **Binding scope (R36).** The method strings above are dictated
 > public API (R33). The Tron coin is activated by supplying
@@ -350,6 +372,16 @@ succeeds MUST be preferred for subsequent traffic so steady-state
 requests stay on a healthy endpoint. The failover ordering policy
 is binding behaviour; the locking/storage realisation is
 discretionary.
+The host-only node-naming rule of
+[Chapter 35](35-evm-v2-activation-rpcs.md) R35.1.14 applies to Tron node
+URLs in every log line and error text as well. It is a naming rule only:
+Tron requests do not go through the EVM node transport, so the ordering
+policy of this rule, including its stop on a non-retryable rejection, stays
+Tron's own and is not overridden by R35.1.8 there. The credentials rule of
+R35.1.17 applies to the Tron client and its node list in the same way, with
+the same scope limit for the RPC wire dump (Reloaded-original; maintainer
+decision 2026-10-26; no switch). *Status (2026-10-28):* the Tron client's
+debug form already hides its node list.
 
 **R-N2 (request timeout).** Each node request MUST be bounded by a
 per-request timeout so a stalled node cannot block the pipeline.
@@ -416,12 +448,29 @@ a single flag.
 - **D5 -- EVM NFT withdraw.** NFT withdraw is explicitly rejected
   for Tron-family chains with a typed "not supported for this
   chain" error (see [Chapter 19](19-nft-module-layout.md)).
+- **D6 -- Switching TRON back on (beta availability, maintainer
+  decision 2026-10-26).** Activation is switched off for the coming
+  beta by `TRON_ACTIVATION_AVAILABLE` (see the availability note at
+  the top of this chapter). Setting it to `true` and retiring the
+  refusal tests that go with it is planned for the next beta.
 
 **R-D1 (gate invariant).** Because the coin activates with no
 swap-contract binding, no production code path may reach a
 Tron swap/NFT operation; the deferral sites exist to make the
 boundary explicit and MUST surface a typed refusal (or a guarded
 unreachable) rather than producing incorrect swap behaviour.
+
+## 21.11A Trading floors (pointer; Spec Reader 2026-10-25, cleared by the Dirty Gate with chapter 60 on 2026-10-25)
+
+TRX and TRC20 tokens are cases of the EVM coin family in both trees, so
+their minimum trading volume is the EVM rule of
+[Chapter 57](57-evm-fee-inputs.md) R57.7A.1 — one smallest unit,
+`10^-decimals` (TRX: 10^-6) — and their minimum transaction amount is zero
+(R57.7A.3), in both reference designations (`v2.6.0-beta` and
+`v3.0.0-beta` agree). Reloaded today reports the baseline formula's
+10^-2 for TRX; the chapter-57 change (PR #66) corrects TRON with the rest
+of the EVM family. No peer observes the value while D1–D2 keep Tron out
+of swaps ([Chapter 60](60-trading-floors-and-refusal-contract.md) row T1).
 
 ## 21.12 Baseline Verifications
 
@@ -483,7 +532,13 @@ V3. The address encoding, protobuf transaction/contract formats,
   error-aggregation / defence-in-depth deferral pattern the
   swap/NFT refusals follow); Chapter 19 (the NFT-withdraw module
   whose chain-support boundary excludes Tron-family chains).
-- *Forbidden corpus:* consulted **only** to recover the
+- *Forbidden corpus:* (addition of 2026-10-25, §21.11A, cleared by the
+  Dirty Gate with [Chapter 60](60-trading-floors-and-refusal-contract.md)
+  on 2026-10-25, attestation in its §60.12:
+  also consulted under the chapter-01 two-team procedure, at
+  `v2.6.0-beta` and `v3.0.0-beta`, only to establish that TRON coins take
+  the EVM family's floors; no discretionary expression reproduced.)
+  Otherwise consulted **only** to recover the
   externally-dictated activation method strings and coin-config
   JSON shape of §21.4, the SLIP-44 coin type of §21.4/§21.12, and
   the dictated address/transaction/signing/fee/node-API interop
@@ -500,3 +555,8 @@ V3. The address encoding, protobuf transaction/contract formats,
   conformant realisation to the historical lineage is governed by
   the R35 gate and the R36 binding-scope notes that head every
   code-bearing section of this chapter.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):* the
+  sentence in §21.9 R-N1 that applies chapter 35 R35.1.17 to the Tron client,
+  with its status remark, is Reloaded-original. It rests on the maintainer
+  decision of 2026-10-26 (host-only node naming everywhere, except the RPC
+  wire dump) and on this repository's code; its test is chapter 35 T35.36.

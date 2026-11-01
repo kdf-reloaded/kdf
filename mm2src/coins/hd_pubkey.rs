@@ -104,6 +104,14 @@ pub trait HDXPubExtractor {
         trezor_utxo_coin: TrezorUtxoCoin,
         derivation_path: DerivationPath,
     ) -> MmResult<XPub, HDExtractPubkeyError>;
+
+    /// Reads the extended public key of an EVM account from the hardware wallet (CRD R50.1).
+    ///
+    /// An extractor that has no EVM-capable device behind it reports that the coin does not support the
+    /// hardware wallet.
+    async fn extract_eth_xpub(&self, _derivation_path: DerivationPath) -> MmResult<XPub, HDExtractPubkeyError> {
+        MmError::err(HDExtractPubkeyError::CoinDoesntSupportTrezor)
+    }
 }
 
 pub enum RpcTaskXPubExtractor<'task, Task: RpcTask> {
@@ -138,6 +146,16 @@ where
             },
         }
     }
+
+    async fn extract_eth_xpub(&self, derivation_path: DerivationPath) -> MmResult<XPub, HDExtractPubkeyError> {
+        match self {
+            RpcTaskXPubExtractor::Trezor {
+                hw_ctx,
+                task_handle,
+                statuses,
+            } => Self::extract_eth_xpub_from_trezor(hw_ctx, task_handle, statuses, derivation_path).await,
+        }
+    }
 }
 
 impl<'task, Task> RpcTaskXPubExtractor<'task, Task>
@@ -170,6 +188,26 @@ where
         statuses: HwConnectStatuses<Task::InProgressStatus, Task::AwaitingStatus>,
     ) -> XPubExtractorUnchecked<RpcTaskXPubExtractor<'task, Task>> {
         XPubExtractorUnchecked(Self::new(ctx, task_handle, statuses))
+    }
+
+    async fn extract_eth_xpub_from_trezor(
+        hw_ctx: &HardwareWalletArc,
+        task_handle: &RpcTaskHandle<Task>,
+        statuses: &HwConnectStatuses<Task::InProgressStatus, Task::AwaitingStatus>,
+        derivation_path: DerivationPath,
+    ) -> MmResult<XPub, HDExtractPubkeyError> {
+        let connect_processor = TrezorRpcTaskConnectProcessor::new(task_handle, statuses.clone());
+        let trezor = hw_ctx.trezor(&connect_processor).await.mm_err(Into::into)?;
+        let mut trezor_session = trezor.session().await.mm_err(Into::into)?;
+
+        let pubkey_processor = TrezorRpcTaskProcessor::new(task_handle, statuses.to_trezor_request_statuses());
+        trezor_session
+            .get_eth_public_key(derivation_path, false)
+            .await
+            .mm_err(Into::into)?
+            .process(&pubkey_processor)
+            .await
+            .mm_err(HDExtractPubkeyError::from)
     }
 
     async fn extract_utxo_xpub_from_trezor(
@@ -213,6 +251,14 @@ where
             .as_ref()
             .map_err(Clone::clone)?
             .extract_utxo_xpub(trezor_utxo_coin, derivation_path)
+            .await
+    }
+
+    async fn extract_eth_xpub(&self, derivation_path: DerivationPath) -> MmResult<XPub, HDExtractPubkeyError> {
+        self.0
+            .as_ref()
+            .map_err(Clone::clone)?
+            .extract_eth_xpub(derivation_path)
             .await
     }
 }

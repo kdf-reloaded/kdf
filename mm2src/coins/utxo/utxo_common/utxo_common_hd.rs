@@ -350,8 +350,18 @@ where
         Some(from) => match from {
             WithdrawFrom::AddressId(id) => id,
             WithdrawFrom::DerivationPath { derivation_path } => {
-                let derivation_path = Bip44DerivationPath::from_str(&derivation_path)
-                    .map_to_mm(Bip44DerPathError::from)
+                // `StandardHDPath`, not `Bip44DerivationPath`: the latter hardcodes
+                // purpose 44' and rejects any segwit-family coin (BIP49/84) whose
+                // own configured purpose legitimately isn't 44 -- the wire's
+                // "Unexpected 'Purpose' child value ..." on an otherwise-correct
+                // segwit `from` path. `HDAddressId::from` below only reads
+                // account_id/chain/address_id from the parsed path either way
+                // (`derive_address` further down derives from the coin's own
+                // account xpub, not from this string), so the purpose here only
+                // needs validating, never trusting -- `StandardHDPath` still
+                // rejects anything that isn't a recognised BIP32/44/49/84 purpose.
+                let derivation_path = StandardHDPath::from_str(&derivation_path)
+                    .map_to_mm(StandardHDPathError::from)
                     .mm_err(|e| WithdrawError::UnexpectedFromAddress(e.to_string()))?;
                 let coin_type = derivation_path.coin_type();
                 let expected_coin_type = hd_wallet.coin_type();
@@ -397,4 +407,91 @@ where
     }
 
     Ok(WithdrawSenderAddress::from(hd_address))
+}
+
+/// Every address the HD wallet currently knows about, across all activated
+/// accounts and both BIP44 chains.
+///
+/// Used to subscribe an HD wallet's addresses for push notifications. Without
+/// this an HD wallet gets no subscriptions at all, because the single-address
+/// accessor the Iguana path uses is unavailable under HD derivation — the whole
+/// wallet silently falls back to polling.
+///
+/// The set is bounded by the accounts' own known-address counts, i.e. the same
+/// addresses the balance already sums, so it never derives beyond what the
+/// wallet already tracks.
+pub async fn all_known_hd_addresses<T>(coin: &T) -> Vec<T::Address>
+where
+    T: HDWalletBalanceOps<HDAccount = UtxoHDAccount> + AsRef<UtxoCoinFields> + Sync,
+    T::Address: Clone,
+{
+    let fields: &UtxoCoinFields = coin.as_ref();
+    let hd_wallet = match fields.derivation_method.hd_wallet() {
+        Some(hd_wallet) => hd_wallet,
+        None => return Vec::new(),
+    };
+
+    let mut addresses = Vec::new();
+    for (_, account) in hd_wallet.get_accounts().await {
+        for chain in [Bip44Chain::External, Bip44Chain::Internal] {
+            let known = match account.known_addresses_number(chain) {
+                Ok(known) => known,
+                // A coin that does not support this chain simply contributes
+                // nothing; it is not an error for the caller.
+                Err(_) => continue,
+            };
+            for address_id in 0..known {
+                if let Ok(derived) = coin.derive_address(&account, chain, address_id) {
+                    addresses.push(derived.address);
+                }
+            }
+        }
+    }
+    addresses
+}
+
+#[cfg(test)]
+mod withdraw_from_derivation_path_tests {
+    use super::*;
+
+    // Reported bug: withdrawing from a segwit coin's own explicit HD `from`
+    // path failed at preview with
+    //   UnexpectedFromAddress: "Unexpected 'Purpose' child value '2147483732',
+    //   expected: '44'' BIP44 purpose"
+    // 2147483732 - 2^31 = 84: a well-formed, hardened BIP84 (native segwit)
+    // purpose, correctly matching the coin's own segwit derivation -- rejected
+    // only because this parse hardcoded purpose 44' regardless of what the
+    // coin itself uses.
+    const REPORTED_BIP84_PATH: &str = "m/84'/141'/0'/0/0";
+
+    #[test]
+    fn a_reported_bip84_from_path_now_parses_and_yields_the_right_address_id() {
+        let parsed = StandardHDPath::from_str(REPORTED_BIP84_PATH)
+            .map_to_mm(StandardHDPathError::from)
+            .unwrap();
+
+        assert_eq!(parsed.purpose(), crypto::Bip43Purpose::Bip84);
+        assert_eq!(parsed.coin_type(), 141);
+
+        let address_id = HDAddressId::from(parsed);
+        assert_eq!(address_id.account_id, 0);
+        assert_eq!(address_id.chain, Bip44Chain::External);
+        assert_eq!(address_id.address_id, 0);
+    }
+
+    // The old parse, kept only to prove the bug was real and is what the fix
+    // above actually resolves -- not a claim that `Bip44DerivationPath` itself
+    // is wrong; it is still correct for ETH, which has no segwit purpose.
+    #[test]
+    fn the_pre_fix_parse_really_did_reject_it_with_the_reported_message() {
+        let err = crypto::Bip44DerivationPath::from_str(REPORTED_BIP84_PATH)
+            .map_to_mm(crypto::Bip44DerPathError::from)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("Unexpected 'Purpose' child value '2147483732'") && err.contains("expected: '44'"),
+            "expected the exact reported error text, got: {err}"
+        );
+    }
 }

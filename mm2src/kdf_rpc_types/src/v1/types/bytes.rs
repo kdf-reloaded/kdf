@@ -74,7 +74,7 @@ impl<'de> Visitor<'de> for BytesHexVisitor {
         if value.is_empty() {
             return Ok(Bytes::new(Vec::new()));
         }
-        if value.len() % 2 != 0 {
+        if !value.len().is_multiple_of(2) {
             return Err(DeError::custom("invalid format"));
         }
         let parsed: Vec<u8> = value.from_hex().map_err(|_| DeError::custom("invalid hex"))?;

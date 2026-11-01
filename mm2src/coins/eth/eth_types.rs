@@ -1,6 +1,7 @@
 //! Ethereum coin types, constants, contract ABIs, and error conversions.
 
 use super::*;
+use crate::FeeCapBelowBaseFee;
 
 /// https://github.com/artemii235/etomic-swap/blob/master/contracts/EtomicSwap.sol
 /// Dev chain (195.201.0.6:8565) contract address: 0xa09ad3cd7e96586ebd05a2607ee56b56fb2db8fd
@@ -17,6 +18,9 @@ pub(crate) const _PAYMENT_STATE_SPENT: u8 = 2;
 pub(crate) const _PAYMENT_STATE_REFUNDED: u8 = 3;
 // Ethgasstation API returns response in 10^8 wei units. So 10 from their API mean 1 gwei
 pub(crate) const ETH_GAS_STATION_DECIMALS: u8 = 8;
+/// Gas fees are denominated in the platform coin, which is 18-decimal on every
+/// EVM chain regardless of the traded token's own decimals.
+pub(crate) const ETH_DECIMALS: u8 = 18;
 pub(crate) const GAS_PRICE_PERCENT: u64 = 10;
 /// It can change 12.5% max each block according to https://www.blocknative.com/blog/eip-1559-fees
 pub(crate) const BASE_BLOCK_FEE_DIFF_PCT: u64 = 13;
@@ -84,8 +88,50 @@ pub enum Web3RpcError {
     Transport(String),
     #[display(fmt = "Invalid response: {}", _0)]
     InvalidResponse(String),
+    /// CRD ch.56 R5: the node rejected the request for a fee cap below the block base fee.
+    #[display(fmt = "{}", _0)]
+    FeeCapBelowBaseFee(FeeCapBelowBaseFee),
     #[display(fmt = "Internal: {}", _0)]
     Internal(String),
+}
+
+/// The node-observable phrasings of a fee cap below the block base fee (CRD ch.56 R5), matched by
+/// containment and exactly as the node spells them: the Geth family's two texts and the text Nethermind
+/// emitted before release 1.38.0.
+const FEE_CAP_BELOW_BASE_FEE_PHRASES: [&str; 3] = [
+    "max fee per gas less than block base fee",
+    "fee cap less than block base fee",
+    "miner premium is negative",
+];
+
+/// Reads the wei amount that follows `label` in `text`, when there is one.
+fn amount_after(text: &str, label: &str) -> Option<U256> {
+    let rest = text[text.find(label)? + label.len()..].trim_start();
+    let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len())];
+    U256::from_dec_str(digits).ok()
+}
+
+/// Classifies the text of a node error under CRD ch.56 R5.
+///
+/// `Some` when `text` contains one of [`FEE_CAP_BELOW_BASE_FEE_PHRASES`], else `None`: no other text is
+/// classified, whatever its error code. The payload carries the `maxFeePerGas: <wei>` and `baseFee: <wei>`
+/// the node appended, when it did, and the trailing `(node <label>)` the transport appended, when it did.
+pub(crate) fn classify_fee_cap_below_base_fee(text: &str) -> Option<FeeCapBelowBaseFee> {
+    if !FEE_CAP_BELOW_BASE_FEE_PHRASES
+        .iter()
+        .any(|phrase| text.contains(phrase))
+    {
+        return None;
+    }
+    let trimmed = text.trim_end();
+    let node = trimmed
+        .strip_suffix(')')
+        .and_then(|head| head.rfind("(node ").map(|at| head[at + "(node ".len()..].to_owned()));
+    Some(FeeCapBelowBaseFee {
+        max_fee_per_gas: amount_after(text, "maxFeePerGas:"),
+        base_fee: amount_after(text, "baseFee:"),
+        node,
+    })
 }
 
 impl From<GasStationReqErr> for Web3RpcError {
@@ -122,6 +168,7 @@ impl From<Web3RpcError> for WithdrawError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => WithdrawError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => WithdrawError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => WithdrawError::InternalError(internal),
         }
     }
@@ -131,6 +178,7 @@ impl From<Web3RpcError> for TradePreimageError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => TradePreimageError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => TradePreimageError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => TradePreimageError::InternalError(internal),
         }
     }
@@ -140,6 +188,7 @@ impl From<Web3RpcError> for BalanceError {
     fn from(e: Web3RpcError) -> Self {
         match e {
             Web3RpcError::Transport(err) | Web3RpcError::InvalidResponse(err) => BalanceError::Transport(err),
+            Web3RpcError::FeeCapBelowBaseFee(rejection) => BalanceError::FeeCapBelowBaseFee(rejection),
             Web3RpcError::Internal(internal) => BalanceError::Internal(internal),
         }
     }
@@ -409,8 +458,16 @@ pub struct EthCoinImpl {
     pub derivation_method: DerivationMethod<Address, EthHDWallet>,
     /// V2 swap contract addresses (maker, taker). None if V2 not configured.
     pub(crate) swap_v2_contracts: Option<SwapV2Contracts>,
-    /// Gas limits for V2 swap operations.
+    /// Gas limits for V1 swap operations, sends and trade-fee figures (CRD R57.5): the coin's `gas_limit`
+    /// block, else its platform coin's, else the defaults.
+    pub(crate) gas_limit: EthGasLimit,
+    /// Gas limits for V2 swap operations (CRD R57.6): the coin's `gas_limit_v2` block, else its platform
+    /// coin's, else the defaults.
     pub(crate) gas_limit_v2: EthGasLimitV2,
+    /// The `estimate_gas_mult` of the coin's configuration entry, else its platform coin's (CRD R57.5.3b), as
+    /// parsed. `None` means no scaling. Applied only to the estimated gas limit of the legacy ERC-20 `approve`
+    /// that precedes a V1 HTLC payment.
+    pub(crate) estimate_gas_mult: Option<f64>,
     /// HTTP API client for TRON full nodes. Populated only when
     /// `coin_type` is [`EthCoinType::Tron`] or [`EthCoinType::Trc20`].
     /// `None` for ETH/ERC20 coins.
@@ -427,6 +484,9 @@ pub struct EthCoinImpl {
     /// Populated during V2 platform-with-tokens activation so the activation
     /// result can report per-token balances (CRD §35.1.3).
     pub(crate) erc20_tokens_infos: Arc<Mutex<std::collections::HashMap<String, Erc20TokenInfo>>>,
+    /// The token was activated from an inline `protocol` instead of the coins config. Such a custom
+    /// token is a wallet-only coin and has no coins-config entry to say so (CRD ch.35 R35.2.7).
+    pub(crate) custom_token: bool,
 }
 
 // ─── V2 swap types ──────────────────────────────────────────────────────────
@@ -460,13 +520,13 @@ pub(crate) enum TakerPaymentStateV2 {
 }
 
 /// Gas limits for V2 swap contract calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EthGasLimitV2 {
     pub maker: MakerGasLimitV2,
     pub taker: TakerGasLimitV2,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MakerGasLimitV2 {
     pub eth_payment: u64,
     pub erc20_payment: u64,
@@ -489,7 +549,7 @@ pub struct MakerGasLimitV2 {
     pub nft_erc1155_maker_refund_secret: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakerGasLimitV2 {
     pub eth_payment: u64,
     pub erc20_payment: u64,
@@ -502,39 +562,38 @@ pub struct TakerGasLimitV2 {
     pub approve_payment: u64,
 }
 
+/// The defaults of CRD R57.6.2.
 impl Default for EthGasLimitV2 {
     fn default() -> Self {
         EthGasLimitV2 {
             maker: MakerGasLimitV2 {
-                eth_payment: 150_000,
-                erc20_payment: 250_000,
-                eth_taker_spend: 150_000,
+                eth_payment: 65_000,
+                erc20_payment: 150_000,
+                eth_taker_spend: 100_000,
                 erc20_taker_spend: 150_000,
-                eth_maker_refund_timelock: 150_000,
-                erc20_maker_refund_timelock: 150_000,
-                eth_maker_refund_secret: 150_000,
-                erc20_maker_refund_secret: 150_000,
-                // NFT defaults sit above ERC-20 because the HTLC contract
-                // additionally invokes `safeTransferFrom` on the token contract.
-                nft_erc721_payment: 200_000,
-                nft_erc1155_payment: 220_000,
-                nft_erc721_taker_spend: 200_000,
-                nft_erc1155_taker_spend: 220_000,
-                nft_erc721_maker_refund_timelock: 200_000,
-                nft_erc1155_maker_refund_timelock: 220_000,
-                nft_erc721_maker_refund_secret: 200_000,
-                nft_erc1155_maker_refund_secret: 220_000,
+                eth_maker_refund_timelock: 90_000,
+                erc20_maker_refund_timelock: 100_000,
+                eth_maker_refund_secret: 90_000,
+                erc20_maker_refund_secret: 100_000,
+                nft_erc721_payment: 130_000,
+                nft_erc1155_payment: 130_000,
+                nft_erc721_taker_spend: 100_000,
+                nft_erc1155_taker_spend: 100_000,
+                nft_erc721_maker_refund_timelock: 100_000,
+                nft_erc1155_maker_refund_timelock: 100_000,
+                nft_erc721_maker_refund_secret: 100_000,
+                nft_erc1155_maker_refund_secret: 100_000,
             },
             taker: TakerGasLimitV2 {
-                eth_payment: 150_000,
-                erc20_payment: 250_000,
-                eth_maker_spend: 150_000,
-                erc20_maker_spend: 150_000,
-                eth_taker_refund_timelock: 150_000,
-                erc20_taker_refund_timelock: 150_000,
-                eth_taker_refund_secret: 150_000,
-                erc20_taker_refund_secret: 150_000,
-                approve_payment: 150_000,
+                eth_payment: 65_000,
+                erc20_payment: 150_000,
+                eth_maker_spend: 100_000,
+                erc20_maker_spend: 115_000,
+                eth_taker_refund_timelock: 90_000,
+                erc20_taker_refund_timelock: 100_000,
+                eth_taker_refund_secret: 90_000,
+                erc20_taker_refund_secret: 100_000,
+                approve_payment: 50_000,
             },
         }
     }

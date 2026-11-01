@@ -36,7 +36,11 @@ fn addr_hex(addr: Address) -> String { format!("0x{:x}", addr) }
 fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) -> (MmArc, EthCoin) {
     let key_pair = test_key_pair();
     let my_addr = key_pair.address();
-    let web3 = crate::eth::alloy_compat::build_provider(vec![node.rpc_url.clone()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec![node.rpc_url.clone()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let ticker = match &coin_type {
         EthCoinType::Erc20 { .. } => "TEST".to_string(),
@@ -66,11 +70,14 @@ fn dev_eth_coin(coin_type: EthCoinType, node: &GethDev, swap_contract: Address) 
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: Some(node.chain_id),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method: DerivationMethod::Iguana(my_addr),
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }));
     (ctx, coin)
 }

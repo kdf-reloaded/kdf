@@ -10,8 +10,8 @@ pub mod request_response;
 mod runtime;
 
 use lazy_static::lazy_static;
-use secp256k1::{Message as SecpMessage, PublicKey as Secp256k1Pubkey, Secp256k1, SecretKey, SignOnly, Signature,
-                VerifyOnly};
+use secp256k1::ecdsa::Signature;
+use secp256k1::{Message as SecpMessage, PublicKey as Secp256k1Pubkey, Secp256k1, SecretKey, SignOnly, VerifyOnly};
 use sha2::{Digest, Sha256};
 
 pub use atomicdex_behaviour::{spawn_gossipsub, AdexBehaviourError, NodeType, WssCerts};
@@ -67,8 +67,8 @@ struct SignedMessageSerdeHelper<'a> {
 pub fn encode_and_sign<T: Serialize>(message: &T, secret: &[u8; 32]) -> Result<Vec<u8>, rmp_serde::encode::Error> {
     let secret = SecretKey::from_slice(secret).unwrap();
     let encoded = encode_message(message)?;
-    let sig_hash = SecpMessage::from_slice(&sha256(&encoded)).expect("Message::from_slice should never fail");
-    let sig = SECP_SIGN.sign(&sig_hash, &secret);
+    let sig_hash = SecpMessage::from_digest_slice(&sha256(&encoded)).expect("Message::from_slice should never fail");
+    let sig = SECP_SIGN.sign_ecdsa(&sig_hash, &secret);
     let serialized_sig = sig.serialize_compact();
     let pubkey = PublicKey::from(Secp256k1Pubkey::from_secret_key(&*SECP_SIGN, &secret));
     let msg = SignedMessageSerdeHelper {
@@ -85,10 +85,14 @@ pub fn decode_signed<'de, T: de::Deserialize<'de>>(
     let helper: SignedMessageSerdeHelper = decode_message(encoded)?;
     let signature = Signature::from_compact(helper.signature)
         .map_err(|e| rmp_serde::decode::Error::Syntax(format!("Failed to parse signature {}", e)))?;
-    let sig_hash = SecpMessage::from_slice(&sha256(helper.payload)).expect("Message::from_slice should never fail");
+    let sig_hash =
+        SecpMessage::from_digest_slice(&sha256(helper.payload)).expect("Message::from_slice should never fail");
     match &helper.pubkey {
         PublicKey::Secp256k1(serialized_pub) => {
-            if SECP_VERIFY.verify(&sig_hash, &signature, &serialized_pub.0).is_err() {
+            if SECP_VERIFY
+                .verify_ecdsa(&sig_hash, &signature, &serialized_pub.0)
+                .is_err()
+            {
                 return Err(rmp_serde::decode::Error::Syntax("Invalid message signature".into()));
             }
         },

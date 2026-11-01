@@ -29,18 +29,19 @@
 //! byte-identical `init` params and success results.
 
 use crate::context::CoinsActivationContext;
-use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens_for_task, EnablePlatformCoinWithTokensError,
-                                       EnablePlatformCoinWithTokensReq, PlatformWithTokensActivationOps};
+use crate::platform_coin_with_tokens::{enable_platform_coin_with_tokens_for_task, rpc_task_error,
+                                       EnablePlatformCoinWithTokensError, EnablePlatformCoinWithTokensReq,
+                                       PlatformWithTokensActivationOps};
 use crate::prelude::CurrentBlock;
 use async_trait::async_trait;
+use coins::lp_coinfind;
 use common::{log, SuccessResponse};
-use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
+use crypto::hw_rpc_task::{HwConnectStatuses, HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest, RpcTaskUserActionError,
-                           RpcTaskUserActionRequest};
-use rpc_task::{RpcTask, RpcTaskError, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatusAlias,
-               RpcTaskTypes};
+use rpc_task::rpc_common::{CancelRpcTaskError, InitRpcTaskResponse, RpcTaskStatusError, RpcTaskStatusRequest,
+                           RpcTaskUserActionError, RpcTaskUserActionRequest};
+use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatusAlias, RpcTaskTypes};
 use serde_derive::Serialize;
 use serde_json::Value as Json;
 
@@ -63,9 +64,23 @@ pub enum InitPlatformCoinWithTokensInProgressStatus {
     /// A hardware-wallet signing policy is waiting for the Trezor device to be
     /// connected (R48.6.2). Only reached by an interactive (Trezor) policy.
     WaitingForTrezorToConnect,
-    /// The device is prompting the user to confirm the account public key /
-    /// address read during activation. Only reached by an interactive policy.
-    WaitingForUserToConfirmPubkey,
+    /// The device asks the user to confirm on its screen (CRD R48.3.2). Only reached by an interactive
+    /// policy.
+    FollowHwDeviceInstructions,
+}
+
+/// The progress and awaiting values a hardware wallet interaction reports during a platform activation.
+pub(crate) fn xpub_extractor_rpc_statuses(
+) -> HwConnectStatuses<InitPlatformCoinWithTokensInProgressStatus, HwRpcTaskAwaitingStatus> {
+    HwConnectStatuses {
+        on_connect: InitPlatformCoinWithTokensInProgressStatus::WaitingForTrezorToConnect,
+        on_connected: InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin,
+        on_connection_failed: InitPlatformCoinWithTokensInProgressStatus::Finishing,
+        on_button_request: InitPlatformCoinWithTokensInProgressStatus::FollowHwDeviceInstructions,
+        on_pin_request: HwRpcTaskAwaitingStatus::EnterTrezorPin,
+        on_passphrase_request: HwRpcTaskAwaitingStatus::EnterTrezorPassphrase,
+        on_ready: InitPlatformCoinWithTokensInProgressStatus::ActivatingCoin,
+    }
 }
 
 /// Per-platform-coin task registration (R48.4.1).
@@ -89,6 +104,11 @@ where
     EnablePlatformCoinWithTokensError: From<<Self as PlatformWithTokensActivationOps>::ActivationError>,
 {
     fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &InitPlatformCoinWithTokensTaskManagerShared<Self>;
+
+    /// Whether the task also reports `RequestingWalletBalance` and `Finishing` besides the initial
+    /// `ActivatingCoin`. The platforms of ch. 35 do; the Tendermint task reports `ActivatingCoin` only
+    /// (CRD R36.6.4).
+    const REPORTS_BALANCE_AND_FINISHING_PROGRESS: bool = true;
 
     /// Build the platform coin during a task-driven activation, threading the
     /// task handle so an interactive signing policy can drive its device
@@ -150,9 +170,11 @@ where
         // shared token/balance/history/register tail (R48.2.3 / R48.6.2).
         let result = enable_platform_coin_with_tokens_for_task::<Platform>(self.ctx, task_handle, self.request).await?;
 
-        task_handle
-            .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::Finishing)
-            .mm_err(|e| EnablePlatformCoinWithTokensError::Internal(e.to_string()))?;
+        if Platform::REPORTS_BALANCE_AND_FINISHING_PROGRESS {
+            task_handle
+                .update_in_progress_status(InitPlatformCoinWithTokensInProgressStatus::Finishing)
+                .mm_err(rpc_task_error)?;
+        }
         log::debug!(
             "Platform coin activation task finished at block {}",
             result.current_block()
@@ -173,6 +195,15 @@ where
     Platform::ActivationResult: serde::Serialize + Clone + Send + Sync + 'static,
     EnablePlatformCoinWithTokensError: From<Platform::ActivationError>,
 {
+    // The only synchronous check of `init` besides the task creation (CRD R48.5.4): everything else is
+    // reported by the task. The public Tendermint page draws its platform, protocol and token configuration errors
+    // as mmrpc-level answers but does not say which call returns them; the reference reports them in `status`, and
+    // Reloaded does the same (CRD ch.48 R48.5.4, ch.36 R36.6.3).
+    if let Ok(Some(_)) = lp_coinfind(&ctx, &request.ticker).await {
+        return MmError::err(EnablePlatformCoinWithTokensError::PlatformIsAlreadyActivated(
+            request.ticker,
+        ));
+    }
     let coins_act_ctx =
         CoinsActivationContext::from_ctx(&ctx).map_to_mm(EnablePlatformCoinWithTokensError::Internal)?;
     let task = InitPlatformCoinWithTokensTask::<Platform> { ctx, request };
@@ -183,6 +214,10 @@ where
 }
 
 /// `task::enable_<platform>::status` — poll progress / terminal result (R48.1.3).
+///
+/// The terminal error is placed directly in `details`. The task page of the public docs describes a
+/// `details.result` wrapper and lists `CoinCreationError` and `HwError`; the reference has no wrapper, reports the
+/// platform discriminants, and never produces those two for this family, as Reloaded does (CRD ch.35 R35.3.5).
 ///
 /// The terminal error preserves the one-shot platform-activation discriminants
 /// (R48.5.1); `status` itself fails only with the task-framework discriminants
@@ -242,19 +277,16 @@ where
 pub async fn cancel_init_platform_coin_with_tokens<Platform>(
     ctx: MmArc,
     req: RpcTaskStatusRequest,
-) -> MmResult<SuccessResponse, RpcTaskStatusError>
+) -> MmResult<SuccessResponse, CancelRpcTaskError>
 where
     Platform: InitPlatformCoinWithTokensActivationOps,
     Platform::ActivationResult: serde::Serialize + Clone + Send + Sync + 'static,
     EnablePlatformCoinWithTokensError: From<Platform::ActivationError>,
 {
-    let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(RpcTaskStatusError::Internal)?;
+    let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(CancelRpcTaskError::Internal)?;
     let mut task_manager = Platform::rpc_task_manager(&coins_act_ctx)
         .lock()
-        .map_to_mm(|e| RpcTaskStatusError::Internal(e.to_string()))?;
-    task_manager.cancel_task(req.task_id).mm_err(|e| match e {
-        RpcTaskError::NoSuchTask(task_id) => RpcTaskStatusError::NoSuchTask(task_id),
-        other => RpcTaskStatusError::Internal(other.to_string()),
-    })?;
+        .map_to_mm(|e| CancelRpcTaskError::Internal(e.to_string()))?;
+    task_manager.cancel_task(req.task_id).mm_err(Into::into)?;
     Ok(SuccessResponse::new())
 }

@@ -721,8 +721,8 @@ pub fn mm_spat(
             "passphrase": passphrase,
             "rpccors": "http://localhost:4000",
             "coins": [
-                {"coin":"RICK","asset":"RICK","rpcport":8923},
-                {"coin":"MORTY","asset":"MORTY","rpcport":11608},
+                {"coin":"DOC","asset":"DOC","rpcport":62415},
+                {"coin":"MARTY","asset":"MARTY","rpcport":52592},
             ],
             "i_am_seed": true,
             "rpc_password": "pass",

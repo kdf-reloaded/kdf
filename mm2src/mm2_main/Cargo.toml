@@ -6,6 +6,7 @@
 [package]
 name = "mm2_main"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 default-run = "kdf"
 
@@ -28,6 +29,9 @@ regtest-netid = ["mm2_net_config/regtest-netid"]
 unsafe-rpc-wire-dump = []
 # Escape hatch for controlled release debugging. Never enable in production builds.
 unsafe-rpc-wire-dump-release-override = []
+# Test-only: installs a counting global allocator in the test binaries for the memory measurement
+# harness of the order-book trie store (`measure_burst_retention`). Never enable on a build that ships.
+counting-alloc = []
 
 [[bin]]
 name = "kdf"
@@ -73,7 +77,6 @@ mm2_net_config = { path = "../mm2_net_config" }
 mm2_core = { path = "../mm2_core" }
 mm2_db = { path = "../mm2_db" }
 crc32fast = { version = "1.3.2", features = ["std"] }
-crossbeam = "0.7"
 crypto = { path = "../crypto" }
 db_common = { path = "../db_common" }
 derive_more = "0.99"
@@ -82,13 +85,12 @@ ethereum-types.workspace = true
 enum-primitive-derive = "0.2"
 fomat-macros = "0.2"
 futures01 = { version = "0.1", package = "futures" }
-futures-cpupool = "0.1"
 futures = { version = "0.3.1", package = "futures", features = ["compat", "async-await"] }
 gstuff = { version = "0.7" }
 hash256-std-hasher = "0.15.2"
 hash-db = "0.15.2"
 hex = "0.4.2"
-http = "0.2"
+http = "1"
 hw_common = { path = "../hw_common" }
 itertools = "0.10"
 keys = { package = "kdf_keys", path = "../kdf_keys" }
@@ -104,13 +106,12 @@ parity-util-mem = "0.11"
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 prost = { workspace = true }
 rand = { version = "0.8", features = ["std", "small_rng"] }
-rand6 = { version = "0.6", package = "rand" }
 rmp-serde = "0.14.3"
 # TODO: Reduce the size of regex by disabling the features we don't use.
 # cf. https://github.com/rust-lang/regex/issues/583
 regex = "1"
 script = { package = "kdf_script", path = "../kdf_script" }
-secp256k1 = { version = "0.20", features = ["rand"] }
+secp256k1 = { version = "0.29", features = ["rand"] }
 serde = "1.0"
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 serde_derive = "1.0"
@@ -139,16 +140,35 @@ web-sys = { version = "0.3.55", features = ["console"] }
 instant = {version = "0.1.12", features = ["wasm-bindgen"]}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-dirs = { version = "1" }
-hyper = { version = "0.14.11", features = ["client", "http2", "server", "tcp"] }
+# 1.0.5 (2018) pulls redox_users 0.3 -> rust-argon2 0.7 -> crossbeam-utils 0.7.2
+# (RUSTSEC-2022-0041). Only `dirs::home_dir()` is used, which is unchanged across
+# the major versions. Note dirs >= 4 resolves the Windows home via
+# SHGetKnownFolderPath rather than %HOME%/%USERPROFILE%.
+dirs = { version = "6" }
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", default-features = false, features = ["server-auto", "server-graceful", "tokio", "http1", "http2"] }
 tokio = { version = "1.7", features = ["io-util", "rt-multi-thread", "net", "signal"] }
-futures-rustls = { version = "0.21.1" }
+rustls-pemfile = "2.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The in-process slow-relay scenario of `lp_ordermatch/maker_outbox_lab_tests.rs` builds a plain gossipsub relay
+# next to the production swarm. Same pin and feature set as `mm2_p2p`.
+libp2p = { workspace = true, features = ["gossipsub", "noise", "ping", "macros", "yamux"] }
 
 [dev-dependencies]
 crypto = { path = "../crypto", features = ["test-helpers"] }
 mocktopus = "0.8.0"
 testcontainers = { path = "../testcontainers-vendored" }
-winapi = "0.3"
+# winapi features must be declared HERE, not inherited. Every one of these
+# call sites used to compile only because some other crate in the graph
+# happened to enable the feature and Cargo unified it. That broke on
+# 2026-09-23: bumping `dirs` 1 -> 6 moved dirs-sys from winapi to
+# windows-sys, the `shlobj` feature stopped being enabled by anyone, and the
+# Windows build failed with "unresolved import winapi::um::shlobj". Nothing
+# in CI catches this on push -- no Windows job runs outside workflow_dispatch.
+# processenv: SetCurrentDirectoryA (mm2_tests.rs).
+winapi = { version = "0.3", features = ["processenv"] }
 
 [build-dependencies]
 chrono = "0.4"

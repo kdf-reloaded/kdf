@@ -3,23 +3,23 @@
 //! As an example, the following table will be used:
 //! ```
 //! | uuid                                   | base_coin | rel_coin | base_coin_value | started_at |
-//! | "c52659d7-4e13-41f5-9c1a-30cc2f646033" | "RICK"    | "MORTY"  | 10              | 1000000029 |
-//! | "5acb0e63-8b26-469e-81df-7dd9e4a9ad15" | "RICK"    | "MORTY"  | 13              | 1000000030 |
-//! | "9db641f5-4300-4527-9fa6-f1c391d42c35" | "RICK"    | "MORTY"  | 1.2             | 1000000031 |
+//! | "c52659d7-4e13-41f5-9c1a-30cc2f646033" | "DOC"    | "MARTY"  | 10              | 1000000029 |
+//! | "5acb0e63-8b26-469e-81df-7dd9e4a9ad15" | "DOC"    | "MARTY"  | 13              | 1000000030 |
+//! | "9db641f5-4300-4527-9fa6-f1c391d42c35" | "DOC"    | "MARTY"  | 1.2             | 1000000031 |
 //! ```
 //! with the `search_index` index created by:
 //! ```rust
 //! TableUpgrader::create_multi_index(self, "search_index", &["base_coin", "rel_coin", "started_at"]).unwrap();
 //! ```
 //!
-//! If you want to find all `RICK/MORTY` swaps where
+//! If you want to find all `DOC/MARTY` swaps where
 //! 1) `10 <= base_coin_value <= 13`
 //! 2) `started_at <= 1000000030`,
 //! you can use [`WithBound::bound`] along with [`WithOnly::only`]:
 //! ```rust
 //! let table = open_table_somehow();
-//! let all_rick_morty_swaps = table.open_cursor("search_index")
-//!     .only("base_coin", "RICK", "MORTY")?
+//! let all_doc_marty_swaps = table.open_cursor("search_index")
+//!     .only("base_coin", "DOC", "MARTY")?
 //!     .bound("base_coin_value", 10, 13)
 //!     .bound("started_at", 1000000030.into(), u32::MAX.into())
 //!     .collect()
@@ -30,12 +30,12 @@
 //!
 //! In the example above, [`CursorOps::collect`] actually creates a JavaScript cursor with the specified key range:
 //! ```js
-//! var key_range = IDBKeyRange.bound(['RICK', 'MORTY', 10, 1000000030], ['RICK', 'MORTY', 13, 9999999999]);
+//! var key_range = IDBKeyRange.bound(['DOC', 'MARTY', 10, 1000000030], ['DOC', 'MARTY', 13, 9999999999]);
 //! var cursor = table.index('search_index').openCursor(key_range);
 //! ```
 //!
 //! And after that, the database engine compares each record with the specified min and max bounds sequentially from one field to another.
-//! Please note `['RICK', 'MORTY', 10, 1000000029]` <= `['RICK', 'MORTY', 11, 2000000000]`.
+//! Please note `['DOC', 'MARTY', 10, 1000000029]` <= `['DOC', 'MARTY', 11, 2000000000]`.
 //!
 //! # Important
 //!
@@ -44,9 +44,9 @@
 //! and they are specified in the same order as they were declared on [`TableUpgrader::create_multi_index`].
 //!
 //! It's important because if you skip f the `started_at` key, for example, the bounds will be:
-//! min = ['RICK', 'MORTY', 10], max = ['RICK', 'MORTY', 13],
-//! but an actual record ['RICK', 'MORTY', 13, 1000000030] will not be included in the result,
-//! because ['RICK', 'MORTY', 13] < ['RICK', 'MORTY', 13, 1000000030],
+//! min = ['DOC', 'MARTY', 10], max = ['DOC', 'MARTY', 13],
+//! but an actual record ['DOC', 'MARTY', 13, 1000000030] will not be included in the result,
+//! because ['DOC', 'MARTY', 13] < ['DOC', 'MARTY', 13, 1000000030],
 //! although it is expected to be within the specified bounds.
 
 use crate::indexed_db::db_driver::cursor::{CollectCursorAction, CollectItemAction, CursorBoundValue, CursorOps,
@@ -614,12 +614,12 @@ mod tests {
         register_wasm_log();
 
         let items = vec![
-            swap_item!("uuid1", "RICK", "MORTY", 10, 1, 700), // +
-            swap_item!("uuid2", "MORTY", "KMD", 95000, 1, 721),
-            swap_item!("uuid3", "RICK", "XYZ", 7, 6, 721),   // +
-            swap_item!("uuid4", "RICK", "MORTY", 8, 6, 721), // +
-            swap_item!("uuid5", "KMD", "MORTY", 12, 3, 721),
-            swap_item!("uuid6", "QRC20", "RICK", 2, 2, 721),
+            swap_item!("uuid1", "DOC", "MARTY", 10, 1, 700), // +
+            swap_item!("uuid2", "MARTY", "KMD", 95000, 1, 721),
+            swap_item!("uuid3", "DOC", "XYZ", 7, 6, 721),   // +
+            swap_item!("uuid4", "DOC", "MARTY", 8, 6, 721), // +
+            swap_item!("uuid5", "KMD", "MARTY", 12, 3, 721),
+            swap_item!("uuid6", "QRC20", "DOC", 2, 2, 721),
         ];
 
         let db = IndexedDbBuilder::new(DbIdentifier::for_test(DB_NAME))
@@ -639,7 +639,7 @@ mod tests {
             .open_cursor("base_coin")
             .await
             .expect("!DbTable::open_cursor")
-            .only("base_coin", "RICK")
+            .only("base_coin", "DOC")
             .expect("!DbEmptyCursor::only")
             .collect()
             .await
@@ -650,9 +650,9 @@ mod tests {
         actual_items.sort();
 
         let mut expected_items = vec![
-            swap_item!("uuid1", "RICK", "MORTY", 10, 1, 700),
-            swap_item!("uuid3", "RICK", "XYZ", 7, 6, 721),
-            swap_item!("uuid4", "RICK", "MORTY", 8, 6, 721),
+            swap_item!("uuid1", "DOC", "MARTY", 10, 1, 700),
+            swap_item!("uuid3", "DOC", "XYZ", 7, 6, 721),
+            swap_item!("uuid4", "DOC", "MARTY", 8, 6, 721),
         ];
         expected_items.sort();
 
@@ -667,12 +667,12 @@ mod tests {
         register_wasm_log();
 
         let items = vec![
-            swap_item!("uuid1", "RICK", "MORTY", 10, 3, 700),
-            swap_item!("uuid2", "MORTY", "KMD", 95000, 1, 721),
-            swap_item!("uuid3", "RICK", "XYZ", 7, u32::MAX, 1281), // +
-            swap_item!("uuid4", "RICK", "MORTY", 8, 6, 92),        // +
-            swap_item!("uuid5", "QRC20", "RICK", 2, 4, 721),
-            swap_item!("uuid6", "KMD", "MORTY", 12, 3124, 214), // +
+            swap_item!("uuid1", "DOC", "MARTY", 10, 3, 700),
+            swap_item!("uuid2", "MARTY", "KMD", 95000, 1, 721),
+            swap_item!("uuid3", "DOC", "XYZ", 7, u32::MAX, 1281), // +
+            swap_item!("uuid4", "DOC", "MARTY", 8, 6, 92),        // +
+            swap_item!("uuid5", "QRC20", "DOC", 2, 4, 721),
+            swap_item!("uuid6", "KMD", "MARTY", 12, 3124, 214), // +
         ];
 
         let db = IndexedDbBuilder::new(DbIdentifier::for_test(DB_NAME))
@@ -702,9 +702,9 @@ mod tests {
         actual_items.sort();
 
         let mut expected_items = vec![
-            swap_item!("uuid3", "RICK", "XYZ", 7, u32::MAX, 1281),
-            swap_item!("uuid4", "RICK", "MORTY", 8, 6, 92),
-            swap_item!("uuid6", "KMD", "MORTY", 12, 3124, 214),
+            swap_item!("uuid3", "DOC", "XYZ", 7, u32::MAX, 1281),
+            swap_item!("uuid4", "DOC", "MARTY", 8, 6, 92),
+            swap_item!("uuid6", "KMD", "MARTY", 12, 3124, 214),
         ];
         expected_items.sort();
 
@@ -719,18 +719,18 @@ mod tests {
         register_wasm_log();
 
         let items = vec![
-            swap_item!("uuid1", "RICK", "MORTY", 12, 1, 700),
-            swap_item!("uuid2", "RICK", "KMD", 95000, 6, 721),
-            swap_item!("uuid3", "RICK", "MORTY", 12, 5, 720),
-            swap_item!("uuid4", "RICK", "MORTY", 12, 3, 721), // +
-            swap_item!("uuid5", "QRC20", "MORTY", 51, 221, 182),
-            swap_item!("uuid6", "QRC20", "RICK", 12, 6, 121),
-            swap_item!("uuid7", "RICK", "QRC20", 12, 6, 721), // +
+            swap_item!("uuid1", "DOC", "MARTY", 12, 1, 700),
+            swap_item!("uuid2", "DOC", "KMD", 95000, 6, 721),
+            swap_item!("uuid3", "DOC", "MARTY", 12, 5, 720),
+            swap_item!("uuid4", "DOC", "MARTY", 12, 3, 721), // +
+            swap_item!("uuid5", "QRC20", "MARTY", 51, 221, 182),
+            swap_item!("uuid6", "QRC20", "DOC", 12, 6, 121),
+            swap_item!("uuid7", "DOC", "QRC20", 12, 6, 721), // +
             swap_item!("uuid8", "FIRO", "DOGE", 12, 8, 721),
-            swap_item!("uuid9", "RICK", "DOGE", 115, 1221, 721),
-            swap_item!("uuid10", "RICK", "tQTUM", 12, 6, 721), // +
-            swap_item!("uuid11", "MORTY", "RICK", 12, 7, 677),
-            swap_item!("uuid12", "tBTC", "RICK", 92, 6, 721),
+            swap_item!("uuid9", "DOC", "DOGE", 115, 1221, 721),
+            swap_item!("uuid10", "DOC", "tQTUM", 12, 6, 721), // +
+            swap_item!("uuid11", "MARTY", "DOC", 12, 7, 677),
+            swap_item!("uuid12", "tBTC", "DOC", 92, 6, 721),
         ];
 
         let db = IndexedDbBuilder::new(DbIdentifier::for_test(DB_NAME))
@@ -750,7 +750,7 @@ mod tests {
             .open_cursor("basecoin_basecoinvalue_startedat_index")
             .await
             .expect("!DbTable::open_cursor")
-            .only("base_coin", "RICK")
+            .only("base_coin", "DOC")
             .expect("!DbEmptyCursor::only")
             .only("base_coin_value", 12)
             .expect("!DbSingleKeyCursor::only")
@@ -765,9 +765,9 @@ mod tests {
         actual_items.sort();
 
         let mut expected_items = vec![
-            swap_item!("uuid4", "RICK", "MORTY", 12, 3, 721),
-            swap_item!("uuid7", "RICK", "QRC20", 12, 6, 721),
-            swap_item!("uuid10", "RICK", "tQTUM", 12, 6, 721),
+            swap_item!("uuid4", "DOC", "MARTY", 12, 3, 721),
+            swap_item!("uuid7", "DOC", "QRC20", 12, 6, 721),
+            swap_item!("uuid10", "DOC", "tQTUM", 12, 6, 721),
         ];
         expected_items.sort();
 
@@ -782,30 +782,30 @@ mod tests {
         register_wasm_log();
 
         let items = vec![
-            swap_item!("uuid1", "MORTY", "RICK", 12, 10, 999),
-            swap_item!("uuid2", "RICK", "QRC20", 4, 12, 557),
-            swap_item!("uuid3", "RICK", "QRC20", 8, 11, 795), // +
-            swap_item!("uuid4", "MORTY", "QRC20", 2, 10, 596),
-            swap_item!("uuid5", "tQTUM", "MORTY", 1, 8, 709),
-            swap_item!("uuid6", "tQTUM", "RICK", 5, 90, 555),
-            swap_item!("uuid7", "RICK", "QRC20", 66, 88, 744),
+            swap_item!("uuid1", "MARTY", "DOC", 12, 10, 999),
+            swap_item!("uuid2", "DOC", "QRC20", 4, 12, 557),
+            swap_item!("uuid3", "DOC", "QRC20", 8, 11, 795), // +
+            swap_item!("uuid4", "MARTY", "QRC20", 2, 10, 596),
+            swap_item!("uuid5", "tQTUM", "MARTY", 1, 8, 709),
+            swap_item!("uuid6", "tQTUM", "DOC", 5, 90, 555),
+            swap_item!("uuid7", "DOC", "QRC20", 66, 88, 744),
             swap_item!("uuid8", "DOGE", "DOGE", 5, 12, 714),
-            swap_item!("uuid9", "RICK", "QRC20", 7, 10, 743), // +
+            swap_item!("uuid9", "DOC", "QRC20", 7, 10, 743), // +
             swap_item!("uuid10", "FIRO", "tQTUM", 7, 11, 777),
-            swap_item!("uuid11", "RICK", "MORTY", 91, 11, 1061),
+            swap_item!("uuid11", "DOC", "MARTY", 91, 11, 1061),
             swap_item!("uuid12", "tBTC", "tQTUM", 4, 771, 745),
-            swap_item!("uuid13", "RICK", "QRC20", 3, 11, 759), // +
+            swap_item!("uuid13", "DOC", "QRC20", 3, 11, 759), // +
             swap_item!("uuid14", "DOGE", "tBTC", 4, 6, 895),
-            swap_item!("uuid15", "RICK", "QRC20", 723, 19, 558),
+            swap_item!("uuid15", "DOC", "QRC20", 723, 19, 558),
             swap_item!("uuid16", "FIRO", "tBTC", 5, 10, 724),
-            swap_item!("uuid17", "RICK", "tBTC", 5, 13, 636),
-            swap_item!("uuid18", "RICK", "QRC20", 7, 33, 864),
+            swap_item!("uuid17", "DOC", "tBTC", 5, 13, 636),
+            swap_item!("uuid18", "DOC", "QRC20", 7, 33, 864),
             swap_item!("uuid19", "DOGE", "tBTC", 55, 12, 723),
-            swap_item!("uuid20", "RICK", "QRC20", 5, 11, 785), // +
+            swap_item!("uuid20", "DOC", "QRC20", 5, 11, 785), // +
             swap_item!("uuid21", "FIRO", "tBTC", 24, 1, 605),
-            swap_item!("uuid22", "RICK", "QRC20", 9, 10, 734),
+            swap_item!("uuid22", "DOC", "QRC20", 9, 10, 734),
             swap_item!("uuid23", "tBTC", "tBTC", 7, 99, 834),
-            swap_item!("uuid24", "RICK", "QRC20", 8, 12, 849),
+            swap_item!("uuid24", "DOC", "QRC20", 8, 12, 849),
             swap_item!("uuid25", "DOGE", "tBTC", 9, 10, 711),
         ];
 
@@ -826,7 +826,7 @@ mod tests {
             .open_cursor("all_fields_index")
             .await
             .expect("!DbTable::open_cursor")
-            .only("base_coin", "RICK")
+            .only("base_coin", "DOC")
             .expect("!DbEmptyCursor::only")
             .only("rel_coin", "QRC20")
             .expect("!DbEmptyCursor::only")
@@ -842,10 +842,10 @@ mod tests {
 
         // Items are expected to be sorted in the following order.
         let expected_items = vec![
-            swap_item!("uuid13", "RICK", "QRC20", 3, 11, 759),
-            swap_item!("uuid20", "RICK", "QRC20", 5, 11, 785),
-            swap_item!("uuid9", "RICK", "QRC20", 7, 10, 743),
-            swap_item!("uuid3", "RICK", "QRC20", 8, 11, 795),
+            swap_item!("uuid13", "DOC", "QRC20", 3, 11, 759),
+            swap_item!("uuid20", "DOC", "QRC20", 5, 11, 785),
+            swap_item!("uuid9", "DOC", "QRC20", 7, 10, 743),
+            swap_item!("uuid3", "DOC", "QRC20", 8, 11, 795),
         ];
 
         assert_eq!(actual_items, expected_items);

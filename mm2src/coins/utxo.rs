@@ -26,6 +26,7 @@ mod bchd_grpc;
 #[rustfmt::skip]
 #[path = "utxo/pb.rs"]
 mod bchd_pb;
+pub mod header_layout_fallback;
 pub mod qtum;
 pub mod rpc_clients;
 pub mod slp;
@@ -40,6 +41,7 @@ pub mod wc_integration;
 
 use async_trait::async_trait;
 use bigdecimal::BigDecimal;
+#[cfg(not(target_arch = "wasm32"))]
 use bitcoin::network::constants::Network as BitcoinNetwork;
 pub use chain::Transaction as UtxoTx;
 use chain::{OutPoint, TransactionOutput, TxHashAlgo};
@@ -60,10 +62,12 @@ use futures::channel::mpsc;
 use futures::compat::Future01CompatExt;
 use futures::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use futures01::Future;
+use header_layout_fallback::ChainVariant;
 pub use kdf_crypto::{dhash160, sha256, ChecksumType};
 use keys::bytes::Bytes;
 pub use keys::{Address, AddressFormat as UtxoAddressFormat, AddressHashEnum, KeyPair, Private, Public, Secret,
                Type as ScriptType};
+#[cfg(not(target_arch = "wasm32"))]
 use lightning_invoice::Currency as LightningCurrency;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
@@ -74,7 +78,7 @@ use primitives::hash::{H256, H264};
 use rpc::v1::types::{Bytes as BytesJson, Transaction as RpcTransaction, H256 as H256Json};
 use script::{Builder, Opcode, Script, SignatureVersion, TransactionInputSigner};
 use serde_json::{self as json, Value as Json};
-use serialization::{serialize, serialize_with_flags, SERIALIZE_TRANSACTION_WITNESS};
+use serialization::{serialize, serialize_with_flags, CoinVariant, SERIALIZE_TRANSACTION_WITNESS};
 use spv_validation::helpers_validation::SPVError;
 use std::array::TryFromSliceError;
 use std::collections::{HashMap, HashSet};
@@ -88,7 +92,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use utxo_builder::UtxoConfBuilder;
+use utxo_builder::{UnrecognisedEnumPolicy, UtxoConfBuilder};
 use utxo_common::{big_decimal_from_sat, UtxoTxBuilder};
 use utxo_signer::sign_params::{SendingOutputInfo, SpendingInputInfo, UtxoSignTxParamsBuilder};
 use utxo_signer::with_key_pair::sign_tx_with_p2pk;
@@ -108,6 +112,7 @@ use super::{big_decimal_from_sat_unsigned, BalanceError, BalanceFut, BalanceResu
 use crate::coin_balance::{EnableCoinScanPolicy, HDAddressBalanceScanner};
 use crate::hd_wallet::{HDAccountOps, HDAccountsMutex, HDAddress, HDWalletCoinOps, HDWalletOps, InvalidBip44ChainError};
 use crate::hd_wallet_storage::{HDAccountStorageItem, HDWalletCoinStorage, HDWalletStorageError, HDWalletStorageResult};
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::utxo::tx_cache::UtxoVerboseCacheShared;
 use crate::utxo::utxo_block_header_storage::BlockHeaderStorageError;
 use crate::TransactionErr;
@@ -283,8 +288,12 @@ pub struct AdditionalTxData {
 pub enum TxFee {
     /// Tell the coin that it should request the fee from daemon RPC and calculate it relying on tx size
     Dynamic(EstimateFeeMethod),
-    /// Tell the coin that it has fixed tx fee per kb.
+    /// Tell the coin that it has fixed tx fee per kb (CRD ch.38 R38.6.6a "plain fixed"):
+    /// the fee is proportional to the transaction size and truncated.
     FixedPerKb(u64),
+    /// CRD ch.38 R38.6.6a "whole-kilobyte fixed" (`dingo_fee: true` with a positive `txfee`):
+    /// the fee is the rate for every started kilobyte of the transaction.
+    FixedPerStartedKb(u64),
 }
 
 /// The actual "runtime" fee that is received from RPC in case of dynamic calculation
@@ -292,9 +301,43 @@ pub enum TxFee {
 pub enum ActualTxFee {
     /// fee amount per Kbyte received from coin RPC
     Dynamic(u64),
-    /// Use specified amount per each 1 kb of transaction and also per each output less than amount.
-    /// Used by DOGE, but more coins might support it too.
+    /// Use the specified amount per 1 kb of transaction, proportionally and truncated
+    /// (CRD ch.38 R38.6.6b "plain fixed"). There is no per-output surcharge.
     FixedPerKb(u64),
+    /// Use the specified amount per each started 1 kb of transaction (CRD ch.38 R38.6.6b
+    /// "whole-kilobyte fixed"). There is no per-output surcharge.
+    FixedPerStartedKb(u64),
+}
+
+impl ActualTxFee {
+    /// The fee rate in base units per kilobyte.
+    pub fn rate_per_kb(&self) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) | ActualTxFee::FixedPerStartedKb(rate) => *rate,
+        }
+    }
+
+    /// CRD ch.38 R38.6.6b: the fee for a transaction of `size` bytes (virtual size where the coin has
+    /// segregated witness), before any forced minimum relay fee.
+    /// - dynamic and plain fixed: `floor(rate * size / 1000)`;
+    /// - whole-kilobyte fixed: `rate * ceil(size / 1000)`.
+    /// Products saturate at `u64::MAX` instead of wrapping.
+    pub fn fee_for_size(&self, size: u64) -> u64 {
+        match self {
+            ActualTxFee::Dynamic(rate) | ActualTxFee::FixedPerKb(rate) => {
+                let fee = u128::from(*rate) * u128::from(size) / u128::from(KILO_BYTE);
+                u64::try_from(fee).unwrap_or(u64::MAX)
+            },
+            ActualTxFee::FixedPerStartedKb(rate) => rate.saturating_mul(size.div_ceil(KILO_BYTE)),
+        }
+    }
+
+    /// CRD ch.38 R38.6.6b: the increase of the fee that a change output of `P2PKH_OUTPUT_LEN` bytes
+    /// causes on a transaction of `size` bytes (without the change output) under the fixed policies.
+    pub fn change_output_increase(&self, size: u64) -> u64 {
+        self.fee_for_size(size.saturating_add(P2PKH_OUTPUT_LEN))
+            .saturating_sub(self.fee_for_size(size))
+    }
 }
 
 /// Fee policy applied on transaction creation
@@ -330,6 +373,26 @@ impl From<CachedUnspentInfo> for UnspentInfo {
     }
 }
 
+/// How long a pending withdraw entry is kept before it is dropped (CRD ch.38 R38.5B.9 item 3).
+const PENDING_WITHDRAW_TTL_MS: u64 = 10 * 60 * 1000;
+/// The most pending withdraw entries kept at once; the oldest are dropped first (CRD ch.38 R38.5B.9 item 3).
+const PENDING_WITHDRAW_CAP: usize = 64;
+
+/// A withdraw this node built and signed but has not seen broadcast yet.
+/// It is not part of the recently-spent record: it hides no input and offers no output until
+/// [`RecentlySpentOutPoints::promote_pending_withdraw`] enters it into the record (CRD ch.38 R38.5B.9).
+struct PendingWithdraw {
+    /// The unspents the transaction consumes, with their values.
+    inputs: Vec<UnspentInfo>,
+    tx_hash: H256,
+    /// The outputs of the signed transaction. `add_spent` keeps only those paying to the record's script,
+    /// and needs the position of each to name its outpoint.
+    outputs: Vec<TransactionOutput>,
+    created_ms: u64,
+    /// Insertion order, so that "the oldest" is well defined for entries made in the same millisecond.
+    seq: u64,
+}
+
 /// The cache of recently send transactions used to track the spent UTXOs and replace them with new outputs
 /// The daemon needs some time to update the listunspent list for address which makes it return already spent UTXOs
 /// This cache helps to prevent UTXO reuse in such cases
@@ -340,6 +403,10 @@ pub struct RecentlySpentOutPoints {
     output_to_input_map: HashMap<CachedUnspentInfo, HashSet<CachedUnspentInfo>>,
     /// Cache includes only outputs having script_pubkey == for_script_pubkey
     for_script_pubkey: Bytes,
+    /// Withdraws built and signed by this node, keyed by the SHA-256 digest of the exact serialized transaction
+    /// bytes the withdraw returned. They are not consulted by [`Self::replace_spent_outputs_with_cache`].
+    pending_withdraws: HashMap<H256, PendingWithdraw>,
+    pending_withdraw_seq: u64,
 }
 
 impl RecentlySpentOutPoints {
@@ -348,6 +415,78 @@ impl RecentlySpentOutPoints {
             input_to_output_map: HashMap::new(),
             output_to_input_map: HashMap::new(),
             for_script_pubkey,
+            pending_withdraws: HashMap::new(),
+            pending_withdraw_seq: 0,
+        }
+    }
+
+    /// Drops the pending withdraw entries older than [`PENDING_WITHDRAW_TTL_MS`] at `now_ms`.
+    fn purge_pending_withdraws(&mut self, now_ms: u64) {
+        self.pending_withdraws
+            .retain(|_, pending| now_ms.saturating_sub(pending.created_ms) < PENDING_WITHDRAW_TTL_MS);
+    }
+
+    /// Keeps a pending entry for a withdraw transaction this node has just built and signed.
+    /// `tx_bytes` must be exactly the serialization the withdraw returns as the transaction hex.
+    /// The recently-spent record itself is not written (CRD ch.38 R38.5B.9 item 1).
+    pub fn note_pending_withdraw(
+        &mut self,
+        tx_bytes: &[u8],
+        inputs: Vec<UnspentInfo>,
+        tx_hash: H256,
+        outputs: Vec<TransactionOutput>,
+    ) {
+        self.note_pending_withdraw_at(now_ms(), tx_bytes, inputs, tx_hash, outputs)
+    }
+
+    /// [`Self::note_pending_withdraw`] with the clock given, so that tests need not sleep.
+    fn note_pending_withdraw_at(
+        &mut self,
+        now_ms: u64,
+        tx_bytes: &[u8],
+        inputs: Vec<UnspentInfo>,
+        tx_hash: H256,
+        outputs: Vec<TransactionOutput>,
+    ) {
+        self.purge_pending_withdraws(now_ms);
+        self.pending_withdraw_seq += 1;
+        let pending = PendingWithdraw {
+            inputs,
+            tx_hash,
+            outputs,
+            created_ms: now_ms,
+            seq: self.pending_withdraw_seq,
+        };
+        self.pending_withdraws.insert(sha256(tx_bytes), pending);
+        while self.pending_withdraws.len() > PENDING_WITHDRAW_CAP {
+            let oldest = self
+                .pending_withdraws
+                .iter()
+                .min_by_key(|(_, pending)| pending.seq)
+                .map(|(digest, _)| *digest);
+            match oldest {
+                Some(digest) => self.pending_withdraws.remove(&digest),
+                None => break,
+            };
+        }
+    }
+
+    /// Called after the backend accepted the broadcast of `tx_bytes`. If they are exactly the bytes of a pending
+    /// withdraw entry that has not expired, the entry is removed and its spend is entered into the record
+    /// ([`Self::add_spent`]); otherwise nothing changes. Returns whether an entry was promoted.
+    pub fn promote_pending_withdraw(&mut self, tx_bytes: &[u8]) -> bool {
+        self.promote_pending_withdraw_at(now_ms(), tx_bytes)
+    }
+
+    /// [`Self::promote_pending_withdraw`] with the clock given, so that tests need not sleep.
+    fn promote_pending_withdraw_at(&mut self, now_ms: u64, tx_bytes: &[u8]) -> bool {
+        self.purge_pending_withdraws(now_ms);
+        match self.pending_withdraws.remove(&sha256(tx_bytes)) {
+            Some(pending) => {
+                self.add_spent(pending.inputs, pending.tx_hash, pending.outputs);
+                true
+            },
+            None => false,
         }
     }
 
@@ -436,6 +575,7 @@ pub enum BlockchainNetwork {
     Regtest,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<BlockchainNetwork> for BitcoinNetwork {
     fn from(network: BlockchainNetwork) -> Self {
         match network {
@@ -446,6 +586,7 @@ impl From<BlockchainNetwork> for BitcoinNetwork {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<BlockchainNetwork> for LightningCurrency {
     fn from(network: BlockchainNetwork) -> Self {
         match network {
@@ -528,6 +669,22 @@ pub struct UtxoCoinConf {
     pub trezor_coin: Option<TrezorUtxoCoin>,
     /// Used in condition where the coin will validate spv proof or not
     pub enable_spv_proof: bool,
+    /// Header layout selected by the Reloaded-only `protocol.header_layout` key (CRD ch.37
+    /// R37.5.9). `None` when the key is absent: header reads are then unchanged.
+    pub header_layout: Option<CoinVariant>,
+    /// The `protocol.chain_variant` key (CRD ch.37 R37.5.1), read and validated at activation even
+    /// when `header_layout` is present. `None` when the key is absent.
+    pub chain_variant: Option<ChainVariant>,
+    /// The reader of a coin that carries neither key: Qtum for the QTUM and QRC20 protocol types (a
+    /// documented divergence from R37.5.1 that the maintainer keeps), standard otherwise.
+    pub protocol_header_reader: CoinVariant,
+    /// The node switch `header_layout_fallback_families` (`MM2.json`, default `["BTC"]`): the coin
+    /// families whose header-list reads may retry the Riecoin and mixed layouts when the standard
+    /// read fails. Consulted only when `header_layout` is `None` (CRD ch.37 R37.5.9e).
+    pub header_layout_fallback_families: Vec<String>,
+    /// Set once the fallback has picked a layout for this coin, so the suggestion to pin it with
+    /// `header_layout` is logged once per activation.
+    pub header_layout_fallback_logged: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -753,6 +910,10 @@ impl UtxoAddressScanner {
         match rpc_client {
             UtxoRpcClientEnum::Native(native) => UtxoAddressScanner::init_with_native_client(&native).await,
             UtxoRpcClientEnum::Electrum(electrum) => Ok(UtxoAddressScanner::Electrum(electrum)),
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(_) => MmError::err(UtxoRpcError::Internal(
+                "address scanning is not supported over lightwalletd".to_owned(),
+            )),
         }
     }
 
@@ -1325,6 +1486,11 @@ impl SPVConf {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+// The public docs and the reference release disagree on which of these fields are required. Reloaded follows the
+// reference: `utxo_merge_params`, `gap_limit`, `min_addresses_number` and `scan_policy` are optional (the QTUM
+// page marks the last three required), `requires_notarization` defaults from the coin configuration (the docs
+// say `true`), and the duplicate `tx_history` rows of the docs resolve to `false` (CRD ch.55 R55.5.10, R55.7.1,
+// R55.8.3).
 pub struct UtxoActivationParams {
     pub mode: UtxoRpcMode,
     pub utxo_merge_params: Option<UtxoMergeParams>,
@@ -1344,6 +1510,9 @@ pub struct UtxoActivationParams {
     /// The flag determines whether to use mature unspent outputs *only* to generate transactions.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/1181
     pub check_utxo_maturity: Option<bool>,
+    /// The HD address the coin uses for swaps. Defaults to account 0, the external chain and address 0.
+    #[serde(default)]
+    pub path_to_address: Option<PathToAddress>,
 }
 
 #[derive(Debug, Display)]
@@ -1358,6 +1527,13 @@ pub enum UtxoFromLegacyReqErr {
     InvalidCheckUtxoMaturity(json::Error),
     InvalidScanPolicy(json::Error),
     InvalidPrivKeyPolicy(json::Error),
+    #[display(fmt = "Invalid 'min_connected': {}", _0)]
+    InvalidMinConnected(json::Error),
+    #[display(fmt = "Invalid 'max_connected': {}", _0)]
+    InvalidMaxConnected(json::Error),
+    /// Electrum connection settings that cannot be used (CRD ch. 55 R55.4.3, R55.5.14).
+    #[display(fmt = "Unusable Electrum connection settings: {}", _0)]
+    UnusableElectrumConnectionSettings(&'static str),
 }
 
 impl UtxoActivationParams {
@@ -1367,11 +1543,20 @@ impl UtxoActivationParams {
             Some("electrum") => {
                 let servers =
                     json::from_value(req["servers"].clone()).map_to_mm(UtxoFromLegacyReqErr::InvalidElectrumServers)?;
-                UtxoRpcMode::Electrum {
+                // Absent or `null` leaves the defaults: at least one connection, at most one per server.
+                let min_connected = json::from_value(req["min_connected"].clone())
+                    .map_to_mm(UtxoFromLegacyReqErr::InvalidMinConnected)?;
+                let max_connected = json::from_value(req["max_connected"].clone())
+                    .map_to_mm(UtxoFromLegacyReqErr::InvalidMaxConnected)?;
+                let mode = UtxoRpcMode::Electrum {
                     servers,
-                    min_connected: None,
-                    max_connected: None,
+                    min_connected,
+                    max_connected,
+                };
+                if let Some(reason) = mode.electrum_connection_settings_error() {
+                    return MmError::err(UtxoFromLegacyReqErr::UnusableElectrumConnectionSettings(reason));
                 }
+                mode
             },
             _ => return MmError::err(UtxoFromLegacyReqErr::UnexpectedMethod),
         };
@@ -1406,6 +1591,7 @@ impl UtxoActivationParams {
             scan_policy,
             priv_key_policy,
             check_utxo_maturity,
+            path_to_address: None,
         })
     }
 }
@@ -1421,6 +1607,37 @@ pub enum UtxoRpcMode {
         #[serde(default)]
         max_connected: Option<usize>,
     },
+}
+
+impl UtxoRpcMode {
+    /// Why the Electrum connection settings cannot be used, if they cannot (CRD ch. 55 R55.5.14): no server,
+    /// `min_connected` or `max_connected` below 1, or `min_connected` above `max_connected`.
+    /// Always `None` in the native mode. Shared by the legacy and the task-based activation.
+    pub fn electrum_connection_settings_error(&self) -> Option<&'static str> {
+        let UtxoRpcMode::Electrum {
+            servers,
+            min_connected,
+            max_connected,
+        } = self
+        else {
+            return None;
+        };
+        if servers.is_empty() {
+            return Some("no server is configured");
+        }
+        if *min_connected == Some(0) {
+            return Some("'min_connected' must be at least 1");
+        }
+        if *max_connected == Some(0) {
+            return Some("'max_connected' must be at least 1");
+        }
+        match (min_connected, max_connected) {
+            (Some(min_connected), Some(max_connected)) if min_connected > max_connected => {
+                Some("'min_connected' must not exceed 'max_connected'")
+            },
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1535,6 +1752,12 @@ fn kmd_interest(
 ) -> Result<u64, KmdRewardsNotAccruedReason> {
     const KOMODO_ENDOFERA: u64 = 7_777_777;
     const LOCKTIME_THRESHOLD: u64 = 500_000_000;
+    /// KIP-0001 ("Reduce the KMD Active User Reward") dPoW Season-7 hard-fork
+    /// height. A UTXO confirmed at or after this height has its reward
+    /// divided by 500 (CRD ch.38 R38.4.1 step 6). The reduction is keyed on
+    /// the height of the UTXO being spent, not on the current chain height
+    /// or the height of the spending transaction.
+    const KIP_0001_HARDFORK_HEIGHT: u64 = 3_484_958;
 
     // value must be at least 10 KMD
     if value < 1_000_000_000 {
@@ -1578,7 +1801,14 @@ fn kmd_interest(
     }
     // next 2 lines ported as is from Komodo codebase
     minutes -= 59;
-    let accrued = (value / 10_512_000) * minutes;
+    let mut accrued = (value / 10_512_000) * minutes;
+
+    // KIP-0001: the reward rate was cut 500x at the dPoW Season-7 hard fork.
+    // This depends on the height of the UTXO being spent (`height`), not on
+    // the current chain height.
+    if height >= KIP_0001_HARDFORK_HEIGHT {
+        accrued /= 500;
+    }
 
     Ok(accrued)
 }
@@ -1797,6 +2027,12 @@ fn map_trezor_error(trezor: TrezorError) -> String {
         TrezorError::Failure(OperationFailure::InvalidPin) => {
             "hardware_wallet:user_rejected_or_cancelled: Trezor PIN was rejected".to_owned()
         },
+        TrezorError::Failure(OperationFailure::Device(kind)) => {
+            format!(
+                "hardware_wallet:user_rejected_or_cancelled: Trezor operation failed: {}",
+                kind
+            )
+        },
         TrezorError::Failure(OperationFailure::Other(error)) => {
             format!(
                 "hardware_wallet:user_rejected_or_cancelled: Trezor operation failed: {}",
@@ -1848,6 +2084,7 @@ fn map_hw_error(hw: HwError) -> String {
             )
         },
         HwError::Failure(error) => format!("hardware_wallet:user_rejected_or_cancelled: {}", error),
+        HwError::DeviceFailure(kind) => format!("hardware_wallet:user_rejected_or_cancelled: {}", kind),
         HwError::ProtocolError(error) | HwError::Internal(error) => {
             format!("hardware_wallet:invalid_response: {}", error)
         },
@@ -2024,17 +2261,6 @@ async fn send_outputs_from_my_address_impl<T>(
 where
     T: UtxoCommonOps + GetUtxoListOps,
 {
-    send_outputs_from_my_address_impl_with_underdust_output(coin, outputs, None).await
-}
-
-async fn send_outputs_from_my_address_impl_with_underdust_output<T>(
-    coin: T,
-    outputs: Vec<TransactionOutput>,
-    allowed_underdust_output: Option<usize>,
-) -> Result<UtxoTx, TransactionErr>
-where
-    T: UtxoCommonOps + GetUtxoListOps,
-{
     let sender = try_tx_s!(
         active_utxo_sender_address(coin.as_ref(), "UTXO Swap V2 wallet-funded transaction sender selection").await
     );
@@ -2047,7 +2273,6 @@ where
         FeePolicy::SendExact,
         recently_sent_txs,
         outputs,
-        allowed_underdust_output,
     )
     .await
 }
@@ -2063,7 +2288,6 @@ async fn generate_and_send_tx_from_sender<T>(
     fee_policy: FeePolicy,
     mut recently_spent: RecentlySpentOutPointsGuard<'_>,
     outputs: Vec<TransactionOutput>,
-    allowed_underdust_output: Option<usize>,
 ) -> Result<UtxoTx, TransactionErr>
 where
     T: UtxoCommonOps,
@@ -2073,9 +2297,6 @@ where
         .add_available_inputs(unspents)
         .add_outputs(outputs)
         .with_fee_policy(fee_policy);
-    if let Some(output_index) = allowed_underdust_output {
-        builder = builder.allow_underdust_output(output_index);
-    }
     if let Some(required) = required_inputs {
         builder = builder.add_required_inputs(required);
     }
@@ -2189,36 +2410,53 @@ pub fn output_script(address: &Address, script_type: ScriptType) -> Script {
     }
 }
 
+/// Returns the Electrum client and the P2PK script (`<pubkey> OP_CHECKSIG`) to look up for the given legacy
+/// address, if the address belongs to the currently activated keypair and the coin is Electrum-backed.
+///
+/// Such outputs are not returned by the address-based P2PKH script-hash queries, so a P2PKH read of this address
+/// is accompanied by a P2PK read (CRD ch.38 R38.6.3). `None` means no P2PK lookup applies: a segwit or other
+/// non-legacy address, a foreign address, no keypair, or a Native or lightwalletd client.
+pub(crate) fn electrum_p2pk_lookup<'a>(
+    utxo: &'a UtxoCoinFields,
+    address: &Address,
+) -> Option<(&'a ElectrumClient, Script)> {
+    if !address.addr_format.is_legacy() {
+        return None;
+    }
+
+    let key_pair = utxo.priv_key_policy.key_pair()?;
+
+    let my_p2pkh_hash = AddressHashEnum::AddressHash(key_pair.public().address_hash());
+    if my_p2pkh_hash != address.hash {
+        return None;
+    }
+
+    let electrum = match &utxo.rpc_client {
+        UtxoRpcClientEnum::Electrum(electrum) => electrum,
+        UtxoRpcClientEnum::Native(_) => return None,
+        #[cfg(not(target_arch = "wasm32"))]
+        UtxoRpcClientEnum::LightWalletD(_) => return None,
+    };
+
+    Some((electrum, Builder::build_p2pk(key_pair.public())))
+}
+
 /// Returns Electrum P2PK unspents for the given legacy address if the address
 /// belongs to the currently activated keypair.
 ///
 /// This is used to discover legacy pay-to-pubkey outputs (`<pubkey> OP_CHECKSIG`)
 /// that are not returned by address-based P2PKH script-hash queries.
+///
+/// This is a request of its own. A balance read or an unspent-list read goes through
+/// [`electrum_p2pk_lookup`] instead, so that both lookups share one request message (R38.6.3a).
 pub(crate) async fn electrum_p2pk_unspents_for_address(
     utxo: &UtxoCoinFields,
     address: &Address,
 ) -> UtxoRpcResult<Vec<UnspentInfo>> {
-    if !address.addr_format.is_legacy() {
-        return Ok(vec![]);
+    match electrum_p2pk_lookup(utxo, address) {
+        Some((electrum, p2pk_script)) => electrum.list_unspent_for_script(&p2pk_script).compat().await,
+        None => Ok(vec![]),
     }
-
-    let key_pair = match utxo.priv_key_policy.key_pair() {
-        Some(key_pair) => key_pair,
-        None => return Ok(vec![]),
-    };
-
-    let my_p2pkh_hash = AddressHashEnum::AddressHash(key_pair.public().address_hash());
-    if my_p2pkh_hash != address.hash {
-        return Ok(vec![]);
-    }
-
-    let electrum = match &utxo.rpc_client {
-        UtxoRpcClientEnum::Electrum(electrum) => electrum,
-        UtxoRpcClientEnum::Native(_) => return Ok(vec![]),
-    };
-
-    let p2pk_script = Builder::build_p2pk(key_pair.public());
-    electrum.list_unspent_for_script(&p2pk_script).compat().await
 }
 
 /// Returns outpoints of Electrum P2PK unspents for the given legacy address.
@@ -2249,8 +2487,11 @@ pub fn address_by_conf_and_pubkey_str(
         scan_policy: EnableCoinScanPolicy::default(),
         priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
         check_utxo_maturity: None,
+        path_to_address: None,
     };
-    let conf_builder = UtxoConfBuilder::new(conf, &params, coin);
+    let conf_builder = UtxoConfBuilder::new(conf, &params, coin)
+        // Only the address fields are read here, never the signing algorithm.
+        .with_unrecognised_enum_policy(UnrecognisedEnumPolicy::NotUsed);
     let utxo_conf = try_s!(conf_builder.build());
     let pubkey_bytes = try_s!(hex::decode(pubkey));
     let hash = dhash160(&pubkey_bytes);

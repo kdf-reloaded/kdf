@@ -40,10 +40,11 @@ use url::Url;
 /// stub.
 #[async_trait]
 pub trait NftCrawlProvider: Send + Sync {
-    /// Latest block number observed on `chain` according to the provider.
-    /// Used as the new `last_scanned_block` bookmark when no transfers are
-    /// returned for a chain.
-    async fn current_block(&self, chain: Chain) -> MmResult<u64, FetchError>;
+    /// Every token `owner` currently holds on `chain`, following provider
+    /// pagination to completion so the result is the whole inventory rather
+    /// than its first page. This is the only operation activation performs
+    /// (CRD ch.19 R9a).
+    async fn fetch_owned_inventory(&self, chain: Chain, owner: Address) -> MmResult<Vec<Nft>, FetchError>;
 
     /// Transfers involving `owner` on `chain`, strictly after `from_block`.
     /// Implementations are expected to set the `status` field on every
@@ -68,13 +69,33 @@ pub trait NftCrawlProvider: Send + Sync {
     ) -> MmResult<Option<Nft>, FetchError>;
 }
 
-/// Default HTTP-backed [`NftCrawlProvider`].
+/// One page of a Profile A list response (CRD ch.19 §19.5.1).
 ///
-/// Endpoint layout (rooted at `base_url`):
-/// * `GET {base}/<chain>/block/latest` -> `{ "block": <u64> }`
-/// * `GET {base}/<chain>/<owner>/transfers?from_block=<n>` -> array of
-///   [`NftTransfer`]
-/// * `GET {base}/<chain>/<owner>/<contract>/<token_id>` -> [`Nft`] or 404
+/// `result` missing or not an array terminates paging, so it is optional
+/// here rather than a decode error.
+#[derive(serde::Deserialize)]
+struct PagedResponse<T> {
+    result: Option<Vec<T>>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+/// Lowest block the transfers operation may be asked for. The dictated API
+/// treats `0` as absent, so an empty bookmark is sent as `1`.
+const MIN_FROM_BLOCK: u64 = 1;
+
+/// HTTP-backed [`NftCrawlProvider`] speaking the deployed-indexer contract
+/// (CRD ch.19 §19.5.1, R6a).
+///
+/// Endpoint layout, rooted at the caller-supplied `base_url`; every operation
+/// carries `chain` and `format=decimal` as query parameters:
+/// * `GET {base}/api/v2/<owner>/nft` -> `{ "result": [...], "cursor": ... }`
+/// * `GET {base}/api/v2/<owner>/nft/transfers` -> same envelope
+/// * `GET {base}/api/v2/nft/<contract>/<token_id>` -> a bare entry, or 404
+///
+/// The contract has no latest-block operation; the scan bookmark is therefore
+/// left unadvanced when a chain yields no transfers, rather than being moved
+/// to a provider-reported head.
 pub struct HttpCrawlProvider {
     base_url: Url,
     #[allow(dead_code)]
@@ -87,23 +108,50 @@ impl HttpCrawlProvider {
 
     fn endpoint(&self, suffix: &str) -> String {
         format!(
-            "{}/{}",
+            "{}/api/v2/{}",
             self.base_url.as_str().trim_end_matches('/'),
             suffix.trim_start_matches('/')
         )
+    }
+
+    /// Follow `cursor` pagination to completion, concatenating every page.
+    ///
+    /// `extra` carries operation-specific query parameters already encoded as
+    /// `key=value` pairs; `chain` and `format` are added here because the
+    /// contract requires them on every operation.
+    async fn fetch_all_pages<T>(&self, path: &str, chain: Chain, extra: &[String]) -> MmResult<Vec<T>, FetchError>
+    where
+        T: serde::de::DeserializeOwned + Send + 'static,
+    {
+        let mut collected = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut query = vec![format!("chain={}", chain), "format=decimal".to_owned()];
+            query.extend_from_slice(extra);
+            if let Some(ref token) = cursor {
+                query.push(format!("cursor={token}"));
+            }
+            let url = format!("{}?{}", self.endpoint(path), query.join("&"));
+            let page: PagedResponse<T> = fetch_json(&url, &[]).await?;
+            match page.result {
+                Some(entries) => collected.extend(entries),
+                // A missing or non-array `result` terminates paging rather
+                // than failing: the contract permits it and the pages already
+                // collected remain valid.
+                None => return Ok(collected),
+            }
+            match page.cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => return Ok(collected),
+            }
+        }
     }
 }
 
 #[async_trait]
 impl NftCrawlProvider for HttpCrawlProvider {
-    async fn current_block(&self, chain: Chain) -> MmResult<u64, FetchError> {
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            block: u64,
-        }
-        let url = self.endpoint(&format!("{}/block/latest", chain_label(chain)));
-        let resp: Resp = fetch_json(&url, &[]).await?;
-        Ok(resp.block)
+    async fn fetch_owned_inventory(&self, chain: Chain, owner: Address) -> MmResult<Vec<Nft>, FetchError> {
+        self.fetch_all_pages(&format!("{owner:#x}/nft"), chain, &[]).await
     }
 
     async fn fetch_transfers_since(
@@ -112,29 +160,29 @@ impl NftCrawlProvider for HttpCrawlProvider {
         owner: Address,
         from_block: u64,
     ) -> MmResult<Vec<NftTransfer>, FetchError> {
-        let url = self.endpoint(&format!(
-            "{}/{:#x}/transfers?from_block={}",
-            chain_label(chain),
-            owner,
-            from_block
-        ));
-        fetch_json(&url, &[]).await
+        let from_block = from_block.max(MIN_FROM_BLOCK);
+        self.fetch_all_pages(&format!("{owner:#x}/nft/transfers"), chain, &[format!(
+            "from_block={from_block}"
+        )])
+        .await
     }
 
     async fn fetch_token(
         &self,
         chain: Chain,
-        owner: Address,
+        _owner: Address,
         contract: Address,
         token_id: &BigUint,
     ) -> MmResult<Option<Nft>, FetchError> {
-        let url = self.endpoint(&format!(
-            "{}/{:#x}/{:#x}/{}",
-            chain_label(chain),
-            owner,
-            contract,
-            token_id
-        ));
+        // The dictated token-detail endpoint is not owner-scoped, so `owner`
+        // is unused here. For a multi-holder ERC-1155 the response therefore
+        // describes the token rather than this wallet's holding; the owned
+        // quantity comes from the inventory or transfer path instead.
+        let url = format!(
+            "{}?chain={}&format=decimal",
+            self.endpoint(&format!("nft/{contract:#x}/{token_id}")),
+            chain
+        );
         match fetch_json::<Nft>(&url, &[]).await {
             Ok(nft) => Ok(Some(nft)),
             Err(err) => match err.get_inner() {
@@ -144,8 +192,6 @@ impl NftCrawlProvider for HttpCrawlProvider {
         }
     }
 }
-
-fn chain_label(chain: Chain) -> String { format!("{}", chain).to_ascii_lowercase() }
 
 /// Outcome of a single chain's crawl. Returned per-chain so callers can
 /// surface partial successes when one of the chains in a multi-chain
@@ -190,11 +236,10 @@ where
     let mut report = ChainCrawlReport::default();
 
     if transfers.is_empty() {
-        report.last_scanned_block = provider
-            .current_block(chain)
-            .await
-            .mm_err(|err| UpdateNftError::Provider(err.to_string()))?
-            .max(from_block);
+        // The dictated contract has no latest-block operation, so there is no
+        // provider-reported head to advance to; the bookmark stays where it
+        // was and the next crawl re-asks from the same height.
+        report.last_scanned_block = from_block;
         return Ok(report);
     }
 
@@ -644,12 +689,14 @@ mod tests {
     struct StubProvider {
         transfers: Vec<NftTransfer>,
         tokens: HashMap<(Address, BigUint), Nft>,
-        current_block: u64,
+        owned: Vec<Nft>,
     }
 
     #[async_trait]
     impl NftCrawlProvider for StubProvider {
-        async fn current_block(&self, _chain: Chain) -> MmResult<u64, FetchError> { Ok(self.current_block) }
+        async fn fetch_owned_inventory(&self, _chain: Chain, _owner: Address) -> MmResult<Vec<Nft>, FetchError> {
+            Ok(self.owned.clone())
+        }
         async fn fetch_transfers_since(
             &self,
             _chain: Chain,
@@ -674,19 +721,23 @@ mod tests {
         }
     }
 
+    /// The dictated contract has no latest-block operation, so a chain with no
+    /// new transfers must leave the bookmark where it was rather than move it
+    /// to a provider-reported head. Advancing it without having seen the
+    /// intervening blocks would silently skip transfers on the next crawl.
     #[tokio::test]
-    async fn empty_chain_only_advances_bookmark() {
+    async fn empty_chain_leaves_bookmark_unadvanced() {
         let store = StubStore::default();
         let provider = StubProvider {
             transfers: vec![],
             tokens: HashMap::new(),
-            current_block: 200,
+            owned: Vec::new(),
         };
         let report = update_chain(&store, &provider, Chain::Eth, addr(0xA)).await.unwrap();
         assert_eq!(report.appended_transfers, 0);
         assert_eq!(report.upserted_tokens, 0);
         assert_eq!(report.dropped_tokens, 0);
-        assert_eq!(report.last_scanned_block, 200);
+        assert_eq!(report.last_scanned_block, 0);
     }
 
     #[tokio::test]
@@ -709,7 +760,7 @@ mod tests {
                 ContractType::Erc721,
             )],
             tokens,
-            current_block: 10,
+            owned: Vec::new(),
         };
         let report = update_chain(&store, &provider, Chain::Eth, owner).await.unwrap();
         assert_eq!(report.appended_transfers, 1);
@@ -754,7 +805,7 @@ mod tests {
                 ),
             ],
             tokens,
-            current_block: 6,
+            owned: Vec::new(),
         };
         let report = update_chain(&store, &provider, Chain::Eth, owner).await.unwrap();
         assert_eq!(report.appended_transfers, 2);
@@ -787,7 +838,7 @@ mod tests {
                 ContractType::Erc721,
             )],
             tokens: HashMap::new(),
-            current_block: 10,
+            owned: Vec::new(),
         };
         let report = update_chain(&store, &provider, Chain::Eth, owner).await.unwrap();
         assert_eq!(report.dropped_tokens, 1);
@@ -816,7 +867,7 @@ mod tests {
                 ContractType::Erc1155,
             )],
             tokens: HashMap::new(),
-            current_block: 10,
+            owned: Vec::new(),
         };
         let report = update_chain(&store, &provider, Chain::Eth, owner).await.unwrap();
         assert_eq!(report.dropped_tokens, 0);
@@ -862,10 +913,90 @@ mod tests {
                 ContractType::Erc721,
             )],
             tokens: HashMap::new(),
-            current_block: 10,
+            owned: Vec::new(),
         };
         // No new transfers strictly after block 10 -> empty fetch path.
         let report = update_chain(&store, &provider, Chain::Eth, owner).await.unwrap();
         assert_eq!(report.appended_transfers, 0);
+    }
+
+    /// CRD ch.19 T3: the exact path and query set for each operation, including
+    /// a base URL that carries a trailing slash and one that carries a path
+    /// prefix. This is the regression guard for the wrong-path defect that made
+    /// every crawl request 404 against a correctly configured indexer.
+    #[test]
+    fn profile_a_request_construction() {
+        let owner = addr(0xA1);
+        let contract = addr(0xC1);
+
+        for base in [
+            "https://indexer.example",
+            "https://indexer.example/",
+            "https://indexer.example/proxy",
+        ] {
+            let p = HttpCrawlProvider::new(Url::parse(base).unwrap(), false);
+            let trimmed = base.trim_end_matches('/');
+
+            assert_eq!(
+                p.endpoint(&format!("{owner:#x}/nft")),
+                format!("{trimmed}/api/v2/{owner:#x}/nft")
+            );
+            assert_eq!(
+                p.endpoint(&format!("{owner:#x}/nft/transfers")),
+                format!("{trimmed}/api/v2/{owner:#x}/nft/transfers")
+            );
+            assert_eq!(
+                p.endpoint(&format!("nft/{contract:#x}/7")),
+                format!("{trimmed}/api/v2/nft/{contract:#x}/7")
+            );
+        }
+    }
+
+    /// CRD ch.19 T4: the envelope decodes, and the dictated string encodings for
+    /// block number, token id and timestamp are accepted rather than rejected as
+    /// the JSON numbers an undictated shape would use.
+    #[test]
+    fn profile_a_response_decoding() {
+        let page: PagedResponse<NftTransfer> = serde_json::from_str(
+            r#"{"result":[{
+                "token_address":"0x0000000000000000000000000000000000000c01",
+                "log_index":3,
+                "transaction_hash":"0xabc",
+                "amount":"1",
+                "from_address":"0x0000000000000000000000000000000000000a01",
+                "to_address":"0x0000000000000000000000000000000000000a02",
+                "chain":"ETH",
+                "token_id":"42",
+                "block_number":"1234",
+                "block_timestamp":"1700000000",
+                "contract_type":"ERC721",
+                "status":"Receive"
+            }],"cursor":"next-page"}"#,
+        )
+        .expect("dictated encodings must decode");
+
+        let entries = page.result.expect("result array present");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].block_number, 1234);
+        assert_eq!(entries[0].token_id, BigUint::from(42u32));
+        assert_eq!(page.cursor.as_deref(), Some("next-page"));
+    }
+
+    /// CRD ch.19 T4/T5: a response whose `result` member is missing terminates
+    /// paging instead of failing the crawl, and an absent cursor ends it.
+    #[test]
+    fn profile_a_missing_result_terminates_paging() {
+        let page: PagedResponse<NftTransfer> =
+            serde_json::from_str(r#"{"cursor":null}"#).expect("a missing result member is not a decode error");
+        assert!(page.result.is_none());
+        assert!(page.cursor.is_none());
+    }
+
+    /// The transfers operation must never ask for block 0: the dictated API
+    /// treats it as absent, so an empty bookmark is sent as 1.
+    #[test]
+    fn absent_bookmark_is_sent_as_block_one() {
+        assert_eq!(0u64.max(MIN_FROM_BLOCK), 1);
+        assert_eq!(5u64.max(MIN_FROM_BLOCK), 5);
     }
 }

@@ -55,6 +55,7 @@ pub async fn account_balance(
         MmCoinEnum::UtxoCoin(utxo) => utxo.account_balance_rpc(req.params).await,
         MmCoinEnum::QtumCoin(qtum) => qtum.account_balance_rpc(req.params).await,
         MmCoinEnum::EthCoin(eth) => eth.account_balance_rpc(req.params).await,
+        MmCoinEnum::SiaCoin(sia) => sia.account_balance_rpc(req.params).await,
         _ => MmError::err(HDAccountBalanceRpcError::CoinIsActivatedNotWithHDWallet),
     }
 }

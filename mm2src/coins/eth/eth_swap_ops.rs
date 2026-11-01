@@ -370,6 +370,7 @@ impl SwapOps for EthCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         tx: &[u8],
@@ -384,6 +385,7 @@ impl SwapOps for EthCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         _time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         _secret_hash: &[u8],
         tx: &[u8],
@@ -415,6 +417,10 @@ impl SwapOps for EthCoin {
         &self,
         other_side_address: Option<&[u8]>,
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>> {
+        // A wallet-only coin may be activated without a swap contract (the zero address); it can never trade.
+        if self.swap_contract_address == Address::default() {
+            return MmError::err(NegotiateSwapContractAddrErr::NoSwapContract);
+        }
         match other_side_address {
             Some(bytes) => {
                 if bytes.len() != 20 {

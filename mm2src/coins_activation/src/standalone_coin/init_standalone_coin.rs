@@ -1,17 +1,19 @@
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::prelude::*;
 use crate::standalone_coin::init_standalone_coin_error::{InitStandaloneCoinError, InitStandaloneCoinStatusError,
                                                          InitStandaloneCoinUserActionError};
 use async_trait::async_trait;
-use coins::{lp_coinfind, lp_register_coin, MmCoinEnum, RegisterCoinError, RegisterCoinParams};
+use coins::{disable_coin, lp_coinfind, lp_register_coin, MmCoinEnum, RegisterCoinError, RegisterCoinParams};
 use common::{log, SuccessResponse};
 use crypto::trezor::trezor_rpc_task::RpcTaskHandle;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
-use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusRequest, RpcTaskUserActionRequest};
-use rpc_task::{RpcTask, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
+use rpc_task::rpc_common::{CancelRpcTaskError, InitRpcTaskResponse, RpcTaskStatusRequest, RpcTaskUserActionRequest};
+use rpc_task::{CancelCleanup, RpcTask, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
 use serde_derive::Deserialize;
 use serde_json::Value as Json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub type InitStandaloneCoinResponse = InitRpcTaskResponse;
 pub type InitStandaloneCoinStatusRequest = RpcTaskStatusRequest;
@@ -23,6 +25,11 @@ pub type InitStandaloneCoinTaskHandle<Standalone> = RpcTaskHandle<InitStandalone
 pub struct InitStandaloneCoinReq<T> {
     ticker: String,
     activation_params: T,
+    /// The event-stream client the task status changes would be pushed to (CRD ch. 55 R55.2.2).
+    /// It is accepted and ignored: streaming task events is deferred (D55.1).
+    #[serde(default)]
+    #[allow(dead_code)]
+    client_id: u64,
 }
 
 #[async_trait]
@@ -43,17 +50,6 @@ pub trait InitStandaloneCoinActivationOps: Into<MmCoinEnum> + Send + Sync + 'sta
     type UserAction: serde::de::DeserializeOwned + NotMmError + Send + Sync + 'static;
 
     fn rpc_task_manager(activation_ctx: &CoinsActivationContext) -> &InitStandaloneCoinTaskManagerShared<Self>;
-
-    /// Optionally acquires a guard held for the complete activation task,
-    /// including result construction and coin registration. Standalone coins
-    /// whose activation mutates shared persistent state can override this to
-    /// serialize same-ticker requests without delaying unrelated tickers.
-    async fn acquire_activation_guard(
-        _ctx: MmArc,
-        _ticker: &str,
-    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
-        Ok(None)
-    }
 
     /// Initialization of the standalone coin spawned as `RpcTask`.
     async fn init_standalone_coin(
@@ -94,6 +90,7 @@ where
         request,
         coin_conf,
         protocol_info,
+        registered_by_task: Arc::new(AtomicBool::new(false)),
     };
     let task_manager = Standalone::rpc_task_manager(&coins_act_ctx);
 
@@ -143,14 +140,16 @@ pub async fn init_standalone_coin_user_action<Standalone: InitStandaloneCoinActi
     Ok(SuccessResponse::new())
 }
 
+/// Cancels an in-progress activation. A coin the task had already registered is deregistered by the
+/// task framework once the cancelled task has stopped (CRD ch. 55 R55.2.14).
 pub async fn cancel_init_standalone_coin<Standalone: InitStandaloneCoinActivationOps>(
     ctx: MmArc,
     req: InitStandaloneCoinStatusRequest,
-) -> MmResult<SuccessResponse, InitStandaloneCoinError> {
-    let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(InitStandaloneCoinError::Internal)?;
+) -> MmResult<SuccessResponse, CancelRpcTaskError> {
+    let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(CancelRpcTaskError::Internal)?;
     let mut task_manager = Standalone::rpc_task_manager(&coins_act_ctx)
         .lock()
-        .map_to_mm(|poison| InitStandaloneCoinError::Internal(poison.to_string()))?;
+        .map_to_mm(|poison| CancelRpcTaskError::Internal(poison.to_string()))?;
     task_manager.cancel_task(req.task_id).mm_err(Into::into)?;
     Ok(SuccessResponse::new())
 }
@@ -160,6 +159,8 @@ pub struct InitStandaloneCoinTask<Standalone: InitStandaloneCoinActivationOps> {
     request: InitStandaloneCoinReq<Standalone::ActivationRequest>,
     coin_conf: Json,
     protocol_info: Standalone::StandaloneProtocol,
+    /// Set once this task has registered its coin, so a cancellation knows the coin is the task's to remove.
+    registered_by_task: Arc<AtomicBool>,
 }
 
 impl<Standalone: InitStandaloneCoinActivationOps> RpcTaskTypes for InitStandaloneCoinTask<Standalone> {
@@ -180,9 +181,33 @@ where
         <Standalone::InProgressStatus as InitStandaloneCoinInitialStatus>::initial_status()
     }
 
+    fn cancel_cleanup(&self) -> Option<CancelCleanup> {
+        let ctx = self.ctx.clone();
+        let ticker = self.request.ticker.clone();
+        let registered_by_task = self.registered_by_task.clone();
+        Some(Box::new(move || {
+            Box::pin(async move {
+                if registered_by_task.load(Ordering::SeqCst) {
+                    if let Err(error) = disable_coin(&ctx, &ticker).await {
+                        log::warn!("Cannot deregister '{}' of the cancelled activation: {}", ticker, error);
+                    }
+                }
+            })
+        }))
+    }
+
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
         let ticker = self.request.ticker.clone();
-        let _activation_guard = Standalone::acquire_activation_guard(self.ctx.clone(), &ticker).await?;
+        // R55.1.12: activations of one ticker run one at a time, on every family and path. The lock is held through
+        // registration, and the ticker is checked again once it is ours, because the activation that held it may
+        // have registered the coin.
+        let _activation_guard = lock_activation(&self.ctx, &[&ticker])
+            .await
+            .map_to_mm(RegisterCoinError::Internal)
+            .mm_err(Into::into)?;
+        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &ticker).await {
+            return MmError::err(RegisterCoinError::CoinIsInitializedAlready { coin: ticker.clone() }.into());
+        }
         let coin = Standalone::init_standalone_coin(
             self.ctx.clone(),
             ticker.clone(),
@@ -200,28 +225,16 @@ where
 
         let tx_history = self.request.activation_params.tx_history();
 
-        // `lp_register_coin` intentionally allows concurrent activations of the same ticker to
-        // race (to keep activation fast). If another in-flight activation of this coin won the
-        // race and already registered it, our freshly built instance loses and registration
-        // returns `CoinIsInitializedAlready`. In that case the coin is active and the activation
-        // result we computed (block height, balances) is still valid, so report success instead
-        // of surfacing a task-level error. Clients treat a terminal task `Error` as a hard
-        // activation failure, whereas an already-active coin should be an idempotent success.
-        match lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
+        // Registration stays the backstop for a coin that an activation outside the lock registered; the task
+        // that loses ends with `CoinIsAlreadyActivated`; it must not report success for a coin instance it did
+        // not register (CRD ch. 55 R55.5.5).
+        lp_register_coin(&self.ctx, coin.into(), RegisterCoinParams {
             ticker: ticker.clone(),
             tx_history,
         })
         .await
-        {
-            Ok(()) => {},
-            Err(e) if matches!(e.get_inner(), RegisterCoinError::CoinIsInitializedAlready { .. }) => {
-                log::debug!(
-                    "Coin '{}' was concurrently activated by another request; returning the computed activation result",
-                    ticker
-                );
-            },
-            Err(e) => return Err(e.map(Into::into)),
-        }
+        .mm_err(Into::into)?;
+        self.registered_by_task.store(true, Ordering::SeqCst);
 
         Ok(result)
     }
@@ -230,3 +243,5 @@ where
 pub trait InitStandaloneCoinInitialStatus {
     fn initial_status() -> Self;
 }
+
+#[cfg(test)] mod tests;

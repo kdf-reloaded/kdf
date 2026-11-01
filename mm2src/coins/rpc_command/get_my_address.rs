@@ -27,12 +27,14 @@ use crate::{coin_conf, CoinProtocol};
 /// Optional BIP-44 coordinate selecting a specific hierarchical-deterministic
 /// address. Absent fields default to the first account's first external
 /// address (account 0, external branch, address 0).
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PathToAddress {
     /// BIP-44 account index.
     #[serde(default)]
     pub account_id: u32,
-    /// BIP-44 change-level branch selector (external vs internal).
+    /// BIP-44 change-level branch selector (external vs internal). The docs describe `chain` as an integer, but their
+    /// examples and the reference use the strings `"External"` and `"Internal"`, which is what is parsed (CRD
+    /// ch.35 R35.1.1).
     #[serde(default = "external_chain")]
     pub chain: Bip44Chain,
     /// BIP-44 address index.
@@ -41,6 +43,16 @@ pub struct PathToAddress {
 }
 
 fn external_chain() -> Bip44Chain { Bip44Chain::External }
+
+impl Default for PathToAddress {
+    fn default() -> Self {
+        PathToAddress {
+            account_id: 0,
+            chain: Bip44Chain::External,
+            address_id: 0,
+        }
+    }
+}
 
 #[derive(Deserialize)]
 pub struct GetMyAddressRequest {

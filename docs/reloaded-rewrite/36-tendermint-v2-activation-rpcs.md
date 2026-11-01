@@ -6,8 +6,11 @@ reloaded; it does not introduce a new coin.
 
 > **One-sentence claim:** the project shall expose the standard Komodo DeFi
 > Framework **mmrpc 2.0** activation surface for Tendermint (Cosmos-family)
-> coins -- a one-shot "platform coin with tokens" call and a single-token call --
-> on top of the Tendermint coin and token types that reloaded already ships.
+> coins -- a one-shot "platform coin with tokens" call, a single-token call, and
+> the task-managed platform activation family -- with request fields, success
+> shapes, `error_type` discriminants, `error_data` shapes, HTTP statuses and
+> error placement that are wire-identical to the reference implementation named
+> in §36.0.1.
 
 > **Treatment:** **T-PORT.** The Tendermint coin and token types, and their
 > activation-parameter scaffolding, are present in reloaded (see §36.5). What is
@@ -17,19 +20,36 @@ reloaded; it does not introduce a new coin.
 > distilled here is the source of truth for that port.
 
 > **Binding scope (R36).** Requirements bind observable behaviour, the public
-> mmrpc-2.0 method strings and their request/response JSON field names, and
-> externally *dictated* interop (Cosmos / Tendermint RPC endpoints, IBC denom and
-> channel identification, the Cosmos secp256k1 public-key / account-id model,
-> CAIP-style chain identification). Those public contracts are the source of
-> truth, not this project's code. Private Rust types, helper decomposition, and
-> internal module structure are informative and are **not** bound by this
-> chapter.
+> mmrpc-2.0 method strings and their request/response JSON field names, the
+> `error_type` discriminants with their `error_data` shapes and HTTP statuses,
+> and externally *dictated* interop (Cosmos / Tendermint RPC endpoints, IBC denom
+> and channel identification, the Cosmos secp256k1 public-key / account-id
+> model, CAIP-style chain identification). Private Rust types, helper
+> decomposition, and internal module structure are informative and are **not**
+> bound by this chapter. Human-readable `error` text, `error_path` and
+> `error_trace` are never bound.
 
 > **Source of truth (informative).** The method strings, JSON field names, and
-> error discriminants below are the published Komodo DeFi Framework API contract
-> (the public KDF API documentation / `komodo-docs` coin-activation and
-> Tendermint/token sections). Where this chapter and the public API docs
-> disagree, the public API docs govern.
+> error discriminants below follow the published Komodo DeFi Framework API
+> documentation (the `enable_tendermint_with_assets`, `enable_tendermint_token`
+> and `task::enable_tendermint` pages and the error-type catalogue). Where those
+> pages are explicit (field table and example agree, or only an example exists
+> and nothing contradicts it), they govern. Where they are silent, ambiguous or
+> contradict themselves -- including every HTTP status code, which the public
+> docs state nowhere -- this chapter binds what the reference implementation of
+> §36.0.1 does, by maintainer decision.
+
+> **Availability in the beta (maintainer decision 2026-10-26).** The
+> activation surface of this chapter is unaffected: Tendermint platform coins
+> and tokens activate, report balances and `withdraw` as bound here. Tendermint
+> swap support is not finished, so for the coming beta every activated
+> Tendermint coin and token is wallet-only: while the build constant
+> `TENDERMINT_SWAPS_AVAILABLE` (`coins/lp_coins_ops.rs`) is `false`,
+> `setprice`, `buy`, `sell` and `start_swap` refuse it with the usual "… is
+> wallet only" answer and an order with a Tendermint coin saved by an
+> earlier version is cancelled at startup; a swap that
+> has already started still completes or is recovered. Swaps are planned to
+> return in a later release ([Chapter 18](18-tendermint-ibc-htlc.md)).
 
 ---
 
@@ -37,34 +57,57 @@ reloaded; it does not introduce a new coin.
 
 Tendermint coins follow the project's **platform-coin-with-tokens** activation
 model: the native chain coin (the Cosmos-SDK fee/staking coin, e.g. ATOM, IRIS,
-OSMO) is the *platform coin*, and its IBC / native (CW20-style and bank) assets
-are its *child tokens*. The surface specified here is:
+OSMO) is the *platform coin*, and its IBC / native bank assets are its *child
+tokens*. The surface specified here is:
 
 | Method string | Tier | Targets | Purpose |
 | --- | --- | --- | --- |
-| `enable_tendermint_with_assets` | mmrpc 2.0 | all (incl. WASM) | activate the Tendermint platform coin plus an inline batch of Tendermint (IBC / native) tokens in one call |
-| `enable_tendermint_token` | mmrpc 2.0 | all (incl. WASM) | activate one Tendermint token against an already-active Tendermint platform |
+| `enable_tendermint_with_assets` | mmrpc 2.0 | all (incl. WASM) | activate the Tendermint platform coin plus an inline batch of Tendermint (IBC / native) tokens in one call (§36.1) |
+| `enable_tendermint_token` | mmrpc 2.0 | all (incl. WASM) | activate one Tendermint token against an already-active Tendermint platform (§36.2) |
+| `task::enable_tendermint::{init,status,user_action,cancel}` | mmrpc 2.0 (task) | all (incl. WASM) | task-managed platform activation wrapping §36.1 (§36.6) |
 
-Both methods use the mmrpc-2.0 envelope (`{"mmrpc":"2.0","method":...,"params":
-{...},"id":...}`) and, on success, return `{"mmrpc":"2.0","result":{...},"id":
-...}`. On error they return the standard mmrpc-2.0 error envelope carrying
-`error`, `error_path`, `error_trace`, `error_type`, and `error_data`; only the
-**`error_type` discriminant** and its HTTP status are bound below (the human-
-readable `error` text is not part of the contract).
+All methods use the mmrpc-2.0 envelope. The envelope, the adjacently tagged
+`error_type` / `error_data` error object (a unit variant omits `error_data`),
+the `id` echo, the HTTP-status policy, the task-status object and the
+task-framework errors of `status` / `user_action` / `cancel` (`NoSuchTask`,
+`TaskFinished`, ...) are bound once for every activation family by
+[Chapter 55](55-coin-activation-wire-contract.md) §55.1 and §55.2; this chapter
+binds only the Tendermint-specific request fields, success shapes and the
+failure -> `error_type` mapping of each method.
 
-Both methods are driven by the **same generic activation framework** used by the
-EVM (ch. 35), BCH/SLP, and Solana/SPL activation surfaces: the generic
-platform-coin-with-tokens activator and the generic single-token activator. The
-Tendermint port supplies the platform/token trait implementations that let those
-generic activators drive Tendermint activation.
+There is **no** `task::enable_tendermint_token::*` family: the reference routes
+none, and this chapter binds none.
 
-Tendermint activation is available on **all targets, including WASM**.
+### 36.0.1 Reference version
 
-A long-running, **task-based** activation variant
-(`task::enable_tendermint::{init,status,user_action,cancel}`) is also part of the
-published KDF surface; it is specified in §36.6 and is delivered by the shared
-platform-coin task-activation framework of ch. 48 (which wraps the one-shot
-activation of this chapter as its unit of work).
+R36.0.1 The reference implementation for every behaviour this chapter binds
+where the public docs are silent is the GLEEC KDF release tag **`v3.0.0-beta`**.
+For every Tendermint activation wire shape bound in this chapter (request
+fields, success shapes, error discriminants, `error_data` shapes, HTTP
+statuses, placement), the netid-8762 legacy reference `v2.6.0-beta` behaves
+identically; no Tendermint activation behaviour is network- or
+reference-version-dependent.
+
+### 36.0.2 Shared numeric and shape conventions
+
+R36.0.2 In every success result of this chapter, balances (`spendable`,
+`unspendable`) are JSON **strings** holding a plain decimal number; no
+`*_rat` / `*_fraction` form is emitted. `current_block` and task ids are JSON
+integers. A balance object is always `{"spendable": <string>, "unspendable":
+<string>}`; for Tendermint the `unspendable` member is always `"0"`.
+
+R36.0.3 Where an `error_data` object below carries a `protocol` member, its
+value is the offending coin's protocol re-serialized in the canonical
+coin-configuration form `{"type": <string>, "protocol_data": <object>}`, with
+`protocol_data` omitted for a protocol that carries no protocol data (the
+public-docs example `{"type": "UTXO"}`). It is not a verbatim copy of the
+configuration text.
+
+> **Upstream divergence (informative).** For a `UTXO` protocol without protocol
+> data the reference (both tags) emits `"protocol_data": null` rather than
+> omitting the member. The public-docs example omits it and is explicit, so the
+> omitted form is bound; clients written against either form read only
+> `protocol.type` in practice.
 
 ---
 
@@ -72,140 +115,208 @@ activation of this chapter as its unit of work).
 
 R36.1.1 The public RPC `enable_tendermint_with_assets` shall activate a
 Tendermint platform coin together with an inline list of Tendermint tokens in a
-single mmrpc-2.0 call. The mmrpc-2.0 `params` object carries the platform
-`ticker` (string, required) plus the platform activation parameters of R36.1.2,
-flattened at the same level as `ticker`.
+single mmrpc-2.0 call. All request fields of R36.1.2 sit **flat** in `params`
+(there is no `activation_params` wrapper around them). Fields not listed are
+ignored without error.
 
-R36.1.2 The platform activation parameters shall carry:
+R36.1.2 **Request fields.**
 
-- `nodes` (array, required, non-empty) -- the Tendermint RPC endpoints. Each
-  entry is an object carrying `url` (string, required) and an optional boolean
-  selecting whether the endpoint is reached through the project's proxy
-  (defaulting to off). No Tendermint node endpoints are embedded in the project;
-  the node list is entirely caller-supplied.
-- `tokens_params` (array, optional, default empty) -- the Tendermint tokens to
-  enable alongside the platform. Each entry carries `ticker` (string, required)
-  and the per-token activation parameters of R36.2.1.
-- `tx_history` (boolean, optional, default **false**) -- whether to enable
-  transaction-history tracking for the platform coin.
-- `get_balances` (boolean, optional, default **true**) -- when true the result
-  includes balances; when false the balance fields may be omitted to speed up
-  activation (see R36.1.5).
-- `path_to_address` (object, optional) -- the HD account/change/address selector
-  picking which derived address is used (defaults to the first non-change
-  address of the first account).
-- `activation_params` (tagged object, optional) -- an alternative
-  public-key / external-signer activation policy (R36.1.3). When omitted, the
-  platform is activated with the in-context wallet private key (the default
-  signing policy).
+| Field | JSON type | Required / default | Effect |
+| --- | --- | --- | --- |
+| `ticker` | string | **required** | Platform coin ticker; must name a `TENDERMINT`-protocol entry in the coins configuration. |
+| `nodes` | array of node objects | **required** (the array itself; an empty array is accepted by the parser and then fails per R36.1.6) | Caller-supplied Tendermint RPC endpoints with failover; no endpoints are embedded in the project. |
+| `nodes[].url` | string | **required** | Tendermint RPC endpoint URL. A URL that cannot be turned into an HTTP client fails per R36.1.6. |
+| `nodes[].komodo_proxy` | boolean | optional, default `false` | When `true`, requests to that endpoint are signed for the komodo-defi-proxy with this KDF instance's P2P identity key. |
+| `nodes[].api_url`, `nodes[].grpc_url`, `nodes[].ws_url` | string | optional | Accepted (they appear in the public-docs examples) and **ignored**. |
+| `tokens_params` | array of token requests | **required** (may be empty) | Tendermint tokens to activate alongside the platform. |
+| `tokens_params[].ticker` | string | **required** | Token ticker. |
+| `tokens_params[].protocol` | object (coin-protocol form) | optional | Custom-token activation: when present, the token is activated from this protocol object instead of the coins configuration (R36.1.4 step 4). Any other member of a token request (e.g. `required_confirmations`) is accepted and ignored. |
+| `tx_history` | boolean | optional, default `false` | When `true`, background transaction-history fetching is started for the platform coin after successful activation. |
+| `get_balances` | boolean | optional, default `true` | Selects the balance view or the ticker view of the result (R36.1.5). |
+| `path_to_address` | object `{account_id: integer, chain: "External"\|"Internal", address_id: integer}` | optional, default `{0, "External", 0}` | In HD-wallet mode selects which derived address is activated (under the coin's configured derivation path); without HD mode it has no effect. |
+| `activation_params` | tagged object | optional | Non-private-key signing policy (R36.1.3). When omitted, the platform activates under the context signing policy. |
+| `priv_key_policy` | string | optional | Accepted and **ignored** (the docs list `ContextPrivKey` / `Trezor`; the reference never treats a Tendermint request as a hardware-policy request). |
+| `required_confirmations`, `requires_notarization`, `mm2` | integer / boolean / integer | optional | Accepted and **ignored**. A Tendermint coin always reports zero required confirmations and no notarization requirement, irrespective of these fields. |
 
-R36.1.3 The `activation_params` selector, when present, is a tagged object (tag
-field `type`, payload field `params`) over the published non-private-key signing
-policies:
+> **Upstream divergence (informative).** The public docs list
+> `required_confirmations` with default 3 and `requires_notarization` with
+> default false, and `priv_key_policy` as a string; the reference ignores all
+> three for Tendermint. Because the docs do not state what observable effect the
+> fields have, the reference behaviour is bound. The docs mark `nodes`,
+> `ticker` and `tokens_params` required, which the reference also enforces.
 
-- a watch-only / public-key policy carrying the caller-supplied Cosmos
-  secp256k1 `pubkey` and an `is_ledger_connection` boolean flag indicating
-  whether the public key originates from a Ledger device; and
-- a WalletConnect policy carrying the WalletConnect session topic
-  (`session_topic`).
+R36.1.3 **`activation_params` forms.** When present, `activation_params` shall
+be accepted in each of the following forms:
 
-The `pubkey` value follows the dictated Cosmos public-key JSON shape (a tagged
-key object whose inner `value` carries the base64-encoded secp256k1 key); the
-account id is derived from that key and the chain's address prefix. WalletConnect
-activation is bound by ch. 22; this chapter binds only the activation-parameter
-field names.
+1. *Public-key form* -- `{"type": "WithPubkey", "params": {"pubkey": <key>,
+   "is_ledger_connection": <boolean>}}`. `is_ledger_connection` is required. The
+   key object is `{"type": "secp256k1" | "ed25519", "value": [<integer 0..255>,
+   ...]}` -- the raw public-key bytes as a JSON array of integers (not base64,
+   not hex). The activated account id is derived from this key and the chain's
+   `account_prefix`; the coin activates watch-only (Keplr-style, flagged as a
+   Ledger connection when `is_ledger_connection` is true).
+2. *WalletConnect form* -- `{"type": "WalletConnect", "params":
+   {"session_topic": <string>}}`. The account and its public key are fetched
+   over the WalletConnect session for the coin's `chain_id` (ch. 22 binds the
+   WalletConnect side); whether the session is a Ledger-backed one is taken
+   from the session.
+3. *Public-docs WalletConnect form* -- `{"priv_key_policy": {"type":
+   "WalletConnect", "data": <session topic string>}}`, shown by the published
+   example. It shall be treated exactly as form 2 with `session_topic` = `data`.
 
-R36.1.4 The activation flow shall: reject an empty `nodes` list; construct the
-multi-node Tendermint RPC client with failover across the supplied nodes; resolve
-the chain identity and address prefix from coin configuration (the chain id is
-required for Tendermint coins); build the platform coin under the selected
-signing policy; then activate each requested token against it. A token whose
-declared platform does not match the platform coin being activated shall be
-rejected rather than partially activating the platform.
+Any other shape of `activation_params` (unknown `type`, missing `type` or
+`params` for forms 1-2, a key `type` other than the two listed, a `value` that is
+not an array of byte integers, a key of invalid length) is a request-parse
+failure and shall be reported as the dispatcher-level `InvalidRequest` of
+[Chapter 55](55-coin-activation-wire-contract.md) §55.1 -- never as a crash.
 
-R36.1.5 The success `result` shall report:
-- `ticker` -- the activated platform coin ticker;
-- `address` -- the activated Cosmos account address;
-- `current_block` -- the current Tendermint chain height;
-- `balance` -- the platform coin balance (a `{spendable, unspendable}` balance
-  object), present only when `get_balances` is true;
-- `tokens_balances` -- a map of token ticker to balance object, present only when
-  `get_balances` is true; and
-- `tokens_tickers` -- the set of activated token tickers, present when
-  `get_balances` is false (so a caller that skipped balances still learns which
-  tokens were activated).
+> **Upstream divergence (informative).** The reference accepts forms 1 and 2
+> only; it rejects form 3 (the published example) as a request-parse failure.
+> Form 3 is bound because the public docs are explicit about it and accepting it
+> cannot break a client that uses forms 1-2.
 
-The `balance` / `tokens_balances` fields and the `tokens_tickers` field are
-mutually exclusive views selected by the `get_balances` flag; absent fields are
-omitted from the JSON object rather than emitted as null.
+R36.1.4 **Activation semantics.** The observable outcome of a request shall be
+as if the following checks and actions ran in this order, the first failing one
+determining the error of R36.1.6:
 
-R36.1.6 `error_type` discriminants for this method, and their HTTP status, form
-the bound error contract. Because the method is driven by the generic
-platform-coin-with-tokens activator, the discriminants are those of the generic
-platform-with-tokens error contract and shall include at least:
+1. If a coin with `ticker` is already active, reject (`PlatformIsAlreadyActivated`).
+2. Resolve the platform's coins-configuration entry and its protocol
+   (`PlatformConfigIsNotFound`, `CoinProtocolParseError`,
+   `UnexpectedPlatformProtocol`).
+3. Build the platform coin without contacting any node: validate the protocol
+   data (`decimals` at most 18), the coin configuration (e.g. `avg_blocktime`
+   present and in range), the signing policy (R36.1.3, HD derivation config and
+   `path_to_address` in HD mode; a hardware-wallet context cannot sign for
+   Tendermint), and that `nodes` is non-empty and every `url` yields a client.
+   Any failure here is `PlatformCoinCreationError`. A WalletConnect activation
+   contacts the WalletConnect peer in this step; its failure is also
+   `PlatformCoinCreationError`.
+4. Resolve every `tokens_params` entry: from the coins configuration when no
+   `protocol` is supplied, from the supplied `protocol` otherwise (custom
+   token; supplying a `protocol` for a ticker that **is** in the configuration
+   is rejected). Then check that every token's protocol names this platform as
+   its `platform`. Token Tendermint objects are created without contacting any
+   node.
+5. Query the chain over the node set: the current height and, when
+   `get_balances` is true, the platform and token balances. This is the first
+   step that contacts a node, so unreachable / failing nodes surface here
+   (`PlatformCoinCreationError`).
+6. When `tx_history` is true, start background history fetching.
+7. Register the platform coin and its tokens; a concurrent activation that
+   registered the same platform first yields `PlatformIsAlreadyActivated`.
 
-| `error_type` | HTTP status |
-| --- | --- |
-| `PlatformIsAlreadyActivated` | 400 |
-| `PlatformConfigIsNotFound` | 400 |
-| `AtLeastOneNodeRequired` | 400 |
-| `UnexpectedPlatformProtocol` | 400 |
-| `TokenConfigIsNotFound` | 400 |
-| `UnexpectedTokenProtocol` | 400 |
-| `CoinProtocolParseError` | 500 |
-| `TokenProtocolParseError` | 500 |
-| `PlatformCoinCreationError` | 500 |
-| `PrivKeyNotAllowed` | 500 |
-| `UnexpectedDerivationMethod` | 500 |
-| `Transport` | 500 |
-| `Internal` | 500 |
+No failure leaves the platform or any of its tokens partially registered.
 
-A request with an empty `nodes` list shall be rejected with `AtLeastOneNodeRequired`;
-a request for an already-active platform shall be rejected with
-`PlatformIsAlreadyActivated`; an unknown or mistyped platform/token in coin
-configuration shall be rejected with the corresponding config-not-found /
-unexpected-protocol discriminant rather than partially activating the coin.
+R36.1.5 **Success result** (HTTP 200):
+
+| Field | JSON type | Presence | Content |
+| --- | --- | --- | --- |
+| `ticker` | string | always | the platform ticker as requested |
+| `address` | string | always | the activated bech32 account address (HRP = `account_prefix`) |
+| `current_block` | integer | always | current Tendermint chain height |
+| `balance` | balance object | only when `get_balances` is true | platform balance in display units (R36.0.2) |
+| `tokens_balances` | object (map) | only when `get_balances` is true | token ticker -> balance object, one entry per token activated in this call; `{}` when none |
+| `tokens_tickers` | array of strings | only when `get_balances` is false | tickers of the tokens activated in this call (order unspecified; `[]` when none) |
+
+Absent fields are omitted, never emitted as `null`.
+
+> **Upstream divergence (informative).** The public docs' response table types
+> `tokens_balances` as an array of AddressInfo objects, while every published
+> example shows the ticker-keyed map above; the reference emits the map. The map
+> is bound.
+
+R36.1.6 **Errors of `enable_tendermint_with_assets`** (all mmrpc-level). The
+bound mapping is:
+
+| `error_type` | Returned when | `error_data` | HTTP |
+| --- | --- | --- | --- |
+| `PlatformIsAlreadyActivated` | the platform ticker is already active (step 1), or lost a registration race (step 7) | string: the platform ticker | 400 |
+| `PlatformConfigIsNotFound` | no coins-configuration entry for `ticker` | string: the requested ticker | 400 |
+| `CoinProtocolParseError` | the platform's `protocol` object does not parse (incl. a missing required `protocol_data` field, §36.3) | object `{ticker: string, error: string}` | 500 |
+| `UnexpectedPlatformProtocol` | the platform's protocol is not `TENDERMINT` | object `{ticker: string, protocol: object}` (R36.0.3) | 400 |
+| `TokenConfigIsNotFound` | a `tokens_params` ticker without `protocol` has no coins-configuration entry | string: the token ticker | 400 |
+| `TokenProtocolParseError` | a token's `protocol` does not parse | object `{ticker: string, error: string}` | 500 |
+| `UnexpectedTokenProtocol` | a token's protocol is not `TENDERMINTTOKEN` | object `{ticker: string, protocol: object}` (R36.0.3) | 400 |
+| `CustomTokenError` | a `tokens_params` entry carries `protocol` for a ticker that exists in the configuration | object, externally tagged: `{"DuplicateTickerInConfig": {"ticker_in_config": string}}` | 500 |
+| `PlatformCoinMismatch` | a token's protocol `platform` differs from the requested platform ticker | absent (unit variant) | 400 |
+| `PlatformCoinCreationError` | any failure of step 3 (incl. an **empty `nodes` array**, an unusable node URL, `decimals` above 18, missing `avg_blocktime`, unsupported signing context, WalletConnect account fetch failure) or of step 5 (incl. **all nodes unreachable / failing**) | object `{ticker: string, error: string}` -- `ticker` is the platform ticker | 500 |
+| `Internal` | an internal failure (context, history storage, token address derivation) | string | 500 |
+
+**Unresponsive nodes.** When every node in `nodes` is unreachable, times out or
+answers with an HTTP error, `enable_tendermint_with_assets` shall return
+`PlatformCoinCreationError` with `error_data` `{ticker, error}` and HTTP **500**.
+It shall **not** return `Transport` and shall not return HTTP 502.
+
+> **Upstream divergence (informative).** The public Tendermint page lists
+> `Transport` among the error types without an example; the reference never
+> produces it for Tendermint (node failures are wrapped into
+> `PlatformCoinCreationError`). This differs from the EVM family, whose
+> unresponsive-node error is `Transport` (ch. 35); the per-family table is in
+> [Chapter 55](55-coin-activation-wire-contract.md) §55.3.
+
+R36.1.7 **Shared discriminants not produced by Tendermint.** The
+platform-with-tokens `error_type` set shared with EVM / BCH / Solana also
+contains `Transport` (string, 502), `PrivKeyPolicyNotAllowed` (string, 500 --
+the catalogue name; the docs' method tables say `PrivKeyNotAllowed`, which is
+not a wire name), `UnexpectedDerivationMethod` (string, 500),
+`AtLeastOneNodeRequired` (string, 400), `InvalidPayload` (string, 400),
+`FailedSpawningBalanceEvents` (string, 400), `WalletConnectError` (string,
+400), `UnexpectedDeviceActivationPolicy` (absent, 400), `NoSuchTask` (integer,
+400) and `TaskTimedOut` (object `{duration: {secs, nanos}}`, 500). Tendermint
+activation shall not produce any of them; their shapes and statuses are bound
+where they are produced (ch. 35, ch. 55).
 
 ---
 
 ## 36.2 `enable_tendermint_token` -- single token on an active platform
 
-R36.2.1 The public RPC `enable_tendermint_token` shall activate a single
-Tendermint token against an already-active Tendermint platform coin. The
-mmrpc-2.0 `params` object carries:
-- `ticker` (string, required) -- the token ticker; and
-- `activation_params` (object, required) -- the per-token activation parameters.
-  The Tendermint token currently defines no additional activation fields, so this
-  is an (initially empty) object reserved for forward-compatible token options;
-  it must still be present.
+R36.2.1 **Request fields.**
 
-R36.2.2 The token's platform binding, decimals, and on-chain denomination
-(`denom`) are taken from the token's `TENDERMINTTOKEN` `protocol_data` (§36.3.2):
-`platform`, `decimals`, and `denom`. Activation resolves the token against the
-named active platform coin and reads its balance over the platform's connection.
+| Field | JSON type | Required / default | Effect |
+| --- | --- | --- | --- |
+| `ticker` | string | **required** | Token ticker. |
+| `activation_params` | object | **required** (may be `{}`) | Present for forward compatibility; its members (e.g. the docs' `required_confirmations`) are accepted and ignored. A request without it is a request-parse failure (`InvalidRequest`, ch. 55 §55.1). |
+| `protocol` | object (coin-protocol form) | optional | Custom-token activation from the supplied `TENDERMINTTOKEN` protocol instead of the coins configuration. |
 
-R36.2.3 The success `result` shall report:
-- `balances` -- a map of the activated address to its token balance object; and
-- `platform_coin` -- the ticker of the platform coin the token is bound to.
+R36.2.2 The token's platform binding, decimals, and on-chain denomination are
+taken from its `TENDERMINTTOKEN` `protocol_data` (§36.3.2). Activation shall,
+in observable order: reject an already-active token; resolve the token's
+configuration / protocol (or the custom protocol); find the named platform
+among the active coins; check that it is a Tendermint platform coin; build the
+token on the platform's connection; read the token balance over the platform's
+nodes; register the token; and only then add it to the platform's token set,
+so a failed activation leaves the platform's token set unchanged.
 
-R36.2.4 `error_type` discriminants for this method, and their HTTP status, are
-those of the generic single-token error contract and shall include at least:
+R36.2.3 **Success result** (HTTP 200):
 
-| `error_type` | HTTP status |
-| --- | --- |
-| `TokenIsAlreadyActivated` | 400 |
-| `PlatformCoinIsNotActivated` | 400 |
-| `TokenConfigIsNotFound` | 400 |
-| `UnexpectedTokenProtocol` | 400 |
-| `TokenProtocolParseError` | 500 |
-| `UnsupportedPlatformCoin` | 500 |
-| `UnexpectedDerivationMethod` | 500 |
-| `Transport` | 500 |
-| `Internal` | 500 |
+| Field | JSON type | Content |
+| --- | --- | --- |
+| `balances` | object (map) | exactly one entry: the activated account address -> balance object (R36.0.2) |
+| `platform_coin` | string | the ticker of the platform coin the token is bound to |
 
-A token whose platform coin is not active shall be rejected with
-`PlatformCoinIsNotActivated`; a token already active shall be rejected with
-`TokenIsAlreadyActivated`.
+R36.2.4 **Errors of `enable_tendermint_token`** (all mmrpc-level):
+
+| `error_type` | Returned when | `error_data` | HTTP |
+| --- | --- | --- | --- |
+| `TokenIsAlreadyActivated` | the token is already active, or lost a registration race | string: the token ticker | 400 |
+| `TokenConfigIsNotFound` | no coins-configuration entry and no `protocol` supplied | string: the token ticker | 400 |
+| `TokenProtocolParseError` | the token's `protocol` does not parse | object `{ticker: string, error: string}` | 500 |
+| `UnexpectedTokenProtocol` | the token's protocol is not `TENDERMINTTOKEN` | object `{ticker: string, protocol: object}` (R36.0.3) | 400 |
+| `CustomTokenError` | `protocol` supplied for a ticker that exists in the configuration | object `{"DuplicateTickerInConfig": {"ticker_in_config": string}}` | 400 |
+| `PlatformCoinIsNotActivated` | the token's `platform` is not an active coin | string: the **platform** ticker | 400 |
+| `UnsupportedPlatformCoin` | the token's `platform` is active but is not a Tendermint platform coin | object `{platform_coin_ticker: string, token_ticker: string}` | 500 |
+| `CouldNotFetchBalance` | the token balance could not be read -- incl. **all platform nodes unreachable / failing** | string | 500 |
+| `Internal` | token construction or address derivation failed internally | string | 500 |
+
+The shared single-token `error_type` set also contains `Transport` (string,
+500), `InvalidConfig` (string, 500), `InvalidPayload` (string, 400),
+`PrivKeyPolicyNotAllowed` (string, 500), `UnexpectedDerivationMethod` (500) and
+`PlatformCoinMismatch` (absent, 400); `enable_tendermint_token` shall not
+produce them.
+
+**Unresponsive nodes.** When the platform's nodes are all unreachable or
+failing, `enable_tendermint_token` shall return `CouldNotFetchBalance` (string)
+with HTTP **500**.
 
 ---
 
@@ -231,7 +342,7 @@ functional role activation must give it.
 | `protocol_data` key | JSON type | Required? | Functional role |
 | --- | --- | --- | --- |
 | `denom` | string | **required** | The platform chain's native base denomination (the smallest-unit bank denom, e.g. `uatom`, `uiris`, `uosmo`). It is the denom the platform coin queries for its own balance, denominates transaction fees in, and signs bank/HTLC/IBC messages against. Without it the platform coin has no base unit and cannot report balance, build fees, or sign. |
-| `decimals` | integer | **required** | The number of decimal places between the base denom and one whole coin. Used to convert base-unit balances and amounts to and from human-readable decimal values. It must be **18 or lower**; a value above 18 shall fail activation as invalid protocol data (a bounded-input check, not a free-form message). Without it, all balance and amount conversion for the platform coin is undefined. |
+| `decimals` | integer (0-255 by type) | **required** | The number of decimal places between the base denom and one whole coin. Used to convert base-unit balances and amounts to and from human-readable decimal values. It must be **18 or lower**; a value above 18 shall fail activation with `PlatformCoinCreationError` (R36.1.6), not with a protocol parse error. Without it, all balance and amount conversion for the platform coin is undefined. |
 | `account_prefix` | string | **required** | The bech32 human-readable prefix (HRP) of the chain's account addresses (e.g. `cosmos`, `iaa`, `osmo`, per BIP-173). Used to derive the activated account address from the public key. Without it no address can be formed, so the coin cannot activate. |
 | `chain_id` | string | **required** | The Cosmos/Tendermint chain identifier (e.g. `cosmoshub-4`, `irishub-1`, `osmosis-1`). Bound into the signing document for every transaction and into the WalletConnect/Keplr session. Without it transactions cannot be signed or broadcast to the correct chain. |
 | `gas_price` | number (float) | optional | The default gas price (in the base denom per gas unit) used for fee estimation when a withdraw/transaction does not override it. When absent, a built-in default gas price applies. Its absence is **benign** -- activation and all operations still succeed using the default. |
@@ -253,9 +364,10 @@ signing and the external-signer session; `gas_price` seeds fee estimation (or th
 default when omitted); and `ibc_channels` seeds the destination-prefix -> channel
 map used by the IBC/HTLC layer of ch. 18. `chain_registry_name` is retained by
 config but need not be consumed. A `TENDERMINT` `protocol_data` missing any of the
-four required fields (`denom`, `decimals`, `account_prefix`, `chain_id`), or with
-`decimals` above 18, shall fail activation with an invalid-protocol-data error
-under the R36.1.6 contract and shall not partially activate the coin.
+four required fields (`denom`, `decimals`, `account_prefix`, `chain_id`) shall
+fail activation with `CoinProtocolParseError`; one whose `decimals` exceeds 18
+shall fail with `PlatformCoinCreationError` (R36.1.6). Neither partially
+activates the coin.
 
 ### 36.3.2 `TENDERMINTTOKEN` token `protocol_data`
 
@@ -264,7 +376,7 @@ fields.
 
 | `protocol_data` key | JSON type | Required? | Functional role |
 | --- | --- | --- | --- |
-| `platform` | string | **required** | The ticker of the `TENDERMINT` platform coin the token rides on. Token activation resolves the token against this already-active platform; a mismatch or inactive platform is rejected (R36.2.4). |
+| `platform` | string | **required** | The ticker of the `TENDERMINT` platform coin the token rides on. Token activation resolves the token against this already-active platform; inline activation rejects a token whose `platform` differs from the platform being activated (`PlatformCoinMismatch`, R36.1.6); single-token activation rejects an inactive or non-Tendermint platform (R36.2.4). |
 | `decimals` | integer | **required** | The token's decimal precision, used to scale its base-denom balance to a human value. |
 | `denom` | string | **required** | The token's on-chain base denomination -- either a native bank denom or an IBC denom of the form `ibc/<HASH>` (the IBC-derived denom hash). It is the denom the token queries for its balance and transacts against on the platform's connection. |
 | `gas_price` | number (float) | optional / informational | A per-token gas-price hint. Tendermint tokens transact over the **platform coin's** connection and use the platform coin's gas/fee settings, so this key is **not consumed** by token activation or token operation in the behaviour distilled here. Its presence or absence is benign. |
@@ -277,57 +389,18 @@ from anywhere other than its own `protocol_data`.
 
 ### 36.3.3 Reloaded status and required additions
 
-> **Upstream divergence (informative).** Reloaded currently under-captures both
-> Tendermint `protocol_data` arms and, because the coin-protocol enum does not
-> reject unknown fields, silently **drops** the surplus config keys rather than
-> erroring on them. The functional impact of each dropped field is:
->
-> - **`TENDERMINT.denom` (dropped -> functional gap, MUST add):** reloaded's
->   `TENDERMINT` arm captures only `account_prefix` and `chain_id`, so the
->   platform coin has **no base denomination**. Without `denom` the platform coin
->   cannot query its own balance, denominate fees, or sign bank/HTLC/IBC messages.
->   `denom` is required and must be added.
-> - **`TENDERMINT.decimals` (dropped -> functional gap, MUST add):** likewise
->   dropped by reloaded. Without it, platform balance/amount scaling is undefined
->   (and the `decimals <= 18` bound cannot be enforced). Required; must be added.
-> - **`TENDERMINT.ibc_channels` (dropped -> partial gap, SHOULD add):** without
->   the configured destination-prefix -> channel map, manually-configured IBC
->   channel resolution is unavailable; runtime healthy-channel discovery may still
->   cover some routes, but configured IBC transfer/HTLC routing toward a given
->   destination prefix is not guaranteed. Add to restore configured IBC routing.
-> - **`TENDERMINT.gas_price` (dropped -> benign):** absence falls back to the
->   built-in default gas price; activation and operations still succeed. Adding it
->   only restores per-chain fee tuning; safe to defer.
-> - **`TENDERMINT.chain_registry_name` (dropped -> benign):** not consumed by any
->   distilled functional path; safe to ignore.
-> - **`TENDERMINTTOKEN.gas_price` (dropped -> benign):** tokens use the platform
->   coin's fee settings; the token-level key is not consumed. Safe to ignore.
-> - **`TENDERMINTTOKEN.platform` / `decimals` / `denom`:** already captured by
->   reloaded and consumed correctly (R36.3.3--R36.3.4); no change needed.
->
-> Net: reloaded's `TENDERMINT` arm must be extended to carry `denom` and
-> `decimals` (required) and `ibc_channels` (recommended); `gas_price` and
-> `chain_registry_name` are optional/benign. The `TENDERMINTTOKEN` arm needs no
-> functional change. The enum must continue to tolerate unknown `protocol_data`
-> keys (no `deny_unknown_fields`) so benign surplus keys do not fail activation.
-
 > **Status update (reloaded).** Implemented (commit 40645ebad). The `TENDERMINT`
-> arm now carries all three required/recommended fields:
->
-> - **`denom` (required):** platform coin base denomination (e.g., `"uatom"`);
->   passed to `TendermintProtocolInfo` and consumed by balance queries, fee
->   calculations, and bank/HTLC/IBC message construction.
-> - **`decimals` (required):** platform coin display decimals, bounded by a custom
->   deserializer at ≤18; enables correct scaling of amounts and fee representation.
-> - **`ibc_channels` (recommended):** optional map from destination bech32 HRP to
->   ICS-20 channel number; passed to `TendermintProtocolInfo.ibc_channels` and
->   available to the IBC/HTLC layer via `ibc_channel_for_prefix()` for configured
->   channel routing (ch. 18 §18.4). Defaults to empty when absent.
->
-> The `TENDERMINTTOKEN` arm captures `platform`, `decimals`, and `denom` correctly
-> (no change needed). Benign fields (`gas_price`, `chain_registry_name`) continue
-> to be silently dropped; the enum still tolerates unknown `protocol_data` keys
-> so surplus config does not fail activation.
+> arm carries `denom`, `decimals` and `ibc_channels` in addition to
+> `account_prefix` and `chain_id`; the `TENDERMINTTOKEN` arm captures
+> `platform`, `decimals`, and `denom`. Benign fields (`gas_price`,
+> `chain_registry_name`) are silently dropped; the enum tolerates unknown
+> `protocol_data` keys so surplus config does not fail activation.
+
+> **Reloaded status (informative).** Reloaded enforces the `decimals <= 18`
+> bound while *parsing* the coin protocol, so a value above 18 currently fails
+> with `CoinProtocolParseError` (HTTP 500) instead of the bound
+> `PlatformCoinCreationError` (HTTP 500, `{ticker, error}`). The bound must move
+> from protocol parsing to platform-coin construction (R36.3.2).
 
 ---
 
@@ -338,7 +411,8 @@ specified in ch. 18. Activation establishes the platform coin, its RPC client,
 the active address, and the set of enabled tokens; the swap, IBC-transfer, and
 HTLC behaviours those activated coins then participate in are bound by ch. 18 and
 the swap-v2 chapters. This chapter binds only the *activation* request/response
-contract.
+contract. In this beta the activated coins take part in no new swap (see the
+availability note at the top of this chapter).
 
 ---
 
@@ -359,17 +433,15 @@ This note orients the implementer; it is not normative.
   the same machinery that already drives BCH/SLP, Solana/SPL, and EVM (ch. 35)
   activation;
 - the legacy single-coin enable path explicitly rejects the Tendermint and
-  Tendermint-token protocols and directs callers to these two mmrpc-2.0 methods,
-  so the method strings are already the intended activation entry points.
+  Tendermint-token protocols and directs callers to these mmrpc-2.0 methods.
 
-**What must be added (scope of this chapter's port):**
-- implement the **platform-coin-with-tokens activation trait** for the Tendermint
-  platform coin and the **token activation trait** for the Tendermint token, so
-  the generic activators above can drive Tendermint activation, including the
-  platform/token request and result shapes of §36.1--§36.2;
-- add the **dispatcher routes** for the two method strings in §36.0 so the
-  mmrpc-2.0 layer reaches these handlers;
-- ensure the surface compiles and is routed on **all targets including WASM**.
+> **Status update (reloaded).** Implemented. The platform-coin-with-tokens
+> activation trait is implemented for the Tendermint platform coin and the token
+> activation trait for the Tendermint token; `enable_tendermint_with_assets` and
+> `enable_tendermint_token` are both routed on native and WASM. The long-running
+> task family `task::enable_tendermint::*` is also implemented, via the
+> [Chapter 48](48-platform-coin-task-activation.md) substrate (§36.6). The wire
+> deviations still open against this chapter are listed in §36.7.
 
 The placement of these implementations (which crate/module they live in) should
 follow the existing activation layout used by the other platform coins (the
@@ -378,66 +450,402 @@ choice.
 
 ---
 
-## 36.6 Task-based activation (delivered via ch. 48 substrate)
+## 36.5A Node naming, credentials and node responses in logs (Reloaded-original)
 
-R36.6.1 The published KDF surface also exposes a long-running, task-based
-Tendermint platform-activation family
-`task::enable_tendermint::{init,status,user_action,cancel}`, following the same
-init/status/user_action/cancel pattern as the other `task::enable_*` families.
-This variant is the intended path for activation policies that need interactive
-user actions (e.g. hardware-backed signing).
+The rules of this section bind what the Tendermint coin layer's texts and
+renderings may say about an RPC node of `nodes[]` (R36.1.2). They bind no wire
+shape: the human-readable `error` text stays unbound except for what these
+rules forbid it to carry.
 
-R36.6.2 This task variant is delivered by the **shared platform-coin
-task-activation framework of ch. 48** -- the third sibling alongside the
-standalone-coin and l2 task substrates. The framework wraps the one-shot
-activation of §36.1 as its unit of work; the same dependency was recorded for the
-EVM `task::enable_eth` family (ch. 35 §35.3), and ch. 48 unblocks both.
+R36.5A.1 **Host-only naming of Tendermint nodes (Reloaded; clean-room
+original; maintainer decision 2026-10-26; no switch).** Every log line, error
+text and status message the Tendermint coin layer emits that names a node
+shall name it in the host-only form of [chapter 35](35-evm-v2-activation-rpcs.md)
+R35.1.14: scheme, host and, when present, port, with the userinfo, path, query
+and fragment stripped. This covers at least:
 
-R36.6.3 `task::enable_tendermint::init` shall accept the same activation
-parameters as `enable_tendermint_with_assets` (§36.1) and ultimately yield the
-same success result shape (R36.1.5), with `status` surfacing in-progress states
-and `user_action` supplying interactive confirmations, per ch. 48 §§48.1--48.3.
-The family shall not be stubbed: it performs the real one-shot activation as its
-unit of work, so the one-shot `enable_tendermint_with_assets` of §36.1 and the
-task variant share a single activation path.
+- the per-node logs of node selection, including a failed health check and
+  the fallback check that follows it;
+- the error a caller receives when no node is usable, and the per-node
+  details it lists;
+- the activation error for a node URL that cannot be used. It shall not echo
+  the configured string: an entry without a usable scheme and host is named
+  by a fixed placeholder;
+- any lower-layer text (HTTP client, TLS, DNS) embedded in one of these
+  texts. A full URL that arrives from a lower layer is replaced by its
+  host-only form before the text is logged or returned.
+
+The rule applies to the native and the browser build alike.
+
+R36.5A.2 **Credentials in renderings (Reloaded; clean-room original;
+maintainer decision 2026-10-26; no switch).** Chapter 35 R35.1.17 applies to
+the Tendermint coin layer: the coin's node list, each per-node client, and the
+node entries of the activation request render a node URL in host-only form
+only, and no rendering prints a header value or other credential the
+configuration supplies. The scope limit of R35.1.17 for the RPC wire dump
+applies here too.
+
+R36.5A.3 **Node response bodies are not logged (Reloaded; clean-room
+original; maintainer decision 2026-10-28, D36.3).** No log line, at any
+level, shall carry the body of a node's response, in whole or in part. A log
+line about a response may carry the request kind, the node in host-only form,
+the outcome and the body's size in bytes. This rule binds log lines only. An error text
+that quotes the node's own error code and message is governed by R36.5A.1
+alone.
+
+These three rules state Reloaded's own behavior; this chapter records nothing
+about the reference's logging. They have no opt-back switch, for the reason
+chapter 35 R35.1.14 gives: node access reaches no peer and the rules only
+protect the operator, so by the second arm of the default-side rule
+(`docs/COMPAT_SWITCHES.md`) the Reloaded form is the default, and an opt-in to
+print credentials would be an opt-in to weaken security. They are recorded in
+`docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
+
+> **Status (2026-10-28).** Implemented. Node-selection logs and errors name
+> each node host-only, an unparseable URL is not echoed, the per-node HTTP
+> client's debug form is host-only, and a response is logged by its size only.
+> T36.15 covers the texts; the coin-level case of T36.14 has no test yet,
+> because no test builds a full Tendermint coin.
 
 ---
 
-## 36.7 Acceptance criteria
+## 36.6 Task-based activation (delivered via [Chapter 48](48-platform-coin-task-activation.md) substrate)
 
-- `enable_tendermint_with_assets` activates a Tendermint platform coin plus zero
-  or more Tendermint tokens in one call and returns `ticker`, `address`,
-  `current_block`, and -- when `get_balances` is true -- the platform `balance`
-  and per-token `tokens_balances`, or, when `get_balances` is false, the
-  `tokens_tickers` set (R36.1).
-- A request with an empty `nodes` list is rejected with `AtLeastOneNodeRequired`,
-  and an already-active platform with `PlatformIsAlreadyActivated`, using the
-  bound HTTP status of R36.1.6 without partially activating the coin.
-- `enable_tendermint_token` adds a single Tendermint token to an already-active
-  Tendermint platform and returns the token `balances` map and the bound
-  `platform_coin` ticker (R36.2); a token whose platform is not active is
-  rejected with `PlatformCoinIsNotActivated`.
-- Both methods are driven by the generic platform-coin-with-tokens / single-token
-  activators (R36.0, R36.5) and carry the generic activation `error_type`
-  discriminants and HTTP statuses of R36.1.6 and R36.2.4.
-- A `TENDERMINT` platform coin activates only when its `protocol_data` supplies
-  all four required fields -- `denom`, `decimals`, `account_prefix`, `chain_id` --
-  and `decimals <= 18`; the platform balance is reported in the correct base
-  denom scaled by `decimals`, the address uses the `account_prefix` HRP, and
-  transactions sign against `chain_id`. A `protocol_data` missing any required
-  field, or with `decimals > 18`, fails activation without partially activating
-  (R36.3.1--R36.3.2).
-- A `TENDERMINT` coin whose `protocol_data` supplies `ibc_channels` can resolve
-  an outbound IBC transfer channel for a configured destination account-prefix
-  (mapping prefix -> integer channel number `N` -> `channel-N`); omitting
-  `gas_price` or `chain_registry_name` does not prevent activation or operation
-  (R36.3.1).
-- The `TENDERMINTTOKEN` protocol resolves `platform`, `decimals`, and `denom`
-  from its `protocol_data`, accepting both bank and IBC (`ibc/<HASH>`) denoms; a
-  token-level `gas_price` key, if present, is accepted and ignored (R36.3.2).
-- Surplus/unknown `protocol_data` keys on either arm do not cause activation to
-  fail (R36.3.3).
-- Both method strings are routed and build on native **and** WASM targets (R36.5).
-- The task-based `task::enable_tendermint::*` family is delivered via the shared
-  platform-coin task-activation framework of ch. 48, wrapping the one-shot
-  activation of §36.1 as its unit of work (R36.6).
+R36.6.1 The published KDF surface exposes the task-managed Tendermint platform
+activation family `task::enable_tendermint::{init,status,user_action,cancel}`,
+routed on the same targets as `enable_tendermint_with_assets`. It is delivered
+by the shared platform-coin task-activation framework of
+[Chapter 48](48-platform-coin-task-activation.md), which runs the one-shot
+activation of §36.1 as its unit of work (the family is not a stub).
+
+R36.6.2 **`init` request and response.** `task::enable_tendermint::init` shall
+accept exactly the `params` of `enable_tendermint_with_assets` (R36.1.2,
+R36.1.3), flat in `params`, and on acceptance return
+`{"task_id": <integer>}` (HTTP 200).
+
+R36.6.3 **`init` error placement.** Before spawning the task, `init` shall
+reject synchronously, at **mmrpc level**, only:
+
+| `error_type` | Returned when | `error_data` | HTTP |
+| --- | --- | --- | --- |
+| `PlatformIsAlreadyActivated` | a coin with `ticker` is already active | string: the platform ticker | 400 |
+| `Internal` | the task could not be created | string | 500 |
+
+plus the request-parse failure of ch. 55 §55.1. **Every other** error of
+R36.1.6 -- including `PlatformConfigIsNotFound`, the protocol / token errors,
+`PlatformCoinMismatch` and `PlatformCoinCreationError` for unresponsive nodes --
+shall be reported at **status level**: `task::enable_tendermint::status`
+returns HTTP 200 with `{"status": "Error", "details": <error object>}`, the
+error object carrying the same `error_type` and `error_data` shape as in
+R36.1.6 (ch. 55 §55.2 binds the status object).
+
+> **Upstream divergence (informative).** Every error example on the public
+> `task::enable_tendermint` page is drawn as an mmrpc-level response whose
+> trace points at the one-shot activation path, so the page does not establish
+> where the task variant reports them. The reference reports all of them except
+> the already-active check at status level; that placement is bound.
+
+R36.6.4 **`status`.** Request `{task_id: integer, forget_if_finished: boolean
+(default true)}`. While running, the Tendermint task reports
+`{"status": "InProgress", "details": "ActivatingCoin"}` and no other in-progress
+value; it never reports `UserActionRequired` (Tendermint has no interactive
+signing policy). On success it reports `{"status": "Ok", "details": <result>}`
+where `<result>` is exactly the R36.1.5 result, including the
+`get_balances`-dependent view. The family-wide in-progress value set and the
+task-framework errors of `status` are bound by ch. 48 and ch. 55 §55.2.
+
+R36.6.5 **`user_action`.** Routed; since no Tendermint task ever awaits a user
+action, a call returns the task-framework error of ch. 55 §55.2 for its case.
+The request payload shape is the shared hardware user-action shape of ch. 55
+§55.2.
+
+R36.6.6 **`cancel`.** Request `{task_id: integer}`; success `"success"`.
+Cancelling a running task stops it; it never de-registers a coin that a
+finished task registered. Task-framework errors (`NoSuchTask`, `TaskFinished`)
+are bound by ch. 55 §55.2.
+
+R36.6.7 The one-shot `enable_tendermint_with_assets` never rejects a request as
+a hardware-policy request (Tendermint has none), so
+`UnexpectedDeviceActivationPolicy` is not produced by either path.
+
+> **Status update (reloaded).** `task::enable_tendermint::{init,status,
+> user_action,cancel}` is routed via the
+> [Chapter 48](48-platform-coin-task-activation.md) substrate on native and
+> WASM, wrapping the one-shot activation unchanged as its unit of work. The
+> placement and in-progress deviations still open are listed in §36.7.
+
+---
+
+## 36.7 Reloaded status (informative)
+
+> **Maintainer decision (binding, 2026-10-11).** This branch implements the
+> wire contract of this chapter: items 1-4, 7 and 10-15 below. Items 5, 6, 8 and
+> 9 are features (signing policies via `activation_params` in all three forms of
+> R36.1.3, HD `path_to_address`, custom tokens, transaction history) and are
+> deferred to `docs/plans/tendermint-activation-features.md`.
+>
+> **Deliberate divergence (binding, interim).** Until R36.1.3 is implemented, a
+> request that carries a non-null `activation_params` shall be rejected with
+> `PlatformCoinCreationError` (`{ticker, error}`, HTTP 500) -- the discriminant
+> the reference uses for an unsupported signing context (R36.1.4 step 3) --
+> rather than activated with the local context key. The reference accepts these
+> requests and honors them. The silent fallback to the local key is not kept,
+> because a caller that asked for a device-backed or watch-only activation must
+> not get a hot-key one without knowing. This overrides R36.1.3 and R36.1.7 for
+> `activation_params` only, and is removed when the plan's item 1 lands.
+
+> **Implemented on `fix/activation-api-parity`:** items 1-4, 7 and 10-15 below
+> and the interim rejection of `activation_params`. Remaining: items 5, 6, 8 and
+> 9 (deferred to the Tendermint plan). The list is kept as the record of what
+> changed.
+
+Current reloaded behaviour that deviates from the bound contract (behavioural
+terms; the clean implementer works from this list):
+
+1. **Empty `nodes`.** Reloaded returns `AtLeastOneNodeRequired` as a unit
+   variant (no `error_data`, HTTP 400). Bound: `PlatformCoinCreationError`
+   `{ticker, error}`, HTTP 500 (R36.1.6).
+2. **Unresponsive nodes / height or balance query failure.** Reloaded returns
+   `Transport` (string, HTTP 502). Bound: `PlatformCoinCreationError`
+   `{ticker, error}`, HTTP 500 (R36.1.6).
+3. **`decimals` above 18.** Reloaded fails at protocol parsing
+   (`CoinProtocolParseError`). Bound: `PlatformCoinCreationError` (R36.3.2).
+4. **`tokens_params` absent.** Reloaded defaults it to an empty list. Bound:
+   required; absence is the request-parse failure of ch. 55 §55.1.
+5. **`activation_params`.** Reloaded accepts any JSON and ignores it, so a
+   public-key or WalletConnect request silently activates with the local
+   context key. Bound: the three forms of R36.1.3 with their effects; malformed
+   input is `InvalidRequest`.
+6. **`path_to_address` / HD mode.** Reloaded ignores `path_to_address` and
+   always activates the context key's address. Bound: in HD-wallet mode the
+   address at `path_to_address` under the coin's derivation path; missing
+   derivation config or an invalid path is `PlatformCoinCreationError`.
+7. **Token platform check.** Reloaded does not check that an inline token's
+   `platform` equals the activated platform. Bound: `PlatformCoinMismatch`
+   (unit, HTTP 400).
+8. **Custom tokens.** Reloaded accepts no `protocol` member on
+   `tokens_params[]` or on `enable_tendermint_token`. Bound: custom-token
+   activation and `CustomTokenError` (R36.1.6, R36.2.4). When custom Tendermint
+   tokens are implemented, each shall be wallet-only, as a custom EVM token is
+   (ch. 35 R35.2.7); see `docs/plans/tendermint-activation-features.md` item 3.
+9. **`tx_history`.** Reloaded accepts `true` but starts no history fetching.
+   Bound: background history fetching starts after activation.
+10. **`protocol` member of `UnexpectedPlatformProtocol` /
+    `UnexpectedTokenProtocol`.** Reloaded serializes its own internal protocol
+    representation; bound: the canonical coin-configuration form (R36.0.3). A
+    wire-shape test must pin it for at least a `UTXO`, an `ERC20` and a
+    `TENDERMINTTOKEN` protocol.
+11. **Shared platform enum.** Reloaded names the private-key-policy variant
+    `PrivKeyNotAllowed`, carries `AtLeastOneNodeRequired` without data, and
+    lacks `CustomTokenError`, `PlatformCoinMismatch` and the other variants of
+    R36.1.7. Their binding is shared with ch. 35 / ch. 55.
+12. **`enable_tendermint_token` balance failure.** Reloaded returns
+    `Transport` (string, HTTP 500). Bound: `CouldNotFetchBalance` (string,
+    HTTP 500).
+13. **`enable_tendermint_token` side effect.** Reloaded adds the token to the
+    platform's token set *before* reading the balance, so a failed activation
+    leaves a stale entry that later platform balance views include. Bound: add
+    only after successful registration (R36.2.2).
+14. **Task `init` placement.** Reloaded `init` does not reject an
+    already-active platform at mmrpc level; the failure appears only in
+    `status`. Bound: mmrpc-level `PlatformIsAlreadyActivated`, HTTP 400
+    (R36.6.3).
+15. **Task in-progress values.** Reloaded reports `ActivatingCoin` and then
+    `RequestingWalletBalance`. Bound: `ActivatingCoin` only (R36.6.4).
+
+> **Code-quality finding (informative; trigger: a code comment states the
+> problem).** The reference treats every Tendermint activation request as a
+> non-hardware request, acknowledged in the reference as a placeholder until a
+> device policy exists. Observable consequence: a request carrying
+> `priv_key_policy: "Trezor"` silently activates with the context key instead of
+> being refused. Reloaded binds the reference behaviour (R36.1.2) for parity;
+> proposed hardening for both lineages: refuse a hardware `priv_key_policy` on
+> Tendermint with `UnexpectedDeviceActivationPolicy` once the maintainer accepts
+> that deviation.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** In the reference, a malformed `WithPubkey` key (a `value` that is
+> not an array of byte integers, or bytes of the wrong length for the key type)
+> aborts request handling with a panic rather than producing a request-parse
+> error, and a WalletConnect activation assumes the WalletConnect context
+> exists and aborts otherwise. Reloaded shall instead return `InvalidRequest`
+> (R36.1.3) and `PlatformCoinCreationError` respectively.
+
+> **Code-quality finding (informative; trigger: apparent with little extra
+> effort).** In the reference's HD-wallet mode, the activated key pair pairs the
+> derived private key with the wallet's *root* public key, while the account
+> address is derived from the derived private key. Anything that exposes or
+> embeds the coin's public key (transaction signer information, public-key
+> queries) is then inconsistent with the activated address. Proposed fix for
+> Reloaded: derive the public key from the activated private key; verify with an
+> HD-mode signing test before relying on HD Tendermint swaps.
+
+---
+
+## 36.8 Tests
+
+T36.1 *Unresponsive-node mapping.* With a `nodes` list whose every endpoint
+refuses connections, `enable_tendermint_with_assets` returns HTTP 500,
+`error_type` `PlatformCoinCreationError`, and `error_data` an object with
+exactly the string members `ticker` (= requested ticker) and `error`.
+
+T36.2 *Empty `nodes`.* `nodes: []` yields HTTP 500 `PlatformCoinCreationError`
+with object `error_data` `{ticker, error}`; no coin is registered.
+
+T36.3 *`decimals` bound.* A `TENDERMINT` config with `decimals` 19 yields HTTP 500
+`PlatformCoinCreationError` (not `CoinProtocolParseError`).
+
+T36.4 *Missing `tokens_params`.* A request without `tokens_params` is rejected
+with the request-parse error of ch. 55 §55.1.
+
+T36.5 *Platform mismatch.* An inline token whose `platform` names another
+Tendermint coin yields HTTP 400 `PlatformCoinMismatch` with no `error_data`
+key, and neither the platform nor any token is registered.
+
+T36.6 *Custom token.* An inline token with a `protocol` for a ticker present in
+the configuration yields HTTP 500 `CustomTokenError` with `error_data`
+`{"DuplicateTickerInConfig": {"ticker_in_config": <ticker>}}`; the same on
+`enable_tendermint_token` yields HTTP 400.
+
+T36.7 *Protocol payload shape.* `UnexpectedPlatformProtocol` for a UTXO-protocol
+ticker serializes `error_data.protocol` as `{"type": "UTXO"}` (no `protocol_data`
+key) when the UTXO coin has no protocol data; for an
+`ERC20`-protocol ticker as `{"type": "ERC20", "protocol_data": {...}}`.
+
+T36.8 *`activation_params` forms.* Each of the three forms of R36.1.3
+deserializes to the intended policy; a key `value` given as a string, a key
+`type` other than `secp256k1`/`ed25519`, and a wrong-length key each yield
+`InvalidRequest` (no panic).
+
+T36.9 *Result views.* With `get_balances` true the result has `balance` and a
+ticker-keyed `tokens_balances` object and no `tokens_tickers`; with false it has
+`tokens_tickers` and neither balance member; all balances are strings and
+`unspendable` is `"0"`.
+
+T36.10 *Token balance failure.* `enable_tendermint_token` against a platform
+whose nodes are all unreachable returns HTTP 500 `CouldNotFetchBalance` with a
+string `error_data`, and the platform's token set is unchanged afterwards.
+
+T36.11 *Token platform errors.* `enable_tendermint_token` for a token whose
+platform is inactive returns HTTP 400 `PlatformCoinIsNotActivated` whose
+`error_data` is the platform ticker; for a platform that is an active
+non-Tendermint coin returns HTTP 500 `UnsupportedPlatformCoin` with
+`{platform_coin_ticker, token_ticker}`.
+
+T36.12 *Task placement.* `task::enable_tendermint::init` for an already-active
+platform returns HTTP 400 mmrpc-level `PlatformIsAlreadyActivated`; for an
+unknown ticker it returns a `task_id`, and `status` then returns HTTP 200
+`{"status":"Error","details":{..., "error_type":"PlatformConfigIsNotFound",
+"error_data":"<ticker>"}}`.
+
+T36.13 *Task in-progress value.* While a Tendermint task is running its status
+`details` is the string `ActivatingCoin`.
+
+T36.14 *Host-only naming and credentials (R36.5A.1, R36.5A.2).* Activate with
+two nodes whose URLs carry userinfo, a path segment and a query string, both
+refusing connections. The activation error, each node-selection log line and
+the debug form of the coin's node list and of the parsed request contain each
+node's host-only form and none of the userinfo, path or query parts. A node
+URL that cannot be used fails activation with an error that does not contain
+the configured string. Run on the native build; on the browser build once a
+browser test harness exists.
+
+T36.15 *No response bodies in logs (R36.5A.3).* With log capture at the most
+verbose level, a request whose answer carries a marker string succeeds, and
+no captured line contains the marker. A line that reports the answer may
+carry its size.
+
+## 36.9 Deferred Work
+
+D36.1 Hardware-wallet (Trezor/Ledger-native) Tendermint activation is not part
+of the reference and is not specified here.
+
+D36.2 The task-managed single-token family (`task::enable_tendermint_token::*`)
+is not routed by the reference and is deferred.
+
+D36.3 *(Resolved 2026-10-28, maintainer decision, for Tendermint; the second
+question resolved 2026-10-29, maintainer decision.)* *Node response bodies in logs.* R36.5A.3 forbids
+response bodies in log lines at every level. A looser reading would allow them
+at trace level only. The stricter reading was taken because a trace level can
+be switched on in the field, and a body then reaches a shared log. The
+maintainer kept the rule: a log line names a body's size only. The second
+question was whether the same rule should bind the other node families,
+whose error texts carried the body of a non-success answer. The maintainer
+decided on 2026-10-29 that it does, for error texts as well as log lines: the
+native UTXO daemon's errors carry the daemon's error code and message and the
+body's size only (chapter 38 R38.6.9b item 4), and so do the Sia wallet
+daemon's (chapter 20 R-N3).
+
+## 36.10 Baseline Verifications
+
+V36.1 The dispatcher routes `enable_tendermint_with_assets`,
+`enable_tendermint_token` and the four `task::enable_tendermint::*` strings on
+native and WASM.
+
+V36.2 The legacy `enable` path still rejects the `TENDERMINT` and
+`TENDERMINTTOKEN` protocols (activation only through this chapter's methods).
+
+## 36.11 Acceptance criteria
+
+- `enable_tendermint_with_assets` accepts the R36.1.2 fields (flat), the three
+  `activation_params` forms, and returns the R36.1.5 result in both
+  `get_balances` views.
+- Every failure class of R36.1.6 / R36.2.4 yields the bound `error_type`,
+  `error_data` shape and HTTP status; unresponsive nodes yield
+  `PlatformCoinCreationError` (500) on the platform method and
+  `CouldNotFetchBalance` (500) on the token method.
+- The `TENDERMINT` / `TENDERMINTTOKEN` `protocol_data` contract of §36.3 holds,
+  with `decimals > 18` failing as `PlatformCoinCreationError`.
+- `task::enable_tendermint::init` rejects only an already-active platform at
+  mmrpc level; all other activation errors appear at status level with the same
+  shapes; in-progress `details` is `ActivatingCoin`.
+- The Tests of §36.8 pass.
+
+## 36.12 External References
+
+- Komodo DeFi Framework API documentation: `enable_tendermint_with_assets`,
+  `enable_tendermint_token`, `task::enable_tendermint`, common structures
+  (activation, wallet), error-type catalogue.
+- Cosmos SDK / Tendermint RPC, ICS-20 IBC transfer, BIP-173 bech32.
+
+## 36.13 Provenance Footer
+
+- *Inputs:* the published Komodo DeFi Framework API documentation (the
+  Tendermint/token activation method family, its request/response JSON field
+  names, examples and error discriminants); the Cosmos/Tendermint RPC endpoint
+  contract, IBC denom and channel identification, the Cosmos secp256k1
+  public-key/account-id model, and CAIP-style chain identification; reloaded's
+  existing Tendermint coin/token types and activation code (§36.5, §36.7);
+  [Chapter 18](18-tendermint-ibc-htlc.md); [Chapter 22](22-walletconnect-v2.md);
+  [Chapter 35](35-evm-v2-activation-rpcs.md);
+  [Chapter 48](48-platform-coin-task-activation.md);
+  [Chapter 55](55-coin-activation-wire-contract.md).
+- *Permitted-input classes used:* external public specification (the
+  published KDF API documentation; the Cosmos/Tendermint RPC/IBC/secp256k1/
+  CAIP specifications); baseline and as-built source (reloaded's Tendermint
+  coin/token types and activation code); cross-chapter contracts (Chapters 18,
+  22, 35, 48, 55); interop / wire-and-API-bound reuse (R29/R31) for the
+  dictated method strings, JSON field names and error discriminants.
+- *Sibling-allowlist consultations:* [Chapter 18](18-tendermint-ibc-htlc.md),
+  [Chapter 22](22-walletconnect-v2.md), [Chapter 35](35-evm-v2-activation-rpcs.md),
+  [Chapter 48](48-platform-coin-task-activation.md),
+  [Chapter 55](55-coin-activation-wire-contract.md).
+- *Forbidden corpus:* consulted, under the chapter-01 two-team clean-room
+  workflow, at the GLEEC KDF tags `v3.0.0-beta` (reference) and `v2.6.0-beta`
+  (legacy comparison), for upstream wire parity of the Tendermint activation
+  methods only -- specifically the request-field acceptance of R36.1.2-R36.1.3,
+  the failure -> `error_type` mapping, `error_data` shapes, HTTP statuses and
+  placement of R36.1.6, R36.2.4 and R36.6.3, the `decimals` failure class of
+  R36.3.2, and the in-progress value of R36.6.4. No source text, private
+  identifier, internal decomposition, or error/log string literal was carried
+  into this chapter; the code-quality findings of §36.7 are restated as
+  behaviour.
+- *Clean-context addition (2026-10-28, forbidden corpus not consulted):*
+  §36.5A (R36.5A.1 -- R36.5A.3 and the status note), T36.14, T36.15 and D36.3
+  are Reloaded-original. They rest on the maintainer decision of 2026-10-26
+  (host-only node naming everywhere, except the RPC wire dump, which keeps its
+  own secrets switch), his decision of 2026-10-28 on D36.3 and this
+  repository's own code. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required. The resolution of D36.3's second question (2026-10-29, decision
+  AU) was added on the same terms.

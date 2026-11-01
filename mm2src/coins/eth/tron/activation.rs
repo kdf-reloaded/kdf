@@ -14,9 +14,10 @@
 
 use super::api::TronApiClient;
 use super::{Network, TronAddress, TRX_DECIMALS};
+use crate::node_url::host_only;
 
-use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimitV2, EthSigner,
-                 SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
+use crate::eth::{rpc_event_handlers_for_eth_transport, EthCoin, EthCoinImpl, EthCoinType, EthGasLimit, EthGasLimitV2,
+                 EthSigner, SwapGasFeePolicy, ETH_GAS_STATION_DECIMALS};
 use crate::{CoinProtocol, DerivationMethod, HistorySyncState};
 
 use common::log::warn;
@@ -80,7 +81,8 @@ pub async fn tron_coin_from_conf_and_request(
     // Validate URLs eagerly so misconfiguration surfaces at activation time.
     for url in &urls {
         if http::Uri::from_str(url).is_err() {
-            return Err(format!("TRON node URL '{url}' is not a valid URI"));
+            // Never echo the configured string: it may carry an API key (CRD ch.35 R35.1.14).
+            return Err(format!("TRON node URL '{}' is not a valid URI", host_only(url)));
         }
     }
 
@@ -117,7 +119,7 @@ pub async fn tron_coin_from_conf_and_request(
     // never dispatch RPCs through this provider; it exists only to satisfy
     // the shared `EthCoinImpl` shape.
     let event_handlers = rpc_event_handlers_for_eth_transport(ctx, ticker.to_string());
-    let web3 = crate::eth::alloy_compat::build_provider(urls, event_handlers)
+    let web3 = crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes(ticker, urls), event_handlers)
         .map_err(|e| format!("Failed to build placeholder alloy provider for TRON: {e}"))?;
 
     if req["swap_contract_address"].is_string() {
@@ -158,11 +160,17 @@ pub async fn tron_coin_from_conf_and_request(
         logs_block_range: 0,
         derivation_method: DerivationMethod::Iguana(my_address),
         swap_v2_contracts: None,
+        // TRON has no V1 or V2 EVM swap and no EVM gas model (energy and bandwidth instead): the gas-limit
+        // blocks of CRD ch. 57 do not apply, so the defaults stand.
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        // No EVM estimation on TRON, so no multiplier (CRD R57.5.3b).
+        estimate_gas_mult: None,
         tron_api: Some(tron_api),
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
     };
     Ok(EthCoin(Arc::new(coin)))
 }
@@ -241,6 +249,22 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.contains("not a valid URI"));
+    }
+
+    #[tokio::test]
+    async fn invalid_url_error_does_not_echo_the_configured_string() {
+        let ctx = mm2_core::mm_ctx::MmCtxBuilder::new().into_mm_arc();
+        let conf = json::json!({});
+        let req = json::json!({"urls": ["https://user:secret@bad host/APIKEY?token=X"]});
+        let err = tron_coin_from_conf_and_request(&ctx, "TRX", &conf, &req, &priv_key(), CoinProtocol::TRX {
+            network: Network::Mainnet,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.contains("not a valid URI"), "the invalid-URI reason is missing");
+        for secret in ["user", "secret", "APIKEY", "token=X", "bad host"] {
+            assert!(!err.contains(secret), "a credential part is rendered");
+        }
     }
 
     #[tokio::test]

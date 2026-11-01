@@ -540,7 +540,8 @@ fn build_trezor_coin(
     signer: EthSigner,
     derivation_method: DerivationMethod<Address, EthHDWallet>,
 ) -> EthCoin {
-    let web3 = crate::eth::alloy_compat::build_provider(vec![url], vec![]).unwrap();
+    let web3 =
+        crate::eth::alloy_compat::build_provider(crate::node_url::listed_nodes("TEST", vec![url]), vec![]).unwrap();
     EthCoin(Arc::new(EthCoinImpl {
         coin_type,
         decimals: 18,
@@ -565,11 +566,14 @@ fn build_trezor_coin(
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
         chain_id: Some(1),
         logs_block_range: DEFAULT_LOGS_BLOCK_RANGE,
         derivation_method,
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
     }))
 }
 

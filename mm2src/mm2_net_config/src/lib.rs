@@ -70,12 +70,22 @@ pub trait NetConfig: Send + Sync + 'static {
     fn dex_fee_share(&self) -> BigRational { BigRational::from_integer(1.into()) }
 
     /// Hex-encoded compressed public key for the burn address.
-    /// Only meaningful when `burn_enabled()` returns true.
+    ///
+    /// This is also the no-fee waiver key (CRD ch.08 R15C / ch.16 R7): a
+    /// taker whose taker-coin swap public key equals this value pays no DEX
+    /// fee, independently of `burn_enabled()`. MUST be non-empty on both
+    /// production networks.
     fn burn_addr_pubkey(&self) -> &'static str { "" }
 
     /// Raw bytes of the burn address public key (decoded from hex at startup).
-    /// Only meaningful when `burn_enabled()` returns true.
+    /// See `burn_addr_pubkey` for the no-fee waiver semantics.
     fn burn_addr_raw_pubkey(&self) -> &'static [u8] { &[] }
+
+    /// Version-two-protocol no-fee ticker set (CRD ch.16 R12B). If the maker
+    /// or taker coin's ticker is in this set, a version-two dex-fee
+    /// computation yields `NoFee`. Empty by default; `["KMD"]` on netid 8762,
+    /// empty on netid 6133.
+    fn no_fee_tickers_v2(&self) -> &'static [&'static str] { &[] }
 
     // ── Seed Nodes ───────────────────────────────────────────────────
 
@@ -165,9 +175,15 @@ mod tests {
         let cfg = net_config_for(8762).unwrap();
         assert!(cfg.burn_enabled());
         assert_eq!(cfg.dex_fee_share(), BigRational::new(3.into(), 4.into()));
-        // Netid 8762 burns KMD directly via OP_RETURN and has no account-burn key.
-        assert!(cfg.burn_addr_pubkey().is_empty());
-        assert!(cfg.burn_addr_raw_pubkey().is_empty());
+        // Netid 8762 burns KMD directly via OP_RETURN and has no account-burn
+        // key, but the burn-address key doubles as the no-fee waiver key
+        // (CRD ch.08 R15C / ch.16 R7) and MUST be non-empty (issue #11).
+        const EXPECTED_BURN_PUBKEY: &str = "0369aa10c061cd9e085f4adb7399375ba001b54136145cb748eb4c48657be13153";
+        assert_eq!(cfg.burn_addr_pubkey(), EXPECTED_BURN_PUBKEY);
+        let decoded = hex::decode(cfg.burn_addr_pubkey()).expect("burn pubkey hex should be valid");
+        assert_eq!(cfg.burn_addr_raw_pubkey(), decoded.as_slice());
+        // Version-two KMD pairs are exempt from the dex fee (ch.16 R12B).
+        assert_eq!(cfg.no_fee_tickers_v2(), &["KMD"]);
     }
 
     #[test]
@@ -180,6 +196,8 @@ mod tests {
         assert!(!cfg.burn_addr_raw_pubkey().is_empty());
         let decoded = hex::decode(cfg.burn_addr_pubkey()).expect("burn pubkey hex should be valid");
         assert_eq!(cfg.burn_addr_raw_pubkey(), decoded.as_slice());
+        // No version-two ticker exemption on netid 6133 (ch.16 R12B).
+        assert!(cfg.no_fee_tickers_v2().is_empty());
     }
 
     #[test]

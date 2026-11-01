@@ -8,16 +8,13 @@ name: Build WASM
 #   - `cargo check -p coins`        (P7.1.a)
 #   - `cargo check -p mm2_db`       (P7.1.a)
 #   - `cargo check -p mm2_main`     (P7.1.e — gated by P7.1.b–d fixes)
-#   - `wasm-pack build mm2src/mm2_main --target web` (P7.1.e)
+#   - `wasm-pack build mm2src/mm2_main --target web` in the `build` job, which
+#     produces the actual WASM artifact
 #
 # Build/test toolchain is stable per `rust-toolchain.toml`; rustfmt
 # is unrelated to this workflow.
 
 on:
-  push:
-    branches: [ reloaded-gplv2-base ]
-  pull_request:
-    branches: [ reloaded-gplv2-base ]
   workflow_dispatch:
     inputs:
       profile:
@@ -87,3 +84,76 @@ jobs:
       - name: cargo check mm2_main (wasm32)
         shell: bash
         run: cargo check --target wasm32-unknown-unknown -p mm2_main
+
+  # The real WASM artifact. `wasm-pack build` was present until 4a54d4415
+  # (2026-08-05, "ci: replace wasm-pack with wasm build check"), which removed it
+  # and left only the `cargo check` steps above - so the umbrella "all platforms"
+  # builds that call this workflow produced no WASM bundle between 2026-08-05 and
+  # its restoration in #26, while still reporting success.
+  #
+  # The restored job ran `continue-on-error` while it was unproven. It is now
+  # proven: `wasm-pack build mm2src/mm2_main --target web --dev` builds the
+  # kdflib_bg.wasm bundle + JS bindings cleanly on the pinned stable 1.98.0
+  # toolchain (the historical getrandom-0.3 wasm breakage is already handled by
+  # .cargo/config.toml's `getrandom_backend="wasm_js"` cfg; only unused-import
+  # warnings remain, which do not fail the build). `continue-on-error` has
+  # therefore been removed so this job actually guards the WASM leg of
+  # staging-build.yml, dev-build.yml and dev-build-rpc.yml (its only callers;
+  # release.yml has no WASM leg) instead of letting a broken WASM build report
+  # success. build-wasm.yml has no PR trigger, so the first
+  # clean-runner confirmation is a `workflow_dispatch`.
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Add wasm32 target
+        shell: bash
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          if ! command -v wasm-pack >/dev/null 2>&1; then
+            curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          fi
+          wasm-pack --version
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: wasm32-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: wasm-pack build mm2_main
+        shell: bash
+        run: |
+          PROFILE_FLAG="--dev"
+          if [ "${{ inputs.profile }}" = "release" ]; then
+            PROFILE_FLAG="--release"
+          fi
+          FEATURES_FLAG=""
+          if [ -n "${{ inputs.features }}" ]; then
+            FEATURES_FLAG="--features ${{ inputs.features }}"
+          fi
+          wasm-pack build mm2src/mm2_main \
+            --target web \
+            --out-dir ../../target/wasm-pack-out \
+            $PROFILE_FLAG \
+            -- $FEATURES_FLAG
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: kdf-wasm32-unknown-unknown
+          path: target/wasm-pack-out
+          if-no-files-found: error

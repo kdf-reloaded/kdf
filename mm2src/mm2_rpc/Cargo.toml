@@ -1,6 +1,7 @@
 [package]
 name = "mm2_rpc"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -10,7 +11,7 @@ common = { path = "../common" }
 mm2_err_handle = { path = "../mm2_err_handle" }
 derive_more = "0.99"
 futures = { version = "0.3", package = "futures", features = ["compat", "async-await", "thread-pool"] }
-http = "0.2"
+http = "1"
 serde = "1"
 serde_json = { version = "1.0", features = ["preserve_order", "raw_value"] }
 ser_error = { path = "../derives/ser_error" }

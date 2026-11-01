@@ -34,9 +34,37 @@ pub enum TrezorError {
     Internal(String),
 }
 
-#[derive(Debug, Display)]
+/// The hardware RPC error names of the public error-types catalogue. They are the string payload of the
+/// `HwError` discriminant of the hardware-wallet activation errors (CRD ch. 55 R55.2.17).
+#[derive(Clone, Copy, Debug, Display, PartialEq, Eq, Serialize)]
+pub enum HwRpcError {
+    NoTrezorDeviceAvailable,
+    FoundMultipleDevices,
+    FoundUnexpectedDevice,
+    InvalidPin,
+    UnexpectedMessage,
+    ButtonExpected,
+    DataError,
+    PinExpected,
+    InvalidSignature,
+    ProcessError,
+    NotEnoughFunds,
+    NotInitialized,
+    WipeCodeMismatch,
+    InvalidSession,
+    FirmwareError,
+    FailureMessageNotFound,
+    UserCancelled,
+    PongMessageMismatch,
+}
+
+#[derive(Clone, Debug, Display)]
 pub enum OperationFailure {
     InvalidPin,
+    /// A failure the device reported with a known failure code. The payload is never
+    /// [`HwRpcError::InvalidPin`] (that is [`OperationFailure::InvalidPin`]).
+    #[display(fmt = "Operation failed on the device: {}", _0)]
+    Device(HwRpcError),
     /// TODO expand it to other types.
     #[display(fmt = "Operation failed due to unknown reason: {}", _0)]
     Other(String),
@@ -44,11 +72,29 @@ pub enum OperationFailure {
 
 impl From<Failure> for OperationFailure {
     fn from(failure: Failure) -> Self {
-        match failure.code.and_then(|code| FailureType::try_from(code).ok()) {
+        let code = match failure.code {
+            Some(code) => code,
+            None => return OperationFailure::Device(HwRpcError::FailureMessageNotFound),
+        };
+        match FailureType::try_from(code).ok() {
             Some(FailureType::FailurePinInvalid) | Some(FailureType::FailurePinMismatch) => {
                 OperationFailure::InvalidPin
             },
-            _ => OperationFailure::Other(format!("{:?}", failure)),
+            Some(FailureType::FailureUnexpectedMessage) => OperationFailure::Device(HwRpcError::UnexpectedMessage),
+            Some(FailureType::FailureButtonExpected) => OperationFailure::Device(HwRpcError::ButtonExpected),
+            Some(FailureType::FailureDataError) => OperationFailure::Device(HwRpcError::DataError),
+            Some(FailureType::FailureActionCancelled) | Some(FailureType::FailurePinCancelled) => {
+                OperationFailure::Device(HwRpcError::UserCancelled)
+            },
+            Some(FailureType::FailurePinExpected) => OperationFailure::Device(HwRpcError::PinExpected),
+            Some(FailureType::FailureInvalidSignature) => OperationFailure::Device(HwRpcError::InvalidSignature),
+            Some(FailureType::FailureProcessError) => OperationFailure::Device(HwRpcError::ProcessError),
+            Some(FailureType::FailureNotEnoughFunds) => OperationFailure::Device(HwRpcError::NotEnoughFunds),
+            Some(FailureType::FailureNotInitialized) => OperationFailure::Device(HwRpcError::NotInitialized),
+            Some(FailureType::FailureWipeCodeMismatch) => OperationFailure::Device(HwRpcError::WipeCodeMismatch),
+            Some(FailureType::FailureInvalidSession) => OperationFailure::Device(HwRpcError::InvalidSession),
+            Some(FailureType::FailureFirmwareError) => OperationFailure::Device(HwRpcError::FirmwareError),
+            None => OperationFailure::Other(format!("{:?}", failure)),
         }
     }
 }

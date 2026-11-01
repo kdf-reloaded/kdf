@@ -158,7 +158,7 @@ mod tests {
     /// Builds a distinct pubkey hash from a single repeated byte, via the same hex
     /// representation the RPC layer accepts.
     fn pubkey(byte: u8) -> H256Json {
-        let hex: String = std::iter::repeat(format!("{:02x}", byte)).take(32).collect();
+        let hex: String = format!("{:02x}", byte).repeat(32);
         json::from_value(json!(hex)).unwrap()
     }
 

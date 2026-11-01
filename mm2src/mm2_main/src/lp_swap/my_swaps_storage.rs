@@ -480,20 +480,20 @@ mod wasm_tests {
 
     #[wasm_bindgen_test]
     async fn test_my_recent_swaps() {
-        const COINS: [&str; 3] = ["RICK", "MORTY", "KMD"];
+        const COINS: [&str; 3] = ["DOC", "MARTY", "KMD"];
 
         register_wasm_log();
 
         let filters = MySwapsFilter {
-            my_coin: Some("RICK".to_owned()),
-            other_coin: Some("MORTY".to_owned()),
+            my_coin: Some("DOC".to_owned()),
+            other_coin: Some("MARTY".to_owned()),
             from_timestamp: Some(2000),
             to_timestamp: Some(3000),
         };
         test_my_recent_swaps_impl(1000, &COINS, 1000..5000, filters).await;
 
         let filters = MySwapsFilter {
-            my_coin: Some("RICK".to_owned()),
+            my_coin: Some("DOC".to_owned()),
             other_coin: None,
             from_timestamp: Some(2000),
             to_timestamp: Some(3000),
@@ -501,7 +501,7 @@ mod wasm_tests {
         test_my_recent_swaps_impl(100, &COINS, 1000..5000, filters).await;
 
         let filters = MySwapsFilter {
-            my_coin: Some("RICK".to_owned()),
+            my_coin: Some("DOC".to_owned()),
             other_coin: None,
             from_timestamp: Some(2000),
             to_timestamp: None,

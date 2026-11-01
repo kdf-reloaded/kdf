@@ -1,6 +1,7 @@
 [package]
 name = "shared_ref_counter"
 version = "0.1.0"
+license = "GPL-2.0-only"
 edition = "2021"
 
 [features]

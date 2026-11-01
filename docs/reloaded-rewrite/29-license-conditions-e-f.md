@@ -1,5 +1,12 @@
 # Chapter 29 -- Treatment of License Conditions (e) and (f)
 
+**Status:** legal-position.
+
+The chapter records this project's legal position on the additional
+copyright-holder conditions the upstream project appended to its
+license after the chapter-02-anchored baseline date, and how the
+post-baseline portion of this project relates to them.
+
 ## 29.0 Executive Summary
 
 A short time after the baseline (see
@@ -22,7 +29,7 @@ statements and developed below:
    project inherits only the baseline tree, which was distributed
    under GPL version 2; it has incorporated no post-baseline upstream
    material (the prohibition in
-   [01-clean-room-rules.md §3.1](01-clean-room-rules.md#3-forbidden-inputs)).
+   [01-clean-room-rules.md §1.4](01-clean-room-rules.md#14-bound-forbidden-input-classes)).
    The post-baseline conditions therefore have no contractual reach
    into this tree.
 
@@ -58,8 +65,8 @@ two conditions are not the source from which any of that work
 derives.
 
 The chapter is filed under the document set's clean-room rules
-(see [Chapter 01 §8](01-clean-room-rules.md#8-what-to-do-when-a-chapter-cannot-be-written)
-and [§6](01-clean-room-rules.md#6-chapter-shape): the methodology
+(see [Chapter 01 §1.8](01-clean-room-rules.md#18-bound-missing-derivation-discipline)
+and [§1.7](01-clean-room-rules.md#17-bound-per-chapter-shape): the methodology
 treats high-risk regions as requiring an explicit chapter even when
 no legal constraint forces one) even though, as just noted, the two
 conditions are not a legal constraint on this tree. The reason is that the regions they name are exactly
@@ -130,12 +137,13 @@ paths they used at the baseline:
   `dex_fee_addr_raw_pubkey()` for production use.
 
 - [`mm2src/coins/z_coin.rs`](../../mm2src/coins/z_coin.rs) defines
-  `DEX_FEE_OVK` (current line 145, exact bytes `[7; 32]`, exact type
+  `DEX_FEE_OVK` (current line 282, exact bytes `[7; 32]`, exact type
   `OutgoingViewingKey`, exact module path) and is preceded by a
-  multi-paragraph doc comment (lines 125-144) that records the two
+  multi-paragraph doc comment (lines 263-281) that records the two
   independent reasons the value is frozen: the cross-implementation
-  audit convention on the ARRR shielded-fee path, and the
-  legal-audit cross-reference.
+  audit convention on the ARRR shielded-fee path, and continuity of
+  the value, type, and source location inherited from the shared
+  GPLv2 baseline.
 
 The values are byte-identical to the baseline. They are not modified
 by any post-baseline commit; `git log c1d46c0..HEAD --
@@ -165,25 +173,48 @@ globals. It runs through two post-baseline crates:
   registered.
 
 - [`mm2src/mm2_main/src/lp_swap/dex_fee.rs`](../../mm2src/mm2_main/src/lp_swap/dex_fee.rs)
-  -- a small dedicated module (about 100 LOC) holding the
+  -- a small dedicated module (around 250 lines) holding the
   post-baseline fee-emission logic. It exposes a `DexFee` value type
   and the helper functions the V1 and V2 swap state machines call to
   compute fee amounts. The module was authored in this tree as a
   carve-out; the equivalent logic at baseline lived inside the
-  monolithic `lp_swap.rs` file.
+  monolithic `lp_swap.rs` file. [Chapter 8](08-fee-routing-engine.md)
+  binds `dex_fee.rs` and the `DexFee` descriptor as substrate in
+  full; this chapter discusses the module only insofar as it bears
+  on the two preserved constants.
 
 The dependency direction is:
 `maker_swap`, `taker_swap`, `maker_swap_v2`, `taker_swap_v2`,
 `swap_watcher` (all in
 [`mm2src/mm2_main/src/lp_swap/`](../../mm2src/mm2_main/src/lp_swap/))
-call `dex_fee.rs`; `dex_fee.rs` and the swap modules read the fee
-address and related parameters through `mm2_net_config::NetConfig`.
-None of them read the deprecated `common::DEX_FEE_*` constants in
-production. Those constants survive in `common.rs` so that the
-public Rust surface promised by the baseline crate continues to
-resolve, and so that protocol-level interoperability with peers
-running baseline-era binaries remains exact, but they are not the
-source any post-baseline consumer reads.
+call `dex_fee.rs`; `dex_fee.rs` and these five swap-state-machine
+modules read the fee address and related parameters through
+`mm2_net_config::NetConfig`. None of these five modules reads the
+deprecated `common::DEX_FEE_*` constants in production. Those
+constants survive in `common.rs` so that the public Rust surface
+promised by the baseline crate continues to resolve, and so that
+protocol-level interoperability with peers running baseline-era
+binaries remains exact.
+
+**Code-quality finding (informative).** One coin-layer consumer
+below `dex_fee.rs` still reads the deprecated global directly rather
+than resolving it through `NetConfig`: the unspent-transaction-output
+dex-fee output builder for the `DexFee::Standard` case, part of the
+version-two unspent-transaction-output swap path
+([Chapter 15](15-swap-v2-utxo-path.md)) under
+`mm2src/coins/utxo/`, resolves the fee-recipient public key from the
+deprecated `common::DEX_FEE_ADDR_RAW_PUBKEY` global instead of from
+the active network's `NetConfig`. Because that global carries the
+netid-`8762` value, an unspent-transaction-output version-two swap
+running on netid `6133` would build its standard dex-fee output
+against the netid-`8762` fee address rather than netid `6133`'s
+distinct fee address -- the same class of defect the `NetConfig`
+carve-out described above exists to prevent, and a wire-compatibility
+break for any netid-`6133` counterparty validating that output. The
+fix is to thread the active `NetConfig` (or the resolved fee-recipient
+bytes) into that coin-layer function the same way the EVM and
+Tendermint fee-output builders and the five `lp_swap` modules above
+already do, rather than reading the deprecated global.
 
 ### 29.1.5 Why the constants are preserved
 
@@ -238,7 +269,7 @@ fee logic is written from the public protocol description, the
 baseline GPLv2 source, the per-network configuration values that
 each network's operators publish, and nothing else. The
 clean-room-rules forbidden-input rule
-([01-clean-room-rules.md §3](01-clean-room-rules.md#3-forbidden-inputs))
+([01-clean-room-rules.md §1.4](01-clean-room-rules.md#14-bound-forbidden-input-classes))
 applies here as it applies everywhere in the tree; the post-baseline
 upstream `lp_swap.rs` is not consulted.
 
@@ -264,8 +295,14 @@ chapter discusses is:
   fee-emission path) are preserved byte-identically where they are
   values, and independently re-expressed where they are logic;
 - the toxicity check found and removed one stray comment that
-  attributed behaviour to a post-baseline upstream party
-  (commit `760099074`, replaced with a factual design-intent note).
+  attributed behaviour to a post-baseline upstream party, replacing
+  it with a factual design-intent note. The specific commit is
+  tracked in that internal audit's own record, not reproduced here as
+  a hash: this document's project history was checked directly (full
+  and unreachable-object log search) and does not contain a commit
+  matching the hash this chapter previously cited, so citing it here
+  would assert a false sense of independent verifiability this
+  document cannot back up.
 
 The audit conclusions, the package-by-package classifications, and
 the standing methodology are recorded in that internal engineering
@@ -306,7 +343,7 @@ To avoid overstating the legal posture:
   upstream tree. Reachable through the upstream repository at the
   relicensing commit; this chapter does not pin a specific
   upstream-tree path because the project's clean-room rules
-  ([§3](01-clean-room-rules.md#3-forbidden-inputs)) treat
+  ([§1.4](01-clean-room-rules.md#14-bound-forbidden-input-classes)) treat
   post-baseline upstream material as a forbidden input. The license
   document is referenced through its observable existence on a
   public repository.
@@ -326,17 +363,26 @@ To avoid overstating the legal posture:
 
 ## 29.3 Provenance Footer
 
-Drafted against the working tree at the time of writing, baseline
-`c1d46c0c1592faa0860f704008b2b2381bc3840f`. The two value constants
-were verified present at baseline via `git show c1d46c0:` of
-`mm2src/common/common.rs` and `mm2src/coins/z_coin.rs`; the baseline
-filename for the historical `lp_swap.rs` was verified via
-`git ls-tree -r c1d46c0 -- mm2src/`. Present-day file locations were
-verified by `grep` for `DEX_FEE_ADDR_PUBKEY`, `DEX_FEE_OVK`,
-`SUPPORTED_NETIDS`, `net_config_or_panic`, and by directory listing
-of `mm2src/mm2_net_config/src/`. Citations to the internal
-engineering audit refer to the operational audit
-record maintained outside the published document set at the time of
-writing. The chapter does
-not quote from the post-baseline upstream license document; the
-clauses are summarised, not reproduced verbatim.
+- *Inputs:* the baseline workspace at the pinned baseline-revision
+  commit `c1d46c0c1592faa0860f704008b2b2381bc3840f` of chapter 02
+  (the two value constants verified present at baseline via
+  `git show c1d46c0:` of `mm2src/common/common.rs` and
+  `mm2src/coins/z_coin.rs`; the baseline filename for the historical
+  `lp_swap.rs` verified via `git ls-tree -r c1d46c0 -- mm2src/`); the
+  present-day working tree, re-verified for this revision by `grep`
+  for `DEX_FEE_ADDR_PUBKEY`, `DEX_FEE_OVK`, `SUPPORTED_NETIDS`,
+  `net_config_or_panic`, and `dex_fee_standard_output`, and by
+  directory listing of `mm2src/mm2_net_config/src/`; chapter 02 (the
+  pinned baseline anchor); chapter 08 (the `dex_fee.rs` / `DexFee`
+  substrate this chapter discusses); chapter 06 (the network-identity
+  and `NetConfig` registry the preserved constants are resolved
+  against in production).
+- *Permitted-input classes used:* the baseline itself (chapter 01
+  R1); the present-day working tree, quoted as evidence under the
+  legal-position carve-out of chapter 01 R11.
+- *Sibling-allowlist consultations:* none.
+- *Forbidden corpus:* not consulted. Citations to the internal
+  engineering audit refer to an operational record maintained outside
+  the published document set. The chapter does not quote from the
+  post-baseline upstream license document; the two clauses are
+  summarised, not reproduced verbatim.

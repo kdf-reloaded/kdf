@@ -151,6 +151,13 @@ pub async fn init_channel_manager(
                 "electrum".into(),
             ))
         },
+        #[cfg(not(target_arch = "wasm32"))]
+        UtxoRpcClientEnum::LightWalletD(_) => {
+            return MmError::err(EnableLightningError::UnsupportedMode(
+                "Lightning network".into(),
+                "electrum".into(),
+            ))
+        },
     };
     let best_header = get_best_header(&rpc_client).await?;
     platform.update_best_block_height(best_header.block_height());

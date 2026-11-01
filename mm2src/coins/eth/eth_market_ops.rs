@@ -1,6 +1,7 @@
 //! MarketCoinOps trait implementation for EthCoin.
 
 use super::*;
+use crate::one_smallest_unit;
 
 #[cfg_attr(test, mockable)]
 impl MarketCoinOps for EthCoin {
@@ -92,7 +93,9 @@ impl MarketCoinOps for EthCoin {
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();
-            let pending = try_s!(assert_send_future(provider.send_raw_transaction(&bytes)).await);
+            let pending = assert_send_future(provider.send_raw_transaction(&bytes))
+                .await
+                .map_err(|e| selfi.broadcast_error_text(e.to_string()))?;
             let hash = *pending.tx_hash();
             Ok(format!("{:02x}", hash))
         };
@@ -107,7 +110,9 @@ impl MarketCoinOps for EthCoin {
         let selfi = self.clone();
         let fut = async move {
             let provider = selfi.alloy_provider();
-            let pending = try_s!(assert_send_future(provider.send_raw_transaction(&bytes)).await);
+            let pending = assert_send_future(provider.send_raw_transaction(&bytes))
+                .await
+                .map_err(|e| selfi.broadcast_error_text(e.to_string()))?;
             let hash = *pending.tx_hash();
             Ok(format!("{:02x}", hash))
         };
@@ -331,10 +336,7 @@ impl MarketCoinOps for EthCoin {
 
     fn min_tx_amount(&self) -> BigDecimal { BigDecimal::from(0) }
 
-    fn min_trading_vol(&self) -> MmNumber {
-        let pow = self.decimals / 3;
-        MmNumber::from(1) / MmNumber::from(10u64.pow(pow as u32))
-    }
+    fn min_trading_vol(&self) -> MmNumber { one_smallest_unit(self.decimals) }
 
     fn sign_raw_tx(&self, args: &SignRawTransactionRequest) -> RawTransactionFut {
         let coin = self.clone();

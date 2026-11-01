@@ -11,7 +11,10 @@
 //! surfaced through the supplied [`TrezorConnectProcessor`], which the caller
 //! wires to the activation task's status / user-action vocabulary.
 
+use super::eth_activation::{build_eth_hd_wallet, eth_coin_from_params_with_trezor, eth_full_derivation_path,
+                            EthCoinActivationParams, EthCoinBuildError};
 use super::*;
+use crate::rpc_command::get_my_address::PathToAddress;
 use crate::CryptoCtx;
 use crypto::trezor::{ProcessTrezorResponse, TrezorProcessingError};
 use crypto::{DerivationPath, HwProcessingError, Secp256k1ExtendedPublicKey, TrezorConnectProcessor};
@@ -50,34 +53,37 @@ pub async fn eth_coin_from_conf_and_request_with_trezor(
     address: Address,
     public: Public,
 ) -> Result<EthCoin, String> {
-    let signer = EthSigner::Trezor(EthTrezorSigner {
+    let params = try_s!(EthCoinActivationParams::from_legacy_request(req, conf));
+    let signer = EthTrezorSigner {
         derivation_path,
         address,
         public,
-    });
-    super::eth_coin_from_conf_and_request_with_signer(ctx, ticker, conf, req, signer, protocol).await
+    };
+    eth_coin_from_params_with_trezor(
+        ctx,
+        ticker,
+        conf,
+        &params,
+        signer,
+        DerivationMethod::Iguana(address),
+        protocol,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
-/// Activate an EVM platform coin under the Trezor signing policy: connect to the
-/// device (surfacing connect / PIN / passphrase through `processor`), read the
-/// enabled address + account public key at the default EVM path from the device,
-/// and build the [`EthCoin`] with `EthSigner::Trezor` (R50.1 / R50.4). No local
-/// secret is derived or stored.
-pub async fn eth_coin_activate_with_trezor<Processor>(
+/// Connect to the device (surfacing connect / PIN / passphrase through `processor`) and read the
+/// address and the account public key at `derivation_path`. The device-reported public key must map
+/// to the reported address before it is bound into a coin's signer.
+async fn read_device_address<Processor>(
     ctx: &MmArc,
-    ticker: &str,
-    conf: &Json,
-    req: &Json,
-    protocol: CoinProtocol,
+    derivation_path: &DerivationPath,
     processor: &Processor,
-) -> Result<EthCoin, String>
+) -> Result<(Address, Public), String>
 where
     Processor: TrezorConnectProcessor + Sync,
     Processor::Error: std::fmt::Display,
 {
-    let derivation_path =
-        DerivationPath::from_str(EVM_TREZOR_DEFAULT_PATH).map_err(|e| format!("Invalid EVM derivation path: {}", e))?;
-
     let crypto_ctx = CryptoCtx::from_ctx(ctx).map_err(|e| e.to_string())?;
     let hw_ctx = crypto_ctx
         .hw_ctx()
@@ -124,6 +130,91 @@ where
     if super::public_to_address(&public) != address {
         return Err("Device EVM public key does not match the reported address".to_owned());
     }
+    Ok((address, public))
+}
 
+/// Activate an EVM platform coin under the Trezor signing policy: connect to the
+/// device (surfacing connect / PIN / passphrase through `processor`), read the
+/// enabled address + account public key at the default EVM path from the device,
+/// and build the [`EthCoin`] with `EthSigner::Trezor` (R50.1 / R50.4). No local
+/// secret is derived or stored.
+///
+/// The coin built here is bound to the single default address (no HD wallet);
+/// [`eth_coin_activate_with_trezor_hd`] is the HD form `task::enable_eth` uses.
+pub async fn eth_coin_activate_with_trezor<Processor>(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    req: &Json,
+    protocol: CoinProtocol,
+    processor: &Processor,
+) -> Result<EthCoin, String>
+where
+    Processor: TrezorConnectProcessor + Sync,
+    Processor::Error: std::fmt::Display,
+{
+    let derivation_path =
+        DerivationPath::from_str(EVM_TREZOR_DEFAULT_PATH).map_err(|e| format!("Invalid EVM derivation path: {}", e))?;
+    let (address, public) = read_device_address(ctx, &derivation_path, processor).await?;
     eth_coin_from_conf_and_request_with_trezor(ctx, ticker, conf, req, protocol, derivation_path, address, public).await
+}
+
+/// Activate an EVM platform coin under the Trezor signing policy as an HD wallet whose root identity is
+/// the connected device (CRD R50.1, R35.3.2): the enabled address is the one `path_to_address` selects below
+/// the coin's configured `derivation_path`, read from the device.
+///
+/// The checks that need no device exchange run first: an initialized hardware-wallet context, hardware
+/// support declared by the coin configuration (`trezor_coin`), and a usable `derivation_path`.
+///
+/// # Errors
+///
+/// [`EthCoinBuildError::InvalidPayload`] for an unusable `derivation_path`, [`EthCoinBuildError::Transport`]
+/// when no node answers, and [`EthCoinBuildError::Internal`] for every hardware failure.
+pub async fn eth_coin_activate_with_trezor_hd<Processor>(
+    ctx: &MmArc,
+    ticker: &str,
+    conf: &Json,
+    params: &EthCoinActivationParams,
+    protocol: CoinProtocol,
+    path_to_address: &PathToAddress,
+    gap_limit: u32,
+    processor: &Processor,
+) -> Result<EthCoin, MmError<EthCoinBuildError>>
+where
+    Processor: TrezorConnectProcessor + Sync,
+    Processor::Error: std::fmt::Display,
+{
+    let crypto_ctx = CryptoCtx::from_ctx(ctx).mm_err(|e| EthCoinBuildError::Internal(e.to_string()))?;
+    if crypto_ctx.hw_ctx().is_none() {
+        return MmError::err(EthCoinBuildError::Internal(
+            "Trezor device is not initialized; connect a Trezor (task::init_trezor) first".to_owned(),
+        ));
+    }
+    if conf["trezor_coin"].as_str().is_none() {
+        return MmError::err(EthCoinBuildError::Internal(format!(
+            "Coin {} does not support the Trezor hardware wallet",
+            ticker
+        )));
+    }
+    let full_path = eth_full_derivation_path(conf, path_to_address)?;
+    let hd_wallet = build_eth_hd_wallet(ctx, ticker, conf, gap_limit).await?;
+
+    let (address, public) = read_device_address(ctx, &full_path, processor)
+        .await
+        .map_to_mm(EthCoinBuildError::Internal)?;
+    let signer = EthTrezorSigner {
+        derivation_path: full_path,
+        address,
+        public,
+    };
+    eth_coin_from_params_with_trezor(
+        ctx,
+        ticker,
+        conf,
+        params,
+        signer,
+        DerivationMethod::HDWallet(hd_wallet),
+        protocol,
+    )
+    .await
 }

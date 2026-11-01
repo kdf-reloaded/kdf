@@ -188,6 +188,13 @@ platform-enable RPC that exposes a `priv_key_policy` field shall accept the same
 tagged value with the same semantics. This policy value is defined and routed
 **only on the WASM target** (§47.7).
 
+R47.5.1a The same request shall also carry `"rpc_mode": "Metamask"` (ch. 35
+R35.1.4a): on WASM, `rpc_mode` and `priv_key_policy` must be **both** MetaMask
+or **neither**, and any other combination fails activation with
+`PlatformCoinCreationError` (object `{ticker, error}`, HTTP 500). The
+`Metamask` value of `rpc_mode`, like that of `priv_key_policy`, does not exist
+on native builds.
+
 R47.5.2 When the MetaMask policy is selected, activation shall consume the
 already-connected MetaMask session from the crypto context (established via
 §47.1). A MetaMask session **must already be connected** (the caller must have
@@ -337,7 +344,23 @@ path unguarded for the non-keypair signing policies, so a swap that reaches the
 key-derivation step aborts rather than failing cleanly; reloaded shall instead
 gate it explicitly and early. This is a deliberate safety hardening, not a
 behavioural port of the upstream gap.) The same early gate covers any other
-non-keypair signing policy that shares the unavailable-key-derivation property.
+non-keypair signing policy **for the paths that actually need the unavailable
+key material** — the EVM-family HTLC paths, the swap-protocol-v2 HTLC paths,
+and the watcher-message paths. It is **not** a blanket swap ban on every
+key-less policy: a family that needs no per-swap key and can delegate every
+HTLC signature to the external wallet while the framework retains broadcast
+control falls outside this rule. The WalletConnect policy on the UTXO family
+is exactly that case, and is governed by
+[Chapter 22](22-walletconnect-v2.md) §22.9B (RP10, RP11, RP11.1) rather than
+by this chapter.
+
+> **Clearance (chapter 01 T1, R40).** The narrowing in the closing sentences of
+> R47.5.13a above was authored by the KDF Spec Reader under the chapter-01
+> two-team workflow and **passed the KDF Dirty Gate** on 2026-10-17 before being
+> relied on (PASS, finding list empty). Its clearance is therefore *complete* and
+> not pending: nothing in R47.5.13a is a candidate awaiting a gate. The extent,
+> method and measure of that pass are recorded once, in the *Dirty Gate
+> clearance* item of §47.12, and are not restated here.
 
 ### 47.5.D Address / key model
 
@@ -391,6 +414,28 @@ unsupported-operation rejection (R47.5.12, R47.5.14, R47.5.15) likewise map per
 > async message-signing surface upstream never built, and (b) gates swaps early
 > and cleanly (R47.5.13a) instead of reproducing the unguarded placeholder. Both
 > are documented "not-yet-delivered" boundaries, not behavioural regressions.
+>
+> **Scope correction — this paragraph's "every non-keypair policy" does not
+> extend to WalletConnect on the UTXO family.** The unimplemented per-swap
+> key-derivation placeholder is real for the **EVM** family under MetaMask,
+> hardware and WalletConnect policies, and for the swap-protocol-v2 and
+> watcher-message paths generally. It is **not** what blocks swaps for a
+> WalletConnect-signed **UTXO** coin: that family never derived a per-swap HTLC
+> key at all (the HTLC public key is the activated address's public key, and the
+> swap-unique data is ignored), its HTLC signatures are obtained as detached
+> PSBT partial signatures while the framework keeps broadcast control, and the
+> detached-signature-for-a-watcher requirement is declined rather than met by
+> excluding the coin from watcher participation. Upstream consequently **does**
+> permit a WalletConnect-signed UTXO coin into a legacy (v1) atomic swap. See
+> [Chapter 22](22-walletconnect-v2.md) §22.9B (RP9, RP10, RP11 and RP11.1)
+> for the per-operation reachability record; chapter 22 governs the
+> WalletConnect policy, this chapter governs MetaMask.
+>
+> *Clearance (chapter 01 T1, R40).* This *Scope correction* block was authored by
+> the KDF Spec Reader and **passed the KDF Dirty Gate** on 2026-10-17 before being
+> relied on (PASS, finding list empty); its clearance is *complete* and not
+> pending. The extent, method and measure are recorded in the *Dirty Gate
+> clearance* item of §47.12.
 
 ---
 
@@ -442,11 +487,20 @@ mapping (the human-readable cause is not bound):
 | Active-account mismatch at activation | `enable_eth_with_tokens` aggregated activation error | `Transport` | 502 |
 | Per-operation active-account mismatch (R47.5.9) | the invoked operation's error envelope | account-mismatch / transport-class discriminant of that operation | 500 |
 | Unsupported operation under MetaMask -- atomic swap (R47.5.12), private-key export (R47.5.14), HD/derivation-path op (R47.5.15) | the invoked operation's error envelope | that operation's unsupported / not-supported discriminant | 400 |
-| MetaMask `priv_key_policy` requested on a native build | EVM activation rejects the value | invalid-policy / unsupported discriminant | 400 |
+| MetaMask `priv_key_policy` or `rpc_mode: "Metamask"` requested on a native build | request-parse failure at the dispatcher (the value does not exist on native) | `InvalidRequest` (string `error_data`) | 400 |
+| `rpc_mode` and `priv_key_policy` not both MetaMask (WASM, R47.5.1a) | `enable_eth_with_tokens` aggregated activation error | `PlatformCoinCreationError` (object `{ticker, error}`) | 500 |
+| MetaMask cannot select the coin's chain (chain not registered in the wallet, or another provider failure while switching) | `enable_eth_with_tokens` aggregated activation error | `PlatformCoinCreationError` (object `{ticker, error}`) | 500 |
+| MetaMask reports a chain id other than the coin's | `enable_eth_with_tokens` aggregated activation error | `Internal` (string) | 500 |
 
-The per-operation discriminant names are inherited from each operation's own
-ch. 35 error contract; this chapter binds only the **condition** and its HTTP
-status class, not new discriminants.
+The activation-time rows carry a string `error_data` unless stated otherwise
+(ch. 35 R35.1.5 is authoritative for shapes). The per-operation discriminant
+names are inherited from each operation's own error contract; this chapter
+binds only the **condition** and its HTTP status class, not new discriminants.
+
+> **Reloaded status (informative).** Reloaded selects the MetaMask signer from
+> `priv_key_policy` alone and does not parse `rpc_mode`; the both-or-neither
+> rule of R47.5.1a is not enforced, and `rpc_mode: "Metamask"` on a native
+> build is silently accepted instead of answering `InvalidRequest`.
 
 ---
 
@@ -772,3 +826,127 @@ wallet-bridged message-signing flow for MetaMask / external-wallet EVM coins?
 This section records **no** such surface and rejects `sign_message` under those
 policies (R47.11.8, R47.11.10). If the docs define one, they govern and §47.11.C
 must be revisited.
+
+## 47.12 Provenance Footer
+
+- *Inputs:* the published Komodo DeFi Framework API documentation (the
+  `task::connect_metamask` method family and the EVM activation sections,
+  the source of truth this chapter distills per its own "Source of truth"
+  note); the EIP-1193 provider contract, EIP-712 typed-data signing,
+  EIP-155 chain identification, and secp256k1 public-key recovery (public
+  Ethereum-ecosystem specifications, cited throughout §47.1-§47.11);
+  reloaded's existing EIP-1193 transport, MetaMask session abstraction, and
+  crypto-context login handshake (§47.8, already present in the workspace);
+  [Chapter 35](35-evm-v2-activation-rpcs.md) (the EVM V2 platform activation
+  RPC, its request/response shapes, and its aggregated activation error
+  contract that §47.5 and §47.11.D bind against throughout).
+- *Permitted-input classes used:* external public specification (the
+  published KDF API documentation; the EIP-1193/EIP-712/EIP-155/secp256k1
+  public-key-recovery specifications); baseline source (the existing
+  EIP-1193 transport and MetaMask session/login handshake); cross-chapter
+  contracts (Chapter 35); Interop / wire-and-API-bound reuse (R29/R31) for
+  the dictated method strings, JSON field names, and error discriminants
+  this chapter distills.
+- *Sibling-allowlist consultations:* [Chapter 35](35-evm-v2-activation-rpcs.md).
+- *Forbidden corpus:* consulted by the KDF Spec Reader, in two separate
+  passes and for nothing beyond the passages named below; no private
+  implementation expression is normative in this chapter, and the remainder
+  of the chapter was not derived from it.
+  - *First pass.* R47.5.1a and the activation-time rows added to R47.6.7
+    (`rpc_mode` pairing and MetaMask chain-selection failure mapping), where
+    the public reference is silent. Reference version: `v3.0.0-beta`. This
+    pass predates the adoption of chapter 01 §1.4A, so R43 leaves it outside
+    R37–R44; see the *Dirty Gate clearance* item below for what is and is not
+    claimed about it.
+  - *Second pass.* The narrowing of the early swap gate in the closing
+    sentences of R47.5.13a (§47.5.C) and the *Scope correction* block in the
+    informative upstream-maturity note of §47.5.E. Both bound the reach of
+    this chapter's key-less-policy swap gate by establishing that one
+    external-wallet signing policy on one chain family needs no per-swap HTLC
+    key and keeps broadcast control in the framework, and both are fresh
+    forbidden-class input taken after §1.4A was adopted, so R38–R40 bind
+    them. **The reference version under which this input was taken is not
+    recorded in this document set.** The designation named for the first pass
+    attaches to that pass alone, and nothing here establishes that the two
+    passes read the same designation; the reference version the *gate*
+    compared against is a separate fact, recorded in the item below.
+- *Dirty Gate clearance (chapter 01 T1):* the whole of this chapter's
+  forbidden-class-sourced material — both passes of the item above, which is
+  R47.5.1a, the activation-time rows of R47.6.7, the closing narrowing of
+  R47.5.13a and the *Scope correction* block of §47.5.E — **passed the KDF
+  Dirty Gate** on 2026-10-17: PASS, discretionary-expression measure 0.03,
+  finding list empty, and accordingly no remedy class for any line or for the
+  candidate as a whole. The pass was taken over this chapter's working-tree
+  state in full and gated all four of those bodies for the first time rather
+  than re-gating an earlier clearance. The clearance is therefore **complete
+  and not pending**, so R40 withholds nothing here; §47.5.C and §47.5.E each
+  carry a short pointer to this item so that a reader at the material does not
+  have to come here to learn as much.
+
+  **This item does not claim the same thing for both passes.** For the second
+  pass it *discharges an obligation*: that material is fresh forbidden-class
+  input committed on or after the adoption of §1.4A, so R38–R40 bind it, and
+  T1 would fail were neither a completed-clearance statement nor the
+  pending-clearance statement of R40 present. For the first pass it *closes a
+  record gap voluntarily*: R43 binds R37–R44 only to chapter revisions
+  committed on or after §1.4A's adopting commit, and the gate established in
+  this repository's own history — independently, by running the ancestry check
+  in both directions — that the revision carrying R47.5.1a and the R47.6.7
+  activation-time rows is an ancestor of that adopting commit, committed
+  roughly ten hours earlier on the same day, 2026-10-11. T1's
+  clearance-record duty is accordingly not engaged by the first pass, and the
+  residual gap in its route record — it names neither the role that took the
+  input nor a clearance it passed — is the deferred work of chapter 01 D3 and
+  not a defect. Attesting it here is better hygiene than leaving it
+  unattested; it is not compelled, and nothing in this item concedes that it
+  was.
+
+  The three elements of the R39 scope attestation, carried forward here in
+  corpus-free terms as chapter 01 T1 requires:
+  - *Extent.* The subject matter this chapter's own scope names: the
+    browser-wallet (EIP-1193) signing-policy surface and the EVM V2
+    platform-activation surface this chapter binds, including the
+    activation-request policy pairing of R47.5.1a and the activation-error
+    surfacing of R47.6.7; together with the external-wallet UTXO
+    transaction-signing surface and the UTXO swap and watcher operation
+    surface that the second pass's two passages cross-refer to chapter 22
+    for. Reference version: the post-anchor v3-series development reference
+    this document set designates `v3.0.0-beta`. **This record is no more
+    precise than that release designation** — §1.7 bars naming a commit
+    identifier, a branch state or a location within the reference material,
+    so no finer pin is given and the gap is left visible rather than papered
+    over. That designation is what the *gate* compared against; the
+    designation under which the second pass's input was *taken* is
+    unrecorded, as the item above states, and the two must not be read as one
+    claim. Quantity examined: **four subsystem source modules**, read in full
+    or in the parts covering the surfaces listed above, plus two workspace
+    manifests read for orientation only. *Stated gap, left visible:* the
+    per-swap HTLC key-derivation helper layer that the second pass's passages
+    speak about **was not itself read**. The chapter's statements in that area
+    were assessed by category — a behavioural assertion carrying no
+    identifier, string literal, ordering or constant — rather than by reading
+    that layer, and nothing in this clearance depends on the unread part. The
+    extent is complete for what was compared and expressly incomplete in that
+    one respect; it is recorded that way deliberately and must not be
+    restated as an unqualified pass over everything the chapter speaks about.
+  - *Method.* Reading, in combination with per-identifier classification: the
+    candidate read in full, the corresponding reference material read
+    directly, and the R39 / R35 forced-versus-free test applied to every
+    candidate token that matched it, with only free — non-dictated — matches
+    admitted to the measured set. Judgement was made per identifier and never
+    by aggregate match density. **No mechanical comparison was run**, and the
+    reason is a property of the inputs rather than a shortcut: this
+    repository's own clean-room gate tooling compares files of source, and
+    this candidate embeds no code blocks, so the tool had no applicable
+    input.
+  - *Measure.* **0.03** on the discretionary-expression basis — the same
+    figure the leak report carries, not a second one. The judgement standard
+    it is read against: any single verbatim or near-verbatim discretionary
+    element fails the candidate however much of the surrounding content is
+    legitimately dictated, and dictated-interop and pinned-interface matching
+    contributes nothing to the figure however dense it is. The figure sits
+    above zero rather than at zero for one reason only: the two-valued
+    constraint R47.5.1a states over two dictated request-field names admits
+    little phrasing beyond the one it uses, and the forced-versus-free test
+    resolved that phrasing as dictated or convergent rather than
+    discretionary. No finding follows from it.

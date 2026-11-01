@@ -1,7 +1,6 @@
 use crate::manager::{RpcTaskManager, RpcTaskManagerWeak};
 use crate::{FinishedTaskResult, RpcTask, RpcTaskError, RpcTaskResult, TaskId, TaskStatus};
 use common::custom_futures::FutureTimerExt;
-use common::log::LogOnError;
 use futures::channel::oneshot;
 use mm2_err_handle::prelude::*;
 use std::sync::MutexGuard;
@@ -61,12 +60,14 @@ impl<Task: RpcTask> RpcTaskHandle<Task> {
             .map_to_mm(|_canceled| RpcTaskError::Canceled)
     }
 
-    pub(crate) fn finish(self, result: Result<Task::Item, MmError<Task::Error>>) {
+    /// Records the task result. Returns `false` if the result could not be recorded
+    /// because the task was cancelled or its manager is gone.
+    pub(crate) fn finish(self, result: Result<Task::Item, MmError<Task::Error>>) -> bool {
         let task_result = Self::prepare_task_result(result);
         self.lock_and_then(|mut task_manager| {
             task_manager.update_task_status(self.task_id, TaskStatus::Ready(task_result))
         })
-        .warn_log();
+        .is_ok()
     }
 
     fn prepare_task_result(

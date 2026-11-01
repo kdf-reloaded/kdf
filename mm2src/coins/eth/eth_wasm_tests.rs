@@ -28,7 +28,11 @@ async fn test_send() {
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
     )
     .unwrap();
-    let web3 = crate::eth::alloy_compat::build_provider(vec!["http://195.201.0.6:8565".into()], vec![]).unwrap();
+    let web3 = crate::eth::alloy_compat::build_provider(
+        crate::node_url::listed_nodes("TEST", vec!["http://195.201.0.6:8565".into()]),
+        vec![],
+    )
+    .unwrap();
     let ctx = MmCtxBuilder::new().into_mm_arc();
     let coin = EthCoin(Arc::new(EthCoinImpl {
         ticker: "ETH".into(),
@@ -39,7 +43,9 @@ async fn test_send() {
         swap_contract_address: Address::from_str("7Bc1bBDD6A0a722fC9bffC49c921B685ECB84b94").unwrap(),
         fallback_swap_contract: None,
         swap_v2_contracts: None,
+        gas_limit: EthGasLimit::default(),
         gas_limit_v2: EthGasLimitV2::default(),
+        estimate_gas_mult: None,
         derivation_method: DerivationMethod::Iguana(key_pair.address()),
         web3_instances: vec![Web3Instance {
             web3: web3.clone(),
@@ -59,6 +65,7 @@ async fn test_send() {
         nft_swap_v2_contract: None,
         swap_gas_fee_policy: Mutex::new(SwapGasFeePolicy::default()),
         erc20_tokens_infos: Default::default(),
+        custom_token: false,
     }));
     let tx = coin
         .send_maker_payment(

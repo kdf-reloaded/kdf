@@ -1,6 +1,6 @@
 # Chapter 17 — Atomic-Swap V2 EVM Path & Contract Interaction
 
-**Status:** driving-spec
+**Status:** driving-spec.
 
 > **One-sentence claim:** the project's V2 atomic-swap protocol
 > reaches EVM-native assets (ETH, ERC-20, ERC-721, ERC-1155) by
@@ -281,6 +281,22 @@ skip-payment-spend-preimage trait method returning `true`) to skip
 the preimage round entirely. This is the correct behaviour for
 EVM and is intentional, not a stub.
 
+Those stand-in preimage bytes are a *serialized counterparty
+transaction*, so the receiving side reads them through the
+foreign-transaction decoding contract of
+[Chapter 35](35-evm-v2-activation-rpcs.md) §35.6A, not through a
+legacy-only reader. Which serialized form arrives is decided by the
+sender's swap gas-fee policy (ch. 35 R35.6.3), by how that peer
+activated the coin, and by that peer's per-coin cap on the emitted
+transaction type (ch. 35 R35.6.7, D35.7 and the note after
+R35.6A.19; a reference build and Reloaded both honour the cap and
+differ only in what an absent key means): a peer on any non-legacy tier produces an EIP-2718 typed
+envelope rather than an untyped legacy transaction. None of that may
+narrow what the receiving side accepts (ch. 35 R35.6A.19). The same
+applies to every other step of this chapter that reads a
+counterparty's serialized transaction rather than its decoded
+calldata.
+
 ### 17.5.2 The `takerPaymentApprove` step (ERC-20 only)
 
 For ERC-20 tokens, `erc20TakerPayment` deposits funds into the
@@ -378,13 +394,36 @@ argument list.
 The V2 EVM contracts accept a flat `dexFee` `uint256` argument on
 the `*TakerPayment` entry points and forward the entire amount to
 the network's fee-collection address on `spendTakerPayment`. The
-EVM path delivers only the `Standard` dex-fee shape;
-[Chapter 16](16-swap-v2-pre-burn-output.md) fixes that the
-factory used to construct the dex-fee value returns `Standard`
-for an EVM taker coin, so the `WithBurn` variant never reaches an
-EVM contract argument. Extending pre-burn to the EVM contracts
+EVM path delivers only the `Standard` dex-fee shape, or a `dexFee`
+of zero when the descriptor is `NoFee`.
+[Chapter 16](16-swap-v2-pre-burn-output.md) fixes that the factory
+returns `Standard` for an EVM taker coin, or `NoFee` under the waiver
+of chapter 16 R7 or the netid-8762 version-two KMD-pair exemption of
+chapter 16 R12B. The `WithBurn` variant therefore never reaches an EVM
+contract argument, and the `dexFee` argument is the descriptor's fee
+amount. Extending pre-burn to the EVM contracts
 requires the ABI to grow `burnAmount` and `burnAddress`
 parameters; that change is out of scope here.
+
+> **Fee-collection-address resolution contrasts with the UTXO V2
+> path (informative).** On this path the fee-collection address is
+> a constructor argument of the deployed taker-payment contract —
+> fixed once, on chain, at contract-deployment time. The project's
+> Rust coin implementation never resolves or passes a
+> fee-collection address for a V2 EVM call; only the `dexFee`
+> amount travels in the calldata, and the deployed contract routes
+> it to its own baked-in address. There is therefore no per-swap,
+> per-network address-resolution step on this path for a
+> network-identifier mismatch to corrupt. This is a structural
+> contrast, not a parity gap, with the version-two
+> unspent-transaction-output path, where the fee-collection address
+> *is* resolved per swap by Rust code building an explicit output —
+> and where [Chapter 29 §29.1.4](29-license-conditions-e-f.md#2914-the-fee-routing-logic-is-independently-re-expressed)
+> records a code-quality finding that one such builder resolves the
+> address from a deprecated global fixed to network identifier
+> `8762` instead of through the active network's `NetConfig`. That
+> finding is scoped to the unspent-transaction-output builder; it
+> does not apply to this chapter's contracts.
 
 ---
 
@@ -402,6 +441,13 @@ calldata decoded for the secret. Confirmations are tracked via
 the standard `eth_blockNumber` polling mechanism shared with the
 V1 EVM path. The symmetric pattern (a different topic, the
 maker-payment contract address) covers `MakerPaymentSpent`.
+
+Every `eth_getLogs`, `eth_blockNumber` and transaction read named in
+this section is issued under the multi-node access contract of
+[Chapter 35](35-evm-v2-activation-rpcs.md) §35.1.F (per-request failover
+including on a JSON-RPC error body, sticky last-good node, 10 s per-node
+cutoff, host-only node naming), and every signed swap transaction this
+chapter broadcasts follows R35.1.12 there.
 
 ---
 
@@ -716,7 +762,7 @@ with parallel error/abort branches.
 
 Both state machines dispatch through the V2 maker- and taker-side
 coin traits — the same dispatch surface used by the UTXO V2 path
-([Chapter 15 §15.5](15-swap-v2-utxo-path.md#155-protocol-surface)).
+([Chapter 15 §15.3](15-swap-v2-utxo-path.md#153-bound-coin-trait-implementation-surface)).
 A single state-machine driver therefore supports UTXO×UTXO,
 EVM×EVM, and cross-asset combinations (UTXO×EVM, EVM×Tendermint,
 and so on). When the maker asset is an EVM NFT, the production
@@ -761,7 +807,22 @@ native persistence contract.
    confirmation policy.
 5. **Gas estimation** — gas estimates use `eth_estimateGas` with
    the standard +10% safety margin shared with the V1 EVM path;
-   documented in [Chapter 8](08-fee-routing-engine.md).
+   documented in [Chapter 8](08-fee-routing-engine.md). This is the
+   gas-**limit** estimate; the distinct EIP-1559 fee-per-gas
+   (`maxFeePerGas` / priority-fee) estimation derived from
+   `eth_feeHistory` is bound in
+   [Chapter 56](56-evm-eip1559-fee-estimation.md).
+6. **Per-coin gas limits for the V2 entry points** — the V2
+   maker, taker and non-fungible-maker entry points are priced
+   from a per-coin `gas_limit_v2` coin-configuration block whose
+   complete member set, selection matrix and absent-member
+   defaults are bound by
+   [Chapter 57](57-evm-fee-inputs.md) §57.6. Reloaded does not
+   read that block and uses its own differing defaults
+   (ch. 57 R57.6.4), so the gas limits this chapter's contract
+   calls carry are not yet configurable and not yet at parity.
+   The fee *price* those limits are multiplied by is bound by
+   ch. 57 Part A.
 
 ---
 
@@ -801,6 +862,21 @@ The chapter relies on one baseline-state claim:
 
 ## 17.16 Provenance Footer
 
+> **Shape conformance (informative).** This chapter does not yet meet
+> chapter 01 §1.7 in three respects, each left for the chapter's
+> author because closing it means stating what only the author's
+> derivation record holds. (1) R20: the footer below carries only one
+> of the four bound items, *Forbidden corpus*; *Inputs*,
+> *Permitted-input classes used* and *Sibling-allowlist
+> consultations* are missing, and the footer carries items R20 does
+> not enumerate. (2) R19: there is no *Deferred Work* section with
+> D-numbered entries (§17.13 carries numbered prose instead), and
+> §17.15 states its baseline claim in prose rather than as a
+> V-numbered verification. (3) R40: the §17.5.1 clause added on
+> 2026-10-16 recorded its pending clearance only in this footer, not
+> at the point where it appears; the clearance has since been given,
+> so the point is procedural.
+
 - *Status:* driving-spec.
 - *Version:* v2.
 - *Verified against:* baseline commit
@@ -808,7 +884,64 @@ The chapter relies on one baseline-state claim:
   EIP-1155; the Solidity Contract ABI Specification; the
   Ethereum JSON-RPC method definitions for `eth_call`,
   `eth_sendRawTransaction`, `eth_getLogs`, `eth_estimateGas`,
-  `eth_blockNumber`; keccak-256.
+  `eth_blockNumber`; keccak-256; the on-disk taker- and
+  maker-contract ABI JSON files under `mm2src/coins/eth/`
+  (constructor argument shape, §17.7); [Chapter 15](15-swap-v2-utxo-path.md)
+  (the coin-trait dispatch surface shared with the UTXO V2 path,
+  §17.10); [Chapter 29](29-license-conditions-e-f.md) (the
+  UTXO-side dex-fee-address resolution finding contrasted in
+  §17.7); [Chapter 35](35-evm-v2-activation-rpcs.md) §35.6 and
+  §35.6A (the swap gas-fee policy that decides which serialized
+  transaction form a peer emits, and the contract for reading a
+  counterparty's serialized transaction, cited from §17.5.1).
 - *Forbidden corpus:* consulted by the KDF Spec Reader for
   upstream-compatible behaviour; no private implementation
-  expression is normative in this chapter.
+  expression is normative in this chapter. The §17.5.1 paragraph on
+  reading a counterparty's serialized transaction through chapter 35
+  §35.6A, and this footer item, were cleared by the KDF Dirty Gate
+  together with that section. Chapter 35 §35.6A's *Clearance record*
+  is the single authority for that clearance's extent, method and
+  measure; this chapter does not restate them. The clause added to
+  that paragraph on 2026-10-16, naming the activation route and the
+  reference's per-coin cap on the emitted transaction type as further
+  influences on the form that arrives, comes from the later Spec
+  Reader pass chapter 35's footer records. (Later the same day the
+  words "on a reference peer" were dropped from that clause and the
+  parenthesis after "R35.6A.19" was added, by a context that never read
+  the forbidden corpus, once Reloaded implemented the cap itself; the
+  added words state Reloaded's own decided behavior from ch. 35 D35.7
+  and carry no reference content beyond what that clause already
+  cited. The Dirty Gate clearance below does not cover that wording.)
+  That authority does not
+  extend to it: the clause **passed the KDF Dirty Gate** on 2026-10-16
+  (PASS, 0.00, no findings) in a pass of this chapter's own, whose
+  subject was which serialized forms a counterparty may send and
+  which a receiving node must accept, and whose comparison ran over
+  the whole chapter text. Its record:
+  - *Extent.* The EVM-native V2 atomic-swap coin-side surface: the
+    maker-side and taker-side V2 payment operations, the NFT
+    maker-side surface, the shared coin-trait definitions, the V2
+    maker and taker state machines and their persisted event
+    surface, the EVM activation routes and shared
+    activation-parameter helpers, the swap signing and emission path
+    including the per-coin transaction-type gate, and the public ABI
+    documents of the maker, taker and NFT-maker contracts. Reference:
+    17 files at each of `v2.6.0-beta` and `v3.0.0-beta`, with an
+    identical result at both, plus a comparison against a further
+    working state for which no release designation can be given
+    within R11's limits; that gap is left visible here.
+  - *Method.* By reading, combined with two mechanical comparisons,
+    each run separately at both named designations: normalised
+    word-n-gram overlap at lengths 4 to 7 between the full chapter
+    text (6,257 words) and the full text of the compared files; and
+    a containment check of 509 declared identifiers against the
+    chapter. `tools/clean_room_gate.py` was not run, because the
+    chapter embeds no source-code block for its file test to
+    measure.
+  - *Measure.* 0.00, read against the per-token forced-versus-free
+    standard and against the basis of the repository's absolute
+    discretionary-similarity cap of 0.50. The only residual overlap
+    at any length was two five-word sequences, both dictated, and
+    none at six words or more; the 20 of the 509 identifiers that
+    appear in the chapter are all serialized-schema tag values or
+    public ERC-20 and ABI names.

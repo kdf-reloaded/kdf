@@ -31,8 +31,8 @@ pub struct CreateNewAccountRequest {
 #[derive(Deserialize)]
 pub struct CreateNewAccountParams {
     #[serde(default = "true_f")]
-    scan: bool,
-    gap_limit: Option<u32>,
+    pub(crate) scan: bool,
+    pub(crate) gap_limit: Option<u32>,
 }
 
 #[derive(Clone, Serialize)]
@@ -107,6 +107,7 @@ impl RpcTask for InitCreateAccountTask {
                 create_new_account_helper(&self.ctx, qtum, self.req.params, task_handle).await
             },
             MmCoinEnum::EthCoin(eth) => create_new_account_helper(&self.ctx, eth, self.req.params, task_handle).await,
+            MmCoinEnum::SiaCoin(sia) => create_new_account_helper(&self.ctx, sia, self.req.params, task_handle).await,
             _ => MmError::err(HDWalletRpcError::CoinIsActivatedNotWithHDWallet),
         }
     }

@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin::secp256k1::SecretKey;
 use common::executor::{spawn, Timer};
 use common::log::LogState;
 use derive_more::Display;
@@ -10,7 +11,6 @@ use lightning_net_tokio::SocketDescriptor;
 use lightning_persister::storage::NodesAddressesMapShared;
 use mm2_net::ip_addr::fetch_external_ip;
 use rand::RngCore;
-use secp256k1::SecretKey;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::net::TcpListener;
 

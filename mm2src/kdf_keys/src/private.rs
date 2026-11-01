@@ -25,8 +25,8 @@ impl Private {
     /// Sign `message` and return a DER-encoded ECDSA signature.
     pub fn sign(&self, message: &Message) -> Result<Signature, Error> {
         let secret = SecretKey::from_slice(&*self.secret)?;
-        let msg = SecpMessage::from_slice(&**message)?;
-        let sig = SECP_SIGN.sign(&msg, &secret);
+        let msg = SecpMessage::from_digest_slice(&**message)?;
+        let sig = SECP_SIGN.sign_ecdsa(&msg, &secret);
         Ok(sig.serialize_der().as_ref().to_vec().into())
     }
 
@@ -35,8 +35,8 @@ impl Private {
     /// recovery id and compressed flag (Bitcoin / Qtum signmessage convention).
     pub fn sign_compact(&self, message: &Message) -> Result<Signature, Error> {
         let secret = SecretKey::from_slice(&*self.secret)?;
-        let msg = SecpMessage::from_slice(&**message)?;
-        let recoverable = SECP_SIGN.sign_recoverable(&msg, &secret);
+        let msg = SecpMessage::from_digest_slice(&**message)?;
+        let recoverable = SECP_SIGN.sign_ecdsa_recoverable(&msg, &secret);
         let (recovery_id, body) = recoverable.serialize_compact();
         let mut out: Vec<u8> = body.to_vec();
         let header = 27u8 + recovery_id.to_i32() as u8 + if self.compressed { 4 } else { 0 };

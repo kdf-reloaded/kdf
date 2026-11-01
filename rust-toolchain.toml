@@ -1,3 +1,21 @@
 [toolchain]
-channel = "stable"
+# `channel = "stable"` is not actually a pin -- it resolves to whatever
+# release rustup considers "latest" at install time, which is exactly what
+# broke CI on 2026-08-20: the runner picked up rustc 1.98.0 (2026-08-18,
+# shipped after this file was last touched) between two otherwise-unrelated
+# builds, and a change to std::io::Error's internal representation in that
+# release broke mm2_err_handle's `auto trait NotMmError` against it
+# (mm2src/mm2_io/src/fs.rs and every other ?-on-io::Error call site under
+# an MmError-returning function) -- unrelated to whatever commit happened
+# to be building at the time.
+#
+# That incompatibility now has a real fix (mm2_err_handle/src/mm_error.rs,
+# the NonNull<T> impl next to the pre-existing Box<T>/UnsafeCell<T> ones),
+# verified by compiling coins/mm2_main (native and wasm32-unknown-unknown)
+# and running the mm2_err_handle and lp_swap suites under both 1.97.1 and
+# 1.98.0 directly (`cargo +1.98.0 check`/`test`) -- not just inferred. Pinned
+# to 1.98.0, the newer of the two confirmed-good versions, so this doesn't
+# need touching again for its own sake; bump deliberately when a real reason
+# comes up, not by rustup silently drifting forward.
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

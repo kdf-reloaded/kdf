@@ -31,7 +31,7 @@ pub fn spawn_after(utc: f64, future: impl Future03<Output = ()> + Send + 'static
                 loop {
                     let now = Duration::from_secs_f64(now_float());
                     let mut next_stop = Duration::from_secs_f64(0.1);
-                    for (utc, _) in tasks.iter() {
+                    for utc in tasks.keys() {
                         if *utc <= now {
                             ready.push(*utc)
                         } else {

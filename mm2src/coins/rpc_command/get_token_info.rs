@@ -75,7 +75,7 @@ impl From<CoinFindError> for GetTokenInfoError {
 
 /// Scans coin configuration for an `ERC20` entry on `platform` whose contract
 /// address matches `contract_address` (case-insensitive), returning its ticker.
-fn config_ticker_for_contract(ctx: &MmArc, platform: &str, contract_address: &str) -> Option<String> {
+pub fn config_ticker_for_contract(ctx: &MmArc, platform: &str, contract_address: &str) -> Option<String> {
     let coins = ctx.conf["coins"].as_array()?;
     let wanted = contract_address.to_lowercase();
     for coin in coins {

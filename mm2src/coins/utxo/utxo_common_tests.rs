@@ -17,7 +17,12 @@ pub async fn test_electrum_display_balances(rpc_client: &ElectrumClient) {
             "RG278CfeNPFtNztFZQir8cgdWexVhViYVy".into(),
             BigDecimal::try_from(5.77699).unwrap(),
         ),
-        ("RYPz6Lr4muj4gcFzpMdv3ks1NCGn3mkDPN".into(), BigDecimal::from(0)),
+        // Unlike the other three genesis-era balances, this address received 3.33 DOC
+        // at height 263268; it has not moved since.
+        (
+            "RYPz6Lr4muj4gcFzpMdv3ks1NCGn3mkDPN".into(),
+            BigDecimal::try_from(3.33).unwrap(),
+        ),
         (
             "RJeDDtDRtKUoL8BCKdH7TNCHqUKr7kQRsi".into(),
             BigDecimal::try_from(0.77699).unwrap(),

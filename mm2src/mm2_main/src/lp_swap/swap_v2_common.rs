@@ -369,23 +369,40 @@ cfg_native! {
 
     // SQL helper functions --------------------------------------------------
 
+    /// Fields extracted from either a maker or taker V2 swap DB repr, already
+    /// resolved to the plain values the shared `my_swaps` INSERT statement
+    /// binds. `insert_swap_v2_maker`/`insert_swap_v2_taker` each populate one
+    /// of these from their own repr type and hand it to [`insert_swap_v2`].
+    struct SwapV2InsertFields {
+        my_coin: String,
+        other_coin: String,
+        started_at: u64,
+        swap_type: u8,
+        maker_volume: String,
+        taker_volume: String,
+        premium: String,
+        dex_fee: String,
+        dex_fee_burn: String,
+        secret: Vec<u8>,
+        secret_hash: Vec<u8>,
+        secret_hash_algo: i64,
+        p2p_privkey: Vec<u8>,
+        lock_duration: u64,
+        maker_coin_confs: u64,
+        maker_coin_nota: bool,
+        taker_coin_confs: u64,
+        taker_coin_nota: bool,
+        other_p2p_pub: Vec<u8>,
+        swap_version: u8,
+    }
+
     /// Insert a new V2 swap record into the my_swaps table.
     /// For maker swaps: my_coin = maker_coin, other_coin = taker_coin.
     /// For taker swaps: my_coin = taker_coin, other_coin = maker_coin.
-    fn insert_swap_v2_maker(ctx: &MmArc, uuid: &Uuid, repr: &MakerSwapDbRepr) -> Result<(), String> {
+    fn insert_swap_v2(ctx: &MmArc, uuid: &Uuid, fields: SwapV2InsertFields, role: &str) -> Result<(), String> {
         let conn = ctx.sqlite_connection();
         let uuid_str = uuid.to_string();
         let events_json = serde_json::to_string(&serde_json::json!([])).unwrap();
-        let maker_vol_str = repr.maker_volume.to_decimal().to_string();
-        let taker_vol_str = repr.taker_volume.to_decimal().to_string();
-        let premium_str = repr.taker_premium.to_decimal().to_string();
-        let dex_fee_str = repr.dex_fee_amount.to_decimal().to_string();
-        let dex_fee_burn_str = repr.dex_fee_burn.to_decimal().to_string();
-        let secret: Vec<u8> = repr.maker_secret.0.to_vec();
-        let secret_hash: Vec<u8> = repr.maker_secret_hash.to_vec();
-        let secret_hash_algo: i64 = secret_hash_algo_to_i64(repr.secret_hash_algo);
-        let p2p_privkey: Vec<u8> = repr.p2p_keypair.as_ref().map(|k| k.0.clone()).unwrap_or_default();
-        let other_p2p_pub: Vec<u8> = repr.taker_p2p_pub.to_vec();
 
         conn.execute(
             "INSERT INTO my_swaps (
@@ -396,56 +413,70 @@ cfg_native! {
                 other_p2p_pub, swap_version
             ) VALUES (?1,?2,?3,?4,?5,0,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
             params![
-                repr.maker_coin, repr.taker_coin, uuid_str, repr.started_at as i64,
-                MAKER_SWAP_V2_TYPE as i64, events_json,
-                maker_vol_str, taker_vol_str, premium_str, dex_fee_str, dex_fee_burn_str,
-                secret, secret_hash, secret_hash_algo, p2p_privkey,
-                repr.lock_duration as i64,
-                repr.conf_settings.maker_coin_confs as i64, repr.conf_settings.maker_coin_nota as i64,
-                repr.conf_settings.taker_coin_confs as i64, repr.conf_settings.taker_coin_nota as i64,
-                other_p2p_pub, repr.swap_version as i64,
+                fields.my_coin, fields.other_coin, uuid_str, fields.started_at as i64,
+                fields.swap_type as i64, events_json,
+                fields.maker_volume, fields.taker_volume, fields.premium, fields.dex_fee, fields.dex_fee_burn,
+                fields.secret, fields.secret_hash, fields.secret_hash_algo, fields.p2p_privkey,
+                fields.lock_duration as i64,
+                fields.maker_coin_confs as i64, fields.maker_coin_nota as i64,
+                fields.taker_coin_confs as i64, fields.taker_coin_nota as i64,
+                fields.other_p2p_pub, fields.swap_version as i64,
             ],
         )
         .map(|_| ())
-        .map_err(|e| format!("Failed to insert V2 maker swap {}: {}", uuid, e))
+        .map_err(|e| format!("Failed to insert V2 {} swap {}: {}", role, uuid, e))
+    }
+
+    fn insert_swap_v2_maker(ctx: &MmArc, uuid: &Uuid, repr: &MakerSwapDbRepr) -> Result<(), String> {
+        let fields = SwapV2InsertFields {
+            my_coin: repr.maker_coin.clone(),
+            other_coin: repr.taker_coin.clone(),
+            started_at: repr.started_at,
+            swap_type: MAKER_SWAP_V2_TYPE,
+            maker_volume: repr.maker_volume.to_decimal().to_string(),
+            taker_volume: repr.taker_volume.to_decimal().to_string(),
+            premium: repr.taker_premium.to_decimal().to_string(),
+            dex_fee: repr.dex_fee_amount.to_decimal().to_string(),
+            dex_fee_burn: repr.dex_fee_burn.to_decimal().to_string(),
+            secret: repr.maker_secret.0.to_vec(),
+            secret_hash: repr.maker_secret_hash.to_vec(),
+            secret_hash_algo: secret_hash_algo_to_i64(repr.secret_hash_algo),
+            p2p_privkey: repr.p2p_keypair.as_ref().map(|k| k.0.clone()).unwrap_or_default(),
+            lock_duration: repr.lock_duration,
+            maker_coin_confs: repr.conf_settings.maker_coin_confs,
+            maker_coin_nota: repr.conf_settings.maker_coin_nota,
+            taker_coin_confs: repr.conf_settings.taker_coin_confs,
+            taker_coin_nota: repr.conf_settings.taker_coin_nota,
+            other_p2p_pub: repr.taker_p2p_pub.to_vec(),
+            swap_version: repr.swap_version,
+        };
+        insert_swap_v2(ctx, uuid, fields, "maker")
     }
 
     fn insert_swap_v2_taker(ctx: &MmArc, uuid: &Uuid, repr: &TakerSwapDbRepr) -> Result<(), String> {
-        let conn = ctx.sqlite_connection();
-        let uuid_str = uuid.to_string();
-        let events_json = serde_json::to_string(&serde_json::json!([])).unwrap();
-        let maker_vol_str = repr.maker_volume.to_decimal().to_string();
-        let taker_vol_str = repr.taker_volume.to_decimal().to_string();
-        let premium_str = repr.taker_premium.to_decimal().to_string();
-        let dex_fee_str = repr.dex_fee_amount.to_decimal().to_string();
-        let dex_fee_burn_str = repr.dex_fee_burn.to_decimal().to_string();
-        let secret: Vec<u8> = repr.taker_secret.0.to_vec();
-        let secret_hash: Vec<u8> = repr.taker_secret_hash.to_vec();
-        let secret_hash_algo: i64 = secret_hash_algo_to_i64(repr.secret_hash_algo);
-        let p2p_privkey: Vec<u8> = repr.p2p_keypair.as_ref().map(|k| k.0.clone()).unwrap_or_default();
-        let other_p2p_pub: Vec<u8> = repr.maker_p2p_pub.to_vec();
-
-        conn.execute(
-            "INSERT INTO my_swaps (
-                my_coin, other_coin, uuid, started_at, swap_type, is_finished, events_json,
-                maker_volume, taker_volume, premium, dex_fee, dex_fee_burn,
-                secret, secret_hash, secret_hash_algo, p2p_privkey, lock_duration,
-                maker_coin_confs, maker_coin_nota, taker_coin_confs, taker_coin_nota,
-                other_p2p_pub, swap_version
-            ) VALUES (?1,?2,?3,?4,?5,0,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-            params![
-                repr.taker_coin, repr.maker_coin, uuid_str, repr.started_at as i64,
-                TAKER_SWAP_V2_TYPE as i64, events_json,
-                maker_vol_str, taker_vol_str, premium_str, dex_fee_str, dex_fee_burn_str,
-                secret, secret_hash, secret_hash_algo, p2p_privkey,
-                repr.lock_duration as i64,
-                repr.conf_settings.maker_coin_confs as i64, repr.conf_settings.maker_coin_nota as i64,
-                repr.conf_settings.taker_coin_confs as i64, repr.conf_settings.taker_coin_nota as i64,
-                other_p2p_pub, repr.swap_version as i64,
-            ],
-        )
-        .map(|_| ())
-        .map_err(|e| format!("Failed to insert V2 taker swap {}: {}", uuid, e))
+        let fields = SwapV2InsertFields {
+            my_coin: repr.taker_coin.clone(),
+            other_coin: repr.maker_coin.clone(),
+            started_at: repr.started_at,
+            swap_type: TAKER_SWAP_V2_TYPE,
+            maker_volume: repr.maker_volume.to_decimal().to_string(),
+            taker_volume: repr.taker_volume.to_decimal().to_string(),
+            premium: repr.taker_premium.to_decimal().to_string(),
+            dex_fee: repr.dex_fee_amount.to_decimal().to_string(),
+            dex_fee_burn: repr.dex_fee_burn.to_decimal().to_string(),
+            secret: repr.taker_secret.0.to_vec(),
+            secret_hash: repr.taker_secret_hash.to_vec(),
+            secret_hash_algo: secret_hash_algo_to_i64(repr.secret_hash_algo),
+            p2p_privkey: repr.p2p_keypair.as_ref().map(|k| k.0.clone()).unwrap_or_default(),
+            lock_duration: repr.lock_duration,
+            maker_coin_confs: repr.conf_settings.maker_coin_confs,
+            maker_coin_nota: repr.conf_settings.maker_coin_nota,
+            taker_coin_confs: repr.conf_settings.taker_coin_confs,
+            taker_coin_nota: repr.conf_settings.taker_coin_nota,
+            other_p2p_pub: repr.maker_p2p_pub.to_vec(),
+            swap_version: repr.swap_version,
+        };
+        insert_swap_v2(ctx, uuid, fields, "taker")
     }
 
     /// Check if a V2 swap record exists for the given UUID.
@@ -464,11 +495,15 @@ cfg_native! {
 
     /// Append an event to the events_json array of a V2 swap.
     fn append_swap_v2_event<E: Serialize>(ctx: &MmArc, uuid: &Uuid, event: &E) -> Result<(), String> {
-        let conn = ctx.sqlite_connection();
+        let mut conn = ctx.sqlite_connection();
         let uuid_str = uuid.to_string();
 
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction for {}: {}", uuid, e))?;
+
         // Read existing events
-        let events_str: String = conn
+        let events_str: String = tx
             .query_row(
                 "SELECT events_json FROM my_swaps WHERE uuid = ?1",
                 params![uuid_str],
@@ -486,12 +521,14 @@ cfg_native! {
         let updated = serde_json::to_string(&events)
             .map_err(|e| format!("Failed to serialize updated events for {}: {}", uuid, e))?;
 
-        conn.execute(
+        tx.execute(
             "UPDATE my_swaps SET events_json = ?1 WHERE uuid = ?2",
             params![updated, uuid_str],
         )
-        .map(|_| ())
-        .map_err(|e| format!("Failed to update events for swap {}: {}", uuid, e))
+        .map_err(|e| format!("Failed to update events for swap {}: {}", uuid, e))?;
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction for {}: {}", uuid, e))
     }
 
     /// Get the full swap DB repr for a V2 swap.
@@ -1151,6 +1188,87 @@ mod tests {
         assert!(format!("{}", reason).contains("insufficient funds"));
     }
 
+    /// ch.52 R58/R64: both fields are additive, so a log written before either
+    /// existed — the JSON below has neither — must still deserialize, defaulting
+    /// the headroom to zero (its pre-existing, always-correct-for-a-gap value)
+    /// and the reservable-fee marker to absent (recovered from the raw fee
+    /// amount by the caller, not by serde; see `recreate_machine`).
+    #[test]
+    fn old_persisted_initialized_event_without_the_new_fields_still_deserializes() {
+        use common::mm_number::MmNumber;
+
+        // Round-trip through JSON rather than a hand-written literal, so this
+        // test does not depend on guessing the enum's wire tagging shape — only
+        // on the two new fields genuinely being optional. Serialise a fully
+        // populated event, delete the two fields a pre-fix log would never have
+        // written, and confirm it still parses.
+        let maker_event = MakerSwapEvent::Initialized {
+            maker_coin_start_block: 100,
+            taker_coin_start_block: 200,
+            maker_payment_trade_fee: MmNumber::from("0.001"),
+            taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+            taker_payment_spend_headroom: MmNumber::from("0.002"),
+            maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
+        };
+        let mut maker_value = serde_json::to_value(&maker_event).unwrap();
+        let maker_fields = maker_value
+            .get_mut("Initialized")
+            .expect("externally-tagged Initialized");
+        maker_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("taker_payment_spend_headroom");
+        maker_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("maker_payment_trade_fee_reservable");
+        let event: MakerSwapEvent = serde_json::from_value(maker_value).unwrap();
+        match event {
+            MakerSwapEvent::Initialized {
+                taker_payment_spend_headroom,
+                maker_payment_trade_fee_reservable,
+                ..
+            } => {
+                assert_eq!(taker_payment_spend_headroom, MmNumber::from(0));
+                assert_eq!(maker_payment_trade_fee_reservable, None);
+            },
+            other => panic!("expected Initialized, got {other:?}"),
+        }
+
+        let taker_event = TakerSwapEvent::Initialized {
+            maker_coin_start_block: 100,
+            taker_coin_start_block: 200,
+            taker_payment_fee: MmNumber::from("0.001"),
+            maker_payment_spend_fee: MmNumber::from("0.002"),
+            maker_payment_spend_headroom: MmNumber::from("0.002"),
+            taker_payment_fee_reservable: Some(MmNumber::from("0.001")),
+        };
+        let mut taker_value = serde_json::to_value(&taker_event).unwrap();
+        let taker_fields = taker_value
+            .get_mut("Initialized")
+            .expect("externally-tagged Initialized");
+        taker_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("maker_payment_spend_headroom");
+        taker_fields
+            .as_object_mut()
+            .unwrap()
+            .remove("taker_payment_fee_reservable");
+        let event: TakerSwapEvent = serde_json::from_value(taker_value).unwrap();
+        match event {
+            TakerSwapEvent::Initialized {
+                maker_payment_spend_headroom,
+                taker_payment_fee_reservable,
+                ..
+            } => {
+                assert_eq!(maker_payment_spend_headroom, MmNumber::from(0));
+                assert_eq!(taker_payment_fee_reservable, None);
+            },
+            other => panic!("expected Initialized, got {other:?}"),
+        }
+    }
+
     #[test]
     fn t17_9_10_maker_kickstart_guard_extracts_latest_maker_payment() {
         let old_payment = BytesJson::from(vec![0x01]);
@@ -1464,6 +1582,8 @@ mod tests {
                 taker_coin_start_block: 200,
                 maker_payment_trade_fee: MmNumber::from("0.001"),
                 taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+                taker_payment_spend_headroom: MmNumber::from("0.002"),
+                maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
             },
             MakerSwapEvent::WaitingForTakerFunding {
                 maker_coin_start_block: 100,
@@ -1559,6 +1679,8 @@ mod tests {
                 taker_coin_start_block: 200,
                 taker_payment_fee: MmNumber::from("0.001"),
                 maker_payment_spend_fee: MmNumber::from("0.002"),
+                maker_payment_spend_headroom: MmNumber::from("0.002"),
+                taker_payment_fee_reservable: Some(MmNumber::from("0.001")),
             },
             TakerSwapEvent::Negotiated {
                 maker_coin_start_block: 100,
@@ -1627,12 +1749,14 @@ mod tests {
                 taker_payment_spend: BytesJson::from(vec![0x11]),
                 maker_payment: BytesJson::from(vec![0xBB]),
                 negotiation_data: negotiation_data.clone(),
+                taker_payment: BytesJson::from(vec![0xEE]),
             },
             TakerSwapEvent::MakerPaymentSpent {
                 maker_coin_start_block: 100,
                 taker_coin_start_block: 200,
                 maker_payment_spend: BytesJson::from(vec![0x22]),
                 negotiation_data: negotiation_data.clone(),
+                taker_payment: BytesJson::from(vec![0xEE]),
             },
             TakerSwapEvent::TakerFundingRefunded {
                 funding_tx: BytesJson::from(vec![0xAA]),
@@ -1666,7 +1790,7 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let repr = MakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("10.5"),
             maker_secret: H256Json::from([0xABu8; 32]),
             maker_secret_hash: BytesJson::from(vec![
@@ -1675,7 +1799,7 @@ mod tests {
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
             started_at: 1700000000,
             lock_duration: 7200,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("20.5"),
             taker_premium: MmNumber::from("0.1"),
             dex_fee_amount: MmNumber::from("0.01"),
@@ -1694,6 +1818,8 @@ mod tests {
                     taker_coin_start_block: 200,
                     maker_payment_trade_fee: MmNumber::from("0.001"),
                     taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+                    taker_payment_spend_headroom: MmNumber::from("0.002"),
+                    maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
                 },
                 MakerSwapEvent::Completed,
             ],
@@ -1703,12 +1829,12 @@ mod tests {
 
         let json = serde_json::to_string(&repr).unwrap();
         let back: MakerSwapDbRepr = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.maker_coin, "RICK");
-        assert_eq!(back.taker_coin, "MORTY");
+        assert_eq!(back.maker_coin, "DOC");
+        assert_eq!(back.taker_coin, "MARTY");
         assert_eq!(back.uuid, repr.uuid);
         assert_eq!(back.events.len(), 2);
         assert_eq!(back.swap_version, 2);
-        assert_eq!(back.conf_settings.taker_coin_nota, true);
+        assert!(back.conf_settings.taker_coin_nota);
     }
 
     #[test]
@@ -1719,7 +1845,7 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let repr = TakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("10.5"),
             taker_secret: H256Json::from([0xCDu8; 32]),
             taker_secret_hash: BytesJson::from(vec![
@@ -1728,7 +1854,7 @@ mod tests {
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::SHA256,
             started_at: 1700000000,
             lock_duration: 7200,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("20.5"),
             taker_premium: MmNumber::from("0.1"),
             dex_fee_amount: MmNumber::from("0.01"),
@@ -1747,6 +1873,8 @@ mod tests {
                     taker_coin_start_block: 200,
                     taker_payment_fee: MmNumber::from("0.001"),
                     maker_payment_spend_fee: MmNumber::from("0.002"),
+                    maker_payment_spend_headroom: MmNumber::from("0.002"),
+                    taker_payment_fee_reservable: Some(MmNumber::from("0.001")),
                 },
                 TakerSwapEvent::Completed,
             ],
@@ -1756,12 +1884,12 @@ mod tests {
 
         let json = serde_json::to_string(&repr).unwrap();
         let back: TakerSwapDbRepr = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.maker_coin, "RICK");
-        assert_eq!(back.taker_coin, "MORTY");
+        assert_eq!(back.maker_coin, "DOC");
+        assert_eq!(back.taker_coin, "MARTY");
         assert_eq!(back.uuid, repr.uuid);
         assert_eq!(back.events.len(), 2);
         assert_eq!(back.swap_version, 2);
-        assert_eq!(back.conf_settings.maker_coin_nota, true);
+        assert!(back.conf_settings.maker_coin_nota);
     }
 
     #[test]
@@ -1775,13 +1903,13 @@ mod tests {
         let uuid = Uuid::new_v4();
         let info = ActiveSwapV2Info {
             uuid,
-            maker_coin: "RICK".into(),
-            taker_coin: "MORTY".into(),
+            maker_coin: "DOC".into(),
+            taker_coin: "MARTY".into(),
             swap_type: SwapV2Type::MakerV2,
         };
         assert_eq!(info.uuid, uuid);
-        assert_eq!(info.maker_coin, "RICK");
-        assert_eq!(info.taker_coin, "MORTY");
+        assert_eq!(info.maker_coin, "DOC");
+        assert_eq!(info.taker_coin, "MARTY");
         assert_eq!(info.swap_type, SwapV2Type::MakerV2);
     }
 
@@ -1794,14 +1922,14 @@ mod tests {
         use rpc::v1::types::H256 as H256Json;
 
         let mut repr = MakerSwapDbRepr {
-            maker_coin: "RICK".into(),
+            maker_coin: "DOC".into(),
             maker_volume: MmNumber::from("1"),
             maker_secret: H256Json::from([0u8; 32]),
             maker_secret_hash: BytesJson::from(vec![0u8; 20]),
             secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
             started_at: 0,
             lock_duration: 3600,
-            taker_coin: "MORTY".into(),
+            taker_coin: "MARTY".into(),
             taker_volume: MmNumber::from("1"),
             taker_premium: MmNumber::from("0"),
             dex_fee_amount: MmNumber::from("0"),
@@ -1826,6 +1954,8 @@ mod tests {
             taker_coin_start_block: 2,
             maker_payment_trade_fee: MmNumber::from("0.001"),
             taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+            taker_payment_spend_headroom: MmNumber::from("0.002"),
+            maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
         });
         assert_eq!(repr.events.len(), 1);
 
@@ -1862,14 +1992,14 @@ mod tests {
 
         fn sample_maker_repr(uuid: Uuid) -> MakerSwapDbRepr {
             MakerSwapDbRepr {
-                maker_coin: "RICK".into(),
+                maker_coin: "DOC".into(),
                 maker_volume: MmNumber::from("10"),
                 maker_secret: H256Json::from([0xABu8; 32]),
                 maker_secret_hash: BytesJson::from(vec![1u8; 20]),
                 secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::DHASH160,
                 started_at: 1700000000,
                 lock_duration: 7200,
-                taker_coin: "MORTY".into(),
+                taker_coin: "MARTY".into(),
                 taker_volume: MmNumber::from("20"),
                 taker_premium: MmNumber::from("0.1"),
                 dex_fee_amount: MmNumber::from("0.01"),
@@ -1890,14 +2020,14 @@ mod tests {
 
         fn sample_taker_repr(uuid: Uuid) -> TakerSwapDbRepr {
             TakerSwapDbRepr {
-                maker_coin: "RICK".into(),
+                maker_coin: "DOC".into(),
                 maker_volume: MmNumber::from("10"),
                 taker_secret: H256Json::from([0xCDu8; 32]),
                 taker_secret_hash: BytesJson::from(vec![2u8; 20]),
                 secret_hash_algo: crypto::secret_hash_algo::SecretHashAlgo::SHA256,
                 started_at: 1700000000,
                 lock_duration: 7200,
-                taker_coin: "MORTY".into(),
+                taker_coin: "MARTY".into(),
                 taker_volume: MmNumber::from("20"),
                 taker_premium: MmNumber::from("0.1"),
                 dex_fee_amount: MmNumber::from("0.01"),
@@ -1935,8 +2065,8 @@ mod tests {
 
             // get_repr roundtrip — verify core fields
             let loaded: MakerSwapDbRepr = block_on(storage.get_repr(uuid)).unwrap();
-            assert_eq!(loaded.maker_coin, "RICK");
-            assert_eq!(loaded.taker_coin, "MORTY");
+            assert_eq!(loaded.maker_coin, "DOC");
+            assert_eq!(loaded.taker_coin, "MARTY");
             assert_eq!(loaded.started_at, 1700000000);
             assert_eq!(loaded.lock_duration, 7200);
             assert_eq!(loaded.swap_version, 2);
@@ -1948,6 +2078,8 @@ mod tests {
                 taker_coin_start_block: 200,
                 maker_payment_trade_fee: MmNumber::from("0.001"),
                 taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+                taker_payment_spend_headroom: MmNumber::from("0.002"),
+                maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
             };
             block_on(storage.store_event(uuid, event1)).unwrap();
 
@@ -2003,8 +2135,8 @@ mod tests {
             assert!(block_on(storage.has_record_for(&uuid)).unwrap());
 
             let loaded: TakerSwapDbRepr = block_on(storage.get_repr(uuid)).unwrap();
-            assert_eq!(loaded.maker_coin, "RICK");
-            assert_eq!(loaded.taker_coin, "MORTY");
+            assert_eq!(loaded.maker_coin, "DOC");
+            assert_eq!(loaded.taker_coin, "MARTY");
             assert_eq!(loaded.started_at, 1700000000);
             assert_eq!(loaded.swap_version, 2);
 
@@ -2014,6 +2146,8 @@ mod tests {
                 taker_coin_start_block: 200,
                 taker_payment_fee: MmNumber::from("0.001"),
                 maker_payment_spend_fee: MmNumber::from("0.002"),
+                maker_payment_spend_headroom: MmNumber::from("0.002"),
+                taker_payment_fee_reservable: Some(MmNumber::from("0.001")),
             };
             block_on(storage.store_event(uuid, event1)).unwrap();
 
@@ -2114,6 +2248,8 @@ mod tests {
                     taker_coin_start_block: 200,
                     maker_payment_trade_fee: MmNumber::from("0.001"),
                     taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+                    taker_payment_spend_headroom: MmNumber::from("0.002"),
+                    maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
                 },
                 MakerSwapEvent::WaitingForTakerFunding {
                     maker_coin_start_block: 100,
@@ -2162,6 +2298,8 @@ mod tests {
                 taker_coin_start_block: 84,
                 maker_payment_trade_fee: MmNumber::from("0.001"),
                 taker_payment_spend_trade_fee: MmNumber::from("0.002"),
+                taker_payment_spend_headroom: MmNumber::from("0.002"),
+                maker_payment_trade_fee_reservable: Some(MmNumber::from("0.001")),
             }))
             .unwrap();
 
@@ -2196,6 +2334,8 @@ mod tests {
                 taker_coin_start_block: 84,
                 taker_payment_fee: MmNumber::from("0.001"),
                 maker_payment_spend_fee: MmNumber::from("0.002"),
+                maker_payment_spend_headroom: MmNumber::from("0.002"),
+                taker_payment_fee_reservable: Some(MmNumber::from("0.001")),
             }))
             .unwrap();
 
@@ -2228,9 +2368,9 @@ mod tests {
             block_on(storage.store_repr(uuid, repr)).unwrap();
             let loaded: MakerSwapDbRepr = block_on(storage.get_repr(uuid)).unwrap();
             assert_eq!(loaded.conf_settings.maker_coin_confs, 5);
-            assert_eq!(loaded.conf_settings.maker_coin_nota, true);
+            assert!(loaded.conf_settings.maker_coin_nota);
             assert_eq!(loaded.conf_settings.taker_coin_confs, 3);
-            assert_eq!(loaded.conf_settings.taker_coin_nota, false);
+            assert!(!loaded.conf_settings.taker_coin_nota);
         }
 
         #[test]

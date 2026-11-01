@@ -2,7 +2,8 @@
 
 use crate::nft::model::chain::{Chain, ContractType};
 use crate::nft::model::metadata::UriMeta;
-use crate::nft::serde_helpers::{token_id_from_string, token_id_to_string};
+use crate::nft::serde_helpers::{optional_u64_from_string_or_number, token_id_from_string, token_id_to_string,
+                                u64_from_string_or_number};
 use ethereum_types::Address;
 use mm2_number::{BigDecimal, BigUint};
 use serde::{Deserialize, Serialize};
@@ -57,8 +58,10 @@ pub struct Nft {
     #[serde(serialize_with = "token_id_to_string", deserialize_with = "token_id_from_string")]
     pub token_id: BigUint,
     /// Block number at which the token was minted (when known).
+    #[serde(default, deserialize_with = "optional_u64_from_string_or_number")]
     pub block_number_minted: Option<u64>,
     /// Block number at which the cached entry was last updated.
+    #[serde(deserialize_with = "u64_from_string_or_number")]
     pub block_number: u64,
     /// ERC-721 vs ERC-1155.
     pub contract_type: ContractType,

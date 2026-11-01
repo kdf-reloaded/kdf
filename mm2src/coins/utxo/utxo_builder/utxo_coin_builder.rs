@@ -1,10 +1,14 @@
 use crate::hd_wallet::{HDAccountsMap, HDAccountsMutex};
 use crate::hd_wallet_storage::{HDWalletCoinStorage, HDWalletStorageError};
-use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumRpcRequest, EstimateFeeMethod,
-                               UtxoRpcClientEnum};
+use crate::rpc_command::get_my_address::PathToAddress;
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
+use crate::utxo::rpc_clients::electrum_pool::{electrum_block_interval, electrum_server_order, electrum_spread_reads};
+use crate::utxo::rpc_clients::{ElectrumClient, ElectrumClientImpl, ElectrumPoolOptions, ElectrumPoolTimings,
+                               ElectrumRpcRequest, EstimateFeeMethod, UtxoRpcClientEnum};
 use crate::utxo::tx_cache::{UtxoVerboseCacheOps, UtxoVerboseCacheShared};
 use crate::utxo::utxo_block_header_storage::{BlockHeaderStorage, InitBlockHeaderStorageOps};
-use crate::utxo::utxo_builder::utxo_conf_builder::{UtxoConfBuilder, UtxoConfError, UtxoConfResult};
+use crate::utxo::utxo_builder::utxo_conf_builder::{header_layout_fallback_families, unrecognised_enum_policy,
+                                                   UtxoConfBuilder, UtxoConfError, UtxoConfResult};
 use crate::utxo::{output_script, utxo_common, ElectrumBuilderArgs, ElectrumProtoVerifier, RecentlySpentOutPoints,
                   SPVConf, TxFee, UtxoCoinConf, UtxoCoinFields, UtxoHDAccount, UtxoHDWallet, UtxoRpcMode,
                   DEFAULT_GAP_LIMIT, UTXO_DUST_AMOUNT};
@@ -28,53 +32,8 @@ use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use primitives::hash::H256;
 use serde_json::{self as json, Value as Json};
+use serialization::CoinVariant;
 use std::sync::{Arc, Mutex, Weak};
-
-async fn add_next_electrum_server(
-    client: &ElectrumClientImpl,
-    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
-    active_servers: &mut Vec<ElectrumRpcRequest>,
-    max_connected: usize,
-) -> bool {
-    while active_servers.len() < max_connected {
-        let Some(server) = pending_servers.next() else { break };
-        match client.add_server(&server).await {
-            Ok(_) => {
-                active_servers.push(server);
-                return true;
-            },
-            Err(e) => log!("Error " (e) " connecting to " [server] ". Address won't be used"),
-        };
-    }
-
-    false
-}
-
-fn first_disconnected_electrum_server_index(statuses: &[Option<bool>]) -> Option<usize> {
-    statuses.iter().position(|status| *status == Some(false))
-}
-
-async fn replace_disconnected_electrum_server(
-    client: &ElectrumClientImpl,
-    pending_servers: &mut std::vec::IntoIter<ElectrumRpcRequest>,
-    active_servers: &mut Vec<ElectrumRpcRequest>,
-    max_connected: usize,
-) -> bool {
-    while active_servers.len() >= max_connected {
-        let mut statuses = Vec::with_capacity(active_servers.len());
-        for server in active_servers.iter() {
-            statuses.push(client.is_server_connected(&server.url).await);
-        }
-        let disconnected_index = first_disconnected_electrum_server_index(&statuses);
-        let Some(index) = disconnected_index else { break };
-        let server = active_servers.remove(index);
-        if let Err(e) = client.remove_server(&server.url).await {
-            log!("Error " (e) " removing disconnected Electrum server " [server] " during failover");
-        }
-    }
-
-    add_next_electrum_server(client, pending_servers, active_servers, max_connected).await
-}
 
 cfg_native! {
     use crate::utxo::coin_daemon_data_dir;
@@ -84,6 +43,29 @@ cfg_native! {
 }
 
 pub type UtxoCoinBuildResult<T> = Result<T, MmError<UtxoCoinBuildError>>;
+
+/// CRD ch.38 R38.6.6a: the fee policy a coins-configuration entry declares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TxFeeConfClass {
+    /// Plain fixed, `r` base units per kilobyte (proportional, truncated).
+    Fixed(u64),
+    /// Whole-kilobyte fixed, `r` base units per started kilobyte (`dingo_fee: true`).
+    WholeKbFixed(u64),
+    /// `txfee: 0`, the rate is estimated per transaction.
+    Dynamic,
+}
+
+/// Classifies the `txfee` and `dingo_fee` keys of a coins-configuration entry (CRD ch.38 R38.6.6a).
+/// An absent `txfee`, or one that is not a non-negative JSON integer, is plain fixed at 1,000;
+/// `dingo_fee` matters only for a positive `txfee` and only as the JSON boolean `true`.
+pub(crate) fn classify_tx_fee_conf(conf: &Json) -> TxFeeConfClass {
+    match conf["txfee"].as_u64() {
+        None => TxFeeConfClass::Fixed(1000),
+        Some(0) => TxFeeConfClass::Dynamic,
+        Some(fee) if conf["dingo_fee"].as_bool() == Some(true) => TxFeeConfClass::WholeKbFixed(fee),
+        Some(fee) => TxFeeConfClass::Fixed(fee),
+    }
+}
 
 #[derive(Debug, Display)]
 pub enum UtxoCoinBuildError {
@@ -96,16 +78,34 @@ pub enum UtxoCoinBuildError {
     ErrorDetectingFeeMethod(String),
     ErrorDetectingDecimals(String),
     InvalidBlockchainNetwork(String),
+    /// No Electrum server could be connected within the call budget; the text names the coin and each server
+    /// with its failure (CRD ch.38 R38.6.4k-R item 5, R38.6.4i).
+    #[display(fmt = "{}", _0)]
+    FailedToConnectToElectrums(String),
     #[display(
-        fmt = "Failed to connect to at least 1 of {:?} in {} seconds.",
-        electrum_servers,
-        seconds
+        fmt = "No usable Electrum servers for {}: none are configured, or every configured server was rejected as \
+               unusable by this build (native builds cannot use 'ws'/'wss' servers).",
+        ticker
     )]
-    FailedToConnectToElectrums {
-        electrum_servers: Vec<ElectrumRpcRequest>,
-        seconds: u64,
+    NoUsableElectrumServers {
+        ticker: String,
     },
-    ElectrumProtocolVersionCheckError(String),
+    /// A Light-mode shielded coin needs at least one lightwalletd endpoint (CRD ch.39 R39.11.5).
+    #[display(
+        fmt = "{}: `light_wallet_d_servers` must list at least one lightwalletd endpoint",
+        ticker
+    )]
+    NoLightwalletdServers {
+        ticker: String,
+    },
+    /// lightwalletd exposes no fee estimation, so `txfee: 0` (estimate) is refused (CRD ch.39 R39.11.1).
+    #[display(
+        fmt = "{}: `txfee: 0` requests fee estimation, which lightwalletd cannot do; declare a fixed `txfee` or omit it",
+        ticker
+    )]
+    NoFixedFeeDeclared {
+        ticker: String,
+    },
     #[display(fmt = "Can not detect the user home directory")]
     CantDetectUserHome,
     #[display(fmt = "Unexpected derivation method: {}", _0)]
@@ -180,6 +180,8 @@ pub trait UtxoCoinWithIguanaPrivKeyBuilder: UtxoFieldsWithIguanaPrivKeyBuilder {
 pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
     async fn build_utxo_fields_with_iguana_priv_key(&self, priv_key: &[u8]) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), self.ticker())
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
+            .with_unrecognised_enum_policy(unrecognised_enum_policy(self.ctx()))
             .build()
             .mm_err(Into::into)?;
 
@@ -213,7 +215,7 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -235,6 +237,43 @@ pub trait UtxoFieldsWithIguanaPrivKeyBuilder: UtxoCoinBuilderCommonOps {
     }
 }
 
+/// The secp256k1 secret of the address a UTXO coin activates under the global HD wallet:
+/// `m/<derivation_path>/<account>'/<chain>/<address_id>` of `path_to_address` (by default account 0,
+/// the external chain and address 0, e.g. `m/44'/141'/0'/0/0`).
+///
+/// A shielded coin takes its transparent key from this same derivation (CRD ch.39 R39.6.4,
+/// "Transparent key under HD").
+///
+/// # Errors
+///
+/// Fails when a child number is out of range or the derivation fails.
+pub fn derive_activated_hd_secret(
+    global_hd_ctx: &GlobalHDAccountArc,
+    derivation_path: &HDPathToCoin,
+    path_to_address: &PathToAddress,
+) -> UtxoCoinBuildResult<crypto::Secp256k1Secret> {
+    let mut full_path = derivation_path.to_derivation_path();
+    // account (hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.account_id, true)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create hardened child number".to_owned()))?,
+    );
+    // chain (non-hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.chain as u32, false)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
+    );
+    // address index (non-hardened)
+    full_path.push(
+        crypto::ChildNumber::new(path_to_address.address_id, false)
+            .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
+    );
+
+    global_hd_ctx
+        .derive_secp256k1_secret(&full_path)
+        .mm_err(|e| UtxoCoinBuildError::Internal(e.to_string()))
+}
+
 #[async_trait]
 pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWithHardwareWalletBuilder {
     async fn build_utxo_fields_with_global_hd(
@@ -243,33 +282,17 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
     ) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let ticker = self.ticker().to_owned();
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), &ticker)
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
+            .with_unrecognised_enum_policy(unrecognised_enum_policy(self.ctx()))
             .build()
             .mm_err(Into::into)?;
 
-        // Derive key pair at the default activated address: m/44'/coin_type'/0'/0/0
+        // Derive key pair at the activated address: `path_to_address` of the request,
+        // defaulting to account 0, the external chain and address 0 (m/44'/coin_type'/0'/0/0).
         let derivation_path = self.derivation_path().mm_err(Into::into)?;
+        let path_to_address = self.activation_params().path_to_address.clone().unwrap_or_default();
 
-        // Build the full derivation path to the first receiving address.
-        let mut full_path = derivation_path.to_derivation_path();
-        // account 0' (hardened)
-        full_path.push(
-            crypto::ChildNumber::new(0, true)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create hardened child number".to_owned()))?,
-        );
-        // external chain 0 (non-hardened)
-        full_path.push(
-            crypto::ChildNumber::new(0, false)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
-        );
-        // address index 0 (non-hardened)
-        full_path.push(
-            crypto::ChildNumber::new(0, false)
-                .map_err(|_| UtxoCoinBuildError::Internal("failed to create child number".to_owned()))?,
-        );
-
-        let secret = global_hd_ctx
-            .derive_secp256k1_secret(&full_path)
-            .mm_err(|e| UtxoCoinBuildError::Internal(e.to_string()))?;
+        let secret = derive_activated_hd_secret(&global_hd_ctx, &derivation_path, &path_to_address)?;
 
         let private = Private {
             prefix: conf.wif_prefix,
@@ -321,7 +344,7 @@ pub trait UtxoFieldsWithGlobalHDBuilder: UtxoCoinBuilderCommonOps + UtxoFieldsWi
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -348,6 +371,8 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     async fn build_utxo_fields_with_trezor(&self) -> UtxoCoinBuildResult<UtxoCoinFields> {
         let ticker = self.ticker().to_owned();
         let conf = UtxoConfBuilder::new(self.conf(), self.activation_params(), &ticker)
+            .with_header_layout_fallback_families(header_layout_fallback_families(self.ctx()).mm_err(Into::into)?)
+            .with_unrecognised_enum_policy(unrecognised_enum_policy(self.ctx()))
             .build()
             .mm_err(Into::into)?;
 
@@ -387,7 +412,7 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
         let tx_hash_algo = self.tx_hash_algo();
         let check_utxo_maturity = self.check_utxo_maturity();
         let tx_cache = self.tx_cache();
-        let block_headers_storage = self.block_headers_storage()?;
+        let block_headers_storage = self.block_headers_storage(HeaderReadPolicy::for_conf(&conf))?;
 
         let coin = UtxoCoinFields {
             conf,
@@ -445,6 +470,72 @@ pub trait UtxoFieldsWithHardwareWalletBuilder: UtxoCoinBuilderCommonOps {
     }
 }
 
+/// Builds the Electrum client of a coin: the shared pool of CRD ch.38 R38.6.4b--R38.6.4k, probed once so the build
+/// waits for the first connection, then maintained in the background. Both the activation of an
+/// Electrum-backed UTXO coin and the lazily built fallback client of a shielded coin (CRD ch.39 R39.11.25) come
+/// through here.
+pub(crate) async fn build_electrum_client(
+    ctx: &MmArc,
+    ticker: &str,
+    coin_conf: &Json,
+    args: ElectrumBuilderArgs,
+    servers: Vec<ElectrumRpcRequest>,
+    min_connected: Option<usize>,
+    max_connected: Option<usize>,
+) -> UtxoCoinBuildResult<ElectrumClient> {
+    let mut event_handlers = vec![];
+    if args.collect_metrics {
+        event_handlers.push(
+            CoinTransportMetrics::new(ctx.metrics.weak(), ticker.to_owned(), RpcClientType::Electrum).into_shared(),
+        );
+    }
+
+    // Distinguish "nothing to try" from "everything we tried failed": an empty server
+    // list means the coin's `electrum` entry is missing.
+    if servers.is_empty() {
+        return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
+            ticker: ticker.to_owned(),
+        });
+    }
+
+    // The activation probe (CRD ch.38 R38.6.4k-R) connects every listed server at once and the build
+    // waits for the first connection; the pool then maintains its set in the background.
+    let client_name = args
+        .negotiate_version
+        .then(|| format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version()));
+    let mut client = ElectrumClientImpl::new(ticker.to_owned(), event_handlers);
+    client.configure_pool(ElectrumPoolOptions {
+        min_connected: min_connected.unwrap_or(1),
+        max_connected,
+        client_name,
+        timings: ElectrumPoolTimings::default(),
+        order: electrum_server_order(ctx),
+        spread_reads: electrum_spread_reads(ctx),
+        block_interval: electrum_block_interval(coin_conf),
+    });
+    for (server, e) in client.add_servers(&servers) {
+        // A server is named as `host:port` or by a placeholder, never by its configured string (CRD ch.38
+        // R38.6.9a).
+        log!("Error " (e) " using " (server) ". Address won't be used");
+    }
+    // A server this build cannot use at all (native builds skip 'ws'/'wss' servers, so a WSS-only
+    // coin lands here) leaves the pool; with none left there is nothing to wait for.
+    if client.count_connections().await == 0 {
+        return MmError::err(UtxoCoinBuildError::NoUsableElectrumServers {
+            ticker: ticker.to_owned(),
+        });
+    }
+
+    let client = Arc::new(client);
+    client
+        .activation_probe()
+        .await
+        .map_to_mm(UtxoCoinBuildError::FailedToConnectToElectrums)?;
+    client.start_pool(args.spawn_ping);
+
+    Ok(ElectrumClient(client))
+}
+
 #[async_trait]
 pub trait UtxoCoinBuilderCommonOps {
     fn ctx(&self) -> &MmArc;
@@ -456,7 +547,7 @@ pub trait UtxoCoinBuilderCommonOps {
     fn ticker(&self) -> &str;
 
     #[inline]
-    fn block_headers_storage(&self) -> UtxoCoinBuildResult<Option<BlockHeaderStorage>> {
+    fn block_headers_storage(&self, policy: HeaderReadPolicy) -> UtxoCoinBuildResult<Option<BlockHeaderStorage>> {
         let conf: Option<SPVConf> = json::from_value(self.conf()["spv_conf"].clone())
             .map_to_mm(|e| UtxoConfError::InvalidSpvConf(e.to_string()))
             .mm_err(Into::into)?;
@@ -466,7 +557,7 @@ pub trait UtxoCoinBuilderCommonOps {
                 conf.validate()
                     .map_to_mm(UtxoConfError::InvalidSpvConf)
                     .mm_err(Into::into)?;
-                Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), conf))
+                Ok(BlockHeaderStorage::new_from_ctx(self.ctx().clone(), conf, policy))
             },
         }
     }
@@ -546,11 +637,23 @@ pub trait UtxoCoinBuilderCommonOps {
     }
 
     async fn tx_fee(&self, rpc_client: &UtxoRpcClientEnum) -> UtxoCoinBuildResult<TxFee> {
-        let tx_fee = match self.conf()["txfee"].as_u64() {
-            None => TxFee::FixedPerKb(1000),
-            Some(0) => {
+        // lightwalletd has no fee estimation: an explicit request for it (`txfee: 0`) is refused.
+        // An undeclared fee keeps the shared fixed default below, as the published ARRR entry relies
+        // on (CRD ch.39 R39.11.1).
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(rpc_client, UtxoRpcClientEnum::LightWalletD(_)) && self.conf()["txfee"].as_u64() == Some(0) {
+            return MmError::err(UtxoCoinBuildError::NoFixedFeeDeclared {
+                ticker: self.ticker().to_owned(),
+            });
+        }
+        let tx_fee = match classify_tx_fee_conf(self.conf()) {
+            TxFeeConfClass::Fixed(fee) => TxFee::FixedPerKb(fee),
+            TxFeeConfClass::WholeKbFixed(fee) => TxFee::FixedPerStartedKb(fee),
+            TxFeeConfClass::Dynamic => {
                 let fee_method = match &rpc_client {
                     UtxoRpcClientEnum::Electrum(_) => EstimateFeeMethod::Standard,
+                    #[cfg(not(target_arch = "wasm32"))]
+                    UtxoRpcClientEnum::LightWalletD(_) => EstimateFeeMethod::Standard,
                     UtxoRpcClientEnum::Native(client) => client
                         .detect_fee_method()
                         .compat()
@@ -559,7 +662,6 @@ pub trait UtxoCoinBuilderCommonOps {
                 };
                 TxFee::Dynamic(fee_method)
             },
-            Some(fee) => TxFee::FixedPerKb(fee),
         };
         Ok(tx_fee)
     }
@@ -606,72 +708,16 @@ pub trait UtxoCoinBuilderCommonOps {
         min_connected: Option<usize>,
         max_connected: Option<usize>,
     ) -> UtxoCoinBuildResult<ElectrumClient> {
-        let (on_connect_tx, on_connect_rx) = mpsc::unbounded();
-        let ticker = self.ticker().to_owned();
-        let ctx = self.ctx();
-        let mut event_handlers = vec![];
-        if args.collect_metrics {
-            event_handlers.push(
-                CoinTransportMetrics::new(ctx.metrics.weak(), ticker.clone(), RpcClientType::Electrum).into_shared(),
-            );
-        }
-
-        if args.negotiate_version {
-            event_handlers.push(ElectrumProtoVerifier { on_connect_tx }.into_shared());
-        }
-
-        let all_servers = servers.clone();
-        let max_connected = max_connected.unwrap_or(servers.len()).max(1);
-        let min_connected = min_connected.unwrap_or(1).max(1).min(max_connected);
-
-        let client = ElectrumClientImpl::new(ticker, event_handlers);
-        let mut pending_servers = servers.into_iter();
-        let mut active_servers = Vec::new();
-        while add_next_electrum_server(&client, &mut pending_servers, &mut active_servers, max_connected).await {}
-
-        let mut attempts = 0i32;
-        while client.count_connected().await < min_connected {
-            if attempts >= 10 {
-                if replace_disconnected_electrum_server(
-                    &client,
-                    &mut pending_servers,
-                    &mut active_servers,
-                    max_connected,
-                )
-                .await
-                {
-                    attempts = 0;
-                    continue;
-                }
-
-                return MmError::err(UtxoCoinBuildError::FailedToConnectToElectrums {
-                    electrum_servers: all_servers.clone(),
-                    seconds: 5,
-                });
-            }
-
-            Timer::sleep(0.5).await;
-            attempts += 1;
-        }
-
-        let client = Arc::new(client);
-
-        if args.negotiate_version {
-            let weak_client = Arc::downgrade(&client);
-            let client_name = format!("{} GUI/MM2 {}", ctx.gui().unwrap_or("UNKNOWN"), ctx.mm_version());
-            spawn_electrum_version_loop(weak_client, on_connect_rx, client_name);
-
-            wait_for_protocol_version_checked(&client)
-                .await
-                .map_to_mm(UtxoCoinBuildError::ElectrumProtocolVersionCheckError)?;
-        }
-
-        if args.spawn_ping {
-            let weak_client = Arc::downgrade(&client);
-            spawn_electrum_ping_loop(weak_client, active_servers);
-        }
-
-        Ok(ElectrumClient(client))
+        build_electrum_client(
+            self.ctx(),
+            self.ticker(),
+            self.conf(),
+            args,
+            servers,
+            min_connected,
+            max_connected,
+        )
+        .await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -825,141 +871,43 @@ fn read_native_mode_conf(
     Ok((rpc_port, rpc_user.clone(), rpc_password.clone()))
 }
 
-/// Ping the electrum servers every 30 seconds to prevent them from disconnecting us.
-/// According to docs server can do it if there are no messages in ~10 minutes.
-/// https://electrumx.readthedocs.io/en/latest/protocol-methods.html?highlight=keep#server-ping
-/// Weak reference will allow to stop the thread if client is dropped.
-fn spawn_electrum_ping_loop(weak_client: Weak<ElectrumClientImpl>, servers: Vec<ElectrumRpcRequest>) {
-    spawn(async move {
-        loop {
-            if let Some(client) = weak_client.upgrade() {
-                if let Err(e) = ElectrumClient(client).server_ping().compat().await {
-                    log!("Electrum servers " [servers] " ping error " [e]);
-                }
-            } else {
-                log!("Electrum servers " [servers] " ping loop stopped");
-                break;
-            }
-            Timer::sleep(30.).await
-        }
-    });
-}
-
-/// Follow the `on_connect_rx` stream and verify the protocol version of each connected electrum server.
-/// https://electrumx.readthedocs.io/en/latest/protocol-methods.html?highlight=keep#server-version
-/// Weak reference will allow to stop the thread if client is dropped.
-fn spawn_electrum_version_loop(
-    weak_client: Weak<ElectrumClientImpl>,
-    mut on_connect_rx: mpsc::UnboundedReceiver<String>,
-    client_name: String,
-) {
-    spawn(async move {
-        while let Some(electrum_addr) = on_connect_rx.next().await {
-            spawn(check_electrum_server_version(
-                weak_client.clone(),
-                client_name.clone(),
-                electrum_addr,
-            ));
-        }
-
-        log!("Electrum server.version loop stopped");
-    });
-}
-
-async fn check_electrum_server_version(
-    weak_client: Weak<ElectrumClientImpl>,
-    client_name: String,
-    electrum_addr: String,
-) {
-    // client.remove_server() is called too often
-    async fn remove_server(client: ElectrumClient, electrum_addr: &str) {
-        if let Err(e) = client.remove_server(electrum_addr).await {
-            log!("Error on remove server "[e]);
-        }
-    }
-
-    if let Some(c) = weak_client.upgrade() {
-        let client = ElectrumClient(c);
-        let available_protocols = client.protocol_version();
-        let version = match client
-            .server_version(&electrum_addr, &client_name, available_protocols)
-            .compat()
-            .await
-        {
-            Ok(version) => version,
-            Err(e) => {
-                log!("Electrum " (electrum_addr) " server.version error \"" [e] "\".");
-                if !e.error.is_transport() {
-                    remove_server(client, &electrum_addr).await;
-                };
-                return;
-            },
-        };
-
-        // check if the version is allowed
-        let actual_version = match version.protocol_version.parse::<f32>() {
-            Ok(v) => v,
-            Err(e) => {
-                log!("Error on parse protocol_version "[e]);
-                remove_server(client, &electrum_addr).await;
-                return;
-            },
-        };
-
-        if !available_protocols.contains(&actual_version) {
-            log!("Received unsupported protocol version " [actual_version] " from " [electrum_addr] ". Remove the connection");
-            remove_server(client, &electrum_addr).await;
-            return;
-        }
-
-        match client.set_protocol_version(&electrum_addr, actual_version).await {
-            Ok(()) => {
-                log!("Use protocol version " [actual_version] " for Electrum " [electrum_addr]);
-            },
-            Err(e) => {
-                log!("Error on set protocol_version "[e]);
-            },
-        };
-    }
-}
-
-/// Wait until the protocol version of at least one client's Electrum is checked.
-async fn wait_for_protocol_version_checked(client: &ElectrumClientImpl) -> Result<(), String> {
-    let mut attempts = 0;
-    loop {
-        if attempts >= 10 {
-            return ERR!("Failed protocol version verifying of at least 1 of Electrums in 5 seconds.");
-        }
-
-        if client.count_connections().await == 0 {
-            // All of the connections were removed because of server.version checking
-            return ERR!(
-                "There are no Electrums with the required protocol version {:?}",
-                client.protocol_version()
-            );
-        }
-
-        if client.is_protocol_version_checked().await {
-            break;
-        }
-
-        Timer::sleep(0.5).await;
-        attempts += 1;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// CRD ch.38 R38.6.6a: the classification table.
     #[test]
-    fn test_first_disconnected_electrum_server_index() {
-        assert_eq!(
-            first_disconnected_electrum_server_index(&[Some(true), Some(false), None]),
-            Some(1)
-        );
-        assert_eq!(first_disconnected_electrum_server_index(&[Some(true), None]), None);
+    fn test_classify_tx_fee_conf_r38_6_6a() {
+        use serde_json::json;
+        let cases = [
+            (json!({}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": "1000"}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": -5}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": 1000.5}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": null, "dingo_fee": true}), TxFeeConfClass::Fixed(1000)),
+            (json!({"dingo_fee": true}), TxFeeConfClass::Fixed(1000)),
+            (json!({"txfee": 0}), TxFeeConfClass::Dynamic),
+            (json!({"txfee": 0, "dingo_fee": true}), TxFeeConfClass::Dynamic),
+            (
+                json!({"txfee": 100_000_000, "dingo_fee": true}),
+                TxFeeConfClass::WholeKbFixed(100_000_000),
+            ),
+            (
+                json!({"txfee": 300_000, "dingo_fee": false}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+            (json!({"txfee": 300_000}), TxFeeConfClass::Fixed(300_000)),
+            (
+                json!({"txfee": 300_000, "dingo_fee": "true"}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+            (
+                json!({"txfee": 300_000, "dingo_fee": 1}),
+                TxFeeConfClass::Fixed(300_000),
+            ),
+        ];
+        for (conf, expected) in cases {
+            assert_eq!(classify_tx_fee_conf(&conf), expected, "{conf}");
+        }
     }
 }

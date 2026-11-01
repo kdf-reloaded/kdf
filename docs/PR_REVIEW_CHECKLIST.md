@@ -13,4 +13,4 @@ the test is unstable, please clarify it with the team.
 - [ ] Check if the code can be improved/simplified: it might be overly abstracted or require the additional abstraction layer instead for a better design.
 - [ ] Follow SOLID if applicable.
 - [ ] For PRs targeting the release branch (`main`) check that QA tested and approved it.
-      Branch hierarchy: `main` ← `staging` ← `reloaded-gplv2-base` (dev) ← feature branches.
+      Branch hierarchy: `main` ← `staging` ← `dev` ← feature branches.

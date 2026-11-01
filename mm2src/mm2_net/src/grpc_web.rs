@@ -1,3 +1,9 @@
+// Portions of this file are adapted from the gRPC-Web client example of `tonic`
+// (https://github.com/hyperium/tonic), Copyright (c) 2020 Lucio Franco, licensed
+// under the MIT license. The full upstream MIT notice is reproduced in
+// `LEGAL/THIRDPARTY-LICENSES`. See `docs/reloaded-rewrite/34-provenance-ledger.md`
+// for provenance details.
+
 /// The small module implementing gRPC-WEB support
 /// Implementation was taken from https://github.com/hyperium/tonic/blob/ddab65ede90f503360b7adb0d7afe6d5b7bb8b02/examples/src/grpc-web/client.rs
 /// with minor refactoring

@@ -1,6 +1,7 @@
 [package]
 # Vendored from `https://github.com/artemii235/testcontainers-rs.git` (commit `65e7380`),
 # itself a fork of `testcontainers/testcontainers-rs` v0.7.0 (MIT/Apache-2.0).
+# Used under the MIT option; the upstream MIT notice is kept in `LICENSE-MIT`.
 # Kept locally so the workspace is free of `artemii235/*` git dependencies. Test-only.
 # Combines `tc_core` + `tc_cli_client` + `tc_generic` into a single flat crate that
 # preserves the `testcontainers::{clients::Cli, images::generic::*, Container, Docker, Image}`

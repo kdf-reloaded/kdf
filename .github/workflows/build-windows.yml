@@ -37,6 +37,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # A `workflow_dispatch` input is free-form text a human types into the
+      # "Run workflow" form; a stray leading/trailing space (easy to pick up
+      # from a copy-paste, or an editor's autocomplete) is invisible in the
+      # UI but not in `${{ inputs.profile }}`'s expansion. That's benign
+      # inside the `cargo build` shell command below -- PowerShell just
+      # treats trailing whitespace as an ordinary token separator -- but the
+      # exact same substitution inside the artifact `path:` list below is
+      # plain multi-line text, not shell, so the space survives literally in
+      # the middle of the glob and matches nothing. That's exactly what
+      # happened on 2026-08-21 (run 32538705121): the build succeeded, the
+      # upload step silently produced zero artifacts, and
+      # `target/x86_64-pc-windows-msvc/release-dbg /kdf.exe` (note the
+      # space) was left in the job's own warning as the only clue. Trim
+      # once, here, and use the trimmed values everywhere downstream so this
+      # class of input mistake can't break anything again.
+      - name: Normalize inputs
+        id: inputs
+        shell: powershell
+        run: |
+          $profile = "${{ inputs.profile }}".Trim()
+          $features = "${{ inputs.features }}".Trim()
+          "profile=$profile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "features=$features" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
       - name: Install protoc
         shell: powershell
         run: choco install protoc -y
@@ -57,14 +81,20 @@ jobs:
         shell: powershell
         run: |
           cd mm2src
-          if ("${{ inputs.features }}") {
-            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }} --features ${{ inputs.features }}
+          if ("${{ steps.inputs.outputs.features }}") {
+            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ steps.inputs.outputs.profile }} --features ${{ steps.inputs.outputs.features }}
           } else {
-            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ inputs.profile }}
+            cargo build --bin kdf --target x86_64-pc-windows-msvc --profile ${{ steps.inputs.outputs.profile }}
           }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: kdf-x86_64-pc-windows-msvc
-          path: target/x86_64-pc-windows-msvc/${{ inputs.profile }}/kdf.exe
+          # kdf.pdb only exists for a profile that generates one (e.g.
+          # `release-dbg`, see Cargo.toml); upload-artifact doesn't fail the
+          # build when a pattern matches nothing, it just skips it, so this
+          # is safe for the default `release` profile too.
+          path: |
+            target/x86_64-pc-windows-msvc/${{ steps.inputs.outputs.profile }}/kdf.exe
+            target/x86_64-pc-windows-msvc/${{ steps.inputs.outputs.profile }}/kdf.pdb

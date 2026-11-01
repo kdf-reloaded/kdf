@@ -42,18 +42,15 @@ The crate is bounded by the following architectural rules:
 
 In the chapter-bound substrate the native backend, the type surface,
 the trait, and the handler module are complete; the browser
-backend is the stub of (2); and the eleven handlers are not
-yet registered in the public RPC dispatcher.
+backend is the stub of (2); and the eleven handlers are
+registered in the public RPC dispatcher.
 
-**Port status.** The `mm2_gui_storage` crate (backend, type
-surface, trait, and the eleven typed handlers) is present in
-reloaded as a **library**, but its public `gui_storage::` JSON-RPC
-namespace is **required but NOT yet registered in reloaded's
-dispatcher** (and `mm2_gui_storage` is not yet a dependency of the
-application crate). Per the project's PORT decision the dispatcher
-registration is a **binding driving-spec requirement**, not
-optional deferred work; the required public method surface is
-specified normatively in §24.9A and §24.7.
+**Port status.** *Implemented.* The `mm2_gui_storage` crate
+(backend, type surface, trait, and the eleven typed handlers) is
+present in reloaded as a **library**, `mm2_gui_storage` is a
+dependency of the application crate, and its public `gui_storage::`
+JSON-RPC namespace is registered in reloaded's dispatcher, per the
+public method surface specified normatively in §24.9A and §24.7.
 
 ## 24.1 Subsystem Shape
 
@@ -683,13 +680,10 @@ because they are not reachable through the dispatcher (D1).
 
 ## 24.9A Required Port — `gui_storage::` Dispatcher Surface (driving-spec)
 
-**STATUS.** The capability in this section is **required but NOT
-yet implemented in reloaded; the `mm2_gui_storage` crate (backend,
-trait, type surface, and the eleven typed handlers of §24.7) is
-present** as a library. The crate is not yet a dependency of the
-application crate, and its handlers are not yet wired into the
-public dispatcher. Per the PORT decision the registration is a
-binding requirement, not optional deferred work.
+**STATUS.** *Implemented.* The `mm2_gui_storage` crate (backend,
+trait, type surface, and the eleven typed handlers of §24.7) is a
+dependency of the application crate, and its handlers are wired
+into the public dispatcher under the `gui_storage::` namespace.
 
 **RP1.** The application crate MUST take `mm2_gui_storage` as a
 dependency and register the eleven handlers of §24.7 under the
@@ -743,14 +737,11 @@ R1-R12 above are binding.
 The following are **deferred work** named explicitly in scope
 of this chapter:
 
-D1. **[REQUIRED PORT — §24.9A]** Public dispatcher
-    registration. The eleven handlers of §24.7 shall be
-    registered in the public RPC dispatcher under the
-    `gui_storage::` namespace per R9, and `mm2_gui_storage`
-    shall become a dependency of the application crate. In
-    reloaded the handler module exists but is not registered;
-    landing this is a binding requirement, not optional, and
-    is the single biggest blocker to consumer adoption.
+D1. **[REQUIRED PORT — §24.9A, implemented]** Public dispatcher
+    registration. The eleven handlers of §24.7 are registered
+    in the public RPC dispatcher under the `gui_storage::`
+    namespace per R9, and `mm2_gui_storage` is a dependency of
+    the application crate.
 
 D2. **Browser-target persistence.** The browser-target stub
     of §24.8 shall be replaced by an IndexedDB-backed
@@ -818,10 +809,10 @@ V1. The baseline tree contains **no** GUI account-state
     `gui_account_enabled`).
 
 V2. The baseline public RPC dispatcher carries no
-    `gui_storage::` namespace. The library-only posture of
-    the chapter-bound crate (D1 deferred) is
-    consistent with the baseline's complete absence of this
-    surface.
+    `gui_storage::` namespace. That the chapter-bound crate now
+    registers this namespace (D1, implemented) is therefore
+    additive relative to the baseline's complete absence of this
+    surface, not a regression from it.
 
 V3. The three-variant identity enum of §24.2 corresponds to
     the three wallet identity styles the project already

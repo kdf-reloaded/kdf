@@ -31,6 +31,7 @@ use mm2_metrics::{ClockOps, MetricsOps};
 use mm2_p2p::atomicdex_behaviour::{AdexBehaviourCmd, AdexBehaviourEvent, AdexCmdTx, AdexEventRx, AdexResponse,
                                    AdexResponseChannel};
 use mm2_p2p::peers_exchange::PeerAddresses;
+use mm2_p2p::request_response::LocalFailure;
 use mm2_p2p::{decode_message, decode_signed, encode_and_sign, encode_message, pub_sub_topic, DecodingError,
               GossipsubMessage, Libp2pPublic, Libp2pSecpPublic, MessageId, NetworkPorts, PeerId, TOPIC_SEPARATOR};
 #[cfg(test)] use mocktopus::macros::*;
@@ -39,6 +40,7 @@ use rand::random;
 use serde::de;
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::mm2::{lp_ordermatch, lp_stats, lp_swap};
@@ -63,7 +65,12 @@ pub enum P2PRequestError {
     EncodeError(String),
     DecodeError(String),
     SendError(String),
+    /// The peer answered with an error.
     ResponseError(String),
+    /// This node's own request failed without an answer from the peer (the order-book synchronization logging
+    /// classifies by it); the text is the same as it was when this was a [`P2PRequestError::ResponseError`].
+    #[display(fmt = "{}", _1)]
+    LocalResponseError(LocalFailure, String),
     #[display(fmt = "Expected 1 response, found {}", _0)]
     ExpectedSingleResponseError(usize),
 }
@@ -126,10 +133,22 @@ pub(crate) struct PendingHealthcheckWaiter {
     ack_tx: oneshot::Sender<()>,
 }
 
+/// The queue signal toward the node's relays (CRD ch.32 §32.9B R-MP2 item 2), as the swarm side last saw it. The
+/// swarm side writes it on every poll; the maker outbox reads it.
+#[derive(Debug, Default)]
+pub struct RelayQueueSignal {
+    /// Whether the signal is raised toward any connection to a relay.
+    pub raised: AtomicBool,
+    /// How many times it was raised toward a relay connection since start.
+    pub raised_count: AtomicU64,
+}
+
 pub struct P2PContext {
     /// Using Mutex helps to prevent cloning which can actually result to channel being unbounded in case of using 1 tx clone per 1 message.
     pub cmd_tx: PaMutex<AdexCmdTx>,
     pub(crate) pending_healthchecks: PaMutex<HashMap<String, PendingHealthcheckWaiter>>,
+    /// The queue signal toward the relays (CRD ch.32 §32.9B R-MP2 item 2).
+    pub relay_queue_signal: Arc<RelayQueueSignal>,
 }
 
 #[cfg_attr(test, mockable)]
@@ -138,7 +157,14 @@ impl P2PContext {
         P2PContext {
             cmd_tx: PaMutex::new(cmd_tx),
             pending_healthchecks: PaMutex::new(HashMap::new()),
+            relay_queue_signal: Arc::default(),
         }
+    }
+
+    /// Uses `relay_queue_signal`, which the swarm side already updates, as the queue signal of the context.
+    pub fn with_relay_queue_signal(mut self, relay_queue_signal: Arc<RelayQueueSignal>) -> Self {
+        self.relay_queue_signal = relay_queue_signal;
+        self
     }
 
     pub fn store_to_mm_arc(self, ctx: &MmArc) { *ctx.p2p_ctx.lock().unwrap() = Some(Arc::new(self)) }
@@ -153,6 +179,27 @@ impl P2PContext {
             .downcast()
             .unwrap()
     }
+}
+
+fn relay_queue_signal_of(ctx: &MmArc) -> Option<Arc<RelayQueueSignal>> {
+    match ctx.p2p_ctx.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .and_then(|p2p_ctx| p2p_ctx.clone().downcast::<P2PContext>().ok())
+            .map(|p2p_ctx| p2p_ctx.relay_queue_signal.clone()),
+        Err(_) => None,
+    }
+}
+
+/// Whether the queue signal is raised toward any connection to a relay (CRD ch.32 §32.9B R-MP2 item 2). `false`
+/// while there is no P2P context.
+pub fn relay_queue_signal(ctx: &MmArc) -> bool {
+    relay_queue_signal_of(ctx).is_some_and(|signal| signal.raised.load(Ordering::Relaxed))
+}
+
+/// How many times the queue signal was raised toward a relay connection since start (CRD ch.32 §32.9B R-MP5).
+pub fn relay_queue_signal_count(ctx: &MmArc) -> u64 {
+    relay_queue_signal_of(ctx).map_or(0, |signal| signal.raised_count.load(Ordering::Relaxed))
 }
 
 fn peer_healthcheck_topic(peer_id: &str) -> String { pub_sub_topic(PEER_HEALTHCHECK_PREFIX, peer_id) }
@@ -197,6 +244,7 @@ pub async fn peer_connection_healthcheck(ctx: MmArc, peer_address: String) -> Pe
     let publish_cmd = AdexBehaviourCmd::PublishMsg {
         topics: vec![peer_healthcheck_topic(&peer_address)],
         msg: signed_probe,
+        priority: false,
     };
     p2p_ctx
         .cmd_tx
@@ -304,13 +352,32 @@ pub async fn p2p_event_process_loop(ctx: MmWeak, mut rx: AdexEventRx, i_am_relay
                     log::error!("Error on process P2P request: {:?}", e);
                 }
             },
+            Some(AdexBehaviourEvent::RelayConnectionClosed { peer_id }) => {
+                log::debug!("The last connection to relay {} closed", peer_id);
+                // CRD ch.32 §32.9B R-MP2 item 2: the close signal.
+                lp_ordermatch::relay_connection_closed(&ctx);
+            },
+            Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }) => {
+                log::debug!("Relay {} joined the relay mesh", peer_id);
+                // CRD ch.32 §32.9B R-MP4: the keep-alive round that replaces what a closed connection lost.
+                lp_ordermatch::schedule_reconnect_keep_alive_round(ctx);
+            },
             None => break,
             _ => (),
         }
     }
 }
 
-async fn process_p2p_message(
+/// The transaction a transaction-helper message carries (CRD ch.51 R50B). The sender signs the transaction's bytes
+/// (`lp_swap::broadcast_p2p_tx_msg`), so the message is a signed envelope; one that does not decode or verify is an
+/// error.
+fn tx_helper_transaction(data: &[u8]) -> Result<Vec<u8>, String> {
+    mm2_p2p::decode_signed::<Vec<u8>>(data)
+        .map(|(tx, _signature, _pubkey)| tx)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn process_p2p_message(
     ctx: MmArc,
     peer_id: PeerId,
     message_id: MessageId,
@@ -318,7 +385,9 @@ async fn process_p2p_message(
     i_am_relay: bool,
 ) {
     let mut to_propagate = false;
+    let mut priority = false;
     let mut orderbook_pairs = vec![];
+    let priority_only = relay_second_copy_priority_only(&ctx);
 
     for topic in std::iter::once(&message.topic) {
         let mut split = topic.as_str().split(TOPIC_SEPARATOR);
@@ -349,9 +418,14 @@ async fn process_p2p_message(
             Some(lp_swap::TX_HELPER_PREFIX) => {
                 if let Some(pair) = split.next() {
                     if let Ok(Some(coin)) = lp_coinfind(&ctx, pair).await {
-                        match coin.send_raw_tx_bytes(&message.data).compat().await {
-                            Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
-                            Err(e) => log::error!("Broadcast transaction failed. {}", e),
+                        // CRD ch.51 R50B: the message is the signed envelope of the transaction, not the transaction.
+                        match tx_helper_transaction(&message.data) {
+                            Ok(tx) => match coin.send_raw_tx_bytes(&tx).compat().await {
+                                Ok(id) => log::debug!("Transaction broadcasted successfully: {:?} ", id),
+                                // The usual outcome: the parties have already broadcast it themselves.
+                                Err(e) => log::debug!("Broadcast transaction failed. {}", e),
+                            },
+                            Err(e) => log::warn!("Transaction-helper message for {} does not decode: {}", pair, e),
                         }
                     }
                 }
@@ -364,8 +438,9 @@ async fn process_p2p_message(
         }
     }
 
-    if !orderbook_pairs.is_empty() {
-        let process_fut = lp_ordermatch::process_msg(
+    let orderbook_message = !orderbook_pairs.is_empty();
+    if orderbook_message {
+        let process_fut = lp_ordermatch::process_msg_with_priority(
             ctx.clone(),
             orderbook_pairs,
             peer_id.to_string(),
@@ -373,24 +448,63 @@ async fn process_p2p_message(
             i_am_relay,
         );
 
-        if process_fut.await {
+        let (propagate, is_priority) = process_fut.await;
+        if propagate {
             to_propagate = true;
+            // CRD ch.32 §32.9B R-MP1 item 2: a cancellation or a swap-negotiation message is propagated
+            // with priority.
+            priority = is_priority;
         }
     }
 
     if to_propagate && i_am_relay {
-        propagate_message(&ctx, message_id, peer_id);
+        if relay_sends_second_copy(priority, orderbook_message, priority_only) {
+            propagate_message_with_priority(&ctx, message_id, peer_id, priority);
+        } else {
+            validate_message(&ctx, message_id);
+        }
     }
+}
+
+/// CRD ch.32 R-F3b (D11): the MM2.json boolean `relay_second_copy_priority_only`, default `true`. Only an explicit
+/// JSON `false` restores the reference relay's application-level second copy of every message.
+fn relay_second_copy_priority_only(ctx: &MmArc) -> bool {
+    ctx.conf["relay_second_copy_priority_only"].as_bool() != Some(false)
+}
+
+/// Whether a relay sends the application-level second copy of a message (CRD ch.32 R-F3b, amended, D11).
+/// With `priority_only` (the default) a priority message keeps it, and so does a message outside the orderbook
+/// topics; for any other orderbook message the gossip-layer forward is the only copy. Without `priority_only` every
+/// message gets it, as on a reference relay. The relay validates the message in its message cache either way.
+fn relay_sends_second_copy(priority: bool, orderbook_message: bool, priority_only: bool) -> bool {
+    !priority_only || priority || !orderbook_message
 }
 
 fn process_p2p_request(
     ctx: MmArc,
-    _peer_id: PeerId,
+    peer_id: PeerId,
     request: Vec<u8>,
     response_channel: AdexResponseChannel,
 ) -> P2PRequestResult<()> {
+    // Sends the answer through the response channel. A synchronization request may be parked, and then
+    // the answer is sent later from another task (CRD ch.32 R-Q5b), so the channel travels in a closure.
+    let reply_ctx = ctx.clone();
+    let reply: lp_ordermatch::SyncAnswerReply = Box::new(move |res| {
+        let cmd = AdexBehaviourCmd::SendResponse { res, response_channel };
+        let p2p_ctx = P2PContext::fetch_from_mm_arc(&reply_ctx);
+        let sent = p2p_ctx.cmd_tx.lock().try_send(cmd).map_err(|e| e.to_string());
+        sent
+    });
+
     let mut decode_error = None;
     let res = match decode_message::<P2PRequest>(&request) {
+        Ok(P2PRequest::Ordermatch(lp_ordermatch::OrdermatchRequest::SyncPubkeyOrderbookState {
+            pubkey,
+            trie_roots,
+        })) => {
+            return lp_ordermatch::answer_sync_request(&ctx, peer_id, pubkey, trie_roots, reply)
+                .map_to_mm(P2PRequestError::SendError);
+        },
         Ok(request) => {
             let result = match request {
                 P2PRequest::Ordermatch(req) => lp_ordermatch::process_peer_request(ctx.clone(), req),
@@ -410,13 +524,7 @@ fn process_p2p_request(
         },
     };
 
-    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
-    let cmd = AdexBehaviourCmd::SendResponse { res, response_channel };
-    p2p_ctx
-        .cmd_tx
-        .lock()
-        .try_send(cmd)
-        .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
+    reply(res).map_to_mm(P2PRequestError::SendError)?;
 
     if let Some(error) = decode_error {
         return MmError::err(P2PRequestError::DecodeError(error));
@@ -426,10 +534,27 @@ fn process_p2p_request(
 }
 
 pub fn broadcast_p2p_msg(ctx: &MmArc, topics: Vec<String>, msg: Vec<u8>, from: Option<PeerId>) {
+    broadcast_p2p_msg_with_priority(ctx, topics, msg, from, false)
+}
+
+/// Like [`broadcast_p2p_msg`]; a `priority` message goes through the priority lane of the send queue of every
+/// connection it is written to (CRD ch.28 §28.9B RQ1 item 9).
+pub fn broadcast_p2p_msg_with_priority(
+    ctx: &MmArc,
+    topics: Vec<String>,
+    msg: Vec<u8>,
+    from: Option<PeerId>,
+    priority: bool,
+) {
     let ctx = ctx.clone();
     let cmd = match from {
-        Some(from) => AdexBehaviourCmd::PublishMsgFrom { topics, msg, from },
-        None => AdexBehaviourCmd::PublishMsg { topics, msg },
+        Some(from) => AdexBehaviourCmd::PublishMsgFrom {
+            topics,
+            msg,
+            from,
+            priority,
+        },
+        None => AdexBehaviourCmd::PublishMsg { topics, msg, priority },
     };
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
     if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
@@ -469,7 +594,7 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     match response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?
     {
         Some((from_peer, response)) => {
             let response = decode_message::<T>(&response)?;
@@ -482,7 +607,10 @@ pub async fn request_any_relay<T: de::DeserializeOwned>(
 pub enum PeerDecodedResponse<T> {
     Ok(T),
     None,
+    /// The peer answered with an error.
     Err(String),
+    /// This node's own request failed without an answer, or its answer could not be decoded.
+    LocalErr(LocalFailure, String),
 }
 
 #[allow(dead_code)]
@@ -505,7 +633,7 @@ pub async fn request_relays<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -530,7 +658,7 @@ pub async fn request_peers<T: de::DeserializeOwned>(
         .map_to_mm(|e| P2PRequestError::SendError(e.to_string()))?;
     let responses = response_rx
         .await
-        .map_to_mm(|e| P2PRequestError::ResponseError(e.to_string()))?;
+        .map_to_mm(|e| P2PRequestError::LocalResponseError(LocalFailure::Transport, e.to_string()))?;
     Ok(parse_peers_responses(responses))
 }
 
@@ -552,6 +680,7 @@ pub async fn request_one_peer<T: de::DeserializeOwned>(
         PeerDecodedResponse::Ok(response) => Ok(Some(response)),
         PeerDecodedResponse::None => Ok(None),
         PeerDecodedResponse::Err(e) => MmError::err(P2PRequestError::ResponseError(e)),
+        PeerDecodedResponse::LocalErr(kind, e) => MmError::err(P2PRequestError::LocalResponseError(kind, e)),
     }
 }
 
@@ -564,10 +693,11 @@ fn parse_peers_responses<T: de::DeserializeOwned>(
             let res = match res {
                 AdexResponse::Ok { response } => match decode_message::<T>(&response) {
                     Ok(res) => PeerDecodedResponse::Ok(res),
-                    Err(e) => PeerDecodedResponse::Err(ERRL!("{}", e)),
+                    Err(e) => PeerDecodedResponse::LocalErr(LocalFailure::Decode, ERRL!("{}", e)),
                 },
                 AdexResponse::None => PeerDecodedResponse::None,
                 AdexResponse::Err { error } => PeerDecodedResponse::Err(error),
+                AdexResponse::LocalErr { kind, error } => PeerDecodedResponse::LocalErr(kind, error),
             };
             (peer_id, res)
         })
@@ -575,14 +705,31 @@ fn parse_peers_responses<T: de::DeserializeOwned>(
 }
 
 pub fn propagate_message(ctx: &MmArc, message_id: MessageId, propagation_source: PeerId) {
+    propagate_message_with_priority(ctx, message_id, propagation_source, false)
+}
+
+/// Like [`propagate_message`]; a `priority` message goes through the priority lane of the send queue of every
+/// connection it is written to (CRD ch.28 §28.9B RQ1 item 9).
+pub fn propagate_message_with_priority(ctx: &MmArc, message_id: MessageId, propagation_source: PeerId, priority: bool) {
     let ctx = ctx.clone();
     let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
     let cmd = AdexBehaviourCmd::PropagateMessage {
         message_id,
         propagation_source,
+        priority,
     };
     if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
         log::error!("propagate_message cmd_tx.send error {:?}", e);
+    };
+}
+
+/// Marks a cached message as validated without forwarding it (CRD ch.32 R-F3b, D11).
+pub fn validate_message(ctx: &MmArc, message_id: MessageId) {
+    let ctx = ctx.clone();
+    let p2p_ctx = P2PContext::fetch_from_mm_arc(&ctx);
+    let cmd = AdexBehaviourCmd::ValidateMessage { message_id };
+    if let Err(e) = p2p_ctx.cmd_tx.lock().try_send(cmd) {
+        log::error!("validate_message cmd_tx.send error {:?}", e);
     };
 }
 
@@ -678,13 +825,87 @@ pub fn peer_id_from_secp_public(secp_public: &[u8]) -> Result<PeerId, MmError<De
 
 #[cfg(test)]
 mod tests {
-    use super::{peer_connection_healthcheck, peer_healthcheck_topic};
+    use super::{peer_connection_healthcheck, peer_healthcheck_topic, relay_second_copy_priority_only,
+                relay_sends_second_copy, tx_helper_transaction};
     use common::block_on;
     use mm2_core::mm_ctx::MmCtxBuilder;
+    use serde_json::json;
+
+    /// CRD ch.51 R50B: the receiver broadcasts the transaction inside the signed envelope, never the envelope.
+    #[test]
+    fn tx_helper_message_yields_the_signed_transaction() {
+        // The first bytes of a transaction, with values above 0x7f as in a real one.
+        let tx: Vec<u8> = vec![1, 0, 0, 0, 1, 0xa6, 0x7a, 0x32, 0x94, 0xd4, 0x80, 0xfb, 0, 0, 0, 0];
+        // What `lp_swap::broadcast_p2p_tx_msg` publishes.
+        let envelope = mm2_p2p::encode_and_sign(&tx, &[1; 32]).unwrap();
+        assert_ne!(envelope, tx);
+        assert_eq!(tx_helper_transaction(&envelope).unwrap(), tx);
+
+        // A bare transaction is not an envelope.
+        assert!(tx_helper_transaction(&tx).is_err());
+        // A changed byte of the signed payload fails the signature.
+        let mut tampered = envelope.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 1;
+        assert!(tx_helper_transaction(&tampered).is_err());
+    }
 
     #[test]
     fn peer_healthcheck_topic_is_prefixed_by_peer() {
         assert_eq!(peer_healthcheck_topic("12D3KooWtest"), "peer_healthcheck/12D3KooWtest");
+    }
+
+    /// T-F3d: a relay sends the second copy of a priority message and of a message outside the orderbook topics, and
+    /// not of any other orderbook message (CRD ch.32 R-F3b, D11).
+    #[test]
+    fn relay_sends_second_copy_for_priority_and_non_orderbook_messages() {
+        // (priority, orderbook message, priority only)
+        assert!(
+            !relay_sends_second_copy(false, true, true),
+            "ordinary orderbook message"
+        );
+        assert!(
+            relay_sends_second_copy(true, true, true),
+            "cancellation or swap negotiation"
+        );
+        assert!(
+            relay_sends_second_copy(false, false, true),
+            "swap, swap v2 or watcher message"
+        );
+        assert!(
+            relay_sends_second_copy(true, false, true),
+            "priority outside the orderbook topics"
+        );
+    }
+
+    /// With `relay_second_copy_priority_only` off, a relay sends the second copy of every message, as a reference
+    /// relay does (CRD ch.32 R-F3b, Compatibility note).
+    #[test]
+    fn relay_sends_second_copy_of_every_message_when_priority_only_is_off() {
+        for priority in [false, true] {
+            for orderbook_message in [false, true] {
+                assert!(
+                    relay_sends_second_copy(priority, orderbook_message, false),
+                    "priority {priority}, orderbook message {orderbook_message}"
+                );
+            }
+        }
+    }
+
+    /// The switch defaults to on; only a JSON `false` turns it off (CRD ch.32 R-F3b).
+    #[test]
+    fn relay_second_copy_priority_only_defaults_to_true() {
+        let ctx = MmCtxBuilder::default().into_mm_arc();
+        assert!(relay_second_copy_priority_only(&ctx), "absent");
+        for (conf, expected) in [
+            (json!({ "relay_second_copy_priority_only": true }), true),
+            (json!({ "relay_second_copy_priority_only": false }), false),
+            (json!({ "relay_second_copy_priority_only": "false" }), true),
+            (json!({ "relay_second_copy_priority_only": null }), true),
+        ] {
+            let ctx = MmCtxBuilder::default().with_conf(conf.clone()).into_mm_arc();
+            assert_eq!(relay_second_copy_priority_only(&ctx), expected, "{conf}");
+        }
     }
 
     #[test]

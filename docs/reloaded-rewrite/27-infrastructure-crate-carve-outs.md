@@ -9,10 +9,11 @@
 > exact numerics, I/O scaffolding, repository-driven
 > configuration, libp2p proxy signing, hardware-wallet
 > primitives, shared-reference debug helper, procedural-macro
-> derives); each subsystem owns no user-visible feature on
-> its own but is depended upon by feature-bearing subsystems,
-> and each is bound by a single chapter or single binding
-> rule in this chapter.
+> derives, the native SQLite persistence gateway, and the
+> central per-process application context); each subsystem
+> owns no user-visible feature on its own but is depended upon
+> by feature-bearing subsystems, and each is bound by a single
+> chapter or single binding rule in this chapter.
 
 ## 27.0 Executive Summary
 
@@ -38,7 +39,7 @@ architectural rules that apply to that population: what is
 depend on each other, and what changes to an infrastructure
 subsystem require coordinated changes elsewhere.
 
-The thirteen subsystems registered in this chapter cover:
+The fifteen subsystems registered in this chapter cover:
 
 - error handling and its serialisation scaffolding (§27.1);
 - server-sent-events fan-out (§27.2);
@@ -49,11 +50,13 @@ The thirteen subsystems registered in this chapter cover:
 - metrics surface (§27.6);
 - exact-arithmetic numeric type (§27.7);
 - filesystem and network I/O scaffolding (§27.8);
+- the native SQLite persistence gateway (§27.8A);
 - repository-driven configuration (§27.9);
 - libp2p proxy signing (§27.10);
 - hardware-wallet primitives (§27.11);
 - shared-reference debug helper (§27.12);
-- procedural-macro derives for boilerplate reduction (§27.13).
+- procedural-macro derives for boilerplate reduction (§27.13);
+- the central per-process application context (§27.13A).
 
 ## 27.1 Error Handling and Serialisation
 
@@ -252,6 +255,33 @@ R16. **Single source-of-truth for per-network constants.**
      configuration registry of §27.8 / Chapter 6. No
      per-network constant lives outside that substrate.
 
+## 27.8A Native SQLite Persistence Gateway
+
+The native SQLite persistence gateway is the codebase's single
+point of contact with the on-disk SQLite engine on native
+(non-WebAssembly) targets: an identifier-validation and
+pragma-application toolbox, a typed query-builder substrate
+covering the common single-table SQL shapes, and an
+asynchronous connection facade backed by a dedicated worker
+thread. Every native-side persistence consumer in the
+workspace -- including the central application-context
+substrate of §27.13A, the graphical-user-interface account-
+state substrate, the transaction-history and per-protocol
+history stores, the Lightning persister, the WalletConnect
+session store, and the non-fungible-token table substrate --
+reaches the SQLite engine through this gateway rather than
+constructing a bare SQLite connection of its own.
+
+R28. **Single native SQL gateway.** Every native-side
+     persistence consumer in the codebase shall reach the
+     SQLite engine through this substrate. The substrate's full
+     contract -- the validation-and-pragma layer, the typed
+     query-builder substrate, the asynchronous connection
+     facade, and the consumer-routing discipline -- is bound by
+     [Chapter 25](25-sql-query-builder.md); the parallel
+     WebAssembly persistence substrate is bound by
+     [Chapter 26](26-cross-platform-and-wasm.md).
+
 ## 27.9 Repository-Driven Configuration
 
 The repository-driven-configuration substrate is the
@@ -352,6 +382,32 @@ R24. **Derives are additive.** New derives in this substrate
      shall not change the semantics of any existing derive.
      Existing call sites do not need to be revisited when
      the substrate is extended.
+
+## 27.13A Central Application Context
+
+The central application-context substrate is the codebase's
+single per-process shared-state handle: an owned-state record,
+a reference-counted handle around it, a once-set lazy-
+initialisation field substrate for values pinned once at
+startup and read many times thereafter, and a sub-context slot
+substrate through which every other feature-bearing subsystem
+registers and fetches its own per-process shared state. Every
+workspace consumer that needs shared state across the process
+boundary -- the SQLite gateway of §27.8A, the SSE fan-out of
+§27.2, the state-machine runtime of §27.5, the metrics surface
+of §27.6, and every feature-bearing subsystem with per-process
+state of its own -- fetches it through this substrate's single
+handle.
+
+R29. **Single central context.** Every workspace consumer that
+     needs per-process shared state shall fetch it through this
+     substrate's single handle rather than through process-
+     global state, static mutable variables, or thread-local
+     storage. The substrate's full contract -- the owned-state
+     record and handle pair, the once-set lazy-initialisation
+     field substrate, the sub-context slot substrate, and the
+     construction-and-lifecycle discipline -- is bound by
+     [Chapter 31](31-central-application-context.md).
 
 ## 27.14 Population Boundary and Cross-Population Rules
 

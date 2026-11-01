@@ -406,10 +406,11 @@ fn session_grants_chain(namespaces: &SettleNamespaces, chain_id: &str) -> bool {
         let in_chains = namespace
             .chains
             .as_ref()
-            .map_or(false, |chains| chains.contains(chain_id));
-        let in_accounts = namespace.accounts.as_ref().map_or(false, |accounts| {
-            accounts.iter().any(|account| account.starts_with(&account_prefix))
-        });
+            .is_some_and(|chains| chains.contains(chain_id));
+        let in_accounts = namespace
+            .accounts
+            .as_ref()
+            .is_some_and(|accounts| accounts.iter().any(|account| account.starts_with(&account_prefix)));
         in_chains || in_accounts
     })
 }

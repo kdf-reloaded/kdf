@@ -100,16 +100,16 @@ fn test_enable_token_error_http_status_codes() {
 
 #[test]
 fn test_enable_token_error_from_coin_conf_error() {
-    let e: EnableTokenError = CoinConfWithProtocolError::ConfigIsNotFound("RICK".into()).into();
-    assert!(matches!(e, EnableTokenError::TokenConfigIsNotFound(ref t) if t == "RICK"));
+    let e: EnableTokenError = CoinConfWithProtocolError::ConfigIsNotFound("DOC".into()).into();
+    assert!(matches!(e, EnableTokenError::TokenConfigIsNotFound(ref t) if t == "DOC"));
 
     let json_err = serde_json::from_str::<serde_json::Value>("bad_json").unwrap_err();
     let e: EnableTokenError = CoinConfWithProtocolError::CoinProtocolParseError {
-        ticker: "MORTY".into(),
+        ticker: "MARTY".into(),
         err: json_err,
     }
     .into();
-    assert!(matches!(e, EnableTokenError::TokenProtocolParseError { ref ticker, .. } if ticker == "MORTY"));
+    assert!(matches!(e, EnableTokenError::TokenProtocolParseError { ref ticker, .. } if ticker == "MARTY"));
 
     let e: EnableTokenError = CoinConfWithProtocolError::UnexpectedProtocol {
         ticker: "BTC".into(),
@@ -315,7 +315,7 @@ fn test_platform_error_display() {
     };
     assert!(e.to_string().contains("ETH") && e.to_string().contains("gas too low"));
 
-    let e = EnablePlatformCoinWithTokensError::PrivKeyNotAllowed("trezor mode".into());
+    let e = EnablePlatformCoinWithTokensError::PrivKeyPolicyNotAllowed("trezor mode".into());
     assert!(e.to_string().contains("trezor mode"));
 }
 
@@ -377,7 +377,7 @@ fn test_platform_error_http_status_codes() {
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
-        EnablePlatformCoinWithTokensError::PrivKeyNotAllowed("e".into()).status_code(),
+        EnablePlatformCoinWithTokensError::PrivKeyPolicyNotAllowed("e".into()).status_code(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(
@@ -529,8 +529,8 @@ fn test_standalone_error_display() {
     };
     assert!(e.to_string().contains("KMD"));
 
-    let e = InitStandaloneCoinError::PrivKeyNotAllowed("hw wallet".into());
-    assert!(e.to_string().contains("hw wallet"));
+    let e = InitStandaloneCoinError::HwError(crypto::HwRpcError::NoTrezorDeviceAvailable);
+    assert!(e.to_string().contains("NoTrezorDeviceAvailable"));
 
     let e = InitStandaloneCoinError::TaskTimedOut {
         duration: Duration::from_secs(30),
@@ -577,13 +577,10 @@ fn test_standalone_error_http_status_codes() {
         .status_code(),
         StatusCode::BAD_REQUEST
     );
+    // 410
     assert_eq!(
-        InitStandaloneCoinError::PrivKeyNotAllowed("e".into()).status_code(),
-        StatusCode::BAD_REQUEST
-    );
-    assert_eq!(
-        InitStandaloneCoinError::UnexpectedDerivationMethod("e".into()).status_code(),
-        StatusCode::BAD_REQUEST
+        InitStandaloneCoinError::HwError(crypto::HwRpcError::FoundMultipleDevices).status_code(),
+        StatusCode::GONE
     );
 
     // 408
@@ -638,8 +635,12 @@ fn test_zcoin_error_to_standalone_error_does_not_panic() {
             if ticker == "ARRR" && error.contains("lightwalletd unavailable")
     ));
 
-    let e: InitStandaloneCoinError = ZcoinInitError::HardwareWalletsAreNotSupportedYet.into();
-    assert!(matches!(e, InitStandaloneCoinError::PrivKeyNotAllowed(ref reason) if reason.contains("Hardware wallets")));
+    let e: InitStandaloneCoinError = ZcoinInitError::HardwareWalletsAreNotSupportedYet { ticker: "ARRR".into() }.into();
+    assert!(matches!(
+        e,
+        InitStandaloneCoinError::CoinCreationError { ref ticker, ref error }
+            if ticker == "ARRR" && error.contains("Hardware wallets")
+    ));
 }
 
 // ---------------------------------------------------------------------------

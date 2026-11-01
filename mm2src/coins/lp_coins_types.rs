@@ -15,6 +15,10 @@ pub enum PaymentInstructions {
     WatcherReward(BigDecimal),
 }
 
+/// Exactly one smallest unit of a coin with `decimals` decimals, i.e. 10^-decimals, as a rational.
+/// Valid for every `u8`: the scale is carried by `BigDecimal`, so no machine-integer power is formed.
+pub(crate) fn one_smallest_unit(decimals: u8) -> MmNumber { BigDecimal::new(1.into(), i64::from(decimals)).into() }
+
 pub type BalanceResult<T> = Result<T, MmError<BalanceError>>;
 pub type BalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<BalanceError>> + Send>;
 pub type NonZeroBalanceFut<T> = Box<dyn Future<Item = T, Error = MmError<GetNonZeroBalance>> + Send>;
@@ -42,6 +46,13 @@ pub struct RawTransactionRequest {
 pub struct RawTransactionRes {
     /// Raw bytes of signed transaction in hexadecimal string, this should be return hexadecimal encoded signed transaction for get_raw_transaction
     pub tx_hex: BytesJson,
+    /// The transaction in a coin's native JSON form, for a coin whose native
+    /// serialisation of a transaction is JSON text rather than a binary encoding --
+    /// currently Sia only (CRD ch.20 R-W12). It is the same serialisation `tx_hex`
+    /// hex-encodes, emitted unencoded, and is omitted entirely for every other coin
+    /// family, exactly as the equivalent field on `TransactionDetails` (R-W7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_json: Option<Json>,
 }
 /// Previous utxo transaction data for signing
 #[derive(Clone, Debug, Deserialize)]
@@ -139,6 +150,13 @@ pub enum TransactionErr {
     TxRecoverable(TransactionEnum, String),
     /// Simply for plain error messages.
     Plain(String),
+    /// CRD ch.56 R5: an EVM node rejected the transaction, or its gas estimation, for a fee cap below the
+    /// block base fee. A rejected broadcast keeps its signed transaction, as [`TransactionErr::TxRecoverable`]
+    /// does: a node that did not answer may still have taken it.
+    FeeCapBelowBaseFee {
+        rejection: FeeCapBelowBaseFee,
+        tx: Option<TransactionEnum>,
+    },
 }
 impl TransactionErr {
     /// Returns transaction if the error includes it.
@@ -146,7 +164,8 @@ impl TransactionErr {
     pub fn get_tx(&self) -> Option<TransactionEnum> {
         match self {
             TransactionErr::TxRecoverable(tx, _) => Some(tx.clone()),
-            _ => None,
+            TransactionErr::FeeCapBelowBaseFee { tx, .. } => tx.clone(),
+            TransactionErr::Plain(_) => None,
         }
     }
 
@@ -156,6 +175,7 @@ impl TransactionErr {
         match self {
             TransactionErr::TxRecoverable(_, err) => err.to_string(),
             TransactionErr::Plain(err) => err.to_string(),
+            TransactionErr::FeeCapBelowBaseFee { rejection, .. } => rejection.to_string(),
         }
     }
 }
@@ -177,6 +197,29 @@ pub enum NegotiateSwapContractAddrErr {
     #[display(fmt = "UnexpectedOtherAddr, addr supplied {:?}", _0)]
     UnexpectedOtherAddr(BytesJson),
     NoOtherAddrAndNoFallback,
+    /// The coin was activated without a swap contract (a wallet-only coin), so it cannot take part in a swap.
+    #[display(fmt = "The coin has no swap contract")]
+    NoSwapContract,
+}
+/// Width of a per-coin hash-time-locked-contract public key, at the coin layer
+/// and on the legacy swap wire alike (CRD ch.51 R62, R63).
+///
+/// The width belongs to the deployed wire format, not to secp256k1. A chain
+/// whose native key is narrower occupies the field by the padding convention of
+/// R64 instead of shortening it, so neither the swap machines nor the
+/// negotiation message ever become key-length-polymorphic.
+pub const SWAP_HTLC_PUBKEY_LEN: usize = 33;
+/// Failure of one of the two coin-layer key operations bound by CRD ch.51 R63,
+/// [`SwapOps::derive_htlc_pubkey`](crate::SwapOps::derive_htlc_pubkey) and
+/// [`SwapOps::validate_other_pubkey`](crate::SwapOps::validate_other_pubkey).
+#[derive(Debug, Display, Eq, PartialEq)]
+pub enum HtlcPubkeyError {
+    #[display(fmt = "HTLC public key must be exactly {} bytes, got {}", SWAP_HTLC_PUBKEY_LEN, _0)]
+    UnexpectedLength(usize),
+    #[display(fmt = "HTLC public key is not a valid {} point: {}", _0, _1)]
+    NotOnCurve(&'static str, String),
+    #[display(fmt = "Coin cannot derive an HTLC public key: {}", _0)]
+    NotAvailable(String),
 }
 /// Where the burn portion of a DEX fee is sent.
 #[derive(Clone, Debug, PartialEq)]
@@ -250,20 +293,46 @@ impl fmt::Display for DexFee {
     }
 }
 
-/// KMD path: split the fee between the fee address and an `OP_RETURN` burn
-/// output. The `min_tx_amount` check applies to the total fee; if the entire
-/// fee is below that minimum, fall back to `Standard`.
-pub fn calc_dex_fee_for_op_return(fee: MmNumber, min_tx_amount: MmNumber, fee_share: MmNumber) -> DexFee {
-    if fee < min_tx_amount {
-        return DexFee::Standard(fee);
+/// KMD path (CRD ch.08 R8 / ch.16 R8): split the (already dust-floored) total
+/// fee between the fee address and an `OP_RETURN` burn output using three
+/// exact-rational ranges, evaluated in order:
+///
+/// 1. `total <= dust` -- `Standard(dust)`: one fee output, no burn.
+/// 2. `total * share >= dust` -- full split: `fee = total * share`,
+///    `burn = total - fee`.
+/// 3. otherwise (`dust < total` and `total * share < dust`) -- clamped
+///    split: `fee = dust`, `burn = total - dust`. The fee-collection leg is
+///    never below dust; only the burn leg can be.
+///
+/// This is the netid-8762 `v2.6.0-beta` wire contract (issue #11): it
+/// replaces an earlier, incorrect implementation that always split 75/25
+/// above dust and then exempted the resulting under-dust fee output from the
+/// builder's dust guard (see ch.08 R15A's compatibility correction).
+pub fn calc_dex_fee_for_op_return(total: MmNumber, min_tx_amount: MmNumber, fee_share: MmNumber) -> DexFee {
+    if total <= min_tx_amount {
+        return DexFee::Standard(min_tx_amount);
     }
-    let fee_part = &fee * &fee_share;
-    let burn_part = &fee - &fee_part;
-    if fee_part <= MmNumber::from(0) || burn_part <= MmNumber::from(0) {
-        return DexFee::Standard(fee);
+    let fee_part = &total * &fee_share;
+    if fee_part >= min_tx_amount {
+        let burn_part = &total - &fee_part;
+        // Ch.08 R10 safety fallback: never emit a degenerate WithBurn. Not
+        // reachable for either production network's parameters (R8), but a
+        // non-default share (e.g. 1) can still hit this.
+        if fee_part <= MmNumber::from(0) || burn_part <= MmNumber::from(0) {
+            return DexFee::Standard(total);
+        }
+        return DexFee::WithBurn {
+            fee_amount: fee_part,
+            burn_amount: burn_part,
+            burn_destination: DexFeeBurnDestination::KmdOpReturn,
+        };
+    }
+    let burn_part = &total - &min_tx_amount;
+    if burn_part <= MmNumber::from(0) {
+        return DexFee::Standard(total);
     }
     DexFee::WithBurn {
-        fee_amount: fee_part,
+        fee_amount: min_tx_amount,
         burn_amount: burn_part,
         burn_destination: DexFeeBurnDestination::KmdOpReturn,
     }
@@ -322,17 +391,21 @@ impl DexFee {
         calc_dex_fee_for_burn_account(base_fee, min_tx_amount, fee_share, burn_pubkey)
     }
 
-    /// Validation-time variant. Returns `NoFee` when an active account-burn
-    /// coin is itself the taker; inactive network keys and direct OP_RETURN
-    /// burns do not waive the fee. Otherwise delegates to
-    /// `new_from_taker_coin`.
+    /// Validation-time variant (CRD ch.16 R7). Step 1: if the taker coin is
+    /// not a privacy coin and its resolved burn public key (the coin's own
+    /// non-empty value, else the network's) is byte-for-byte equal to the
+    /// taker's public key, return `NoFee` -- the burn-key holder pays no fee
+    /// on its own trades. This does NOT depend on the network burn gate or
+    /// on either per-coin burn predicate, and applies on both production
+    /// networks (netid 8762 and 6133) and both swap protocols. Otherwise
+    /// delegates to `new_from_taker_coin`.
     pub fn new_with_taker_pubkey(
         taker_coin: &dyn MmCoin,
         net_cfg: &dyn mm2_net_config::NetConfig,
         base_fee: MmNumber,
         taker_pubkey: &[u8],
     ) -> DexFee {
-        if net_cfg.burn_enabled() && !taker_coin.should_burn_directly() && taker_coin.should_burn_dex_fee() {
+        if !taker_coin.is_privacy() {
             let burn_pubkey = match taker_coin.burn_pubkey() {
                 ref v if !v.is_empty() => v.clone(),
                 _ => net_cfg.burn_addr_raw_pubkey().to_vec(),
@@ -556,23 +629,57 @@ impl<'de> Deserialize<'de> for TxFeeDetails {
     where
         D: Deserializer<'de>,
     {
+        // `#[serde(untagged)]` ignores the `type` tag `TxFeeDetails`'s own
+        // `Serialize` derive writes and picks the first variant whose *shape*
+        // the data happens to fit, so every arm of `TxFeeDetails` needs an
+        // arm here too -- `Sia` and `Tendermint` never got one when they were
+        // added to `TxFeeDetails`. A variant missing from this list isn't
+        // merely mis-tagged on read: since one history file holds every tx as
+        // one JSON array, a single unrepresentable entry fails deserializing
+        // the *whole* file, which `load_history_from_file_impl` treats as
+        // corruption and wipes on every single read, including the read
+        // `my_tx_history_v2_rpc` does directly against the file on every RPC
+        // call (see lp_coins_ops.rs / my_tx_history_v2.rs) -- so a coin with
+        // any fee-details shape missing here can never show history at all,
+        // not even transiently. Confirmed live: SC's cache reset with a
+        // "TxFeeDetailsUnTagged" deserialization error on every KDF start and
+        // every history RPC call, immediately discarding whatever the
+        // background history loop had just fetched and saved.
+        //
+        // `Tendermint` is listed before `Utxo` deliberately: its shape
+        // (`coin`, `amount`, `gas_limit`) is a strict superset of Utxo's
+        // (`coin: Option<..>`, `amount`), so trying Utxo first would silently
+        // swallow every Tendermint entry as a (wrongly re-tagged) Utxo one
+        // instead of failing -- same bug, quieter symptom, not the one that
+        // was reported but the same oversight. Genuine Utxo entries have no
+        // `gas_limit` field, so this reordering can't misclassify them.
+        //
+        // `Slp { amount, coin: String }` is deliberately NOT added: its shape
+        // is *identical* to Utxo's whenever `coin` is present, so no
+        // placement in this list can distinguish the two structurally --
+        // fixing that needs the tag to actually be read, not guessed, and is
+        // a separate, untested change left alone here.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum TxFeeDetailsUnTagged {
+            Tendermint(tendermint::TendermintFeeDetails),
             Utxo(UtxoFeeDetails),
             Eth(EthTxFeeDetails),
             Qrc20(Qrc20FeeDetails),
             #[cfg(not(target_arch = "wasm32"))]
             Solana(SolanaFeeDetails),
+            Sia(siacoin::SiaFeeDetails),
             Tron(crate::eth::tron::fee::TronTxFeeDetails),
         }
 
         match Deserialize::deserialize(deserializer)? {
+            TxFeeDetailsUnTagged::Tendermint(f) => Ok(TxFeeDetails::Tendermint(f)),
             TxFeeDetailsUnTagged::Utxo(f) => Ok(TxFeeDetails::Utxo(f)),
             TxFeeDetailsUnTagged::Eth(f) => Ok(TxFeeDetails::Eth(f)),
             TxFeeDetailsUnTagged::Qrc20(f) => Ok(TxFeeDetails::Qrc20(f)),
             #[cfg(not(target_arch = "wasm32"))]
             TxFeeDetailsUnTagged::Solana(f) => Ok(TxFeeDetails::Solana(f)),
+            TxFeeDetailsUnTagged::Sia(f) => Ok(TxFeeDetails::Sia(f)),
             TxFeeDetailsUnTagged::Tron(f) => Ok(TxFeeDetails::Tron(f)),
         }
     }
@@ -619,6 +726,13 @@ pub enum TransactionType {
     ClaimDelegationRewards,
     StandardTransfer,
     TokenTransfer(BytesJson),
+    /// A Siacoin v1 transaction event (CRD ch.53 R53.5.10).
+    SiaV1Transaction,
+    /// A Siacoin v2 transaction event (CRD ch.53 R53.5.10).
+    SiaV2Transaction,
+    /// A Siacoin miner *or* foundation payout event (CRD ch.53 R53.5.10);
+    /// both consensus payout kinds share this wire value.
+    SiaMinerPayout,
 }
 impl Default for TransactionType {
     fn default() -> Self { TransactionType::StandardTransfer }
@@ -628,6 +742,13 @@ impl Default for TransactionType {
 pub struct TransactionDetails {
     /// Raw bytes of signed transaction, this should be sent as is to `send_raw_transaction_bytes` RPC to broadcast the transaction
     pub tx_hex: BytesJson,
+    /// The signed transaction in a coin's native JSON form, for a coin whose native
+    /// serialisation of a transaction is JSON text rather than a binary encoding --
+    /// currently Sia only (CRD ch.20 R-W7). It is the same serialisation `tx_hex`
+    /// hex-encodes, emitted unencoded, and is omitted entirely for every other coin
+    /// family; its absence means "this coin has no JSON carrier", never an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tx_json: Option<Json>,
     /// Transaction hash in hexadecimal format
     pub(crate) tx_hash: String,
     /// Coins are sent from these addresses
@@ -939,6 +1060,11 @@ pub struct GenTakerPaymentSpendArgs<'a, Coin: ParseCoinAssocTypes + ?Sized> {
     pub dex_fee: &'a DexFee,
     pub premium_amount: BigDecimal,
     pub trading_amount: BigDecimal,
+    /// Raw bytes of the active network's DEX-fee-collection public key (CRD
+    /// ch.16 R14 / chapter 08 R16 finding). The version-two taker-payment-spend
+    /// fee-collection output MUST be derived from this, not from a
+    /// network-fixed constant.
+    pub dex_fee_addr_raw_pubkey: &'a [u8],
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "state", content = "additional_info")]
@@ -948,4 +1074,52 @@ pub enum HistorySyncState {
     InProgress(Json),
     Error(Json),
     Finished,
+}
+
+#[cfg(test)]
+mod tx_fee_details_tests {
+    //! Regression coverage for `TxFeeDetails`'s hand-rolled untagged
+    //! `Deserialize`: every `TxFeeDetails` arm must round-trip through it, or
+    //! a single such entry in a saved history file makes the whole file
+    //! (a JSON array shared by every tx of that coin) fail to load -- which
+    //! `load_history_from_file_impl` then treats as corruption and silently
+    //! wipes, on every read, forever (this is exactly what happened to SC).
+    use super::*;
+
+    fn roundtrip(details: TxFeeDetails) {
+        let serialized = json::to_string(&details).expect("TxFeeDetails always serializes");
+        let deserialized: TxFeeDetails =
+            json::from_str(&serialized).unwrap_or_else(|e| panic!("{} failed to deserialize back: {}", serialized, e));
+        assert_eq!(details, deserialized, "serialized as: {}", serialized);
+    }
+
+    #[test]
+    fn test_sia_fee_details_roundtrip() {
+        roundtrip(TxFeeDetails::Sia(siacoin::SiaFeeDetails {
+            coin: "SC".to_owned(),
+            policy: siacoin::SiaFeePolicy::Unknown,
+            total_amount: "0.001".parse().unwrap(),
+        }));
+    }
+
+    #[test]
+    fn test_tendermint_fee_details_roundtrip() {
+        roundtrip(TxFeeDetails::Tendermint(tendermint::TendermintFeeDetails {
+            coin: "ATOM".to_owned(),
+            amount: "0.002".parse().unwrap(),
+            uamount: 0,
+            gas_limit: 100000,
+        }));
+    }
+
+    /// A real Utxo entry (no `gas_limit`) must keep deserializing as `Utxo`
+    /// now that `Tendermint` -- whose shape is a strict superset of Utxo's --
+    /// is tried first.
+    #[test]
+    fn test_utxo_fee_details_roundtrip_unaffected_by_tendermint_reordering() {
+        roundtrip(TxFeeDetails::Utxo(UtxoFeeDetails {
+            coin: Some("RIN".to_owned()),
+            amount: "0.0001".parse().unwrap(),
+        }));
+    }
 }

@@ -161,35 +161,35 @@ mod tests {
             .expect("!TxHistoryDb::init_with_fs_path");
 
         let history = db
-            .load_history("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
+            .load_history("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
             .await
             .expect("!TxHistoryDb::load_history");
         assert!(history.is_empty());
 
-        let history_str = r#"[{"tx_hex":"0400008085202f89018ec8f6f02e008ebd57bbf94c0d8297c1825f3af204490c43f5652b002a2c8b17010000006b483045022100e625a8b77beac5ec891e7d44b18fc4d780ef8456847eb2c6fa2f765e3379a9c102200f323612189fa44ee16f5deb39809b71c4811545b36ee4d6cc622d01aab10ef3012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff03809698000000000017a9142ffaf6694c6b441790546eefd277e430e08e47a6870000000000000000166a14094ab490fffa9939544545a656b345bf21920a90f6b35714000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acf9d29260000000000000000000000000000000","tx_hash":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","bH6y6RtvbLToqSUNtLA5rQRjSwyNNzUSNc"],"total_amount":"3.51293022","spent_by_me":"3.51293022","received_by_me":"3.41292022","my_balance_change":"-0.10001","block_height":916940,"timestamp":1620235027,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"RICK","internal_id":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8"}]"#;
+        let history_str = r#"[{"tx_hex":"0400008085202f89018ec8f6f02e008ebd57bbf94c0d8297c1825f3af204490c43f5652b002a2c8b17010000006b483045022100e625a8b77beac5ec891e7d44b18fc4d780ef8456847eb2c6fa2f765e3379a9c102200f323612189fa44ee16f5deb39809b71c4811545b36ee4d6cc622d01aab10ef3012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff03809698000000000017a9142ffaf6694c6b441790546eefd277e430e08e47a6870000000000000000166a14094ab490fffa9939544545a656b345bf21920a90f6b35714000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acf9d29260000000000000000000000000000000","tx_hash":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","bH6y6RtvbLToqSUNtLA5rQRjSwyNNzUSNc"],"total_amount":"3.51293022","spent_by_me":"3.51293022","received_by_me":"3.41292022","my_balance_change":"-0.10001","block_height":916940,"timestamp":1620235027,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"DOC","internal_id":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8"}]"#;
         let history: Vec<TransactionDetails> = json::from_str(history_str).unwrap();
-        db.save_history("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD", history)
+        db.save_history("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD", history)
             .await
             .expect("!TxHistoryDb::save_history");
 
-        let updated_history_str = r#"[{"tx_hex":"0400008085202f89018ec8f6f02e008ebd57bbf94c0d8297c1825f3af204490c43f5652b002a2c8b17010000006b483045022100e625a8b77beac5ec891e7d44b18fc4d780ef8456847eb2c6fa2f765e3379a9c102200f323612189fa44ee16f5deb39809b71c4811545b36ee4d6cc622d01aab10ef3012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff03809698000000000017a9142ffaf6694c6b441790546eefd277e430e08e47a6870000000000000000166a14094ab490fffa9939544545a656b345bf21920a90f6b35714000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acf9d29260000000000000000000000000000000","tx_hash":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","bH6y6RtvbLToqSUNtLA5rQRjSwyNNzUSNc"],"total_amount":"3.51293022","spent_by_me":"3.51293022","received_by_me":"3.41292022","my_balance_change":"-0.10001","block_height":916940,"timestamp":1620235027,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"RICK","internal_id":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8"},{"tx_hex":"0400008085202f8901a5620f30001e5e31bcbffacee7687fd84490fa1f8625ddd1e098f0bc530d673e020000006b483045022100a9864707855307681b81d94ae17328f6feccb2a9439d27378dfeae2df0220cc102207476f8304af14794a9cd2fe6287e07a1c802c05ec134b789ddb22ab51f7d2238012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff0246320000000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac5e4ef014000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acacd29260000000000000000000000000000000","tx_hash":"178b2c2a002b65f5430c4904f23a5f82c197820d4cf9bb57bd8e002ef0f6c88e","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","RThtXup6Zo7LZAi8kRWgjAyi1s4u6U9Cpf"],"total_amount":"3.51306892","spent_by_me":"3.51306892","received_by_me":"3.51293022","my_balance_change":"-0.0001387","block_height":916939,"timestamp":1620234997,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"RICK","internal_id":"178b2c2a002b65f5430c4904f23a5f82c197820d4cf9bb57bd8e002ef0f6c88e"}]"#;
+        let updated_history_str = r#"[{"tx_hex":"0400008085202f89018ec8f6f02e008ebd57bbf94c0d8297c1825f3af204490c43f5652b002a2c8b17010000006b483045022100e625a8b77beac5ec891e7d44b18fc4d780ef8456847eb2c6fa2f765e3379a9c102200f323612189fa44ee16f5deb39809b71c4811545b36ee4d6cc622d01aab10ef3012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff03809698000000000017a9142ffaf6694c6b441790546eefd277e430e08e47a6870000000000000000166a14094ab490fffa9939544545a656b345bf21920a90f6b35714000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acf9d29260000000000000000000000000000000","tx_hash":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","bH6y6RtvbLToqSUNtLA5rQRjSwyNNzUSNc"],"total_amount":"3.51293022","spent_by_me":"3.51293022","received_by_me":"3.41292022","my_balance_change":"-0.10001","block_height":916940,"timestamp":1620235027,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"DOC","internal_id":"f05d786bd4b647a5720094bf0a2c6f23b5e131c451d750a96102898f7b5458e8"},{"tx_hex":"0400008085202f8901a5620f30001e5e31bcbffacee7687fd84490fa1f8625ddd1e098f0bc530d673e020000006b483045022100a9864707855307681b81d94ae17328f6feccb2a9439d27378dfeae2df0220cc102207476f8304af14794a9cd2fe6287e07a1c802c05ec134b789ddb22ab51f7d2238012102043663e9c5af8275771809b3889d437f559e49e8df79b6ba19ade4cc5d8eb3e0ffffffff0246320000000000001976a914ca1e04745e8ca0c60d8c5881531d51bec470743f88ac5e4ef014000000001976a9145ed376ce9faa63cb2fef5862e1a5cc811c17316588acacd29260000000000000000000000000000000","tx_hash":"178b2c2a002b65f5430c4904f23a5f82c197820d4cf9bb57bd8e002ef0f6c88e","from":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3"],"to":["RHvavL8j683JwrN2ygk9Bg495DvPu5QVN3","RThtXup6Zo7LZAi8kRWgjAyi1s4u6U9Cpf"],"total_amount":"3.51306892","spent_by_me":"3.51306892","received_by_me":"3.51293022","my_balance_change":"-0.0001387","block_height":916939,"timestamp":1620234997,"fee_details":{"type":"Utxo","amount":"0.00001"},"coin":"DOC","internal_id":"178b2c2a002b65f5430c4904f23a5f82c197820d4cf9bb57bd8e002ef0f6c88e"}]"#;
         let updated_history: Vec<TransactionDetails> = json::from_str(updated_history_str).unwrap();
-        db.save_history("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD", updated_history.clone())
+        db.save_history("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD", updated_history.clone())
             .await
             .expect("!TxHistoryDb::save_history");
 
         let actual_history = db
-            .load_history("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
+            .load_history("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
             .await
             .expect("!TxHistoryDb::load_history");
         assert_eq!(actual_history, updated_history);
 
-        db.clear("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
+        db.clear("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
             .await
             .expect("!TxHistoryDb::clear");
 
         let history = db
-            .load_history("RICK", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
+            .load_history("DOC", "RRnMcSeKiLrNdbp91qNVQwwXx5azD4S4CD")
             .await
             .expect("!TxHistoryDb::load_history");
         assert!(history.is_empty());

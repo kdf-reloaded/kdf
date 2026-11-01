@@ -173,7 +173,7 @@ fn addr_hash_for_privkey(priv_key: [u8; 32]) -> String {
         checksum_type: ChecksumType::DSHA256,
     };
     let key_pair = KeyPair::from_private(private).unwrap();
-    hex::encode(&*key_pair.public().address_hash())
+    hex::encode(*key_pair.public().address_hash())
 }
 
 fn swap_should_not_kick_start_if_finished_during_waiting_for_file_lock(

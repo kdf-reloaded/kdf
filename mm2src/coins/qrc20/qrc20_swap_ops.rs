@@ -245,6 +245,7 @@ impl SwapOps for Qrc20Coin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -260,6 +261,7 @@ impl SwapOps for Qrc20Coin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        _my_pub: &[u8],
         _other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],

@@ -1,4 +1,5 @@
 pub mod grpc_web;
+pub mod host_label;
 pub mod transport;
 
 #[cfg(not(target_arch = "wasm32"))] pub mod ip_addr;

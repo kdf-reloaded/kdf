@@ -74,6 +74,11 @@ role:
   `/home/tomas_admin`.
 - If forbidden content appears accidentally, stop reading it, do not use it,
   and report the contamination risk.
+- A suspected or confirmed clean-room wall breach halts all `git commit` and
+  `git push` activity in this repository immediately — every in-flight
+  change, not only the one that triggered it — until the situation is
+  investigated and cured. Report it to the maintainer privately and
+  promptly; do not commit or push while remediation is pending.
 
 Do not claim that every existing file is a clean-room rewrite. The repository
 has a documented hybrid provenance: baseline-derived GPLv2 code,
@@ -89,9 +94,14 @@ Use the role files under `.github/agents/` exactly as intended:
 - `kdf-spec-reader.agent.md` is the dirty-side specification author. It is the
   only implementation-analysis role allowed to inspect the forbidden corpus.
   It writes clean-channel behavioral/interface requirements into the relevant
-  CRD chapter and never edits implementation code.
+  CRD chapter and never edits implementation code. It may also update facts
+  and step premises in `docs/plans/*.md` under the same clean-channel
+  discipline — never a plan's `**Status:**` line — as its own "Plan documents"
+  section bounds.
 - `kdf-dirty-gate.agent.md` compares a candidate chapter with the corpus and
-  returns only its sanitized verdict. A Spec Reader change is not ready to
+  returns only the sanitized verdict CRD chapter 01 R39 bounds: a leak
+  report, a scope attestation every verdict must carry, and optionally a
+  labelled non-leak section. A Spec Reader change is not ready to
   cross the wall until this gate passes.
 - `coder.agent.md` is the clean-side implementer. It reads the approved chapter
   and this repository, never the forbidden corpus, and implements only the
@@ -100,6 +110,37 @@ Use the role files under `.github/agents/` exactly as intended:
 Do not combine the dirty and clean roles in one context. A dirty-side agent
 must not implement code, and an agent that has seen forbidden implementation
 expression must not become the clean-side implementer.
+
+### Requesting code-quality analysis from KDF Spec Reader
+
+KDF Spec Reader's job is distilling behavior into CRD chapters, not auditing
+code for correctness — do not turn every dispatch into a code review. By
+default it only surfaces a finding that falls out of its normal reading with
+little extra effort, or one a code comment states outright (see its own
+"Incidental code-quality findings" section for the exact triggers).
+
+When dispatching it, decide deliberately whether this run also needs an
+explicit request to look harder, based on what kind of task it is:
+
+- Routine chapter authoring or a scoped rewrite: leave the default alone: do
+  not ask for extra scrutiny.
+- Chasing a bug where the relevant chapter already exists, already passed the
+  Dirty Gate, and accurately describes what the code does — and the bug
+  persists anyway: this shape means the chapter is faithfully documenting
+  code that was already wrong at the source, not that the chapter or the
+  implementation drifted from it. Always explicitly ask Spec Reader to
+  analyze the original (corpus) code for correctness in this specific area,
+  not merely to re-confirm the chapter still matches it — this is the one
+  case where a deeper look is mandatory, not optional.
+- A user-reported bug in an area with no chapter yet, or one being rewritten
+  from scratch: reasonable to ask for it too, since the authoring pass is
+  already reading the relevant code closely and a second pass would be pure
+  overhead.
+
+Either way, a finding is informative, not a mandate — decide what to do with
+it the same way you would any other CRD content: verify it against this
+repository's actual code before acting, and gate any chapter change it
+produced through KDF Dirty Gate before treating it as final.
 
 ## 3. Upstream-version and network compatibility policy
 
@@ -205,6 +246,19 @@ While editing:
 - Use typed errors and explicit propagation. Do not introduce `unwrap()`,
   `expect()`, or `panic!()` in production code except unavoidable constant
   initialization already justified by project convention.
+- Never substitute a placeholder value — an empty/default/zero stand-in, or a
+  fallback branch on a conversion that looks fallible but your data's actual
+  type makes infallible — for data you do not have at a call site, in a
+  funds-moving or state-machine transition path. Propagate a typed error or
+  abort instead. If the real fix needs a design decision you cannot make in
+  this change, stop and follow the stub policy (`unimplemented!()` + a
+  recorded reason) rather than shipping a value that lets the code compile
+  but cannot do its job.
+- For a new or touched state-machine transition, check every state that can
+  actually reach it and confirm each one's field set carries what the
+  transition needs — do not infer completeness from the code compiling and
+  the happy-path test passing. A compiler and a happy-path test cannot see
+  that a downstream abort path needs data an upstream state already dropped.
 - Do not log passphrases, private keys, mnemonics, session secrets, raw
   authorization headers, or unredacted RPC payloads.
 - Keep public APIs documented, including `# Errors` and `# Panics` where
@@ -226,9 +280,20 @@ For CRD edits:
   upstream expression.
 - Update a governing chapter in the same commit as the source behavior it
   describes.
-- Do not write `Forbidden corpus: not consulted` unless that statement is true
-  for the authoring context or the chapter has completed the documented
-  Spec Reader and Dirty Gate workflow.
+- The provenance footer's *Forbidden corpus* item is a statement about the
+  chapter's inputs, not about what an authoring context did. Write it in one of
+  the two forms CRD chapter 01 R20 binds — the blanket `not consulted` trailer,
+  or a scoped record naming what was taken, for which sections, and under which
+  reference versions — and only where the chapter contains no R8–R10 material.
+  Where forbidden-class input was taken, it must have been taken through the
+  two-team procedure of CRD §1.4A, which R38 requires.
+- Before finishing any edit to a CRD chapter — whether authored via `KDF
+  Spec Reader` or edited directly in a session — identify every other
+  chapter that references it, is referenced by it, or states a binding
+  requirement the changed subsystem must satisfy. Check each for continued
+  accuracy; fix or cross-reference as needed in the same pass. See
+  `kdf-spec-reader.agent.md`'s "Cross-chapter consistency" section for the
+  full procedure when the Spec Reader role is doing the authoring.
 
 ## 6. Formatting, tests, and verification
 
@@ -258,12 +323,69 @@ Add `--all-features` only when it is relevant and supported by that package.
 Use a separate dependency-wide lint only when the task changes dependencies or
 patched vendor code; do not turn unrelated warnings in vendored trees into
 opportunistic edits.
-For WASM-only work, also check `--target wasm32-unknown-unknown`. Full
-integration suites may require Docker, chain parameters, live endpoints, or
+
+**Do not run bare `cargo clippy --workspace`.** It fails outright — the
+vendored, patched `rust-lightning-patched/lightning` crate trips 13
+deny-level clippy lints against its own source (confirmed 2026-08-26:
+`cargo clippy -p lightning --no-deps` exits nonzero, "could not compile
+`lightning` (lib) due to 13 previous errors"). This does **not** affect the
+per-package pattern above — `cargo clippy -p <package> --all-targets
+--no-deps -- -D warnings` never clippy-invokes `lightning` as its own primary
+target, so it lints your package's first-party code correctly regardless
+(confirmed the same day: `cargo clippy -p coins --no-deps -- -D warnings`
+exits 0 and reports only `coins`' own diagnostics). The only thing that
+breaks is a literal `--workspace` sweep, or a manual `-p lightning`/
+`-p lightning-invoice` invocation. If a task genuinely needs a
+workspace-wide sweep (a periodic audit, not routine per-crate work), use
+`RUSTFLAGS="--cap-lints=warn" cargo clippy --workspace --all-targets`
+instead of the bare form.
+Full integration suites may require Docker, chain parameters, live endpoints, or
 test passphrases; consult `docs/DEV_ENVIRONMENT.md`,
 `docs/TEST_ENV_VARS.md`, and `docs/DISABLED_TESTS.md` before running them.
 Never turn a required regression test into an ignored or network-dependent
 test when a deterministic unit test can cover it.
+
+### Targets a plain `cargo check` does not cover
+
+The default host build compiles neither the WASM targets nor the
+feature-gated test binaries, so a change can pass every local check and still
+break CI. Two distinct failures have reached `dev` this way: a borrow the host
+accepts but `wasm32-unknown-unknown` rejects, and a dependency-version mismatch
+that only surfaced when the `docker_tests` binary was built.
+
+**Check the target when your change could plausibly affect it — not only when
+the work is "about" that target.** The wasm break came from ordinary streaming
+code; the rand break came from a `secp256k1` upgrade. Neither author was
+working on wasm or on Docker.
+
+| Trigger | Also run |
+|---|---|
+| Anything in `coins`, `mm2_db`, or `mm2_main` | `cargo check --target wasm32-unknown-unknown -p <coins\|mm2_db\|mm2_main>` |
+| Dependency, version, or feature changes | the wasm checks above **and** `cargo test --no-run --bin docker_tests --features regtest-netid` |
+| Anything touching swap, key, or RNG code | as above, plus the focused CI jobs listed below |
+
+`--no-run` is enough to catch build breakage in the Docker binary without a
+running Docker daemon; the suite itself still needs the environment described
+in `docs/DEV_ENVIRONMENT.md`.
+
+The cheap focused jobs CI runs, worth mirroring before pushing a broad change:
+
+```sh
+cargo test -p coins_activation --lib
+cargo test -p mm2_main --lib ordermatch_tests
+cargo test -p coins --lib rpc_response_tests
+cargo test -p kdf_spv_validation
+```
+
+`.github/workflows/` is the authority on what CI builds. Read it rather than
+relying on this list when a change is wide or touches the build itself; other
+gated targets exist (for example `trezor-emulator-tests`) and the set moves.
+
+Where a test suite has known-failing cases in your environment — several
+require network access — establish the baseline before judging your own change:
+run the suite on an unmodified checkout, then compare failing test *names*, not
+counts. A differing name that passes in isolation is environment flakiness; a
+new name that fails in isolation is a regression.
 
 For compatibility-sensitive swap changes, verify all affected crates and run
 the focused fee/transaction/state-machine tests for both production netids.
@@ -300,8 +422,19 @@ A change is complete only when:
 - implementation and governing CRD agree;
 - focused regression tests cover the failure and both sides of relevant
   compatibility branches;
-- formatting and applicable checks pass;
+- formatting and applicable checks pass, **including the targets a host
+  `cargo check` does not build** — see §6 "Targets a plain `cargo check` does
+  not cover". Claiming a change is verified on the strength of the host build
+  alone is how the two known CI breakages reached `dev`;
 - public/operator documentation is consistent;
 - provenance and license requirements are preserved;
 - the final diff contains no unrelated changes, secrets, generated junk, or
-  forbidden-corpus expression.
+  forbidden-corpus expression;
+- passing `cargo check`/`test`/`clippy` is a floor, not evidence of
+  completeness — it was true of both real gaps a 2026-08-25 external review
+  found in `lp_swap/` (CRD ch.52 D7, D8). Before calling a change verified,
+  grep your own diff for placeholder/fallback patterns (`unwrap_or(`,
+  `::default()` used as a stand-in, empty-value substitutions, `TODO`) in
+  funds-moving or state-machine code; any hit ships either fixed, or as an
+  explicit stub paired with a same-commit CRD Deferred Work entry — never as
+  a silent comment only.

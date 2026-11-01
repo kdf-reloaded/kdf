@@ -1,8 +1,8 @@
 # Plan: QTUM/QRC20 activation, transport, history, and swap stabilization
 
-> **Status:** analysis and implementation plan only; not started.
->
-> This plan was created after the 2026-08-05 wallet-log maintenance pass.
+**Status:** parked (analysis and plan only; untouched since 2026-08-05) — **Last reviewed:** 2026-10-18
+
+> **Context:** this plan was created after the 2026-08-05 wallet-log maintenance pass.
 > That run showed long-lived QRC20 history failures and separate QTUM and QRC20
 > Electrum activity against the same platform servers. The retry loop has been
 > made less noisy, but this plan deliberately does not treat reduced logging as

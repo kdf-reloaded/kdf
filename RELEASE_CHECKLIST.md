@@ -4,8 +4,25 @@ A release is not cut until every box below is ticked. This checklist applies to 
 
 ## Code
 
-- [ ] `cargo fmt --all -- --check` passes.
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes.
+- [ ] First-party formatting is clean. `cargo fmt --all -- --check` also
+      descends into the vendored `*-patched/` trees and aborts before
+      formatting anything (a `zcash_client_backend` build-generated module
+      doesn't exist yet on a clean checkout); use the same first-party-only
+      selection the `fmt` CI job runs instead:
+      ```sh
+      pkgs=$(cargo metadata --no-deps --format-version 1 \
+        | jq -r '.packages[] | select(.manifest_path | test("-patched/") | not) | .name')
+      cargo +nightly-2026-05-08 fmt $(printf -- '-p %s ' $pkgs) -- --check
+      ```
+- [ ] No new first-party Clippy warnings. `cargo clippy --all-targets
+      --all-features -- -D warnings` fails outright regardless of first-party
+      code quality -- the vendored, patched `rust-lightning-patched/lightning`
+      crate trips 13 deny-level lints against its own source. CI does not run
+      Clippy as a gate, so this is manual-only; use
+      `RUSTFLAGS="--cap-lints=warn" cargo clippy --workspace --all-targets`
+      (per `AGENTS.md` §6) for a release-time sweep, or the per-package
+      `cargo clippy -p <package> --all-targets --no-deps -- -D warnings`
+      pattern crate by crate.
 - [ ] `cargo test --bins --lib` passes.
 - [ ] Integration tests pass (`cargo test --test 'mm2_tests_main'`).
 - [ ] Docker tests pass (`cargo test --bin docker_tests --features regtest-netid -- --test-threads=1`).
@@ -35,6 +52,7 @@ For each behavioural divergence from GLEEC KDF introduced in this release (see [
 
 - [ ] Counsel review on file for the licensing posture of this release (or, for an interim release, an explicit counsel waiver).
 - [ ] Release artifacts signed with the published GPG/minisign key. Signature files attached to the GitHub release.
+- [ ] `COPYING`, `LICENSE` and `THIRDPARTY-LICENSES` attached to the GitHub release (added by `release.yml`), and the release notes point to the source at the release tag.
 - [ ] Vulnerability disclosure mailbox active and monitored.
 - [ ] No known unfixed high-severity advisories against direct dependencies (verified via `cargo audit` or equivalent).
 - [ ] No secrets present in the tree (sweep for accidental commits of `MM2.json`, `.env`, mnemonics, private keys).
@@ -42,7 +60,7 @@ For each behavioural divergence from GLEEC KDF introduced in this release (see [
 ## Release artifacts
 
 - [ ] Linux x86-64 release binary built via `.github/workflows/build-linux.yml` (Debian 11 container, glibc 2.31 floor for broad backwards compatibility) and uploaded.
-- [ ] Other-platform binaries built via the umbrella `dev-build.yml` if they are part of this release's matrix. Note: `dev`/`staging` `v*` tags auto-trigger the unsigned `dev-build.yml` snapshot; only `main` `v*` tags trigger the signed `release.yml`.
+- [ ] Other-platform binaries built via the umbrella `dev-build.yml` if they are part of this release's matrix. Note: **every** `v*` tag drives the signed `release.yml`; its `gate` job requires a final tag's commit to be on `main` and a pre-release tag's (`-alpha`/`-beta`/`-rc`) to be on `staging` or `main`, and self-skips any other tag. Unsigned snapshots are not tag-driven at all: they come from `dev-build.yml` / `dev-build-rpc.yml` (manual dispatch) and `staging-build.yml` (automatic on push to `staging`). See [`docs/GIT_FLOW_AND_WORKING_PROCESS.md`](docs/GIT_FLOW_AND_WORKING_PROCESS.md).
 - [ ] Artifact filenames include the version tag.
 - [ ] SHA-256 checksums published alongside artifacts.
 

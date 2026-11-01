@@ -50,7 +50,7 @@ mod tests {
     #[test]
     fn publish_records_is_lazy_when_streamer_inactive() {
         let ctx = MmCtxBuilder::default().into_mm_arc();
-        publish_tx_history_records(&ctx, "RICK", PanicOnIter);
+        publish_tx_history_records(&ctx, "DOC", PanicOnIter);
     }
 
     #[test]

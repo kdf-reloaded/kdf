@@ -17,6 +17,7 @@
 //
 //  Split into sub-modules for maintainability:
 //    eth_types      – constants, ABIs, structs, enums, error conversions
+//    eth_gas_limit  – per-coin `gas_limit` / `gas_limit_v2` overrides (CRD ch. 57)
 //    eth_impl       – EthCoinImpl methods, transaction helpers, utility fns
 //    eth_swap_ops   – SwapOps + WatcherOps trait impls
 //    eth_market_ops – MarketCoinOps trait impl
@@ -38,7 +39,8 @@ pub(crate) use futures::future::{join_all, select, Either, FutureExt, TryFutureE
 pub(crate) use futures01::Future;
 pub(crate) use http::StatusCode;
 pub(crate) use kdf_crypto::{keccak256, sha256};
-pub(crate) use legacy_tx::{Action, Transaction as UnSignedEthTx, UnverifiedTransaction};
+pub(crate) use legacy_tx::{Action, Eip1559Transaction, Transaction as UnSignedEthTx, TxBody, TxKind,
+                           UnverifiedTransaction};
 pub(crate) use mm2_core::mm_ctx::{MmArc, MmWeak};
 pub(crate) use mm2_err_handle::prelude::*;
 pub(crate) use mm2_eth::keys::{public_to_address, KeyPair, Public, Signature};
@@ -90,6 +92,8 @@ pub mod nft_swap_v2 {
     pub use crate::eth::eth_swap_v2::nft_swap_v2::*;
 }
 
+mod eth_activation;
+mod eth_gas_limit;
 mod eth_impl;
 mod eth_market_ops;
 mod eth_mm_coin;
@@ -106,12 +110,15 @@ mod eth_types;
 pub mod wc_integration;
 mod wire_types;
 // Re-export split module contents for backward-compatible access paths
+pub use eth_activation::*;
+pub use eth_gas_limit::*;
 pub use eth_impl::*;
 pub use eth_mm_coin::EthTxFeeDetails;
 pub use eth_types::*;
 // EVM Trezor activation entrypoints (native, non-iOS).
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "ios")))]
-pub use eth_trezor_activation::{eth_coin_activate_with_trezor, eth_coin_from_conf_and_request_with_trezor};
+pub use eth_trezor_activation::{eth_coin_activate_with_trezor, eth_coin_activate_with_trezor_hd,
+                                eth_coin_from_conf_and_request_with_trezor};
 
 pub(crate) use crate::DerivationMethod;
 pub(crate) use crate::{CommonSwapOpsV2, DexFee, FindPaymentSpendError, FundingTxSpend, GenPreimageResult,
@@ -133,7 +140,11 @@ pub(crate) mod abi;
 pub(crate) use abi::{AbiError, Contract, Function, Token};
 
 #[cfg(test)] mod abi_golden_tests;
+#[cfg(test)] mod eth_failover_tests;
+#[cfg(test)] mod eth_gas_limit_call_site_tests;
 #[cfg(test)] mod eth_tests;
+#[cfg(test)] mod fee_service_url_tests;
+#[cfg(test)] mod typed_tx_vector_tests;
 // Local `geth --dev` integration tests for the v1 ETH/ERC20 HTLC payment +
 // refund path. Native only; they skip themselves when `geth` is not on PATH.
 #[cfg(all(test, not(target_arch = "wasm32")))]

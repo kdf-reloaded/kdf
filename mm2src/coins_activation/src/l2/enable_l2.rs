@@ -1,5 +1,6 @@
 /// Simple one-shot L2 activation. For lightweight L2 protocols that
 /// activate quickly and do not need progress tracking.
+use crate::context::lock_activation;
 use crate::prelude::*;
 use async_trait::async_trait;
 use coins::{lp_coinfind, lp_coinfind_or_err, CoinProtocol, CoinsContext, MmCoinEnum};
@@ -28,6 +29,7 @@ pub trait L2ActivationOps: Into<MmCoinEnum> {
     fn coin_conf_from_json(json: Json) -> Result<Self::CoinConf, MmError<Self::ActivationError>>;
 
     fn validate_platform_configuration(
+        ctx: &MmArc,
         platform_coin: &Self::PlatformCoin,
     ) -> Result<(), MmError<Self::ActivationError>>;
 
@@ -46,6 +48,12 @@ pub trait L2ActivationOps: Into<MmCoinEnum> {
 
 #[derive(Debug, Display, Serialize, SerializeErrorType)]
 #[serde(tag = "error_type", content = "error_data")]
+// `UnexpectedL2Protocol` carries a `CoinProtocol` by value for diagnostics on a
+// cold error path. Boxing it (clippy's suggestion) would force `Box::new` at
+// every construction site in this compatibility-sensitive activation code for a
+// negligible size win on a rarely built RPC error enum. The per-item allow is
+// the established precedent for this lint across coins_activation.
+#[allow(clippy::large_enum_variant)]
 pub enum EnableL2Error {
     #[display(fmt = "Layer 2 {} is already activated", _0)]
     L2IsAlreadyActivated(String),
@@ -67,6 +75,11 @@ pub enum EnableL2Error {
     UnsupportedPlatformCoin {
         platform_coin_ticker: String,
         l2_ticker: String,
+    },
+    #[display(fmt = "Invalid platform configuration for {}: {}", platform_coin_ticker, err)]
+    InvalidPlatformConfiguration {
+        platform_coin_ticker: String,
+        err: String,
     },
     #[display(fmt = "Layer 2 configuration parsing failed: {}", _0)]
     L2ConfigParseError(String),
@@ -103,6 +116,10 @@ where
     L2: L2ActivationOps,
     EnableL2Error: From<L2::ActivationError>,
 {
+    // R55.1.12: the lock is held through registration; the check below is the one that follows the wait.
+    let _activation_guard = lock_activation(&ctx, &[&req.ticker])
+        .await
+        .map_to_mm(EnableL2Error::Internal)?;
     if let Ok(Some(_)) = lp_coinfind(&ctx, &req.ticker).await {
         return MmError::err(EnableL2Error::L2IsAlreadyActivated(req.ticker));
     }
@@ -121,7 +138,7 @@ where
             l2_ticker: req.ticker.clone(),
         })?;
 
-    L2::validate_platform_configuration(&platform_coin).mm_err(Into::into)?;
+    L2::validate_platform_configuration(&ctx, &platform_coin).mm_err(Into::into)?;
 
     let validated_params = L2::validate_activation_params(req.activation_params).mm_err(Into::into)?;
 
@@ -147,6 +164,7 @@ impl HttpStatusCode for EnableL2Error {
             | EnableL2Error::UnexpectedL2Protocol { .. } => StatusCode::BAD_REQUEST,
             EnableL2Error::L2ProtocolParseError { .. }
             | EnableL2Error::UnsupportedPlatformCoin { .. }
+            | EnableL2Error::InvalidPlatformConfiguration { .. }
             | EnableL2Error::L2ConfigParseError(_)
             | EnableL2Error::Transport(_)
             | EnableL2Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

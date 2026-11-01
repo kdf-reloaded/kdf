@@ -16,10 +16,10 @@ use crate::platform_coin_with_tokens::*;
 use crate::prelude::*;
 use crate::tendermint_token_activation::TendermintTokenProtocol;
 use async_trait::async_trait;
+use coins::hd_pubkey::HDXPubExtractor;
 use coins::my_tx_history_v2::TxHistoryStorage;
 use coins::tendermint::{tendermint_coin_from_conf_and_request, RpcNode, TendermintCoin, TendermintInitError,
-                        TendermintInitErrorKind, TendermintToken, TendermintTokenActivationParams,
-                        TendermintTokenInitError};
+                        TendermintToken, TendermintTokenActivationParams, TendermintTokenInitError};
 use coins::{CoinBalance, MarketCoinOps};
 use common::mm_number::BigDecimal;
 use common::Future01CompatExt;
@@ -38,13 +38,18 @@ impl TokenOf for TendermintToken {
 fn default_get_balances() -> bool { true }
 
 /// `enable_tendermint_with_assets` request parameters (R36.1.2). The
-/// single-address activation subset; `path_to_address` and the alternative
-/// `activation_params` signing policy (R36.1.3) are accepted for
-/// wire-compatibility but are not consumed on the private-key activation path.
+/// single-address activation subset; `path_to_address` is accepted for
+/// wire-compatibility but is not consumed on the private-key activation path.
+/// A non-null `activation_params` (R36.1.3) is rejected, see
+/// [`reject_unsupported_activation_params`].
+///
+/// The public docs list `required_confirmations` (default 3), `requires_notarization` and `priv_key_policy` for
+/// this method. The reference ignores all three for Tendermint, since the docs do not state an observable effect,
+/// Reloaded does the same: they are not declared here and so are ignored (CRD ch.36 R36.1.2).
 #[derive(Clone, Deserialize)]
 pub struct TendermintActivationParams {
     nodes: Vec<RpcNode>,
-    #[serde(default)]
+    // CRD R36.1.2: required, the array itself may be empty.
     tokens_params: Vec<TokenActivationRequest<TendermintTokenActivationParams>>,
     #[serde(default)]
     tx_history: bool,
@@ -54,8 +59,27 @@ pub struct TendermintActivationParams {
     #[allow(dead_code)]
     path_to_address: Option<Json>,
     #[serde(default)]
-    #[allow(dead_code)]
     activation_params: Option<Json>,
+}
+
+/// Rejects a request that asks for a signing policy this build does not provide (CRD ch.36 §36.7, interim
+/// divergence).
+///
+/// The reference honors the three forms of `activation_params` (R36.1.3). Reloaded implements none of them yet
+/// and refuses the request instead of activating with the local context key, so that a caller who asked for a
+/// device-backed or watch-only activation never gets a hot-key one. The discriminant is the one the reference
+/// uses for an unsupported signing context. Remove when R36.1.3 is implemented.
+fn reject_unsupported_activation_params(
+    ticker: &str,
+    activation_params: &Option<Json>,
+) -> Result<(), MmError<TendermintActivationError>> {
+    match activation_params {
+        Some(params) if !params.is_null() => MmError::err(TendermintActivationError::PlatformCoinCreationError {
+            ticker: ticker.to_owned(),
+            error: "The `activation_params` signing policies are not supported yet".to_owned(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 impl TxHistory for TendermintActivationParams {
@@ -125,6 +149,15 @@ impl TokenInitializer for TendermintTokenInitializer {
         &self,
         activation_params: Vec<TokenActivationParams<TendermintTokenActivationParams, TendermintTokenProtocol>>,
     ) -> Result<Vec<TendermintToken>, MmError<TendermintTokenInitError>> {
+        // CRD R36.1.4 step 4 / R36.1.6: every token must ride on the platform being activated. All tokens are
+        // checked before any is built, so a mismatch leaves nothing behind.
+        if activation_params
+            .iter()
+            .any(|params| params.protocol.platform_coin_ticker != self.platform_coin.ticker())
+        {
+            return MmError::err(TendermintTokenInitError::PlatformCoinMismatch);
+        }
+
         let mut tokens = Vec::with_capacity(activation_params.len());
         for params in activation_params {
             let token = TendermintToken::from_protocol(
@@ -145,6 +178,7 @@ impl From<TendermintTokenInitError> for InitTokensAsMmCoinsError {
     fn from(err: TendermintTokenInitError) -> Self {
         match err {
             TendermintTokenInitError::InternalError(e) => InitTokensAsMmCoinsError::InvalidPubkey(e),
+            TendermintTokenInitError::PlatformCoinMismatch => InitTokensAsMmCoinsError::PlatformCoinMismatch,
         }
     }
 }
@@ -165,6 +199,8 @@ pub struct TendermintActivationResult {
     current_block: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     balance: Option<CoinBalance>,
+    // The docs' response table types `tokens_balances` as an array; every docs example and the reference return a
+    // ticker-keyed map, which is what Reloaded returns (CRD ch.36 R36.1.5).
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens_balances: Option<HashMap<String, CoinBalance>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,9 +223,7 @@ impl CurrentBlock for TendermintActivationResult {
 #[derive(Debug)]
 pub enum TendermintActivationError {
     PlatformCoinCreationError { ticker: String, error: String },
-    AtLeastOneNodeRequired,
     UnexpectedDerivationMethod(String),
-    Transport(String),
     Internal(String),
 }
 
@@ -199,13 +233,9 @@ impl From<TendermintActivationError> for EnablePlatformCoinWithTokensError {
             TendermintActivationError::PlatformCoinCreationError { ticker, error } => {
                 EnablePlatformCoinWithTokensError::PlatformCoinCreationError { ticker, error }
             },
-            TendermintActivationError::AtLeastOneNodeRequired => {
-                EnablePlatformCoinWithTokensError::AtLeastOneNodeRequired
-            },
             TendermintActivationError::UnexpectedDerivationMethod(e) => {
                 EnablePlatformCoinWithTokensError::UnexpectedDerivationMethod(e)
             },
-            TendermintActivationError::Transport(e) => EnablePlatformCoinWithTokensError::Transport(e),
             TendermintActivationError::Internal(e) => EnablePlatformCoinWithTokensError::Internal(e),
         }
     }
@@ -213,13 +243,13 @@ impl From<TendermintActivationError> for EnablePlatformCoinWithTokensError {
 
 impl From<TendermintInitError> for TendermintActivationError {
     fn from(err: TendermintInitError) -> Self {
+        // CRD ch.36 R36.1.6 (public-docs erratum): the public docs list `AtLeastOneNodeRequired` and `Transport` for
+        // Tendermint, the reference never returns them (every step-3 failure, an empty `nodes` array included, is
+        // `PlatformCoinCreationError`). Reloaded follows the reference.
         let TendermintInitError { ticker, kind } = err;
-        match kind {
-            TendermintInitErrorKind::EmptyRpcUrls => TendermintActivationError::AtLeastOneNodeRequired,
-            other => TendermintActivationError::PlatformCoinCreationError {
-                ticker,
-                error: other.to_string(),
-            },
+        TendermintActivationError::PlatformCoinCreationError {
+            ticker,
+            error: kind.to_string(),
         }
     }
 }
@@ -240,9 +270,7 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         _protocol_conf: Self::PlatformProtocolInfo,
         priv_key: &[u8],
     ) -> Result<Self, MmError<Self::ActivationError>> {
-        if activation_request.nodes.is_empty() {
-            return MmError::err(TendermintActivationError::AtLeastOneNodeRequired);
-        }
+        reject_unsupported_activation_params(&ticker, &activation_request.activation_params)?;
 
         let coin = tendermint_coin_from_conf_and_request(
             &ctx,
@@ -257,6 +285,14 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         Ok(coin)
     }
 
+    fn requested_token_tickers(activation_request: &Self::ActivationRequest) -> Vec<String> {
+        activation_request
+            .tokens_params
+            .iter()
+            .map(|token| token.ticker.clone())
+            .collect()
+    }
+
     fn token_initializers(
         &self,
     ) -> Vec<Box<dyn TokenAsMmCoinInitializer<PlatformCoin = Self, ActivationRequest = Self::ActivationRequest>>> {
@@ -265,25 +301,35 @@ impl PlatformWithTokensActivationOps for TendermintCoin {
         })]
     }
 
-    async fn get_activation_result(&self) -> Result<TendermintActivationResult, MmError<TendermintActivationError>> {
+    async fn get_activation_result<XPubExtractor>(
+        &self,
+        _ctx: &MmArc,
+        _activation_request: &Self::ActivationRequest,
+        _xpub_extractor: Option<&XPubExtractor>,
+    ) -> Result<TendermintActivationResult, MmError<TendermintActivationError>>
+    where
+        XPubExtractor: HDXPubExtractor + Sync,
+    {
         let ticker = self.ticker().to_owned();
         let address = self.my_address().map_to_mm(TendermintActivationError::Internal)?;
-        let current_block = self
-            .current_block()
-            .compat()
-            .await
-            .map_to_mm(TendermintActivationError::Transport)?;
+        // The first step that contacts a node: unreachable or failing nodes are a platform-coin creation error and
+        // never `Transport` (CRD R36.1.6).
+        let creation_error = |error: String| TendermintActivationError::PlatformCoinCreationError {
+            ticker: ticker.clone(),
+            error,
+        };
+        let current_block = self.current_block().compat().await.map_to_mm(creation_error)?;
 
         let (balance, tokens_balances, tokens_tickers) = if self.activation_get_balances() {
             let balance = self
                 .my_balance()
                 .compat()
                 .await
-                .mm_err(|e| TendermintActivationError::Transport(e.to_string()))?;
+                .mm_err(|e| creation_error(e.to_string()))?;
             let tokens_balances = self
                 .get_activated_tokens_balances()
                 .await
-                .mm_err(|e| TendermintActivationError::Transport(e.to_string()))?;
+                .mm_err(|e| creation_error(e.to_string()))?;
             (Some(balance), Some(tokens_balances), None)
         } else {
             (None, None, Some(self.activated_token_tickers()))
@@ -327,6 +373,9 @@ impl crate::init_platform_coin_with_tokens::InitPlatformCoinWithTokensActivation
         &activation_ctx.init_tendermint_task_manager
     }
 
+    // CRD R36.6.4: the Tendermint task reports `ActivatingCoin` and no other in-progress value.
+    const REPORTS_BALANCE_AND_FINISHING_PROGRESS: bool = false;
+
     /// Tendermint activation is non-interactive: it builds the coin with the
     /// centrally-threaded local secret exactly as the one-shot activator and
     /// never enters the awaiting state (R48.6.1). The task handle is unused.
@@ -353,6 +402,8 @@ impl crate::init_platform_coin_with_tokens::InitPlatformCoinWithTokensActivation
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))] mod wire_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +412,7 @@ mod tests {
     fn activation_params_deserializes_with_defaults() {
         let req: TendermintActivationParams = serde_json::from_str(
             r#"{
+                "tokens_params": [],
                 "nodes": [
                     {"url": "https://rpc1.example"},
                     {"url": "https://rpc2.example", "komodo_proxy": true}
@@ -374,6 +426,22 @@ mod tests {
         // get_balances defaults to true (R36.1.2).
         assert!(req.get_balances);
         assert!(!req.tx_history());
+    }
+
+    /// CRD ch.55 R55.1.12: the activation locks the tickers of the tokens the request registers beside the platform.
+    #[test]
+    fn the_requested_token_tickers_are_the_token_tickers_of_the_request() {
+        let req: TendermintActivationParams = serde_json::from_str(
+            r#"{
+                "nodes": [{"url": "https://rpc.example"}],
+                "tokens_params": [{"ticker": "IRIS-IBC"}, {"ticker": "IRIS-NYAN"}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            <TendermintCoin as PlatformWithTokensActivationOps>::requested_token_tickers(&req),
+            ["IRIS-IBC", "IRIS-NYAN"]
+        );
     }
 
     #[test]

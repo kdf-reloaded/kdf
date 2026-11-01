@@ -1,5 +1,4 @@
 use super::PUBLIC_METHODS;
-#[cfg(not(target_arch = "wasm32"))] use common::wio::CPUPOOL;
 use common::HyRes;
 use futures::compat::Future01CompatExt;
 use futures::{Future as Future03, FutureExt, TryFutureExt};
@@ -145,7 +144,27 @@ fn spawn_highload_future<F>(f: F) -> HyRes
 where
     F: FnOnce() -> HyRes + Send + 'static,
 {
-    Box::new(CPUPOOL.spawn_fn(f))
+    // `f()` only constructs the handler's future (lazy, cheap -- see the two
+    // call sites below); `common::async_blocking` moves both that
+    // construction and actually driving it to completion onto tokio's
+    // dedicated blocking thread pool, off the async reactor, so a slow RPC
+    // (import_swaps, recover_funds_of_swap) can't stall other concurrent
+    // requests -- the same guarantee the previous implementation gave.
+    //
+    // This replaces a `futures_cpupool::CpuPool`-based implementation
+    // (`common::wio::CPUPOOL`, this function's only call site in the whole
+    // workspace), which is where a real heap-corruption crash traced to: a
+    // Windows Application Verifier page-heap catch (STATUS_VERIFIER_STOP,
+    // later reproduced as a clean access violation once full-memory dumps
+    // were captured) landed squarely inside
+    // `core::ptr::drop_glue<futures_cpupool::MySender<...>>`, in the middle
+    // of a heap-free call chain (AVrfpHeapFree / AVrfpDphPlaceOnDelayFree /
+    // RtlpFreeHeap) -- a bug in that crate's own task-teardown path, not in
+    // anything this function's callers do. futures-cpupool is unmaintained
+    // (last released 2018, long superseded by real async-runtime blocking
+    // pools); the fix removes the dependency rather than working around it.
+    let fut = async move { common::async_blocking(move || common::block_on(f().compat())).await };
+    Box::new(fut.boxed().compat())
 }
 
 pub async fn process_single_request(
@@ -189,5 +208,43 @@ mod into_legacy {
         let res = json!({ "result": result });
         let body = try_s!(json::to_vec(&res));
         Ok(try_s!(Response::builder().body(body)))
+    }
+}
+
+/// Regression coverage for `spawn_highload_future`'s tokio-`spawn_blocking`
+/// based implementation, which replaced a `futures_cpupool::CpuPool` one --
+/// a real heap-corruption crash traced to a bug in that crate's own
+/// task-teardown path (see the doc comment on `spawn_highload_future`).
+/// These pin down the observable contract callers (`import_swaps`,
+/// `recover_funds_of_swap`) actually rely on: the success value, the error
+/// value, and that a panic in `f` still surfaces as a panic to whoever
+/// drives the returned `HyRes`, exactly as `futures_cpupool::CpuFuture`
+/// documented and provided.
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
+mod spawn_highload_future_tests {
+    use super::*;
+
+    #[test]
+    fn test_spawn_highload_future_returns_the_success_value() {
+        let handler: HyRes = Box::new(futures01::future::ok(
+            Response::builder().status(200).body(b"ok".to_vec()).unwrap(),
+        ));
+        let response = common::block_on(spawn_highload_future(move || handler).compat()).unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), b"ok");
+    }
+
+    #[test]
+    fn test_spawn_highload_future_returns_the_error_value() {
+        let handler: HyRes = Box::new(futures01::future::err("computed error".to_owned()));
+        let error = common::block_on(spawn_highload_future(move || handler).compat()).unwrap_err();
+        assert_eq!(error, "computed error");
+    }
+
+    #[test]
+    #[should_panic(expected = "f panicked")]
+    fn test_spawn_highload_future_propagates_a_panic_in_f() {
+        let _ = common::block_on(spawn_highload_future(|| -> HyRes { panic!("f panicked") }).compat());
     }
 }

@@ -1,4 +1,14 @@
 use super::*;
+use keys::Public;
+
+/// The answer of [`SwapOps::check_payment_pays_htlc`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum HtlcPaymentCheck {
+    /// Output 0 of the payment pays the script rebuilt from the given keys.
+    Pays,
+    /// The payment was read, and it pays another script. `payment_id` is its transaction id in display order.
+    PaysAnotherScript { payment_id: String },
+}
 
 /// Swap operations (mostly based on the Hash/Time locked transactions implemented by coin wallets).
 #[async_trait]
@@ -84,6 +94,7 @@ pub trait SwapOps {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -94,12 +105,64 @@ pub trait SwapOps {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String>;
+
+    /// Whether `payment_tx` pays the HTLC script rebuilt from `first_pub` (the refund key) and `second_pub`
+    /// (the spend key). Swap recovery asks it to pick between the swap's own HTLC key and the coin's
+    /// persistent key (CRD ch.39 R39.5.4) before it searches for, refunds or spends the payment.
+    ///
+    /// The default answers [`HtlcPaymentCheck::Pays`]: a coin whose HTLC script is not built from the
+    /// swap's keys, or whose swap key is always the persistent key, has nothing to choose between, and
+    /// recovery uses the swap's own key as it always did.
+    async fn check_payment_pays_htlc(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+        _payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        Ok(HtlcPaymentCheck::Pays)
+    }
+
+    /// What the shielded HTLC detection in flight for the payment script built from these parameters is
+    /// reading (the endpoint and address form it read last), for the error of the recovery bound
+    /// (CRD ch.39 R39.5.5, R39.11.4h). The parameters are those of the search or sent-check call:
+    /// `first_pub` is the refund key, `second_pub` the spend key.
+    ///
+    /// The default is `None`: only a coin that detects HTLCs over a remote index has anything to report.
+    fn htlc_detection_progress(
+        &self,
+        _time_lock: u32,
+        _first_pub: &[u8],
+        _second_pub: &[u8],
+        _secret_hash: &[u8],
+    ) -> Option<String> {
+        None
+    }
+
+    /// Whether this coin's HTLC script is unique to one swap by construction: the key it pays to is
+    /// unique per swap (random, or derived from the swap's unique input, see
+    /// [`SwapOps::derives_swap_htlc_key`]) and the secret hash is fresh, so no payment to
+    /// the script can exist unless the swap sent it (CRD ch.39 R39.5.4, R39.11.27). The swap layer uses
+    /// this to skip the already-sent question in a swap this process started a moment ago.
+    ///
+    /// The default is `false`: every other coin pays a script that the persistent key (or the chain's own
+    /// rules) can reproduce, and keeps asking.
+    fn htlc_key_is_random_per_swap(&self) -> bool { false }
+
+    /// Whether this coin can watch the taker's own payment for the maker's spend, checked before the taker
+    /// fee is sent (CRD ch.39 R39.11.28). The error names every source that could not answer.
+    ///
+    /// The default is `Ok(())`: only a Light-mode shielded coin, whose watch depends on the address
+    /// questions of a remote index, can be unable to watch.
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> { Ok(()) }
 
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String>;
 
@@ -116,12 +179,93 @@ pub trait SwapOps {
         Box::new(futures01::future::ok(result))
     }
 
+    /// CRD ch.39 R39.5.13. When the refund broadcast of this coin was rejected with `rejection` (the plain
+    /// text of the failure) and the rejection says that the transaction is not yet final, returns the part
+    /// of the node's text worth logging; the refund stage then waits and goes back to the refund gate
+    /// instead of ending the swap in the refund-failed state. Every other rejection, and every other coin,
+    /// is terminal as before, which is the default.
+    fn retriable_refund_rejection(&self, _rejection: &str) -> Option<String> { None }
+
+    /// CRD ch.39 R39.5.13. For a coin whose refund gate waits for the chain's median time past: why the
+    /// refund may not be built yet, or `None` when the gate is open. `recover_funds_of_swap` asks it after
+    /// its own deadline check. The default reads nothing and answers `None`, so every other coin's
+    /// recovery is unchanged.
+    fn refund_gate_closed_note(
+        &self,
+        _locktime: u64,
+    ) -> Box<dyn Future<Item = Option<String>, Error = String> + Send + '_> {
+        Box::new(futures01::future::ok(None))
+    }
+
     fn negotiate_swap_contract_addr(
         &self,
         other_side_address: Option<&[u8]>,
     ) -> Result<Option<BytesJson>, MmError<NegotiateSwapContractAddrErr>>;
 
     fn get_htlc_key_pair(&self) -> Option<KeyPair>;
+
+    /// Whether this coin's per-swap HTLC key is derived from the swap (CRD ch.39 R39.5.6) rather than
+    /// taken from [`SwapOps::get_htlc_key_pair`]. A derived key is never saved with the swap: every
+    /// later use derives it again with [`SwapOps::derive_swap_htlc_key_pair`].
+    fn derives_swap_htlc_key(&self) -> bool { false }
+
+    /// This node's HTLC key pair for one swap, derived from the coin's transparent key and
+    /// `swap_unique_input` (R39.5.7: the maker's secret-hash bytes, the taker's 16 raw uuid bytes).
+    /// Only a coin whose [`SwapOps::derives_swap_htlc_key`] is true has one.
+    ///
+    /// # Errors
+    ///
+    /// Fails for a coin that does not derive its key, and when the derivation fails.
+    fn derive_swap_htlc_key_pair(&self, _swap_unique_input: &[u8]) -> Result<KeyPair, String> {
+        ERR!("This coin does not derive a per-swap HTLC key")
+    }
+
+    /// This node's hash-time-locked-contract public key for this coin, in the
+    /// form the legacy negotiation carries (CRD ch.51 R63).
+    ///
+    /// The result is exactly [`SWAP_HTLC_PUBKEY_LEN`] bytes on every chain, so
+    /// a swap machine never has to know which curve a coin signs with.
+    /// `node_secp_pubkey` is the secp256k1 key the swap machine resolved for
+    /// this coin — this coin's [`SwapOps::get_htlc_key_pair`] public key when
+    /// it has one, otherwise the node's persistent public key.
+    ///
+    /// The default is the secp256k1 case of R64: the field carries that key
+    /// unchanged. A chain whose native key is not a 33-byte secp256k1 point
+    /// overrides this and fills the field by the convention R64 dictates for
+    /// its key type; it ignores `node_secp_pubkey`, which is not a key it can
+    /// sign with.
+    ///
+    /// # Errors
+    ///
+    /// Fails when this coin has no key of the bound width to offer.
+    fn derive_htlc_pubkey(&self, node_secp_pubkey: &Public) -> MmResult<[u8; SWAP_HTLC_PUBKEY_LEN], HtlcPubkeyError> {
+        let bytes: &[u8] = node_secp_pubkey;
+        bytes
+            .try_into()
+            .map_to_mm(|_| HtlcPubkeyError::UnexpectedLength(bytes.len()))
+    }
+
+    /// Validate the counterparty's hash-time-locked-contract public key for
+    /// this coin (CRD ch.51 R63).
+    ///
+    /// Accepts exactly [`SWAP_HTLC_PUBKEY_LEN`] bytes and nothing else. The
+    /// default also enforces the rest of R64's secp256k1 case: a chain whose
+    /// native key is a 33-byte secp256k1 point rejects anything that is not a
+    /// well-formed point. A chain with another key type overrides this and
+    /// checks the key its own convention puts in the field.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the field is not exactly the bound width, or holds something
+    /// this chain cannot use as a counterparty key.
+    fn validate_other_pubkey(&self, raw_pubkey: &[u8]) -> MmResult<(), HtlcPubkeyError> {
+        if raw_pubkey.len() != SWAP_HTLC_PUBKEY_LEN {
+            return MmError::err(HtlcPubkeyError::UnexpectedLength(raw_pubkey.len()));
+        }
+        secp256k1::PublicKey::from_slice(raw_pubkey)
+            .map(|_| ())
+            .map_to_mm(|e| HtlcPubkeyError::NotOnCurve("secp256k1", e.to_string()))
+    }
 }
 /// Operations required for watcher node functionality.
 ///
@@ -518,6 +662,11 @@ pub trait MmCoin: SwapOps + WatcherOps + MarketCoinOps + fmt::Debug + Send + Syn
 
     /// Transaction history background sync status
     fn history_sync_status(&self) -> HistorySyncState;
+
+    /// CRD ch.60 R60.6.7 items 1 and 2: the smallest HTLC value whose spend or refund leaves a valid output,
+    /// for a coin whose HTLC spend fee is paid out of the HTLC value. `Ok(None)` means the coin is not covered
+    /// by the pre-trade spend-safety check, which is the default.
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> { Ok(None) }
 
     /// Get fee to be paid per 1 swap transaction
     fn get_trade_fee(&self) -> Box<dyn Future<Item = TradeFee, Error = String> + Send>;

@@ -36,9 +36,9 @@ impl TryFrom<HwRpcTaskUserAction> for TrezorPinMatrix3x3Response {
     fn try_from(value: HwRpcTaskUserAction) -> Result<Self, Self::Error> {
         match value {
             HwRpcTaskUserAction::TrezorPin(pin) => Ok(pin),
-            HwRpcTaskUserAction::TrezorPassphrase(_) => Err(RpcTaskError::Internal(
-                "Unexpected user action: expected 'TrezorPin'".to_string(),
-            )),
+            HwRpcTaskUserAction::TrezorPassphrase(_) => {
+                Err(RpcTaskError::UnexpectedUserAction { expected: "TrezorPin" })
+            },
         }
     }
 }
@@ -49,9 +49,9 @@ impl TryFrom<HwRpcTaskUserAction> for TrezorPassphraseResponse {
     fn try_from(value: HwRpcTaskUserAction) -> Result<Self, Self::Error> {
         match value {
             HwRpcTaskUserAction::TrezorPassphrase(passphrase) => Ok(passphrase),
-            HwRpcTaskUserAction::TrezorPin(_) => Err(RpcTaskError::Internal(
-                "Unexpected user action: expected 'TrezorPassphrase'".to_string(),
-            )),
+            HwRpcTaskUserAction::TrezorPin(_) => Err(RpcTaskError::UnexpectedUserAction {
+                expected: "TrezorPassphrase",
+            }),
         }
     }
 }

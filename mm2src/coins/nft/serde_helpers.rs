@@ -94,3 +94,44 @@ mod tests {
         assert_eq!(default_page_size(), 10);
     }
 }
+
+/// Deserialize a `u64` that the indexer contract sends as a decimal string.
+///
+/// Block heights and timestamps arrive as strings from the deployed indexer
+/// (CRD ch.19 §19.5.1) but as JSON numbers from our own persisted payloads and
+/// from GUI clients, so both are accepted. Serialization is left alone: the
+/// model keeps emitting numbers, which is what existing consumers read.
+pub(crate) fn u64_from_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match StringOrNumber::deserialize(deserializer)? {
+        StringOrNumber::Number(value) => Ok(value),
+        StringOrNumber::Text(raw) => u64::from_str(raw.trim()).map_err(DeError::custom),
+    }
+}
+
+/// Optional counterpart of [`u64_from_string_or_number`].
+pub(crate) fn optional_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<StringOrNumber>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(StringOrNumber::Number(value)) => Ok(Some(value)),
+        Some(StringOrNumber::Text(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            u64::from_str(trimmed).map(Some).map_err(DeError::custom)
+        },
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrNumber {
+    Number(u64),
+    Text(String),
+}

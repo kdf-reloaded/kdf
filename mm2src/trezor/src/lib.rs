@@ -15,7 +15,7 @@ pub mod user_interaction;
 pub mod utxo;
 
 pub use client::{TrezorClient, TrezorSession};
-pub use error::{OperationFailure, TrezorError, TrezorResult};
+pub use error::{HwRpcError, OperationFailure, TrezorError, TrezorResult};
 pub use ethereum::{TrezorEthSignature, TrezorEthTxInput};
 pub use hw_common::primitives::{DerivationPath, EcdsaCurve};
 pub use response::{ButtonRequest, PassphraseRequest, PinMatrixRequest, TrezorResponse};

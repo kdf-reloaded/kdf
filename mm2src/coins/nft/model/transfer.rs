@@ -4,7 +4,7 @@ use crate::eth::EthTxFeeDetails;
 use crate::nft::errors::ParseTransferStatusError;
 use crate::nft::model::chain::{Chain, ContractType};
 use crate::nft::model::nft::Nft;
-use crate::nft::serde_helpers::{token_id_from_string, token_id_to_string};
+use crate::nft::serde_helpers::{token_id_from_string, token_id_to_string, u64_from_string_or_number};
 use ethereum_types::Address;
 use mm2_number::{BigDecimal, BigUint};
 use serde::{Deserialize, Serialize};
@@ -86,8 +86,10 @@ pub struct NftTransfer {
     #[serde(serialize_with = "token_id_to_string", deserialize_with = "token_id_from_string")]
     pub token_id: BigUint,
     /// Block number that included the transfer.
+    #[serde(deserialize_with = "u64_from_string_or_number")]
     pub block_number: u64,
     /// UNIX timestamp of the block.
+    #[serde(deserialize_with = "u64_from_string_or_number")]
     pub block_timestamp: u64,
     /// ERC-721 vs ERC-1155.
     pub contract_type: ContractType,
@@ -111,6 +113,11 @@ pub struct NftTransfer {
     /// EVM fee details extracted from the transaction receipt.
     pub fee_details: Option<EthTxFeeDetails>,
     /// Number of confirmations the transfer has accumulated.
+    ///
+    /// Absent from the indexer contract — live confirmation counts are deferred
+    /// work (CRD ch.19 §19.9) — so a missing member decodes as `0` rather than
+    /// failing the whole page.
+    #[serde(default, deserialize_with = "u64_from_string_or_number")]
     pub confirmations: u64,
 }
 

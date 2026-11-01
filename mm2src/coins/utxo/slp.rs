@@ -992,6 +992,7 @@ mod slp_tests {
         let err = match tx_err.clone() {
             TransactionErr::TxRecoverable(_tx, err) => err,
             TransactionErr::Plain(err) => err,
+            TransactionErr::FeeCapBelowBaseFee { rejection, .. } => rejection.to_string(),
         };
 
         println!("{:?}", err);

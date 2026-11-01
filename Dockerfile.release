@@ -24,6 +24,8 @@ RUN apt-get update \
 
 WORKDIR /mm2
 COPY kdf /app/kdf
+# GPLv2 section 1: ship the license texts and third-party notices with the binary.
+COPY LEGAL/COPYING LEGAL/LICENSE LEGAL/THIRDPARTY-LICENSES /usr/share/doc/kdf/
 EXPOSE 7783
 ENV PATH="/app:${PATH}"
 CMD kdf

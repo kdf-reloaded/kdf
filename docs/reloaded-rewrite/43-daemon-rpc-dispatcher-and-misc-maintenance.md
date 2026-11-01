@@ -47,11 +47,22 @@ R43.1.2 The endpoint shall accept a **versioned** request shape carrying:
 - `userpass` -- the RPC password (see §43.3);
 - `id` (optional) -- echoed back in the response.
 
-R43.1.3 An unrecognised `mmrpc` version shall not be fatal: the dispatcher shall
-fall back to the latest known version rather than rejecting the request outright.
+R43.1.3 An unrecognised `mmrpc` version shall not be fatal: the endpoint shall
+answer with a structured, well-formed version-mismatch error response rather
+than failing to produce a valid response at all. The error response's own
+version tag defaults to the latest known version so the envelope stays
+well-formed; the triggering request is refused (as a version-mismatch error),
+not processed under the fallback version.
 
 R43.1.4 A response shall carry the matching version and `id`, and either a result
 or a structured error object.
+
+> **Cross-reference (informative).** The coin-activation methods' error
+> envelope, the encoding of `error_data`, the two error placements
+> (mmrpc-level and task-status-level), the HTTP-status policy and the legacy
+> error body are bound in [Chapter 55](55-coin-activation-wire-contract.md)
+> §55.1, which also restates the dispatcher errors of this section that
+> activation callers observe.
 
 ## 43.2 Public vs protected method classification
 
@@ -89,6 +100,30 @@ config) if it fails. The policy shall require **all** of:
 > dropping a character-class requirement, or removing the repeated-character cap)
 > is a regression. Verified: the shipped policy enforces all of the above.
 
+> **Code-quality finding (informative, resolved 2026-08-27).** The
+> request-time authentication comparison of R43.3.1 used to substitute an
+> empty string for the configured password whenever `rpc_password` was
+> absent, rather than refusing every comparison outright: a caller who
+> explicitly supplied an empty (present, non-null) credential satisfied that
+> comparison whenever `rpc_password` was unconfigured, gaining access to
+> every protected method without ever having been given a password -- which
+> did not honour R43.3.1's "a missing or wrong password shall be rejected"
+> floor, nor Chapter 45 R45.5.2's requirement that an absent `rpc_password`
+> "shall not silently grant unauthenticated access." The sibling case --
+> `rpc_password` explicitly configured as an empty string -- was already
+> refused at startup, so the gap was specific to the *absent* case. Closed
+> by making the authentication comparison itself reject every caller
+> credential, including an explicitly empty one, whenever no `rpc_password`
+> is configured -- routed through the same rate-limited invalid-password
+> path a wrong password already takes, so an unconfigured node gives a
+> caller no signal distinguishing "no password set" from "wrong password."
+> The startup strength-policy validation of R43.3.2 still only runs when
+> `rpc_password` is present (a genuinely absent `rpc_password` still only
+> logs a diagnostic at startup and does not refuse to start) -- this is now
+> a pure availability/UX question, not a security gap, since no request can
+> authenticate against an unconfigured password regardless. Code:
+> `mm2src/mm2_main/src/rpc/dispatcher/dispatcher.rs` (`auth`).
+
 R43.3.3 The RPC password and passphrase shall never be logged or echoed in
 responses or errors.
 
@@ -113,7 +148,9 @@ shall be wound down as part of shutdown rather than abandoned.
 ## 43.6 Acceptance criteria
 
 - A legacy request and a versioned (`mmrpc`) request both route correctly; an
-  unknown `mmrpc` version falls back to the latest rather than erroring (§43.1).
+  unknown `mmrpc` version yields a structured version-mismatch error response
+  (its own envelope defaulting to the latest known version) rather than a
+  raw or invalid response (§43.1).
 - A public method succeeds without a password; a protected method fails without
   the correct password and, in local-only mode, fails from a non-loopback client
   (§43.2).
@@ -123,3 +160,21 @@ shall be wound down as part of shutdown rather than abandoned.
   daemon running (§43.4).
 - A termination signal triggers a clean, bounded shutdown of the daemon and its
   subsystems (§43.5).
+
+## 43.7 Provenance Footer
+
+- *Inputs:* the project's own revision history and current tree (the
+  shipped dispatcher -- legacy and namespaced routing, public-method
+  classification, password authentication -- and the daemon lifecycle
+  this chapter documents as-built and binds the security obligations of,
+  by public behaviour and wire-envelope shape only, no code
+  transcribed); the 2026-08-26 external audit's KDF-001 finding (the
+  auth-bypass gap this chapter's §43.3 code-quality finding records and
+  the fix it now describes as resolved); [Chapter 45](45-startup-configuration-and-environment-tolerance.md)
+  (the startup-tolerance contract R45.5.2/R45.7.1 this chapter's R43.3.1/
+  R43.4.1 security obligations are bound alongside).
+- *Permitted-input classes used:* baseline/as-built source (the shipped
+  dispatcher and daemon lifecycle); R7 (independent work, for the
+  security-fix description); cross-chapter contracts (Chapter 45).
+- *Sibling-allowlist consultations:* [Chapter 45](45-startup-configuration-and-environment-tolerance.md).
+- *Forbidden corpus:* not consulted.

@@ -112,9 +112,50 @@ impl MarketCoinOps for LightningCoin {
             .to_string())
     }
 
-    // Todo: Implement this when implementing swaps for lightning as it's is used only for swaps
-    fn min_tx_amount(&self) -> BigDecimal { unimplemented!() }
+    fn min_tx_amount(&self) -> BigDecimal {
+        let htlc_minimums = self
+            .channel_manager
+            .list_channels()
+            .into_iter()
+            .map(|chan| chan.outbound_htlc_minimum_msat);
+        big_decimal_from_sat_unsigned(min_outbound_htlc_msat(htlc_minimums), self.decimals())
+    }
 
-    // Todo: Implement this when implementing swaps for lightning as it's is used only for order matching/swaps
-    fn min_trading_vol(&self) -> MmNumber { unimplemented!() }
+    fn min_trading_vol(&self) -> MmNumber { self.min_tx_amount().into() }
+}
+
+/// The largest counterparty minimum outbound HTLC amount over the node's channels in millisatoshi.
+/// A channel that states none counts as one millisatoshi, and so does a node with no channels
+/// (CRD ch.41 R41.11A.1).
+fn min_outbound_htlc_msat<I: IntoIterator<Item = Option<u64>>>(channel_minimums: I) -> u64 {
+    channel_minimums
+        .into_iter()
+        .map(|min| min.unwrap_or(1))
+        .max()
+        .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_outbound_htlc_no_channels_is_one_msat() {
+        assert_eq!(min_outbound_htlc_msat(Vec::new()), 1);
+        // One millisatoshi in the coin's own decimals (11 for a millisatoshi-denominated coin).
+        assert_eq!(
+            big_decimal_from_sat_unsigned(min_outbound_htlc_msat(Vec::new()), 11),
+            BigDecimal::from_str("0.00000000001").unwrap()
+        );
+    }
+
+    #[test]
+    fn min_outbound_htlc_is_maximum_over_channels() {
+        assert_eq!(
+            min_outbound_htlc_msat(vec![Some(1000), Some(250_000), None, Some(5)]),
+            250_000
+        );
+        // A channel that states none counts as one millisatoshi.
+        assert_eq!(min_outbound_htlc_msat(vec![None, None]), 1);
+    }
 }

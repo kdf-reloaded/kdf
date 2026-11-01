@@ -1,6 +1,7 @@
 [package]
 name = "crypto"
 version = "1.0.0"
+license = "GPL-2.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -21,12 +22,16 @@ arrayref = "0.3"
 async-trait = "0.1"
 # Base64 encoding for encrypted data serialization
 base64 = "0.21.2"
-bip32 = { version = "0.2.2", default-features = false, features = ["alloc", "secp256k1-ffi"] }
+bip32 = { version = "0.6.0-pre.1", default-features = false, features = ["alloc", "secp256k1-ffi"] }
 # BIP39 mnemonic generation and seed derivation
 bip39 = { version = "2.1.0", features = ["rand_core", "zeroize", "std"], default-features = false }
 kdf_crypto = { path = "../kdf_crypto" }
-# Base58 encoding for xpub prefix conversion
-bs58 = "0.4.0"
+# Base58 encoding for xpub prefix conversion. `check` is required explicitly
+# (xpub.rs uses `.with_check()` directly) rather than relying on it leaking in
+# via bip32's own bs58 feature request on the same dependency edge — that
+# unification broke silently when bip32 0.6.0-pre.1 moved to bs58 0.5,
+# leaving crypto's own bs58 0.4 instance without the feature it actually uses.
+bs58 = { version = "0.4.0", features = ["check"] }
 # CBC block cipher mode
 cbc = "0.1.2"
 # Block cipher traits (alloc enables encrypt_padded_vec_mut / decrypt_padded_vec_mut)
@@ -40,7 +45,7 @@ futures = "0.3"
 hex = "0.4.2"
 # HMAC-SHA256 for authenticated encryption
 hmac = "0.12.1"
-http = "0.2"
+http = "1"
 hw_common = { path = "../hw_common" }
 keys = { package = "kdf_keys", path = "../kdf_keys" }
 lazy_static = "1.4"
@@ -51,7 +56,7 @@ parking_lot = { version = "0.12.0" }
 primitives = { package = "kdf_primitives", path = "../kdf_primitives" }
 rpc_task = { path = "../rpc_task" }
 rustc-hex = "2"
-secp256k1 = "0.20"
+secp256k1 = "0.29"
 ser_error = { path = "../derives/ser_error" }
 ser_error_derive = { path = "../derives/ser_error_derive" }
 serde = "1.0"

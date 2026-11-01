@@ -1,7 +1,7 @@
 use crate::{adex_ping::AdexPing,
-            peers_exchange::{PeerAddresses, PeersExchange},
-            request_response::{build_request_response_behaviour, PeerRequest, PeerResponse, RequestResponseBehaviour,
-                               RequestResponseBehaviourEvent, RequestResponseSender},
+            peers_exchange::{strip_p2p_suffix, PeerAddresses, PeersExchange},
+            request_response::{build_request_response_behaviour, LocalFailure, PeerRequest, PeerResponse,
+                               RequestResponseBehaviour, RequestResponseBehaviourEvent, RequestResponseSender},
             runtime::{SwarmRuntimeOps, SWARM_RUNTIME},
             NetworkInfo, NetworkPorts, RelayAddress, RelayAddressError};
 use derive_more::Display;
@@ -9,7 +9,6 @@ use futures::{channel::{mpsc::{channel, Receiver, Sender},
                         oneshot},
               future::{abortable, join_all, poll_fn, AbortHandle},
               Future, SinkExt, StreamExt};
-use futures_rustls::rustls;
 use libp2p::core::transport::Boxed as BoxedTransport;
 use libp2p::floodsub::{Floodsub, FloodsubEvent, Topic as FloodsubTopic};
 use libp2p::gossipsub::{Behaviour as Gossipsub, ConfigBuilder as GossipsubConfigBuilder, Event as GossipsubEvent,
@@ -20,9 +19,9 @@ use libp2p::{core::{ConnectedPoint, Multiaddr, Transport},
              multiaddr::Protocol,
              noise,
              request_response::ResponseChannel,
-             swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+             swarm::{ConnectionError, DialError, ListenError, NetworkBehaviour, Swarm, SwarmEvent},
              PeerId};
-use log::{debug, error, info, warn};
+use log::{debug, error, info, warn, Level};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use std::{collections::hash_map::{DefaultHasher, HashMap},
@@ -47,6 +46,18 @@ pub type AdexEventRx = Receiver<AdexBehaviourEvent>;
 type AdexSpawnFn = fn(Box<dyn Future<Output = ()> + Send + Unpin + 'static>) -> ();
 
 #[cfg(test)] mod tests;
+
+/// Content-addressed gossipsub message id (R13): the payload bytes followed by the sequence number are
+/// fed through `Hash` into the standard library's default hasher, and the 64-bit result is encoded as
+/// exactly 8 bytes, big-endian. The id is a wire value (IHAVE/IWANT), so the preimage and encoding
+/// must not change.
+fn gossipsub_message_id(data: &[u8], sequence_number: Option<u64>) -> MessageId {
+    let mut s = DefaultHasher::new();
+    // `Vec<u8>` and `[u8]` hash identically (length prefix, then bytes).
+    data.hash(&mut s);
+    sequence_number.hash(&mut s);
+    MessageId::from(s.finish().to_be_bytes().to_vec())
+}
 
 pub const PEERS_TOPIC: &str = "PEERS";
 const CONNECTED_RELAYS_CHECK_INTERVAL: Duration = Duration::from_secs(30);
@@ -134,11 +145,17 @@ pub enum AdexBehaviourCmd {
     PublishMsg {
         topics: Vec<String>,
         msg: Vec<u8>,
+        /// Queue the message in the priority lane of every connection it is written to
+        /// (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
     },
     PublishMsgFrom {
         topics: Vec<String>,
         msg: Vec<u8>,
         from: PeerId,
+        /// Queue the message in the priority lane of every connection it is written to
+        /// (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
     },
     /// Request relays sequential until a response is received.
     RequestAnyRelay {
@@ -186,6 +203,13 @@ pub enum AdexBehaviourCmd {
     PropagateMessage {
         message_id: MessageId,
         propagation_source: PeerId,
+        /// Queue the propagated message in the priority lane of every connection it is written
+        /// to (CRD ch.28 §28.9B RQ1 item 9).
+        priority: bool,
+    },
+    /// Mark a cached message as validated without forwarding it (CRD ch.32 R-F3b, D11).
+    ValidateMessage {
+        message_id: MessageId,
     },
 }
 
@@ -193,9 +217,18 @@ pub enum AdexBehaviourCmd {
 /// but is used to prevent `PeerResponse` from being used outside the network implementation.
 #[derive(Debug, Eq, PartialEq)]
 pub enum AdexResponse {
-    Ok { response: Vec<u8> },
+    Ok {
+        response: Vec<u8>,
+    },
     None,
-    Err { error: String },
+    Err {
+        error: String,
+    },
+    /// A failure of this node's own request (see [`LocalFailure`]); it is never sent to a peer.
+    LocalErr {
+        kind: LocalFailure,
+        error: String,
+    },
 }
 
 impl From<PeerResponse> for AdexResponse {
@@ -204,6 +237,7 @@ impl From<PeerResponse> for AdexResponse {
             PeerResponse::Ok { res } => AdexResponse::Ok { response: res },
             PeerResponse::None => AdexResponse::None,
             PeerResponse::Err { err } => AdexResponse::Err { error: err },
+            PeerResponse::LocalErr { kind, err } => AdexResponse::LocalErr { kind, error: err },
         }
     }
 }
@@ -213,7 +247,8 @@ impl From<AdexResponse> for PeerResponse {
         match res {
             AdexResponse::Ok { response } => PeerResponse::Ok { res: response },
             AdexResponse::None => PeerResponse::None,
-            AdexResponse::Err { error } => PeerResponse::Err { err: error },
+            // Only an answer to a peer's request is converted this way, and a local failure is never one.
+            AdexResponse::Err { error } | AdexResponse::LocalErr { error, .. } => PeerResponse::Err { err: error },
         }
     }
 }
@@ -250,7 +285,21 @@ pub enum AdexBehaviourEvent {
         /// See [`AdexBehaviourCmd::SendResponse`].
         response_channel: AdexResponseChannel,
     },
+    /// A connected relay joined this node's relay mesh (CRD ch.32 §32.9B R-MP4). The application
+    /// uses it to publish the keep-alive round that follows a reconnect.
+    RelayMeshJoined {
+        /// The relay that joined the mesh.
+        peer_id: PeerId,
+    },
+    /// The last connection to a relay closed (CRD ch.32 §32.9B R-MP2 item 2, the close signal).
+    RelayConnectionClosed {
+        /// The relay.
+        peer_id: PeerId,
+    },
 }
+
+/// Aggregate counters of the gossip send queues, for metrics (CRD ch.32 §32.9B R-MP5).
+pub use libp2p::gossipsub::SendQueueSnapshot;
 
 /// AtomicDEX libp2p Network behaviour implementation.
 ///
@@ -280,6 +329,28 @@ fn gossipsub_event_to_adex(event: GossipsubEvent) -> Option<AdexBehaviourEvent> 
         GossipsubEvent::Subscribed { peer_id, topic } => Some(AdexBehaviourEvent::Subscribed { peer_id, topic }),
         GossipsubEvent::Unsubscribed { peer_id, topic } => Some(AdexBehaviourEvent::Unsubscribed { peer_id, topic }),
         GossipsubEvent::GossipsubNotSupported { .. } => None,
+        // The pressure level feeds the queue signal inside the behaviour, and the application reads that
+        // (`relay_queue_signal`), so it always sees the current level and not a stream of changes it could miss.
+        GossipsubEvent::SendQueuePressure {
+            peer_id,
+            connection_id,
+            raised,
+        } => {
+            debug!(
+                "Gossip send queue pressure toward peer {} on connection {:?}: {}",
+                peer_id,
+                connection_id,
+                if raised { "raised" } else { "cleared" }
+            );
+            None
+        },
+        GossipsubEvent::RelayMeshJoined { peer_id } => Some(AdexBehaviourEvent::RelayMeshJoined { peer_id }),
+        // The queue signal is read from the behaviour (`relay_queue_signal`), so the application always sees the
+        // current level.
+        GossipsubEvent::SendQueueSignal { .. } => None,
+        GossipsubEvent::RelayConnectionClosed { peer_id } => {
+            Some(AdexBehaviourEvent::RelayConnectionClosed { peer_id })
+        },
     }
 }
 
@@ -337,7 +408,7 @@ impl AtomicDexBehaviour {
                 },
             },
             PeerResponse::None => return PeerClockCheck::Inconclusive,
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 debug!("Peer clock check inconclusive: {}", err);
                 return PeerClockCheck::Inconclusive;
             },
@@ -404,20 +475,31 @@ impl AtomicDexBehaviour {
                     error!("Error subscribing to topic {}: {:?}", topic, e);
                 }
             },
-            AdexBehaviourCmd::PublishMsg { topics, msg } => {
+            AdexBehaviourCmd::PublishMsg { topics, msg, priority } => {
                 for topic in topics {
-                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish(Topic::new(topic), msg.clone()) {
+                    if let Err(e) =
+                        swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish_with_priority(Topic::new(topic), msg.clone(), priority)
+                    {
                         error!("Error publishing message: {:?}", e);
                     }
                 }
             },
-            AdexBehaviourCmd::PublishMsgFrom { topics, msg, from } => {
+            AdexBehaviourCmd::PublishMsgFrom {
+                topics,
+                msg,
+                from,
+                priority,
+            } => {
                 for topic in topics {
-                    if let Err(e) = swarm
-                        .behaviour_mut()
-                        .gossipsub
-                        .publish_from(Topic::new(topic), msg.clone(), from)
-                    {
+                    if let Err(e) = swarm.behaviour_mut().gossipsub.publish_from_with_priority(
+                        Topic::new(topic),
+                        msg.clone(),
+                        from,
+                        priority,
+                    ) {
                         error!("Error publishing message from {}: {:?}", from, e);
                     }
                 }
@@ -552,14 +634,21 @@ impl AtomicDexBehaviour {
             AdexBehaviourCmd::PropagateMessage {
                 message_id,
                 propagation_source,
+                priority,
             } => {
-                if let Err(e) = swarm
-                    .behaviour_mut()
-                    .gossipsub
-                    .propagate_message(&message_id, &propagation_source)
-                {
+                if let Err(e) = swarm.behaviour_mut().gossipsub.propagate_message_with_priority(
+                    &message_id,
+                    &propagation_source,
+                    priority,
+                ) {
                     error!("Error propagating message {}: {:?}", message_id, e);
                 }
+            },
+            AdexBehaviourCmd::ValidateMessage { message_id } => {
+                swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .validate_message_without_forwarding(&message_id);
             },
         }
     }
@@ -576,6 +665,16 @@ impl AtomicDexBehaviour {
     pub fn received_messages_in_period(&self) -> (Duration, usize) { self.gossipsub.get_received_messages_in_period() }
 
     pub fn connected_peers_len(&self) -> usize { self.gossipsub.get_num_peers() }
+
+    /// The send queue counters of all connections (CRD ch.32 §32.9B R-MP5).
+    pub fn send_queue_snapshot(&self) -> SendQueueSnapshot { self.gossipsub.send_queue_snapshot() }
+
+    /// Whether the queue signal of CRD ch.32 §32.9B R-MP2 item 2 is raised toward any connection to a relay: the
+    /// data queue has held something for 2 seconds, or the pressure level of CRD ch.28 §28.9B RQ1 item 8 is raised.
+    pub fn relay_queue_signal(&self) -> bool { self.gossipsub.relay_queue_signal() }
+
+    /// How many times the queue signal was raised toward a relay connection since start.
+    pub fn queue_signals_raised(&self) -> u64 { self.gossipsub.queue_signals_raised() }
 }
 
 /// Dispatches an event produced by the composed [`AtomicDexBehaviour`] to the application layer.
@@ -657,13 +756,19 @@ fn maintain_connection_to_relays(swarm: &mut AtomicDexSwarm, bootstrap_addresses
     // allow 2 * mesh_n_high connections to other nodes
     let max_n = behaviour.gossipsub.get_config().mesh_n_high() * 2;
 
+    let local_peer_id = *Swarm::local_peer_id(swarm);
+
     let mut rng = rand::thread_rng();
     if connected_relays.len() < mesh_n_low {
         let to_connect_num = mesh_n - connected_relays.len();
+        // The node never dials itself (CRD ch.28 R8c item 5): peers exchange does not hold its own entry, and the
+        // candidate filter excludes it as well.
         let to_connect = swarm
             .behaviour_mut()
             .peers_exchange
-            .get_random_peers(to_connect_num, |peer| !connected_relays.contains(peer));
+            .get_random_peers(to_connect_num, |peer| {
+                *peer != local_peer_id && !connected_relays.contains(peer)
+            });
 
         // choose some random bootstrap addresses to connect if peers exchange returned not enough peers
         if to_connect.len() < to_connect_num {
@@ -754,6 +859,8 @@ pub enum AdexBehaviourError {
     ParsingRelayAddress(RelayAddressError),
     #[display(fmt = "Error listening on '{}': {}", address, error)]
     ListenOn { address: String, error: String },
+    #[display(fmt = "Invalid WSS key or certificate configuration: {}", _0)]
+    WssConfig(String),
 }
 
 impl From<RelayAddressError> for AdexBehaviourError {
@@ -793,8 +900,148 @@ fn dial_peer_addr(swarm: &mut AtomicDexSwarm, peer: PeerId, addr: Multiaddr, rea
     }
 }
 
-fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>)
-where
+/// How often an address or a source is reported at the high log level (INFO or WARN) when its connections keep
+/// failing; the reports in between are logged at DEBUG.
+const CONNECTION_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(3600);
+/// How many addresses or sources are remembered. The map is cleared when it is full, so its memory stays bounded.
+const MAX_CONNECTION_FAILURE_LOG_KEYS: usize = 256;
+
+/// The time of the last high-level report per key.
+struct ConnectionFailureLog<K> {
+    last_high: HashMap<K, Instant>,
+}
+
+impl<K> Default for ConnectionFailureLog<K> {
+    fn default() -> Self {
+        ConnectionFailureLog {
+            last_high: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> ConnectionFailureLog<K> {
+    /// The level an event naming `keys` is logged at at `now`: `high` when any key was not reported at the high
+    /// level within [`CONNECTION_FAILURE_LOG_INTERVAL`] (the keys that were not are marked as reported), DEBUG
+    /// otherwise.
+    fn level(&mut self, keys: impl IntoIterator<Item = K>, now: Instant, high: Level) -> Level {
+        let mut level = Level::Debug;
+        for key in keys {
+            let reported_recently = self
+                .last_high
+                .get(&key)
+                .is_some_and(|last| now.duration_since(*last) < CONNECTION_FAILURE_LOG_INTERVAL);
+            if reported_recently {
+                continue;
+            }
+            if self.last_high.len() >= MAX_CONNECTION_FAILURE_LOG_KEYS && !self.last_high.contains_key(&key) {
+                self.last_high.clear();
+            }
+            self.last_high.insert(key, now);
+            level = high;
+        }
+        level
+    }
+}
+
+/// What an outgoing connection failure is keyed by.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum DialFailureKey {
+    /// An address the error names, without its trailing `/p2p/<peer id>` component.
+    Address(Multiaddr),
+    /// The peer the dial was for, when the error names no address.
+    Peer(PeerId),
+    /// The error names neither an address nor a peer.
+    Unknown,
+}
+
+/// The keys of an outgoing connection failure: every address the error names, or the peer ID when it names none.
+fn dial_failure_keys(peer_id: Option<PeerId>, error: &DialError) -> Vec<DialFailureKey> {
+    let mut keys: Vec<DialFailureKey> = match error {
+        DialError::Transport(failures) => failures
+            .iter()
+            .map(|(address, _)| DialFailureKey::Address(strip_p2p_suffix(address)))
+            .collect(),
+        DialError::WrongPeerId { endpoint, .. } | DialError::LocalPeerId { endpoint } => {
+            vec![DialFailureKey::Address(strip_p2p_suffix(endpoint.get_remote_address()))]
+        },
+        _ => Vec::new(),
+    };
+    if keys.is_empty() {
+        keys.push(peer_id.map_or(DialFailureKey::Unknown, DialFailureKey::Peer));
+    }
+    keys
+}
+
+/// How a closed connection is logged.
+enum ConnectionClosedLog<'a, E> {
+    /// Closed without a cause: INFO, "closed cleanly".
+    Clean,
+    /// A surplus connection that idled out while the peer stays connected: INFO, "idle connection ... closed".
+    IdleDuplicate,
+    /// Closed with a cause that is a failure, or the last connection to the peer idled out: WARN. Carries the cause.
+    Error(&'a ConnectionError<E>),
+}
+
+/// Classifies a `SwarmEvent::ConnectionClosed` by the type of its cause and the connections left to the peer
+/// (CRD ch.32 R-F3b and D11, maintainer decision BF).
+///
+/// The swarm offers each gossipsub message for a peer to that peer's connections in a fixed order of its own, not the
+/// order they were established. A later connection receives a message only when an earlier one's command queue is
+/// full.
+///
+/// Only the first connection established to a mesh peer is held open regardless of traffic. Any other connection that
+/// carries nothing for gossipsub's idle timeout closes with [`ConnectionError::KeepAliveTimeout`], while the peer
+/// stays connected through the remaining one. Under load that happens mainly when the overflow that kept a
+/// connection busy goes away, which R-F3b as amended (D11) makes common. On a quiet mesh it happens whenever
+/// neither end sends on that connection.
+///
+/// That is not an error, so a keep-alive timeout with `remaining > 0` is [`ConnectionClosedLog::IdleDuplicate`]. A
+/// keep-alive timeout of the last connection (`remaining == 0`), and every other cause, are
+/// [`ConnectionClosedLog::Error`], which carries the cause for the log line.
+fn connection_closed_log<E>(cause: Option<&ConnectionError<E>>, remaining: u32) -> ConnectionClosedLog<'_, E> {
+    match cause {
+        None => ConnectionClosedLog::Clean,
+        Some(ConnectionError::KeepAliveTimeout) if remaining > 0 => ConnectionClosedLog::IdleDuplicate,
+        Some(cause) => ConnectionClosedLog::Error(cause),
+    }
+}
+
+/// The source IP of an incoming connection, if its address carries one.
+fn source_ip(address: &Multiaddr) -> Option<IpAddr> {
+    address.iter().find_map(|protocol| match protocol {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
+    })
+}
+
+/// Rate limits of the connection failure log lines (CRD leaves the logging to the implementation).
+#[derive(Default)]
+struct ConnectionFailureLogs {
+    outgoing: ConnectionFailureLog<DialFailureKey>,
+    incoming: ConnectionFailureLog<Option<IpAddr>>,
+}
+
+impl ConnectionFailureLogs {
+    /// An outgoing connection failure is logged at WARN at most once per address per hour, at DEBUG otherwise.
+    fn outgoing_level(&mut self, peer_id: Option<PeerId>, error: &DialError, now: Instant) -> Level {
+        self.outgoing.level(dial_failure_keys(peer_id, error), now, Level::Warn)
+    }
+
+    /// An incoming transport negotiation failure is logged at INFO at most once per source IP per hour, at DEBUG
+    /// otherwise. Other incoming failures stay at WARN.
+    fn incoming_level(&mut self, send_back_addr: &Multiaddr, error: &ListenError, now: Instant) -> Level {
+        match error {
+            ListenError::Transport(_) => self.incoming.level([source_ip(send_back_addr)], now, Level::Info),
+            _ => Level::Warn,
+        }
+    }
+}
+
+fn log_swarm_event<TBehaviourOutEvent, THandlerErr>(
+    event: &SwarmEvent<TBehaviourOutEvent, THandlerErr>,
+    failure_logs: &mut ConnectionFailureLogs,
+) where
     TBehaviourOutEvent: std::fmt::Debug,
     THandlerErr: std::fmt::Debug,
 {
@@ -825,12 +1072,16 @@ where
             num_established,
             cause,
             ..
-        } => match cause {
-            Some(cause) => warn!(
+        } => match connection_closed_log(cause.as_ref(), *num_established) {
+            ConnectionClosedLog::IdleDuplicate => info!(
+                "P2P idle connection to peer {} via {:?} closed (KeepAliveTimeout); remaining connections to peer: {}",
+                peer_id, endpoint, num_established
+            ),
+            ConnectionClosedLog::Error(cause) => warn!(
                 "P2P connection to peer {} via {:?} closed with error: {:?}; remaining connections to peer: {}",
                 peer_id, endpoint, cause, num_established
             ),
-            None => info!(
+            ConnectionClosedLog::Clean => info!(
                 "P2P connection to peer {} via {:?} closed cleanly; remaining connections to peer: {}",
                 peer_id, endpoint, num_established
             ),
@@ -848,12 +1099,24 @@ where
             send_back_addr,
             error,
             ..
-        } => warn!(
-            "P2P incoming connection failed on {} from {}: {}",
-            local_addr, send_back_addr, error
-        ),
+        } => {
+            let level = failure_logs.incoming_level(send_back_addr, error, Instant::now());
+            log::log!(
+                level,
+                "P2P incoming connection failed on {} from {}: {}",
+                local_addr,
+                send_back_addr,
+                error
+            );
+        },
         SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-            warn!("P2P outgoing connection failed for peer {:?}: {}", peer_id, error);
+            let level = failure_logs.outgoing_level(*peer_id, error, Instant::now());
+            log::log!(
+                level,
+                "P2P outgoing connection failed for peer {:?}: {}",
+                peer_id,
+                error
+            );
         },
         SwarmEvent::NewListenAddr { listener_id, address } => {
             info!("P2P listener {:?} is listening on {}", listener_id, address);
@@ -885,20 +1148,29 @@ where
     }
 }
 
+/// DER-encoded WSS server key and certificate chain.
 pub struct WssCerts {
-    pub server_priv_key: rustls::PrivateKey,
-    pub certs: Vec<rustls::Certificate>,
+    pub server_priv_key: Vec<u8>,
+    pub certs: Vec<Vec<u8>>,
 }
 
 pub enum NodeType {
     Light {
         network_ports: NetworkPorts,
+        /// `p2p_resolve_peer_hostnames` (CRD ch.28 R8c item 10, decision BH).
+        resolve_peer_hostnames: bool,
+        /// `p2p_allow_private_addresses` (CRD ch.28 R8c item 8, decision BH).
+        allow_private_addresses: bool,
     },
     LightInMemory,
     Relay {
         ip: IpAddr,
         network_ports: NetworkPorts,
         wss_certs: Option<WssCerts>,
+        /// `p2p_resolve_peer_hostnames` (CRD ch.28 R8c item 10, decision BH).
+        resolve_peer_hostnames: bool,
+        /// `p2p_allow_private_addresses` (CRD ch.28 R8c item 8, decision BH).
+        allow_private_addresses: bool,
     },
     RelayInMemory {
         port: u64,
@@ -908,7 +1180,7 @@ pub enum NodeType {
 impl NodeType {
     pub fn to_network_info(&self) -> NetworkInfo {
         match self {
-            NodeType::Light { network_ports } | NodeType::Relay { network_ports, .. } => NetworkInfo::Distributed {
+            NodeType::Light { network_ports, .. } | NodeType::Relay { network_ports, .. } => NetworkInfo::Distributed {
                 network_ports: *network_ports,
             },
             NodeType::LightInMemory | NodeType::RelayInMemory { .. } => NetworkInfo::InMemory,
@@ -916,6 +1188,24 @@ impl NodeType {
     }
 
     pub fn is_relay(&self) -> bool { matches!(self, NodeType::Relay { .. } | NodeType::RelayInMemory { .. }) }
+
+    /// The flags `p2p_resolve_peer_hostnames` and `p2p_allow_private_addresses` (CRD ch.28 R8c items 10 and 8,
+    /// decision BH). An in-memory node has no hostnames to look up, so both are `false` for it.
+    fn peer_address_settings(&self) -> (bool, bool) {
+        match self {
+            NodeType::Light {
+                resolve_peer_hostnames,
+                allow_private_addresses,
+                ..
+            }
+            | NodeType::Relay {
+                resolve_peer_hostnames,
+                allow_private_addresses,
+                ..
+            } => (*resolve_peer_hostnames, *allow_private_addresses),
+            NodeType::LightInMemory | NodeType::RelayInMemory { .. } => (false, false),
+        }
+    }
 
     pub fn wss_certs(&self) -> Option<&WssCerts> {
         match self {
@@ -974,7 +1264,7 @@ fn start_gossipsub(
     let network_info = node_type.to_network_info();
     let transport = match network_info {
         NetworkInfo::InMemory => build_memory_transport(&local_key),
-        NetworkInfo::Distributed { .. } => build_dns_ws_transport(&local_key, node_type.wss_certs()),
+        NetworkInfo::Distributed { .. } => build_dns_ws_transport(&local_key, node_type.wss_certs())?,
     };
 
     let (cmd_tx, mut cmd_rx) = channel(CHANNEL_BUF_SIZE);
@@ -998,12 +1288,7 @@ fn start_gossipsub(
     let mut swarm = {
         // To content-address a message, take the hash of its payload plus sequence number and use
         // it as the message id, so duplicate payloads collapse to a single id (R13).
-        let message_id_fn = |message: &GossipsubMessage| {
-            let mut s = DefaultHasher::new();
-            message.data.hash(&mut s);
-            message.sequence_number.hash(&mut s);
-            MessageId::from(s.finish().to_string())
-        };
+        let message_id_fn = |message: &GossipsubMessage| gossipsub_message_id(&message.data, message.sequence_number);
 
         // set custom gossipsub
         let gossipsub_config = GossipsubConfigBuilder::default()
@@ -1029,7 +1314,9 @@ fn start_gossipsub(
 
         let floodsub = Floodsub::new(local_peer_id, true);
 
-        let peers_exchange = PeersExchange::new(network_info);
+        let (resolve_peer_hostnames, allow_private_addresses) = node_type.peer_address_settings();
+        let peers_exchange = PeersExchange::new(network_info, local_peer_id)
+            .with_address_settings(resolve_peer_hostnames, allow_private_addresses);
 
         // build a request-response network behaviour
         let request_response = build_request_response_behaviour();
@@ -1056,6 +1343,7 @@ fn start_gossipsub(
             ip,
             network_ports,
             wss_certs,
+            ..
         } => {
             let dns_addr: Multiaddr = format!("/ip4/{}/tcp/{}", ip, network_ports.tcp).parse().unwrap();
             listen_on_addr(&mut swarm, dns_addr)?;
@@ -1081,6 +1369,7 @@ fn start_gossipsub(
     );
     let mut announce_interval = Interval::new_at(Instant::now() + ANNOUNCE_INITIAL_DELAY, ANNOUNCE_INTERVAL);
     let mut listening = false;
+    let mut failure_logs = ConnectionFailureLogs::default();
     let polling_fut = poll_fn(move |cx: &mut Context| {
         loop {
             match cmd_rx.poll_next_unpin(cx) {
@@ -1093,7 +1382,7 @@ fn start_gossipsub(
         loop {
             match swarm.poll_next_unpin(cx) {
                 Poll::Ready(Some(event)) => {
-                    log_swarm_event(&event);
+                    log_swarm_event(&event, &mut failure_logs);
                     match event {
                         SwarmEvent::Behaviour(behaviour_event) => {
                             handle_behaviour_event(&mut swarm, &mut event_tx, behaviour_event)
@@ -1105,6 +1394,23 @@ fn start_gossipsub(
                                 &mut pending_clock_checks,
                                 peer_id,
                             );
+                        },
+                        // A dial of an address stored for `peer` reached another peer: the stored address is stale
+                        // (CRD ch.28 R8c item 6).
+                        SwarmEvent::OutgoingConnectionError {
+                            peer_id: Some(peer),
+                            error: DialError::WrongPeerId { endpoint, .. },
+                            ..
+                        } => {
+                            debug!(
+                                "Removing the stale address {} of peer {} from peers exchange",
+                                endpoint.get_remote_address(),
+                                peer
+                            );
+                            swarm
+                                .behaviour_mut()
+                                .peers_exchange
+                                .remove_stale_address(&peer, endpoint.get_remote_address());
                         },
                         _ => {},
                     }
@@ -1147,17 +1453,17 @@ fn start_gossipsub(
 fn build_dns_ws_transport(
     keypair: &identity::Keypair,
     _wss_certs: Option<&WssCerts>,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     let websocket = libp2p::wasm_ext::ffi::websocket_transport();
     let transport = libp2p::wasm_ext::ExtTransport::new(websocket);
-    upgrade_transport(transport, keypair)
+    Ok(upgrade_transport(transport, keypair))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_dns_ws_transport(
     keypair: &identity::Keypair,
     wss_certs: Option<&WssCerts>,
-) -> BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)> {
+) -> Result<BoxedTransport<(PeerId, libp2p::core::muxing::StreamMuxerBox)>, AdexBehaviourError> {
     use libp2p::websocket::tls as libp2p_tls;
 
     // The DNS-over-TCP transport is not `Clone` in the 0.52 API, so a fresh instance is built for
@@ -1172,17 +1478,19 @@ fn build_dns_ws_transport(
     let mut ws_dns_tcp = libp2p::websocket::WsConfig::new(new_dns_tcp());
 
     if let Some(certs) = wss_certs {
-        let server_priv_key = libp2p_tls::PrivateKey::new(certs.server_priv_key.0.clone());
+        let server_priv_key = libp2p_tls::PrivateKey::new(certs.server_priv_key.clone())
+            .map_err(|e| AdexBehaviourError::WssConfig(e.to_string()))?;
         let certs = certs
             .certs
             .iter()
-            .map(|cert| libp2p_tls::Certificate::new(cert.0.clone()));
-        let wss_config = libp2p_tls::Config::new(server_priv_key, certs).unwrap();
+            .map(|cert| libp2p_tls::Certificate::new(cert.clone()));
+        let wss_config = libp2p_tls::Config::new(server_priv_key, certs)
+            .map_err(|e| AdexBehaviourError::WssConfig(e.to_string()))?;
         ws_dns_tcp.set_tls_config(wss_config);
     }
 
     let transport = dns_tcp.or_transport(ws_dns_tcp);
-    upgrade_transport(transport, keypair)
+    Ok(upgrade_transport(transport, keypair))
 }
 
 fn build_memory_transport(
@@ -1248,7 +1556,7 @@ async fn request_any_peer(
             PeerResponse::None => {
                 debug!("Received None from peer {:?}, request next peer", peer);
             },
-            PeerResponse::Err { err } => {
+            PeerResponse::Err { err } | PeerResponse::LocalErr { err, .. } => {
                 error!("Error on request {:?} peer: {:?}. Request next peer", peer, err);
             },
         };
@@ -1303,7 +1611,9 @@ async fn request_one_peer(peer: PeerId, req: Vec<u8>, mut request_response_tx: R
 
     match internal_response_rx.await {
         Ok(response) => response,
-        Err(e) => PeerResponse::Err {
+        // The pending request was dropped without an answer: the local timeout expired.
+        Err(e) => PeerResponse::LocalErr {
+            kind: LocalFailure::Timeout,
             err: format!("Error on request the peer {:?}: \"{:?}\". Request next peer", peer, e),
         },
     }
@@ -1374,5 +1684,224 @@ mod application_tests {
 
         assert!(AtomicDexBehaviour::is_current_timestamp_request(&wrapped));
         assert!(AtomicDexBehaviour::is_current_timestamp_request(&bare));
+    }
+}
+
+#[cfg(test)]
+mod connection_failure_log_tests {
+    use super::{connection_closed_log, dial_failure_keys, ConnectionClosedLog, ConnectionFailureLog,
+                ConnectionFailureLogs, DialFailureKey, CONNECTION_FAILURE_LOG_INTERVAL,
+                MAX_CONNECTION_FAILURE_LOG_KEYS};
+    use libp2p::core::transport::TransportError;
+    use libp2p::core::{ConnectedPoint, Endpoint, Multiaddr};
+    use libp2p::swarm::{ConnectionError, DialError, ListenError};
+    use libp2p::PeerId;
+    use log::Level;
+    use std::time::Duration;
+    use wasm_timer::Instant;
+
+    fn transport_error(addresses: &[&str]) -> DialError {
+        DialError::Transport(
+            addresses
+                .iter()
+                .map(|address| {
+                    (
+                        address.parse::<Multiaddr>().unwrap(),
+                        TransportError::Other(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn incoming_transport_error() -> ListenError {
+        ListenError::Transport(TransportError::Other(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "negotiation failed",
+        )))
+    }
+
+    /// An outgoing failure is logged at WARN the first time, at DEBUG within the hour, and at WARN again after it.
+    #[test]
+    fn outgoing_failure_is_warned_once_per_address_per_hour() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let start = Instant::now();
+
+        assert_eq!(logs.outgoing_level(None, &error, start), Level::Warn);
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + Duration::from_secs(30)),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL - Duration::from_secs(1)
+            ),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.outgoing_level(None, &error, start + CONNECTION_FAILURE_LOG_INTERVAL),
+            Level::Warn
+        );
+        // The hour counts from the last high-level report.
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(60)
+            ),
+            Level::Debug
+        );
+
+        // Another address has its own hour. An event that names a new address among known ones is high.
+        let other = transport_error(&["/ip4/203.0.113.8/tcp/42845"]);
+        assert_eq!(
+            logs.outgoing_level(None, &other, start + Duration::from_secs(40)),
+            Level::Warn
+        );
+        let both = transport_error(&["/ip4/203.0.113.7/tcp/42845", "/ip4/203.0.113.9/tcp/42845"]);
+        assert_eq!(
+            logs.outgoing_level(
+                None,
+                &both,
+                start + CONNECTION_FAILURE_LOG_INTERVAL + Duration::from_secs(70)
+            ),
+            Level::Warn
+        );
+    }
+
+    /// The bare and the /p2p form of an address are one key, and an error without an address is keyed by the peer.
+    #[test]
+    fn outgoing_failure_keys() {
+        let peer = PeerId::random();
+        let bare = transport_error(&["/ip4/203.0.113.7/tcp/42845"]);
+        let with_peer = transport_error(&[format!("/ip4/203.0.113.7/tcp/42845/p2p/{}", peer).as_str()]);
+        assert_eq!(
+            dial_failure_keys(None, &bare),
+            dial_failure_keys(Some(peer), &with_peer)
+        );
+
+        assert_eq!(dial_failure_keys(Some(peer), &DialError::Aborted), vec![
+            DialFailureKey::Peer(peer)
+        ]);
+        assert_eq!(dial_failure_keys(None, &DialError::NoAddresses), vec![
+            DialFailureKey::Unknown
+        ]);
+
+        let endpoint = ConnectedPoint::Dialer {
+            address: format!("/ip4/203.0.113.7/tcp/42845/p2p/{}", peer).parse().unwrap(),
+            role_override: Endpoint::Dialer,
+        };
+        let wrong = DialError::WrongPeerId {
+            obtained: PeerId::random(),
+            endpoint,
+        };
+        assert_eq!(dial_failure_keys(Some(peer), &wrong), dial_failure_keys(None, &bare));
+    }
+
+    /// An incoming transport negotiation failure is logged at INFO once per source IP per hour; other incoming
+    /// failures stay at WARN.
+    #[test]
+    fn incoming_transport_failure_is_reported_once_per_source_ip_per_hour() {
+        let mut logs = ConnectionFailureLogs::default();
+        let error = incoming_transport_error();
+        let from = |address: &str| address.parse::<Multiaddr>().unwrap();
+        let start = Instant::now();
+
+        assert_eq!(
+            logs.incoming_level(&from("/ip4/198.51.100.5/tcp/50001"), &error, start),
+            Level::Info
+        );
+        // The same IP from another port is the same source.
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.5/tcp/50002"),
+                &error,
+                start + Duration::from_secs(5)
+            ),
+            Level::Debug
+        );
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.6/tcp/50001"),
+                &error,
+                start + Duration::from_secs(6)
+            ),
+            Level::Info
+        );
+        assert_eq!(
+            logs.incoming_level(
+                &from("/ip4/198.51.100.5/tcp/50003"),
+                &error,
+                start + CONNECTION_FAILURE_LOG_INTERVAL
+            ),
+            Level::Info
+        );
+
+        // Other incoming failures are not limited.
+        for _ in 0..3 {
+            assert_eq!(
+                logs.incoming_level(&from("/ip4/198.51.100.5/tcp/50001"), &ListenError::Aborted, start),
+                Level::Warn
+            );
+        }
+    }
+
+    /// A keep-alive timeout of a surplus connection is an INFO idle close; the same timeout of the last connection,
+    /// and every other cause, stay WARN and carry the cause printed as before; no cause is a clean close.
+    #[test]
+    fn connection_closed_is_classified_by_cause_type_and_remaining_connections() {
+        let timeout = ConnectionError::<()>::KeepAliveTimeout;
+        let io = ConnectionError::<()>::IO(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"));
+        let handler = ConnectionError::Handler(());
+
+        assert!(matches!(
+            connection_closed_log(Some(&timeout), 1),
+            ConnectionClosedLog::IdleDuplicate
+        ));
+        match connection_closed_log(Some(&timeout), 0) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "KeepAliveTimeout"),
+            _ => panic!("the last connection idling out must be a WARN"),
+        }
+        match connection_closed_log(Some(&io), 1) {
+            ConnectionClosedLog::Error(cause) => assert!(format!("{:?}", cause).starts_with("IO(")),
+            _ => panic!("an IO error must be a WARN"),
+        }
+        match connection_closed_log(Some(&handler), 1) {
+            ConnectionClosedLog::Error(cause) => assert_eq!(format!("{:?}", cause), "Handler(())"),
+            _ => panic!("a handler error must be a WARN"),
+        }
+        assert!(matches!(
+            connection_closed_log::<()>(None, 1),
+            ConnectionClosedLog::Clean
+        ));
+        assert!(matches!(
+            connection_closed_log::<()>(None, 0),
+            ConnectionClosedLog::Clean
+        ));
+    }
+
+    /// The remembered keys stay bounded: a full map is cleared.
+    #[test]
+    fn remembered_keys_stay_bounded() {
+        let mut log = ConnectionFailureLog::<u32>::default();
+        let start = Instant::now();
+        for key in 0..MAX_CONNECTION_FAILURE_LOG_KEYS as u32 {
+            assert_eq!(log.level([key], start, Level::Warn), Level::Warn);
+        }
+        assert_eq!(log.last_high.len(), MAX_CONNECTION_FAILURE_LOG_KEYS);
+        assert_eq!(log.level([0], start, Level::Warn), Level::Debug);
+
+        // One more distinct key clears the full map.
+        assert_eq!(log.level([u32::MAX], start, Level::Warn), Level::Warn);
+        assert_eq!(log.last_high.len(), 1);
+        assert_eq!(log.level([0], start, Level::Warn), Level::Warn);
+
+        for key in 1_000..1_000 + 10 * MAX_CONNECTION_FAILURE_LOG_KEYS as u32 {
+            log.level([key], start, Level::Warn);
+            assert!(log.last_high.len() <= MAX_CONNECTION_FAILURE_LOG_KEYS);
+        }
     }
 }

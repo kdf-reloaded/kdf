@@ -219,6 +219,9 @@ pub struct LightningCoinConf {
     pub accept_inbound_channels: Option<bool>,
     pub accept_forwards_to_priv_channels: Option<bool>,
     pub channel_options: Option<ChannelOptions>,
+    // The public Lightning page spells this key both `our_channels_config` and `our_channels_configs`; the
+    // reference reads `our_channels_configs`. Reloaded still reads only `our_channels_config` (CRD ch.41 R41.2.11,
+    // deferred item 8).
     pub our_channels_config: Option<OurChannelsConfig>,
     pub counterparty_channel_config_limits: Option<CounterpartyLimits>,
     pub sign_message_prefix: Option<String>,

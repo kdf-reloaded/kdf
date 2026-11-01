@@ -42,7 +42,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn test_start_and_stop_simple_market_maker_bot() {
         let coins = json!([
-            {"coin":"RICK","asset":"RICK","rpcport":8923,"txversion":4,"protocol":{"type":"UTXO"}},
+            {"coin":"DOC","asset":"DOC","rpcport":62415,"txversion":4,"protocol":{"type":"UTXO"}},
         ]);
 
         let mm = MarketMakerIt::start(

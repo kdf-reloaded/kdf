@@ -1,19 +1,23 @@
 /// Task-based L2 activation framework. Long-running L2 activations
 /// run as background RPC tasks with progress and cancellation support.
-use crate::context::CoinsActivationContext;
+use crate::context::{lock_activation, CoinsActivationContext};
 use crate::l2::enable_l2::L2ProtocolParams;
 use crate::l2::l2_activation_errors::{CancelL2ActivationError, L2ActivationError, L2ActivationStatusError,
                                       L2ActivationUserActionError};
 use crate::prelude::*;
 use async_trait::async_trait;
-use coins::{lp_coinfind, lp_coinfind_or_err, CoinsContext, MmCoinEnum, RegisterCoinError};
+use coins::{disable_coin, lp_coinfind, lp_coinfind_or_err, CoinsContext, MmCoinEnum, RegisterCoinError};
+use common::log::warn;
 use common::SuccessResponse;
 use mm2_core::mm_ctx::MmArc;
 use mm2_err_handle::prelude::*;
 use rpc_task::rpc_common::{InitRpcTaskResponse, RpcTaskStatusRequest, RpcTaskUserActionRequest};
-use rpc_task::{RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus, RpcTaskTypes};
+use rpc_task::{CancelCleanup, RpcTask, RpcTaskHandle, RpcTaskManager, RpcTaskManagerShared, RpcTaskStatus,
+               RpcTaskTypes};
 use serde_derive::Deserialize;
 use serde_json::Value as Json;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub type L2ActivationResponse = InitRpcTaskResponse;
 pub type L2StatusRequest = RpcTaskStatusRequest;
@@ -24,6 +28,11 @@ pub type L2TaskManagerShared<L2> = RpcTaskManagerShared<L2ActivationTask<L2>>;
 pub struct L2ActivationRequest<T> {
     ticker: String,
     activation_params: T,
+    /// The event-stream client the task status changes would be pushed to (CRD ch. 55 R55.2.2).
+    /// It is accepted and ignored: streaming task events is deferred (D55.1).
+    #[serde(default)]
+    #[allow(dead_code)]
+    client_id: u64,
 }
 
 #[async_trait]
@@ -44,6 +53,7 @@ pub trait InitL2ActivationOps: Into<MmCoinEnum> + Send + Sync + 'static {
     fn coin_conf_from_json(json: Json) -> Result<Self::CoinConf, MmError<Self::ActivationError>>;
 
     fn validate_platform_configuration(
+        ctx: &MmArc,
         platform_coin: &Self::PlatformCoin,
     ) -> Result<(), MmError<Self::ActivationError>>;
 
@@ -67,6 +77,9 @@ pub trait L2InitialStatus {
 
 pub struct L2ActivationTask<L2: InitL2ActivationOps> {
     ctx: MmArc,
+    ticker: String,
+    /// Set once this task has registered its coin, so a cancellation knows the coin is the task's to remove.
+    registered_by_task: Arc<AtomicBool>,
     platform_coin: L2::PlatformCoin,
     validated_params: L2::ValidatedParams,
     protocol_conf: L2::ProtocolInfo,
@@ -89,7 +102,33 @@ where
 {
     fn initial_status(&self) -> Self::InProgressStatus { <L2::InProgressStatus as L2InitialStatus>::initial_status() }
 
+    fn cancel_cleanup(&self) -> Option<CancelCleanup> {
+        let ctx = self.ctx.clone();
+        let ticker = self.ticker.clone();
+        let registered_by_task = self.registered_by_task.clone();
+        Some(Box::new(move || {
+            Box::pin(async move {
+                if registered_by_task.load(Ordering::SeqCst) {
+                    if let Err(error) = disable_coin(&ctx, &ticker).await {
+                        warn!("Cannot deregister '{}' of the cancelled activation: {}", ticker, error);
+                    }
+                }
+            })
+        }))
+    }
+
     async fn run(self, task_handle: &RpcTaskHandle<Self>) -> Result<Self::Item, MmError<Self::Error>> {
+        // R55.1.12: activations of one ticker run one at a time. The lock is held through registration, and the
+        // ticker is checked again once it is ours, because the activation that held it may have registered the coin.
+        let _activation_guard = lock_activation(&self.ctx, &[&self.ticker])
+            .await
+            .map_err(|e| MmError::new(L2::ActivationError::from(RegisterCoinError::Internal(e))))?;
+        if let Ok(Some(_)) = lp_coinfind(&self.ctx, &self.ticker).await {
+            return Err(MmError::new(L2::ActivationError::from(
+                RegisterCoinError::CoinIsInitializedAlready { coin: self.ticker },
+            )));
+        }
+
         let (coin, result) = L2::init_l2(
             &self.ctx,
             self.platform_coin,
@@ -109,6 +148,7 @@ where
             };
             MmError::new(L2::ActivationError::from(reg_err))
         })?;
+        self.registered_by_task.store(true, Ordering::SeqCst);
 
         Ok(result)
     }
@@ -125,7 +165,7 @@ where
 {
     let ticker = req.ticker.clone();
     if let Ok(Some(_)) = lp_coinfind(&ctx, &ticker).await {
-        return MmError::err(L2ActivationError::AlreadyActivated(ticker));
+        return MmError::err(L2ActivationError::L2IsAlreadyActivated(ticker));
     }
 
     let (coin_conf_json, protocol_conf): (Json, L2::ProtocolInfo) =
@@ -134,15 +174,15 @@ where
 
     let platform_coin = lp_coinfind_or_err(&ctx, protocol_conf.platform_coin_ticker())
         .await
-        .mm_err(|_| L2ActivationError::PlatformNotActivated(ticker.clone()))?;
+        .mm_err(|_| L2ActivationError::PlatformCoinIsNotActivated(ticker.clone()))?;
 
     let platform_coin =
-        L2::PlatformCoin::try_from_mm_coin(platform_coin).or_mm_err(|| L2ActivationError::IncompatiblePlatform {
+        L2::PlatformCoin::try_from_mm_coin(platform_coin).or_mm_err(|| L2ActivationError::UnsupportedPlatformCoin {
             platform_coin_ticker: protocol_conf.platform_coin_ticker().into(),
             l2_ticker: ticker.clone(),
         })?;
 
-    L2::validate_platform_configuration(&platform_coin).mm_err(Into::into)?;
+    L2::validate_platform_configuration(&ctx, &platform_coin).mm_err(Into::into)?;
     let validated_params = L2::validate_activation_params(req.activation_params).mm_err(Into::into)?;
 
     let coins_act_ctx = CoinsActivationContext::from_ctx(&ctx)
@@ -150,6 +190,8 @@ where
         .map_mm_err()?;
     let task = L2ActivationTask::<L2> {
         ctx,
+        ticker,
+        registered_by_task: Arc::new(AtomicBool::new(false)),
         platform_coin,
         validated_params,
         protocol_conf,
@@ -213,8 +255,6 @@ pub async fn cancel_l2_activation<L2: InitL2ActivationOps>(
         .lock()
         .map_to_mm(|poison| CancelL2ActivationError::Internal(poison.to_string()))
         .map_mm_err()?;
-    task_manager
-        .cancel_task(req.task_id)
-        .map_err(|e| MmError::new(CancelL2ActivationError::Internal(e.to_string())))?;
+    task_manager.cancel_task(req.task_id).mm_err(Into::into)?;
     Ok(SuccessResponse::new())
 }

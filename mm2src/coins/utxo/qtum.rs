@@ -16,6 +16,7 @@ use crate::rpc_command::init_withdraw::{InitWithdrawCoin, WithdrawTaskHandle};
 use crate::utxo::utxo_builder::{MergeUtxoArcOps, UtxoCoinBuildError, UtxoCoinBuilder, UtxoCoinBuilderCommonOps,
                                 UtxoFieldsWithGlobalHDBuilder, UtxoFieldsWithHardwareWalletBuilder,
                                 UtxoFieldsWithIguanaPrivKeyBuilder};
+use crate::SpendSafeAmountError;
 use crate::{eth, CanRefundHtlc, CoinBalance, CoinWithDerivationMethod, DelegationError, DelegationFut, DexFee,
             GetWithdrawSenderAddress, NegotiateSwapContractAddrErr, PrivKeyBuildPolicy, RawTransactionFut,
             SignRawTransactionRequest, SignatureResult, StakingInfosFut, SwapOps, TradePreimageValue, TransactionFut,
@@ -399,9 +400,7 @@ impl UtxoCommonOps for QtumCoin {
         utxo_common::checked_address_from_str(self, address)
     }
 
-    async fn get_current_mtp(&self) -> UtxoRpcResult<u32> {
-        utxo_common::get_current_mtp(&self.utxo_arc, CoinVariant::Qtum).await
-    }
+    async fn get_current_mtp(&self) -> UtxoRpcResult<u32> { utxo_common::get_current_mtp(&self.utxo_arc).await }
 
     fn is_unspent_mature(&self, output: &RpcTransaction) -> bool { self.is_qtum_unspent_mature(output) }
 
@@ -633,6 +632,7 @@ impl SwapOps for QtumCoin {
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -642,6 +642,7 @@ impl SwapOps for QtumCoin {
         utxo_common::search_for_swap_tx_spend_my(
             &self.utxo_arc,
             time_lock,
+            my_pub,
             other_pub,
             secret_hash,
             tx,
@@ -654,6 +655,7 @@ impl SwapOps for QtumCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
@@ -663,6 +665,7 @@ impl SwapOps for QtumCoin {
         utxo_common::search_for_swap_tx_spend_other(
             &self.utxo_arc,
             time_lock,
+            my_pub,
             other_pub,
             secret_hash,
             tx,
@@ -695,10 +698,9 @@ impl SwapOps for QtumCoin {
     fn get_htlc_key_pair(&self) -> Option<KeyPair> { utxo_common::get_htlc_key_pair(self) }
 }
 
+// No watcher methods are implemented for this family yet, so it does not opt in to watching (CRD ch.09 R17).
 #[async_trait]
-impl WatcherOps for QtumCoin {
-    fn is_supported_by_watchers(&self) -> bool { true }
-}
+impl WatcherOps for QtumCoin {}
 
 impl MarketCoinOps for QtumCoin {
     fn ticker(&self) -> &str { &self.utxo_arc.conf.ticker }
@@ -730,12 +732,12 @@ impl MarketCoinOps for QtumCoin {
 
     #[inline(always)]
     fn send_raw_tx(&self, tx: &str) -> Box<dyn Future<Item = String, Error = String> + Send> {
-        utxo_common::send_raw_tx(&self.utxo_arc, tx)
+        utxo_common::send_raw_tx_promoting_withdraw(&self.utxo_arc, tx)
     }
 
     #[inline(always)]
     fn send_raw_tx_bytes(&self, tx: &[u8]) -> Box<dyn Future<Item = String, Error = String> + Send> {
-        utxo_common::send_raw_tx_bytes(&self.utxo_arc, tx)
+        utxo_common::send_raw_tx_bytes_promoting_withdraw(&self.utxo_arc, tx)
     }
 
     fn wait_for_confirmations(
@@ -833,6 +835,10 @@ impl MmCoin for QtumCoin {
         stage: FeeApproxStage,
     ) -> TradePreimageResult<TradeFee> {
         utxo_common::get_sender_trade_fee(self, value, stage).await
+    }
+
+    async fn spend_safe_amount(&self) -> MmResult<Option<MmNumber>, SpendSafeAmountError> {
+        utxo_common::spend_safe_amount(self).await
     }
 
     fn get_receiver_trade_fee(&self, _stage: FeeApproxStage) -> TradePreimageFut<TradeFee> {

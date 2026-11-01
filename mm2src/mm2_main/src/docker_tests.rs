@@ -1,7 +1,25 @@
 #![feature(custom_test_frameworks)]
-#![feature(test)]
+#![cfg_attr(test, feature(test))]
 #![test_runner(docker_tests_runner)]
 #![recursion_limit = "512"]
+// This is a separate crate root from `mm2_lib.rs`/`mm2_bin.rs` (its own [[bin]]
+// target), so it does not inherit their crate-level lint policy even though it
+// pulls in the same first-party modules. Mirroring their allows here (KDF-009)
+// keeps that policy consistent instead of letting already-accepted lints
+// resurface just because this crate root happened to omit the same headers.
+#![allow(uncommon_codepoints)]
+#![allow(dead_code)]
+#![allow(mismatched_lifetime_syntaxes)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::diverging_sub_expression)]
+#![allow(clippy::explicit_auto_deref)]
+// Test builds expand `#[mockable]` (mocktopus) on the mocked items; the
+// generated injection code trips these lints, which cannot be fixed at the
+// source, so they are allowed for test builds only.
+#![cfg_attr(
+    test,
+    allow(clippy::swap_ptr_to_ref, clippy::forget_non_drop, clippy::let_unit_value)
+)]
 
 #[cfg(test)] use docker_tests::docker_tests_runner;
 
@@ -78,7 +96,7 @@ mod docker_tests {
             })
             .collect();
         let args: Vec<String> = std::env::args().collect();
-        let _exit_code = test_main(&args, owned_tests, None);
+        test_main(&args, owned_tests, None);
     }
 }
 
@@ -107,9 +125,10 @@ mod docker_tests {
     use coins::utxo::rpc_clients::{UnspentInfo, UtxoRpcClientEnum};
     use coins::utxo::slp::SlpToken;
     use coins::utxo::slp::{slp_genesis_output, SlpOutput};
-    use coins::utxo::utxo_common::send_outputs_from_my_address;
+    use coins::utxo::utxo_common::{send_outputs_from_my_address, tx_size_in_v_bytes, UtxoTxBuilder};
     use coins::utxo::utxo_standard::{utxo_standard_coin_with_priv_key, UtxoStandardCoin};
-    use coins::utxo::{dhash160, GetUtxoListOps, UtxoActivationParams, UtxoCommonOps};
+    use coins::utxo::{dhash160, FeePolicy, GetUtxoListOps, UtxoActivationParams, UtxoAddressFormat, UtxoCommonOps,
+                      UtxoTx, UtxoTxGenerationOps};
     use coins::{CoinProtocol, FoundSwapTxSpend, MarketCoinOps, MmCoin, SwapOps, Transaction, TransactionEnum,
                 ValidatePaymentInput, WithdrawRequest};
     use common::mm_number::{BigDecimal, MmNumber};
@@ -192,7 +211,7 @@ mod docker_tests {
             })
             .collect();
         let args: Vec<String> = std::env::args().collect();
-        let _exit_code = test_main(&args, owned_tests, None);
+        test_main(&args, owned_tests, None);
     }
 
     fn pull_docker_image(name: &str) {
@@ -330,7 +349,7 @@ mod docker_tests {
             let mut slp_outputs = vec![];
 
             for _ in 0..18 {
-                let priv_key = SecretKey::new(&mut rand6::thread_rng());
+                let priv_key = SecretKey::new(&mut rand::thread_rng());
                 let key_pair = key_pair_from_secret(priv_key.as_ref()).unwrap();
                 let address_hash = key_pair.public().address_hash();
                 let address = Address {
@@ -396,7 +415,7 @@ mod docker_tests {
         ticker: &str,
         balance: BigDecimal,
     ) -> (MmArc, UtxoStandardCoin, [u8; 32]) {
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
         let (ctx, coin) = utxo_coin_from_privkey(ticker, priv_key.as_ref());
         let timeout = 30; // timeout if test takes more than 30 seconds to run
         let my_address = coin.my_address().expect("!my_address");
@@ -431,7 +450,8 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
-            &*coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &[0; 20],
             &tx.tx_hex(),
             0,
@@ -469,7 +489,8 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
-            &*coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &[0; 20],
             &tx.tx_hex(),
             0,
@@ -508,7 +529,8 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
-            &*coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &*dhash160(&secret),
             &tx.tx_hex(),
             0,
@@ -547,7 +569,8 @@ mod docker_tests {
 
         let found = block_on(coin.search_for_swap_tx_spend_my(
             time_lock,
-            &*coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
+            coin.my_public_key().unwrap(),
             &*dhash160(&secret),
             &tx.tx_hex(),
             0,
@@ -738,7 +761,7 @@ mod docker_tests {
 
     #[test]
     fn order_should_be_updated_when_balance_is_decreased_alice_subscribes_after_update() {
-        let (_ctx, _, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
+        let (_ctx, bob_coin, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -820,6 +843,15 @@ mod docker_tests {
         assert!(withdraw.0.is_success(), "!withdraw: {}", withdraw.1);
 
         let withdraw: Json = json::from_str(&withdraw.1).unwrap();
+        // CRD ch.38 R38.6.6b: the withdraw fee is proportional to the transaction size, and the remaining
+        // balance pays one more proportional fee for the swap payment transaction of the maker order.
+        let withdraw_fee: BigDecimal = withdraw["fee_details"]["amount"].as_str().unwrap().parse().unwrap();
+        let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&bob_coin);
+        let expected_volume = (BigDecimal::from(1000)
+            - "499.99998".parse::<BigDecimal>().unwrap()
+            - withdraw_fee
+            - fee_for_rate(payment_tx_size, 1000))
+        .to_string();
 
         let send_raw = block_on(mm_bob.rpc(&json! ({
             "userpass": mm_bob.userpass,
@@ -848,7 +880,7 @@ mod docker_tests {
         assert_eq!(asks.len(), 1, "Bob MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
 
         let order_volume = asks[0]["maxvolume"].as_str().unwrap();
-        assert_eq!("500", order_volume);
+        assert_eq!(expected_volume, order_volume);
 
         log!("Get MYCOIN/MYCOIN1 orderbook on Alice side");
         let rc = block_on(mm_alice.rpc(&json! ({
@@ -866,7 +898,7 @@ mod docker_tests {
         assert_eq!(asks.len(), 1, "Alice MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
 
         let order_volume = asks[0]["maxvolume"].as_str().unwrap();
-        assert_eq!("500", order_volume);
+        assert_eq!(expected_volume, order_volume);
 
         block_on(mm_bob.stop()).unwrap();
         block_on(mm_alice.stop()).unwrap();
@@ -874,7 +906,7 @@ mod docker_tests {
 
     #[test]
     fn order_should_be_updated_when_balance_is_decreased_alice_subscribes_before_update() {
-        let (_ctx, _, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
+        let (_ctx, bob_coin, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -972,6 +1004,15 @@ mod docker_tests {
         assert!(withdraw.0.is_success(), "!withdraw: {}", withdraw.1);
 
         let withdraw: Json = json::from_str(&withdraw.1).unwrap();
+        // CRD ch.38 R38.6.6b: the withdraw fee is proportional to the transaction size, and the remaining
+        // balance pays one more proportional fee for the swap payment transaction of the maker order.
+        let withdraw_fee: BigDecimal = withdraw["fee_details"]["amount"].as_str().unwrap().parse().unwrap();
+        let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&bob_coin);
+        let expected_volume = (BigDecimal::from(1000)
+            - "499.99998".parse::<BigDecimal>().unwrap()
+            - withdraw_fee
+            - fee_for_rate(payment_tx_size, 1000))
+        .to_string();
 
         let send_raw = block_on(mm_bob.rpc(&json! ({
             "userpass": mm_bob.userpass,
@@ -1000,7 +1041,7 @@ mod docker_tests {
         assert_eq!(asks.len(), 1, "Bob MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
 
         let order_volume = asks[0]["maxvolume"].as_str().unwrap();
-        assert_eq!("500", order_volume);
+        assert_eq!(expected_volume, order_volume);
 
         log!("Get MYCOIN/MYCOIN1 orderbook on Alice side");
         let rc = block_on(mm_alice.rpc(&json! ({
@@ -1018,7 +1059,7 @@ mod docker_tests {
         assert_eq!(asks.len(), 1, "Alice MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
 
         let order_volume = asks[0]["maxvolume"].as_str().unwrap();
-        assert_eq!("500", order_volume);
+        assert_eq!(expected_volume, order_volume);
 
         block_on(mm_bob.stop()).unwrap();
         block_on(mm_alice.stop()).unwrap();
@@ -1135,7 +1176,7 @@ mod docker_tests {
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/471
     #[test]
     fn test_match_and_trade_setprice_max() {
-        let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
+        let (_ctx, bob_coin, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
         let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 2000.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1204,7 +1245,10 @@ mod docker_tests {
         log!("orderbook "[bob_orderbook]);
         let asks = bob_orderbook["asks"].as_array().unwrap();
         assert_eq!(asks.len(), 1, "MYCOIN/MYCOIN1 orderbook must have exactly 1 ask");
-        assert_eq!(asks[0]["maxvolume"], Json::from("999.99999"));
+        // CRD ch.38 R38.6.6b: the maker keeps back the proportional fee of its swap payment transaction.
+        let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&bob_coin);
+        let expected_max_volume = (BigDecimal::from(1000) - fee_for_rate(payment_tx_size, 1000)).to_string();
+        assert_eq!(asks[0]["maxvolume"], Json::from(expected_max_volume));
 
         let rc = block_on(mm_alice.rpc(&json! ({
             "userpass": mm_alice.userpass,
@@ -1239,7 +1283,7 @@ mod docker_tests {
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/888
     fn test_max_taker_vol_swap() {
         let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 50.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 50.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1316,7 +1360,12 @@ mod docker_tests {
         .unwrap();
         assert!(rc.0.is_success(), "!max_taker_vol: {}", rc.1);
         let vol: MaxTakerVolResponse = json::from_str(&rc.1).unwrap();
-        let expected_vol = MmNumber::from((647499741, 12965000));
+        // CRD ch.38 R38.6.6b: `x + x * 9 / 7770 + fees = 50`, with proportional fees
+        let expected_vol = expected_max_taker_vol(
+            BigDecimal::from(50),
+            taker_send_fees(&alice_coin, 1000),
+            MmNumber::from((9, 7770)),
+        );
 
         let actual_vol = MmNumber::from(vol.result.clone());
         assert_eq!(expected_vol, actual_vol);
@@ -1360,7 +1409,16 @@ mod docker_tests {
     #[test]
     fn test_buy_when_coins_locked_by_other_swap() {
         let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 2.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 2.into());
+        // CRD ch.38 R38.6.6b: the result of equation `x + x / 777 + fees = 1`, where the fees are the proportional
+        // fees of the swap payment and taker fee transactions.
+        let max_vol = expected_max_taker_vol(
+            BigDecimal::from(1),
+            taker_send_fees(&alice_coin, 1000),
+            MmNumber::from((1, 777)),
+        );
+        // slightly more than the previous volume so it should fail
+        let over_max_vol = max_vol.clone() + MmNumber::from((1, 77_800_000));
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1418,11 +1476,7 @@ mod docker_tests {
             "base": "MYCOIN",
             "rel": "MYCOIN1",
             "price": 1,
-            // the result of equation x + x / 777 + 0.00002 = 1
-            "volume": {
-                "numer":"77698446",
-                "denom":"77800000"
-            },
+            "volume": max_vol,
         })))
         .unwrap();
         assert!(rc.0.is_success(), "!buy: {}", rc.1);
@@ -1442,10 +1496,7 @@ mod docker_tests {
             "price": 1,
             // it is slightly more than previous volume so it should fail
             // because the total sum of used funds will be slightly more than available 2
-            "volume": {
-                "numer":"77698447",
-                "denom":"77800000"
-            },
+            "volume": over_max_vol,
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "buy success, but should fail: {}", rc.1);
@@ -1457,7 +1508,16 @@ mod docker_tests {
     #[test]
     fn test_sell_when_coins_locked_by_other_swap() {
         let (_ctx, _, bob_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1000.into());
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 2.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 2.into());
+        // CRD ch.38 R38.6.6b: the result of equation `x + x / 777 + fees = 1`, where the fees are the proportional
+        // fees of the swap payment and taker fee transactions.
+        let max_vol = expected_max_taker_vol(
+            BigDecimal::from(1),
+            taker_send_fees(&alice_coin, 1000),
+            MmNumber::from((1, 777)),
+        );
+        // slightly more than the previous volume so it should fail
+        let over_max_vol = max_vol.clone() + MmNumber::from((1, 77_800_000));
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1515,11 +1575,7 @@ mod docker_tests {
             "base": "MYCOIN1",
             "rel": "MYCOIN",
             "price": 1,
-            // the result of equation x + x / 777 + 0.00002 = 1
-            "volume": {
-                "numer":"77698446",
-                "denom":"77800000"
-            },
+            "volume": max_vol,
         })))
         .unwrap();
         assert!(rc.0.is_success(), "!sell: {}", rc.1);
@@ -1539,10 +1595,7 @@ mod docker_tests {
             "price": 1,
             // it is slightly more than previous volume so it should fail
             // because the total sum of used funds will be slightly more than available 2
-            "volume": {
-                "numer":"77698447",
-                "denom":"77800000"
-            },
+            "volume": over_max_vol,
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "sell success, but should fail: {}", rc.1);
@@ -1553,7 +1606,16 @@ mod docker_tests {
 
     #[test]
     fn test_buy_max() {
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
+        // CRD ch.38 R38.6.6b: the result of equation `x + x / 777 + fees = 1`, where the fees are the proportional
+        // fees of the swap payment and taker fee transactions.
+        let max_vol = expected_max_taker_vol(
+            BigDecimal::from(1),
+            taker_send_fees(&alice_coin, 1000),
+            MmNumber::from((1, 777)),
+        );
+        // slightly more than the previous volume so it should fail
+        let over_max_vol = max_vol.clone() + MmNumber::from((1, 77_800_000));
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -1582,11 +1644,7 @@ mod docker_tests {
             "base": "MYCOIN",
             "rel": "MYCOIN1",
             "price": 1,
-            // the result of equation x + x / 777 + 0.00002 = 1
-            "volume": {
-                "numer":"77698446",
-                "denom":"77800000"
-            },
+            "volume": max_vol,
         })))
         .unwrap();
         assert!(rc.0.is_success(), "!buy: {}", rc.1);
@@ -1598,10 +1656,7 @@ mod docker_tests {
             "rel": "MYCOIN1",
             "price": 1,
             // it is slightly more than previous volume so it should fail
-            "volume": {
-                "numer":"77698447",
-                "denom":"77800000"
-            },
+            "volume": over_max_vol,
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "buy success, but should fail: {}", rc.1);
@@ -1611,7 +1666,7 @@ mod docker_tests {
 
     #[test]
     fn test_maker_trade_preimage() {
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
 
         let (_ctx, mycoin) = utxo_coin_from_privkey("MYCOIN", &priv_key[..]);
         let my_address = mycoin.my_address().expect("!my_address");
@@ -1621,6 +1676,14 @@ mod docker_tests {
         let my_address = mycoin1.my_address().expect("!my_address");
         fill_address(&mycoin1, &my_address, 20.into(), 30);
 
+        // CRD ch.38 R38.6.6b: every fee is the plain fixed rate (1,000 for MYCOIN, 2,000 for MYCOIN1 per kB)
+        // applied to the size of its transaction; the spend fee of a received payment is the 496-byte estimate.
+        let (my_payment_size, _) = single_unspent_swap_tx_sizes(&mycoin);
+        let (my1_payment_size, _) = single_unspent_swap_tx_sizes(&mycoin1);
+        let my_fee = fee_for_rate(my_payment_size, 1000);
+        let my1_fee = fee_for_rate(my1_payment_size, 2000);
+        let my_spend_fee = fee_for_rate(496, 1000);
+        let my1_spend_fee = fee_for_rate(496, 2000);
         let coins = json!([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":2000,"protocol":{"type":"UTXO"}},
@@ -1658,12 +1721,12 @@ mod docker_tests {
         })))
         .unwrap();
         assert!(rc.0.is_success(), "!trade_preimage: {}", rc.1);
-        let base_coin_fee = TradeFeeForTest::new("MYCOIN", "0.00001", false);
-        let rel_coin_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", true);
-        let volume = MmNumber::from("9.99999");
+        let base_coin_fee = TradeFeeForTest::from_amount("MYCOIN", my_fee.clone(), false);
+        let rel_coin_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_spend_fee.clone(), true);
+        let volume = MmNumber::from(BigDecimal::from(10) - my_fee.clone());
 
-        let my_coin_total = TotalTradeFeeForTest::new("MYCOIN", "0.00001", "0.00001");
-        let my_coin1_total = TotalTradeFeeForTest::new("MYCOIN1", "0.00002", "0");
+        let my_coin_total = TotalTradeFeeForTest::from_amounts("MYCOIN", my_fee.clone(), my_fee.clone());
+        let my_coin1_total = TotalTradeFeeForTest::from_amounts("MYCOIN1", my1_spend_fee.clone(), 0.into());
 
         let expected = TradePreimageResult::MakerPreimage(MakerPreimage {
             base_coin_fee,
@@ -1695,12 +1758,12 @@ mod docker_tests {
         let mut actual: RpcSuccessResponse<TradePreimageResult> = json::from_str(&rc.1).unwrap();
         actual.result.sort_total_fees();
 
-        let base_coin_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", false);
-        let rel_coin_fee = TradeFeeForTest::new("MYCOIN", "0.00001", true);
-        let volume = MmNumber::from("19.99998");
+        let base_coin_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_fee.clone(), false);
+        let rel_coin_fee = TradeFeeForTest::from_amount("MYCOIN", my_spend_fee.clone(), true);
+        let volume = MmNumber::from(BigDecimal::from(20) - my1_fee.clone());
 
-        let my_coin_total = TotalTradeFeeForTest::new("MYCOIN", "0.00001", "0");
-        let my_coin1_total = TotalTradeFeeForTest::new("MYCOIN1", "0.00002", "0.00002");
+        let my_coin_total = TotalTradeFeeForTest::from_amounts("MYCOIN", my_spend_fee.clone(), 0.into());
+        let my_coin1_total = TotalTradeFeeForTest::from_amounts("MYCOIN1", my1_fee.clone(), my1_fee.clone());
         let expected = TradePreimageResult::MakerPreimage(MakerPreimage {
             base_coin_fee,
             rel_coin_fee,
@@ -1722,7 +1785,7 @@ mod docker_tests {
                 "rel": "MYCOIN",
                 "swap_method": "setprice",
                 "price": 1,
-                "volume": "19.99998",
+                "volume": (BigDecimal::from(20) - my1_fee.clone()).to_string(),
             },
         })))
         .unwrap();
@@ -1730,11 +1793,11 @@ mod docker_tests {
         let mut actual: RpcSuccessResponse<TradePreimageResult> = json::from_str(&rc.1).unwrap();
         actual.result.sort_total_fees();
 
-        let base_coin_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", false);
-        let rel_coin_fee = TradeFeeForTest::new("MYCOIN", "0.00001", true);
+        let base_coin_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_fee.clone(), false);
+        let rel_coin_fee = TradeFeeForTest::from_amount("MYCOIN", my_spend_fee.clone(), true);
 
-        let total_my_coin = TotalTradeFeeForTest::new("MYCOIN", "0.00001", "0");
-        let total_my_coin1 = TotalTradeFeeForTest::new("MYCOIN1", "0.00002", "0.00002");
+        let total_my_coin = TotalTradeFeeForTest::from_amounts("MYCOIN", my_spend_fee.clone(), 0.into());
+        let total_my_coin1 = TotalTradeFeeForTest::from_amounts("MYCOIN1", my1_fee.clone(), my1_fee.clone());
 
         let expected = TradePreimageResult::MakerPreimage(MakerPreimage {
             base_coin_fee,
@@ -1751,7 +1814,7 @@ mod docker_tests {
 
     #[test]
     fn test_taker_trade_preimage() {
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
 
         let (_ctx, mycoin) = utxo_coin_from_privkey("MYCOIN", priv_key.as_ref());
         let my_address = mycoin.my_address().expect("!my_address");
@@ -1761,6 +1824,16 @@ mod docker_tests {
         let my_address = mycoin1.my_address().expect("!my_address");
         fill_address(&mycoin1, &my_address, 20.into(), 30);
 
+        // CRD ch.38 R38.6.6b: every fee is the plain fixed rate (1,000 for MYCOIN, 2,000 for MYCOIN1 per kB)
+        // applied to the size of its transaction; the spend fee of a received payment is the 496-byte estimate.
+        let (my_payment_size, my_taker_fee_size) = single_unspent_swap_tx_sizes(&mycoin);
+        let (my1_payment_size, my1_taker_fee_size) = single_unspent_swap_tx_sizes(&mycoin1);
+        let my_fee = fee_for_rate(my_payment_size, 1000);
+        let my1_fee = fee_for_rate(my1_payment_size, 2000);
+        let my_taker_send_fee = fee_for_rate(my_taker_fee_size, 1000);
+        let my1_taker_send_fee = fee_for_rate(my1_taker_fee_size, 2000);
+        let my_spend_fee = fee_for_rate(496, 1000);
+        let my1_spend_fee = fee_for_rate(496, 2000);
         let coins = json!([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":2000,"protocol":{"type":"UTXO"}},
@@ -1826,13 +1899,14 @@ mod docker_tests {
         let mut actual: RpcSuccessResponse<TradePreimageResult> = json::from_str(&rc.1).unwrap();
         actual.result.sort_total_fees();
 
-        let base_coin_fee = TradeFeeForTest::new("MYCOIN", "0.00001", false);
-        let rel_coin_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", true);
+        let base_coin_fee = TradeFeeForTest::from_amount("MYCOIN", my_fee.clone(), false);
+        let rel_coin_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_spend_fee.clone(), true);
         let taker_fee = TradeFeeForTest::new("MYCOIN", "0.01", false);
-        let fee_to_send_taker_fee = TradeFeeForTest::new("MYCOIN", "0.00001", false);
+        let fee_to_send_taker_fee = TradeFeeForTest::from_amount("MYCOIN", my_taker_send_fee.clone(), false);
 
-        let my_coin_total_fee = TotalTradeFeeForTest::new("MYCOIN", "0.01002", "0.01002");
-        let my_coin1_total_fee = TotalTradeFeeForTest::new("MYCOIN1", "0.00002", "0");
+        let my_coin_total = "0.01".parse::<BigDecimal>().unwrap() + my_fee.clone() + my_taker_send_fee.clone();
+        let my_coin_total_fee = TotalTradeFeeForTest::from_amounts("MYCOIN", my_coin_total.clone(), my_coin_total);
+        let my_coin1_total_fee = TotalTradeFeeForTest::from_amounts("MYCOIN1", my1_spend_fee.clone(), 0.into());
 
         let expected = TradePreimageResult::TakerPreimage(TakerPreimage {
             base_coin_fee,
@@ -1860,13 +1934,14 @@ mod docker_tests {
         let mut actual: RpcSuccessResponse<TradePreimageResult> = json::from_str(&rc.1).unwrap();
         actual.result.sort_total_fees();
 
-        let base_coin_fee = TradeFeeForTest::new("MYCOIN", "0.00001", true);
-        let rel_coin_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", false);
+        let base_coin_fee = TradeFeeForTest::from_amount("MYCOIN", my_spend_fee.clone(), true);
+        let rel_coin_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_fee.clone(), false);
         let taker_fee = TradeFeeForTest::new("MYCOIN1", "0.02", false);
-        let fee_to_send_taker_fee = TradeFeeForTest::new("MYCOIN1", "0.00002", false);
+        let fee_to_send_taker_fee = TradeFeeForTest::from_amount("MYCOIN1", my1_taker_send_fee.clone(), false);
 
-        let my_coin_total_fee = TotalTradeFeeForTest::new("MYCOIN", "0.00001", "0");
-        let my_coin1_total_fee = TotalTradeFeeForTest::new("MYCOIN1", "0.02004", "0.02004");
+        let my_coin_total_fee = TotalTradeFeeForTest::from_amounts("MYCOIN", my_spend_fee.clone(), 0.into());
+        let my_coin1_total = "0.02".parse::<BigDecimal>().unwrap() + my1_fee.clone() + my1_taker_send_fee.clone();
+        let my_coin1_total_fee = TotalTradeFeeForTest::from_amounts("MYCOIN1", my_coin1_total.clone(), my_coin1_total);
 
         let expected = TradePreimageResult::TakerPreimage(TakerPreimage {
             base_coin_fee,
@@ -1898,7 +1973,16 @@ mod docker_tests {
             assert_eq!(actual.error_data, Some(expected));
         }
 
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
+        // CRD ch.38 R38.6.6b: the fee of the swap payment is proportional to its size, so the balance that is
+        // "not sufficient" is derived from it: dust (0.00001) plus the fee is required to trade at all.
+        let (_ctx, size_coin, _) = generate_utxo_coin_with_random_privkey("MYCOIN", 1.into());
+        let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&size_coin);
+        // an insufficient wallet builds the payment without a change output
+        let fee_without_change = fee_for_rate(payment_tx_size - 34, 1000);
+        let dust: BigDecimal = "0.00001".parse().unwrap();
+        // less than dust plus the fee
+        let low_balance = dust.clone() + fee_for_rate(payment_tx_size / 2, 1000);
         let fill_balance_functor = |amount: BigDecimal| {
             let (_ctx, mycoin) = utxo_coin_from_privkey("MYCOIN", priv_key.as_ref());
             let my_address = mycoin.my_address().expect("!my_address");
@@ -1928,7 +2012,7 @@ mod docker_tests {
         log!([block_on(enable_native(&mm, "MYCOIN1", &[]))]);
         log!([block_on(enable_native(&mm, "MYCOIN", &[]))]);
 
-        fill_balance_functor(MmNumber::from("0.000015").to_decimal());
+        fill_balance_functor(low_balance.clone());
         // Try sell the max amount with the zero balance.
         let rc = block_on(mm.rpc(&json!({
             "userpass": mm.userpass,
@@ -1944,9 +2028,9 @@ mod docker_tests {
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "trade_preimage success, but should fail: {}", rc.1);
-        let available = MmNumber::from("0.000015").to_decimal();
-        // Required at least 0.00002 MYCOIN to pay the transaction_fee(0.00001) and to send a value not less than dust(0.00001).
-        let required = MmNumber::from("0.00002").to_decimal();
+        let available = low_balance.clone();
+        // Required at least dust plus the transaction fee: to pay the fee and to send a value not less than dust(0.00001).
+        let required = dust.clone() + fee_without_change.clone();
         expect_not_sufficient_balance(&rc.1, available, required, None);
 
         let rc = block_on(mm.rpc(&json!({
@@ -1963,9 +2047,9 @@ mod docker_tests {
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "trade_preimage success, but should fail: {}", rc.1);
-        // Required 0.00001 MYCOIN to pay the transaction fee and the specified 0.1 volume.
-        let available = MmNumber::from("0.000015").to_decimal();
-        let required = MmNumber::from("0.10001").to_decimal();
+        // Required the transaction fee and the specified 0.1 volume.
+        let available = low_balance.clone();
+        let required = "0.1".parse::<BigDecimal>().unwrap() + fee_without_change.clone();
         expect_not_sufficient_balance(&rc.1, available, required, None);
 
         let rc = block_on(mm.rpc(&json!({
@@ -1982,10 +2066,9 @@ mod docker_tests {
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "trade_preimage success, but should fail: {}", rc.1);
-        // balance(0.000015)
-        let available = MmNumber::from("0.000015").to_decimal();
-        // balance(0.000015) + transaction_fee(0.00001)
-        let required = MmNumber::from("0.00002").to_decimal();
+        let available = low_balance.clone();
+        // dust + transaction_fee
+        let required = dust.clone() + fee_without_change.clone();
         expect_not_sufficient_balance(&rc.1, available, required, None);
 
         fill_balance_functor(MmNumber::from("7.770085").to_decimal());
@@ -2003,20 +2086,24 @@ mod docker_tests {
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "trade_preimage success, but should fail: {}", rc.1);
-        let available = MmNumber::from("7.7701").to_decimal();
+        let available = low_balance.clone() + "7.770085".parse::<BigDecimal>().unwrap();
         // `required = volume + fee_to_send_taker_payment + dex_fee + fee_to_send_dex_fee`,
-        // where `volume = 7.77`, `fee_to_send_taker_payment = fee_to_send_dex_fee = 0.00001`, `dex_fee = 0.01`.
-        // Please note `dex_fee = 7.77 / 777` with dex_fee = 0.01
-        // required = 7.77 + 0.01 (dex_fee) + (0.0001 * 2) = 7.78002
-        let required = MmNumber::from("7.78002");
-        expect_not_sufficient_balance(&rc.1, available, required.to_decimal(), Some(BigDecimal::from(0)));
+        // where `volume = 7.77`, `dex_fee = 0.01` (`7.77 / 777`) and both fees are proportional to the size of
+        // their transactions, which now spend both unspents of the wallet.
+        let (_ctx, two_unspents_coin) = utxo_coin_from_privkey("MYCOIN", priv_key.as_ref());
+        let (payment_tx_size, taker_fee_tx_size) = single_unspent_swap_tx_sizes(&two_unspents_coin);
+        let required = "7.77".parse::<BigDecimal>().unwrap()
+            + "0.01".parse::<BigDecimal>().unwrap()
+            + fee_for_rate(payment_tx_size, 1000)
+            + fee_for_rate(taker_fee_tx_size, 1000);
+        expect_not_sufficient_balance(&rc.1, available, required, Some(BigDecimal::from(0)));
     }
 
     /// This test ensures that `trade_preimage` will not succeed on input that will fail on `buy/sell/setprice`.
     /// https://github.com/KomodoPlatform/atomicDEX-API/issues/902
     #[test]
     fn test_trade_preimage_additional_validation() {
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
 
         let (_ctx, mycoin1) = utxo_coin_from_privkey("MYCOIN1", priv_key.as_ref());
         let my_address = mycoin1.my_address().expect("!my_address");
@@ -2161,7 +2248,7 @@ mod docker_tests {
 
     #[test]
     fn test_trade_preimage_legacy() {
-        let priv_key = SecretKey::new(&mut rand6::thread_rng());
+        let priv_key = SecretKey::new(&mut rand::thread_rng());
         let (_ctx, mycoin) = utxo_coin_from_privkey("MYCOIN", priv_key.as_ref());
         let my_address = mycoin.my_address().expect("!my_address");
         fill_address(&mycoin, &my_address, 10.into(), 30);
@@ -2241,7 +2328,7 @@ mod docker_tests {
 
     #[test]
     fn test_get_max_taker_vol() {
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -2272,10 +2359,16 @@ mod docker_tests {
         .unwrap();
         assert!(rc.0.is_success(), "!max_taker_vol: {}", rc.1);
         let json: MaxTakerVolResponse = json::from_str(&rc.1).unwrap();
-        // the result of equation `max_vol + max_vol / 777 + 0.00002 = 1`
+        // the result of equation `max_vol + max_vol / 777 + fees = 1`
         // derived from `max_vol = balance - locked - trade_fee - fee_to_send_taker_fee - dex_fee(max_vol)`
-        // where balance = 1, locked = 0, trade_fee = fee_to_send_taker_fee = 0.00001, dex_fee = max_vol / 777
-        let expected = MmNumber::from((38849223, 38900000)).to_fraction();
+        // where balance = 1, locked = 0, dex_fee = max_vol / 777 and both fees are proportional to the size of
+        // their transactions (CRD ch.38 R38.6.6b)
+        let expected = expected_max_taker_vol(
+            BigDecimal::from(1),
+            taker_send_fees(&alice_coin, 1000),
+            MmNumber::from((1, 777)),
+        )
+        .to_fraction();
         assert_eq!(json.result, expected);
         assert_eq!(json.coin, "MYCOIN1");
 
@@ -2296,11 +2389,11 @@ mod docker_tests {
     // https://github.com/KomodoPlatform/atomicDEX-API/issues/733
     #[test]
     fn test_get_max_taker_vol_dex_fee_threshold() {
-        let (_ctx, _, alice_priv_key) =
+        let (_ctx, alice_coin, alice_priv_key) =
             generate_utxo_coin_with_random_privkey("MYCOIN1", "0.05328455".parse().unwrap());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"}},
-            {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"}},
+            {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"},"dust":10000},
         ]);
         let mm_alice = MarketMakerIt::start(
             json! ({
@@ -2328,9 +2421,16 @@ mod docker_tests {
         .unwrap();
         assert!(rc.0.is_success(), "!max_taker_vol: {}", rc.1);
         let json: Json = json::from_str(&rc.1).unwrap();
-        // the result of equation x + 0.0001 (dex fee) + 0.0002 (miner fee * 2) = 0.05328455
-        assert_eq!(json["result"]["numer"], Json::from("1059691"));
-        assert_eq!(json["result"]["denom"], Json::from("20000000"));
+        // The dex fee floor is the taker coin's minimum transaction amount, i.e. its dust (0.0001 here).
+        // The result of equation x + 0.0001 (dex fee) + miner fees = 0.05328455, where the miner fees are
+        // proportional to the transaction sizes at 10,000 per kB (CRD ch.38 R38.6.6b)
+        let result: MmNumber = json::from_value(json["result"].clone()).unwrap();
+        let expected = MmNumber::from(
+            "0.05328455".parse::<BigDecimal>().unwrap()
+                - "0.0001".parse::<BigDecimal>().unwrap()
+                - taker_send_fees(&alice_coin, 10_000),
+        );
+        assert_eq!(result, expected);
 
         let rc = block_on(mm_alice.rpc(&json! ({
             "userpass": mm_alice.userpass,
@@ -2352,13 +2452,17 @@ mod docker_tests {
     /// Test if the `max_taker_vol` cannot return a volume less than the coin's dust.
     /// The minimum required balance for trading can be obtained by solving the equation:
     /// `volume + taker_fee + trade_fee + fee_to_send_taker_fee = x`.
-    /// Let `dust = 0.000728` like for Qtum, `trade_fee = 0.0001`, `fee_to_send_taker_fee = 0.0001` and `taker_fee` is the `0.000728` threshold,
+    /// Let `dust = 0.000728` like for Qtum, `trade_fee` and `fee_to_send_taker_fee` the fees of CRD ch.38 R38.6.6b (proportional to
+    /// the transaction sizes at 10,000 per kB) and `taker_fee` is the `0.000728` threshold,
     /// therefore to find a minimum required balance, we should pass the `dust` as the `volume` into the equation above:
-    /// `2 * 0.000728 + 0.0002 = x`, so `x = 0.001656`
+    /// `2 * 0.000728 + trade_fee + fee_to_send_taker_fee = x`
     #[test]
     fn test_get_max_taker_vol_dust_threshold() {
+        // The fees depend on the transaction sizes only, so measure them on a separate funded wallet.
+        let (_ctx, size_coin, _) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
+        let required_balance = "0.001456".parse::<BigDecimal>().unwrap() + taker_send_fees(&size_coin, 10_000);
         // first, try to test with the balance slightly less than required
-        let (_ctx, coin, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", "0.001656".parse().unwrap());
+        let (_ctx, coin, priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", required_balance.clone());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"},"dust":72800},
@@ -2393,7 +2497,8 @@ mod docker_tests {
         let result: MmNumber = json::from_value(json["result"].clone()).unwrap();
         assert!(result.is_zero());
 
-        fill_address(&coin, &coin.my_address().unwrap(), "0.00001".parse().unwrap(), 30);
+        // The second unspent adds an input to every transaction, which the proportional fees pay for.
+        fill_address(&coin, &coin.my_address().unwrap(), "0.0001".parse().unwrap(), 30);
 
         let rc = block_on(mm.rpc(&json! ({
             "userpass": mm.userpass,
@@ -2403,16 +2508,21 @@ mod docker_tests {
         .unwrap();
         assert!(rc.0.is_success(), "!max_taker_vol: {}", rc.1);
         let json: Json = json::from_str(&rc.1).unwrap();
-        // the result of equation x + 0.000728 (dex fee) + 0.0002 (miner fee * 2) = 0.001666
-        assert_eq!(json["result"]["numer"], Json::from("369"));
-        assert_eq!(json["result"]["denom"], Json::from("500000"));
+        // the result of equation x + 0.000728 (dex fee) + miner fees = required_balance + 0.0001
+        let result: MmNumber = json::from_value(json["result"].clone()).unwrap();
+        let expected = MmNumber::from(
+            required_balance.clone() + "0.0001".parse::<BigDecimal>().unwrap()
+                - "0.000728".parse::<BigDecimal>().unwrap()
+                - taker_send_fees(&coin, 10_000),
+        );
+        assert_eq!(result, expected);
 
         block_on(mm.stop()).unwrap();
     }
 
     #[test]
     fn test_get_max_taker_vol_with_kmd() {
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN1", 1.into());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":10000,"protocol":{"type":"UTXO"}},
@@ -2450,9 +2560,15 @@ mod docker_tests {
         .unwrap();
         assert!(rc.0.is_success(), "!max_taker_vol: {}", rc.1);
         let json: Json = json::from_str(&rc.1).unwrap();
-        // the result of equation x + x * 9 / 7770 + 0.0002 = 1
-        assert_eq!(json["result"]["numer"], Json::from("1294741"));
-        assert_eq!(json["result"]["denom"], Json::from("1296500"));
+        // the result of equation x + x * 9 / 7770 + miner fees = 1, where the fees are proportional to the
+        // transaction sizes at 10,000 per kB (CRD ch.38 R38.6.6b)
+        let result: MmNumber = json::from_value(json["result"].clone()).unwrap();
+        let expected = expected_max_taker_vol(
+            BigDecimal::from(1),
+            taker_send_fees(&alice_coin, 10_000),
+            MmNumber::from((9, 7770)),
+        );
+        assert_eq!(result, expected);
 
         let rc = block_on(mm_alice.rpc(&json! ({
             "userpass": mm_alice.userpass,
@@ -2473,7 +2589,10 @@ mod docker_tests {
 
     #[test]
     fn test_set_price_max() {
-        let (_ctx, _, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1.into());
+        let (_ctx, alice_coin, alice_priv_key) = generate_utxo_coin_with_random_privkey("MYCOIN", 1.into());
+        let (payment_tx_size, _) = single_unspent_swap_tx_sizes(&alice_coin);
+        let max_vol = MmNumber::from(BigDecimal::from(1) - fee_for_rate(payment_tx_size, 1000));
+        let over_max_vol = max_vol.clone() + MmNumber::from((1, 100_000_000));
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -2502,11 +2621,8 @@ mod docker_tests {
             "base": "MYCOIN",
             "rel": "MYCOIN1",
             "price": 1,
-            // the result of equation x + 0.00001 = 1
-            "volume": {
-                "numer":"99999",
-                "denom":"100000"
-            },
+            // the result of equation x + trade_fee = 1, where the fee is proportional to the swap payment size
+            "volume": max_vol,
         })))
         .unwrap();
         assert!(rc.0.is_success(), "!setprice: {}", rc.1);
@@ -2518,10 +2634,7 @@ mod docker_tests {
             "rel": "MYCOIN1",
             "price": 1,
             // it is slightly more than previous volume so it should fail
-            "volume": {
-                "numer":"100000",
-                "denom":"100000"
-            },
+            "volume": over_max_vol,
         })))
         .unwrap();
         assert!(!rc.0.is_success(), "setprice success, but should fail: {}", rc.1);
@@ -2669,7 +2782,7 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
 
-        log!("Get RICK/MORTY orderbook on Bob side");
+        log!("Get DOC/MARTY orderbook on Bob side");
         let rc = block_on(mm_bob_dup.rpc(&json! ({
             "userpass": mm_bob_dup.userpass,
             "method": "orderbook",
@@ -2743,7 +2856,7 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
 
-        log!("Get RICK/MORTY orderbook on Bob side");
+        log!("Get DOC/MARTY orderbook on Bob side");
         let rc = block_on(mm_bob_dup.rpc(&json! ({
             "userpass": mm_bob_dup.userpass,
             "method": "orderbook",
@@ -3232,7 +3345,7 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
         let (unspents, _) =
-            block_on(coin.get_unspent_ordered_list(&coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
+            block_on(coin.get_unspent_ordered_list(coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
         assert_eq!(unspents.len(), 1);
     }
 
@@ -3290,14 +3403,14 @@ mod docker_tests {
 
         thread::sleep(Duration::from_secs(2));
         let (unspents, _) =
-            block_on(coin.get_unspent_ordered_list(&coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
+            block_on(coin.get_unspent_ordered_list(coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
         // 4 utxos are merged of 5 so the resulting unspents len must be 2
         assert_eq!(unspents.len(), 2);
     }
 
     #[test]
     fn test_withdraw_not_sufficient_balance() {
-        let privkey = SecretKey::new(&mut rand6::thread_rng());
+        let privkey = SecretKey::new(&mut rand::thread_rng());
         let coins = json! ([
             {"coin":"MYCOIN","asset":"MYCOIN","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
             {"coin":"MYCOIN1","asset":"MYCOIN1","txversion":4,"overwintered":1,"txfee":1000,"protocol":{"type":"UTXO"}},
@@ -3334,7 +3447,7 @@ mod docker_tests {
         })))
         .unwrap();
 
-        assert!(withdraw.0.is_client_error(), "RICK withdraw: {}", withdraw.1);
+        assert!(withdraw.0.is_client_error(), "DOC withdraw: {}", withdraw.1);
         log!("error: "[withdraw.1]);
         let error: RpcErrorResponse<withdraw_error::NotSufficientBalance> =
             json::from_str(&withdraw.1).expect("Expected 'RpcErrorResponse<NotSufficientBalance>'");
@@ -3351,9 +3464,28 @@ mod docker_tests {
         let (_ctx, coin) = utxo_coin_from_privkey("MYCOIN", privkey.as_ref());
         fill_address(&coin, &coin.my_address().unwrap(), balance.clone(), 30);
 
-        // txfee = 0.00001, amount = 0.5 => required = 0.50001
-        // but balance = 0.5
-        let txfee = BigDecimal::from(1) / BigDecimal::from(100000);
+        // CRD ch.38 R38.6.6b: the coin's plain fixed fee (1,000 per kB) is proportional to the size of the
+        // transaction, one input and one P2PKH output here, so the required amount is 0.5 + that fee.
+        // Derive the size from the builder's unsigned transaction for the same shape (fee deducted from a
+        // single output) rather than hard-coding it.
+        let (unspents, _) =
+            block_on(coin.get_unspent_ordered_list(coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
+        assert_eq!(unspents.len(), 1);
+        let (unsigned, _) = block_on(
+            UtxoTxBuilder::new(&coin)
+                .add_available_inputs(unspents)
+                .add_outputs(vec![TransactionOutput {
+                    value: 50_000_000,
+                    script_pubkey: Builder::build_p2pkh(&coin.as_ref().derivation_method.unwrap_iguana().hash)
+                        .to_bytes(),
+                }])
+                .with_fee_policy(FeePolicy::DeductFromOutput(0))
+                .build(),
+        )
+        .unwrap();
+        let tx_size = tx_size_in_v_bytes(&UtxoAddressFormat::Standard, &UtxoTx::from(unsigned)) as u64;
+        let txfee_sat = block_on(coin.get_tx_fee()).unwrap().fee_for_size(tx_size);
+        let txfee = BigDecimal::from(txfee_sat as i64) / BigDecimal::from(100_000_000);
         let withdraw = block_on(mm.rpc(&json! ({
             "mmrpc": "2.0",
             "userpass": mm.userpass,
@@ -3367,7 +3499,7 @@ mod docker_tests {
         })))
         .unwrap();
 
-        assert!(withdraw.0.is_client_error(), "RICK withdraw: {}", withdraw.1);
+        assert!(withdraw.0.is_client_error(), "DOC withdraw: {}", withdraw.1);
         log!("error: "[withdraw.1]);
         let error: RpcErrorResponse<withdraw_error::NotSufficientBalance> =
             json::from_str(&withdraw.1).expect("Expected 'RpcErrorResponse<NotSufficientBalance>'");
@@ -4072,7 +4204,7 @@ mod docker_tests {
         }
 
         let (unspents, _) =
-            block_on(coin.get_unspent_ordered_list(&coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
+            block_on(coin.get_unspent_ordered_list(coin.as_ref().derivation_method.unwrap_iguana())).unwrap();
         assert_eq!(unspents.len(), 5, "Expected 5 unspent outputs, got: {}", unspents.len());
 
         // Verify total value: 100 + 4*10 = 140

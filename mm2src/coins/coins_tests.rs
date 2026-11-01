@@ -356,18 +356,18 @@ mod hd_wallet_integration {
 fn test_update_coin_config_success() {
     let conf = json!([
         {
-            "coin": "RICK",
-            "asset": "RICK",
-            "fname": "RICK (TESTCOIN)",
+            "coin": "DOC",
+            "asset": "DOC",
+            "fname": "DOC (TESTCOIN)",
             "rpcport": 25435,
             "txversion": 4,
             "overwintered": 1,
             "mm2": 1,
         },
         {
-            "coin": "MORTY",
-            "asset": "MORTY",
-            "fname": "MORTY (TESTCOIN)",
+            "coin": "MARTY",
+            "asset": "MARTY",
+            "fname": "MARTY (TESTCOIN)",
             "rpcport": 16348,
             "txversion": 4,
             "overwintered": 1,
@@ -410,9 +410,9 @@ fn test_update_coin_config_success() {
     let actual = update_coins_config(conf).unwrap();
     let expected = json!([
         {
-            "coin": "RICK",
-            "asset": "RICK",
-            "fname": "RICK (TESTCOIN)",
+            "coin": "DOC",
+            "asset": "DOC",
+            "fname": "DOC (TESTCOIN)",
             "rpcport": 25435,
             "txversion": 4,
             "overwintered": 1,
@@ -422,9 +422,9 @@ fn test_update_coin_config_success() {
             },
         },
         {
-            "coin": "MORTY",
-            "asset": "MORTY",
-            "fname": "MORTY (TESTCOIN)",
+            "coin": "MARTY",
+            "asset": "MARTY",
+            "fname": "MARTY (TESTCOIN)",
             "rpcport": 16348,
             "txversion": 4,
             "overwintered": 1,
@@ -480,9 +480,9 @@ fn test_update_coin_config_success() {
 #[test]
 fn test_update_coin_config_error_not_array() {
     let conf = json!({
-        "coin": "RICK",
-        "asset": "RICK",
-        "fname": "RICK (TESTCOIN)",
+        "coin": "DOC",
+        "asset": "DOC",
+        "fname": "DOC (TESTCOIN)",
         "rpcport": 25435,
         "txversion": 4,
         "overwintered": 1,

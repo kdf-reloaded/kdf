@@ -20,12 +20,14 @@
 use coins::register_balance_update_handler;
 use common::executor::{spawn, spawn_boxed, Timer};
 use common::log::{error, info, warn};
+use common::now_ms;
 use crypto::{CryptoCtx, CryptoInitError, EncryptedMnemonicData, HwError, HwProcessingError};
 use derive_more::Display;
 use kdf_crypto::sha256;
 use mm2_core::mm_ctx::{MmArc, MmCtx};
 use mm2_err_handle::prelude::*;
 use mm2_net_config::{net_config_for, NetConfig, SUPPORTED_NETIDS};
+use mm2_p2p::atomicdex_behaviour::AtomicDexBehaviour;
 use mm2_p2p::{spawn_gossipsub, AdexBehaviourError, NodeType, RelayAddress, RelayAddressError, WssCerts};
 use rpc_task::RpcTaskError;
 use serde_json::{self as json};
@@ -33,17 +35,19 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::str;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mm2::database::init_and_migrate_db;
 use crate::mm2::lp_message_service::{init_message_service, InitMessageServiceError};
 use crate::mm2::lp_network::{lp_network_ports, p2p_event_process_loop, subscribe_to_own_peer_healthcheck_topic,
-                             NetIdError, P2PContext};
+                             NetIdError, P2PContext, RelayQueueSignal};
 use crate::mm2::lp_ordermatch::{broadcast_maker_orders_keep_alive_loop, clean_memory_loop, init_ordermatch_context,
-                                lp_ordermatch_loop, orders_kick_start, BalanceUpdateOrdermatchHandler,
-                                OrdermatchInitError};
-use crate::mm2::lp_swap::{running_swaps_num, swap_kick_starts};
+                                lp_ordermatch_loop, maker_outbox_loop, orders_kick_start,
+                                BalanceUpdateOrdermatchHandler, OrdermatchInitError};
+use crate::mm2::lp_swap::{clear_running_swaps, swap_kick_starts};
 use crate::mm2::rpc::spawn_rpc;
 use crate::mm2::{MM_DATETIME, MM_VERSION};
 
@@ -52,6 +56,9 @@ cfg_native! {
     use mm2_net::ip_addr::myipaddr;
     use db_common::sqlite::rusqlite::Error as SqlError;
 }
+
+/// The send queue gauges walk all connections, so they are recorded at most this often (milliseconds).
+const SEND_QUEUE_GAUGES_INTERVAL_MS: u64 = 1000;
 
 #[path = "lp_init/init_context.rs"] mod init_context;
 #[path = "lp_init/init_hw.rs"] pub mod init_hw;
@@ -81,6 +88,8 @@ pub enum P2PInitError {
     InvalidRelayAddress(RelayAddressError),
     #[display(fmt = "Error listening on P2P address '{}': {}", address, error)]
     ErrorListeningOnAddress { address: String, error: String },
+    #[display(fmt = "Invalid WSS key/cert configuration: {}", _0)]
+    InvalidWssConfig(String),
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     #[display(fmt = "WASM node can be a seed if only 'p2p_in_memory' is true")]
     WasmNodeCannotBeSeed,
@@ -97,6 +106,7 @@ impl From<AdexBehaviourError> for P2PInitError {
         match e {
             AdexBehaviourError::ParsingRelayAddress(e) => P2PInitError::InvalidRelayAddress(e),
             AdexBehaviourError::ListenOn { address, error } => P2PInitError::ErrorListeningOnAddress { address, error },
+            AdexBehaviourError::WssConfig(error) => P2PInitError::InvalidWssConfig(error),
         }
     }
 }
@@ -229,7 +239,9 @@ impl From<RpcTaskError> for MmInitError {
         match e {
             RpcTaskError::Canceled => MmInitError::Canceled,
             RpcTaskError::Timeout(timeout) => MmInitError::Timeout(timeout),
-            RpcTaskError::NoSuchTask(_) | RpcTaskError::UnexpectedTaskStatus { .. } => MmInitError::Internal(error),
+            RpcTaskError::NoSuchTask(_)
+            | RpcTaskError::UnexpectedTaskStatus { .. }
+            | RpcTaskError::UnexpectedUserAction { .. } => MmInitError::Internal(error),
             RpcTaskError::Internal(internal) => MmInitError::Internal(internal),
         }
     }
@@ -459,6 +471,7 @@ pub async fn lp_init_continue(ctx: MmArc) -> MmInitResult<()> {
     spawn(lp_ordermatch_loop(ctx.clone()));
 
     spawn(broadcast_maker_orders_keep_alive_loop(ctx.clone()));
+    spawn(maker_outbox_loop(ctx.clone()));
 
     spawn(clean_memory_loop(ctx.weak()));
     Ok(())
@@ -470,6 +483,12 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
     info!("Version: {} DT {}", MM_VERSION, MM_DATETIME);
 
     validate_netid_range(&ctx.conf)?;
+    coins::utxo::utxo_builder::header_layout_fallback_families(&ctx).mm_err(|e| {
+        MmInitError::ErrorDeserializingConfig {
+            field: "header_layout_fallback_families".to_owned(),
+            error: e.to_string(),
+        }
+    })?;
 
     // Validate netid against compiled network configurations ("deny except config exists").
     let netid = ctx.netid();
@@ -543,6 +562,14 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
 
     let ctx_id = ctx.ffi_handle().map_to_mm(MmInitError::Internal)?;
 
+    // Native `spawn_rpc` binds a real TCP listener and can fail (port in use,
+    // permission denied, ...); CRD ch.45 R45.7.1 requires that surface as a clean
+    // launch error, not a panic, so it now returns a `Result`. The WASM build
+    // never binds a socket (in-process channel bridge only) and keeps its
+    // existing infallible signature.
+    #[cfg(not(target_arch = "wasm32"))]
+    spawn_rpc(ctx_id).map_to_mm(MmInitError::Internal)?;
+    #[cfg(target_arch = "wasm32")]
     spawn_rpc(ctx_id);
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     if let Err(err) =
@@ -564,13 +591,9 @@ pub async fn lp_init(ctx: MmArc) -> MmInitResult<()> {
         Timer::sleep(0.2).await
     }
 
-    // wait for swaps to stop
-    loop {
-        if running_swaps_num(&ctx) == 0 {
-            break;
-        };
-        Timer::sleep(0.2).await
-    }
+    // The stop signal was observed. Swaps stop by task-scope cancellation / the swap shutdown channel; here
+    // the registry's strong handles are dropped in one step, without waiting for the swap count (CRD ch.51 R58A).
+    clear_running_swaps(&ctx);
     Ok(())
 }
 
@@ -591,8 +614,87 @@ async fn kick_start(ctx: MmArc) -> MmInitResult<()> {
     Ok(())
 }
 
+/// What the node records from the swarm on every poll: the P2P gauges, and the send queue pressure level that the
+/// maker outbox reads (CRD ch.32 §32.9B R-MP2 item 2, R-MP5).
+pub(crate) struct SwarmPollRecorder {
+    ctx: MmArc,
+    relay_queue_signal: Arc<RelayQueueSignal>,
+    /// The send queue gauges walk all connections, so they are recorded at most once per interval.
+    last_send_queue_gauges_ms: AtomicU64,
+}
+
+impl SwarmPollRecorder {
+    pub(crate) fn new(ctx: MmArc, relay_queue_signal: Arc<RelayQueueSignal>) -> Self {
+        SwarmPollRecorder {
+            ctx,
+            relay_queue_signal,
+            last_send_queue_gauges_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn record(&self, behaviour: &AtomicDexBehaviour) {
+        mm_gauge!(
+            self.ctx.metrics,
+            "p2p.connected_relays.len",
+            behaviour.connected_relays_len() as i64
+        );
+        mm_gauge!(
+            self.ctx.metrics,
+            "p2p.relay_mesh.len",
+            behaviour.relay_mesh_len() as i64
+        );
+        let (period, received_msgs) = behaviour.received_messages_in_period();
+        mm_gauge!(
+            self.ctx.metrics,
+            "p2p.received_messages.period_in_secs",
+            period.as_secs() as i64
+        );
+
+        mm_gauge!(self.ctx.metrics, "p2p.received_messages.count", received_msgs as i64);
+
+        let connected_peers_count = behaviour.connected_peers_len();
+
+        mm_gauge!(
+            self.ctx.metrics,
+            "p2p.connected_peers.count",
+            connected_peers_count as i64
+        );
+
+        self.relay_queue_signal
+            .raised
+            .store(behaviour.relay_queue_signal(), Ordering::Relaxed);
+        self.relay_queue_signal
+            .raised_count
+            .store(behaviour.queue_signals_raised(), Ordering::Relaxed);
+
+        let now = now_ms();
+        let last = self.last_send_queue_gauges_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) >= SEND_QUEUE_GAUGES_INTERVAL_MS
+            && self
+                .last_send_queue_gauges_ms
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            let queues = behaviour.send_queue_snapshot();
+            mm_gauge!(self.ctx.metrics, "p2p.send_queue.len", queues.queued as i64);
+            mm_gauge!(
+                self.ctx.metrics,
+                "p2p.send_queue.max_per_peer",
+                queues.max_per_connection as i64
+            );
+            mm_gauge!(self.ctx.metrics, "p2p.send_queue.dropped.count", queues.dropped as i64);
+        }
+    }
+}
+
 async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
     let i_am_seed = ctx.conf["i_am_seed"].as_bool().unwrap_or(false);
+    if allow_private_addresses(&ctx) {
+        warn!(
+            "'p2p_allow_private_addresses' is set: peer addresses that are not globally routable are accepted. \
+             This setting is for private test networks only, not for production"
+        );
+    }
 
     if i_am_seed && ctx.secp256k1_key_pair.as_option().is_none() {
         return MmError::err(P2PInitError::Internal(
@@ -602,7 +704,8 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
 
     let seednodes = seednodes(&ctx)?;
 
-    let ctx_on_poll = ctx.clone();
+    // Written from the swarm poll, read by the maker outbox (CRD ch.32 §32.9B R-MP2 item 2).
+    let relay_queue_signal = Arc::new(RelayQueueSignal::default());
     let force_p2p_key = if i_am_seed {
         let key = sha256(&*ctx.secp256k1_key_pair().private().secret);
         Some(key.take())
@@ -616,34 +719,9 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
         light_node_type(&ctx)?
     };
 
+    let recorder = SwarmPollRecorder::new(ctx.clone(), relay_queue_signal.clone());
     let spawn_result = spawn_gossipsub(force_p2p_key, spawn_boxed, seednodes, node_type, move |swarm| {
-        let behaviour = swarm.behaviour();
-        mm_gauge!(
-            ctx_on_poll.metrics,
-            "p2p.connected_relays.len",
-            behaviour.connected_relays_len() as i64
-        );
-        mm_gauge!(
-            ctx_on_poll.metrics,
-            "p2p.relay_mesh.len",
-            behaviour.relay_mesh_len() as i64
-        );
-        let (period, received_msgs) = behaviour.received_messages_in_period();
-        mm_gauge!(
-            ctx_on_poll.metrics,
-            "p2p.received_messages.period_in_secs",
-            period.as_secs() as i64
-        );
-
-        mm_gauge!(ctx_on_poll.metrics, "p2p.received_messages.count", received_msgs as i64);
-
-        let connected_peers_count = behaviour.connected_peers_len();
-
-        mm_gauge!(
-            ctx_on_poll.metrics,
-            "p2p.connected_peers.count",
-            connected_peers_count as i64
-        );
+        recorder.record(swarm.behaviour())
     })
     .await;
     let (cmd_tx, event_rx, peer_id, p2p_abort) = spawn_result?;
@@ -655,7 +733,7 @@ async fn init_p2p(ctx: MmArc) -> P2PResult<()> {
         Ok(())
     }));
     ctx.peer_id.pin(peer_id.to_string()).map_to_mm(P2PInitError::Internal)?;
-    let p2p_context = P2PContext::new(cmd_tx);
+    let p2p_context = P2PContext::new(cmd_tx).with_relay_queue_signal(relay_queue_signal);
     p2p_context.store_to_mm_arc(&ctx);
     subscribe_to_own_peer_healthcheck_topic(&ctx, &peer_id.to_string());
     spawn(p2p_event_process_loop(ctx.weak(), event_rx, i_am_seed));
@@ -743,8 +821,18 @@ Example:    "wss_certs": { "server_priv_key": "/path/to/key.pem", "certificate":
         ip,
         network_ports,
         wss_certs,
+        resolve_peer_hostnames: resolve_peer_hostnames(ctx),
+        allow_private_addresses: allow_private_addresses(ctx),
     })
 }
+
+/// The configuration flag `p2p_resolve_peer_hostnames` (default `true`): whether the node looks up the hostnames that
+/// peers hand out and keeps the answers it gives to the accepted form (CRD ch.28 R8c items 7, 9 and 10, decision BH).
+fn resolve_peer_hostnames(ctx: &MmArc) -> bool { ctx.conf["p2p_resolve_peer_hostnames"].as_bool().unwrap_or(true) }
+
+/// The configuration flag `p2p_allow_private_addresses` (default `false`): whether the node accepts peer addresses
+/// that are not globally routable, for private test networks (CRD ch.28 R8c item 8, decision BH).
+fn allow_private_addresses(ctx: &MmArc) -> bool { ctx.conf["p2p_allow_private_addresses"].as_bool().unwrap_or(false) }
 
 fn relay_in_memory_node_type(ctx: &MmArc) -> P2PResult<NodeType> {
     let port = ctx
@@ -762,7 +850,11 @@ fn light_node_type(ctx: &MmArc) -> P2PResult<NodeType> {
 
     let netid = ctx.netid();
     let network_ports = lp_network_ports(netid).mm_err(Into::into)?;
-    Ok(NodeType::Light { network_ports })
+    Ok(NodeType::Light {
+        network_ports,
+        resolve_peer_hostnames: resolve_peer_hostnames(ctx),
+        allow_private_addresses: allow_private_addresses(ctx),
+    })
 }
 
 /// Returns non-empty vector of keys/certs or an error.
@@ -785,7 +877,24 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
-    use futures_rustls::rustls;
+    use rustls_pemfile as pemfile;
+
+    // Parsers return raw DER bytes: libp2p's websocket TLS types take plain `Vec<u8>`.
+    fn pkcs8_keys(r: &mut dyn io::BufRead) -> Result<Vec<Vec<u8>>, ()> {
+        pemfile::pkcs8_private_keys(r)
+            .map(|k| k.map(|k| k.secret_pkcs8_der().to_vec()).map_err(|_| ()))
+            .collect()
+    }
+    fn rsa_keys(r: &mut dyn io::BufRead) -> Result<Vec<Vec<u8>>, ()> {
+        pemfile::rsa_private_keys(r)
+            .map(|k| k.map(|k| k.secret_pkcs1_der().to_vec()).map_err(|_| ()))
+            .collect()
+    }
+    fn cert_chain(r: &mut dyn io::BufRead) -> Result<Vec<Vec<u8>>, ()> {
+        pemfile::certs(r)
+            .map(|c| c.map(|c| c.as_ref().to_vec()).map_err(|_| ()))
+            .collect()
+    }
 
     #[derive(Deserialize)]
     struct WssCertsInfo {
@@ -805,14 +914,14 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
     // First, try to extract the all PKCS8 private keys
     let mut server_priv_keys = extract_cert_from_file(
         certs.server_priv_key.clone(),
-        rustls::internal::pemfile::pkcs8_private_keys,
+        pkcs8_keys,
         "Private key, DER-encoded ASN.1 in either PKCS#8 or PKCS#1 format".to_owned(),
     )
     // or try to extract all PKCS1 private keys
     .or_else(|_| {
         extract_cert_from_file(
             certs.server_priv_key.clone(),
-            rustls::internal::pemfile::rsa_private_keys,
+            rsa_keys,
             "Private key, DER-encoded ASN.1 in either PKCS#8 or PKCS#1 format".to_owned(),
         )
     })?;
@@ -821,7 +930,7 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
 
     let certs = extract_cert_from_file(
         certs.certificate,
-        rustls::internal::pemfile::certs,
+        cert_chain,
         "Certificate, DER-encoded X.509 format".to_owned(),
     )?;
     Ok(Some(WssCerts { server_priv_key, certs }))

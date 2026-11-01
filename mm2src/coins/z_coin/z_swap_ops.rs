@@ -1,4 +1,7 @@
 use super::*;
+use crate::z_coin::{z_refund_gate, z_tx_read};
+use crate::CanRefundHtlc;
+use crate::HtlcPaymentCheck;
 
 #[async_trait]
 impl SwapOps for ZCoin {
@@ -212,23 +215,20 @@ impl SwapOps for ZCoin {
         let coin = self.clone();
         let fut = async move {
             let tx_hash = H256::from(*z_tx.txid().as_ref()).reversed();
-            let tx_from_rpc = try_s!(
-                coin.rpc_client()
-                    .get_verbose_transaction(&tx_hash.into())
-                    .compat()
-                    .await
-            );
+            // Bytes and mined height only: a Light coin's backend decodes nothing (R39.11.4e).
+            let (rpc_bytes, rpc_height) = try_s!(coin.raw_transaction_with_height(&tx_hash.into()).await);
             let mut encoded = Vec::with_capacity(1024);
             z_tx.write(&mut encoded).expect("Writing should not fail");
-            if encoded != tx_from_rpc.hex.0 {
+            if encoded != rpc_bytes {
                 return ERR!(
-                    "Encoded transaction {:?} does not match the tx {:?} from RPC",
+                    "Encoded transaction {:?} does not match the tx {:?} from RPC (height {:?})",
                     encoded,
-                    tx_from_rpc
+                    rpc_bytes,
+                    rpc_height
                 );
             }
 
-            let block_height = match tx_from_rpc.height {
+            let block_height = match rpc_height {
                 Some(h) => {
                     if h < min_block_number {
                         return ERR!("Dex fee tx {:?} confirmed before min block {}", z_tx, min_block_number);
@@ -246,8 +246,11 @@ impl SwapOps for ZCoin {
                 if let Some((note, address, memo)) = try_sapling_output_recovery(
                     &DEX_FEE_OVK,
                     shielded_out,
+                    // Decryption-only parameters: the dex-fee output is built by
+                    // the counterparty, which may be a modern Pirate wallet using
+                    // the post-ZIP-212 note plaintext (R39.8.0am).
                     zcash_primitives::transaction::components::sapling::zip212_enforcement(
-                        &coin.z_fields.consensus_params,
+                        &crate::z_coin::ZcoinDecryptionParams::new(coin.z_fields.consensus_params.clone()),
                         block_height,
                     ),
                 ) {
@@ -288,11 +291,13 @@ impl SwapOps for ZCoin {
     }
 
     fn validate_maker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_maker_payment(self, input)
+        let (first_pub, second_pub) = (input.maker_pub.clone(), input.taker_pub.clone());
+        z_tx_read::validate_payment(self, input, first_pub, second_pub)
     }
 
     fn validate_taker_payment(&self, input: ValidatePaymentInput) -> Box<dyn Future<Item = (), Error = String> + Send> {
-        utxo_common::validate_taker_payment(self, input)
+        let (first_pub, second_pub) = (input.taker_pub.clone(), input.maker_pub.clone());
+        z_tx_read::validate_payment(self, input, first_pub, second_pub)
     }
 
     fn check_if_my_payment_sent(
@@ -301,28 +306,36 @@ impl SwapOps for ZCoin {
         my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
-        _search_from_block: u64,
+        search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Box<dyn Future<Item = Option<TransactionEnum>, Error = String> + Send> {
-        utxo_common::check_if_my_payment_sent(self.clone(), time_lock, my_pub, other_pub, secret_hash)
+        z_tx_read::check_if_my_payment_sent(
+            self.clone(),
+            time_lock,
+            my_pub,
+            other_pub,
+            secret_hash,
+            search_from_block,
+        )
     }
 
     async fn search_for_swap_tx_spend_my(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        utxo_common::search_for_swap_tx_spend_my(
-            self.as_ref(),
+        z_tx_read::search_for_swap_tx_spend(
+            self,
             time_lock,
-            other_pub,
+            &try_s!(Public::from_slice(my_pub)),
+            &try_s!(Public::from_slice(other_pub)),
             secret_hash,
             tx,
-            utxo_common::DEFAULT_SWAP_VOUT,
             search_from_block,
         )
         .await
@@ -331,26 +344,62 @@ impl SwapOps for ZCoin {
     async fn search_for_swap_tx_spend_other(
         &self,
         time_lock: u32,
+        my_pub: &[u8],
         other_pub: &[u8],
         secret_hash: &[u8],
         tx: &[u8],
         search_from_block: u64,
         _swap_contract_address: &Option<BytesJson>,
     ) -> Result<Option<FoundSwapTxSpend>, String> {
-        utxo_common::search_for_swap_tx_spend_other(
-            self.as_ref(),
+        z_tx_read::search_for_swap_tx_spend(
+            self,
             time_lock,
-            other_pub,
+            &try_s!(Public::from_slice(other_pub)),
+            &try_s!(Public::from_slice(my_pub)),
             secret_hash,
             tx,
-            utxo_common::DEFAULT_SWAP_VOUT,
             search_from_block,
         )
         .await
     }
 
+    fn htlc_detection_progress(
+        &self,
+        time_lock: u32,
+        first_pub: &[u8],
+        second_pub: &[u8],
+        secret_hash: &[u8],
+    ) -> Option<String> {
+        z_tx_read::htlc_detection_progress(self, time_lock, first_pub, second_pub, secret_hash)
+    }
+
+    async fn check_payment_pays_htlc(
+        &self,
+        time_lock: u32,
+        first_pub: &[u8],
+        second_pub: &[u8],
+        secret_hash: &[u8],
+        payment_tx: &[u8],
+    ) -> Result<HtlcPaymentCheck, String> {
+        z_tx_read::check_payment_pays_htlc(
+            time_lock,
+            &try_s!(Public::from_slice(first_pub)),
+            &try_s!(Public::from_slice(second_pub)),
+            secret_hash,
+            payment_tx,
+        )
+    }
+
+    // The derived key is unique per swap (derived from the fresh secret hash or the uuid), so the property the
+    // fresh-swap skip needs still holds (CRD ch.39 R39.11.27).
+    fn htlc_key_is_random_per_swap(&self) -> bool { true }
+
+    async fn ensure_own_payment_watchable(&self) -> Result<(), String> {
+        z_tx_read::ensure_own_payment_watchable(self).await
+    }
+
     fn extract_secret(&self, secret_hash: &[u8], spend_tx: &[u8]) -> Result<Vec<u8>, String> {
-        utxo_common::extract_secret(secret_hash, spend_tx)
+        z_tx_read::extract_secret(secret_hash, spend_tx)
     }
 
     fn negotiate_swap_contract_addr(
@@ -360,7 +409,34 @@ impl SwapOps for ZCoin {
         Ok(None)
     }
 
-    fn get_htlc_key_pair(&self) -> Option<KeyPair> { Some(KeyPair::random_compressed()) }
+    // The shielded leg's HTLC key is derived per swap, never random (CRD ch.39 R39.5.6): see
+    // `derive_swap_htlc_key_pair`. The swap machines ask for it there, so this key-less answer is not used.
+    fn get_htlc_key_pair(&self) -> Option<KeyPair> { None }
+
+    fn derives_swap_htlc_key(&self) -> bool { true }
+
+    fn derive_swap_htlc_key_pair(&self, swap_unique_input: &[u8]) -> Result<KeyPair, String> {
+        self.derived_htlc_key_pair(swap_unique_input)
+    }
+
+    /// R39.5.13: the refund waits until the wall clock and the chain's median time past have both passed
+    /// the lock time, and a read failure is an error the refund stage retries after 30 seconds.
+    fn can_refund_htlc(&self, locktime: u64) -> Box<dyn Future<Item = CanRefundHtlc, Error = String> + Send + '_> {
+        let fut = async move { Ok(z_refund_gate::refund_gate(self, locktime).await?.into_can_refund()) };
+        Box::new(fut.boxed().compat())
+    }
+
+    fn retriable_refund_rejection(&self, rejection: &str) -> Option<String> {
+        z_refund_gate::non_final_rejection(rejection)
+    }
+
+    fn refund_gate_closed_note(
+        &self,
+        locktime: u64,
+    ) -> Box<dyn Future<Item = Option<String>, Error = String> + Send + '_> {
+        let fut = async move { Ok(z_refund_gate::refund_gate(self, locktime).await?.closed_note(locktime)) };
+        Box::new(fut.boxed().compat())
+    }
 }
 
 #[async_trait]

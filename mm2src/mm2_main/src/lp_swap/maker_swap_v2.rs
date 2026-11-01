@@ -67,6 +67,25 @@ pub enum MakerSwapEvent {
         taker_coin_start_block: u64,
         maker_payment_trade_fee: MmNumber,
         taker_payment_spend_trade_fee: MmNumber,
+        /// The part of `taker_payment_spend_trade_fee` that must stay free in
+        /// our own balance — zero when the taker coin takes the fee out of the
+        /// payment we are claiming (CRD ch.52 R64). The coin that pays it is not
+        /// persisted: it is that coin's platform ticker, which does not vary.
+        ///
+        /// Additive and defaulted: a log written before this field existed
+        /// resumes with no headroom rather than failing to parse.
+        #[serde(default)]
+        taker_payment_spend_headroom: MmNumber,
+        /// The reservable part of `maker_payment_trade_fee` (CRD ch.52 R58,
+        /// R62): the whole amount unless the maker coin marks it payable out of
+        /// the trading volume, in which case zero. The coin that pays it is not
+        /// persisted — it is `maker_coin`'s platform ticker, which does not
+        /// vary — but for a log written before this field existed there is no
+        /// way to recover whether the marker was set, so a `None` falls back to
+        /// reserving the full legacy amount (which was always correct in *how
+        /// much*, only ever wrong in *which coin's bucket*).
+        #[serde(default)]
+        maker_payment_trade_fee_reservable: Option<MmNumber>,
     },
     /// Waiting for taker to send funding; negotiation data exchanged.
     WaitingForTakerFunding {
@@ -188,6 +207,17 @@ pub struct MakerSwapStateMachine<MakerCoin: MmCoin + MakerCoinSwapOpsV2, TakerCo
     pub require_taker_funding_confirm: bool,
     pub require_taker_payment_spend_confirm: bool,
     pub swap_version: u8,
+    /// Taker-coin balance to keep free for spending the taker payment (ch.52
+    /// R64). Learned from the `Initialized` event — on a live run when it is
+    /// applied, on a resume by reading it back out of the persisted log — so
+    /// that a swap resumed past initialisation still holds its headroom.
+    pub taker_payment_spend_headroom: MmNumber,
+    /// The reservable part of the fee to send the maker payment (ch.52 R58,
+    /// R62). Populated the same way as `taker_payment_spend_headroom` — from
+    /// the `Initialized` event, live or read back on resume — because
+    /// `WaitingForTakerFunding` and `TakerFundingReceived`, which also
+    /// re-create this reservation on resume (R63), do not themselves carry it.
+    pub maker_payment_trade_fee_reservable: MmNumber,
 }
 
 impl<MakerCoin, TakerCoin> MakerSwapStateMachine<MakerCoin, TakerCoin>
@@ -202,6 +232,68 @@ where
     pub fn secret_hash(&self) -> Vec<u8> { self.secret_hash_algo.hash_secret(self.secret.as_slice()) }
 
     pub fn unique_data(&self) -> Vec<u8> { self.secret_hash() }
+
+    /// The coin whose balance pays for spending the taker payment. For an ERC20
+    /// taker coin that is the platform coin, not the token — the same choice the
+    /// coin makes when it reports the fee.
+    fn taker_payment_spend_fee_coin(&self) -> &str { self.taker_coin.platform_ticker() }
+
+    fn reserve_taker_payment_spend_headroom(&self) {
+        super::reserve_v2_spend_headroom(
+            &self.ctx,
+            self.uuid,
+            self.taker_payment_spend_fee_coin(),
+            self.taker_payment_spend_headroom.clone(),
+        );
+    }
+
+    fn release_taker_payment_spend_headroom(&self) {
+        super::release_v2_spend_headroom(&self.ctx, &self.uuid, self.taker_payment_spend_fee_coin());
+    }
+
+    /// The coin whose balance pays for sending the maker payment. For an ERC20
+    /// maker coin that is the platform coin, not the token — the same choice
+    /// the coin makes when it reports the fee (ch.52 R58, R62).
+    fn maker_payment_trade_fee_coin(&self) -> &str { self.maker_coin.platform_ticker() }
+
+    /// Reserve both halves of the short-lived (R58) reservation: the maker's
+    /// own outgoing volume, and the fee to send it — which may land in the same
+    /// bucket as the volume or, for a token maker coin, in a different one.
+    /// Both share the `Volume` kind and are released together by
+    /// `release_maker_payment_volume`.
+    fn reserve_maker_payment_volume(&self) {
+        super::reserve_v2_amount(
+            &self.ctx,
+            self.uuid,
+            super::LockedAmountV2Kind::Volume,
+            self.maker_coin.ticker(),
+            self.maker_volume.clone(),
+        );
+        super::reserve_v2_amount(
+            &self.ctx,
+            self.uuid,
+            super::LockedAmountV2Kind::Volume,
+            self.maker_payment_trade_fee_coin(),
+            self.maker_payment_trade_fee_reservable.clone(),
+        );
+    }
+
+    /// Release both halves reserved by `reserve_maker_payment_volume`, in
+    /// whichever bucket(s) they ended up in.
+    fn release_maker_payment_volume(&self) {
+        super::release_v2_amount(
+            &self.ctx,
+            &self.uuid,
+            super::LockedAmountV2Kind::Volume,
+            self.maker_coin.ticker(),
+        );
+        super::release_v2_amount(
+            &self.ctx,
+            &self.uuid,
+            super::LockedAmountV2Kind::Volume,
+            self.maker_payment_trade_fee_coin(),
+        );
+    }
 }
 
 // States — each carries PhantomData to bind to the generic state machine -----
@@ -221,6 +313,8 @@ pub struct Initialized<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwap
     pub taker_coin_start_block: u64,
     pub maker_payment_trade_fee: MmNumber,
     pub taker_payment_spend_trade_fee: MmNumber,
+    pub taker_payment_spend_headroom: MmNumber,
+    pub maker_payment_trade_fee_reservable: Option<MmNumber>,
     _p: PhantomData<(M, T)>,
 }
 
@@ -230,12 +324,16 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> Initialized
         taker_coin_start_block: u64,
         maker_payment_trade_fee: MmNumber,
         taker_payment_spend_trade_fee: MmNumber,
+        taker_payment_spend_headroom: MmNumber,
+        maker_payment_trade_fee_reservable: Option<MmNumber>,
     ) -> Self {
         Initialized {
             maker_coin_start_block,
             taker_coin_start_block,
             maker_payment_trade_fee,
             taker_payment_spend_trade_fee,
+            taker_payment_spend_headroom,
+            maker_payment_trade_fee_reservable,
             _p: PhantomData,
         }
     }
@@ -323,6 +421,26 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> MakerPaymen
             _p: PhantomData,
         }
     }
+
+    /// Shared body for this state's `on_changed` abort paths: they all carry the same
+    /// fields forward into `MakerPaymentRefundRequired` and differ only in `reason`.
+    async fn abort_to_maker_payment_refund_required(
+        &self,
+        reason: AbortReason,
+        sm: &mut MakerSwapStateMachine<M, T>,
+    ) -> StateResult<MakerSwapStateMachine<M, T>> {
+        Self::change_state(
+            MakerPaymentRefundRequired::new(
+                self.maker_coin_start_block,
+                self.taker_coin_start_block,
+                self.negotiation_data.clone(),
+                self.maker_payment.clone(),
+                reason,
+            ),
+            sm,
+        )
+        .await
+    }
 }
 
 pub struct TakerPaymentReceived<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> {
@@ -351,6 +469,26 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerPaymen
             _p: PhantomData,
         }
     }
+
+    /// Shared body for this state's `on_changed` abort paths: they all carry the same
+    /// fields forward into `MakerPaymentRefundRequired` and differ only in `reason`.
+    async fn abort_to_maker_payment_refund_required(
+        &self,
+        reason: AbortReason,
+        sm: &mut MakerSwapStateMachine<M, T>,
+    ) -> StateResult<MakerSwapStateMachine<M, T>> {
+        Self::change_state(
+            MakerPaymentRefundRequired::new(
+                self.maker_coin_start_block,
+                self.taker_coin_start_block,
+                self.negotiation_data.clone(),
+                self.maker_payment.clone(),
+                reason,
+            ),
+            sm,
+        )
+        .await
+    }
 }
 
 pub struct TakerPaymentReceivedPreimageSkipped<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> {
@@ -378,6 +516,26 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> TakerPaymen
             taker_payment,
             _p: PhantomData,
         }
+    }
+
+    /// Shared body for this state's `on_changed` abort paths: they all carry the same
+    /// fields forward into `MakerPaymentRefundRequired` and differ only in `reason`.
+    async fn abort_to_maker_payment_refund_required(
+        &self,
+        reason: AbortReason,
+        sm: &mut MakerSwapStateMachine<M, T>,
+    ) -> StateResult<MakerSwapStateMachine<M, T>> {
+        Self::change_state(
+            MakerPaymentRefundRequired::new(
+                self.maker_coin_start_block,
+                self.taker_coin_start_block,
+                self.negotiation_data.clone(),
+                self.maker_payment.clone(),
+                reason,
+            ),
+            sm,
+        )
+        .await
     }
 }
 
@@ -462,6 +620,10 @@ pub struct Completed<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOp
 
 impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> Completed<M, T> {
     pub fn new() -> Self { Completed(PhantomData) }
+}
+
+impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> Default for Completed<M, T> {
+    fn default() -> Self { Self::new() }
 }
 
 pub struct Aborted<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> {
@@ -634,17 +796,50 @@ where
 
         let last_event = repr.events.remove(repr.events.len() - 1);
 
+        // Only `Initialized` records the headroom, but the swap owes it for as
+        // long as the taker payment is unspent, so recover it from the log
+        // rather than from whichever event we happen to be resuming at.
+        let (taker_payment_spend_headroom, maker_payment_trade_fee_reservable) = repr
+            .events
+            .iter()
+            .chain(std::iter::once(&last_event))
+            .find_map(|event| match event {
+                MakerSwapEvent::Initialized {
+                    maker_payment_trade_fee,
+                    taker_payment_spend_headroom,
+                    maker_payment_trade_fee_reservable,
+                    ..
+                } => Some((
+                    taker_payment_spend_headroom.clone(),
+                    // A log written before this field existed has no way to say
+                    // whether the fee was payable out of the trading volume, so
+                    // fall back to the legacy assumption that it was not — the
+                    // full amount, which was always the correct *quantity* for
+                    // every coin family implementing V2 today, only ever wrong
+                    // in *which coin's bucket* it belonged to.
+                    maker_payment_trade_fee_reservable
+                        .clone()
+                        .unwrap_or_else(|| maker_payment_trade_fee.clone()),
+                )),
+                _ => None,
+            })
+            .unwrap_or_default();
+
         let current_state: Box<dyn RestoredState<StateMachine = Self>> = match last_event {
             MakerSwapEvent::Initialized {
                 maker_coin_start_block,
                 taker_coin_start_block,
                 maker_payment_trade_fee,
                 taker_payment_spend_trade_fee,
+                taker_payment_spend_headroom,
+                maker_payment_trade_fee_reservable,
             } => Box::new(Initialized::new(
                 maker_coin_start_block,
                 taker_coin_start_block,
                 maker_payment_trade_fee,
                 taker_payment_spend_trade_fee,
+                taker_payment_spend_headroom,
+                maker_payment_trade_fee_reservable,
             )),
             MakerSwapEvent::WaitingForTakerFunding {
                 maker_coin_start_block,
@@ -784,6 +979,8 @@ where
             require_taker_funding_confirm: false,
             require_taker_payment_spend_confirm: true,
             swap_version: repr.swap_version,
+            taker_payment_spend_headroom,
+            maker_payment_trade_fee_reservable,
         };
 
         Ok((RestoredMachine::new(machine), current_state))
@@ -804,74 +1001,78 @@ where
             taker_coin: self.taker_coin.ticker().into(),
             swap_type: SwapV2Type::MakerV2,
         };
+        // Safe: `from_ctx` (mm2_core::mm_ctx::from_ctx) memoizes a per-process
+        // singleton keyed on `ctx.swaps_ctx`. Every other call site in this
+        // codebase (dozens, across lp_swap.rs, swap_v2_rpcs.rs, swap_msg.rs, ...)
+        // already treats it as infallible via `.unwrap()`, and the constructor
+        // closure has no fallible/panicking step of its own — failure here would
+        // require a poisoned `ctx.swaps_ctx` mutex, i.e. an earlier panic while
+        // holding that exact lock, which nothing in `from_ctx`'s own closure does.
+        // See docs/plans/v2-swap-engine-hardening.md (T10/P2.3) for the full
+        // reachability analysis.
         let swap_ctx = super::SwapsContext::from_ctx(&self.ctx).expect("SwapsContext should exist");
         swap_ctx.add_active_swap_v2(swap_info);
+        // KNOWN GAP (T10/P2.3, docs/plans/v2-swap-engine-hardening.md): unlike
+        // the `SwapsContext` lookup above, this parse is NOT provably
+        // unreachable. This codebase has no fresh-swap-initiation path yet —
+        // `MakerSwapStateMachine` is only ever built by `recreate_machine` — and
+        // `recreate_machine` does not itself validate `taker_p2p_pub` before
+        // accepting a stored record, even though CRD ch.52 R9's "fifth case"
+        // requires stored pubkey bytes that no longer parse to fail recreation
+        // with a distinct, typed error rather than reach here. A malformed
+        // persisted pubkey does reach this `.expect()`. Left as a panic rather
+        // than a logged skip-and-continue of `init_v2_msg_store`: skipping it
+        // would silently break this swap's entire P2P message routing, while the
+        // reentrancy-lock-renewal task (already spawned in `on_start`, on the
+        // shared executor, independent of this hook) keeps holding the swap's
+        // lock forever in this process either way — so a graceful degrade here
+        // does not clearly dominate a loud panic. The real fix belongs in
+        // `recreate_machine` per R9, not this infallible hook.
         let accept_from = secp256k1::PublicKey::from_slice(&self.taker_p2p_pubkey)
             .expect("taker_p2p_pubkey must be a valid 33-byte compressed pubkey");
         swap_ctx.init_v2_msg_store(self.uuid, accept_from);
     }
 
     fn clean_up_context(&mut self) {
+        // See the `init_additional_context` comment above — same guarantee applies.
         let swap_ctx = super::SwapsContext::from_ctx(&self.ctx).expect("SwapsContext should exist");
         swap_ctx.remove_active_swap_v2(&self.uuid);
         swap_ctx.remove_v2_msg_store(&self.uuid);
 
-        // Clean up V2 locked amounts for both coins.
-        let mut locked = swap_ctx.locked_amounts_v2.lock().unwrap();
-        let maker_ticker = self.maker_coin.ticker();
-        if let Some(entries) = locked.get_mut(maker_ticker) {
-            entries.retain(|info| info.swap_uuid != self.uuid);
-        }
-        let taker_ticker = self.taker_coin.ticker();
-        if let Some(entries) = locked.get_mut(taker_ticker) {
-            entries.retain(|info| info.swap_uuid != self.uuid);
-        }
+        // Every entry, not just the two the swap trades in: an ERC20 leg files
+        // its spend headroom under the platform coin (ch.52 R59).
+        super::release_all_v2_locked_amounts(&self.ctx, &self.uuid);
     }
 
     fn on_event(&mut self, event: &MakerSwapEvent) {
         match event {
             MakerSwapEvent::Initialized {
                 maker_payment_trade_fee,
+                taker_payment_spend_headroom,
+                maker_payment_trade_fee_reservable,
                 ..
             } => {
-                let swaps_ctx =
-                    super::SwapsContext::from_ctx(&self.ctx).expect("from_ctx should not fail at this point");
-                let maker_coin_ticker: String = self.maker_coin.ticker().into();
-                let new_locked = super::LockedAmountV2Info {
-                    swap_uuid: self.uuid,
-                    locked_amount: super::LockedAmount {
-                        coin: maker_coin_ticker.clone(),
-                        amount: self.maker_volume.clone(),
-                        trade_fee: Some(coins::TradeFee {
-                            coin: maker_coin_ticker.clone(),
-                            amount: maker_payment_trade_fee.clone(),
-                            paid_from_trading_vol: false,
-                        }),
-                    },
-                };
-                swaps_ctx
-                    .locked_amounts_v2
-                    .lock()
-                    .unwrap()
-                    .entry(maker_coin_ticker)
-                    .or_default()
-                    .push(new_locked);
+                self.maker_payment_trade_fee_reservable = maker_payment_trade_fee_reservable
+                    .clone()
+                    .unwrap_or_else(|| maker_payment_trade_fee.clone());
+                self.reserve_maker_payment_volume();
+
+                self.taker_payment_spend_headroom = taker_payment_spend_headroom.clone();
+                self.reserve_taker_payment_spend_headroom();
             },
-            MakerSwapEvent::MakerPaymentSentFundingSpendGenerated { .. } => {
-                let swaps_ctx =
-                    super::SwapsContext::from_ctx(&self.ctx).expect("from_ctx should not fail at this point");
-                let ticker = self.maker_coin.ticker();
-                if let Some(maker_coin_locked) = swaps_ctx.locked_amounts_v2.lock().unwrap().get_mut(ticker) {
-                    maker_coin_locked.retain(|locked| locked.swap_uuid != self.uuid);
-                };
-            },
+            // Both halves of R58's reservation die together: the payment being
+            // broadcast is what both the volume and its send fee were held
+            // against.
+            MakerSwapEvent::MakerPaymentSentFundingSpendGenerated { .. } => self.release_maker_payment_volume(),
+            // The taker payment is ours now, so the fee to claim it is no longer
+            // owed and its headroom is released (ch.52 R64).
+            MakerSwapEvent::TakerPaymentSpent { .. } => self.release_taker_payment_spend_headroom(),
             MakerSwapEvent::WaitingForTakerFunding { .. }
             | MakerSwapEvent::TakerFundingReceived { .. }
             | MakerSwapEvent::MakerPaymentRefundRequired { .. }
             | MakerSwapEvent::MakerPaymentRefunded { .. }
             | MakerSwapEvent::TakerPaymentReceived { .. }
             | MakerSwapEvent::TakerPaymentReceivedPreimageSkipped { .. }
-            | MakerSwapEvent::TakerPaymentSpent { .. }
             | MakerSwapEvent::Aborted { .. }
             | MakerSwapEvent::Completed => (),
         }
@@ -888,42 +1089,23 @@ where
     }
 
     fn on_kickstart_event(&mut self, event: MakerSwapEvent) {
+        // The volume entry comes back only where the maker payment is still
+        // unsent, but the headroom is owed for as long as the taker payment is
+        // unspent — which is every resumable event but the spend itself. This is
+        // what the legacy protocol reserves at the same points (ch.51 R54), and
+        // the two answers have to agree.
+        if !matches!(event, MakerSwapEvent::TakerPaymentSpent { .. }) {
+            self.reserve_taker_payment_spend_headroom();
+        }
+
+        // `self.maker_payment_trade_fee_reservable` was already recovered from
+        // the persisted `Initialized` event during `recreate_machine`, so the
+        // volume reservation of R58 does not need to re-extract anything from
+        // whichever of the three events below we are actually resuming at.
         match event {
-            MakerSwapEvent::Initialized {
-                maker_payment_trade_fee,
-                ..
-            }
-            | MakerSwapEvent::WaitingForTakerFunding {
-                maker_payment_trade_fee,
-                ..
-            }
-            | MakerSwapEvent::TakerFundingReceived {
-                maker_payment_trade_fee,
-                ..
-            } => {
-                let swaps_ctx =
-                    super::SwapsContext::from_ctx(&self.ctx).expect("from_ctx should not fail at this point");
-                let maker_coin_ticker: String = self.maker_coin.ticker().into();
-                let new_locked = super::LockedAmountV2Info {
-                    swap_uuid: self.uuid,
-                    locked_amount: super::LockedAmount {
-                        coin: maker_coin_ticker.clone(),
-                        amount: self.maker_volume.clone(),
-                        trade_fee: Some(coins::TradeFee {
-                            coin: maker_coin_ticker.clone(),
-                            amount: maker_payment_trade_fee,
-                            paid_from_trading_vol: false,
-                        }),
-                    },
-                };
-                swaps_ctx
-                    .locked_amounts_v2
-                    .lock()
-                    .unwrap()
-                    .entry(maker_coin_ticker)
-                    .or_default()
-                    .push(new_locked);
-            },
+            MakerSwapEvent::Initialized { .. }
+            | MakerSwapEvent::WaitingForTakerFunding { .. }
+            | MakerSwapEvent::TakerFundingReceived { .. } => self.reserve_maker_payment_volume(),
             MakerSwapEvent::MakerPaymentSentFundingSpendGenerated { .. }
             | MakerSwapEvent::MakerPaymentRefundRequired { .. }
             | MakerSwapEvent::MakerPaymentRefunded { .. }
@@ -950,6 +1132,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> StorableSta
             taker_coin_start_block: self.taker_coin_start_block,
             maker_payment_trade_fee: self.maker_payment_trade_fee.clone(),
             taker_payment_spend_trade_fee: self.taker_payment_spend_trade_fee.clone(),
+            taker_payment_spend_headroom: self.taker_payment_spend_headroom.clone(),
+            maker_payment_trade_fee_reservable: self.maker_payment_trade_fee_reservable.clone(),
         }
     }
 }
@@ -1147,6 +1331,16 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
             return Self::change_state(Aborted::new(reason), sm).await;
         }
 
+        // Resolved here, where the coin's own descriptor is still available: the
+        // persisted event carries a bare number, which cannot say whether the
+        // fee comes out of the payment being claimed or out of our balance.
+        let taker_payment_spend_headroom = super::fee_reservable_amount(&taker_payment_spend_trade_fee);
+        // Same resolution for our own payment's send fee (ch.52 R58, closing
+        // V5): `maker_payment_trade_fee.coin` need not be the maker coin — an
+        // ERC20 maker coin bills it to the platform coin — and only the
+        // descriptor in hand right now says so.
+        let maker_payment_trade_fee_reservable = Some(super::fee_reservable_amount(&maker_payment_trade_fee));
+
         info!("Maker swap {} has successfully started", sm.uuid);
         Self::change_state(
             Initialized::new(
@@ -1154,6 +1348,8 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for I
                 taker_coin_start_block,
                 maker_payment_trade_fee.amount,
                 taker_payment_spend_trade_fee.amount,
+                taker_payment_spend_headroom,
+                maker_payment_trade_fee_reservable,
             ),
             sm,
         )
@@ -1390,8 +1586,15 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
                 return Self::change_state(Aborted::new(reason), sm).await;
             },
         };
-        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
-            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+        let net_config = match mm2_net_config::net_config_for(sm.ctx.netid()) {
+            Some(cfg) => cfg,
+            None => {
+                let reason = AbortReason::InternalError(format!("No net config for netid {}", sm.ctx.netid()));
+                return Self::change_state(Aborted::new(reason), sm).await;
+            },
+        };
+        let dex_fee = super::compute_dex_fee_v2_with_taker_pubkey_from_coin(
+            net_config,
             &sm.taker_coin,
             sm.maker_coin.ticker(),
             &sm.taker_volume,
@@ -1544,17 +1747,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to re-parse taker funding: {:?}", e));
-                return Self::change_state(
-                    super::maker_swap_v2::MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -1564,17 +1757,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             let now = now_ms() / 1000;
             if now > wait_until {
                 let reason = AbortReason::FundingSpendError("Taker funding not spent in time".into());
-                break Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                break self.abort_to_maker_payment_refund_required(reason, sm).await;
             }
 
             let search_result = sm
@@ -1617,17 +1800,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 },
                 Ok(Some(FundingTxSpend::RefundedTimelock(_))) => {
                     let reason = AbortReason::FundingSpendError("Taker funding reclaimed via timelock".into());
-                    break Self::change_state(
-                        MakerPaymentRefundRequired::new(
-                            self.maker_coin_start_block,
-                            self.taker_coin_start_block,
-                            self.negotiation_data.clone(),
-                            self.maker_payment.clone(),
-                            reason,
-                        ),
-                        sm,
-                    )
-                    .await;
+                    break self.abort_to_maker_payment_refund_required(reason, sm).await;
                 },
                 Ok(Some(FundingTxSpend::RefundedSecret { secret, .. })) => {
                     // Taker revealed their secret while reclaiming — maker can use it
@@ -1636,17 +1809,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                         "Taker funding reclaimed via secret: {}",
                         hex::encode(secret)
                     ));
-                    break Self::change_state(
-                        MakerPaymentRefundRequired::new(
-                            self.maker_coin_start_block,
-                            self.taker_coin_start_block,
-                            self.negotiation_data.clone(),
-                            self.maker_payment.clone(),
-                            reason,
-                        ),
-                        sm,
-                    )
-                    .await;
+                    break self.abort_to_maker_payment_refund_required(reason, sm).await;
                 },
                 Ok(None) => {
                     Timer::sleep(30.).await;
@@ -1657,17 +1820,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
                 },
                 Err(e) => {
                     let reason = AbortReason::FundingSpendError(format!("Irrecoverable search error: {:?}", e));
-                    break Self::change_state(
-                        MakerPaymentRefundRequired::new(
-                            self.maker_coin_start_block,
-                            self.taker_coin_start_block,
-                            self.negotiation_data.clone(),
-                            self.maker_payment.clone(),
-                            reason,
-                        ),
-                        sm,
-                    )
-                    .await;
+                    break self.abort_to_maker_payment_refund_required(reason, sm).await;
                 },
             }
         }
@@ -1699,17 +1852,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             .await
         {
             let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
-            return Self::change_state(
-                MakerPaymentRefundRequired::new(
-                    self.maker_coin_start_block,
-                    self.taker_coin_start_block,
-                    self.negotiation_data.clone(),
-                    self.maker_payment.clone(),
-                    reason,
-                ),
-                sm,
-            )
-            .await;
+            return self.abort_to_maker_payment_refund_required(reason, sm).await;
         }
 
         // Step 2: Receive taker payment spend preimage.
@@ -1725,17 +1868,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Err(e) => {
                 let reason =
                     AbortReason::NegotiationFailed(format!("Did not receive taker payment spend preimage: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -1744,34 +1877,14 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse taker preimage: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
         let signature = match sm.taker_coin.parse_signature(&preimage_data.signature) {
             Ok(s) => s,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse taker signature: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -1785,17 +1898,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to re-parse taker payment: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -1803,56 +1906,33 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Ok(pubkey) => pubkey,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
         let taker_coin_maker_addr = match sm.taker_coin.try_my_addr().await {
             Ok(address) => address,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
         let taker_htlc_pub = match sm.taker_coin.parse_pubkey(&self.negotiation_data.taker_coin_htlc_pub) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse taker HTLC pub: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
-        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
-            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+        let net_config = match mm2_net_config::net_config_for(sm.ctx.netid()) {
+            Some(cfg) => cfg,
+            None => {
+                let reason = AbortReason::InternalError(format!("No net config for netid {}", sm.ctx.netid()));
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
+            },
+        };
+        let dex_fee = super::compute_dex_fee_v2_with_taker_pubkey_from_coin(
+            net_config,
             &sm.taker_coin,
             sm.maker_coin.ticker(),
             &sm.taker_volume,
@@ -1868,6 +1948,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
+            dex_fee_addr_raw_pubkey: net_config.dex_fee_addr_raw_pubkey(),
         };
 
         // Step 5: Validate the preimage.
@@ -1877,17 +1958,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             .await
         {
             let reason = AbortReason::FailedToValidateTx(format!("Taker payment spend preimage invalid: {}", e));
-            return Self::change_state(
-                MakerPaymentRefundRequired::new(
-                    self.maker_coin_start_block,
-                    self.taker_coin_start_block,
-                    self.negotiation_data.clone(),
-                    self.maker_payment.clone(),
-                    reason,
-                ),
-                sm,
-            )
-            .await;
+            return self.abort_to_maker_payment_refund_required(reason, sm).await;
         }
 
         // Step 6: Sign and broadcast the taker payment spend (reveals maker secret).
@@ -1904,17 +1975,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State for T
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::FailedToSendTx(format!("Failed to spend taker payment: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -1972,17 +2033,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             .await
         {
             let reason = AbortReason::ConfirmationTimeout(format!("Taker payment not confirmed in time: {}", e));
-            return Self::change_state(
-                MakerPaymentRefundRequired::new(
-                    self.maker_coin_start_block,
-                    self.taker_coin_start_block,
-                    self.negotiation_data.clone(),
-                    self.maker_payment.clone(),
-                    reason,
-                ),
-                sm,
-            )
-            .await;
+            return self.abort_to_maker_payment_refund_required(reason, sm).await;
         }
 
         // Parse taker payment and build spend args.
@@ -1990,17 +2041,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to re-parse taker payment: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
@@ -2008,56 +2049,33 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             Ok(pubkey) => pubkey,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to derive taker-coin V2 HTLC pubkey: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
         let taker_coin_maker_addr = match sm.taker_coin.try_my_addr().await {
             Ok(address) => address,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to select taker-coin V2 address: {}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
         let taker_htlc_pub = match sm.taker_coin.parse_pubkey(&self.negotiation_data.taker_coin_htlc_pub) {
             Ok(p) => p,
             Err(e) => {
                 let reason = AbortReason::InternalError(format!("Failed to parse taker pub: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 
-        let dex_fee = super::compute_dex_fee_with_taker_pubkey_from_coin(
-            mm2_net_config::net_config_or_panic(sm.ctx.netid()),
+        let net_config = match mm2_net_config::net_config_for(sm.ctx.netid()) {
+            Some(cfg) => cfg,
+            None => {
+                let reason = AbortReason::InternalError(format!("No net config for netid {}", sm.ctx.netid()));
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
+            },
+        };
+        let dex_fee = super::compute_dex_fee_v2_with_taker_pubkey_from_coin(
+            net_config,
             &sm.taker_coin,
             sm.maker_coin.ticker(),
             &sm.taker_volume,
@@ -2073,6 +2091,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             dex_fee: &dex_fee,
             premium_amount: sm.taker_premium.to_decimal(),
             trading_amount: sm.taker_volume.to_decimal(),
+            dex_fee_addr_raw_pubkey: net_config.dex_fee_addr_raw_pubkey(),
         };
 
         // Sign and broadcast without preimage (None).
@@ -2084,17 +2103,7 @@ impl<M: MmCoin + MakerCoinSwapOpsV2, T: MmCoin + TakerCoinSwapOpsV2> State
             Ok(tx) => tx,
             Err(e) => {
                 let reason = AbortReason::FailedToSendTx(format!("Failed to spend taker payment: {:?}", e));
-                return Self::change_state(
-                    MakerPaymentRefundRequired::new(
-                        self.maker_coin_start_block,
-                        self.taker_coin_start_block,
-                        self.negotiation_data.clone(),
-                        self.maker_payment.clone(),
-                        reason,
-                    ),
-                    sm,
-                )
-                .await;
+                return self.abort_to_maker_payment_refund_required(reason, sm).await;
             },
         };
 

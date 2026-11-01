@@ -1,6 +1,8 @@
 #![cfg_attr(target_arch = "wasm32", allow(unused_macros))]
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
+use crate::node_url::{electrum_host_port, electrum_server_name, host_only, scrub_node_url, SECRET_SET, UNNAMED_SERVER};
+use crate::utxo::header_layout_fallback::HeaderReadPolicy;
 use crate::utxo::{output_script, sat_from_big_decimal};
 use crate::{big_decimal_from_sat_unsigned, NumConversError, RpcTransportEventHandler, RpcTransportEventHandlerShared};
 use async_trait::async_trait;
@@ -51,16 +53,16 @@ cfg_native! {
     use futures::io::Error;
     use http::header::AUTHORIZATION;
     use http::{Request, StatusCode};
-    use rustls::client::ServerCertVerified;
-    use rustls::{Certificate, ClientConfig, ServerName, OwnedTrustAnchor, RootCertStore};
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::crypto::{ring as rustls_ring, verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+    use rustls::pki_types::{CertificateDer, DnsName, ServerName, UnixTime};
+    use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
     use std::convert::TryFrom;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use std::time::SystemTime;
     use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
     use tokio::net::TcpStream;
     use tokio_rustls::{client::TlsStream, TlsConnector};
-    use tokio_rustls::webpki::DnsNameRef;
     use webpki_roots::TLS_SERVER_ROOTS;
 }
 
@@ -77,9 +79,24 @@ pub use native_rpc_client::*;
 pub(crate) mod electrum_types;
 pub use electrum_types::*;
 
+#[path = "rpc_clients/electrum_measure.rs"]
+pub(crate) mod electrum_measure;
+
+#[path = "rpc_clients/electrum_pool.rs"]
+pub(crate) mod electrum_pool;
+pub use electrum_pool::{ElectrumPoolOptions, ElectrumPoolTimings, ServerOrder};
+
 #[path = "rpc_clients/electrum_rpc_client.rs"]
 pub(crate) mod electrum_rpc_client;
 pub use electrum_rpc_client::*;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc_clients/electrum_stub_server.rs"]
+pub(crate) mod electrum_stub_server;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "rpc_clients/electrum_pool_tests.rs"]
+mod electrum_pool_tests;
 
 type ElectrumScriptHash = String;
 type ScriptHashUnspents = Vec<ElectrumUnspent>;
@@ -90,21 +107,55 @@ pub struct AddressPurpose {
     purpose: String,
 }
 
-/// Skips the server certificate verification on TLS connection
-pub struct NoCertificateVerification {}
+/// Skips the server certificate verification on TLS connection.
+///
+/// Only the certificate *chain and name* checks are skipped. The handshake signature is still
+/// verified against the public key of the presented certificate (as rustls 0.20 did by default),
+/// so the certificate must still parse and the peer must prove possession of its key.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct NoCertificateVerification {
+    provider: Arc<CryptoProvider>,
+}
 
 #[cfg(not(target_arch = "wasm32"))]
-impl rustls::client::ServerCertVerifier for NoCertificateVerification {
+impl NoCertificateVerification {
+    pub fn new(provider: Arc<CryptoProvider>) -> Self { NoCertificateVerification { provider } }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
         &self,
-        _: &Certificate,
-        _: &[Certificate],
-        _: &ServerName,
-        _: &mut dyn Iterator<Item = &[u8]>,
+        _: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
         _: &[u8],
-        _: SystemTime,
+        _: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -112,6 +163,10 @@ impl rustls::client::ServerCertVerifier for NoCertificateVerification {
 pub enum UtxoRpcClientEnum {
     Native(NativeClient),
     Electrum(ElectrumClient),
+    /// The sole backend of a Light-mode ZHTLC coin (CRD ch.39 R39.11.1, R39.11.4g). Native builds only:
+    /// the shielded wallet database it serves does not exist on WASM.
+    #[cfg(not(target_arch = "wasm32"))]
+    LightWalletD(crate::z_coin::LightwalletdClient),
 }
 
 impl From<ElectrumClient> for UtxoRpcClientEnum {
@@ -128,6 +183,8 @@ impl Deref for UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Native(ref c) => c,
             UtxoRpcClientEnum::Electrum(ref c) => c,
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(ref c) => c,
         }
     }
 }
@@ -137,6 +194,8 @@ impl Clone for UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Native(c) => UtxoRpcClientEnum::Native(c.clone()),
             UtxoRpcClientEnum::Electrum(c) => UtxoRpcClientEnum::Electrum(c.clone()),
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(c) => UtxoRpcClientEnum::LightWalletD(c.clone()),
         }
     }
 }
@@ -151,6 +210,20 @@ impl UtxoRpcClientEnum {
         wait_until: u64,
         check_every: u64,
     ) -> Box<dyn Future<Item = (), Error = String> + Send> {
+        // The lightwalletd backend derives confirmations locally from the mined height and the tip
+        // and treats an uncorroborated expiry differently (CRD ch.39 R39.11.4e, R39.11.12). It
+        // serves only ZHTLC coins, which have no notarized confirmation count, so
+        // `requires_notarization` has no effect there (R39.11.4e).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let UtxoRpcClientEnum::LightWalletD(client) = self {
+            let client = client.clone();
+            let fut = async move {
+                client
+                    .wait_for_confirmations(tx_hash, expiry_height, confirmations, wait_until, check_every)
+                    .await
+            };
+            return Box::new(fut.boxed().compat());
+        }
         let selfi = self.clone();
         let fut = async move {
             loop {
@@ -212,6 +285,8 @@ impl UtxoRpcClientEnum {
         match self {
             UtxoRpcClientEnum::Native(_) => true,
             UtxoRpcClientEnum::Electrum(_) => false,
+            #[cfg(not(target_arch = "wasm32"))]
+            UtxoRpcClientEnum::LightWalletD(_) => false,
         }
     }
 }
@@ -349,6 +424,29 @@ pub trait UtxoRpcClientOps: fmt::Debug + Send + Sync + 'static {
         coin_variant: CoinVariant,
     ) -> UtxoRpcFut<u32>;
 
+    /// As [`UtxoRpcClient::get_median_time_past`], reading the served header list under `policy`
+    /// (the coin's one layout and the structural fallback, CRD ch.37 R37.5.1a /
+    /// R37.5.9e). Clients that read no header list use only the layout of `policy`.
+    fn get_median_time_past_with_policy(
+        &self,
+        starting_block: u64,
+        count: NonZeroU64,
+        policy: HeaderReadPolicy,
+    ) -> UtxoRpcFut<u32> {
+        self.get_median_time_past(starting_block, count, policy.layout())
+    }
+
     /// Returns block time in seconds since epoch (Jan 1 1970 GMT).
     async fn get_block_timestamp(&self, height: u64) -> Result<u64, MmError<UtxoRpcError>>;
+
+    /// As [`UtxoRpcClient::get_block_timestamp`], reading the served header under `policy` (the
+    /// coin's pinned layout, or the standard layout with the structural fallback, CRD ch.37
+    /// R37.5.1a / R37.5.9e). Clients that parse no header ignore `policy`.
+    async fn get_block_timestamp_with_policy(
+        &self,
+        height: u64,
+        _policy: &HeaderReadPolicy,
+    ) -> Result<u64, MmError<UtxoRpcError>> {
+        self.get_block_timestamp(height).await
+    }
 }

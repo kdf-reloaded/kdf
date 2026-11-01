@@ -5,11 +5,14 @@ use crate::standalone_coin::{InitStandaloneCoinActivationOps, InitStandaloneCoin
                              InitStandaloneCoinTaskManagerShared};
 use async_trait::async_trait;
 use coins::coin_balance::{EnableCoinBalance, IguanaWalletBalance};
+use coins::node_url::lightwalletd_endpoint_label;
 use coins::utxo::rpc_clients::ElectrumRpcRequest;
 use coins::utxo::{UtxoActivationParams, UtxoRpcMode};
-use coins::z_coin::{z_coin_from_conf_and_params, ZCoin, ZCoinBuildError, ZcoinProtocolInfo};
+use coins::z_coin::{z_coin_from_conf_and_params, ZCoin, ZCoinBuildError, ZcoinBackend, ZcoinProtocolInfo};
+#[cfg(not(target_arch = "wasm32"))]
+use coins::z_coin::{LightwalletdError, ShieldedFetchError};
 use coins::{BalanceError, CoinProtocol, MarketCoinOps, PrivKeyActivationPolicy, RegisterCoinError};
-use common::{executor::Timer, log};
+use common::{executor::Timer, log, now_ms};
 use crypto::hw_rpc_task::{HwRpcTaskAwaitingStatus, HwRpcTaskUserAction};
 use crypto::{CryptoCtx, CryptoCtxError, CryptoInitError};
 use derive_more::Display;
@@ -20,8 +23,62 @@ use rpc_task::RpcTaskError;
 use ser_error_derive::SerializeErrorType;
 use serde_derive::{Deserialize, Serialize};
 use serde_json::Value as Json;
+use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::time::Duration;
+
+/// Pause between two attempts of a shielded sync that failed after it had started (CRD ch.39
+/// R39.10.14: "on the order of ten seconds").
+#[cfg(not(target_arch = "wasm32"))]
+const SHIELDED_SYNC_RETRY_PAUSE_SECS: f64 = 10.;
+
+/// Recorded deviation (CRD ch.39 R39.10.1): `task::enable_z_coin` is routed on WASM as the chapter requires,
+/// but the WebAssembly build has no shielded wallet database, so `ZCoin::my_balance` cannot report a real
+/// balance there. An activation therefore ends with `CoinCreationError` before the coin is built or
+/// registered, rather than reporting a made-up zero balance.
+const SHIELDED_WALLET_UNAVAILABLE: bool = cfg!(target_arch = "wasm32");
+
+fn shielded_unavailable_error(ticker: &str) -> ZcoinInitError {
+    ZcoinInitError::CoinCreationError {
+        ticker: ticker.to_owned(),
+        error: "Shielded activation is not available in the WebAssembly build: it has no shielded wallet database"
+            .to_owned(),
+    }
+}
+
+/// The backend an activation request asks for. A Light-mode request with no lightwalletd endpoint is
+/// a configuration error naming the coin, reported before any shielded work begins -- not a
+/// transient backend failure (CRD ch.39 R39.11.5). `electrum_servers` is accepted on the wire and kept for the
+/// fallback of three swap-path questions (R39.11.25); nothing connects to it here, and an empty list means no
+/// fallback (R39.11.5, R39.11.7). The Electrum connection counts are accepted and ignored. A Native-mode request is
+/// refused the same way: native mode is not supported in this release (R39.11.1a); the request still
+/// deserializes, so the wire shape is unchanged.
+fn zcoin_backend(ticker: &str, mode: &ZcoinRpcMode) -> Result<ZcoinBackend, ZcoinInitError> {
+    match mode {
+        #[cfg(not(target_arch = "wasm32"))]
+        ZcoinRpcMode::Native => Err(ZcoinInitError::CoinCreationError {
+            ticker: ticker.to_owned(),
+            error: format!("{ticker} native mode is not supported in this release; use light mode"),
+        }),
+        ZcoinRpcMode::Light {
+            light_wallet_d_servers,
+            electrum_servers,
+            ..
+        } => {
+            if light_wallet_d_servers.is_empty() {
+                return Err(ZcoinInitError::CoinCreationError {
+                    ticker: ticker.to_owned(),
+                    error: "`light_wallet_d_servers` must list at least one lightwalletd endpoint".to_owned(),
+                });
+            }
+            Ok(ZcoinBackend::Light {
+                light_wallet_d_servers: light_wallet_d_servers.clone(),
+                electrum_servers: electrum_servers.clone(),
+            })
+        },
+    }
+}
 
 pub type ZcoinTaskManagerShared = InitStandaloneCoinTaskManagerShared<ZCoin>;
 pub type ZcoinRpcTaskHandle = InitStandaloneCoinTaskHandle<ZCoin>;
@@ -58,6 +115,11 @@ impl CurrentBlock for ZcoinActivationResult {
     fn current_block(&self) -> u64 { self.current_block }
 }
 
+// Docs vs reference (CRD ch.39 R39.8, R39.10.7): the public in-progress list omits
+// `UpdatingBlocksCache`, `BuildingWalletDb` and `TemporaryError`, which the reference emits, and wrongly
+// lists `FollowHwDeviceInstructions`, which a shielded-coin task never reaches. Reloaded follows the
+// reference: it emits the first three and never emits `FollowHwDeviceInstructions`, so a client sees
+// exactly the values the reference produces.
 #[derive(Clone, Serialize)]
 #[non_exhaustive]
 pub enum ZcoinInProgressStatus {
@@ -74,6 +136,9 @@ pub enum ZcoinInProgressStatus {
         current_scanned_block: u64,
         latest_block: u64,
     },
+    /// A retriable shielded-backend or sync failure; the activation keeps retrying and the task stays
+    /// alive (CRD ch.39 R39.10.7, R39.10.14). Serializes as `{"TemporaryError": "<text>"}`.
+    TemporaryError(String),
     RequestingWalletBalance,
     Finishing,
     /// This status doesn't require the user to send `UserAction`,
@@ -86,12 +151,34 @@ impl InitStandaloneCoinInitialStatus for ZcoinInProgressStatus {
     fn initial_status() -> Self { ZcoinInProgressStatus::ActivatingCoin }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "rpc", content = "rpc_data")]
 pub enum ZcoinRpcMode {
+    /// Full-node backend. It exists only on native builds: on WASM the name is an unknown variant and
+    /// the request fails to parse (CRD ch.39 R39.10.4).
+    #[cfg(not(target_arch = "wasm32"))]
     Native,
+    /// lightwalletd backend. `"Electrum"` is accepted as a synonym of `"Light"`, as the public
+    /// `ZcoinRpcModeEnum` documents it (CRD ch.39 R39.10.4).
+    ///
+    /// lightwalletd serves the whole of a Light-mode coin (R39.11.1, R39.11.7): no Electrum connection
+    /// is opened, attempted, probed or reported on at activation, and activation never fails for an
+    /// Electrum-related reason. The Electrum servers are kept for the fallback of R39.11.25.
+    #[serde(alias = "Electrum")]
     Light {
+        /// Accepted and optional (R39.11.5): deployed KDF-family wallets send it unconditionally. It may
+        /// be absent or empty, which means no fallback. Its servers are used for one thing only, the
+        /// fallback of three swap-path questions (R39.11.25), and are connected on its first use.
+        /// `servers` is accepted as a synonym (CRD ch.39 R39.10.4).
+        #[serde(default, alias = "servers")]
         electrum_servers: Vec<ElectrumRpcRequest>,
+        /// Accepted and ignored (R39.11.5).
+        #[serde(default)]
+        min_connected: Option<usize>,
+        /// Accepted and ignored (R39.11.5).
+        #[serde(default)]
+        max_connected: Option<usize>,
+        /// Mandatory and non-empty (R39.11.5): the only backend of the coin.
         light_wallet_d_servers: Vec<String>,
         /// Optional shielded sync starting point (R39.6.2). Externally dictated
         /// wire location: nested inside the Light-mode `rpc_data` alongside the
@@ -104,6 +191,38 @@ pub enum ZcoinRpcMode {
         #[serde(default)]
         skip_sync_params: Option<bool>,
     },
+}
+
+/// The debug form names each lightwalletd endpoint by its host-only form (CRD ch.35 R35.1.17, ch.39 R39.11.29).
+impl fmt::Debug for ZcoinRpcMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinRpcMode::Native => f.write_str("Native"),
+            ZcoinRpcMode::Light {
+                electrum_servers,
+                min_connected,
+                max_connected,
+                light_wallet_d_servers,
+                sync_params,
+                skip_sync_params,
+            } => {
+                let endpoints: Vec<String> = light_wallet_d_servers
+                    .iter()
+                    .enumerate()
+                    .map(|(position, server)| lightwalletd_endpoint_label(server, position))
+                    .collect();
+                f.debug_struct("Light")
+                    .field("electrum_servers", electrum_servers)
+                    .field("min_connected", min_connected)
+                    .field("max_connected", max_connected)
+                    .field("light_wallet_d_servers", &endpoints)
+                    .field("sync_params", sync_params)
+                    .field("skip_sync_params", skip_sync_params)
+                    .finish()
+            },
+        }
+    }
 }
 
 /// Shielded sync starting point (R39.6.2). This is the externally *dictated*
@@ -123,16 +242,34 @@ pub enum ZcoinSyncParams {
     Earliest,
 }
 
+/// The backend used when `mode` is absent: Light mode with empty server lists, which then ends the task
+/// with `CoinCreationError` (CRD ch.39 R39.10.4, R39.10.13).
+fn default_zcoin_rpc_mode() -> ZcoinRpcMode {
+    ZcoinRpcMode::Light {
+        electrum_servers: Vec::new(),
+        min_connected: None,
+        max_connected: None,
+        light_wallet_d_servers: Vec::new(),
+        sync_params: None,
+        skip_sync_params: None,
+    }
+}
+
+// Members the public `ActivationRpcData` table lists but that have no Z-coin meaning (`tx_history`,
+// `get_balances`, `gap_limit`, `scan_policy`, `path_to_address`, `min_addresses_number`) and any other
+// unknown member are deliberately ignored: this struct has no strict-field rejection (CRD ch.39 R39.10.5).
 #[derive(Deserialize)]
 pub struct ZcoinActivationParams {
+    #[serde(default = "default_zcoin_rpc_mode")]
     pub mode: ZcoinRpcMode,
     pub required_confirmations: Option<u64>,
     pub requires_notarization: Option<bool>,
     /// Sync-throughput tuning: blocks processed per iteration (R39.6.2). The
     /// dictated wire name is `scan_blocks_per_iteration`; `blocks_per_iteration`
     /// is accepted as an alias. Defaults to 1000.
+    /// A zero is a request-parse failure, not a silent clamp (CRD ch.39 R39.10.4).
     #[serde(default, alias = "scan_blocks_per_iteration")]
-    pub blocks_per_iteration: Option<u32>,
+    pub blocks_per_iteration: Option<NonZeroU32>,
     /// Sync pacing interval (R39.6.2). The public-API dictated wire name is
     /// `scan_interval_ms`; the desktop wallet sends `scan_interval`. Both are
     /// accepted as aliases. Defaults to 0.
@@ -158,6 +295,7 @@ impl ZcoinActivationParams {
     fn sync_params(&self) -> Option<&ZcoinSyncParams> {
         match &self.mode {
             ZcoinRpcMode::Light { sync_params, .. } => sync_params.as_ref(),
+            #[cfg(not(target_arch = "wasm32"))]
             ZcoinRpcMode::Native => None,
         }
     }
@@ -167,6 +305,7 @@ impl ZcoinActivationParams {
     fn skip_sync_params(&self) -> bool {
         match &self.mode {
             ZcoinRpcMode::Light { skip_sync_params, .. } => skip_sync_params.unwrap_or(false),
+            #[cfg(not(target_arch = "wasm32"))]
             ZcoinRpcMode::Native => false,
         }
     }
@@ -176,15 +315,31 @@ impl TxHistory for ZcoinActivationParams {
     fn tx_history(&self) -> bool { false }
 }
 
+/// Resolves a requested sync date to the last block at or before it (CRD ch.39 R39.8.0h, R39.10.11).
+///
+/// A date in the future is an error. "Future" means later than both the wall clock (`now`) and the
+/// tip's own block time: a date after the tip but not after `now` is the ordinary case of a chain
+/// that has not produced a block since that moment, and resolves to the tip; a date after `now` that
+/// is covered by a tip block time ahead of the clock (block times may run ahead of it) resolves to a
+/// real block. Only a date beyond both is rejected. A start given as a height is not handled here and
+/// keeps clamping to the tip.
 async fn resolve_requested_shielded_scan_start_height<F, Fut>(
     target_timestamp: u64,
     tip_height: u64,
+    now: u64,
     mut get_block_timestamp: F,
 ) -> Result<u64, String>
 where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<u64, String>>,
 {
+    let tip_timestamp = get_block_timestamp(tip_height).await?;
+    if target_timestamp > now.max(tip_timestamp) {
+        return Err(format!(
+            "the sync start date {target_timestamp} is in the future (current time {now}, chain tip block time {tip_timestamp})"
+        ));
+    }
+
     let mut low = 0u64;
     let mut high = tip_height;
     let mut resolved_height = 0u64;
@@ -195,16 +350,25 @@ where
         if block_timestamp <= target_timestamp {
             resolved_height = mid;
             low = mid + 1;
+        } else if mid == 0 {
+            // A date before block 0: `saturating_sub` would leave the window at 0..=0 forever.
+            break;
         } else {
-            high = mid.saturating_sub(1);
+            high = mid - 1;
         }
     }
 
     Ok(resolved_height)
 }
 
+// Docs vs reference (CRD ch.39 R39.10.6 "start-point resolution", R39.8.0g): the reference resolves a
+// `{"date": T}` start with a block-time estimate from the coin config's `avg_blocktime`, and without
+// `sync_params` it starts roughly one day before the tip. Reloaded resolves a date against the backend's
+// block timestamps instead, because the estimate drifts from the real chain. Only the value of
+// `first_sync_block.requested` differs; the wire shapes are the same.
 async fn requested_shielded_scan_start_height(
     coin: &ZCoin,
+    ticker: &str,
     sync_params: Option<&ZcoinSyncParams>,
 ) -> Result<Option<u64>, ZcoinInitError> {
     match sync_params {
@@ -212,23 +376,29 @@ async fn requested_shielded_scan_start_height(
         Some(ZcoinSyncParams::Height(height)) => Ok(Some(*height)),
         Some(ZcoinSyncParams::Earliest) => Ok(Some(coin.sapling_activation_height())),
         Some(ZcoinSyncParams::Date(target_timestamp)) => {
+            // R39.10.11: a date in the future ends activation with `CoinCreationError`.
             let tip_height = coin
                 .current_block()
                 .compat()
                 .await
                 .map_err(ZcoinInitError::CouldNotGetBlockCount)?;
-            let resolved_height =
-                resolve_requested_shielded_scan_start_height(*target_timestamp, tip_height, |height| async move {
+            let resolved_height = resolve_requested_shielded_scan_start_height(
+                *target_timestamp,
+                tip_height,
+                now_ms() / 1_000,
+                |height| async move {
                     coin.rpc_client()
                         .get_block_timestamp(height)
                         .await
                         .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| ZcoinInitError::CouldNotResolveSyncStartDate {
-                    sync_start: target_timestamp.to_string(),
-                    error,
-                })?;
+                },
+            )
+            .await
+            .map_err(|error| ZcoinInitError::CouldNotResolveSyncStartDate {
+                ticker: ticker.to_owned(),
+                sync_start: target_timestamp.to_string(),
+                error,
+            })?;
             Ok(Some(resolved_height))
         },
     }
@@ -256,7 +426,10 @@ pub enum ZcoinInitError {
     CoinIsAlreadyActivated {
         ticker: String,
     },
-    HardwareWalletsAreNotSupportedYet,
+    #[display(fmt = "Hardware wallets are not supported yet for {}", ticker)]
+    HardwareWalletsAreNotSupportedYet {
+        ticker: String,
+    },
     #[display(fmt = "Initialization task has timed out {:?}", duration)]
     TaskTimedOut {
         duration: Duration,
@@ -265,6 +438,7 @@ pub enum ZcoinInitError {
     CouldNotGetBlockCount(String),
     #[display(fmt = "Could not resolve sync start date {}: {}", sync_start, error)]
     CouldNotResolveSyncStartDate {
+        ticker: String,
         sync_start: String,
         error: String,
     },
@@ -279,15 +453,64 @@ pub enum ZcoinInitError {
         activation_tip: u64,
         error: String,
     },
+    /// Every configured lightwalletd endpoint failed the server-information read (R39.11.6).
+    #[display(fmt = "No lightwalletd endpoint of {} is reachable: {}", ticker, error)]
+    LightwalletdUnreachable {
+        ticker: String,
+        error: String,
+    },
+    /// Endpoints answered, and admission excluded every one of them as serving another chain or
+    /// branch (R39.11.6, R39.11.7a). Distinct from [`ZcoinInitError::LightwalletdUnreachable`].
+    #[display(
+        fmt = "No lightwalletd endpoint of {} passed admission (wrong chain or branch, or stale): {}",
+        ticker,
+        error
+    )]
+    LightwalletdExcluded {
+        ticker: String,
+        error: String,
+    },
     Internal(String),
 }
 
 impl ZcoinInitError {
-    pub fn from_build_err(build_err: ZCoinBuildError, ticker: String) -> Self {
-        ZcoinInitError::CoinCreationError {
-            ticker,
-            error: build_err.to_string(),
+    #[cfg(not(target_arch = "wasm32"))]
+    fn from_lightwalletd(ticker: &str, error: LightwalletdError) -> Self {
+        let ticker = ticker.to_owned();
+        match error {
+            LightwalletdError::AllUnreachable(error) => ZcoinInitError::LightwalletdUnreachable { ticker, error },
+            LightwalletdError::AllExcluded(error) => ZcoinInitError::LightwalletdExcluded { ticker, error },
+            // The whole message: the bare payload (`37a5165b x1`) reads as a chain verdict, not as
+            // "this branch is reported by one endpoint only".
+            no_majority @ LightwalletdError::NoBranchMajority(_) => ZcoinInitError::LightwalletdExcluded {
+                ticker,
+                error: no_majority.to_string(),
+            },
+            LightwalletdError::NoEndpoints => ZcoinInitError::CoinCreationError {
+                ticker,
+                error: "`light_wallet_d_servers` must list at least one lightwalletd endpoint".to_owned(),
+            },
+            other => ZcoinInitError::Internal(other.to_string()),
         }
+    }
+
+    /// Maps a coin-build failure to the task error.
+    ///
+    /// Docs vs reference (CRD ch.39 R39.10.12): the public page binds the content of the error object
+    /// for missing Sapling parameters, `error_data.error == "ZCashParamsNotFound"`, and shows that error
+    /// once as a bare object and once inside a `status` `Error`. The reference only ever emits it inside
+    /// a `status` `Error`. Reloaded follows the reference for the placement (it is a task-level
+    /// `CoinCreationError`) and the docs for the content, so clients that match on the token keep
+    /// working. The descriptive text with the path goes to the log.
+    pub fn from_build_err(build_err: ZCoinBuildError, ticker: String) -> Self {
+        let error = match build_err {
+            ZCoinBuildError::ZCashParamsNotFound | ZCoinBuildError::ZCashParamsDirNotFound { .. } => {
+                log::warn!("Cannot activate {}: {}", ticker, build_err);
+                "ZCashParamsNotFound".to_owned()
+            },
+            other => other.to_string(),
+        };
+        ZcoinInitError::CoinCreationError { ticker, error }
     }
 }
 
@@ -325,22 +548,124 @@ impl From<CryptoCtxError> for ZcoinInitError {
 
 impl From<ZcoinInitError> for InitStandaloneCoinError {
     fn from(err: ZcoinInitError) -> Self {
-        match err {
+        match err.clone() {
             ZcoinInitError::CoinCreationError { ticker, error } => {
                 InitStandaloneCoinError::CoinCreationError { ticker, error }
             },
             ZcoinInitError::CoinIsAlreadyActivated { ticker } => {
                 InitStandaloneCoinError::CoinIsAlreadyActivated { ticker }
             },
-            ZcoinInitError::HardwareWalletsAreNotSupportedYet => {
-                InitStandaloneCoinError::PrivKeyNotAllowed("Hardware wallets are not supported yet".into())
+            ZcoinInitError::HardwareWalletsAreNotSupportedYet { ticker } => {
+                InitStandaloneCoinError::CoinCreationError {
+                    ticker,
+                    error: "Hardware wallets are not supported yet".into(),
+                }
             },
             ZcoinInitError::TaskTimedOut { duration } => InitStandaloneCoinError::TaskTimedOut { duration },
-            ZcoinInitError::CouldNotGetBalance(e)
-            | ZcoinInitError::CouldNotGetBlockCount(e)
-            | ZcoinInitError::CouldNotResolveSyncStartDate { error: e, .. }
-            | ZcoinInitError::ShieldedWalletDbScanIncomplete { error: e, .. }
-            | ZcoinInitError::Internal(e) => InitStandaloneCoinError::Internal(e),
+            ZcoinInitError::LightwalletdUnreachable { .. } => InitStandaloneCoinError::Transport(err.to_string()),
+            ZcoinInitError::LightwalletdExcluded { ticker, error } => InitStandaloneCoinError::CoinCreationError {
+                ticker,
+                error: format!(
+                    "No lightwalletd endpoint passed admission (wrong chain or branch, or stale): {}",
+                    error
+                ),
+            },
+            // The coin was built and the shielded sync finished, but the transparent backend could not
+            // deliver the height or the balance (CRD ch.39 R39.10.11).
+            ZcoinInitError::CouldNotGetBalance(e) | ZcoinInitError::CouldNotGetBlockCount(e) => {
+                InitStandaloneCoinError::Transport(e)
+            },
+            ZcoinInitError::CouldNotResolveSyncStartDate {
+                ticker,
+                sync_start,
+                error,
+            } => InitStandaloneCoinError::CoinCreationError {
+                ticker,
+                error: format!("Could not resolve sync start date {}: {}", sync_start, error),
+            },
+            // Docs vs reference (CRD ch.39 R39.10.13): the public error catalogue lists
+            // `HardwareWalletsAreNotSupportedYet`, `CouldNotGetBalance` and `CouldNotGetBlockCount` as
+            // Z-coin errors. The reference never puts those names on the wire, and neither does
+            // Reloaded: they are translated into the task-level discriminants here.
+            ZcoinInitError::ShieldedWalletDbScanIncomplete { error: e, .. } | ZcoinInitError::Internal(e) => {
+                InitStandaloneCoinError::Internal(e)
+            },
+        }
+    }
+}
+
+/// Waits for the commitment-tree sync loop to report that it has caught up.
+///
+/// While the loop cannot read from its backend (the full-node daemon in Native mode, the Electrum
+/// connection in Light mode) the failure is shown as a retriable `TemporaryError` and the wait goes on
+/// (CRD ch.39 R39.10.14). A loop that ended without ever reporting completion is a dead sync process and
+/// ends the task with `Internal`.
+async fn wait_for_sapling_state_sync(coin: &ZCoin, task_handle: &ZcoinRpcTaskHandle) -> MmResult<(), ZcoinInitError> {
+    let mut reported_error: Option<String> = None;
+    loop {
+        // The loop ends right after it reports completion, so "stopped" must be read before "synced":
+        // a stopped loop that is not synced on the second read really never completed.
+        let stopped = coin.sapling_loop_stopped();
+        if coin.is_sapling_state_synced() {
+            return Ok(());
+        }
+        if stopped {
+            return MmError::err(ZcoinInitError::Internal(
+                "The shielded sync process stopped before it reported completion".to_owned(),
+            ));
+        }
+
+        let current_error = coin.sapling_loop_error();
+        if current_error != reported_error {
+            let status = match &current_error {
+                Some(message) => ZcoinInProgressStatus::TemporaryError(message.clone()),
+                None => ZcoinInProgressStatus::ActivatingCoin,
+            };
+            task_handle.update_in_progress_status(status).mm_err(Into::into)?;
+            reported_error = current_error;
+        }
+        Timer::sleep(1.).await;
+    }
+}
+
+/// Runs the Light-mode shielded sync until it succeeds.
+///
+/// A failure before the sync started (no lightwalletd endpoint can be connected, the endpoint list is
+/// empty, the initial chain-state query fails, the local storage cannot be read) ends the task with
+/// `CoinCreationError`. A failure after it started is reported as a `TemporaryError` in-progress value
+/// and the sync is retried after a pause, without any cap: the task ends only on success or on cancel
+/// (CRD ch.39 R39.10.14, maintainer decision: follow the reference). Once a failure was reported the
+/// sync counts as started, so later failures never turn terminal.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_shielded_sync_with_retry<Attempt, AttemptFut, Report, Pause, PauseFut>(
+    ticker: &str,
+    mut attempt: Attempt,
+    mut report_temporary_error: Report,
+    mut pause: Pause,
+) -> MmResult<(), ZcoinInitError>
+where
+    Attempt: FnMut() -> AttemptFut,
+    AttemptFut: Future<Output = Result<(), ShieldedFetchError>>,
+    Report: FnMut(String) -> MmResult<(), ZcoinInitError>,
+    Pause: FnMut() -> PauseFut,
+    PauseFut: Future<Output = ()>,
+{
+    let mut sync_started = false;
+    loop {
+        match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(ShieldedFetchError::BeforeSync(error)) if !sync_started => {
+                return MmError::err(ZcoinInitError::CoinCreationError {
+                    ticker: ticker.to_owned(),
+                    error,
+                });
+            },
+            Err(error) => {
+                sync_started = true;
+                log::warn!("ZCoin shielded sync for {} failed, retrying: {}", ticker, error);
+                report_temporary_error(error.to_string())?;
+                pause().await;
+            },
         }
     }
 }
@@ -371,17 +696,6 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         &activation_ctx.init_z_coin_task_manager
     }
 
-    async fn acquire_activation_guard(
-        ctx: MmArc,
-        ticker: &str,
-    ) -> Result<Option<Box<dyn Send>>, MmError<Self::ActivationError>> {
-        let activation_ctx = CoinsActivationContext::from_ctx(&ctx).map_to_mm(ZcoinInitError::Internal)?;
-        let lock = activation_ctx
-            .z_coin_activation_lock(ticker)
-            .map_to_mm(ZcoinInitError::Internal)?;
-        Ok(Some(Box::new(lock.lock_owned().await)))
-    }
-
     async fn init_standalone_coin(
         ctx: MmArc,
         ticker: String,
@@ -390,16 +704,14 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         mut protocol_info: ZcoinProtocolInfo,
         task_handle: &ZcoinRpcTaskHandle,
     ) -> MmResult<Self, ZcoinInitError> {
-        let utxo_mode = match &activation_request.mode {
-            ZcoinRpcMode::Native => UtxoRpcMode::Native,
-            ZcoinRpcMode::Light { electrum_servers, .. } => UtxoRpcMode::Electrum {
-                servers: electrum_servers.clone(),
-                min_connected: None,
-                max_connected: None,
-            },
-        };
+        if SHIELDED_WALLET_UNAVAILABLE {
+            return MmError::err(shielded_unavailable_error(&ticker));
+        }
+        let backend = zcoin_backend(&ticker, &activation_request.mode)?;
         let utxo_params = UtxoActivationParams {
-            mode: utxo_mode,
+            // Not consulted: the RPC client of a shielded coin is chosen by `backend`, so no Electrum
+            // connection can be built from this value (R39.11.1, R39.11.5).
+            mode: UtxoRpcMode::Native,
             utxo_merge_params: None,
             tx_history: false,
             required_confirmations: activation_request.required_confirmations,
@@ -410,11 +722,12 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             scan_policy: Default::default(),
             priv_key_policy: PrivKeyActivationPolicy::IguanaPrivKey,
             check_utxo_maturity: None,
+            path_to_address: None,
         };
 
         // Wire sync parameters from RPC request into protocol_info (R39.6.2)
         if let Some(blocks_per_iter) = activation_request.blocks_per_iteration {
-            protocol_info.blocks_per_iteration = blocks_per_iter.max(1);
+            protocol_info.blocks_per_iteration = blocks_per_iter.get();
         }
         if let Some(inter_iter_ms) = activation_request.inter_iteration_interval_ms {
             protocol_info.inter_iteration_interval_ms = inter_iter_ms;
@@ -430,17 +743,35 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             &utxo_params,
             priv_key.as_slice(),
             activation_request.account.unwrap_or(0),
+            // The Sapling parameter directory is a native-build setting; it is ignored on WASM
+            // (CRD ch.39 R39.10.4).
+            #[cfg(not(target_arch = "wasm32"))]
             activation_request
                 .zcash_params_path
                 .as_ref()
                 .map(std::path::PathBuf::from),
             protocol_info,
+            backend,
         )
         .await
         .mm_err(|e| ZcoinInitError::from_build_err(e, ticker.clone()))?;
 
+        // Admission before anything reads the chain (R39.11.6, R39.11.7a): an unreachable set and an
+        // excluded set are different failures and neither reports a placeholder tip.
+        #[cfg(not(target_arch = "wasm32"))]
+        if coin.is_light() {
+            coin.admitted_lightwalletd_servers()
+                .await
+                .map_to_mm(|e| ZcoinInitError::from_lightwalletd(&ticker, e))?;
+        }
+
         let requested_start_height =
-            requested_shielded_scan_start_height(&coin, activation_request.sync_params()).await?;
+            requested_shielded_scan_start_height(&coin, &ticker, activation_request.sync_params()).await?;
+        // Docs vs reference (CRD ch.39 R39.10.6, code-quality finding): the documented intent of
+        // `skip_sync_params` is "resume from the last synced block; use `sync_params` only when nothing
+        // was synced yet". The reference still rewinds and rescans from `sync_params` when the flag is
+        // set and a local block cache exists, so it honours the flag only for an empty cache. Reloaded
+        // implements the documented intent (R39.6.2) and does not copy that behavior.
         let skip_sync_params = activation_request.skip_sync_params();
         log::info!(
             "ZCoin shielded sync settings for {}: sync_params={:?}, resolved_start_height={:?}, skip_sync_params={}, scan_blocks_per_iteration={}, scan_interval_ms={}",
@@ -452,56 +783,85 @@ impl InitStandaloneCoinActivationOps for ZCoin {
             scan_interval_ms
         );
 
-        while !coin.is_sapling_state_synced() {
-            Timer::sleep(1.).await;
-        }
+        wait_for_sapling_state_sync(&coin, task_handle).await?;
+        // The shielded wallet scan below needs the tip; WASM has no wallet scan, so there it only proves
+        // that the transparent backend answers.
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
         let activation_tip = coin
             .current_block()
             .compat()
             .await
             .map_to_mm(ZcoinInitError::CouldNotGetBlockCount)?;
 
-        if let ZcoinRpcMode::Light {
-            light_wallet_d_servers, ..
-        } = &activation_request.mode
-        {
-            // Phase 1 — `UpdatingBlocksCache`: download compact blocks from
-            // lightwalletd, reporting incremental progress (R39.3.1).
-            let cache_progress = |current_scanned_block: u64, latest_block: u64| {
-                let _ = task_handle.update_in_progress_status(ZcoinInProgressStatus::UpdatingBlocksCache {
+        // Native mode scans the wallet database once, up to the activation tip. A scan failure there is a
+        // local one, not a lightwalletd outage, so it ends the task.
+        #[cfg(not(target_arch = "wasm32"))]
+        if matches!(activation_request.mode, ZcoinRpcMode::Native) {
+            let build_progress = |current_scanned_block: u64, latest_block: u64| {
+                let _ = task_handle.update_in_progress_status(ZcoinInProgressStatus::BuildingWalletDb {
                     current_scanned_block,
                     latest_block,
                 });
             };
-            coin.fetch_lightwalletd_compact_blocks_to_height(
-                light_wallet_d_servers,
-                activation_tip,
-                requested_start_height,
-                skip_sync_params,
-                &cache_progress,
-            )
-            .await
-            .map_err(|error| ZcoinInitError::ShieldedWalletDbScanIncomplete {
-                ticker: ticker.clone(),
-                activation_tip,
-                error,
-            })?;
+            coin.scan_shielded_wallet_db_to_height(activation_tip, build_progress)
+                .map_err(|error| ZcoinInitError::ShieldedWalletDbScanIncomplete {
+                    ticker: ticker.clone(),
+                    activation_tip,
+                    error,
+                })?;
         }
 
-        // Phase 2 — `BuildingWalletDb`: scan cached blocks into the wallet DB,
-        // reporting incremental progress (R39.3.1).
-        let build_progress = |current_scanned_block: u64, latest_block: u64| {
-            let _ = task_handle.update_in_progress_status(ZcoinInProgressStatus::BuildingWalletDb {
-                current_scanned_block,
-                latest_block,
-            });
-        };
-        coin.scan_shielded_wallet_db_to_height(activation_tip, build_progress)
-            .map_err(|error| ZcoinInitError::ShieldedWalletDbScanIncomplete {
-                ticker: ticker.clone(),
-                activation_tip,
-                error,
-            })?;
+        // Light mode: download compact blocks from lightwalletd, then scan them into the wallet
+        // database. The shielded wallet database exists on native builds only, so on WASM the
+        // commitment-tree sync above is the whole shielded sync.
+        #[cfg(not(target_arch = "wasm32"))]
+        if coin.is_light() {
+            run_shielded_sync_with_retry(
+                &ticker,
+                || async {
+                    // Phase 1 - `UpdatingBlocksCache`: download compact blocks from lightwalletd,
+                    // reporting incremental progress (R39.3.1).
+                    let cache_progress = |current_scanned_block: u64, latest_block: u64| {
+                        let _ = task_handle.update_in_progress_status(ZcoinInProgressStatus::UpdatingBlocksCache {
+                            current_scanned_block,
+                            latest_block,
+                        });
+                    };
+                    coin.fetch_lightwalletd_compact_blocks_to_height(
+                        activation_tip,
+                        requested_start_height,
+                        skip_sync_params,
+                        &cache_progress,
+                    )
+                    .await?;
+
+                    // Phase 2 - `BuildingWalletDb`: scan cached blocks into the wallet DB, reporting
+                    // incremental progress (R39.3.1).
+                    let build_progress = |current_scanned_block: u64, latest_block: u64| {
+                        let _ = task_handle.update_in_progress_status(ZcoinInProgressStatus::BuildingWalletDb {
+                            current_scanned_block,
+                            latest_block,
+                        });
+                    };
+                    coin.scan_shielded_wallet_db_to_height(activation_tip, build_progress)
+                        .map(|_| ())
+                        .map_err(ShieldedFetchError::DuringSync)
+                },
+                |message| {
+                    task_handle
+                        .update_in_progress_status(ZcoinInProgressStatus::TemporaryError(message))
+                        .mm_err(Into::into)
+                },
+                || Timer::sleep(SHIELDED_SYNC_RETRY_PAUSE_SECS),
+            )
+            .await?;
+
+            // The scan above is a one-shot up to the activation tip. Light mode has no other component
+            // advancing the wallet DB afterwards, so without this the balance would stay frozen at the
+            // activation height until the coin is activated again.
+            coin.spawn_post_activation_shielded_sync();
+        }
+
         Ok(coin)
     }
 
@@ -511,6 +871,10 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         task_handle: &ZcoinRpcTaskHandle,
         activation_request: &Self::ActivationRequest,
     ) -> MmResult<Self::ActivationResult, ZcoinInitError> {
+        // Unreachable on WASM (the coin is never built there); kept so that no zero balance can be reported.
+        if SHIELDED_WALLET_UNAVAILABLE {
+            return MmError::err(shielded_unavailable_error(self.ticker()));
+        }
         task_handle
             .update_in_progress_status(ZcoinInProgressStatus::RequestingWalletBalance)
             .mm_err(Into::into)?;
@@ -527,13 +891,17 @@ impl InitStandaloneCoinActivationOps for ZCoin {
         // backend used during scan); otherwise it falls back to the height the
         // shielded scan was actually anchored at, then to Sapling activation.
         let requested_start_height =
-            requested_shielded_scan_start_height(self, activation_request.sync_params()).await?;
+            requested_shielded_scan_start_height(self, self.ticker(), activation_request.sync_params()).await?;
         let effective_start_height = requested_start_height
             .or_else(|| self.shielded_wallet_sync_start_height())
             .unwrap_or_else(|| self.sapling_activation_height());
         let first_sync_block = first_sync_block(effective_start_height, self.sapling_activation_height());
 
         let balance = self.my_balance().compat().await.mm_err(Into::into)?;
+        // Docs vs reference (CRD ch.39 R39.10.9): the public `get_balances` remark says the structure of the
+        // result may vary. The reference ignores `get_balances` for this coin and always reports the
+        // single-address form with `"wallet_type": "Iguana"`, also when the shielded key is HD-derived.
+        // Reloaded does the same: there is no per-account HD report and no ticker-keyed balance map.
         Ok(ZcoinActivationResult {
             ticker: self.ticker().to_owned(),
             current_block,
@@ -589,7 +957,7 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(params.blocks_per_iteration, Some(5000));
+        assert_eq!(params.blocks_per_iteration.map(NonZeroU32::get), Some(5000));
         assert_eq!(params.inter_iteration_interval_ms, Some(0));
         assert_eq!(params.sync_params(), Some(&ZcoinSyncParams::Height(3_785_000)));
     }
@@ -616,6 +984,7 @@ mod tests {
         let resolved = futures::executor::block_on(resolve_requested_shielded_scan_start_height(
             350,
             3,
+            1_000,
             |height| async move {
                 let timestamps = [100u64, 200u64, 300u64, 400u64];
                 Ok::<u64, String>(timestamps[height as usize])
@@ -624,6 +993,46 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolved, 2);
+    }
+
+    fn resolve_date(target: u64, now: u64) -> Result<u64, String> {
+        futures::executor::block_on(resolve_requested_shielded_scan_start_height(
+            target,
+            3,
+            now,
+            |height| async move {
+                let timestamps = [100u64, 200u64, 300u64, 400u64];
+                Ok::<u64, String>(timestamps[height as usize])
+            },
+        ))
+    }
+
+    #[test]
+    fn sync_date_beyond_the_clock_and_the_tip_is_rejected_not_clamped() {
+        // R39.10.11: tip time 400, clock 1_000, date 1_001.
+        let error = resolve_date(1_001, 1_000).unwrap_err();
+        assert!(error.contains("in the future"), "{error}");
+    }
+
+    #[test]
+    fn sync_date_between_the_tip_time_and_the_clock_resolves_to_the_tip() {
+        // Deliberate window: later than the tip block (400) but not later than now (1_000).
+        assert_eq!(resolve_date(700, 1_000), Ok(3));
+        assert_eq!(resolve_date(1_000, 1_000), Ok(3));
+    }
+
+    #[test]
+    fn sync_date_ahead_of_a_lagging_clock_but_covered_by_the_tip_block_resolves() {
+        // Clock 300 is behind the tip block time 400; a date of 350 is not in the future.
+        assert_eq!(resolve_date(350, 300), Ok(2));
+        assert_eq!(resolve_date(400, 300), Ok(3));
+        assert!(resolve_date(401, 300).is_err());
+    }
+
+    #[test]
+    fn sync_date_at_the_tip_time_and_before_genesis_still_resolve() {
+        assert_eq!(resolve_date(400, 1_000), Ok(3));
+        assert_eq!(resolve_date(50, 1_000), Ok(0));
     }
 
     #[test]
@@ -670,6 +1079,491 @@ mod tests {
                 }
             })
         );
+    }
+
+    fn lightd_light_mode_json() -> serde_json::Value {
+        json!({
+            "rpc": "Light",
+            "rpc_data": {
+                "electrum_servers": [{ "url": "electrum1.example:10008" }],
+                "light_wallet_d_servers": ["https://lightd1.example:443"]
+            }
+        })
+    }
+
+    #[test]
+    fn activation_params_without_mode_are_light_with_empty_server_lists() {
+        // CRD ch.39 R39.10.4 / T39.10.2 (a): a request without `mode` parses and ends later with
+        // `CoinCreationError`.
+        let params: ZcoinActivationParams = serde_json::from_value(json!({})).unwrap();
+        match params.mode {
+            ZcoinRpcMode::Light {
+                electrum_servers,
+                light_wallet_d_servers,
+                min_connected,
+                max_connected,
+                ..
+            } => {
+                assert!(electrum_servers.is_empty());
+                assert!(light_wallet_d_servers.is_empty());
+                assert_eq!((min_connected, max_connected), (None, None));
+            },
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinRpcMode::Native => panic!("a missing mode must behave as Light mode"),
+        }
+    }
+
+    #[test]
+    fn electrum_is_a_synonym_of_light_and_servers_of_electrum_servers() {
+        // T39.10.2 (b), (c) and (d).
+        let params: ZcoinActivationParams = serde_json::from_value(json!({
+            "mode": {
+                "rpc": "Electrum",
+                "rpc_data": {
+                    "servers": [{ "url": "electrum1.example:10008" }, { "url": "electrum2.example:10008" }],
+                    "min_connected": 2,
+                    "max_connected": 5,
+                    "light_wallet_d_servers": ["https://lightd1.example:443"]
+                }
+            }
+        }))
+        .unwrap();
+        match params.mode {
+            ZcoinRpcMode::Light {
+                electrum_servers,
+                min_connected,
+                max_connected,
+                ..
+            } => {
+                assert_eq!(electrum_servers.len(), 2);
+                assert_eq!(min_connected, Some(2));
+                assert_eq!(max_connected, Some(5));
+            },
+            #[cfg(not(target_arch = "wasm32"))]
+            ZcoinRpcMode::Native => panic!("`Electrum` must parse as Light mode"),
+        }
+    }
+
+    /// T39.11.b / R39.11.5: `light_wallet_d_servers` is mandatory and non-empty; `electrum_servers`
+    /// is neither. The retired form of this test required both lists.
+    #[test]
+    fn light_mode_requires_only_the_lightwalletd_list() {
+        // Absent: a parse failure, as before.
+        let missing_lightd = json!({ "mode": { "rpc": "Light", "rpc_data": {
+            "electrum_servers": [{ "url": "electrum1.example:10008" }]
+        } } });
+        assert!(serde_json::from_value::<ZcoinActivationParams>(missing_lightd).is_err());
+
+        // Empty: a configuration error that names the coin.
+        let empty_lightd = json!({ "mode": { "rpc": "Light", "rpc_data": { "light_wallet_d_servers": [] } } });
+        let params: ZcoinActivationParams = serde_json::from_value(empty_lightd).unwrap();
+        match zcoin_backend("ARRR", &params.mode) {
+            Err(ZcoinInitError::CoinCreationError { ticker, error }) => {
+                assert_eq!(ticker, "ARRR");
+                assert!(error.contains("light_wallet_d_servers"), "{error}");
+            },
+            _ => panic!("an empty lightwalletd list must be a configuration error"),
+        }
+    }
+
+    /// T39.11.b, T39.11.p / R39.11.5, R39.11.7, R39.11.25(e): absent, empty and populated (unreachable)
+    /// `electrum_servers` all activate: the backend's lightwalletd list is the same, the Electrum servers
+    /// are kept for the fallback exactly as listed, and nothing here connects to them.
+    #[test]
+    fn electrum_servers_are_accepted_kept_for_the_fallback_and_never_connected_at_activation() {
+        let lightd = json!(["https://lightd1.example:443", "https://lightd2.example:443"]);
+        let variants = [
+            json!({ "light_wallet_d_servers": lightd }),
+            json!({ "electrum_servers": [], "light_wallet_d_servers": lightd }),
+            json!({
+                "electrum_servers": [{ "url": "unreachable.invalid:10008" }, { "url": "also-unreachable.invalid:10008" }],
+                "min_connected": 3,
+                "max_connected": 9,
+                "light_wallet_d_servers": lightd
+            }),
+        ];
+        let mut backends = Vec::new();
+        let mut kept = Vec::new();
+        for rpc_data in variants {
+            let params: ZcoinActivationParams =
+                serde_json::from_value(json!({ "mode": { "rpc": "Light", "rpc_data": rpc_data } })).unwrap();
+            match zcoin_backend("ARRR", &params.mode).ok().unwrap() {
+                ZcoinBackend::Light {
+                    light_wallet_d_servers,
+                    electrum_servers,
+                } => {
+                    backends.push(light_wallet_d_servers);
+                    kept.push(electrum_servers.into_iter().map(|s| s.url).collect::<Vec<_>>());
+                },
+                #[cfg(not(target_arch = "wasm32"))]
+                ZcoinBackend::Native => panic!("Light mode must select the lightwalletd backend"),
+            }
+        }
+        assert_eq!(backends[0], vec![
+            "https://lightd1.example:443",
+            "https://lightd2.example:443"
+        ]);
+        assert!(backends.iter().all(|servers| servers == &backends[0]));
+        assert_eq!(kept, vec![Vec::<String>::new(), Vec::<String>::new(), vec![
+            "unreachable.invalid:10008".to_owned(),
+            "also-unreachable.invalid:10008".to_owned()
+        ],]);
+    }
+
+    /// T39.11.b / R39.11.6: an unreachable endpoint set and an excluded one are different failures.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unreachable_and_excluded_endpoint_sets_are_distinguishable_activation_errors() {
+        let unreachable =
+            ZcoinInitError::from_lightwalletd("ARRR", LightwalletdError::AllUnreachable("a: refused".to_owned()));
+        let excluded =
+            ZcoinInitError::from_lightwalletd("ARRR", LightwalletdError::AllExcluded("a: other branch".to_owned()));
+        let no_majority =
+            ZcoinInitError::from_lightwalletd("ARRR", LightwalletdError::NoBranchMajority("37a5165b x1".to_owned()));
+        assert!(matches!(unreachable, ZcoinInitError::LightwalletdUnreachable { .. }));
+        assert!(matches!(excluded, ZcoinInitError::LightwalletdExcluded { .. }));
+        match &no_majority {
+            ZcoinInitError::LightwalletdExcluded { error, .. } => {
+                // The branch is the healthy one; the endpoint is merely alone, and the message must
+                // not say it is off the coin's chain.
+                assert!(
+                    error.contains("37a5165b x1") && error.contains("fewer than two"),
+                    "{error}"
+                );
+            },
+            _ => panic!("expected LightwalletdExcluded"),
+        }
+        assert!(!no_majority.to_string().contains("on this coin's chain"));
+        // Neither carries a tip.
+        assert!(matches!(
+            InitStandaloneCoinError::from(unreachable),
+            InitStandaloneCoinError::Transport(_)
+        ));
+        assert!(matches!(
+            InitStandaloneCoinError::from(excluded),
+            InitStandaloneCoinError::CoinCreationError { .. }
+        ));
+    }
+
+    #[test]
+    fn zero_scan_blocks_per_iteration_is_a_parse_failure() {
+        // T39.10.2 (e): the value 0 is not silently clamped.
+        for name in ["scan_blocks_per_iteration", "blocks_per_iteration"] {
+            let request = json!({ "mode": lightd_light_mode_json(), name: 0 });
+            assert!(
+                serde_json::from_value::<ZcoinActivationParams>(request).is_err(),
+                "{name}: 0 must not parse"
+            );
+        }
+        let params: ZcoinActivationParams =
+            serde_json::from_value(json!({ "mode": lightd_light_mode_json(), "scan_blocks_per_iteration": 1 }))
+                .unwrap();
+        assert_eq!(params.blocks_per_iteration.map(NonZeroU32::get), Some(1));
+    }
+
+    #[test]
+    fn shielded_wallet_availability_matches_the_build_target() {
+        // Recorded deviation (CRD ch.39 R39.10.1): WASM activation ends with CoinCreationError, native is
+        // unaffected.
+        assert_eq!(SHIELDED_WALLET_UNAVAILABLE, cfg!(target_arch = "wasm32"));
+        let (wire, _) = task_error(shielded_unavailable_error("ARRR"));
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "ARRR");
+        assert!(wire["error_data"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("not available in the WebAssembly build"));
+    }
+
+    /// T39.11.1a / R39.11.1a: a Native-mode request is a configuration error naming the coin, raised by
+    /// the backend selection that runs before any wallet database, backend or scan is created.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_mode_activation_is_refused() {
+        match zcoin_backend("ARRR", &ZcoinRpcMode::Native) {
+            Err(ZcoinInitError::CoinCreationError { ticker, error }) => {
+                assert_eq!(ticker, "ARRR");
+                assert_eq!(
+                    error,
+                    "ARRR native mode is not supported in this release; use light mode"
+                );
+            },
+            _ => panic!("native mode must be refused with a CoinCreationError"),
+        }
+        // The wire shape is unchanged: the request parses, only activation refuses.
+        let params: ZcoinActivationParams = serde_json::from_value(json!({ "mode": { "rpc": "Native" } })).unwrap();
+        assert!(matches!(
+            zcoin_backend("PIRATE", &params.mode),
+            Err(ZcoinInitError::CoinCreationError { ticker, .. }) if ticker == "PIRATE"
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_mode_parses_on_native_builds() {
+        let params: ZcoinActivationParams = serde_json::from_value(json!({ "mode": { "rpc": "Native" } })).unwrap();
+        assert!(matches!(params.mode, ZcoinRpcMode::Native));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn native_mode_is_an_unknown_variant_on_wasm() {
+        // T39.10.2 (f).
+        assert!(serde_json::from_value::<ZcoinActivationParams>(json!({ "mode": { "rpc": "Native" } })).is_err());
+    }
+
+    #[test]
+    fn members_without_zcoin_meaning_are_ignored() {
+        // T39.10.2 (g): `get_balances`, `tx_history`, an Electrum `ws_url` and unknown members.
+        let params: ZcoinActivationParams = serde_json::from_value(json!({
+            "mode": { "rpc": "Light", "rpc_data": {
+                "electrum_servers": [{ "url": "electrum1.example:10008", "ws_url": "wss://electrum1.example:30008" }],
+                "light_wallet_d_servers": ["https://lightd1.example:443"]
+            } },
+            "get_balances": false,
+            "tx_history": true,
+            "gap_limit": 20,
+            "scan_policy": "scan_if_new_wallet",
+            "path_to_address": { "account_id": 0 },
+            "min_addresses_number": 3,
+            "something_else": [1, 2]
+        }))
+        .unwrap();
+        assert!(!params.tx_history());
+    }
+
+    #[test]
+    fn temporary_error_in_progress_status_wire_shape() {
+        // T39.10.3.
+        assert_eq!(
+            serde_json::to_value(ZcoinInProgressStatus::TemporaryError("lightwalletd is down".to_owned())).unwrap(),
+            json!({ "TemporaryError": "lightwalletd is down" })
+        );
+        assert_eq!(
+            serde_json::to_value(ZcoinInProgressStatus::ActivatingCoin).unwrap(),
+            json!("ActivatingCoin")
+        );
+        assert_eq!(
+            serde_json::to_value(ZcoinInProgressStatus::RequestingWalletBalance).unwrap(),
+            json!("RequestingWalletBalance")
+        );
+    }
+
+    fn task_error(err: ZcoinInitError) -> (serde_json::Value, common::StatusCode) {
+        use common::HttpStatusCode;
+        let err: InitStandaloneCoinError = err.into();
+        (serde_json::to_value(&err).unwrap(), err.status_code())
+    }
+
+    #[test]
+    fn height_and_balance_failures_are_transport_errors_with_a_string() {
+        // T39.10.4 (a).
+        for err in [
+            ZcoinInitError::CouldNotGetBlockCount("every lightwalletd endpoint is unreachable".to_owned()),
+            ZcoinInitError::CouldNotGetBalance("balance read failed".to_owned()),
+        ] {
+            let (wire, status) = task_error(err);
+            assert_eq!(wire["error_type"], "Transport");
+            assert!(wire["error_data"].is_string());
+            assert_eq!(status, common::StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    #[test]
+    fn unresolvable_sync_date_is_a_coin_creation_error_with_the_requested_ticker() {
+        // T39.10.4 (b).
+        let (wire, status) = task_error(ZcoinInitError::CouldNotResolveSyncStartDate {
+            ticker: "ARRR".to_owned(),
+            sync_start: "1775037600".to_owned(),
+            error: "no block timestamp".to_owned(),
+        });
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "ARRR");
+        assert!(wire["error_data"]["error"].is_string());
+        assert_eq!(wire["error_data"].as_object().map(|object| object.len()), Some(2));
+        assert_eq!(status, common::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn missing_sapling_parameters_report_the_bare_token() {
+        // T39.10.4 (d), R39.10.12.
+        for build_err in [
+            ZCoinBuildError::ZCashParamsNotFound,
+            ZCoinBuildError::ZCashParamsDirNotFound {
+                path: "/nonexistent/ZcashParams".to_owned(),
+            },
+        ] {
+            let (wire, _) = task_error(ZcoinInitError::from_build_err(build_err, "ARRR".to_owned()));
+            assert_eq!(wire["error_type"], "CoinCreationError");
+            assert_eq!(wire["error_data"]["ticker"], "ARRR");
+            assert_eq!(wire["error_data"]["error"], "ZCashParamsNotFound");
+        }
+        // Other build failures keep their human-readable text.
+        let (wire, _) = task_error(ZcoinInitError::from_build_err(
+            ZCoinBuildError::HdDerivationError("z_derivation_path is missing".to_owned()),
+            "ARRR".to_owned(),
+        ));
+        assert_ne!(wire["error_data"]["error"], "ZCashParamsNotFound");
+    }
+
+    #[test]
+    fn unsupported_key_policy_is_a_coin_creation_error_and_never_a_priv_key_error() {
+        // T39.10.4 (e) and (f), R39.10.13.
+        let (wire, _) = task_error(ZcoinInitError::HardwareWalletsAreNotSupportedYet {
+            ticker: "ARRR".to_owned(),
+        });
+        assert_eq!(wire["error_type"], "CoinCreationError");
+        assert_eq!(wire["error_data"]["ticker"], "ARRR");
+
+        // The residual hardware-wallet class is an `Internal` string; neither it nor any other
+        // activation error uses a name that R39.10.13 forbids.
+        let forbidden = ["HwError", "PrivKeyNotAllowed", "UnexpectedDerivationMethod"];
+        let errors = [
+            ZcoinInitError::CoinCreationError {
+                ticker: "ARRR".to_owned(),
+                error: "e".to_owned(),
+            },
+            ZcoinInitError::CoinIsAlreadyActivated {
+                ticker: "ARRR".to_owned(),
+            },
+            ZcoinInitError::HardwareWalletsAreNotSupportedYet {
+                ticker: "ARRR".to_owned(),
+            },
+            ZcoinInitError::TaskTimedOut {
+                duration: Duration::from_secs(1),
+            },
+            ZcoinInitError::CouldNotGetBalance("e".to_owned()),
+            ZcoinInitError::CouldNotGetBlockCount("e".to_owned()),
+            ZcoinInitError::CouldNotResolveSyncStartDate {
+                ticker: "ARRR".to_owned(),
+                sync_start: "1".to_owned(),
+                error: "e".to_owned(),
+            },
+            ZcoinInitError::ShieldedWalletDbScanIncomplete {
+                ticker: "ARRR".to_owned(),
+                activation_tip: 1,
+                error: "e".to_owned(),
+            },
+            ZcoinInitError::Internal("the wallet key context is not initialised".to_owned()),
+        ];
+        for err in errors {
+            let (wire, _) = task_error(err);
+            let name = wire["error_type"].as_str().unwrap().to_owned();
+            assert!(!forbidden.contains(&name.as_str()), "{name} must not be observable");
+            if name == "Internal" {
+                assert!(wire["error_data"].is_string());
+            }
+        }
+    }
+
+    #[test]
+    fn registration_race_and_timeout_keep_their_shapes() {
+        let (wire, status) = task_error(ZcoinInitError::CoinIsAlreadyActivated {
+            ticker: "ARRR".to_owned(),
+        });
+        assert_eq!(
+            wire,
+            json!({ "error_type": "CoinIsAlreadyActivated", "error_data": { "ticker": "ARRR" } })
+        );
+        assert_eq!(status, common::StatusCode::BAD_REQUEST);
+
+        let (wire, status) = task_error(ZcoinInitError::TaskTimedOut {
+            duration: Duration::from_secs(3),
+        });
+        assert_eq!(wire["error_type"], "TaskTimedOut");
+        assert_eq!(status, common::StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod sync_retry {
+        use super::*;
+        use std::cell::{Cell, RefCell};
+
+        /// Runs the retry loop against a scripted sequence of attempt outcomes, and returns the
+        /// result with the reported temporary errors and the number of pauses taken.
+        fn run(
+            outcomes: Vec<Result<(), ShieldedFetchError>>,
+        ) -> (MmResult<(), ZcoinInitError>, Vec<String>, usize, usize) {
+            let outcomes = RefCell::new(outcomes.into_iter());
+            let attempts = Cell::new(0usize);
+            let reported = RefCell::new(Vec::new());
+            let pauses = Cell::new(0usize);
+            let result = futures::executor::block_on(run_shielded_sync_with_retry(
+                "ARRR",
+                || {
+                    attempts.set(attempts.get() + 1);
+                    let outcome = outcomes.borrow_mut().next().expect("the script ran out of outcomes");
+                    async move { outcome }
+                },
+                |message| {
+                    reported.borrow_mut().push(message);
+                    Ok(())
+                },
+                || {
+                    pauses.set(pauses.get() + 1);
+                    async {}
+                },
+            ));
+            (result, reported.into_inner(), pauses.get(), attempts.get())
+        }
+
+        #[test]
+        fn an_outage_at_the_start_is_a_coin_creation_error() {
+            // T39.10.4 (c).
+            let (result, reported, pauses, attempts) = run(vec![Err(ShieldedFetchError::BeforeSync(
+                "All lightwalletd servers failed: connection refused".to_owned(),
+            ))]);
+            match result.map_err(|e| e.into_inner()) {
+                Err(ZcoinInitError::CoinCreationError { ticker, error }) => {
+                    assert_eq!(ticker, "ARRR");
+                    assert!(error.contains("connection refused"));
+                },
+                Err(other) => panic!("expected CoinCreationError, got {}", other),
+                Ok(()) => panic!("expected CoinCreationError, got success"),
+            }
+            assert!(reported.is_empty());
+            assert_eq!((pauses, attempts), (0, 1));
+        }
+
+        #[test]
+        fn a_mid_sync_failure_is_reported_and_retried_until_the_backend_recovers() {
+            // T39.10.5.
+            let (result, reported, pauses, attempts) = run(vec![
+                Err(ShieldedFetchError::DuringSync("batch 2 failed".to_owned())),
+                Err(ShieldedFetchError::DuringSync("batch 2 failed again".to_owned())),
+                Ok(()),
+            ]);
+            assert!(result.is_ok());
+            assert_eq!(reported, vec![
+                "batch 2 failed".to_owned(),
+                "batch 2 failed again".to_owned()
+            ]);
+            assert_eq!((pauses, attempts), (2, 3));
+        }
+
+        #[test]
+        fn once_the_sync_started_even_an_unreachable_backend_is_only_temporary() {
+            let (result, reported, _, attempts) = run(vec![
+                Err(ShieldedFetchError::DuringSync("scan failed".to_owned())),
+                Err(ShieldedFetchError::BeforeSync("connection refused".to_owned())),
+                Ok(()),
+            ]);
+            assert!(result.is_ok());
+            assert_eq!(reported.len(), 2);
+            assert_eq!(attempts, 3);
+        }
+
+        #[test]
+        fn retries_have_no_cap() {
+            // Maintainer decision: the sync never turns terminal until it recovers or is cancelled.
+            let mut outcomes: Vec<_> = (0..500)
+                .map(|n| Err(ShieldedFetchError::DuringSync(format!("failure {n}"))))
+                .collect();
+            outcomes.push(Ok(()));
+            let (result, reported, pauses, attempts) = run(outcomes);
+            assert!(result.is_ok());
+            assert_eq!((reported.len(), pauses, attempts), (500, 500, 501));
+        }
     }
 
     #[test]
