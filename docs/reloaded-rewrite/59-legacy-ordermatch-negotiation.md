@@ -325,7 +325,11 @@ both halves included.
 > **Exception (2026-10-28):** the second paragraph of R59.6.2 and the
 > cross-reference sentence of R59.6.7 item 1 were added after those passes
 > and passed the KDF Dirty Gate on 2026-10-28 (§59.11, addition of
-> 2026-10-28).
+> 2026-10-28). **Exception (2026-11-01):** the cross-reference sentences
+> appended to the divergence note of R59.6.1a, to R59.6.4 and to D2 were
+> added by the KDF Spec Reader on 2026-11-01 and **passed the KDF Dirty
+> Gate** on 2026-11-01 (PASS, measure 0.03) together with chapter 32 §32.9C
+> (§59.11, addition of 2026-11-01).
 
 **R59.6.1** *Expiry runs on the receiver's clock.* A tracked maker public
 key's liveness instant shall be the receiver's **own local receipt time**
@@ -375,6 +379,9 @@ instant is then the last keep-alive alone, as in the reference.
 > duplicate window to keep a stopped P alive; the same is already possible
 > with an old signed keep-alive, whose timestamp the receiver ignores
 > (R59.6.2), so the rule adds no new exposure. Nothing on the wire changes.
+> One consequence is recorded in [Chapter 32](32-orderbook-p2p-and-trie.md)
+> §32.9C R-GH10: a stale entry of a maker whose keep-alives are lost but
+> whose order messages arrive lives as long as those messages keep coming.
 
 **R59.6.2** *The wire timestamp is carried, ignored, and unvalidated.*
 The keep-alive message carries two members: `trie_roots`, a map from
@@ -421,7 +428,12 @@ order identifiers from the read index — once its liveness instant
 intervals, i.e. 90 seconds. The window shall be overridable by the
 daemon's `maker_order_timeout` configuration member, in whole seconds.
 The eviction sweep is part of the same periodic maintenance as R59.4.1
-and R59.4.4.
+and R59.4.4. The window is per public key only: no pair and no order of
+another maker expires on its own at the reference's release rows
+([Chapter 32](32-orderbook-p2p-and-trie.md) §32.9C R-GH3); the per-pair
+variant of the reference's later, unreleased change is recorded there as
+R-GH6 item 7, and whether Reloaded adopts a form of it is ch. 32 §32.10
+D12.
 
 **R59.6.5** *Own public keys are exempt.* The eviction of R59.6.4 shall
 never apply to the node's own persistent public key or to any
@@ -591,7 +603,10 @@ from it until the relay's own eviction of that maker fires. R59.6.3
 explains why a consumer-side freshness filter is the wrong remedy; the
 right one is a question about relay-side eviction and
 synchronisation-response construction, which belongs to
-[Chapter 32](32-orderbook-p2p-and-trie.md) §32.7 and is unresolved.
+[Chapter 32](32-orderbook-p2p-and-trie.md) §32.7 and §32.9C: R-GH1 and
+R-GH4 there bind the facts (a stale relay passes its view to every peer
+that asks it, and no requester checks the root it reaches), and §32.10
+D12 holds the open decision.
 
 **D3.** *The silence window.* Between a maker going silent and its
 eviction under R59.6.4 there is a window of up to the configured window
@@ -916,3 +931,10 @@ its gating is not.*
   R59.6.5 and R59.6.7. *Inputs:* this repository's own code and tests only.
   No reference input: the rules themselves are unchanged, so no Dirty Gate
   pass is needed.
+- *Scoped addition (2026-11-01) -- the cross-reference sentences appended to
+  the divergence note of R59.6.1a, to R59.6.4 and to D2.* Authored by the
+  KDF Spec Reader on 2026-11-01 as part of chapter 32 §32.9C; **KDF Dirty
+  Gate: PASS on 2026-11-01, measure 0.03** (the inputs, the facts taken and
+  the clearance are recorded in chapter 32 §32.13, scoped addition of
+  2026-11-01). The sentences state no reference fact beyond those bound in
+  chapter 32.

@@ -886,6 +886,31 @@ D7, T11, V5. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
   involved seeds: a relay that subscribes to no orderbook topic neither
   announces nor requests message ids for them (R13a). No action.
 
+## #20 — Orderbook: an entry from a missed cancel lives as long as the maker's pubkey record ("ghost orders") — **PARITY (reference facts authored 2026-11-01, passed the KDF Dirty Gate 2026-11-01, measure 0.03)**
+
+CRD reference: [`32-orderbook-p2p-and-trie.md`](./32-orderbook-p2p-and-trie.md)
+§32.9C R-GH1–R-GH10, T-GH1–T-GH10; §32.10 D12;
+[`59-legacy-ordermatch-negotiation.md`](./59-legacy-ordermatch-negotiation.md)
+R59.6.4, D2. Reference designations: `v2.6.0-beta` and `v3.0.0-beta`
+(agree); the reference's later, unreleased change is recorded as the row
+`PR #2605 (merged 2025-09-10)`, which neither release carries.
+
+- [ ] *Open decision (ch. 32 D12).* At both release rows and in Reloaded a
+  receiver removes another maker's entry only on a cancel message, on a
+  synchronization answer for the pair that drops it, on eviction of the
+  whole pubkey record (90 s after the last keep-alive for any pair), or on
+  a local order-book request whose answer lists the pubkey. A keep-alive
+  says nothing about pairs it does not name, an emptied pair is never
+  advertised, and an applied answer is never checked against the advertised
+  root, so an entry from a missed cancel persists while the maker keeps
+  sending keep-alives for any pair, and a stale relay passes its view to
+  every peer that asks it. The field observation of 2026-10-31 (five entries
+  for one maker on one pair, two valid, gone only at the maker's restart) is
+  consistent with this. The later reference change adds per-pair liveness,
+  root-check acceptance with the pair cleared on mismatch, clearing on an
+  advertised zero root and a per-pair order on the sender's timestamp; the
+  Reloaded candidates are listed under D12.
+
 ---
 
 ## Audit method (for reproducibility)
