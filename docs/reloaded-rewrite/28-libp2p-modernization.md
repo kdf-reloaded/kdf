@@ -827,6 +827,56 @@ Peers that remain connected and advertise as relays remain eligible for
 relay-mesh maintenance even when peers-exchange requests to them time
 out, fail, or report unsupported protocol negotiation.
 
+**R27a.** *Redial guards (added 2026-11-02, batch 0.4.0 item P1).* Item
+1 is parity with the reference, whose facts are those of RQ1a items 3
+and 4, except for the bound on its record. Items 2 and 3 are
+Reloaded-original. The start-up dials of R23 item 2 and the 30 s
+relay-connection maintenance of RQ1a item 4 MUST follow these rules:
+
+1. **Dial guard.** The node MUST NOT dial an address that it dialed
+   within the last 5 minutes, at start-up or from maintenance. This
+   holds for both candidate sets of RQ1a item 4: the addresses of
+   known peers and the configured bootstrap addresses. An address is
+   compared as written, before name resolution. The record of dialed
+   addresses forgets an entry after 5 minutes. It holds at most 1,024
+   entries, and when it is full the oldest entry is dropped. As at the
+   reference, a connection that lasted less than 5 minutes delays the
+   redial of its address to the 5-minute mark.
+2. **Connected seed.** The node MUST NOT dial a configured bootstrap
+   address while the peer that the address belongs to is connected,
+   inbound or outbound. An address belongs to the peer that the last
+   outbound connection established to that address, as written,
+   reached. Before such a connection exists, only the address check of
+   RQ1a item 6 applies.
+   - *Why.* That address check compares only the remote addresses of
+     open connections. An inbound connection carries the dialer's
+     ephemeral port, so a relay that this node holds only through the
+     relay's own dial never matches its bootstrap address. A node below
+     its low watermark then dials that relay again at every tick.
+     Gossipsub writes to one connection per relay, so the second
+     connection idles out after the gossipsub idle timeout of 120 s,
+     and the next tick dials again. The result is one dial and one
+     close every 150 s. A lab run on 2026-11-01 showed it for 13.5
+     hours: the relay's own connection stayed open throughout, and
+     every second connection closed on the idle timeout.
+   - Item 1 alone would only slow that loop to one cycle per 5 minutes.
+   - Maintenance already picks its peer-exchange candidates among peers
+     that are not connected relays, by peer ID, so item 2 concerns the
+     bootstrap list only.
+3. **Short-of-relays line.** When the node is below its low watermark
+   and nothing is left to dial, the WARN line "P2P relays below low
+   watermark" keeps its text. It is logged at most once per 5 minutes
+   while the count of connected relays is unchanged, and at DEBUG in
+   between.
+
+Item 1 ends the difference on the dial guard recorded after RQ1a item 6.
+Item 2 diverges from the dial-side check of RQ1a item 6: by RQ1a items 4
+and 6, a reference node below its low watermark dials such a relay
+again, at most once per 5 minutes. The divergence changes no wire shape
+and nothing a peer relies on; the peer sees one connection fewer. It is
+therefore not a divergence under `docs/COMPAT_SWITCHES.md` and has no
+switch. Item 3 changes logging only.
+
 ## 28.9A Required Port — Peer Health-check, Time-sync Admission, Expirable Bans (driving-spec)
 
 **STATUS.** The three behaviours in this section are post-baseline
@@ -1264,7 +1314,9 @@ moved to the other connection, while closing all of them makes X drop R
 and redial under item 4; the consequence of items 4 and 5 is that a
 reference client with one relay is back in at most 30 s once the
 5-minute dial guard has passed, and a reference client with spare relays
-does not come back until it is short of relays.
+does not come back until it is short of relays. *(Amended 2026-11-02:
+R27a item 1 adopts the 5-minute dial guard, which ends the second of
+these differences.)*
 
 **RQ1 test items.**
 
@@ -1464,6 +1516,26 @@ heartbeat receives IWANT for at most 5000 ids drawn from at most 10 of
 the announcements, and the next heartbeat starts the count afresh. A node
 with no orderbook topic in its mesh emits no IHAVE for such topics and
 ignores IHAVE for them.
+
+**T12.** *Redial guards (R27a; added 2026-11-02).* The 5-minute
+interval and the maintenance tick are shortened by test configuration.
+- A bootstrap address dialed at start-up is not dialed again before the
+  interval has passed, even when every dial to it fails. It is dialed
+  at the first tick after the interval.
+- The same holds for an address of a known peer dialed by maintenance.
+- A bootstrap address whose last outbound connection reached peer P is
+  not dialed while P is connected through an inbound connection only.
+  Once P has no connection, the address is dialed again, subject to
+  item 1.
+- A node below its low watermark that holds a seed only through the
+  seed's own dial opens no second connection to it over 10 ticks.
+- The record of dialed addresses holds at most 1,024 entries.
+- The short-of-relays line is logged at most once per interval while
+  the count of connected relays is unchanged.
+- *Lab item.* A Reloaded relay with a reference relay among its
+  seednodes, below its low watermark, runs for at least 15 minutes. It
+  opens no second connection to that relay while connected, and no
+  dial-and-close cycle appears.
 
 ## 28.11 Deferred Work
 
@@ -1887,5 +1959,18 @@ hardening carried by the pinned fork).
     - the public libp2p fork's request-response crate;
     - a 25-minute run of a Reloaded node on the public netid-8762
       network on 2026-10-31.
+  - The forbidden corpus was not consulted for this amendment, and it
+    needs no Dirty Gate pass of its own.
+- *Scoped amendment (2026-11-02) -- R27a, T12 and the note after RQ1a
+  item 6.* Reloaded-original, except R27a item 1, which adopts
+  reference facts already stated in RQ1a items 3 and 4. Those were
+  cleared by KDF Dirty Gate passes on 2026-10-30 and 2026-10-31. The
+  amendment states no new reference fact.
+  - *Inputs:*
+    - RQ1a, for every reference fact;
+    - this repository's relay-connection maintenance and the vendored
+      gossipsub behavior's address check;
+    - the logs of Reloaded nodes in lab runs on 2026-10-31 and
+      2026-11-01.
   - The forbidden corpus was not consulted for this amendment, and it
     needs no Dirty Gate pass of its own.
