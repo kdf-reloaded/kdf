@@ -78,6 +78,17 @@ pub mod mm2_tests;
 
 pub const MM_DATETIME: &str = env!("MM_DATETIME");
 pub const MM_VERSION: &str = env!("MM_VERSION");
+/// The version of the `mm2_bin_lib` crate (see `build.rs`), shown in the version text.
+pub const MM_CRATE_VERSION: &str = env!("MM_CRATE_VERSION");
+
+/// Formats the user-visible version text `<crate-version> (<short-hash>) DT <datetime>`.
+/// `MM_VERSION` itself stays the bare short hash; it is also used by the `version` RPC and the swap records.
+fn format_version_text(crate_version: &str, short_hash: &str, datetime: &str) -> String {
+    format!("{crate_version} ({short_hash}) DT {datetime}")
+}
+
+/// The version text of this binary, shown in the startup log lines.
+pub fn version_text() -> String { format_version_text(MM_CRATE_VERSION, MM_VERSION, MM_DATETIME) }
 pub const PASSWORD_MAXIMUM_CONSECUTIVE_CHARACTERS: usize = 3;
 
 #[cfg(feature = "custom-swap-locktime")]
@@ -419,7 +430,7 @@ pub fn mm2_main() {
     use libc::c_char;
 
     init_crash_reports();
-    log!({"KDF-Reloaded DeFi Framework {} DT {}", MM_VERSION, MM_DATETIME});
+    log!({"KDF-Reloaded DeFi Framework {}", version_text()});
 
     // Temporarily simulate `argv[]` for the C version of the main method.
     let args: Vec<String> = env::args()
@@ -605,7 +616,7 @@ fn init_logger(level: LogLevel) -> Result<(), String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::get_mm2config;
+    use super::{format_version_text, get_mm2config, version_text, MM_CRATE_VERSION, MM_VERSION};
     use lazy_static::lazy_static;
     use std::env;
     use std::ffi::OsString;
@@ -675,5 +686,59 @@ mod tests {
 
         fs::remove_file(coins_path).expect("unable to remove coins file");
         fs::remove_dir(tmp_dir).expect("unable to remove temp dir");
+    }
+
+    #[test]
+    fn test_format_version_text_normal() {
+        assert_eq!(
+            format_version_text("0.4.0", "e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "0.4.0 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_prerelease() {
+        assert_eq!(
+            format_version_text("0.4.0-alpha.1", "e65d3c4", "2026-11-02T18:30:00+00:00"),
+            "0.4.0-alpha.1 (e65d3c4) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_unknown_hash() {
+        assert_eq!(
+            format_version_text("0.4.0", "UNKNOWN", "2026-11-02T18:30:00+00:00"),
+            "0.4.0 (UNKNOWN) DT 2026-11-02T18:30:00+00:00"
+        );
+    }
+
+    #[test]
+    fn test_format_version_text_empty_datetime() {
+        assert_eq!(format_version_text("0.4.0", "e65d3c4", ""), "0.4.0 (e65d3c4) DT ");
+    }
+
+    #[test]
+    fn test_version_text_contains_crate_version_and_hash() {
+        let text = version_text();
+        assert!(text.starts_with(MM_CRATE_VERSION), "{text}");
+        assert!(text.contains(&format!("({MM_VERSION})")), "{text}");
+    }
+
+    /// `MM_CRATE_VERSION` must follow the `mm2_bin_lib` package version.
+    #[test]
+    fn test_crate_version_matches_bin_lib_manifest() {
+        let manifest = include_str!("../../mm2_bin_lib/Cargo.toml");
+        let package = manifest
+            .split("[package]")
+            .nth(1)
+            .and_then(|rest| rest.split("\n[").next())
+            .expect("mm2_bin_lib manifest has a [package] table");
+        let version = package
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("version"))
+            .and_then(|rest| rest.trim().strip_prefix('='))
+            .map(|value| value.trim().trim_matches('"'))
+            .expect("mm2_bin_lib manifest has a package version");
+        assert_eq!(MM_CRATE_VERSION, version);
     }
 }
