@@ -14,6 +14,18 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
+#### Order book and peer-to-peer network
+
+- **How close a connection comes to being closed as stuck can now be watched.** A node closes a
+  connection whose peer loses at least 25 % of the messages queued for it in each of three
+  consecutive minutes.
+  - **Log.** Each minute in which a connection loses 10 % or more is now logged at debug level,
+    with the counts and how many such minutes in a row it has had.
+  - **Metrics.** `p2p.send_queue.window_share.max` gives the highest recent share, and
+    `p2p.send_queue.drop_series.max` the longest current run of such minutes.
+
+  Detail: PRs #204, #214; CRD ch.28 RQ1 items 6 and 8.
+
 ### Changed
 
 #### Order book and peer-to-peer network
@@ -50,6 +62,20 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Fixed
 
+#### Order book and peer-to-peer network
+
+- **A maker with `maker_update_coalescing` on is no longer held at its lowest rate by steady
+  traffic.** The maker slows down when a relay falls behind.
+  - **The old signal.** It was raised once a relay's queue had stayed non-empty for 2 seconds,
+    and cleared only after the queue had been empty for 5 seconds. Toward a busy relay, every new
+    message restarted those 5 seconds, so the signal could stay raised for hours. A seed showed
+    `p2p.outbox.pressure` at 1 while every queue was empty.
+  - **The new signal.** It is judged by how long a queued message has waited: raised at 2
+    seconds, cleared 5 seconds after the last such wait ends. The default
+    (`maker_update_coalescing` off) was never affected.
+
+  Detail: PRs #204, #214; CRD ch.32 R-MP2 item 2.
+
 ### Tests
 
 - **The tests run before the next beta will be listed in
@@ -62,7 +88,11 @@ file carries the detail. "New" means the plan was created in this cycle.
 
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206), and so are the peer-exchange
-  logging, the address ranges and the idle-close log (PRs #203, #211).
+  logging, the address ranges and the idle-close log (PRs #203, #211), and the send-queue window
+  shares and the queue-signal fix (PRs #204, #214).
+- [`maker-gossip-rate-control`](docs/plans/maker-gossip-rate-control.md) — still parked: the
+  queue-signal flaw found in the field is fixed (PRs #204, #214); the other default-on items
+  remain.
 
 ### Known limitations
 
