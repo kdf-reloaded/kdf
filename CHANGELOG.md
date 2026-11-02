@@ -24,6 +24,12 @@ it and, where one exists, the CRD rule, for readers who want more.
   with an error at once. The limits are the `MM2.json` settings `sync_answer_deferral_max_per_peer`
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
   PR #205; CRD ch.32 R-Q5b.
+- **A node whose order-book sync from one relay fails, or brings back an outdated set, now asks one
+  other relay.** Before, it waited for the maker's next keep-alive, 30 seconds later, and a relay that
+  had missed a cancellation passed the cancelled order on to every node that asked it. The node now
+  asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
+  because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
+  `false` in `MM2.json`. Detail: PR #B1C; CRD ch.32 R-Q5d.
 
 ### Fixed
 
