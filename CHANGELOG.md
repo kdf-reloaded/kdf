@@ -16,6 +16,15 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### Order book and peer-to-peer network
+
+- **A relay holds more sync requests for a maker it is still catching up on.** During a burst, for
+  example after several makers restart, a relay now holds up to 32 such requests per asking node and
+  2,048 in all (before: 8 and 256) and answers them when its own sync lands, instead of answering
+  with an error at once. The limits are the `MM2.json` settings `sync_answer_deferral_max_per_peer`
+  and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
+  CRD ch.32 R-Q5b.
+
 ### Fixed
 
 ### Tests
@@ -27,6 +36,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
+
+- [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
+  showing after a lost cancellation; five work packages after the beta, the first being the higher
+  sync limits on relays above.
 
 ### Known limitations
 

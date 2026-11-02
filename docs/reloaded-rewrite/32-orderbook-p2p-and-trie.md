@@ -936,12 +936,23 @@ outlives the longest parked request.
    (R-Q6); a bound at or above that timeout gains nothing, because the
    transport abandons the request first. The value `0` turns deferral off:
    every request is answered at once, as in the reference.
-4. **Limits.** At most 8 requests are parked per requesting peer and at most
-   256 in total, a request counting once whatever the number of pairs it
-   names; a request past either limit is answered at once. The per-peer
-   limit MUST stay below the number of concurrent inbound streams the
-   transport allows on one connection, because a parked request holds its
-   stream open.
+4. **Limits.** Two top-level `MM2.json` integers bound the parked requests:
+   `sync_answer_deferral_max_per_peer`, default `32`, per requesting peer,
+   and `sync_answer_deferral_max_total`, default `2048`, in total. A request
+   counts once whatever the number of pairs it names, and a request past
+   either limit is answered at once. An absent, non-integer or zero value
+   means the default. The per-peer limit MUST stay below the number of
+   inbound streams the transport negotiates concurrently on one connection
+   (128 with the pinned libp2p version), because a parked request holds its
+   stream open: a per-peer value above `64` is taken as `64`, which leaves at
+   least half of those streams to the peer's other requests. A total above
+   `8192` is taken as `8192`. The limits change neither the bound nor any
+   answer, only how many requests can wait.
+   *(Amended 2026-11-02, Decision BK item 4: the limits were 8 and 256 and
+   could not be configured. On 2026-10-31 a Reloaded seed on the public
+   network answered about 1,100 requests in one minute at once because they
+   were full, during a burst of synchronization requests, most likely
+   after makers restarted.)*
 5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
    the one case in which the answer is not built on the task that received
    the request (R-Q5's last paragraph).
@@ -1076,10 +1087,13 @@ when the bound expires. A request for (P, Y) whose placeholder has no own
 request in flight, a request naming a pair the relay does not track, and a
 request for an unknown pubkey are each answered at once, as R-Q5 binds; a
 request for (P, X) and (P, Y) together is answered at once with the
-placeholder error. Past 8 parked requests from one peer, or 256 in all, a
-further request is answered at once. With `sync_answer_deferral_ms` set to
-`0`, every request is answered at once. After every path the parked table is
-empty.
+placeholder error. Past 32 parked requests from one peer, or 2,048 in all, a
+further request is answered at once; with the per-peer limit set to `2` and
+the total to `3`, the third request from one peer and the fourth in all are
+answered at once. A per-peer value of `100` is taken as `64` and a total of
+`10000` as `8192`; an absent, zero or non-integer value gives the default.
+With `sync_answer_deferral_ms` set to `0`, every request is answered at once.
+After every path the parked table is empty.
 
 **T-Q5c** *A quick failure of the own request is asked once more (R-Q5c).*
 A relay holds the all-zero placeholder for (P, X), has its own request for
@@ -1127,7 +1141,7 @@ behavior the mesh relies on:
    gossip messages and plays no part on the request path, where the
    request is unsigned and names the pubkey asked *about*, not the asker;
    and no backoff or refusal exists for a peer that asks again. (The
-   limits of R-Q5b item 4 -- 8 parked requests per peer, 256 in all --
+   limits of R-Q5b item 4 -- parked requests per peer and in total --
    are Reloaded-original; the reference has no counterpart.)
 3. **A later answer differs only because the state moved.** Two requests
    with the same content a second apart receive the same answer unless
@@ -3030,8 +3044,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     whole. Each adopted candidate is a divergence to record in the
     operator-facing compatibility documents.
 
-    **Decided 2026-11-01 by the maintainer: no candidate before the
-    beta.** The beta's release notes list the behavior as a known
+    **Decided 2026-11-01 by the maintainer (Decision BK): no candidate
+    before the beta.** The beta's release notes list the behavior as a known
     limitation. The decision rests on a lab run of this project's own
     nodes, in which a live pair healed one hop per advertisement interval
     once a keep-alive named it, an emptied pair kept its stale entry until
@@ -3054,7 +3068,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     4. two changes to the deferral of R-Q5b for start-up and re-post
        bursts: parking a request for a pair named by a keep-alive the
        node is still handling, before its placeholder exists, and a
-       review of the parking limits.
+       review of the parking limits. *(The limits were reviewed first,
+       on 2026-11-02: R-Q5b item 4 as amended.)*
 
     (c) and (d) only if (a) is rejected.
 
@@ -3681,3 +3696,12 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   D12 records the maintainer's decision and adds candidate (e); the D12
   pointers in ch. 59 D2 and in UPSTREAM-PARITY-GAPS.md #20 say it is
   decided. No reference input was used for these edits.
+- *Reloaded-original amendment (2026-11-02, Decision BK item 4) -- R-Q5b
+  item 4, the sentence of T-Q5b on the limits, the parenthesis of R-Q6a
+  item 2, the decision letter and item 4 of §32.10 D12.* The parking limits
+  become two top-level `MM2.json` integers with higher defaults and fixed
+  ceilings. *Inputs:* this repository's own deferral tables and inbound
+  request dispatch, the stream limits of the pinned libp2p crates, this
+  project's own seeds' synchronization summaries of 2026-10-31 as counts,
+  and the maintainer's decision. No reference implementation was consulted
+  for this amendment, and it needs no Dirty Gate pass.
