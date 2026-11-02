@@ -307,6 +307,30 @@ to the default log level and shall never refuse or panic the launch.
 R45.6.5 No environment variable bound in this chapter is *required* for a
 successful launch; each has a bound default or a bound degraded mode.
 
+R45.6.6 *Startup path report (KDF Reloaded original addition; operator
+diagnostics).* After the logger is initialized, startup shall report at INFO
+level, as absolute paths (relative paths resolved against the working directory
+without symlink resolution; the path as given if resolution fails):
+
+- the source of the runtime configuration: the command-line argument, or the
+  configuration file with whether it was selected via `MM_CONF_PATH` or by the
+  default name; a host-supplied configuration (library entry point) is reported
+  as such;
+- the source of the coins list: inline in the configuration (noting an
+  `MM_COINS_PATH` that is set but therefore ignored), or the coins file with
+  whether it was selected via `MM_COINS_PATH` or by the default name;
+- the log file named by a usable `MM_LOG` value (R45.6.3);
+- the database root and the per-identity database directory;
+- the optional files the configuration references, when configured: the
+  `wss_certs` private-key and certificate files, and the named-wallet record
+  file actually read (canonical or legacy).
+
+The report names paths and source kinds only; it shall never include the
+contents of any file, the command-line configuration text, or any configuration
+value. Producing the report shall never fail or panic the launch (R45.7.1). The
+log text is operator-facing and non-normative: it carries no wire or
+compatibility obligation.
+
 ## 45.6A Memory Allocator Arena Limit (Reloaded-original)
 
 > **Reloaded-original (2026-10-31, Decision BJ).** This section binds a
@@ -469,6 +493,13 @@ memory growth below 0.3 MB per minute from minute 10.
 T45.13 *Invalid key never refuses the launch (R45.6A.4, R45.7.1).* Each invalid
 value listed in T45.10 MUST start the daemon.
 
+T45.14 *Startup path report.* With the configuration taken from the command line,
+from the default-named file, and from an `MM_CONF_PATH` file, and with coins
+inline versus from the default-named file versus from an `MM_COINS_PATH` file,
+the report MUST state the actual source of each, MUST show relative paths as
+absolute, MUST note an ignored `MM_COINS_PATH` when coins are inline, and MUST
+NOT contain any file content or configuration value (R45.6.6).
+
 ## 45.9 Deferred Work
 
 D45.1 A consolidated, typed startup-configuration schema (replacing ad-hoc
@@ -560,6 +591,10 @@ past the first beta.
 - *Section 45.6A (arena limit):* Reloaded-original, written from our own
   measurements (R45.6A.7) and the documentation of the system allocator; no
   reference material was consulted for it.
+- *Addition R45.6.6 / T45.14 (startup path report):* a KDF Reloaded original
+  operator-diagnostics requirement, authored independently from this
+  repository's code and public documentation, without consulting the forbidden
+  corpus.
 - *Author of this chapter:* clean-room driving-spec working set.
 - *Forbidden corpus:* consulted only to recover the externally observable
   startup tolerance contract (which unset/empty/unexpected inputs start the
