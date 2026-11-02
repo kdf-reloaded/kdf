@@ -1134,8 +1134,8 @@ clean side, maintainer Decision BI, with no forbidden-class input.)*
 6. *Near sessions.* Among the maintained sessions that have a smoothed
    latency (item 7), let *f* be the lowest. A maintained session is *near*
    when it has no smoothed latency yet, or when its smoothed latency is at
-   most the larger of *F* × *f* and *f* + 20 ms, where *F* is the near factor
-   of item 8. When no maintained session has a smoothed latency, every
+   most the larger of *F* × *f* and *f* + *A*, where *F* is the near factor
+   and *A* the near offset of item 8. When no maintained session has a smoothed latency, every
    maintained session is near. The near sessions are judged when the query
    starts, from the figures at that moment, and the turn of item 1 runs over
    them in priority order. A session that is not near still answers a query
@@ -1150,13 +1150,17 @@ clean side, maintainer Decision BI, with no forbidden-class input.)*
    no activation round, no header request on joining, no re-measure round and
    no trigger (R38.6.4l items 1, 6 and 7). A session that leaves the
    maintained set loses its smoothed latency.
-8. *Near factor.* `electrum_spread_near_factor` is a top-level `MM2.json`
-   number, read at coin activation, default 2 (D38.6.4a.1). `0` turns item 6
-   off: every maintained session is near, as before items 6–8 were added. A
-   value above 0 and below 1 is taken as 1. A value that is not a
-   non-negative number is taken as the default, with one warning naming the
-   key and the value; an absent key logs nothing. With `electrum_spread_reads`
-   `false` the factor has no effect.
+8. *Near factor and near offset.* Two top-level `MM2.json` numbers, read at
+   coin activation:
+   - `electrum_spread_near_factor`, *F*, default 2 (D38.6.4a.1). `0` turns
+     item 6 off: every maintained session is near, as before items 6–8 were
+     added. A value above 0 and below 1 is taken as 1.
+   - `electrum_spread_near_offset_ms`, *A*, in milliseconds, default 20
+     (D38.6.4a.1).
+
+   For either key, a value that is not a non-negative number is taken as the
+   default, with one warning naming the key and the value; an absent key logs
+   nothing. With `electrum_spread_reads` `false` neither has an effect.
 
 *Rationale (this project's own measurement, 2026-10-26).* The per-session
 limit of R38.6.3a applies to each session separately. With three connected
@@ -1176,8 +1180,8 @@ is the larger of 50 ms and 45 ms, which keeps exactly the three. A session
 that a server's per-session limit slows down (R38.6.3a) leaves the near set and
 recovers its budget while the ping keeps measuring it. When every session is
 slowed, all of them stay near, so a coin whose servers all limit each session
-keeps the full spread. The 20 ms term keeps sessions within a few
-milliseconds of a very fast one near.
+keeps the full spread. The offset (20 ms by default) keeps sessions within a
+few milliseconds of a very fast one near.
 
 *Herding (informative).* Nodes in one region find the same servers near and
 spread over them. That concentrates load by region, not globally. The
@@ -1843,11 +1847,15 @@ T38.6.4a.5 *Samples under `random` and `listed`.* Under `listed` and under
 maintained session, and no header request shall be sent on joining (compare
 T38.6.4l.15).
 
-T38.6.4a.6 *Near factor values.* An absent `electrum_spread_near_factor` means
-2, without a warning. `0` makes every maintained session near. `0.5` means 1. A
-string, a negative number and `null` mean 2, each with one warning naming the
-key. With `electrum_spread_reads` `false`, read-only queries follow the
-priority order whatever the factor.
+T38.6.4a.6 *Near factor and offset values.* An absent
+`electrum_spread_near_factor` means 2, without a warning. `0` makes every
+maintained session near. `0.5` means 1. A string, a negative number and `null`
+mean 2, each with one warning naming the key. An absent
+`electrum_spread_near_offset_ms` means 20, without a warning. `0` leaves the
+factor alone to decide, and `50` admits a session up to 50 ms behind the
+fastest. A string, a negative number and `null` mean 20, each with one
+warning naming the key. With `electrum_spread_reads` `false`, read-only queries
+follow the priority order whatever the two values.
 
 T38.6.4a.7 *Writes keep their routing.* In the setting of T38.6.4a.2 with the
 slow stub first in priority, a broadcast and a subscription shall go to the
@@ -2016,12 +2024,21 @@ switch, or an unrecognized value, means the default and logs one warning
 naming the value" can be read as a warning for an absent switch too. This
 rule keeps R38.6.4b-R item 1: no warning when the switch is absent.
 
-D38.6.4a.1 *(Open, maintainer decision pending, 2026-11-02.)* *The default of
-`electrum_spread_near_factor`.* Item 8 is written with the default 2, which
-turns the near sessions of item 6 on for every coin. The alternative is the
-default 0, which keeps the spread over every maintained session, as in
-0.3.0-beta.1, and makes item 6 opt-in. The rule is the same either way; only
-the default changes.
+D38.6.4a.1 *(Resolved 2026-11-02, maintainer Decision 8, with a condition.)*
+*The defaults of item 8.* The near sessions of item 6 are on by default, with
+*F* = 2 and *A* = 20 ms. Before the code leaves draft, the rule is validated
+against the server lists coins actually carry: a latency study over coins
+with one to four servers and RIN. Either default may change with that study's
+verdict, which is why both are switches.
+
+D38.6.4a.2 *(Open, 2026-11-02.)* *The form of the limit.* Item 6 bounds a
+near session by the larger of *F* × *f* and *f* + *A*. The maintainer's own
+wording was "twice the fastest plus 20 ms", that is *F* × *f* + *A*. The sum
+is always the looser of the two. When *f* is at least *A* / (*F* − 1), 20 ms
+with the defaults, it admits sessions up to *A* further behind. Below that it
+admits them up to (*F* − 1) × *f* further behind. Example: with *f* = 25 ms the
+larger-of form gives 50 ms, the sum 70 ms. Item 6 keeps the larger-of form
+until the maintainer answers.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -3007,9 +3024,10 @@ R38.8.6 **Tests (two-direction, observable).**
   code. They take no forbidden-class input, so chapter 01 R38 is not engaged
   and no further gate pass is required.
 - *Reloaded-original amendment (2026-11-02, maintainer Decision BI), clean side.*
-  R38.6.4a items 6–8, the changes to its items 1 and 3, its second rationale
-  and herding note, the implementation-status line, T38.6.4a.1–T38.6.4a.7,
-  D38.6.4a.1, and the cross-references in R38.6.4l items 1, 2 and 5 were
+  R38.6.4a items 6–8 (the near offset of item 8 added the same day), the
+  changes to its items 1 and 3, its second rationale and herding note, the
+  implementation-status line, T38.6.4a.1–T38.6.4a.7, D38.6.4a.1 and
+  D38.6.4a.2, and the cross-references in R38.6.4l items 1, 2 and 5 were
   written by a session that never read the corpus. They rest on the
   maintainer's Decision BI of 2026-10-31, this project's own lab timing run of
   2026-10-31, its own latency benchmark of 2026-11-01 and this repository's
