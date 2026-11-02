@@ -16,6 +16,25 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### Order book and peer-to-peer network
+
+- **A node waits 5 minutes before it dials the same address again, and no longer dials a seed it
+  is already connected to.** A node that holds fewer relays than it needs dials seeds and known
+  peers every 30 seconds.
+  - **Repeated dials.** An address that did not answer used to be dialed again at every round,
+    about 120 times an hour. It is now dialed at most once per 5 minutes, as GLEEC KDF does. A
+    seed that drops a connection soon after it was made is therefore redialed up to 5 minutes
+    later, not 30 seconds later.
+  - **A loop with seeds.** A seed that had connected to the node by itself was dialed a second
+    time at every round, because the node compared addresses only. The second connection went
+    unused and closed after two minutes, so the cycle repeated every 2.5 minutes for as long as
+    the node was short of relays. The node now remembers which peer each seed address reached
+    and does not dial the address while that peer is connected.
+  - **Log.** The warning "P2P relays below low watermark" appears at most once per 5 minutes
+    while the number of connected relays stays the same.
+
+  Nothing changes on the wire. Detail: PRs #199, #206; CRD ch.28 R27a.
+
 ### Fixed
 
 ### Tests
@@ -27,6 +46,9 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
+
+- [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
+  items of 0.4.0. The redial guards are in (PRs #199, #206).
 
 ### Known limitations
 

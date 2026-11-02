@@ -13,7 +13,7 @@
 
 | Id | What | CRD | State |
 |---|---|---|---|
-| P1 | **Redial guards.** No address is dialed again within 5 minutes, as GLEEC KDF does. No configured seed is dialed while its peer is connected, which ends a dial-and-close loop every 150 s. The short-of-relays warning appears at most once per 5 minutes. | ch.28 R27a, T12 | Spec in this PR; code next |
+| P1 | **Redial guards.** No address is dialed again within 5 minutes, as GLEEC KDF does. No configured seed is dialed while its peer is connected, which ends a dial-and-close loop every 150 s. The short-of-relays warning appears at most once per 5 minutes. | ch.28 R27a, T12 | Spec PR #199; code PR #206; lab check L-SEED pending |
 | P2 | **Peer-exchange polish.** Skipped addresses are logged at DEBUG, with an hourly INFO summary. The idle close of a relay outside the relay mesh logs at INFO. The routability ranges are aligned with GLEEC KDF. Two wording fixes (R8c, R23 item 3). | ch.28 R8c item 4, R24, R23, D9 | Batch 1, after P1 |
 | P3a | **Send-queue windows visible.** Each connection's dropped share per 60 s window, as a DEBUG line and a gauge. | ch.28 RQ1 item 5 | Batch 1, after P2 |
 | P3b | **Queue-signal clear rule.** The signal clears when nothing has waited 2 s or more, not only after a 5 s empty queue. It affects only makers with `maker_update_coalescing` on (see `maker-gossip-rate-control.md`). | ch.32 R-MP2 item 2, D9 | Batch 1, with P3a |

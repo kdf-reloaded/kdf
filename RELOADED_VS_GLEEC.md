@@ -330,6 +330,13 @@ These are divergences from GLEEC KDF that are **not** operator-configurable in t
   Contract: [CRD ch.37 §37.5.1](docs/reloaded-rewrite/37-utxo-spv-and-block-header-validation.md)
   (the key-absent row and the port note under §37.5.8). Code:
   `coins/utxo/header_layout_fallback.rs`, `coins/utxo/utxo_builder/utxo_conf_builder.rs`.
+- **A seed that is already connected is not dialed again.** A node short of relays dials each
+  address at most once per 5 minutes, as GLEEC KDF does. GLEEC KDF also dials a seed that has
+  connected to it by itself, because it compares addresses only, and the extra connection closes
+  unused after two minutes. KDF Reloaded remembers which peer each seed address reached and does
+  not dial it while that peer is connected. Nothing changes on the wire; no switch. Contract:
+  [CRD ch.28 R27a](docs/reloaded-rewrite/28-libp2p-modernization.md). Code:
+  `mm2_p2p/src/redial_guard.rs`.
 
 ### Removed / disabled in KDF Reloaded
 
