@@ -2031,14 +2031,16 @@ against the server lists coins actually carry: a latency study over coins
 with one to four servers and RIN. Either default may change with that study's
 verdict, which is why both are switches.
 
-D38.6.4a.2 *(Open, 2026-11-02.)* *The form of the limit.* Item 6 bounds a
+D38.6.4a.2 *(Resolved 2026-11-02, maintainer Decision 15: kept as written.)* *The form
+of the limit.* Item 6 bounds a
 near session by the larger of *F* × *f* and *f* + *A*. The maintainer's own
 wording was "twice the fastest plus 20 ms", that is *F* × *f* + *A*. The sum
 is always the looser of the two. When *f* is at least *A* / (*F* − 1), 20 ms
 with the defaults, it admits sessions up to *A* further behind. Below that it
 admits them up to (*F* − 1) × *f* further behind. Example: with *f* = 25 ms the
-larger-of form gives 50 ms, the sum 70 ms. Item 6 keeps the larger-of form
-until the maintainer answers.
+larger-of form gives 50 ms, the sum 70 ms. The maintainer kept the larger-of
+form of item 6. The latency study of 2026-11-02 found the same near sessions
+under both forms on every one of its 13 sampled coins.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
