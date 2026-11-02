@@ -58,6 +58,16 @@ Each package changes no wire shape and has its own switch, so that a lab can run
   cancel messages on a busy seed, from 0.4.0-alpha logs.
 - **B3:** the window assumes that an online maker advertises every non-empty pair at every tick
   (CRD ch.32 R-K2a). Any exception widens the window.
+- **B1, an extra request after a skipped second request.** When a node's first sync request fails
+  quickly and the pairs leave the placeholder before the second request (an order message filled
+  them), no second request is sent, yet the request to another relay still follows, as CRD ch.32
+  R-Q5d reads. It costs one redundant request. It stays as it is unless the lab or field counts show
+  it matters.
+- **B1, a second waiting task per sync.** After each applied sync answer, B1 starts a task that waits
+  for the trie worker before it compares roots, next to the task that already waits to end the
+  record of R-Q5b. Under a resync burst with a lagging worker, this doubles that polling of the trie
+  store. If the large batch-1 run shows the cost (the latency rows or the B1 cost case), a follow-up
+  merges the two into one task.
 - **The known-limitations line** ("other nodes can keep showing a cancelled order for a while") stays
   until B1 and B3 have landed. B1 shortens the case of a pair the maker still advertises; B3 removes
   the case of an emptied pair.
