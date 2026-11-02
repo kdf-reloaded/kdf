@@ -55,6 +55,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Our swaps now give watcher nodes what they need to help.** The taker's watcher message carried
+  whole serialized transactions where transaction hashes belong, so a counterparty's watcher
+  declined every payload, for every coin, and nothing showed it. The taker-fee and taker-payment
+  fields now carry the 32-byte transaction hashes (CRD ch.09 R6a). Detail: PR pending.
 - **A hostile or corrupt Electrum header response can no longer crash the node.** A header (or
   header list) whose length fields asked for gigabytes of memory could abort the process or kill the
   sync task, for any UTXO coin. The Equihash solution, Qtum's block signature and AuxPoW merkle

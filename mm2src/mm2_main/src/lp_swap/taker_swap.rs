@@ -1527,6 +1527,7 @@ impl TakerSwap {
         // Extract all data from the RwLock in a scope so the guard is dropped before any await
         let (
             taker_fee_hash,
+            taker_payment_hash,
             maker_payment_hex,
             secret_hash,
             lock_duration,
@@ -1540,10 +1541,15 @@ impl TakerSwap {
             my_pub,
         ) = {
             let r = self.r();
-            let taker_fee_hash = match &r.taker_fee {
-                Some(fee) => fee.tx_hex.0.clone(),
-                None => {
+            // CRD ch.09 R6/R6a: these fields carry transaction hashes, not serialized transactions.
+            let (taker_fee_hash, taker_payment_hash) = match (&r.taker_fee, &r.taker_payment) {
+                (Some(fee), Some(payment)) => watcher_payload_tx_hashes(fee, payment),
+                (None, _) => {
                     warn!("Watcher broadcast skipped: no taker fee tx available");
+                    return None;
+                },
+                (_, None) => {
+                    warn!("Watcher broadcast skipped: no taker payment tx available");
                     return None;
                 },
             };
@@ -1556,6 +1562,7 @@ impl TakerSwap {
             };
             (
                 taker_fee_hash,
+                taker_payment_hash,
                 maker_payment_hex,
                 r.secret_hash.0.to_vec(),
                 r.data.lock_duration,
@@ -1618,7 +1625,7 @@ impl TakerSwap {
             lock_duration,
             taker_coin: self.taker_coin.ticker().to_owned(),
             taker_fee_hash,
-            taker_payment_hash: taker_payment_hex.to_vec(),
+            taker_payment_hash,
             taker_coin_start_block,
             taker_payment_confirmations,
             taker_payment_requires_nota,
@@ -2584,6 +2591,16 @@ pub fn max_taker_vol_from_available(
     Ok(max_vol)
 }
 
+/// The taker-fee and taker-payment fields of the watcher payload (CRD ch.09 R6/R6a) carry
+/// the transactions' hashes, never their serialized bodies. A no-fee swap records an empty
+/// fee identifier and so yields an empty fee field (ch.09 R10a).
+fn watcher_payload_tx_hashes(
+    taker_fee: &TransactionIdentifier,
+    taker_payment: &TransactionIdentifier,
+) -> (Vec<u8>, Vec<u8>) {
+    (taker_fee.tx_hash.0.clone(), taker_payment.tx_hash.0.clone())
+}
+
 pub fn maker_payment_wait(swap_started_at: u64, payment_locktime: u64) -> u64 {
     swap_started_at + (payment_locktime * 2) / 5
 }
@@ -3348,5 +3365,49 @@ mod taker_swap_tests {
             NegotiationDataMsg::V2(data) => assert_eq!(data.persistent_pubkey, node_pubkey),
             other => panic!("one key for both coins must be sent as shape 2, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod watcher_payload_tests {
+    use super::*;
+
+    /// CRD ch.09 R6a: the watcher payload's fee and payment fields are transaction hashes (32 bytes),
+    /// not serialized transactions. A round trip through our own types cannot see the difference, so
+    /// this asserts the field width against identifiers whose serialized body is deliberately not 32
+    /// bytes long.
+    #[test]
+    fn watcher_payload_hash_fields_are_32_byte_hashes_not_serialized_txs() {
+        let fee = TransactionIdentifier {
+            tx_hex: vec![0xAA; 250].into(),
+            tx_hash: vec![0x11; 32].into(),
+        };
+        let payment = TransactionIdentifier {
+            tx_hex: vec![0xBB; 310].into(),
+            tx_hash: vec![0x22; 32].into(),
+        };
+
+        let (fee_field, payment_field) = watcher_payload_tx_hashes(&fee, &payment);
+
+        assert_eq!(fee_field.len(), 32);
+        assert_eq!(payment_field.len(), 32);
+        assert_eq!(fee_field, vec![0x11; 32]);
+        assert_eq!(payment_field, vec![0x22; 32]);
+    }
+
+    /// CRD ch.09 R10a: a no-fee swap publishes an empty fee field; this is bound behaviour.
+    #[test]
+    fn no_fee_swap_yields_empty_fee_field() {
+        let no_fee = TransactionIdentifier {
+            tx_hex: Vec::new().into(),
+            tx_hash: Vec::new().into(),
+        };
+        let payment = TransactionIdentifier {
+            tx_hex: vec![0xBB; 310].into(),
+            tx_hash: vec![0x22; 32].into(),
+        };
+        let (fee_field, payment_field) = watcher_payload_tx_hashes(&no_fee, &payment);
+        assert!(fee_field.is_empty());
+        assert_eq!(payment_field.len(), 32);
     }
 }
