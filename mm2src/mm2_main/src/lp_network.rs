@@ -684,6 +684,13 @@ pub async fn request_one_peer<T: de::DeserializeOwned>(
     }
 }
 
+/// The relays this node is connected to, as peer ID strings. Empty when there is none, or when the
+/// networking layer cannot be asked (CRD ch.32 R-Q5d item 2).
+pub async fn connected_relays(ctx: &MmArc) -> Vec<String> {
+    let cmd_tx = P2PContext::fetch_from_mm_arc(ctx).cmd_tx.lock().clone();
+    mm2_p2p::atomicdex_behaviour::get_connected_relays(cmd_tx).await
+}
+
 fn parse_peers_responses<T: de::DeserializeOwned>(
     responses: Vec<(PeerId, AdexResponse)>,
 ) -> Vec<(PeerId, PeerDecodedResponse<T>)> {

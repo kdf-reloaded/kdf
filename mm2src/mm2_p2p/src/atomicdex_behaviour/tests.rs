@@ -835,3 +835,42 @@ async fn test_relay_mesh_join_is_reported_again_after_a_forced_close() {
     let _second = Node::spawn(second_port, vec![], |_, _| ()).await;
     wait_for_joins(&joins, 2, 90).await;
 }
+
+/// CRD ch.32 R-Q5d item 2: the relays a node is connected to are listed by `GetConnectedRelays`.
+#[tokio::test]
+async fn test_connected_relays_lists_the_relay_a_light_node_is_connected_to() {
+    let _ = env_logger::try_init();
+    let relay_port = next_port();
+    let relay = Node::spawn(relay_port, vec![], |_, _| ()).await;
+    let mut light = Node::spawn_light(vec![relay_port], |_, _| ()).await;
+    light.wait_peers(1).await;
+
+    let wanted = vec![relay.peer_id.to_string()];
+    for _ in 0..20 {
+        if super::get_connected_relays(light.cmd_tx.clone()).await == wanted {
+            return;
+        }
+        async_std::task::sleep(Duration::from_millis(500)).await;
+    }
+    panic!(
+        "the connected relay was not listed: {:?}",
+        super::get_connected_relays(light.cmd_tx.clone()).await
+    );
+}
+
+/// CRD ch.32 R-Q5d item 1: a command that cannot be sent, or whose reply channel is dropped, is "no relay".
+#[tokio::test]
+async fn test_connected_relays_is_empty_when_the_command_cannot_be_answered() {
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    assert!(super::get_connected_relays(tx).await.is_empty());
+
+    let (tx, mut rx) = mpsc::channel(1);
+    let (relays, _) = futures::join!(super::get_connected_relays(tx), async {
+        match rx.next().await {
+            Some(AdexBehaviourCmd::GetConnectedRelays { result_tx }) => drop(result_tx),
+            other => panic!("unexpected command {:?}", other),
+        }
+    });
+    assert!(relays.is_empty());
+}
