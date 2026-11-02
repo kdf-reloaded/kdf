@@ -14,6 +14,15 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Added
 
+#### EVM coins
+
+- **The log shows the gas limits each EVM coin and token will use.** At activation, one line names
+  where the coin's gas limits come from: its own entry in the coins file, its platform coin's entry,
+  or the built-in defaults. It lists the values that differ from the defaults, and the gas-estimate
+  multiplier when one is set; the full list is logged at debug level. A coins file that lacks the
+  limits a chain needs is now visible at once, as it was not when Monad token swaps ran out of gas
+  with a coins file older than October 28, 2026. Detail: PR #200; CRD ch.57 R57.5.5.
+
 ### Changed
 
 ### Fixed
@@ -27,6 +36,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
+
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: the activation log
+  now names the gas limits each EVM coin and token will use and where they come from (PR #200);
+  options (a) and (b) still wait on the reference maintainers' outcome.
 
 ### Known limitations
 
@@ -108,9 +121,10 @@ lives.
   files from that date on give each Monad token, such as USDC-MON, its own `gas_limit` block, which
   KDF Reloaded uses. With an older file the payment runs out of gas and fails on-chain: its gas fee
   is spent, the tokens stay in the wallet and the swap stops. A counterparty whose payment is already
-  locked gets it back by refund once the swap's lock time passes. More in
-  [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105; CRD ch.57
-  R57.5.2, R57.5.3.
+  locked gets it back by refund once the swap's lock time passes. With an older file, the token's
+  activation log line says `gas_limit: defaults`. More in
+  [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md). Detail: PR #105, PR #200; CRD
+  ch.57 R57.5.2, R57.5.3, R57.5.5.
 
 ## [0.3.0-beta.1] — 2026-11-01
 

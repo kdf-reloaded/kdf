@@ -147,6 +147,12 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   the reference behavior. Nothing a counterparty observes changes, so the
   divergence is the default; the shared registry needs no change. See CRD ch.37
   R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM coins and tokens log the gas limits they will use.** At activation, one
+  INFO line names where each gas-limit block comes from (the coin's own entry,
+  its platform coin's entry or the defaults) and lists the members that differ
+  from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
+  line lists every member. It is logging only: no request, response or
+  transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
 
 ### Behavioural divergences without a compatibility switch
 
