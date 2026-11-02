@@ -2391,7 +2391,9 @@ recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 > Electrum server as `host:port` through the shared helper
 > (`coins/node_url.rs`), on both builds and on the shielded-coin Electrum
 > fallback; an address that cannot be parsed is named by a placeholder and its
-> position. An address with userinfo or a path before the port is rejected
+> position, except on the shielded-coin fallback, which names it by the
+> placeholder alone (item 1 is not met there; ch.39 D39.11.o). An address with
+> userinfo or a path before the port is rejected
 > when the server is added. The native daemon client's debug form shows the
 > `Authorization` value as set, not its content. The browser build is checked
 > to compile; its runtime is not tested.
