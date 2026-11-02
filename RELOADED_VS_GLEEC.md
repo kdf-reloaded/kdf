@@ -475,6 +475,8 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   answered at once.
 - `sync_request_retry_ms: 0` — a failed sync request of this node is not asked again before the
   maker's next keep-alive.
+- `sync_request_alternate_relay: false` — a failed or outdated sync answer is not followed by a
+  request to another relay before the maker's next keep-alive.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
 - `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is
