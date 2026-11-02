@@ -2024,15 +2024,18 @@ switch, or an unrecognized value, means the default and logs one warning
 naming the value" can be read as a warning for an absent switch too. This
 rule keeps R38.6.4b-R item 1: no warning when the switch is absent.
 
-D38.6.4a.1 *(Resolved 2026-11-02, maintainer Decision 8, with a condition.)*
-*The defaults of item 8.* The near sessions of item 6 are on by default, with
-*F* = 2 and *A* = 20 ms. Before the code leaves draft, the rule is validated
-against the server lists coins actually carry: a latency study over coins
-with one to four servers and RIN. Either default may change with that study's
-verdict, which is why both are switches.
+D38.6.4a.1 *(Decided 2026-11-02, maintainer Decisions 8 and 22; under
+monitoring.)* *The defaults of item 8.* The near sessions of item 6 are on by
+default, with *F* = 2 and *A* = 20 ms. A latency study of 2026-11-02 checked
+the rule against the server lists coins actually carry, on 13 coins with one to
+six servers. It found the rule helpful where a coin's servers differ and
+neutral where they do not, and the maintainer kept the rule and both defaults.
+The decision is under monitoring, not closed. The maintainer confirms or
+changes it on the behavior seen in the field and on users' reports. That is
+also why both values are switches.
 
-D38.6.4a.2 *(Resolved 2026-11-02, maintainer Decision 15: kept as written.)* *The form
-of the limit.* Item 6 bounds a
+D38.6.4a.2 *(Decided 2026-11-02, maintainer Decision 15: kept as written; under
+monitoring.)* *The form of the limit.* Item 6 bounds a
 near session by the larger of *F* × *f* and *f* + *A*. The maintainer's own
 wording was "twice the fastest plus 20 ms", that is *F* × *f* + *A*. The sum
 is always the looser of the two. When *f* is at least *A* / (*F* − 1), 20 ms
