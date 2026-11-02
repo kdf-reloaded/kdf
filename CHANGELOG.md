@@ -16,6 +16,18 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Changed
 
+#### EVM coins
+
+- **The quoted fee for sending an EVM taker fee is now the fee at the gas limit the node sends it
+  with.** `trade_preimage`, the taker's balance check before a swap and the maximum taker volume
+  used to price the taker-fee transfer at the node's gas estimate, while the transfer is sent with
+  the fixed `eth_send_erc20` limit (`eth_send_coins` for a platform coin). On Monad, which charges
+  the full limit, the USDC-MON fee transfer is estimated at about 83,000 gas and charged the 150,000
+  its coins-file entry sets. The quote now uses the limit, as every other EVM swap quote already
+  does. On chains that charge only the gas used, the quoted fee is now higher than what is charged.
+  Set the `MM2.json` boolean `evm_taker_fee_quote_at_limit` to `false` to quote the estimate as
+  before. Detail: PR #213; CRD ch.57 R57.4.2.
+
 ### Fixed
 
 ### Tests
@@ -27,6 +39,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
+
+- [`evm-swap-gas-multiplier`](docs/plans/evm-swap-gas-multiplier.md) — blocked: open point 3 is
+  decided, and the fee to send an EVM taker fee is now quoted at the gas limit it is sent with
+  (PR #213); options (a) and (b) still wait on the reference maintainers' outcome.
 
 ### Known limitations
 

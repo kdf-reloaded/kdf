@@ -26,6 +26,16 @@ fn token_address() -> Address { Address::from_str(TOKEN_ADDR).unwrap() }
 /// with the given extra members (`gas_limit`, `gas_limit_v2`, ...). The limits are resolved by the activation
 /// helper from the entry of the coin itself, the platform entry being its fallback.
 fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -> Result<(MmArc, EthCoin), String> {
+    coin_over_entries_and_conf(coin_type, eth_extra, jst_extra, json!({}))
+}
+
+/// [`coin_over_entries`] over a node configuration that also holds the members of `mm2_extra`.
+fn coin_over_entries_and_conf(
+    coin_type: EthCoinType,
+    eth_extra: Json,
+    jst_extra: Json,
+    mm2_extra: Json,
+) -> Result<(MmArc, EthCoin), String> {
     let mut eth = json!({"coin": "ETH", "protocol": {"type": "ETH"}, "mm2": 1});
     let mut jst = json!({"coin": "JST", "mm2": 1, "decimals": 18, "protocol": {"type": "ERC20",
         "protocol_data": {"platform": "ETH", "contract_address": format!("0x{TOKEN_ADDR}")}}});
@@ -34,9 +44,11 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
             entry[key] = value.clone();
         }
     }
-    let ctx = MmCtxBuilder::new()
-        .with_conf(json!({"netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [eth, jst]}))
-        .into_mm_arc();
+    let mut conf = json!({"netid": mm2_net_config::SUPPORTED_NETIDS[0], "coins": [eth, jst]});
+    for (key, value) in mm2_extra.as_object().unwrap() {
+        conf[key] = value.clone();
+    }
+    let ctx = MmCtxBuilder::new().with_conf(conf).into_mm_arc();
 
     let (ticker, protocol) = match &coin_type {
         EthCoinType::Eth => ("ETH", CoinProtocol::ETH { chain_id: None }),
@@ -49,6 +61,7 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
     let entry = crate::coin_conf(&ctx, ticker);
     let (gas_limit, gas_limit_v2) = coin_gas_limits(&ctx, &entry, &protocol).map_err(|e| e.to_string())?;
     let estimate_gas_mult = coin_estimate_gas_mult(&ctx, &entry, &protocol).map_err(|e| e.to_string())?;
+    let (taker_fee_quote_at_limit, _warning) = evm_taker_fee_quote_at_limit_from_conf(&ctx.conf);
 
     let key_pair = KeyPair::from_secret_slice(
         &hex::decode("809465b17d0a4ddb3e4c69e8f23c2cabad868f51f8bed5c765ad1d6516c3306f").unwrap(),
@@ -95,6 +108,7 @@ fn coin_over_entries(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json) -
         gas_limit,
         gas_limit_v2,
         estimate_gas_mult,
+        taker_fee_quote_at_limit,
     }));
     Ok((ctx, coin))
 }
@@ -1109,5 +1123,277 @@ fn t13f_no_fixed_limit_changes_when_the_member_is_set() {
         assert_eq!(token.gas_limit_v2.maker.erc20_payment, maker_pay);
         assert_eq!(token.gas_limit_v2.taker.erc20_payment, taker_pay);
         assert_eq!(token.gas_limit_v2.taker.approve_payment, approve);
+    }
+}
+
+// ─── T15: the DEX-fee preimage at the fixed gas limit (CRD ch.57 R57.4.2) ──────────────────────────────
+
+mod t15_taker_fee_quote_at_limit {
+    use super::*;
+
+    /// A price high enough for every stage increase to change it.
+    const GAS_PRICE: u64 = 1_000;
+    /// The node's `eth_estimateGas` answer for the fee transfer, below every limit used here.
+    const ESTIMATE: u64 = 15_000;
+    const WEI_AMOUNT: u64 = 1_000_000;
+
+    thread_local! {
+        /// How many times the node was asked for the gas estimate of the fee transfer.
+        static ESTIMATE_CALLS: RefCell<u32> = const { RefCell::new(0) };
+    }
+
+    fn estimate_calls() -> u32 { ESTIMATE_CALLS.with(|calls| *calls.borrow()) }
+
+    /// A node pricing at [`GAS_PRICE`] and answering the estimate with `answer`.
+    fn node_answers(answer: Result<u64, Web3RpcError>) {
+        ESTIMATE_CALLS.with(|calls| *calls.borrow_mut() = 0);
+        EthCoin::get_gas_price
+            .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::from(GAS_PRICE)))));
+        EthCoin::fresh_estimation_fee.mock_safe(|_, _| {
+            MockResult::Return(Box::new(futures01::future::ok(SwapFee::Legacy {
+                gas_price: U256::from(GAS_PRICE),
+            })))
+        });
+        EthCoinImpl::estimate_gas.mock_safe(move |_, _| {
+            ESTIMATE_CALLS.with(|calls| *calls.borrow_mut() += 1);
+            let answer = match &answer {
+                Ok(gas) => Ok(U256::from(*gas)),
+                Err(Web3RpcError::FeeCapBelowBaseFee(rejection)) => {
+                    Err(MmError::new(Web3RpcError::FeeCapBelowBaseFee(rejection.clone())))
+                },
+                Err(Web3RpcError::Transport(text)) => Err(MmError::new(Web3RpcError::Transport(text.clone()))),
+                Err(other) => panic!("unscripted estimate error {other:?}"),
+            };
+            let answer: Result<U256, MmError<Web3RpcError>> = answer;
+            let fut: Box<dyn futures01::Future<Item = U256, Error = MmError<Web3RpcError>> + Send> = match answer {
+                Ok(gas) => Box::new(futures01::future::ok(gas)),
+                Err(err) => Box::new(futures01::future::err(err)),
+            };
+            MockResult::Return(fut)
+        });
+    }
+
+    fn mm2_conf(at_limit: bool) -> Json { json!({ "evm_taker_fee_quote_at_limit": at_limit }) }
+
+    fn coin(coin_type: EthCoinType, eth_extra: Json, jst_extra: Json, at_limit: bool) -> EthCoin {
+        coin_over_entries_and_conf(coin_type, eth_extra, jst_extra, mm2_conf(at_limit))
+            .unwrap()
+            .1
+    }
+
+    fn token_type() -> EthCoinType {
+        EthCoinType::Erc20 {
+            platform: "ETH".to_owned(),
+            token_addr: token_address(),
+        }
+    }
+
+    fn preview(coin: &EthCoin, stage: FeeApproxStage) -> Result<TradeFee, MmError<TradePreimageError>> {
+        let dex_fee = u256_to_big_decimal(WEI_AMOUNT.into(), 18).unwrap();
+        block_on(coin.get_fee_to_send_taker_fee(dex_fee, stage))
+    }
+
+    fn fee_of(gas: u64, price: u64) -> TradeFee { wei_amount(gas * price) }
+
+    #[test]
+    fn a_token_is_quoted_at_eth_send_erc20_and_the_switch_false_quotes_the_estimate() {
+        node_answers(Ok(ESTIMATE));
+        let default_limit = EthGasLimit::default().eth_send_erc20;
+        assert!(default_limit > ESTIMATE);
+        let token = coin(token_type(), json!({}), json!({}), true);
+        assert_eq!(
+            preview(&token, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(default_limit, GAS_PRICE)
+        );
+        assert_eq!(estimate_calls(), 1, "the estimate is still asked for");
+
+        node_answers(Ok(ESTIMATE));
+        let token = coin(token_type(), json!({}), json!({}), false);
+        assert_eq!(
+            preview(&token, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(ESTIMATE, GAS_PRICE)
+        );
+        assert_eq!(estimate_calls(), 1);
+    }
+
+    #[test]
+    fn a_platform_coin_is_quoted_at_eth_send_coins_and_the_switch_false_quotes_the_estimate() {
+        node_answers(Ok(ESTIMATE));
+        let limit = EthGasLimit::default().eth_send_coins;
+        assert!(limit > ESTIMATE);
+        let eth = coin(EthCoinType::Eth, json!({}), json!({}), true);
+        assert_eq!(
+            preview(&eth, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(limit, GAS_PRICE)
+        );
+        // The platform coin's figure is its own limit, not the token's.
+        assert_ne!(limit, EthGasLimit::default().eth_send_erc20);
+        assert_eq!(estimate_calls(), 1);
+
+        node_answers(Ok(ESTIMATE));
+        let eth = coin(EthCoinType::Eth, json!({}), json!({}), false);
+        assert_eq!(
+            preview(&eth, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(ESTIMATE, GAS_PRICE)
+        );
+        // The configured platform limit is the figure, whatever the token limit is.
+        node_answers(Ok(ESTIMATE));
+        let eth = coin(
+            EthCoinType::Eth,
+            json!({"gas_limit": {"eth_send_coins": 33_333, "eth_send_erc20": 44_444}}),
+            json!({}),
+            true,
+        );
+        assert_eq!(
+            preview(&eth, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(33_333, GAS_PRICE)
+        );
+    }
+
+    #[test]
+    fn a_token_whose_entry_sets_eth_send_erc20_to_150000_quotes_150000() {
+        node_answers(Ok(83_436));
+        let own = json!({"gas_limit": {"eth_send_erc20": 150_000}});
+        let token = coin(token_type(), json!({}), own.clone(), true);
+        assert_eq!(
+            preview(&token, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(150_000, GAS_PRICE)
+        );
+        // The platform coin's block reaches a token that has none.
+        let token = coin(token_type(), own, json!({}), true);
+        assert_eq!(
+            preview(&token, FeeApproxStage::WithoutApprox).unwrap(),
+            fee_of(150_000, GAS_PRICE)
+        );
+    }
+
+    #[test]
+    fn the_stage_increase_applies_to_the_price_as_before() {
+        for at_limit in [true, false] {
+            node_answers(Ok(ESTIMATE));
+            let token = coin(token_type(), json!({}), json!({}), at_limit);
+            let gas = if at_limit {
+                EthGasLimit::default().eth_send_erc20
+            } else {
+                ESTIMATE
+            };
+            let unstaged = preview(&token, FeeApproxStage::WithoutApprox).unwrap();
+            assert_eq!(unstaged, fee_of(gas, GAS_PRICE));
+            for stage in [
+                FeeApproxStage::StartSwap,
+                FeeApproxStage::OrderIssue,
+                FeeApproxStage::TradePreimage,
+            ] {
+                let raised = increase_gas_price_by_stage(U256::from(GAS_PRICE), &stage).as_u64();
+                assert!(raised > GAS_PRICE, "{stage:?}");
+                assert_eq!(preview(&token, stage).unwrap(), fee_of(gas, raised), "{at_limit}");
+            }
+        }
+    }
+
+    /// What the preview answers, as text, so the two switch values can be compared.
+    fn outcome(result: Result<TradeFee, MmError<TradePreimageError>>) -> String {
+        match result {
+            Ok(fee) => format!("Ok({fee:?})"),
+            Err(err) => format!("Err({:?})", err.get_inner()),
+        }
+    }
+
+    #[test]
+    fn an_estimate_that_fails_gives_the_same_error_under_both_switch_values() {
+        let revert =
+            || Web3RpcError::Transport("error code -32016: The execution failed due to an exception.".to_owned());
+        let no_gas = || Web3RpcError::Transport("error code -32000: gas required exceeds allowance (0)".to_owned());
+        let rejection = crate::FeeCapBelowBaseFee {
+            max_fee_per_gas: Some(U256::from(100u64)),
+            base_fee: Some(U256::from(200u64)),
+            node: Some("node.example".to_owned()),
+        };
+
+        let mut seen = Vec::new();
+        for at_limit in [true, false] {
+            // The coin balance is short: reported against the token, with the required amount.
+            node_answers(Err(revert()));
+            EthCoin::my_balance.mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::one()))));
+            let token = coin(token_type(), json!({}), json!({}), at_limit);
+            let coin_balance = outcome(preview(&token, FeeApproxStage::WithoutApprox));
+            assert!(coin_balance.contains("NotSufficientBalance"), "{coin_balance}");
+            assert!(coin_balance.contains("JST"), "{coin_balance}");
+            assert_eq!(estimate_calls(), 1);
+
+            // The platform coin is short for gas: reported against the platform coin, at `eth_send_coins`.
+            node_answers(Err(no_gas()));
+            EthCoin::my_balance
+                .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(U256::from(u64::MAX)))));
+            EthCoin::base_coin_balance
+                .mock_safe(|_| MockResult::Return(Box::new(futures01::future::ok(BigDecimal::from(0)))));
+            let platform_balance = preview(&token, FeeApproxStage::WithoutApprox);
+            match platform_balance.as_ref().map_err(|e| e.get_inner()) {
+                Err(TradePreimageError::NotSufficientBalance { coin, required, .. }) => {
+                    assert_eq!(coin, "ETH");
+                    let min_gas_fee = EthGasLimit::default().eth_send_coins * GAS_PRICE;
+                    assert_eq!(
+                        *required,
+                        u256_to_big_decimal(min_gas_fee.into(), ETH_DECIMALS).unwrap()
+                    );
+                },
+                other => panic!("expected the platform-coin shortfall, got {other:?}"),
+            }
+            let platform_balance = outcome(platform_balance);
+            assert_eq!(estimate_calls(), 1);
+
+            // A fee cap below the base fee is the typed error and never a balance error.
+            node_answers(Err(Web3RpcError::FeeCapBelowBaseFee(rejection.clone())));
+            let fee_cap = preview(&token, FeeApproxStage::WithoutApprox);
+            match fee_cap.as_ref().map_err(|e| e.get_inner()) {
+                Err(TradePreimageError::FeeCapBelowBaseFee(typed)) => assert_eq!(*typed, rejection),
+                other => panic!("expected the typed fee-cap error, got {other:?}"),
+            }
+            seen.push((coin_balance, platform_balance, outcome(fee_cap)));
+        }
+        assert_eq!(seen[0], seen[1], "the errors do not depend on the switch");
+    }
+
+    #[test]
+    fn the_switch_is_true_unless_it_is_a_json_boolean_and_only_a_bad_value_warns() {
+        use crate::eth::eth_activation::evm_taker_fee_quote_at_limit_from_conf as parse;
+        assert_eq!(parse(&json!({})), (true, None));
+        assert_eq!(parse(&json!({"evm_taker_fee_quote_at_limit": true})), (true, None));
+        assert_eq!(parse(&json!({"evm_taker_fee_quote_at_limit": false})), (false, None));
+        for (bad, shown) in [
+            (json!("false"), "\"false\""),
+            (json!("true"), "\"true\""),
+            (json!(0), "0"),
+            (json!(1), "1"),
+            (json!(null), "null"),
+            (json!([]), "[]"),
+        ] {
+            let (value, warning) = parse(&json!({ "evm_taker_fee_quote_at_limit": bad }));
+            assert!(value, "{shown}");
+            let warning = warning.unwrap_or_else(|| panic!("no warning for {shown}"));
+            assert_eq!(
+                warning,
+                format!(
+                    "MM2.json key evm_taker_fee_quote_at_limit is {shown}, which is not a boolean: using the default true"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn the_coin_keeps_the_switch_and_a_token_takes_the_one_of_its_platform() {
+        let build = |mm2: Json| coin_over_entries_and_conf(EthCoinType::Eth, json!({}), json!({}), mm2).unwrap();
+        assert!(build(json!({})).1.taker_fee_quote_at_limit);
+        assert!(
+            build(json!({"evm_taker_fee_quote_at_limit": "no"}))
+                .1
+                .taker_fee_quote_at_limit
+        );
+        // The context stays alive: the token is built from its coin entry through it.
+        let (_ctx, platform) = build(json!({"evm_taker_fee_quote_at_limit": false}));
+        assert!(!platform.taker_fee_quote_at_limit);
+        let token =
+            block_on(platform.erc20_token_from_conf_or_contract("JST".to_owned(), token_address(), 1, false)).unwrap();
+        assert!(!token.taker_fee_quote_at_limit);
     }
 }

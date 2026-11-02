@@ -403,6 +403,59 @@ of that set.
 > at zero and therefore always resolves to the legacy form, signing an
 > over-priced transaction.
 
+**R57.4.2** *The DEX-fee preimage quotes the fixed gas limit (Reloaded-original,
+maintainer decision of 2026-11-02; written on the clean side from this project's
+own code and lab result, no forbidden-class input).*
+1. *Figure.* The gas of an EVM coin's DEX-fee preimage is the gas limit the
+   taker-fee transaction is broadcast with: `eth_send_coins` for a platform coin,
+   `eth_send_erc20` for an ERC-20 token (R57.5.2). It is multiplied by the price
+   the preimage uses (R57.4.1), raised for the stage (R57.3.3). That preimage is
+   the fee to send the taker fee. It is reported by `trade_preimage`, and it is
+   used by the taker's balance check before a swap starts and by the maximum
+   taker volume.
+2. *The estimate stays for its diagnosis.* The node still asks the node RPC for
+   the gas estimate of the fee transfer, and its failures are reported as before
+   this rule:
+   - a fee cap below the base fee ([chapter 56](56-evm-eip1559-fee-estimation.md)
+     R5);
+   - a coin balance below the fee amount;
+   - a platform-coin balance below the gas cost.
+
+   Its figure no longer enters the quote.
+3. *Switch.* `evm_taker_fee_quote_at_limit` is a top-level `MM2.json` boolean,
+   read at coin activation, default `true`. With `false`, the preimage quotes
+   the estimate, as before this rule. A value that is not a boolean is taken as
+   `true`, with one warning naming the key and the value for each coin whose
+   activation reads it. An absent key logs nothing. A token activated with its
+   platform takes the platform coin's value.
+4. *Unchanged.* The taker-fee transaction itself, its gas limit and its price,
+   and every other preimage figure.
+
+*Rationale (this project's own lab result, 2026-10-31).* Monad charges the full
+gas limit of a transaction. The USDC-MON taker-fee transfer needs 83,436 gas
+(`eth_estimateGas` against a public Monad node), so before this rule it was quoted
+at about that figure, but it is charged 150,000, the `eth_send_erc20` that the
+current coins file sets for the token (the default of R57.5.2 is 210000). Every other swap figure of an EVM coin is already
+priced from the fixed limits of R57.5.2: the payment, spend and refund quotes and
+the flat trade fee. The DEX-fee preimage was the one quote that estimated. A
+node must also hold the limit times the price before it can broadcast. A taker
+whose platform-coin balance covered the estimate but not the limit could
+therefore pass the check before the swap and then fail to send the fee. On a chain
+that charges only the gas used, the quote is now above the charge, as the
+payment quotes already are.
+
+> **Divergence (informative).** Before this rule, Reloaded quoted the
+> `eth_estimateGas` figure. What GLEEC KDF quotes here is not established:
+> the question is with the KDF Spec Reader (SR-4, 2026-11-02). No peer
+> observes the quote, which only changes this node's own figures, so by the
+> second arm of the default-side rule of `docs/COMPAT_SWITCHES.md` Reloaded's
+> variant is the default.
+>
+> **Compatibility:** for the behavior before this rule, set
+> `evm_taker_fee_quote_at_limit` to `false`.
+
+*Acceptance.* T15.
+
 ---
 
 ## Part B — Per-coin gas-limit overrides
@@ -1249,6 +1302,23 @@ derivation record above R57.5.3b.)*
 > written cannot detect a future read of the trading-volume floor on that
 > path, which stays open against this test.
 
+**T15.** *The DEX-fee preimage at the fixed limit (R57.4.2).* Against a
+stubbed node whose `eth_estimateGas` answer for the fee transfer is a known
+`e` below the limit:
+- (a) for an ERC-20 token, the preimage's gas is the token's `eth_send_erc20`,
+  and with `evm_taker_fee_quote_at_limit` `false` it is `e`;
+- (b) for a platform coin, it is `eth_send_coins`;
+- (c) a token whose entry sets `eth_send_erc20` to 150000 quotes 150000;
+- (d) the stage increase of R57.3.3 applies to the price as before;
+- (e) under both switch values, an estimate that fails because the coin
+  balance, or the platform-coin balance for gas, is short gives the same
+  insufficient-balance error as before this rule, and a fee cap below the
+  base fee gives the typed error of chapter 56 R5;
+- (f) an absent switch means `true` without a warning; `false` means `false`;
+  a string or a number means `true` with one warning.
+
+*(Added 2026-11-02 with R57.4.2, clean side.)*
+
 ## 57.9 Deferred Work
 
 **D1.** *Upper-bound and watcher approximation stages.* R57.3.4's three
@@ -1917,3 +1987,9 @@ pre-anchor baseline code.*
   They take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required. The one-line cross-reference in R57.7.3 rides on the
   chapter-56 verdict of 2026-10-30.
+- *Clean-side addition of 2026-11-02, maintainer decision (taker-fee quote).* A
+  session that never read the corpus wrote R57.4.2 and T15 from this project's own
+  code at `e65d3c45f` and the lab result of 2026-10-31. They take no
+  forbidden-class input, so chapter 01 R38 is not engaged and no gate pass is
+  required. The divergence note makes no claim about GLEEC KDF; that question is
+  with the Spec Reader (SR-4).
