@@ -23,7 +23,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   2,048 in all (before: 8 and 256) and answers them when its own sync lands, instead of answering
   with an error at once. The limits are the `MM2.json` settings `sync_answer_deferral_max_per_peer`
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
-  CRD ch.32 R-Q5b.
+  PR #205; CRD ch.32 R-Q5b.
 
 ### Fixed
 
@@ -39,7 +39,7 @@ file carries the detail. "New" means the plan was created in this cycle.
 
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
   showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above.
+  sync limits on relays above (PR #205).
 
 ### Known limitations
 
