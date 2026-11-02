@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-KDF Reloaded is in public alpha. Only the latest tagged alpha release receives security fixes.
+KDF Reloaded is in public beta. Only the latest tagged beta release receives security fixes.
 
 | Version          | Supported |
 |------------------|-----------|
-| `0.1.0-alpha.x`  | ✅        |
+| `0.3.0-beta.x`   | ✅        |
 | Anything older   | ❌        |
 
 ## Reporting a vulnerability
@@ -39,27 +39,40 @@ From June 2026 onward, Git commits and release tags are GPG-signed by the projec
 - **Identity:** `Takologi <takologi@proton.me>`
 - **Key type:** RSA 4096
 - **Fingerprint:** `FEE1 ACA5 2C65 FF3E BF31  818C B559 5E17 52BC 2A82`
+- **Signing subkey:** ed25519, `ABB2 DF8B 79E8 A4E7 6139  4732 B3FF 4116 5803 42CB`
+
+A signature can come from the primary key or from its signing subkey. GnuPG resolves the subkey automatically once the key is imported; you do not need to import it separately. The key also carries a second user ID, which GnuPG may show first. Check the primary key fingerprint, not the name.
 
 Import the key and verify provenance:
 
 ```sh
 # Import from the in-repo copy...
 gpg --import docs/keys/takologi.asc
-# ...or from a keyserver:
-gpg --recv-keys FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82
+# ...or from the keyserver:
+gpg --keyserver hkps://keys.openpgp.org --recv-keys FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82
 
 # Verify the current commit and a release tag:
 git verify-commit HEAD
 git verify-tag <tag>
 ```
 
-A *Good signature* from fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82` confirms maintainer provenance. Treat any release commit or tag that is **not** signed by this key as unverified.
+The copy of `docs/keys/takologi.asc` in tags up to `v0.3.0-beta.1` lacks the signing subkey, so it cannot verify signatures made with it. Import the current copy or the keyserver copy instead.
+
+A *Good signature* from fingerprint `FEE1ACA52C65FF3EBF31818CB5595E1752BC2A82` or its signing subkey confirms maintainer provenance. Treat any release commit or tag that is **not** signed by this key as unverified.
 
 ## Release artifact verification
 
-> GPG and/or minisign signatures on release **binaries** are planned for the alpha cycle and will be produced with the [maintainer signing key](#maintainer-signing-key) above; a per-artifact verification procedure will be published alongside the first signed release.
->
-> Until then, the authoritative provenance signal is the maintainer's commit/tag signature (above), and the only authoritative source of KDF Reloaded code is this repository. Do not trust binaries received through any other channel.
+Every release carries `SHA256SUMS`, the SHA-256 checksums of all its files, and `SHA256SUMS.asc`, a signature over that file made with the [maintainer signing key](#maintainer-signing-key) above. After importing the key, run in the folder with your downloads:
+
+```sh
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+# on macOS: shasum -a 256 --ignore-missing -c SHA256SUMS
+```
+
+A good signature from the key above and an `OK` for every downloaded file authenticate the download. More in [`docs/RELEASE.md`](docs/RELEASE.md#verifying-a-release-for-users).
+
+The only authoritative sources of KDF Reloaded are this repository and its GitHub releases. Do not trust binaries received through any other channel.
 
 DEX fee receiver addresses are inherited from the upstream Komodo DeFi Framework configuration by design and are not under the control of the KDF Reloaded maintainers.
 
