@@ -1146,7 +1146,8 @@ clean side, maintainer Decision BI, with no forbidden-class input.)*
    `electrum_server_order` says. Every ordinary request and every
    `server.ping` (R38.6.4e item 4) answered over the session is a sample; the
    first sample after the session joins the maintained set starts the
-   average. Nothing is sent for it. Under `random` and `listed` there is still
+   average. A broadcast or a subscription answered over the session is a
+   sample too. Nothing is sent for it. Under `random` and `listed` there is still
    no activation round, no header request on joining, no re-measure round and
    no trigger (R38.6.4l items 1, 6 and 7). A session that leaves the
    maintained set loses its smoothed latency.
@@ -1154,7 +1155,8 @@ clean side, maintainer Decision BI, with no forbidden-class input.)*
    coin activation:
    - `electrum_spread_near_factor`, *F*, default 2 (D38.6.4a.1). `0` turns
      item 6 off: every maintained session is near, as before items 6–8 were
-     added. A value above 0 and below 1 is taken as 1.
+     added. A value above 0 and below 1 gives the same limit as 1, because
+     the *f* + *A* term of item 6 then decides.
    - `electrum_spread_near_offset_ms`, *A*, in milliseconds, default 20
      (D38.6.4a.1).
 
@@ -1233,9 +1235,23 @@ every maintained session.
 > output. `electrum_spread_reads` is read at coin activation; a value that is not
 > a boolean is taken as `true` with one warning (the chapter is silent on it).
 >
-> **Implementation status (2026-11-02).** Items 6–8 are not implemented yet.
-> Until they are, every maintained session counts as near, and the smoothed
-> latency is kept under `mixed` and `measured` only.
+> **As-built note (2026-11-02), items 6–8.** The near decision is a pure function in
+> `electrum_measure.rs` (`near_sessions`). It is also the only place that holds the
+> form of the limit (D38.6.4a.2). The two defaults are one constant each there:
+> `NEAR_FACTOR_DEFAULT` and `NEAR_OFFSET_DEFAULT_MS`.
+> - *The turn.* When a read-only query starts, `in_turn_for` in the pool reads each
+>   maintained slot's smoothed latency and asks for the near ones. It rotates them by
+>   the read counter modulo their number, then appends the other maintained slots in
+>   priority order. The budget arithmetic of R38.6.4j is unchanged, since it counts
+>   over that list.
+> - *Samples.* The pool records the smoothed latency of every answered request and
+>   ping under every order. P2 is judged only under `mixed` and `measured`.
+> - *The switches.* `electrum_spread_near_factor` and `electrum_spread_near_offset_ms`
+>   are read once per coin activation, in the UTXO coin builder next to
+>   `electrum_spread_reads`. The Z-coin Electrum fallback goes through the same builder.
+>   An invalid value logs `electrum_spread_near_factor <value> is not a non-negative
+>   number; using 2` or `electrum_spread_near_offset_ms <value> is not a non-negative
+>   number; using 20`; the figure is the default constant.
 
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
@@ -1824,7 +1840,7 @@ alone (R38.6.4a item 6), with smoothed latencies given in milliseconds:
 - 25, 27, 32, 108, 230 and 266 with *F* = 2: the first three are near;
 - the same figures with *F* = 0: all six are near;
 - 25, 27 and 32 with *F* = 0.5, taken as 1: all three are near, through the
-  20 ms term;
+  offset term (20 ms by default);
 - one session without a smoothed latency among the six of the first case: it
   is near as well;
 - no session with a smoothed latency: all are near.
@@ -1839,8 +1855,10 @@ with both fast stubs failing a read-only query, the slow stub shall answer it.
 
 T38.6.4a.4 *A recovered session comes back.* In the setting of T38.6.4a.2,
 with the slow stub's delay dropped to about 5 ms and the ping interval
-shortened, the slow stub shall answer read-only queries again once its
-smoothed latency is within the limit, and not before.
+shortened, the slow stub shall answer no read-only query among the first
+ones after the drop. It shall answer them again once its smoothed latency
+is within the limit, and its figure shall be within the limit when it first
+answers one.
 
 T38.6.4a.5 *Samples under `random` and `listed`.* Under `listed` and under
 `random`, ordinary requests and pings shall produce a smoothed latency for each
@@ -3030,8 +3048,8 @@ R38.8.6 **Tests (two-direction, observable).**
   and no further gate pass is required.
 - *Reloaded-original amendment (2026-11-02, maintainer Decision BI), clean side.*
   R38.6.4a items 6–8 (the near offset of item 8 added the same day), the
-  changes to its items 1 and 3, its second rationale and herding note, the
-  implementation-status line, T38.6.4a.1–T38.6.4a.7, D38.6.4a.1 and
+  changes to its items 1 and 3, its second rationale and herding note, its
+  as-built note for items 6–8, T38.6.4a.1–T38.6.4a.7, D38.6.4a.1 and
   D38.6.4a.2, and the cross-references in R38.6.4l items 1, 2 and 5 were
   written by a session that never read the corpus. They rest on the
   maintainer's Decision BI of 2026-10-31, this project's own lab timing run of
