@@ -24,7 +24,7 @@
 | ID | What | CRD | Size | State |
 |---|---|---|---|---|
 | B5 | Higher, configurable limits for sync requests a relay holds while its own sync is in flight: 32 per asking peer and 2,048 in all by default (were 8 and 256), with ceilings of 64 and 8,192. | ch.32 R-Q5b item 4 | S | PR #205 |
-| B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | CRD and code PRs to follow |
+| B1 | After the forwarding relay's sync request fails, or its answer leaves a pair out of step with the maker's advertised root, ask one other connected relay once. The pair is never emptied. Switch `sync_request_alternate_relay`. | ch.32 R-Q5d (D12 item 1) | M | CRD PR #207, code PR #208 |
 | B2 | A cancel this node received keeps the order out of sync answers for a longer window (for example one hour), so a stale relay cannot bring it back. Memory-capped. | to be written (D12 item 2) | S | waits for one reference fact: whether a cancelled order can come back under the same identifier |
 | B3 | Per-pair liveness on the receiver's clock: a pair the maker stops advertising is dropped after the liveness window (`maker_order_timeout`, 90 s) while the maker's other pairs live on. | to be written (D12 item 3) | M | after B1 |
 | B4 | During start-up and re-post bursts, hold a sync request for a pair the relay is about to sync, instead of answering "missing pair" at once. | to be written (D12 item 4) | M | after B5 and B1 |

@@ -29,7 +29,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   had missed a cancellation passed the cancelled order on to every node that asked it. The node now
   asks one other relay it is connected to, once, for the pairs concerned, and never empties a pair
   because the sets differ. To restore the old behavior, set `sync_request_alternate_relay` to
-  `false` in `MM2.json`. Detail: PR #B1C; CRD ch.32 R-Q5d.
+  `false` in `MM2.json`. Detail: PRs #207, #208; CRD ch.32 R-Q5d.
 
 ### Fixed
 
