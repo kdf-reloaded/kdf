@@ -441,8 +441,15 @@ to the system resolver or to any other server, in any mode.
    and its counterpart on Windows) is read when the resolver is installed
    (R45.6B.8). A name it lists is answered from it, without a query. A change
    to the file takes effect at the next start.
-3. *Address literals.* A name that is an IP address needs no lookup, in any
-   mode.
+3. *Address literals and `localhost`.* A name that is an IP address needs no
+   lookup, in any mode. In the Google and fixed modes, `localhost` and every
+   name ending in `.localhost` resolve to the loopback addresses without a
+   query, as RFC 6761 reserves them. Without this rule a hosts file that does
+   not list `localhost` (the Windows default) would send it to the servers of
+   the mode.
+4. *Queries.* Each UDP query uses a random query ID and a fresh random source
+   port, and an answer is accepted only for the question asked. A name is
+   looked up as an absolute name: no search domain is appended.
 
 R45.6B.4 **Cache (Google and fixed modes).** Answers are cached in memory for
 at most 1,024 entries.
@@ -646,7 +653,10 @@ server run by the test on a loopback address, in the fixed mode:
   one with a lifetime of a day is asked again after 1 hour (a test clock or the
   configured bounds may stand in for real time);
 - a name the hosts file of the test lists is answered without a query;
-- an IP literal makes no query;
+- an IP literal makes no query, and `localhost` and `a.localhost` resolve to
+  loopback with no query;
+- a truncated UDP answer is repeated over TCP, and a first server that does not
+  answer is followed by the second;
 - with the server stopped after a first answer, a lookup after that answer
   expired returns it and logs the WARN line once; with the server answering
   that the name does not exist, it does not; an answer that expired more than
