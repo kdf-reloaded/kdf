@@ -34,6 +34,21 @@ it and, where one exists, the CRD rule, for readers who want more.
   and `sync_answer_deferral_max_total` (at most 64 and 8,192). Nothing on the wire changes. Detail:
   PR #205; CRD ch.32 R-Q5b.
 
+#### UTXO coins and Electrum
+
+- **Electrum reads now go only to the servers with the shortest round trip.** Since 0.3.0-beta.1
+  a coin's read-only Electrum queries took turns over every connected server, so a distant server
+  in the list answered one read in N. Now they take turns only among the connected servers whose
+  recent round trip is at most twice the fastest one's, or within 20 ms of it. The others still
+  answer when those fail, and come back into the turn once their round trip is short again. The
+  round trip is measured from answers the node already gets; nothing extra is sent. From the lab
+  host, RIN's six servers answered a balance read in 25 to 266 ms: spread over all six that
+  averages about 114 ms per read, and over the three this rule keeps, about 28 ms. When every
+  server slows down, as under a per-session limit, all of them stay in the turn. The `MM2.json`
+  numbers `electrum_spread_near_factor` (default `2`) and `electrum_spread_near_offset_ms` (default
+  `20`) set the factor and the margin; a factor of `0` spreads over every connected server as
+  before. Detail: PR #215; CRD ch.38 R38.6.4a.
+
 ### Fixed
 
 #### Node names in logs and errors
@@ -65,7 +80,8 @@ file carries the detail. "New" means the plan was created in this cycle.
   sync limits on relays above (PR #205).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
-  with its two switches and their defaults (PR #201).
+  with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
+  rows are next.
 
 ### Known limitations
 

@@ -471,7 +471,9 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
-  connected server first.
+  connected server first. The near factor `electrum_spread_near_factor` and the near offset
+  `electrum_spread_near_offset_ms`, which limit spreading to the servers with the shortest round
+  trip, then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
