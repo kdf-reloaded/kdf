@@ -571,7 +571,7 @@ threading extends it to the other read paths exactly as it extends the key.
 | H1 + H2 type and config | — | small | PR #74 |
 | H3 threading | H1, H2 | medium (≈10 call sites, both stores) | PR #74 |
 | H4a Reloaded-only layout key (D3) | H3 — not H4: the KawPoW and AuxPoW parsers it reuses are in the tree | medium (key read, two layouts, per-header list read, public-server fixtures) | **PR #62** (key, both readers, median-time-past path) — the remaining threading moved into H2/H3, the linkage skip into H5 |
-| H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | **pending**: the follow-up on PR #62 |
+| H4b structural fallback and its switch (D3, registry-free leg) | H4a — the layout readers; not H2/H3 (every coin is the `"BTC"` family until H2) | small–medium (switch parse at startup, fallback in the list and single-header entry points, info line, COMPAT docs, key rename) | PRs #67 and #74 |
 | H4 family rules | H3 | medium | PR #82 (LBRY and PIVX readers); the rest open |
 | H5 identity, storage, linkage | H4, H4a, H4b | medium, touches persisted data | open |
 
