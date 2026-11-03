@@ -101,13 +101,18 @@ file carries the detail. "New" means the plan was created in this cycle.
   options (a) and (b) still wait on the reference maintainers' outcome.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
   showing after a lost cancellation; five work packages after the beta, the first being the higher
-  sync limits on relays above (PR #205).
+  sync limits on relays above (PR #205). What two later packages waited for is now recorded: how a
+  cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
+  non-empty pair at every tick (PR #222).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
   rows are next.
 - [`p2p-dialing-and-discovery`](docs/plans/p2p-dialing-and-discovery.md) — new: the peer-to-peer
   items of 0.4.0. The redial guards are in (PRs #199, #206).
+- [`trading-floors-parity`](docs/plans/trading-floors-parity.md) — in progress: how Komodo and
+  GLEEC KDF charge an explicit `UtxoFixed` withdraw fee (in proportion to the size) is now
+  recorded; whether KDF Reloaded follows them stays the maintainer's decision (PR #222).
 
 ### Known limitations
 

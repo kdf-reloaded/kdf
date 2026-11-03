@@ -44,7 +44,9 @@ This chapter binds, by behaviour and public/dictated interface:
   on (§32.9A);
 - the removal of a maker's stale orders at other nodes — what a
   keep-alive does not say, how an answer is applied, what expires, and
-  the maker's re-pricing flow (§32.9C).
+  the maker's re-pricing flow (§32.9C) — and, in follow-up, the paths by
+  which a cancelled order can reappear, the order-book answer under a
+  lagging trie worker and the maker's two ticks (§32.9C.1).
 
 > **Binding scope (R36).** Throughout this chapter, requirements
 > bind observable *behaviour*, the *public* cross-crate
@@ -2874,6 +2876,187 @@ value and `order_messages_refresh_liveness` at either value, and with
 `order_messages_refresh_liveness` at its default, T-GH3's silence is
 counted from the last keep-alive **or order message** of P.
 
+### 32.9C.1 Follow-up: resurrection paths, the order-book answer, and the maker's ticks
+
+> *Authored by the KDF Spec Reader 2026-11-03 from the rows `v2.6.0-beta`
+> and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md) §2.15A, identical
+> at both in every surface bound here (the compared regions do not differ
+> between the rows). Prompted by the ghost-order work of the 0.4.0 cycle
+> (§32.10 D12). **Passed the KDF Dirty Gate on 2026-11-03**, measure 0.02;
+> §32.13. Nothing here changes a wire shape. Statements about Reloaded
+> rest on this repository's own code and chapters, not on the reference.*
+
+**R-GH11 (whether a cancelled order identifier can become live again).**
+At both release rows a maker order the maker has cancelled — by
+`cancel_order`, `cancel_all_orders`, `setprice` with `cancel_previous`, the
+per-order timeout ([Chapter 12](12-order-match-state-store.md) R14), the
+balance watch ([Chapter 60](60-trading-floors-and-refusal-contract.md)
+R60.4.5) or the maintenance pass's insufficient-balance or fulfilled cancel
+— leaves the maker's live order set before its cancel message is published
+(R-GH9), and from then on no path of the maker publishes a created or
+updated message for that identifier, except as items 1 and 4 describe. For
+each point the question names:
+
+1. *Restart restore.* At start the node loads every **active-order record**
+   of its storage into the live set, and the first maintenance pass after
+   start finds each restored order absent from the read index, reconciles
+   its volume against a fresh balance read (ch. 60 R60.4.6 item 5) and
+   publishes a **created** message for it under its stored identifier and
+   its stored key ([Chapter 59](59-legacy-ordermatch-negotiation.md) R59.6.7
+   item 2). A cancel deletes the order's active-order record; a failure of
+   that deletion is logged, not retried, and the cancel completes all the
+   same. An active-order record that outlives its cancel therefore brings
+   the identifier back at the next start — at other nodes as an ordinary
+   created message (the guard of R-C5 has long expired), and at the maker
+   itself as a live order. This is the only restore-time path: a history
+   record, in either of the history store's forms, is never loaded back
+   into the live set.
+2. *Release of reserved volume.* The pruning of a timed-out, unconnected
+   match (ch. 59 R59.4.4) raises the order's available amount silently: no
+   message is published, and the order was never removed, so nothing is
+   created. A connected match is never pruned; its volume stays reserved
+   for the life of the order, and the order is cancelled with the fulfilled
+   reason once its available amount is below its minimum with no match in
+   progress. No message of this path names a cancelled identifier.
+3. *Balance recovery.* The balance watch and the restore-time
+   reconciliation only **lower** an order's maximum volume (publishing an
+   updated message with the lower available amount) or cancel it; a later
+   higher balance raises nothing and recreates nothing. An order cancelled
+   for insufficient balance is gone for good, subject only to item 1.
+4. *An update of the same identifier.* `update_maker_order` is refused for
+   an identifier that is not in the live set, both at entry and again after
+   its price and balance checks. It then takes the order's lock. An update
+   that passed the second check and takes the lock **after** a concurrent
+   cancel has removed the order finds the order's fields unchanged (a cancel
+   mutates none of them) and proceeds: it writes the updated order to the
+   **active-order storage** — on the file store of a native deployment that
+   write creates the record when it is absent, at both rows; the browser
+   store's replace-by-key write was not verified in this pass — and
+   publishes an **updated** message for the cancelled identifier. The
+   message changes nothing at a node that holds no entry for it (R-GH5 item
+   2) and refreshes the entry at a node that missed the cancel; the storage
+   write recreates the active record, which item 1 then restores at the
+   next start. The same create-when-absent write, with a narrower window,
+   exists in the match-pruning step of item 2, which writes the active
+   record of every order whose matches it pruned, working from a snapshot
+   of the live set taken before the pruning. These are the two paths on
+   which a cancelled identifier is written back to the active-order storage
+   after its cancel.
+5. *Reuse of a per-order key.* A per-order key is drawn at random for each
+   order of a privacy coin at creation (maker and taker orders alike;
+   [Chapter 16](16-swap-v2-pre-burn-output.md)) and stored with the order;
+   it is reused only by that same order — after a restart (item 1) and when
+   a timed-out taker order becomes a maker order, which keeps the taker
+   order's identifier and key (ch. 59 R59.4.1). No other order ever signs
+   under it, so a per-order pubkey's record at a receiver (R-P1) holds
+   entries of exactly one order, and a new order never reuses a cancelled
+   order's identifier or key.
+
+Consequently the only reference paths by which a cancelled identifier
+reappears **live** are items 1 and 4: a persisted active record that
+outlives the cancel, restored at the next start. The record item 1
+restores outlives the cancel when its deletion failed, or when the update
+of item 4 or the match-pruning step of item 2 wrote it back after the
+cancel. A node that received the cancel re-admits the identifier only after the
+120 s guard (R-K1); a node that never received it keeps the entry under
+R-GH1 regardless. *(Reloaded: ch. 12 R7b item 2 — once an order has left
+the container, no write recreates its active record — is Reloaded-original
+and already forbids the storage writes of items 2 and 4; the restore path
+of item 1 is otherwise at parity, ch. 59 R59.6.7, ch. 60 R60.4.6.)*
+
+**R-GH12 (the order-book answer of a relay whose trie worker lags).** At
+both release rows a responder answers an order-book request (`GetOrderbook`,
+R-Q1) from its **read index**, which every order message and every applied
+answer updates synchronously under the index lock, and reads the trie store
+only for each listed pubkey's record (the per-pubkey receipt time that fills
+the answer's `last_keep_alive` member). The answer is therefore never a
+stale set: it is the index as it stands when the request is handled,
+including entries whose trie insertion the worker has not yet applied and
+excluding entries whose trie removal is still queued. Two conditions make
+the responder fail the **whole** request with an **error answer** (the error
+form of R-Q2, not "no data", not a partial answer): the pair's order count,
+asks and bids together, exceeds 1,000; or a pubkey listed in the index has
+no record in the trie store — which happens when that pubkey's first
+insertion (an order-created message, or an order the responder itself makes
+under a per-order key) is still queued for the worker, because a record is
+created either by that insertion or by the first keep-alive handled from the
+pubkey (R-Q5a item 1). There is no wait. The requester (R-F4, the
+request-and-fill path) asks the relays of its relay mesh
+([Chapter 28](28-libp2p-modernization.md) R10) **one at a time**, moving to
+the next on an error answer, a "no data" answer or the 10 s timeout (R-Q6),
+and stops at the first decoded answer, which it applies as R-GH1 item 4
+describes. If every relay fails: a node that is itself a relay treats the
+request as done (the pair's subscription is recorded as requested and no
+entry changes) and the `orderbook` RPC succeeds with what the node holds; a
+non-relay fails the `orderbook` RPC with an error and leaves the
+subscription as "subscribed, not requested", so the next `orderbook` call
+asks again (R-F6a). *(Reloaded: R-T3b item 2 binds the synchronization
+answer under a lagging worker; the order-book answer is bound here for the
+first time. Whether Reloaded should answer a listed pubkey that has no
+trie record yet — with zero for `last_keep_alive` — instead of failing the
+request is an open question, not bound here and not yet a listed
+candidate; it concerns the same window before a pubkey's record exists as
+the post-beta item 4 of §32.10 D12.)*
+
+**R-GH13 (the maker's two ticks: what is processed, and whom a keep-alive
+reaches).** At both release rows:
+
+1. *Keep-alive tick (30 s, R-K2a).* For each per-order key of a live order,
+   and then for the persistent key, the producer publishes one keep-alive
+   **for every pair in that key's root map whose root is neither all zeros
+   nor the empty-trie root**, each on the pair's topic. It skips no pair
+   because the pair has orders, skips no pair because the previous tick
+   advertised it, and consults the live order set only to collect the
+   per-order keys: a pair with a non-empty root is advertised at every tick
+   for as long as the root stays non-empty. The root map is the trie
+   store's, so the advertised root is whatever the worker has applied
+   (R-GH8).
+2. *Maintenance tick (more than once a second; ch. 59 R59.4.1, R59.4.4,
+   R59.6.4).* Every live maker order is visited in every pass — for the
+   match pruning, the balance-and-minimum check, the expiry drain (ch. 12
+   R14) and the re-announcement of an order missing from the read index.
+   No per-pair skip exists on this tick either.
+3. *Reach.* A keep-alive is a gossip message on the pair's topic. A
+   **relay** receives and forwards every message it is sent regardless of
+   its own subscriptions (ch. 28 R11a, R12; §32.8 R-F3a), so every pair's
+   keep-alive reaches every relay of the maker's relay mesh and, through
+   relay-to-relay forwarding, the relays beyond it. A **non-relay** receives
+   a keep-alive only for a pair whose topic it is subscribed to on the mesh,
+   and forwards nothing (R-F3b). A non-relay therefore never sees the
+   keep-alives of pairs it does not trade, while a relay sees them all and,
+   by R-Q4 item 1, considers every one of them for a synchronization
+   request.
+
+**T-GH11** *Resurrection paths (R-GH11).* (a) With the active-order record
+of a cancelled order left in storage, a restart re-publishes the order's
+created message under its stored identifier and key and lists the order as
+live; with the record deleted, nothing is published and the order stays
+cancelled. (b) Pruning a timed-out match publishes nothing and the order
+stays as it was. (c) A balance that drops and recovers lowers the order
+once and never raises it; a cancel for insufficient balance is not undone
+by the recovery. (d) `update_maker_order` for an identifier not in the live
+set is refused; in Reloaded an update that loses the race with a cancel
+writes no active record (ch. 12 R7b item 2). (e) Two orders of one privacy
+coin have different per-order keys; the key and identifier of a taker order
+that became a maker order are unchanged.
+
+**T-GH12** *Order-book answer (R-GH12).* A responder holding an entry
+whose trie insertion is held back answers an order-book request for the
+pair with an error until the worker applies it, and with the full index
+afterwards; one whose removal is held back omits the order; with the worker
+idle the answer equals the index. A requester with two relays in its mesh,
+the first answering an error, applies the second's answer; with every relay
+failing, a non-relay fails the `orderbook` RPC and asks again on the next
+call, and a relay succeeds with its held set.
+
+**T-GH13** *Ticks (R-GH13).* A maker with orders on pairs X and Y under
+its persistent key and one privacy-coin order under a per-order key on
+pair Z publishes at every keep-alive tick exactly three messages — X and Y
+signed by the persistent key, Z by the per-order key — each on its pair's
+topic, in every tick until a root becomes empty; a relay subscribed to no
+orderbook topic receives all three; a non-relay subscribed to X only
+receives X's.
+
 ## 32.10 Deferred Work
 
 D1. **Module split.** The subsystem is a single large module.
@@ -3829,3 +4012,28 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   with reference binaries as black boxes, reported as counts and classes
   only; and the maintainer's decision. No reference implementation was
   consulted for this item, and it needs no Dirty Gate pass.
+- *Scoped addition (2026-11-03) -- §32.9C.1 (R-GH11 to R-GH13, T-GH11 to
+  T-GH13) and the pointer sentence appended to §32.0.* **KDF Dirty Gate:
+  PASS on 2026-11-03, measure 0.02.** Prompted by the ghost-order
+  follow-up of the 0.4.0 cycle (D12). *Inputs:* the forbidden corpus at the
+  rows `v2.6.0-beta` and `v3.0.0-beta` of [Chapter 02](02-baseline-state.md)
+  §2.15A, which agree in every respect taken, consulted **only** to
+  establish: the paths by which a cancelled order identifier can be
+  published or restored again (restart restore of active-order records, the
+  create-when-absent nature of the active-order storage write, the
+  update-after-cancel race, the silence of match pruning and of balance
+  recovery, the per-order key's random draw and single use); how an
+  order-book request is answered when the trie worker lags (index-sourced
+  set, the two whole-request error conditions, no wait) and how the
+  requester moves across its relay mesh and ends; and the maker's two ticks
+  (every non-empty pair advertised at every keep-alive tick, every order
+  visited at every maintenance pass, relay versus non-relay reach of a
+  topic message). What crosses into this chapter is behavior, public RPC
+  names (`cancel_order`, `cancel_all_orders`, `setprice`, `cancel_previous`,
+  `update_maker_order`, `orderbook`), dictated wire members already bound
+  (`GetOrderbook`, `last_keep_alive`) and numeric values a peer can observe
+  (1,000 orders, 10 s, 30 s, 120 s); no function, type or field name outside
+  those, no helper decomposition, no control-flow transcription, no error,
+  log or comment text was reproduced. The Reloaded statements rest on this
+  repository's own chapters 12, 59 and 60. The T-items are
+  Reloaded-original.
