@@ -524,6 +524,10 @@ next node:
 A request whose first node answers is not retried anywhere else; a subset of
 failing nodes is not an error (R35.1.2 last paragraph).
 
+*(Added 2026-11-02.)* The hostname of a node URL is resolved through the
+node's resolver (chapter 45 §45.6B). A failed lookup is a node failure of the
+first kind above.
+
 R35.1.9 **Sticky last-good node (G, both rows).** When a node answers, the
 list shall be **rotated** so that the answering node becomes first: the nodes
 that failed before it in this request move to the tail in their previous
@@ -2457,3 +2461,7 @@ tests it.
   name the host of an abandoned request, from this repository's own code, so
   chapter 01 R38 is not engaged. The same holds for the *Errors of the shared
   HTTP layer* paragraph, which applies R35.1.17 to the errors of that layer.
+- *Clean-context addition (2026-11-02, forbidden corpus not consulted):* the
+  paragraph on resolving a node's hostname after R35.1.8 is Reloaded-original.
+  It points to chapter 45 §45.6B, from the maintainer's decision of 2026-11-02
+  and this repository's own code, so chapter 01 R38 is not engaged.
