@@ -321,11 +321,11 @@ without symlink resolution; the path as given if resolution fails):
   whether it was selected via `MM_COINS_PATH` or by the default name;
 - the log file named by a usable `MM_LOG` value (R45.6.3);
 - the database root and the per-identity database directory;
-- the optional files the configuration references, when configured: the
-  `wss_certs` certificate file and the named-wallet record file actually read
-  (canonical or legacy). The `wss_certs` private-key file's path is **never**
-  logged by the report; when that file is bad, the error that reports it names
-  the path as before.
+- the optional file the configuration references, when configured: the
+  named-wallet record file actually read (canonical or legacy). The report
+  names **no** `wss_certs` file: the paths of the certificate and private-key
+  files are not logged by it (the errors that report a bad file name the path
+  as before).
 
 The report names paths and source kinds only; it shall never include the
 contents of any file, the command-line configuration text, or any configuration
@@ -501,8 +501,7 @@ inline versus from the default-named file versus from an `MM_COINS_PATH` file,
 the report MUST state the actual source of each, MUST show relative paths as
 absolute, MUST note an ignored `MM_COINS_PATH` when coins are inline, and MUST
 NOT contain any file content or configuration value (R45.6.6). With a
-`wss_certs` configuration, the report MUST name the certificate file's path and
-MUST NOT contain the private-key file's path.
+`wss_certs` configuration, the report MUST NOT contain either file's path.
 
 ## 45.9 Deferred Work
 

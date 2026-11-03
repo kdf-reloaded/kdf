@@ -916,11 +916,6 @@ fn wss_certs(ctx: &MmArc) -> P2PResult<Option<WssCerts>> {
             error: e.to_string(),
         })?;
 
-    info!(
-        "WSS certificate file: {}",
-        crate::mm2::absolute_path_for_log(&certs.certificate)
-    );
-
     // First, try to extract the all PKCS8 private keys
     let mut server_priv_keys = extract_cert_from_file(
         certs.server_priv_key.clone(),
