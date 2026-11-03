@@ -1936,6 +1936,31 @@ events over the streaming infrastructure, registering the addresses to be watche
 at enable time (and re-registering as needed). Acceptance: a balance change on a
 watched address produces a streamed balance event.
 
+> **Decisions and principles (implemented 2026-08-09/11; recorded here 2026-11-02).**
+> Reloaded's own design choices for this rule; no peer observes them.
+>
+> 1. **No subscription cap.** A wallet subscribes one script hash per activated
+>    Electrum coin, or one per known address under an HD wallet. A stress test with
+>    10,000 watchers registered and notified within milliseconds, so the ceiling is
+>    orders of magnitude above any real wallet.
+> 2. **A QRC20 balance wakes on its own contract-event subscription.** A token balance
+>    is contract storage and need not change the holder's UTXOs, so each token wakes on
+>    its per-token `blockchain.contract.event.subscribe` notification, not on the QTUM
+>    script-hash notification. After a disconnect it is not placed again (R38.6.4h).
+> 3. **The history loop wakes on the same signal.** The UTXO transaction-history loop
+>    waits for its interval or for a script-hash notification, whichever comes first,
+>    and still re-reads balance and history itself.
+> 4. **Polling stays the correctness floor.** A notification only shortens the wait. A
+>    missed, dropped or silently dead subscription degrades to polling, never to a
+>    wallet that stops updating, and a failed re-subscription leaves the coin polling
+>    without an error for the user.
+> 5. **A notification only means "something changed".** No balance change is derived
+>    from it; the existing balance and history reads stay authoritative.
+> 6. **Notifications coalesce.** Several notifications that arrive before a refresh
+>    completes cause one refresh, not a queue.
+> 7. **The 10-second poll floor stays** (chapter 10 R25). Lowering it would be a
+>    separate decision, because of the load it puts on public Electrum servers.
+
 ### 38.6.6 Fee policy, the whole-kilobyte fixed-fee option, and the UTXO trading floors
 
 > **Rewritten 2026-10-25 by the Spec Reader; gated by the KDF Dirty
@@ -2366,7 +2391,9 @@ recorded in `docs/GLEEC_COMPATIBILITY.md` with "none -- no switch exists".
 > Electrum server as `host:port` through the shared helper
 > (`coins/node_url.rs`), on both builds and on the shielded-coin Electrum
 > fallback; an address that cannot be parsed is named by a placeholder and its
-> position. An address with userinfo or a path before the port is rejected
+> position, except on the shielded-coin fallback, which names it by the
+> placeholder alone (item 1 is not met there; ch.39 D39.11.o). An address with
+> userinfo or a path before the port is rejected
 > when the server is added. The native daemon client's debug form shows the
 > `Authorization` value as set, not its content. The browser build is checked
 > to compile; its runtime is not tested.
