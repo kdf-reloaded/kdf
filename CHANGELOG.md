@@ -26,7 +26,7 @@ it and, where one exists, the CRD rule, for readers who want more.
   another letter case, with a default port added or dropped, or with a trailing slash added also
   loses its userinfo, path and query, on the native and the browser (WASM) build. Such a URL keeps
   the scheme and port the lower layer wrote, and a URL of another host is left as it is. The
-  `mm2_net` crate now also builds on its own for the browser target. Detail: PR #TBD; CRD ch.35
+  `mm2_net` crate now also builds on its own for the browser target. Detail: PR #218; CRD ch.35
   R35.1.14.
 
 ### Tests

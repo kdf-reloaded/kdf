@@ -845,7 +845,7 @@ weaken security. It is recorded in `docs/GLEEC_COMPATIBILITY.md` with
 > today. The tests use a URL carrying userinfo, a key in the path and a token
 > in the query, plus a Telegram-shaped URL.
 >
-> *Other spellings of the URL (2026-11-03, PR #TBD).* A lower layer may repeat
+> *Other spellings of the URL (2026-11-03, PR #218).* A lower layer may repeat
 > the request URL in another spelling than the configured one; a browser does.
 > Such copies are now covered as well. The userinfo and the path-and-query are
 > also removed in their percent-encoded spelling, in either hex case and in any
