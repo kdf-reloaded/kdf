@@ -63,13 +63,13 @@ it and, where one exists, the CRD rule, for readers who want more.
   for an hour. To restore the old behavior, set `cancel_final_window_secs` to `120` in `MM2.json`.
   Memory stays bounded: cancellations older than two minutes are capped at 100,000, about 20 MB
   (`cancel_final_max_entries`), and past the cap the oldest fall back to the 120-second behavior.
-  Nothing on the wire changes. Detail: PR #223; CRD ch.32 R-K1b.
+  Nothing on the wire changes. Detail: PRs #223, #224; CRD ch.32 R-K1b.
 - **A maker no longer brings back an order it cancelled when the order's stored record could not be
   deleted.** Before, such an order came back live at the next start and was announced again. Now it
   is skipped and deleted when the order history records its removal, and a failed deletion is tried
   three times. An order created with `save_in_history: false` leaves no history entry and is
   restored as before. To restore the old behavior, set `maker_restore_skips_cancelled` to `false` in
-  `MM2.json`. Detail: PR #223; CRD ch.12 R7c.
+  `MM2.json`. Detail: PRs #223, #224; CRD ch.12 R7c.
 
 #### UTXO coins and Electrum
 
@@ -117,7 +117,7 @@ file carries the detail. "New" means the plan was created in this cycle.
   higher sync limits on relays above (PR #205). What two later packages waited for is now recorded:
   how a cancelled order can come back on Komodo and GLEEC KDF, and that their makers advertise every
   non-empty pair at every tick (PR #222). A received cancellation now stays final for an hour, and a
-  maker no longer restores an order it cancelled (PR #223).
+  maker no longer restores an order it cancelled (PRs #223, #224).
 - [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
   spreads read-only Electrum queries only over the servers with the shortest round trip is written,
   with its two switches and their defaults (PR #201), and implemented (PR #215); the SwapLab timing
