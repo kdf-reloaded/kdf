@@ -746,6 +746,39 @@ This gap is also recorded in
 > before. This never under-funds the refund. The approve gas estimate goes through one
 > function, the seam for the per-coin estimate multiplier of D3 (not applied).
 
+**R57.5.5** *The gas limits in effect are logged at activation (Reloaded-original,
+maintainer decision of 2026-10-31, line shape settled on 2026-11-02; written on the
+clean side from this project's own code and lab result, no forbidden-class input).*
+When an EVM platform coin or ERC-20 token is activated, by any activation route, the
+node shall log the gas limits the coin will use:
+1. *Summary, at INFO.* One line names the coin's ticker. For `gas_limit` and for
+   `gas_limit_v2` it says where the block in effect came from: the coin's own
+   configuration entry, its platform coin's entry (R57.5.3), or the built-in defaults
+   (R57.5.2, R57.6.2). It lists every member whose value differs from its default, with
+   that value. When an `estimate_gas_mult` is in effect (R57.5.3b) it gives the value
+   and its source. A coin with default blocks and no multiplier says so in the line.
+2. *Full list, at DEBUG.* One line gives every member of both blocks with its value.
+   In both lines a V1 member is named by its key of R57.5.2 and a V2 member by its path
+   within the block (for example `gas_limit_v2.maker.erc20_payment`), in name order.
+3. *Nothing else.* Neither line names a node URL, an address, or any configuration
+   member other than the two blocks and the multiplier.
+4. *When.* The lines are written once per successful activation, when the coin has
+   been built. An activation that fails, on an invalid member (R57.5.1, R57.6.1) or
+   later, writes neither line.
+
+*Rationale.* On 2026-10-31 two USDC-MON payments on Monad ran out of gas at the 150000
+default of `erc20_payment` because the lab's coins file carried no `gas_limit` block for
+the token. A later coins file sets 250000. Nothing in the log showed which limits the
+node was using, so the cause had to be found from the receipts.
+
+*Example (informative).* A token whose own entry raises three V1 members, lowers a
+fourth and keeps the V2 defaults:
+`USDC-MON gas limits: gas_limit from its own entry (erc20_payment 250000,
+erc20_receiver_spend 200000, erc20_sender_refund 200000, eth_send_erc20 150000);
+gas_limit_v2: defaults; estimate_gas_mult: none`.
+
+*Acceptance.* T14.
+
 ## 57.6 The `gas_limit_v2` configuration block
 
 > **Clearance (chapter 01 T1, R40).** The forbidden-class-sourced
@@ -1276,6 +1309,23 @@ product with `e` has a fractional part is truncated, not rounded. The test
 MUST fail if any R57.5.2 or R57.6.2 limit changes when the member is set.
 *(Added 2026-10-27 with R57.5.3b; passed the KDF Dirty Gate on 2026-10-28 — see the
 derivation record above R57.5.3b.)*
+
+**T14.** *The logged gas limits (R57.5.5).* Driven from JSON coin entries:
+(a) a token whose own entry sets three V1 members: the summary names its own
+entry as the `gas_limit` source and lists exactly those three members with
+their values; (b) a token without a block on a platform whose entry sets
+one: the summary names the platform's entry and lists the platform's
+non-default members; (c) a coin with no block, no platform block and no
+multiplier: the summary says that the defaults are in effect and lists no
+member; (d) a token with its own `gas_limit_v2` block and a multiplier taken
+from its platform: the summary names both sources and gives the multiplier;
+(e) the full list holds all nine V1 members and every V2 member, with the
+values in effect; (f) an activation that fails on an invalid member writes
+neither line. Both assembly paths shall be covered: a token activated with its
+platform through its real assembly, and a platform coin or standalone token
+through the entries its site passes, since that build needs a live node. The
+test shall not rely on a process-wide log capture that it polls. *(Added 2026-11-02 with
+R57.5.5, clean side.)*
 
 > **As-built note (2026-10-25, PR #66) — R57.7A.3 and T12.** As built,
 > the DEX-fee pipeline's threshold is `max(net_cfg.dex_fee_min_threshold(),
@@ -1957,10 +2007,14 @@ pre-anchor baseline code.*
   They take no forbidden-class input, so chapter 01 R38 is not engaged and no
   gate pass is required. The one-line cross-reference in R57.7.3 rides on the
   chapter-56 verdict of 2026-10-30.
+- *Clean-side addition of 2026-11-02, maintainer decision of 2026-10-31 (USDC-MON).* A
+  session that never read the corpus wrote R57.5.5 and T14 from this project's own code at
+  `e65d3c45f` and the lab result of 2026-10-31. They take no forbidden-class input, so
+  chapter 01 R38 is not engaged and no gate pass is required.
 - *Scoped addition (2026-11-03) -- R57.5.2a and its compatibility note.*
   **KDF Dirty Gate: PASS on 2026-11-03, measure 0.00.** The forbidden
-  corpus was consulted at the
-  designations `v2.6.0-beta` and `v3.0.0-beta` of §57.1, which agree,
+  corpus was consulted at the designations `v2.6.0-beta` and `v3.0.0-beta`
+  of §57.1, which agree,
   **only** to establish how the legacy taker-fee transaction obtains its gas
   limit when sent (the fixed send keys of R57.5.2, no estimation, multiplier
   not reached) and when quoted (an estimate over the encoded transfer with

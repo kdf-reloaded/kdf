@@ -1,6 +1,6 @@
 # Plan: order-posting latency
 
-**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule written 2026-11-02, code next) — **Last reviewed:** 2026-11-02
+**Status:** in progress (all passes merged, Decision AM in PR #149; timing run done 2026-10-31; read spreading by round trip, Decision BI: rule and code written 2026-11-02, swaplab rows next) — **Last reviewed:** 2026-11-02
 
 > **Context:** a market maker found order posting on Reloaded slower than on GLEEC KDF, about 20 % on
 > UTXO and EVM coins and about 100 % on DOGE. Orders carrying `timeout_in_minutes` expired in the
@@ -131,7 +131,7 @@ the second time with the beta head first.
 | 1 | Coder pass 1: F1 P2PK batching; F4 concurrent gas-price queries plus reuse within one request; F3(a) one fee read per request; F3(b) skip on price-only updates | R38.6.3a, R57.2.1, R57.2.6 item 1, R38.6.6j item 1, R60.6.7 amendment and item 8 | merged 2026-10-28 (PR #114) |
 | 2 | Coder pass 2: F3(c) fee cache `fee_estimate_cache_secs` with per-coin lifetime and per-chain gas price; F5 read spreading `electrum_spread_reads`; spend check on every update again | R38.6.6j items 2–4, R38.6.6k, R57.2.6, R57.2.7, R38.6.4a, R60.6.7 amendment (AC) | implemented (PR #128) |
 | 3 | F2 balance watch (order-bearing base coins, interval, restart seeding) | R60.4.5, R60.4.6 (D60.4 resolved, PR #96) | merged 2026-10-28 (PR #116) |
-| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule written 2026-11-02; code next, then the swaplab rows: RIN on its six-server list and its earlier three-server list, DOGE, and RIN under `mixed` and `measured` for D38.6.4l.1 |
+| 4 | Read spreading only over the connected servers whose recent round trip is close to the fastest (Decision BI) | R38.6.4a items 6–8, D38.6.4a.1 and D38.6.4a.2 (decided, under monitoring) | rule PR #201; code implemented 2026-11-02 (PR #215); next, the swaplab rows: RIN on its six-server list and its earlier three-server list, DOGE, and RIN under `mixed` and `measured` for D38.6.4l.1 |
 | 5 | Tip check for near sessions: a near server two or more blocks behind the best tip stops being near, under every server order (Decision 22, study proposal (c)) | R38.6.4a amendment, to be written | batch 2 |
 
 Each code PR is checked end to end by the swaplab session's timing run once it is built.
