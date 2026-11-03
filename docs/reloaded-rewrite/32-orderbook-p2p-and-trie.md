@@ -936,12 +936,23 @@ outlives the longest parked request.
    (R-Q6); a bound at or above that timeout gains nothing, because the
    transport abandons the request first. The value `0` turns deferral off:
    every request is answered at once, as in the reference.
-4. **Limits.** At most 8 requests are parked per requesting peer and at most
-   256 in total, a request counting once whatever the number of pairs it
-   names; a request past either limit is answered at once. The per-peer
-   limit MUST stay below the number of concurrent inbound streams the
-   transport allows on one connection, because a parked request holds its
-   stream open.
+4. **Limits.** Two top-level `MM2.json` integers bound the parked requests:
+   `sync_answer_deferral_max_per_peer`, default `32`, per requesting peer,
+   and `sync_answer_deferral_max_total`, default `2048`, in total. A request
+   counts once whatever the number of pairs it names, and a request past
+   either limit is answered at once. An absent, non-integer or zero value
+   means the default. The per-peer limit MUST stay below the number of
+   inbound streams the transport negotiates concurrently on one connection
+   (128 with the pinned libp2p version), because a parked request holds its
+   stream open: a per-peer value above `64` is taken as `64`, which leaves at
+   least half of those streams to the peer's other requests. A total above
+   `8192` is taken as `8192`. The limits change neither the bound nor any
+   answer, only how many requests can wait.
+   *(Amended 2026-11-02, Decision BK item 4: the limits were 8 and 256 and
+   could not be configured. On 2026-10-31 a Reloaded seed on the public
+   network answered about 1,100 requests in one minute at once because they
+   were full, during a burst of synchronization requests, most likely
+   after makers restarted.)*
 5. Parking does not wait on the inbound networking path (R-T3b item 3). It is
    the one case in which the answer is not built on the task that received
    the request (R-Q5's last paragraph).
@@ -988,8 +999,9 @@ after such a failure:
    default `1000` (1 s); an absent or non-integer value means the default, and
    `0` turns the second request off. The default leaves 4 s of the default
    bound for the second answer.
-4. The second request is the last: whatever its outcome, nothing more is sent
-   for that keep-alive. The own request's record of R-Q5b covers both requests,
+4. The second request is the last to that peer: whatever its outcome, nothing
+   more is sent to it for that keep-alive (R-Q5d may ask one other relay once).
+   The own request's record of R-Q5b covers both requests,
    so the requests parked behind it wait for the second answer, each still
    within its own bound. An answered second request counts as success, as an
    answered first request does (the boolean of R-F3).
@@ -1012,6 +1024,76 @@ after such a failure:
 > record of it and applies no limit, ban or penalty (R-Q6a). It costs at most
 > one extra request per failed request, and none toward a peer that timed out.
 
+**R-Q5d (Reloaded: one other relay is asked once when the forwarder's
+answer fails or leaves the pair diverged).** *Reloaded-original
+(2026-11-02, Decision BK, §32.10 D12 item 1); no forbidden-class input.* A
+requester asks only the forwarding peer (R-Q4) and applies its answer
+without checking the root the answer reaches (§32.9C R-GH4). A forwarder
+that fails, or that answers from a stale view, therefore leaves the
+requester failed or diverged until the maker's next keep-alive, and a chain
+of relays heals one hop per advertisement interval at best. Reloaded's
+requester MUST ask one other relay once:
+
+1. **Triggers.** For a keep-alive-driven `SyncPubkeyOrderbookState` request
+   to the forwarding peer F:
+   - (a) *failure:* the request ended without an answer — an error answer,
+     "no data", a transport or decode failure, or the 10 s timeout of R-Q6 —
+     and, where R-Q5c sent a second request, that one ended the same way.
+     The pairs asked about are every pair of the request;
+   - (b) *divergence:* an answer from F was applied (R-GH4 items 1 and 2),
+     the trie worker applied its mutation events within 5 s (R-T7), and the
+     root this node then holds for one or more pairs of the request differs
+     from the root the keep-alive advertised for it. The pairs asked about
+     are those pairs. If the worker has not applied the events within 5 s,
+     no request follows.
+2. **Target.** One peer, other than F, that this node is connected to and
+   knows as a relay at that moment, chosen at random. If there is none,
+   nothing is sent.
+3. **Content.** The shape of R-Q4: the pubkey and, for each pair asked
+   about, the root this node holds for it when the request is built (R-Q4a;
+   with `orderbook_sync_names_held_root` set to `false`, the root the
+   keep-alive advertised).
+4. **Application.** The answer is applied as any answer is (R-GH4 items 1
+   to 3); no root check gates it. Whatever its outcome, nothing more is
+   sent for that keep-alive. The pair is **never cleared** on a mismatch,
+   neither before nor after this request (R-GH6 item 4 is not adopted,
+   D12).
+5. **Once.** At most one such request follows one keep-alive, and it is
+   never sent to F. With R-Q5c, at most three requests follow one
+   keep-alive: two to F and one to another relay.
+6. **Timing.** The request does not delay the result of the keep-alive's
+   handling. The boolean of R-F3, and with it the forward of R-F3b, is the
+   one the requests to F produced. The request to the other relay is sent
+   on a task of its own. Under trigger (a) the own request's record of
+   R-Q5b lasts until that request ends the same way it would end for a
+   request to F, so the requests parked behind it wait for its answer, each
+   still within its own bound.
+7. **Switch.** The top-level `MM2.json` boolean `sync_request_alternate_relay`,
+   default `true`; only a JSON `false` turns the rule off, and then the
+   requester behaves as R-Q5c and R-Q6 describe. The switch is independent
+   of `sync_answer_deferral_ms` and `sync_request_retry_ms`.
+
+> **Compatibility:** for behaviour matching GLEEC KDF, set
+> `sync_request_alternate_relay` to `false` (together with
+> `sync_request_retry_ms` set to `0`).
+
+> **Reloaded divergence (2026-11-02).** The reference requester asks only
+> the forwarding peer and never checks the root an answer reaches (R-GH4,
+> R-Q6). On 2026-10-31 one Reloaded seed on the public network saw up to
+> 22 % of its synchronization requests time out for about two and a half
+> hours while another saw none, and during that time other nodes kept
+> showing cancelled orders of a maker that kept advertising. A
+> lab run of this project's own nodes showed a stale view passing from a
+> relay that had missed a cancel to the nodes that asked it. With this rule
+> a requester that meets a failing or stale forwarder asks one other relay
+> in the same round instead of waiting for the next keep-alive. The wire is
+> unchanged: the request has the shape of R-Q4, and a reference relay
+> answers it like any other, keeping no record of it and applying no limit,
+> ban or penalty (R-Q6a). It costs at most one extra request per keep-alive
+> whose request failed or left a pair diverged. A divergence can also come
+> from an order message that arrived while the answer was being applied;
+> the extra request is then redundant, not harmful.
+
 **R-Q6 (transport properties of the request, bound as facts the mesh
 relies on).** The request is a single one-shot request-response
 exchange with F: it times out after **10 seconds** with no answer; there
@@ -1026,8 +1108,10 @@ Reloaded today has the same four properties (parity); the hardening
 candidates that would change them are recorded under §32.10 D6 and
 are not bound here. As a responder, Reloaded answers a request for a pair
 it is still synchronizing later rather than at once (R-Q5b). As a requester,
-Reloaded asks once more after a quick failure (R-Q5c); a timed-out request is
-still not retried.
+Reloaded asks the same peer once more after a quick failure (R-Q5c), and one
+other relay once after a failure, timeout included, or after an answer that
+leaves a pair diverged (R-Q5d); a timed-out request is never sent to the same
+peer again.
 
 **T-Q4** *Request content and target (R-Q4).* A keep-alive for P with a
 single pair entry whose root differs from the held one, delivered as if
@@ -1076,10 +1160,13 @@ when the bound expires. A request for (P, Y) whose placeholder has no own
 request in flight, a request naming a pair the relay does not track, and a
 request for an unknown pubkey are each answered at once, as R-Q5 binds; a
 request for (P, X) and (P, Y) together is answered at once with the
-placeholder error. Past 8 parked requests from one peer, or 256 in all, a
-further request is answered at once. With `sync_answer_deferral_ms` set to
-`0`, every request is answered at once. After every path the parked table is
-empty.
+placeholder error. Past 32 parked requests from one peer, or 2,048 in all, a
+further request is answered at once; with the per-peer limit set to `2` and
+the total to `3`, the third request from one peer and the fourth in all are
+answered at once. A per-peer value of `100` is taken as `64` and a total of
+`10000` as `8192`; an absent, zero or non-integer value gives the default.
+With `sync_answer_deferral_ms` set to `0`, every request is answered at once.
+After every path the parked table is empty.
 
 **T-Q5c** *A quick failure of the own request is asked once more (R-Q5c).*
 A relay holds the all-zero placeholder for (P, X), has its own request for
@@ -1094,12 +1181,42 @@ for (P, X) arriving during the pause: no second request. No second request
 either when the pause is at least the bound, when the first request fails so
 late that the pause would end past the bound, when `sync_request_retry_ms` is
 `0`, or when `sync_answer_deferral_ms` is `0`. After every path the parked and
-in-flight tables are empty.
+in-flight tables are empty. These cases run with no other relay connected;
+T-Q5d covers the request to another relay.
+
+**T-Q5d** *One other relay is asked once (R-Q5d).* A node is connected to
+the relays F and G and receives through F a keep-alive of P naming (P, X)
+with root A, which differs from the root it holds.
+- F's request times out: after the timeout, exactly one request goes to G,
+  naming (P, X) with the held root; G's answer is applied and nothing more
+  is sent for that keep-alive. The same with F answering with an error,
+  where R-Q5c's second request to F fails as well: one request to G follows
+  the second failure, not the first.
+- F answers with a full set whose root, once applied, differs from A: one
+  request goes to G, naming only (P, X); the node's entries for (P, X) are
+  F's set until G's answer is applied, and are never cleared; G's answer is
+  applied even if the root it reaches differs from A too; nothing more is
+  sent.
+- F answers with a set that reaches A: no request goes to G.
+- A request naming (P, X) and (P, Y), where only Y's root differs from its
+  advertised root after F's answer, is followed by a request to G naming
+  only (P, Y).
+- With the worker held back for more than 5 s after F's answer: no request
+  to G.
+- With only F connected, or with `sync_request_alternate_relay` set to
+  `false`: no request beyond those of R-Q5c, as T-Q5c and T-Q6 describe.
+- The keep-alive's handling returns the boolean F's requests produced
+  before G's request ends.
+- A downstream request parked behind the node's own request for the
+  placeholder of (P, X) when F fails quickly twice is answered with G's set
+  when G's answer is applied within its bound.
+- After every path the in-flight and parked tables are empty.
 
 **T-Q6** *No retry, no de-duplication (R-Q6).* With the responder
 silenced (the request times out), one keep-alive produces exactly one request
 and nothing more for at least two advertisement intervals (R-Q5c asks again
-only after a quick failure); two keep-alives for the same
+only after a quick failure; the case runs with no other relay connected, or
+R-Q5d would ask one); two keep-alives for the same
 `(P, pair)` processed concurrently produce two requests.
 
 **R-Q6a (the responder's view of a repeated request).** *(Authored by
@@ -1127,7 +1244,7 @@ behavior the mesh relies on:
    gossip messages and plays no part on the request path, where the
    request is unsigned and names the pubkey asked *about*, not the asker;
    and no backoff or refusal exists for a peer that asks again. (The
-   limits of R-Q5b item 4 -- 8 parked requests per peer, 256 in all --
+   limits of R-Q5b item 4 -- parked requests per peer and in total --
    are Reloaded-original; the reference has no counterpart.)
 3. **A later answer differs only because the state moved.** Two requests
    with the same content a second apart receive the same answer unless
@@ -2686,7 +2803,10 @@ per-pair liveness and no root check after applying an answer**: the
 exposure R-GH1 and R-GH4 describe is the same as at the release rows, and
 the field observation above is consistent with it. Whether to adopt one of
 the remedies of the later reference change, and in what form, is §32.10
-D12.
+D12. *(Since 2026-11-02, §32.7.3 R-Q5d checks the root a pair reaches after
+an applied answer and asks one other relay once when it differs from the
+advertised root or when the forwarder failed; it never clears the pair.
+Reloaded still has no per-pair liveness.)*
 
 **T-GH1** *Unnamed pairs are untouched (R-GH1).* A node holding entries of
 P on pairs X and Y receives a keep-alive from P naming only X with X's held
@@ -2748,7 +2868,9 @@ at the loop's tick, not earlier.
 
 **T-GH10** *Reloaded parity (R-GH10).* T-GH1 to T-GH5, T-GH8 and T-GH9
 pass on a Reloaded node with `orderbook_sync_names_held_root` at either
-value and `order_messages_refresh_liveness` at either value; with
+value and `order_messages_refresh_liveness` at either value, and with
+`sync_request_alternate_relay` set to `false` or no other relay connected
+(otherwise T-GH4's requester asks one other relay, T-Q5d); with
 `order_messages_refresh_liveness` at its default, T-GH3's silence is
 counted from the last keep-alive **or order message** of P.
 
@@ -3030,8 +3152,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     whole. Each adopted candidate is a divergence to record in the
     operator-facing compatibility documents.
 
-    **Decided 2026-11-01 by the maintainer: no candidate before the
-    beta.** The beta's release notes list the behavior as a known
+    **Decided 2026-11-01 by the maintainer (Decision BK): no candidate
+    before the beta.** The beta's release notes list the behavior as a known
     limitation. The decision rests on a lab run of this project's own
     nodes, in which a live pair healed one hop per advertisement interval
     once a keep-alive named it, an emptied pair kept its stale entry until
@@ -3043,7 +3165,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     1. (b) in this form: one request to a *different* connected relay when
        a request times out or fails, or when the root a pair reaches
        after an applied answer still differs from the advertised one. The
-       pair is never cleared on a mismatch;
+       pair is never cleared on a mismatch *(bound on 2026-11-02 as
+       §32.7.3 R-Q5d)*;
     2. (e) **a cancel this node received is final for synchronization
        answers** (Reloaded-original, added 2026-11-01): an order whose
        cancel the node received is not re-admitted from an answer for a
@@ -3054,7 +3177,8 @@ D12. **Stale entries of a maker that keeps sending keep-alives (open
     4. two changes to the deferral of R-Q5b for start-up and re-post
        bursts: parking a request for a pair named by a keep-alive the
        node is still handling, before its placeholder exists, and a
-       review of the parking limits.
+       review of the parking limits. *(The limits were reviewed first,
+       on 2026-11-02: R-Q5b item 4 as amended.)*
 
     (c) and (d) only if (a) is rejected.
 
@@ -3681,3 +3805,27 @@ V5. **Relay forward ordering at the baseline.** Confirm against the
   D12 records the maintainer's decision and adds candidate (e); the D12
   pointers in ch. 59 D2 and in UPSTREAM-PARITY-GAPS.md #20 say it is
   decided. No reference input was used for these edits.
+- *Reloaded-original amendment (2026-11-02, Decision BK item 4) -- R-Q5b
+  item 4, the sentence of T-Q5b on the limits, the parenthesis of R-Q6a
+  item 2, the decision letter and item 4 of §32.10 D12.* The parking limits
+  become two top-level `MM2.json` integers with higher defaults and fixed
+  ceilings. *Inputs:* this repository's own deferral tables and inbound
+  request dispatch, the stream limits of the pinned libp2p crates, this
+  project's own seeds' synchronization summaries of 2026-10-31 as counts,
+  and the maintainer's decision. No reference implementation was consulted
+  for this amendment, and it needs no Dirty Gate pass.
+- *Reloaded-original addition (2026-11-02, Decision BK, D12 item 1):
+  R-Q5d, its divergence note and T-Q5d; the wording of R-Q5c item 4, of
+  R-Q6's last sentence, of T-Q5c and of T-Q6 that named the request to
+  another relay; the parenthesis appended to R-GH10; the clause added to
+  T-GH10; the pointer in D12 item 1.* A requester asks one other relay once
+  after the forwarder's request failed or its answer left a pair diverged,
+  never clearing the pair, with the opt-back setting. *Inputs:* this
+  repository's own keep-alive requester, deferral tables, trie worker and
+  peer-to-peer request layer; the gated rules of this chapter (R-Q4, R-Q4a,
+  R-Q5c, R-Q6, R-Q6a, on whose "no record, no limit, ban or penalty" it
+  relies, and §32.9C R-GH4); this project's own seeds' synchronization
+  summaries of 2026-10-31 as counts; a lab run of this project's own nodes
+  with reference binaries as black boxes, reported as counts and classes
+  only; and the maintainer's decision. No reference implementation was
+  consulted for this item, and it needs no Dirty Gate pass.

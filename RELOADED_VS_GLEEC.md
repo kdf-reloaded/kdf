@@ -147,6 +147,12 @@ The developer-facing rule (mandatory for AI assistants, strong recommendation fo
   the reference behavior. Nothing a counterparty observes changes, so the
   divergence is the default; the shared registry needs no change. See CRD ch.37
   R37.5.9e and [`docs/GLEEC_COMPATIBILITY.md`](docs/GLEEC_COMPATIBILITY.md).
+- **EVM coins and tokens log the gas limits they will use.** At activation, one
+  INFO line names where each gas-limit block comes from (the coin's own entry,
+  its platform coin's entry or the defaults) and lists the members that differ
+  from the defaults, with the gas-estimate multiplier when one is set; a DEBUG
+  line lists every member. It is logging only: no request, response or
+  transaction changes, so no switch exists. See CRD ch.57 R57.5.5.
 
 ### Behavioural divergences without a compatibility switch
 
@@ -465,7 +471,9 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
 - `fee_estimate_cache_secs: 0`, with no per-coin value — no fee reading is reused between
   requests.
 - `electrum_spread_reads: false` — every read-only Electrum query goes to the highest-ranked
-  connected server first.
+  connected server first. The near factor `electrum_spread_near_factor` and the near offset
+  `electrum_spread_near_offset_ms`, which limit spreading to the servers with the shortest round
+  trip, then have no effect.
 - `electrum_server_order: "listed"` — a coin's Electrum servers are ranked in the order they are
   listed instead of by a random draw.
 - `orderbook_sync_names_held_root: false` — a sync request names the root the maker advertised
@@ -475,6 +483,8 @@ switch. The value below gives the GLEEC-compatible behavior; the row of each swi
   answered at once.
 - `sync_request_retry_ms: 0` — a failed sync request of this node is not asked again before the
   maker's next keep-alive.
+- `sync_request_alternate_relay: false` — a failed or outdated sync answer is not followed by a
+  request to another relay before the maker's next keep-alive.
 - `relay_second_copy_priority_only: false` — a relay sends every message it forwards a second
   time, not only cancellations, swap negotiation and messages outside the order book.
 - `p2p_resolve_peer_hostnames: false` — a hostname a peer gives in its list of peer addresses is

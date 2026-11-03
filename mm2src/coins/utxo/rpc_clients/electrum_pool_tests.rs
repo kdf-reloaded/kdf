@@ -3,6 +3,7 @@
 //! The pool is built with millisecond timings, so no test waits real seconds. The production figures are
 //! pinned in `electrum_pool::budget_tests`; the 12-hour suspension cap is tested there with a clock stub.
 
+use super::electrum_measure::NEAR_OFFSET_DEFAULT_MS;
 use super::electrum_pool::{parse_server_order, ElectrumPoolOptions, ElectrumPoolTimings, OpenedByCall, ServerOrder,
                            ServerStateSnapshot};
 use super::electrum_stub_server::{StubBehavior, StubServer};
@@ -77,7 +78,8 @@ fn pool_client_ordered(
     pool_client_configured(requests, min_connected, max_connected, timings, order, false)
 }
 
-/// Like [`pool_client_ordered`], with `electrum_spread_reads` (R38.6.4a item 5) set as given.
+/// Like [`pool_client_ordered`], with `electrum_spread_reads` (R38.6.4a item 5) set as given. The near factor is
+/// `0`: the tests that use this are about the turn over every maintained session, whatever the latencies are.
 fn pool_client_configured(
     requests: Vec<ElectrumRpcRequest>,
     min_connected: usize,
@@ -85,6 +87,30 @@ fn pool_client_configured(
     timings: ElectrumPoolTimings,
     order: ServerOrder,
     spread_reads: bool,
+) -> Arc<ElectrumClientImpl> {
+    pool_client_spreading(
+        requests,
+        min_connected,
+        max_connected,
+        timings,
+        order,
+        spread_reads,
+        0.,
+        NEAR_OFFSET_DEFAULT_MS,
+    )
+}
+
+/// Like [`pool_client_configured`], with `electrum_spread_near_factor` and `electrum_spread_near_offset_ms`
+/// (R38.6.4a item 8) set as given.
+fn pool_client_spreading(
+    requests: Vec<ElectrumRpcRequest>,
+    min_connected: usize,
+    max_connected: Option<usize>,
+    timings: ElectrumPoolTimings,
+    order: ServerOrder,
+    spread_reads: bool,
+    near_factor: f64,
+    near_offset_ms: f64,
 ) -> Arc<ElectrumClientImpl> {
     let mut client = ElectrumClientImpl::new(TICKER.into(), vec![]);
     client.configure_pool(ElectrumPoolOptions {
@@ -94,6 +120,8 @@ fn pool_client_configured(
         timings,
         order,
         spread_reads,
+        near_factor,
+        near_offset_ms,
         block_interval: None,
     });
     // A server that cannot be used stays in the pool as removed; the tests look at the snapshot.
@@ -1746,6 +1774,451 @@ fn t38_6_4_14_the_switch_in_mm2_json_defaults_to_on_and_false_turns_it_off() {
     assert!(ElectrumPoolOptions::default().spread_reads);
 }
 
+// ---- CRD ch.38 R38.6.4a items 6-8: reads over the near sessions ------------------------------------------------------
+
+/// The factor the pool tests of the near sessions set, as the chapter's cases state it. It is set on purpose and is
+/// not the default of the switch, which is the constant `NEAR_FACTOR_DEFAULT` (D38.6.4a.1).
+const TEST_NEAR_FACTOR: f64 = 2.;
+const READ: &str = "blockchain.block.header";
+/// The delays are real wall-clock waits, wide enough that scheduling jitter on a loaded machine cannot move a
+/// stub across the limit: the near stubs stay within a factor of two of each other with 50 ms to spare, the far
+/// one is eight times the fast ones.
+const FAST_MS: u64 = 50;
+const SLOW_MS: u64 = 400;
+
+fn near_timings() -> ElectrumPoolTimings {
+    ElectrumPoolTimings {
+        request: ms(2_000),
+        call_budget: ms(10_000),
+        ..lenient()
+    }
+}
+
+/// Three answering stubs, listed in this order, whose reads and pings take `delays` (milliseconds); the pool ranks
+/// them by `order`, spreads reads as `spread_reads` says with the near factor `factor` and the default offset, and
+/// has all three maintained.
+async fn near_pool(
+    delays: [u64; 3],
+    order: ServerOrder,
+    spread_reads: bool,
+    factor: f64,
+    timings: ElectrumPoolTimings,
+) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    near_pool_at(delays, order, spread_reads, factor, NEAR_OFFSET_DEFAULT_MS, timings).await
+}
+
+/// Like [`near_pool`], with the near offset `offset_ms` as well.
+async fn near_pool_at(
+    delays: [u64; 3],
+    order: ServerOrder,
+    spread_reads: bool,
+    factor: f64,
+    offset_ms: f64,
+    timings: ElectrumPoolTimings,
+) -> ([StubServer; 3], Arc<ElectrumClientImpl>) {
+    let servers = three_answering().await;
+    for (server, delay) in servers.iter().zip(delays) {
+        server.set_reply_delay(READ, ms(delay));
+        server.set_reply_delay("server.ping", ms(delay));
+    }
+    let client = pool_client_spreading(
+        servers.iter().map(|server| server.request()).collect(),
+        1,
+        None,
+        timings,
+        order,
+        spread_reads,
+        factor,
+        offset_ms,
+    );
+    client.pool.run_pass().await;
+    assert_eq!(maintained(&client).len(), 3);
+    (servers, client)
+}
+
+/// Three reads: no session has a figure yet, so every session is near, each takes one turn and gets its first
+/// sample. This holds when the sessions' delays do not differ: a slow session that sampled before a session with
+/// no sample yet would be far by then.
+async fn warm_up_by_reads(servers: &[StubServer; 3], client: &ElectrumClientImpl) {
+    for _ in 0..3 {
+        ask(client, READ).await.unwrap();
+    }
+    for server in servers {
+        assert_eq!(server.requests(READ), 1);
+        assert_eq!(snap_of(client, server).samples, 1);
+    }
+}
+
+/// One ping over every maintained session gives each its first sample, whatever the delays are.
+async fn warm_up(servers: &[StubServer; 3], client: &ElectrumClientImpl) {
+    client.pool.ping_maintained().await;
+    for server in servers {
+        assert_eq!(server.requests(READ), 0);
+        assert_eq!(snap_of(client, server).samples, 1);
+    }
+}
+
+/// T38.6.4a.2: with two fast stubs and a far one, each with a sample, 30 reads in a row are all answered by the two
+/// fast ones, in turn.
+#[test]
+fn t38_6_4a_2_reads_avoid_a_far_session() {
+    block_on(async {
+        let (servers, client) = near_pool(
+            [FAST_MS, FAST_MS, SLOW_MS],
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            near_timings(),
+        )
+        .await;
+        warm_up_by_reads(&servers, &client).await;
+        let mut answered = Vec::new();
+        for _ in 0..30 {
+            answered.push(ask(&client, READ).await.unwrap());
+        }
+        let count = |server: &StubServer| answered.iter().filter(|addr| **addr == server.addr()).count();
+        assert_eq!(count(&servers[2]), 0, "{answered:?}");
+        assert!((14..=16).contains(&count(&servers[0])), "{answered:?}");
+        assert!((14..=16).contains(&count(&servers[1])), "{answered:?}");
+        // The far one was asked once only, by the warm-up.
+        assert_eq!(servers[2].requests(READ), 1);
+        // The turn goes to the near sessions one after the other.
+        assert!(answered.windows(2).all(|pair| pair[0] != pair[1]), "{answered:?}");
+    });
+}
+
+/// T38.6.4a.3: a far session is still a fallback: with both near stubs failing the read, the far one answers it,
+/// after the near ones were tried.
+#[test]
+fn t38_6_4a_3_a_far_session_is_still_a_fallback() {
+    block_on(async {
+        let (servers, client) = near_pool(
+            [FAST_MS, FAST_MS, SLOW_MS],
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            near_timings(),
+        )
+        .await;
+        warm_up(&servers, &client).await;
+        servers[0].set_behavior(StubBehavior::BlackHoleRequests).await;
+        servers[1].set_behavior(StubBehavior::BlackHoleRequests).await;
+        assert_eq!(ask(&client, READ).await.unwrap(), servers[2].addr());
+        // Both near sessions were asked first (the failed ones are closed and demoted), the far one last.
+        assert_eq!(servers[0].requests(READ), 1);
+        assert_eq!(servers[1].requests(READ), 1);
+        assert_eq!(servers[2].requests(READ), 1);
+        assert!(!snap(&client, 0).maintained && !snap(&client, 1).maintained);
+    });
+}
+
+/// T38.6.4a.4: a recovered session comes back: once the slow stub answers fast and the pings have moved its
+/// smoothed latency within the limit, it answers reads again, and not before.
+#[test]
+fn t38_6_4a_4_a_recovered_session_comes_back() {
+    block_on(async {
+        let timings = ElectrumPoolTimings {
+            ping_interval: ms(100),
+            ..near_timings()
+        };
+        let (servers, client) = near_pool(
+            [FAST_MS, FAST_MS, SLOW_MS],
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            timings,
+        )
+        .await;
+        warm_up(&servers, &client).await;
+        for _ in 0..4 {
+            assert_ne!(ask(&client, READ).await.unwrap(), servers[2].addr());
+        }
+
+        // The stub recovers. Its figure is still the old one, so the first read after that avoids it too.
+        servers[2].set_reply_delay(READ, ms(FAST_MS));
+        servers[2].set_reply_delay("server.ping", ms(FAST_MS));
+        assert_ne!(ask(&client, READ).await.unwrap(), servers[2].addr());
+        client.start_pool(true);
+
+        let started = Instant::now();
+        let mut avoided = 0;
+        loop {
+            let answer = ask(&client, READ).await.unwrap();
+            if answer == servers[2].addr() {
+                break;
+            }
+            avoided += 1;
+            assert!(started.elapsed() < ms(20_000), "the recovered session never came back");
+            Timer::sleep(0.06).await;
+        }
+        // It took several pings to move the average, so some reads went to the fast ones first (a small
+        // allowance for the order the answers and the samples arrive in) ...
+        assert!(avoided >= 3, "{avoided}");
+        // ... and by the time it answered, its figure was within the limit.
+        let figures: Vec<f64> = servers
+            .iter()
+            .map(|server| snap_of(&client, server).smoothed_ms.unwrap())
+            .collect();
+        let fastest = figures.iter().copied().fold(f64::INFINITY, f64::min);
+        let limit = (TEST_NEAR_FACTOR * fastest).max(fastest + NEAR_OFFSET_DEFAULT_MS);
+        assert!(figures[2] <= limit + 20., "{figures:?}");
+    });
+}
+
+/// T38.6.4a.5: under `listed` and under `random`, requests and pings give each maintained session a smoothed
+/// latency, and no header request goes out on joining (compare T38.6.4l.15).
+#[test]
+fn t38_6_4a_5_samples_under_random_and_listed() {
+    block_on(async {
+        for order in [ServerOrder::Listed, ServerOrder::Random] {
+            let (servers, client) = near_pool([5, 5, 5], order.clone(), true, TEST_NEAR_FACTOR, near_timings()).await;
+            // Joining through the pass sent no header request and left no figure.
+            for server in &servers {
+                assert_eq!(server.requests(HEADERS), 0, "{order:?}");
+                assert_eq!(snap_of(&client, server).samples, 0, "{order:?}");
+                assert_eq!(snap_of(&client, server).smoothed_ms, None, "{order:?}");
+            }
+            // Three reads, each on its own session, give each a first sample ...
+            warm_up_by_reads(&servers, &client).await;
+            assert!(servers
+                .iter()
+                .all(|server| snap_of(&client, server).smoothed_ms.is_some()));
+            // ... and a ping over every maintained session gives each another.
+            client.pool.ping_maintained().await;
+            for server in &servers {
+                assert_eq!(snap_of(&client, server).samples, 2, "{order:?}");
+                assert_eq!(server.requests("server.ping"), 1, "{order:?}");
+            }
+            // Still no header request anywhere, no round, nothing judged.
+            Timer::sleep(0.2).await;
+            for server in &servers {
+                assert_eq!(server.requests(HEADERS), 0, "{order:?}");
+                assert!(
+                    !methods_received(server).iter().any(|method| method == HEADERS),
+                    "{order:?}"
+                );
+            }
+            assert!(client.pool.remeasure_rounds().is_empty(), "{order:?}");
+            assert!(client.pool_snapshot().iter().all(|state| !state.poor), "{order:?}");
+        }
+    });
+}
+
+/// T38.6.4a.6: the values of `electrum_spread_near_factor`.
+#[test]
+fn t38_6_4a_6_the_near_factor_switch_parses_as_stated() {
+    use super::electrum_measure::{near_sessions, NEAR_FACTOR_DEFAULT};
+    use super::electrum_pool::parse_spread_near_factor;
+    // Absent: the default, no warning.
+    assert_eq!(parse_spread_near_factor(&json!({})), (NEAR_FACTOR_DEFAULT, None));
+    assert_eq!(
+        parse_spread_near_factor(&json!({"electrum_spread_reads": false})),
+        (NEAR_FACTOR_DEFAULT, None)
+    );
+    // A non-negative number is used as it is.
+    for (value, expected) in [
+        (json!(0), 0.),
+        (json!(0.0), 0.),
+        (json!(0.5), 0.5),
+        (json!(1), 1.),
+        (json!(2), 2.),
+        (json!(3.5), 3.5),
+    ] {
+        assert_eq!(
+            parse_spread_near_factor(&json!({ "electrum_spread_near_factor": value })),
+            (expected, None),
+            "{value}"
+        );
+    }
+    // `0` makes every maintained session near, and `0.5` means `1`.
+    let figures = [Some(25.), Some(27.), Some(32.), Some(108.), Some(230.), Some(266.)];
+    assert_eq!(near_sessions(&figures, 0., NEAR_OFFSET_DEFAULT_MS), vec![true; 6]);
+    assert_eq!(
+        near_sessions(&figures, 0.5, NEAR_OFFSET_DEFAULT_MS),
+        near_sessions(&figures, 1., NEAR_OFFSET_DEFAULT_MS)
+    );
+    // Anything else: the default, with one warning that names the key and the value.
+    for (value, shown) in [
+        (json!("2"), "\"2\""),
+        (json!("fast"), "\"fast\""),
+        (json!(-1), "-1"),
+        (json!(-0.5), "-0.5"),
+        (json!(null), "null"),
+        (json!(true), "true"),
+        (json!([2]), "[2]"),
+    ] {
+        let (factor, warning) = parse_spread_near_factor(&json!({ "electrum_spread_near_factor": value }));
+        assert_eq!(factor, NEAR_FACTOR_DEFAULT, "{value}");
+        let warning = warning.unwrap_or_else(|| panic!("no warning for {value}"));
+        assert!(warning.contains("electrum_spread_near_factor"), "{warning}");
+        assert!(warning.contains(shown), "{warning}");
+    }
+    // The pool option defaults to the constant.
+    assert_eq!(ElectrumPoolOptions::default().near_factor, NEAR_FACTOR_DEFAULT);
+}
+
+/// T38.6.4a.6: the values of `electrum_spread_near_offset_ms`.
+#[test]
+fn t38_6_4a_6_the_near_offset_switch_parses_as_stated() {
+    use super::electrum_pool::parse_spread_near_offset_ms;
+    // Absent: the default, no warning; the other switches do not count.
+    assert_eq!(parse_spread_near_offset_ms(&json!({})), (NEAR_OFFSET_DEFAULT_MS, None));
+    assert_eq!(
+        parse_spread_near_offset_ms(&json!({"electrum_spread_near_factor": 3})),
+        (NEAR_OFFSET_DEFAULT_MS, None)
+    );
+    // A non-negative number is used as it is: `0` leaves the factor to decide, `50` admits 50 ms.
+    for (value, expected) in [
+        (json!(0), 0.),
+        (json!(0.0), 0.),
+        (json!(50), 50.),
+        (json!(12.5), 12.5),
+        (json!(1000), 1000.),
+    ] {
+        assert_eq!(
+            parse_spread_near_offset_ms(&json!({ "electrum_spread_near_offset_ms": value })),
+            (expected, None),
+            "{value}"
+        );
+    }
+    // Anything else: the default, with one warning that names the key and the value.
+    for (value, shown) in [
+        (json!("50"), "\"50\""),
+        (json!("fast"), "\"fast\""),
+        (json!(-1), "-1"),
+        (json!(-0.5), "-0.5"),
+        (json!(null), "null"),
+        (json!(true), "true"),
+        (json!([50]), "[50]"),
+        (json!({"ms": 50}), "{\"ms\":50}"),
+    ] {
+        let (offset, warning) = parse_spread_near_offset_ms(&json!({ "electrum_spread_near_offset_ms": value }));
+        assert_eq!(offset, NEAR_OFFSET_DEFAULT_MS, "{value}");
+        let warning = warning.unwrap_or_else(|| panic!("no warning for {value}"));
+        assert!(warning.contains("electrum_spread_near_offset_ms"), "{warning}");
+        assert!(warning.contains(shown), "{warning}");
+    }
+    // The pool option defaults to the constant.
+    assert_eq!(ElectrumPoolOptions::default().near_offset_ms, NEAR_OFFSET_DEFAULT_MS);
+}
+
+/// T38.6.4a.6: the offset reaches the pool: with the factor at 2 and an offset wide enough, the far session
+/// is near and takes its turn.
+#[test]
+fn t38_6_4a_6_a_wide_offset_gives_every_session_its_turn() {
+    block_on(async {
+        let (servers, client) = near_pool_at(
+            [FAST_MS, FAST_MS, SLOW_MS],
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            10_000.,
+            near_timings(),
+        )
+        .await;
+        for _ in 0..9 {
+            ask(&client, READ).await.unwrap();
+        }
+        assert_eq!(
+            servers.iter().map(|server| server.requests(READ)).collect::<Vec<_>>(),
+            vec![3, 3, 3]
+        );
+    });
+}
+
+/// T38.6.4a.6: the factor reaches the pool: `0` makes the far session near, so it takes its turn.
+#[test]
+fn t38_6_4a_6_a_factor_of_zero_gives_every_session_its_turn() {
+    block_on(async {
+        let (servers, client) = near_pool(
+            [FAST_MS, FAST_MS, SLOW_MS],
+            ServerOrder::Listed,
+            true,
+            0.,
+            near_timings(),
+        )
+        .await;
+        for _ in 0..9 {
+            ask(&client, READ).await.unwrap();
+        }
+        assert_eq!(
+            servers.iter().map(|server| server.requests(READ)).collect::<Vec<_>>(),
+            vec![3, 3, 3]
+        );
+    });
+}
+
+/// T38.6.4a.6: with `electrum_spread_reads` `false`, reads follow the priority order whatever the factor.
+#[test]
+fn t38_6_4a_6_with_spreading_off_the_factor_has_no_effect() {
+    block_on(async {
+        for factor in [0., TEST_NEAR_FACTOR] {
+            let (servers, client) = near_pool(
+                [FAST_MS, FAST_MS, SLOW_MS],
+                ServerOrder::Listed,
+                false,
+                factor,
+                near_timings(),
+            )
+            .await;
+            for _ in 0..6 {
+                assert_eq!(ask(&client, READ).await.unwrap(), servers[0].addr(), "factor {factor}");
+            }
+            assert_eq!(servers[1].ordinary_requests() + servers[2].ordinary_requests(), 0);
+        }
+    });
+}
+
+/// T38.6.4a.7: writes keep their routing: with the far stub first in priority, a broadcast and the subscriptions go
+/// to it, while the reads avoid it.
+#[test]
+fn t38_6_4a_7_writes_keep_their_routing() {
+    block_on(async {
+        let (servers, client) = near_pool(
+            [SLOW_MS, FAST_MS, FAST_MS],
+            ServerOrder::Listed,
+            true,
+            TEST_NEAR_FACTOR,
+            near_timings(),
+        )
+        .await;
+        warm_up(&servers, &client).await;
+        // Every ordinary request is a sample (R38.6.4a item 7), the writes included: the far stub is as slow
+        // for them as for the reads, so they do not bring it near.
+        for method in [
+            "blockchain.transaction.broadcast",
+            "blockchain.scripthash.subscribe",
+            "blockchain.contract.event.subscribe",
+        ] {
+            servers[0].set_reply_delay(method, ms(SLOW_MS));
+        }
+        let first = servers[0].addr();
+        for _ in 0..3 {
+            assert_eq!(ask(&client, "blockchain.transaction.broadcast").await.unwrap(), first);
+        }
+        assert_eq!(
+            route_to(&client, rpc("blockchain.scripthash.subscribe", vec![json!("aa")]))
+                .await
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            route_to(&client, rpc("blockchain.contract.event.subscribe", vec![]))
+                .await
+                .unwrap(),
+            first
+        );
+        assert_eq!(servers[0].requests("blockchain.transaction.broadcast"), 3);
+        assert_eq!(servers[0].requests("blockchain.scripthash.subscribe"), 1);
+        assert_eq!(servers[1].ordinary_requests() + servers[2].ordinary_requests(), 0);
+        // The reads still avoid it.
+        for _ in 0..6 {
+            assert_ne!(ask(&client, READ).await.unwrap(), first);
+        }
+        assert_eq!(servers[0].requests(READ), 0);
+    });
+}
+
 // ---- CRD ch.38 R38.6.4l: the measured server order ---------------------------------------------------------------
 
 const HEADERS: &str = "blockchain.headers.subscribe";
@@ -1777,6 +2250,8 @@ fn measured_pool(
         timings,
         order,
         spread_reads: false,
+        near_factor: 0.,
+        near_offset_ms: NEAR_OFFSET_DEFAULT_MS,
         block_interval,
     });
     client.pool.set_draw_for_test(draw);
@@ -1872,7 +2347,8 @@ fn t38_6_4l_1_random_and_listed_measure_nothing() {
                 script_draw(&[], 0.5),
             );
             activate_and_start(&client).await;
-            // A slow request is not a sample, and a re-measure round does not run.
+            // A slow request is a sample of the smoothed latency (R38.6.4a item 7), but nothing is judged by it
+            // and a re-measure round does not run.
             servers[0].set_reply_delay("blockchain.block.header", ms(150));
             for _ in 0..6 {
                 ask(&client, "blockchain.block.header").await.unwrap();
@@ -1883,10 +2359,14 @@ fn t38_6_4l_1_random_and_listed_measure_nothing() {
                 assert_eq!(server.requests(HEADERS), 0, "{order:?}");
             }
             assert!(client.pool.remeasure_rounds().is_empty(), "{order:?}");
-            assert!(client
-                .pool_snapshot()
-                .iter()
-                .all(|state| state.samples == 0 && !state.poor));
+            // The six reads went to the first-ranked server and are six samples (the delay of one server only
+            // is not the point: the rank, under `random`, is a draw).
+            assert_eq!(
+                client.pool_snapshot().iter().map(|state| state.samples).sum::<u32>(),
+                6,
+                "{order:?}"
+            );
+            assert!(client.pool_snapshot().iter().all(|state| !state.poor));
         }
     });
 }
