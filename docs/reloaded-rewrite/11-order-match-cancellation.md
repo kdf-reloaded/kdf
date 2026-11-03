@@ -62,6 +62,12 @@ R1. **Time-bounded.** The cache shall be a time-keyed
     coverage of realistic worst-case mesh delivery skew
     without permanently blocking legitimate later
     re-use of the same identifier by the same publisher.
+    *(Reloaded amendment 2026-11-03, Decision 29: the
+    time-to-live is the final-cancel window of
+    [Chapter 32](32-orderbook-p2p-and-trie.md) R-K1b, one hour
+    by default and never below 120 s; 120 s is the reference
+    value and the GLEEC-compatible setting. Entries older than
+    120 s are capped there.)*
 
 R2. **Key is the maker-order identifier.** The cache key is
     the identifier the wire protocol uses to refer to a
@@ -139,6 +145,13 @@ R10. **Time-out lets legitimate reuse through.** A cache
      window, which version-4 identifiers make negligible; the
      remedy is an age check in the lookup.
 
+     *(Reloaded, 2026-11-03: the lookup filters by age, so an
+     entry older than the time-to-live no longer suppresses an
+     insert, and the divergence above is closed. Chapter 32
+     R-GH11 item 5 found no legitimate re-use of an identifier at
+     the reference release rows: a new order never reuses one,
+     which is why Reloaded's window can be longer.)*
+
 R11. **Drop shall be logged at warn level.** A suppressed
      insert shall emit a single warn-level log entry
      identifying the dropped identifier; this is the only
@@ -183,7 +196,7 @@ orderbook setup used elsewhere in that module.
 
 | Invariant                                              | Bound by  |
 |--------------------------------------------------------|-----------|
-| Time-to-live is exactly 120 seconds                    | R1        |
+| Time-to-live is 120 s at the reference; in Reloaded the window of ch. 32 R-K1b (default 3600 s, at least 120 s) | R1 |
 | Cancellation is recorded before local removal          | R5, R7    |
 | Guard fires only on identifier-and-publisher match     | R8, R9    |
 | Cross-publisher identifier collisions behave unchanged | R9        |
@@ -204,7 +217,9 @@ D2. **Time-to-live as configuration.** The 120-second
     constant of R1 is a literal. Exposing it as a tunable
     (per-network-id or daemon-wide) would let operators
     trade memory for tolerance of larger mesh skews; it is
-    not in scope at the time of writing.
+    not in scope at the time of writing. *(Bound on
+    2026-11-03 as ch. 32 R-K1b, daemon-wide, with 120 s as the
+    lowest value.)*
 
 D3. **Cross-instance attribution.** The guard distinguishes
     by publisher identity (R3), not by signing key. If the
@@ -286,3 +301,9 @@ V3. The publish-subscribe mesh protocol the codebase uses
   use site of the cache, with the primitive read from the public crate. *Method:*
   reading plus a mechanical scan of the added lines. *Measure:* 0.00 against the
   0.10 threshold.
+- *Reloaded-original amendment (2026-11-03), R1, the note after R10's
+  informative paragraph, the first row of §11.7 and D2:* written by a
+  context that never read the forbidden corpus, from the maintainer's
+  Decision 29 and this repository's own cancellation guard. The window
+  itself is bound in chapter 32 R-K1b; no reference behavior is added
+  here.
