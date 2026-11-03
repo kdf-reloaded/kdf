@@ -637,7 +637,7 @@ memory growth below 0.3 MB per minute from minute 10.
 T45.13 *Invalid key never refuses the launch (R45.6A.4, R45.7.1).* Each invalid
 value listed in T45.10 MUST start the daemon.
 
-T45.14 *Resolver key (R45.6B.2).* A table-driven test of the parsing MUST
+T45.16 *Resolver key (R45.6B.2).* A table-driven test of the parsing MUST
 cover at least: absent, `null` and `"google"` → Google Public DNS; `"system"` →
 the system resolver; `["192.0.2.53"]`, `["192.0.2.53:5353"]`,
 `["2001:db8::53"]`, `["[2001:db8::53]"]` and `["[2001:db8::53]:5353"]` → fixed servers with the
@@ -647,7 +647,7 @@ string, not an array), `[]`, `[""]`, `["dns.example.com"]`, `["192.0.2.53:0"]`,
 the launch with a clean configuration error naming the key, and MUST NOT panic
 (R45.7.1).
 
-T45.15 *Cache and last known answer (R45.6B.3 to R45.6B.5).* Against a DNS
+T45.17 *Cache and last known answer (R45.6B.3 to R45.6B.5).* Against a DNS
 server run by the test on a loopback address, in the fixed mode:
 - an answer with a record lifetime of 0 is served from the cache for 30 s, and
   one with a lifetime of a day is asked again after 1 hour (a test clock or the
@@ -664,29 +664,29 @@ server run by the test on a loopback address, in the fixed mode:
 - a lookup through a server that never answers fails within 15 s, and the
   failure line of R45.6B.6 appears once per name per hour.
 
-T45.16 *Peer-to-peer resolution (R45.6B.9 item 1).* With a test resolver
+T45.18 *Peer-to-peer resolution (R45.6B.9 item 1).* With a test resolver
 installed, a dial of `/dns4/<name>/tcp/<port>` reaches the address the name
 resolves to; a dial of a name with two addresses, the first unreachable,
 connects to the second; a `/dnsaddr` dial fails with its own error; and a WSS
 dial to a hostname completes its TLS check against that hostname.
 
-T45.17 *Coin and HTTP(S) resolution (R45.6B.9 items 3 to 5).* With a test
+T45.19 *Coin and HTTP(S) resolution (R45.6B.9 items 3 to 5).* With a test
 resolver that maps a name to a loopback address, an HTTP(S) request through
 the shared client, an Electrum connection (TCP and TLS) and a lightwalletd
 connection to that name each reach the loopback server, and each lookup is
 counted in `dns.lookups.count`. The TLS cases verify the certificate against
 the name, not the address.
 
-T45.18 *Installation (R45.6B.7, R45.6B.8).* A started node logs the startup
+T45.20 *Installation (R45.6B.7, R45.6B.8).* A started node logs the startup
 line of its mode exactly once. A lookup inside the node before the resolver is
 installed fails a debug assertion. A lookup outside the node uses the system
 resolver. A second node start in the same process replaces the resolver.
 
-T45.19 *One DNS library (R45.6B.11).* The dependency policy check fails if the
+T45.21 *One DNS library (R45.6B.11).* The dependency policy check fails if the
 transport library's DNS layer or the unmaintained resolver library returns to
 the dependency tree.
 
-T45.20 *Lab (R45.6B.2 to R45.6B.9).* With a lab DNS server that logs every
+T45.22 *Lab (R45.6B.2 to R45.6B.9).* With a lab DNS server that logs every
 query and answers one seed name, one RIN Electrum host, one EVM node host and
 one lightwalletd host, none of them in the hosts file:
 1. default mode, Google unable to answer the lab names: the failure line
