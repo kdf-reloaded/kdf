@@ -27,6 +27,17 @@ it and, where one exists, the CRD rule, for readers who want more.
 
 ### Fixed
 
+#### Node names in logs and errors
+
+- **A node URL that a lower layer writes in another spelling is now shortened to scheme, host and
+  port as well.** Before, an error text from the HTTP client, TLS or the browser lost a node's URL
+  only when it repeated the URL exactly as configured. Now a copy that is percent-encoded, in
+  another letter case, with a default port added or dropped, or with a trailing slash added also
+  loses its userinfo, path and query, on the native and the browser (WASM) build. Such a URL keeps
+  the scheme and port the lower layer wrote, and a URL of another host is left as it is. The
+  `mm2_net` crate now also builds on its own for the browser target. Detail: PR #218; CRD ch.35
+  R35.1.14.
+
 ### Tests
 
 - **The tests run before the next beta will be listed in
