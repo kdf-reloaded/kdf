@@ -7367,7 +7367,7 @@ mod v6_transaction_parsing_tests {
     }
 }
 
-/// CRD ch.45 T45.17: the name of a lightwalletd server goes through the node's resolver. The TLS case (the certificate
+/// CRD ch.45 T45.19: the name of a lightwalletd server goes through the node's resolver. The TLS case (the certificate
 /// checked against the name) is not covered here: tonic applies the endpoint's TLS configuration on top of whatever
 /// connector it is given, and the configuration trusts the bundled roots only, so a test certificate cannot be trusted
 /// without a seam in `connect_lightwalletd`.

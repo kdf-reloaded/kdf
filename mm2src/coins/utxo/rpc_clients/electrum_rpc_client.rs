@@ -2142,7 +2142,7 @@ mod tls_tests {
         assert!(DnsName::try_from("").is_err());
     }
 
-    // ---- CRD ch.45 T45.17: the server names go through the node's resolver ----
+    // ---- CRD ch.45 T45.19: the server names go through the node's resolver ----
 
     use common::dns_resolver::{gauges, install_test_map};
     use std::net::{IpAddr, Ipv4Addr};

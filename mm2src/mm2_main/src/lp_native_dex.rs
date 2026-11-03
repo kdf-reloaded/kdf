@@ -994,7 +994,7 @@ mod tests {
     use mm2_p2p::RelayAddress;
     use serde_json::json;
 
-    /// CRD ch.45 T45.14 at the node's start-up: every invalid `dns_resolver` value refuses the launch with a clean
+    /// CRD ch.45 T45.16 at the node's start-up: every invalid `dns_resolver` value refuses the launch with a clean
     /// configuration error that names the key, and installs nothing.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]

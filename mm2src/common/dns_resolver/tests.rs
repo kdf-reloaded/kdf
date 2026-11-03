@@ -1,4 +1,4 @@
-//! Tests of CRD ch.45 §45.6B (T45.14, T45.15, T45.18, and the common part of T45.17). The DNS server is a UDP socket and a
+//! Tests of CRD ch.45 §45.6B (T45.16, T45.17, T45.20, and the common part of T45.19). The DNS server is a UDP socket and a
 //! TCP listener on 127.0.0.1 that the test runs itself, built from the message types of `hickory-proto`. Real time is
 //! replaced by the configured bounds ([`Options`]): the TTL clamps, the last known answer window and the lookup bound are
 //! a second or two instead of an hour or a day, and `defaults_are_the_bounds_of_the_chapter` pins the real values. How
@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::AtomicUsize;
 
-// ---- T45.14: the key ----
+// ---- T45.16: the key ----
 
 fn parse(value: serde_json::Value) -> Result<DnsMode, DnsResolverConfError> { parse_dns_resolver(Some(&value)) }
 
@@ -458,7 +458,7 @@ fn the_system_hosts_file_loads_and_an_empty_one_lists_nothing() {
     assert!(HostsFile::parse("").lookup("localhost", DnsFamily::Any).is_none());
 }
 
-// ---- T45.15: against a DNS server on a loopback address ----
+// ---- T45.17: against a DNS server on a loopback address ----
 
 #[derive(Clone, Copy, Debug)]
 enum Reply {
@@ -1042,7 +1042,7 @@ fn the_system_mode_asks_the_operating_system() {
     assert_eq!(installed.gauges().last_known_entries, 0);
 }
 
-// ---- T45.18: installation ----
+// ---- T45.20: installation ----
 
 #[test]
 fn the_startup_line_names_the_mode() {
@@ -1113,7 +1113,7 @@ fn a_later_installation_takes_effect_for_the_lookups_after_it() {
     ]);
 }
 
-// ---- T45.17, the common part: the shared HTTP client and the TCP connection ----
+// ---- T45.19, the common part: the shared HTTP client and the TCP connection ----
 
 #[test]
 fn an_http_request_through_the_shared_client_resolves_the_name_through_the_installed_resolver() {

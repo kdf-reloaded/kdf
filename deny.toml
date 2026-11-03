@@ -448,7 +448,7 @@ deny = [
     # hickory-proto, via common::dns_resolver (D45.8). The transport library's own DNS
     # layer and the unmaintained trust-dns resolver stack it pulls in must not come
     # back into the dependency tree (the node's P2P transport resolves names itself,
-    # ch.28 R0b/R18). T45.19: re-adding the `dns` feature of libp2p fails this check.
+    # ch.28 R0b/R18). T45.21: re-adding the `dns` feature of libp2p fails this check.
     { name = "libp2p-dns" },
     { name = "trust-dns-resolver" },
     { name = "trust-dns-proto" },
