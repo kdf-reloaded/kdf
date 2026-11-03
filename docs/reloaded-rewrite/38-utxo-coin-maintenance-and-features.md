@@ -1108,18 +1108,22 @@ does not stall block-count discovery.
 > Nothing about R38.6.4 itself changes either way.
 
 R38.6.4a *Spreading read-only queries across sessions (Reloaded-original,
-maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
+maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27.
+Items 6–8 and the changes to items 1 and 3 were added on 2026-11-02 on the
+clean side, maintainer Decision BI, with no forbidden-class input.)*
 1. *What spreads.* With `electrum_spread_reads` enabled, the client sends
    each read-only query of a coin to the next connected session in turn,
-   round-robin over the sessions R38.6.4 keeps connected (the maintained set
-   of R38.6.4b). Read-only queries
+   round-robin over the near sessions (item 6) of the sessions R38.6.4 keeps
+   connected (the maintained set of R38.6.4b). Read-only queries
    are balance, unspent-list, history, header, block-count, transaction-get,
    fee-estimate and relay-fee requests, and the R38.6.3a batches that carry
    them.
 2. *What does not.* Transaction broadcasts, subscriptions and the
    keep-alive ping keep their current routing.
 3. *Failover.* A query that fails on its session falls back to the other
-   connected sessions, exactly as a query does today (R38.6.4f).
+   connected sessions, exactly as a query does today (R38.6.4f): first the
+   other near sessions in turn order, then the maintained sessions that are not
+   near, in priority order, and then the retry of R38.6.4f item 2.
 4. *Consistency.* The recently-spent-output cache already shields a read
    that follows this node's own broadcast from a session that has not yet
    seen the broadcast. That shielding shall continue to hold whichever
@@ -1127,11 +1131,62 @@ maintainer Decision R of 2026-10-27; passed the KDF Dirty Gate on 2026-10-27).*
 5. *Switch.* `electrum_spread_reads` is a top-level `MM2.json` boolean,
    default `true`. With `false`, every query follows the priority order of
    R38.6.4.
+6. *Near sessions.* Among the maintained sessions that have a smoothed
+   latency (item 7), let *f* be the lowest. A maintained session is *near*
+   when it has no smoothed latency yet, or when its smoothed latency is at
+   most the larger of *F* × *f* and *f* + *A*, where *F* is the near factor
+   and *A* the near offset of item 8. When no maintained session has a smoothed latency, every
+   maintained session is near. The near sessions are judged when the query
+   starts, from the figures at that moment, and the turn of item 1 runs over
+   them in priority order. A session that is not near still answers a query
+   when the near sessions fail (item 3), and it becomes near again as soon as
+   its smoothed latency is within the limit.
+7. *Latency under every order.* The smoothed latency of R38.6.4l item 2
+   (*While running*) is kept for every maintained session, whatever
+   `electrum_server_order` says. Every ordinary request and every
+   `server.ping` (R38.6.4e item 4) answered over the session is a sample; the
+   first sample after the session joins the maintained set starts the
+   average. Nothing is sent for it. Under `random` and `listed` there is still
+   no activation round, no header request on joining, no re-measure round and
+   no trigger (R38.6.4l items 1, 6 and 7). A session that leaves the
+   maintained set loses its smoothed latency.
+8. *Near factor and near offset.* Two top-level `MM2.json` numbers, read at
+   coin activation:
+   - `electrum_spread_near_factor`, *F*, default 2 (D38.6.4a.1). `0` turns
+     item 6 off: every maintained session is near, as before items 6–8 were
+     added. A value above 0 and below 1 is taken as 1.
+   - `electrum_spread_near_offset_ms`, *A*, in milliseconds, default 20
+     (D38.6.4a.1).
+
+   For either key, a value that is not a non-negative number is taken as the
+   default, with one warning naming the key and the value; an absent key logs
+   nothing. With `electrum_spread_reads` `false` neither has an effect.
 
 *Rationale (this project's own measurement, 2026-10-26).* The per-session
 limit of R38.6.3a applies to each session separately. With three connected
 servers, spreading triples the read budget an order-posting burst can draw
 on.
+
+*Rationale for items 6–8 (this project's own measurements, 2026-10-31 and
+2026-11-01).* Spreading over every maintained session sends one read in *N*
+to each of *N* sessions, the slowest included. In a lab loop of 200 RIN
+orders, three servers, one of them about 227 ms away and the other two about
+25 ms, made the loop 48 % longer than with every read on one near server. On
+RIN's later list of six servers the medians of a balance read from the lab
+host were about 25, 27 and 32 ms for three servers, 108 ms for a fourth, and
+230 and 266 ms for the last two. Spreading over all six costs about 114 ms per
+read on average; over the three near ones, about 28 ms. With *F* = 2 the limit
+is the larger of 50 ms and 45 ms, which keeps exactly the three. A session
+that a server's per-session limit slows down (R38.6.3a) leaves the near set and
+recovers its budget while the ping keeps measuring it. When every session is
+slowed, all of them stay near, so a coin whose servers all limit each session
+keeps the full spread. The offset (20 ms by default) keeps sessions within a
+few milliseconds of a very fast one near.
+
+*Herding (informative).* Nodes in one region find the same servers near and
+spread over them. That concentrates load by region, not globally. The
+operator's list decides which servers exist, and `0` restores the spread over
+every maintained session.
 
 > **Upstream divergence (informative).** R38.6.4 prioritises servers by their
 > configured order. This sub-rule deliberately departs from that ordering for
@@ -1177,6 +1232,10 @@ on.
 > next two reads be answered by the second and third, which still list the spent
 > output. `electrum_spread_reads` is read at coin activation; a value that is not
 > a boolean is taken as `true` with one warning (the chapter is silent on it).
+>
+> **Implementation status (2026-11-02).** Items 6–8 are not implemented yet.
+> Until they are, every maintained session counts as near, and the smoothed
+> latency is kept under `mixed` and `measured` only.
 
 R38.6.4b **Pool composition and bounds.** (Reference-bound at the rows
 `v2.6.0-beta` and `v3.0.0-beta` of chapter 02 §2.15A, which agree.)
@@ -1499,7 +1558,8 @@ item 3).**
 1. *Values.* With `electrum_server_order` set to `mixed`, the rank is a
    weighted random draw that favors well-measured servers (item 5). With
    `measured`, the rank follows measured quality alone (item 5). Under
-   `random` and `listed` nothing in this rule applies: no measurement
+   `random` and `listed` nothing in this rule applies except the running
+   smoothed latency of item 2, which R38.6.4a item 7 keeps: no measurement
    request is sent and no trigger runs. The default stays `random`
    (R38.6.4b-R item 1) until a field run on RIN with `mixed` has passed;
    `mixed`, the intended default, then becomes the default in a separate
@@ -1520,7 +1580,8 @@ item 3).**
      measurement in the round.
    - *While running.* For each maintained connection, the round trip of
      every ordinary request and of every `server.ping` (R38.6.4e item 4) is a
-     sample of its *smoothed latency*. The first sample after the connection
+     sample of its *smoothed latency*. R38.6.4a item 7 keeps this figure
+     under every value of `electrum_server_order`. The first sample after the connection
      joins the set starts the average, and every later sample *s* updates it
      to 0.2 · *s* + 0.8 · the previous value. The height of each header
      notification is the connection's current height. Apart from the header
@@ -1576,7 +1637,9 @@ item 3).**
    (R38.6.4k-R item 3). The rank from the activation round takes effect when
    the probe ends; until then the uniform draw of R38.6.4b-R item 1 serves as
    the rank (D38.6.4l.2). After that the rank changes only by a replacement
-   (item 7). The spreading of read-only queries (R38.6.4a) is unchanged.
+   (item 7). The rank does not decide which maintained connection a read-only
+   query starts on; R38.6.4a does, with the same smoothed latency (R38.6.4a
+   items 6 and 7).
    R38.6.4b-R item 2 holds for the measured order and its measurements: they
    are not persisted, a re-activation measures afresh, and a token that
    reuses a platform's Electrum client shares that client's rank,
@@ -1756,6 +1819,48 @@ Two activations shall draw independently of each other. Over many draws with
 the real random source, each server shall come first roughly equally often,
 within generous bounds (R38.6.4b-R).
 
+T38.6.4a.1 *Near sessions from figures.* A test of the near-session decision
+alone (R38.6.4a item 6), with smoothed latencies given in milliseconds:
+- 25, 27, 32, 108, 230 and 266 with *F* = 2: the first three are near;
+- the same figures with *F* = 0: all six are near;
+- 25, 27 and 32 with *F* = 0.5, taken as 1: all three are near, through the
+  20 ms term;
+- one session without a smoothed latency among the six of the first case: it
+  is near as well;
+- no session with a smoothed latency: all are near.
+
+T38.6.4a.2 *Reads avoid a far session.* With three maintained stubs, two
+answering in about 5 ms and one in about 200 ms, and each with at least one
+sample, 30 read-only queries in a row shall all be answered by the two fast
+stubs, in turn, each answering 15 within one.
+
+T38.6.4a.3 *A far session is still a fallback.* In the setting of T38.6.4a.2,
+with both fast stubs failing a read-only query, the slow stub shall answer it.
+
+T38.6.4a.4 *A recovered session comes back.* In the setting of T38.6.4a.2,
+with the slow stub's delay dropped to about 5 ms and the ping interval
+shortened, the slow stub shall answer read-only queries again once its
+smoothed latency is within the limit, and not before.
+
+T38.6.4a.5 *Samples under `random` and `listed`.* Under `listed` and under
+`random`, ordinary requests and pings shall produce a smoothed latency for each
+maintained session, and no header request shall be sent on joining (compare
+T38.6.4l.15).
+
+T38.6.4a.6 *Near factor and offset values.* An absent
+`electrum_spread_near_factor` means 2, without a warning. `0` makes every
+maintained session near. `0.5` means 1. A string, a negative number and `null`
+mean 2, each with one warning naming the key. An absent
+`electrum_spread_near_offset_ms` means 20, without a warning. `0` leaves the
+factor alone to decide, and `50` admits a session up to 50 ms behind the
+fastest. A string, a negative number and `null` mean 20, each with one
+warning naming the key. With `electrum_spread_reads` `false`, read-only queries
+follow the priority order whatever the two values.
+
+T38.6.4a.7 *Writes keep their routing.* In the setting of T38.6.4a.2 with the
+slow stub first in priority, a broadcast and a subscription shall go to the
+slow stub.
+
 The tests of R38.6.4l run in-process against the stub Electrum server of
 `mm2src/coins/utxo/rpc_clients/electrum_stub_server.rs`, with the per-method
 reply delay, settable tip height and pushed header notifications that the
@@ -1918,6 +2023,27 @@ D38.6.4l.9 *(Resolved 2026-10-29, maintainer decision: kept as written.)* *A war
 switch, or an unrecognized value, means the default and logs one warning
 naming the value" can be read as a warning for an absent switch too. This
 rule keeps R38.6.4b-R item 1: no warning when the switch is absent.
+
+D38.6.4a.1 *(Decided 2026-11-02, maintainer Decisions 8 and 22; under
+monitoring.)* *The defaults of item 8.* The near sessions of item 6 are on by
+default, with *F* = 2 and *A* = 20 ms. A latency study of 2026-11-02 checked
+the rule against the server lists coins actually carry, on 13 coins with one to
+six servers. It found the rule helpful where a coin's servers differ and
+neutral where they do not, and the maintainer kept the rule and both defaults.
+The decision is under monitoring, not closed. The maintainer confirms or
+changes it on the behavior seen in the field and on users' reports. That is
+also why both values are switches.
+
+D38.6.4a.2 *(Decided 2026-11-02, maintainer Decision 15: kept as written; under
+monitoring.)* *The form of the limit.* Item 6 bounds a
+near session by the larger of *F* × *f* and *f* + *A*. The maintainer's own
+wording was "twice the fastest plus 20 ms", that is *F* × *f* + *A*. The sum
+is always the looser of the two. When *f* is at least *A* / (*F* − 1), 20 ms
+with the defaults, it admits sessions up to *A* further behind. Below that it
+admits them up to (*F* − 1) × *f* further behind. Example: with *f* = 25 ms the
+larger-of form gives 50 ms, the sum 70 ms. The maintainer kept the larger-of
+form of item 6. The latency study of 2026-11-02 found the same near sessions
+under both forms on every one of its 13 sampled coins.
 
 > **Coverage note (2026-10-27).** The deterministic tests cover T38.6.4.1 –
 > T38.6.4.12 against an in-process stub server set, with two exceptions:
@@ -2902,3 +3028,13 @@ R38.8.6 **Tests (two-direction, observable).**
   2026-10-30, the cleared text of R38.5B.1--R38.5B.8 and this repository's own
   code. They take no forbidden-class input, so chapter 01 R38 is not engaged
   and no further gate pass is required.
+- *Reloaded-original amendment (2026-11-02, maintainer Decision BI), clean side.*
+  R38.6.4a items 6–8 (the near offset of item 8 added the same day), the
+  changes to its items 1 and 3, its second rationale and herding note, the
+  implementation-status line, T38.6.4a.1–T38.6.4a.7, D38.6.4a.1 and
+  D38.6.4a.2, and the cross-references in R38.6.4l items 1, 2 and 5 were
+  written by a session that never read the corpus. They rest on the
+  maintainer's Decision BI of 2026-10-31, this project's own lab timing run of
+  2026-10-31, its own latency benchmark of 2026-11-01 and this repository's
+  code. They take no forbidden-class input, so chapter 01 R38 is not engaged
+  and no gate pass is required.
