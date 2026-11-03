@@ -51,6 +51,9 @@ file carries the detail. "New" means the plan was created in this cycle.
 - [`ghost-orders`](docs/plans/ghost-orders.md) — new, planning: cancelled orders that other nodes keep
   showing after a lost cancellation; five work packages after the beta, the first being the higher
   sync limits on relays above (PR #205).
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
+  spreads read-only Electrum queries only over the servers with the shortest round trip is written,
+  with its two switches and their defaults (PR #201).
 
 ### Known limitations
 
