@@ -28,6 +28,10 @@ it and, where one exists, the CRD rule, for readers who want more.
 Every plan this release touched in any sense since v0.3.0-beta.1, with what happened to it. Each plan
 file carries the detail. "New" means the plan was created in this cycle.
 
+- [`order-posting-latency`](docs/plans/order-posting-latency.md) — in progress: the rule that
+  spreads read-only Electrum queries only over the servers with the shortest round trip is written,
+  with its two switches and their defaults (PR #201).
+
 ### Known limitations
 
 What does not work yet, or works only in part, in this release. Each item says where more detail
